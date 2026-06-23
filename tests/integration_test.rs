@@ -1,6 +1,6 @@
-use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
+use std::{fs, path::Path};
 use tempfile::TempDir;
 use tracedecay::config::{load_config, save_config};
 use tracedecay::storage::resolve_layout_for_current_profile;
@@ -452,12 +452,148 @@ async fn test_index_follows_symlinked_directories() {
 // ---------------------------------------------------------------------------
 
 /// Helper: init a project with git_ignore enabled and return the TraceDecay.
-async fn setup_gitignore_project(project: &std::path::Path) -> TraceDecay {
+async fn setup_gitignore_project(project: &Path) -> TraceDecay {
     TraceDecay::init(project).await.unwrap();
     let mut config = load_config(project).unwrap();
     config.git_ignore = true;
     save_config(project, &config).unwrap();
     TraceDecay::open(project).await.unwrap()
+}
+
+async fn indexed_project_paths(cg: &TraceDecay) -> Vec<String> {
+    cg.index_all().await.unwrap();
+    cg.get_all_files()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|file| file.path)
+        .collect()
+}
+
+async fn indexed_paths_for_project(project: &Path) -> Vec<String> {
+    let cg = TraceDecay::init(project).await.unwrap();
+    indexed_project_paths(&cg).await
+}
+
+#[tokio::test]
+async fn test_default_scan_excludes_generated_directories() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::create_dir_all(project.join("packages/web/dist")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn kept() {}\n").unwrap();
+    fs::write(
+        project.join("packages/web/dist/generated.js"),
+        "export function generated() {}\n",
+    )
+    .unwrap();
+
+    let paths = indexed_paths_for_project(project).await;
+    assert!(
+        paths.iter().any(|p| p == "src/lib.rs"),
+        "src/lib.rs must be indexed"
+    );
+    assert!(
+        !paths.iter().any(|p| p.contains("/dist/")),
+        "generated dist files must be skipped by default: {paths:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_default_scan_respects_gitignore() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+
+    fs::create_dir_all(project.join("src/ignored")).unwrap();
+    fs::write(project.join(".gitignore"), "src/ignored/\n").unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn kept() {}\n").unwrap();
+    fs::write(
+        project.join("src/ignored/secret.rs"),
+        "pub fn ignored() {}\n",
+    )
+    .unwrap();
+
+    let paths = indexed_paths_for_project(project).await;
+    assert!(
+        paths.iter().any(|p| p == "src/lib.rs"),
+        "src/lib.rs must be indexed"
+    );
+    assert!(
+        !paths.iter().any(|p| p.contains("ignored")),
+        ".gitignore rules must be respected by default: {paths:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_include_folder_indexes_default_excluded_directory() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+
+    fs::create_dir_all(project.join("dist")).unwrap();
+    fs::write(
+        project.join("dist/generated.js"),
+        "export function generatedApi() {}\n",
+    )
+    .unwrap();
+
+    let mut cg = TraceDecay::init(project).await.unwrap();
+    cg.add_include_folders(&["dist".to_string()]);
+    cg.index_all().await.unwrap();
+
+    let results = cg.search("generatedApi", 10).await.unwrap();
+    assert!(
+        !results.is_empty(),
+        "explicit include folder should index skipped generated output"
+    );
+    assert!(
+        results
+            .iter()
+            .any(|r| r.node.file_path == "dist/generated.js"),
+        "result should point at included dist file: {results:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_include_folder_normalizes_relative_and_project_absolute_prefixes() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+
+    fs::create_dir_all(project.join("dist")).unwrap();
+    fs::create_dir_all(project.join("generated")).unwrap();
+    fs::write(
+        project.join("dist/generated.js"),
+        "export function distGeneratedApi() {}\n",
+    )
+    .unwrap();
+    fs::write(
+        project.join("generated/client.js"),
+        "export function absoluteGeneratedApi() {}\n",
+    )
+    .unwrap();
+
+    let mut cg = TraceDecay::init(project).await.unwrap();
+    cg.add_include_folders(&[
+        "./dist".to_string(),
+        project.join("generated").to_string_lossy().to_string(),
+    ]);
+    cg.index_all().await.unwrap();
+
+    let dist_results = cg.search("distGeneratedApi", 10).await.unwrap();
+    assert!(
+        dist_results
+            .iter()
+            .any(|r| r.node.file_path == "dist/generated.js"),
+        "dot-prefixed include folder should match project-relative scanner paths: {dist_results:?}"
+    );
+
+    let absolute_results = cg.search("absoluteGeneratedApi", 10).await.unwrap();
+    assert!(
+        absolute_results
+            .iter()
+            .any(|r| r.node.file_path == "generated/client.js"),
+        "absolute include folder under project root should match project-relative scanner paths: {absolute_results:?}"
+    );
 }
 
 /// A nested `.gitignore` in a subdirectory must exclude files inside that

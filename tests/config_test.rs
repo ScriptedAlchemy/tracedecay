@@ -2,10 +2,44 @@ use tempfile::TempDir;
 use tracedecay::config::*;
 
 #[test]
-fn test_default_config_has_exclude_patterns() {
+fn default_config_excludes_generated_vendor_cache_trees_and_gitignore_on() {
     let config = TraceDecayConfig::default();
-    assert!(config.exclude.iter().any(|p| p == "target/**"));
-    assert!(config.exclude.iter().any(|p| p == ".git/**"));
+    assert!(config.git_ignore);
+    assert!(config.include.is_empty());
+    for pattern in [
+        "target/**",
+        ".git/**",
+        ".tracedecay/**",
+        "**/node_modules/**",
+        "vendor/**",
+        "**/vendor/**",
+        "build/**",
+        "**/build/**",
+        "dist/**",
+        "**/dist/**",
+        "out/**",
+        "**/out/**",
+        "coverage/**",
+        "**/coverage/**",
+        ".cache/**",
+        "**/.cache/**",
+        ".next/**",
+        "**/.next/**",
+        ".turbo/**",
+        "**/.turbo/**",
+        ".gradle/**",
+        "**/.gradle/**",
+        ".venv/**",
+        "**/.venv/**",
+        "venv/**",
+        "**/venv/**",
+        "**/__pycache__/**",
+    ] {
+        assert!(
+            config.exclude.iter().any(|p| p == pattern),
+            "missing default exclude pattern {pattern}"
+        );
+    }
 }
 
 #[test]
@@ -25,6 +59,29 @@ fn test_is_excluded() {
     assert!(is_excluded("target/debug/foo", &config));
     assert!(is_excluded("node_modules/foo.rs", &config));
     assert!(is_excluded("build/classes/App.class", &config));
+    assert!(is_excluded("packages/web/dist/main.js", &config));
+    assert!(is_excluded("packages/web/coverage/lcov.js", &config));
+    assert!(is_excluded("packages/web/.next/server/app.js", &config));
+    assert!(is_excluded("tools/.cache/generated.py", &config));
+}
+
+#[test]
+fn default_generated_excludes_prune_nested_dirs() {
+    let config = TraceDecayConfig::default();
+    for path in [
+        "packages/web/dist",
+        "packages/web/coverage",
+        "packages/web/.next",
+        "packages/web/.turbo",
+        "tools/.cache",
+        "backend/.venv",
+        "backend/__pycache__",
+    ] {
+        assert!(
+            is_excluded_dir(path, &config),
+            "expected default excludes to prune {path}"
+        );
+    }
 }
 
 #[test]
@@ -63,6 +120,7 @@ fn test_legacy_config_with_include_field_still_loads() {
     let loaded = load_config(dir.path()).unwrap();
     assert_eq!(loaded.version, 1);
     assert!(loaded.exclude.contains(&"target/**".to_string()));
+    assert!(loaded.git_ignore);
 }
 
 // ── is_in_gitignore ─────────────────────────────────────────────────────────

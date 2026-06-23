@@ -115,7 +115,7 @@ impl<'a> ContextBuilder<'a> {
             "get_code called with empty file_path"
         );
         debug_assert!(!node.id.is_empty(), "get_code called with empty node id");
-        if node.start_line == 0 || node.end_line == 0 {
+        if node.start_line == 0 || node.end_line == 0 || node.start_line > node.end_line {
             return None;
         }
 
@@ -124,12 +124,14 @@ impl<'a> ContextBuilder<'a> {
         } else {
             let file_path = self.project_root.join(&node.file_path);
             // Prevent path traversal: ensure the resolved path stays within
-            // the project root. If either side fails to canonicalize (e.g.
-            // file missing on disk) fall through to the read attempt so the
-            // pre-existing missing-file path still returns `None` naturally.
-            let allowed = match (file_path.canonicalize(), self.project_root.canonicalize()) {
-                (Ok(canonical), Ok(root)) => canonical.starts_with(&root),
-                _ => true,
+            // the canonical project root. If the target itself is missing,
+            // allow the read attempt to fail naturally as `None`.
+            let allowed = match self.project_root.canonicalize() {
+                Ok(root) => match file_path.canonicalize() {
+                    Ok(canonical) => canonical.starts_with(&root),
+                    Err(_) => file_path.starts_with(&root),
+                },
+                Err(_) => false,
             };
             let loaded = if allowed {
                 fs::read_to_string(&file_path).ok()

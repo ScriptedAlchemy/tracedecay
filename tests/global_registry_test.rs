@@ -21,6 +21,57 @@ async fn upsert_test_store(db: &GlobalDb, project_id: &str, store_id: &str) {
     .unwrap();
 }
 
+async fn upsert_registry_fixture(db: &GlobalDb, project_root: &Path) {
+    let project = db
+        .upsert_code_project(
+            "proj_registry",
+            project_root,
+            Some(&project_root.join(".git")),
+            Some("https://example.test/repo.git"),
+            Some("main"),
+        )
+        .await
+        .unwrap();
+    db.upsert_project_alias(&project_root.join("."), &project.project_id)
+        .await
+        .unwrap();
+    let store = db
+        .upsert_store_instance(StoreInstanceUpsert {
+            store_id: "store_registry".to_string(),
+            project_id: project.project_id.clone(),
+            store_kind: "code_project".to_string(),
+            storage_mode: "profile_sharded".to_string(),
+            store_relpath: "projects/proj_registry".to_string(),
+            manifest_relpath: Some("projects/proj_registry/store_manifest.json".to_string()),
+            last_verified_at: Some(100),
+            last_write_at: Some(101),
+        })
+        .await
+        .unwrap();
+    db.upsert_graph_scope(GraphScopeUpsert {
+        graph_scope_id: "scope_registry_main".to_string(),
+        project_id: project.project_id,
+        store_id: store.store_id.clone(),
+        branch_name: "main".to_string(),
+        db_relpath: "projects/proj_registry/tracedecay.db".to_string(),
+        parent_scope_id: None,
+        last_synced_at: Some(102),
+        writable: true,
+    })
+    .await
+    .unwrap();
+    db.upsert_store_artifact(StoreArtifactUpsert {
+        store_id: store.store_id,
+        artifact_kind: "store_manifest".to_string(),
+        relpath: "projects/proj_registry/store_manifest.json".to_string(),
+        size_bytes: Some(2048),
+        schema_version: Some("1".to_string()),
+        updated_at: Some(103),
+    })
+    .await
+    .unwrap();
+}
+
 async fn table_exists(db_path: &Path, table: &str) -> bool {
     let db = libsql::Builder::new_local(db_path).build().await.unwrap();
     let conn = db.connect().unwrap();
@@ -146,54 +197,7 @@ async fn open_at_creates_registry_tables_and_round_trips_registry_records() {
         assert!(table_exists(&db_path, table).await, "{table} missing");
     }
 
-    let project = db
-        .upsert_code_project(
-            "proj_registry",
-            &project_root,
-            Some(&project_root.join(".git")),
-            Some("https://example.test/repo.git"),
-            Some("main"),
-        )
-        .await
-        .unwrap();
-    db.upsert_project_alias(&project_root.join("."), &project.project_id)
-        .await
-        .unwrap();
-    let store = db
-        .upsert_store_instance(StoreInstanceUpsert {
-            store_id: "store_registry".to_string(),
-            project_id: project.project_id.clone(),
-            store_kind: "code_project".to_string(),
-            storage_mode: "profile_sharded".to_string(),
-            store_relpath: "projects/proj_registry".to_string(),
-            manifest_relpath: Some("projects/proj_registry/store_manifest.json".to_string()),
-            last_verified_at: Some(100),
-            last_write_at: Some(101),
-        })
-        .await
-        .unwrap();
-    db.upsert_graph_scope(GraphScopeUpsert {
-        graph_scope_id: "scope_registry_main".to_string(),
-        project_id: project.project_id.clone(),
-        store_id: store.store_id.clone(),
-        branch_name: "main".to_string(),
-        db_relpath: "projects/proj_registry/tracedecay.db".to_string(),
-        parent_scope_id: None,
-        last_synced_at: Some(102),
-        writable: true,
-    })
-    .await
-    .unwrap();
-    db.upsert_store_artifact(StoreArtifactUpsert {
-        store_id: store.store_id.clone(),
-        artifact_kind: "store_manifest".to_string(),
-        relpath: "projects/proj_registry/store_manifest.json".to_string(),
-        size_bytes: Some(2048),
-        schema_version: Some("1".to_string()),
-        updated_at: Some(103),
-    })
-    .await
-    .unwrap();
+    upsert_registry_fixture(&db, &project_root).await;
 
     let projects = db.list_code_projects(10).await;
     assert_eq!(projects.len(), 1);
@@ -232,6 +236,33 @@ async fn open_at_creates_registry_tables_and_round_trips_registry_records() {
         context.stores[0].artifacts[0].artifact_kind,
         "store_manifest"
     );
+}
+
+#[tokio::test]
+async fn delete_code_projects_cascades_registry_rows_without_touching_legacy_projects() {
+    let _guard = GLOBAL_REGISTRY_TEST_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let project_root = dir.path().join("repo");
+    std::fs::create_dir_all(&project_root).unwrap();
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+
+    db.upsert(&project_root, 42).await;
+    upsert_registry_fixture(&db, &project_root).await;
+
+    let deleted = db
+        .delete_code_projects(&["proj_registry".to_string()])
+        .await;
+
+    assert_eq!(deleted, 1);
+    assert!(db.get_code_project("proj_registry").await.is_none());
+    assert!(db
+        .project_registry_context_by_id("proj_registry")
+        .await
+        .is_none());
+    assert!(db.list_code_projects(10).await.is_empty());
+    assert_eq!(db.get_project_tokens(&project_root).await, 42);
+    assert_eq!(db.global_tokens_saved().await, Some(42));
 }
 
 #[tokio::test]

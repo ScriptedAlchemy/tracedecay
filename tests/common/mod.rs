@@ -1,11 +1,14 @@
 #![allow(dead_code)]
 
 use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::net::TcpListener;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::Value;
 use tempfile::TempDir;
+use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::types::{Node, NodeKind, Visibility};
@@ -49,6 +52,97 @@ pub const GLOBAL_DB_ENV: &str = "TRACEDECAY_GLOBAL_DB";
 
 /// Serializes tests within one binary that mutate process-wide env vars.
 pub static GLOBAL_DB_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Sets [`GLOBAL_DB_ENV`] to a test DB path for the guard's lifetime.
+pub struct GlobalDbEnvGuard {
+    _env_guard: EnvVarGuard,
+}
+
+impl GlobalDbEnvGuard {
+    pub fn set(db_path: impl AsRef<Path>) -> Self {
+        let db_path = canonicalize_test_db_path(db_path.as_ref());
+        Self {
+            _env_guard: EnvVarGuard::set(GLOBAL_DB_ENV, db_path),
+        }
+    }
+}
+
+/// Isolates TraceDecay user/profile storage and the global DB under one test home.
+///
+/// Callers that may run concurrently with other env-mutating tests should hold
+/// [`GLOBAL_DB_ENV_LOCK`] while this guard is alive.
+pub struct TraceDecayStorageEnvGuard {
+    home: PathBuf,
+    profile_root: PathBuf,
+    global_db_path: PathBuf,
+    _home_guard: EnvVarGuard,
+    _userprofile_guard: EnvVarGuard,
+    _data_dir_guard: EnvVarGuard,
+    _global_db_guard: GlobalDbEnvGuard,
+}
+
+impl TraceDecayStorageEnvGuard {
+    pub fn set(home: impl AsRef<Path>) -> Self {
+        let home = canonicalize_test_dir(home.as_ref());
+        let profile_root = canonicalize_test_dir(&home.join(".tracedecay"));
+        let global_db_path = canonicalize_test_db_path(&profile_root.join("global.db"));
+
+        Self {
+            home: home.clone(),
+            profile_root: profile_root.clone(),
+            global_db_path: global_db_path.clone(),
+            _home_guard: EnvVarGuard::set("HOME", &home),
+            _userprofile_guard: EnvVarGuard::set("USERPROFILE", &home),
+            _data_dir_guard: EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root),
+            _global_db_guard: GlobalDbEnvGuard::set(&global_db_path),
+        }
+    }
+
+    pub fn for_tempdir(tmp: &TempDir) -> Self {
+        Self::set(tmp.path().join("home"))
+    }
+
+    pub fn home(&self) -> &Path {
+        &self.home
+    }
+
+    pub fn profile_root(&self) -> &Path {
+        &self.profile_root
+    }
+
+    pub fn global_db_path(&self) -> &Path {
+        &self.global_db_path
+    }
+}
+
+pub fn isolated_tracedecay_storage(tmp: &TempDir) -> TraceDecayStorageEnvGuard {
+    TraceDecayStorageEnvGuard::for_tempdir(tmp)
+}
+
+fn canonicalize_test_dir(path: &Path) -> PathBuf {
+    fs::create_dir_all(path).unwrap_or_else(|err| {
+        panic!(
+            "failed to create test directory '{}': {err}",
+            path.display()
+        )
+    });
+    path.canonicalize().unwrap_or_else(|err| {
+        panic!(
+            "failed to canonicalize test directory '{}': {err}",
+            path.display()
+        )
+    })
+}
+
+fn canonicalize_test_db_path(path: &Path) -> PathBuf {
+    let parent = path
+        .parent()
+        .unwrap_or_else(|| panic!("test DB path '{}' has no parent", path.display()));
+    canonicalize_test_dir(parent).join(
+        path.file_name()
+            .unwrap_or_else(|| panic!("test DB path '{}' has no file name", path.display())),
+    )
+}
 
 pub fn tempdir_or_panic() -> TempDir {
     match TempDir::new() {

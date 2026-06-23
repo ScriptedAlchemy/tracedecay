@@ -21,6 +21,7 @@
 //! `/api/capabilities` advertises which features are live so hosts (or a
 //! richer Hermes wrapper) can extend the surface without forking the UI.
 
+mod analytics_api;
 pub(crate) mod assets;
 mod curate_preview_store;
 mod graph_api;
@@ -104,6 +105,8 @@ pub(crate) struct DashboardState {
     pub(crate) dashboard_root: PathBuf,
     /// Last saved dry-run curation preview (shared across all clones of the state).
     pub(crate) curate_preview: Arc<RwLock<Option<CuratePreviewEntry>>>,
+    /// Recent deterministic curation activity emitted by the standalone dashboard.
+    pub(crate) curation_activity: Arc<RwLock<Vec<Value>>>,
     /// In-process BPE token-count cache for the Savings & Cost tab (backed
     /// by the `dashboard_token_counts` sidecar in the global accounting DB).
     pub(crate) token_counts: Arc<token_count::TokenCountCache>,
@@ -232,6 +235,7 @@ pub(crate) async fn build_state(cg: &TraceDecay) -> DashboardState {
         store_root,
         dashboard_root,
         curate_preview: Arc::new(RwLock::new(persisted_preview)),
+        curation_activity: Arc::new(RwLock::new(Vec::new())),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
     };
     if let Err(err) = memory_api::repair_derived_memory(&state).await {
@@ -413,6 +417,17 @@ pub(crate) fn router(state: DashboardState) -> Router {
         )
         .route("/api/plugins/graph/subgraph", get(graph_api::subgraph))
         .route("/api/plugins/graph/path", get(graph_api::path))
+        // Durable analytics API (hint lifecycle scaffolds + session usage rollups)
+        .route(
+            "/api/plugins/analytics/overview",
+            get(analytics_api::overview),
+        )
+        .route("/api/plugins/analytics/hints", get(analytics_api::hints))
+        .route("/api/plugins/analytics/usage", get(analytics_api::usage))
+        .route(
+            "/api/plugins/analytics/underused",
+            get(analytics_api::underused),
+        )
         // Savings & Cost API (savings ledger + session cost accounting)
         .route("/api/plugins/savings/overview", get(savings_api::overview))
         .route("/api/plugins/savings/ledger", get(savings_api::ledger))
@@ -444,6 +459,7 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
             "lcm_gc": has_lcm,
             "lcm_payload_health": has_lcm,
             "graph": true,
+            "analytics": true,
             // Similarity-based dedup curation (delete/merge ops via /curate
             // and /curate/apply). LLM-proposed curation is a host-side
             // extension (the Hermes wrapper flips llm_curation when it adds

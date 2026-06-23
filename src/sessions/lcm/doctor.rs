@@ -10,8 +10,7 @@ use serde_json::{json, Value};
 use crate::tracedecay::current_timestamp;
 
 use super::{
-    gc, payload, query, schema, security, util, LcmCleanConfig, LcmError, LcmGcConfig,
-    LCM_SCHEMA_VERSION,
+    gc, query, schema, security, util, LcmCleanConfig, LcmError, LcmGcConfig, LCM_SCHEMA_VERSION,
 };
 
 const MAX_SAMPLES: usize = 20;
@@ -392,85 +391,6 @@ async fn payload_diagnostics(
         "reclaimable_bytes_after_grace": detail.payload.reclaimable_bytes_after_grace,
         "integrity_mismatch_count": detail.payload.integrity_mismatch_count,
         "integrity_mismatch_refs": detail.integrity_mismatch_refs,
-    }))
-}
-
-#[allow(dead_code)]
-async fn placeholder_ref_diagnostics(
-    conn: &Connection,
-    payload_dir: &Path,
-    provider: &str,
-    session_id: Option<&str>,
-    metadata_refs: &BTreeSet<String>,
-) -> Result<Value, LcmError> {
-    let mut refs = BTreeSet::new();
-    let mut first_locations = serde_json::Map::new();
-    let mut rows = conn
-        .query(
-            "SELECT store_id, message_id, content, snippet_text, index_text, metadata_json
-             FROM lcm_raw_messages
-             WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)",
-            params![provider, util::opt_text(session_id)],
-        )
-        .await?;
-    while let Some(row) = rows.next().await? {
-        let store_id: i64 = row.get(0)?;
-        let message_id: String = row.get(1)?;
-        for index in 2..6 {
-            let value: Option<String> = row.get(index).unwrap_or(None);
-            let field = match index {
-                2 => "content",
-                3 => "snippet_text",
-                4 => "index_text",
-                _ => "metadata_json",
-            };
-            for payload_ref in value
-                .as_deref()
-                .map(payload::extract_payload_refs_from_text)
-                .unwrap_or_default()
-            {
-                if refs.insert(payload_ref.clone()) {
-                    first_locations.insert(
-                        payload_ref.clone(),
-                        json!({
-                            "payload_ref": payload_ref,
-                            "store_id": store_id,
-                            "message_id": message_id,
-                            "field": field,
-                        }),
-                    );
-                }
-            }
-        }
-    }
-
-    let missing_metadata = refs
-        .iter()
-        .filter(|payload_ref| !metadata_refs.contains(*payload_ref))
-        .count();
-    let missing_files = refs
-        .iter()
-        .filter(|payload_ref| {
-            payload::validate_payload_ref(payload_ref).is_err()
-                || !payload_dir.join(payload_ref).is_file()
-        })
-        .count();
-    let missing_refs = refs
-        .iter()
-        .filter(|payload_ref| {
-            !metadata_refs.contains(*payload_ref)
-                || payload::validate_payload_ref(payload_ref).is_err()
-                || !payload_dir.join(payload_ref).is_file()
-        })
-        .filter_map(|payload_ref| first_locations.get(payload_ref).cloned())
-        .take(MAX_SAMPLES)
-        .collect::<Vec<_>>();
-
-    Ok(json!({
-        "placeholder_refs_total": refs.len(),
-        "missing_placeholder_metadata": missing_metadata,
-        "missing_placeholder_files": missing_files,
-        "missing_placeholder_refs": missing_refs,
     }))
 }
 

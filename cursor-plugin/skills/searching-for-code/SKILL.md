@@ -7,6 +7,8 @@ description: 'Find code by concept, symbol, signature, or qualified name in this
 
 Use the TraceDecay code graph before Grep/Glob/file reads. Pick the cheapest tool that answers the question.
 
+For multi-step context gathering, use scoped read-only subagents when separate questions can run independently. Give each subagent one bounded target (symbol, path, feature, session, or branch), the TraceDecay tools it may use, and a strict "no writes / no edits / no memory mutations" instruction; the parent agent synthesizes findings and performs any follow-up actions.
+
 ## Workflow
 
 1. **Conceptual / "how does X work" / names unknown → `tracedecay_context`.**
@@ -26,6 +28,7 @@ Use the TraceDecay code graph before Grep/Glob/file reads. Pick the cheapest too
 - All tools above are read-only and parallel-safe. Do not call mutating/editing tools from this skill.
 - Only fall back to Grep/Glob/Read for non-indexed content (string literals, comments, config the graph does not cover) or after TraceDecay pinpoints exact files.
 - Prefer one well-formed `tracedecay_context` call over many narrow searches.
+- When using subagents, ask for cited file/symbol/session ids, tool names used, gaps/uncertainties, and any `tracedecay_metrics:` lines; do not accept uncited conclusions as evidence.
 - If a response is truncated and includes a `handle`, narrow the query/result set first when possible; call `tracedecay_retrieve` with that `handle` only when the omitted details are needed.
 - About to write a new helper because the search came up empty? Run the `tracedecay:finding-duplicate-logic` pre-write probe first.
 

@@ -224,18 +224,23 @@ function App() {
     pluginsRef.current = plugins;
   }, [plugins]);
 
-  // Apply theme to <html> and persist.
+  // Apply theme to <html>. Note: we do NOT persist here. Writing localStorage
+  // on mount would pin the OS-derived theme and stop following
+  // prefers-color-scheme; persistence happens only on explicit toggle below.
   useEffect(() => {
     applyTheme(theme);
-    try {
-      localStorage.setItem("td-theme", theme);
-    } catch {
-      /* storage unavailable */
-    }
   }, [theme]);
 
   const toggleTheme = useCallback(() => {
-    setTheme((t) => (t === "dark" ? "light" : "dark"));
+    setTheme((t) => {
+      const next = t === "dark" ? "light" : "dark";
+      try {
+        localStorage.setItem("td-theme", next);
+      } catch {
+        /* storage unavailable */
+      }
+      return next;
+    });
   }, []);
 
   // Fetch capabilities, update SDK, and return the payload (or null on failure).

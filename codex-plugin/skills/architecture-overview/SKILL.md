@@ -17,6 +17,7 @@ This skill **maps structure**. Its companion `tracedecay:code-health-report` **s
 ## Guardrails
 
 - All tools here are read-only and parallel-safe. This skill maps and explains; it does not edit and it does not rank tech debt.
+- For broad repo maps, dispatch scoped read-only subagents by top-level directory, layer, or dependency question. Each subagent reports only cited TraceDecay findings; the parent agent owns the final architecture synthesis.
 
 ## Output
 

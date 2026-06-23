@@ -38,13 +38,19 @@ export interface ViewBox {
   h: number;
 }
 
+/**
+ * Node fills ride the shared categorical chart tokens (`--hm-cat-*`, which carry
+ * explicit light-theme overrides) so node hues track their edge counterparts in
+ * both themes. Hue mnemonics follow the edges: facts share the (blue) mentions
+ * hue, categories the (amber) contains hue, banks the (pink) bundles hue.
+ */
 export const KIND_COLORS: Record<string, string> = {
-  fact: "#818cf8",
-  entity: "#34d399",
-  category: "#fbbf24",
-  bank: "#f472b6",
+  fact: "var(--hm-cat-1, #7aa7ff)",
+  entity: "var(--hm-cat-6, #67e8a9)",
+  category: "var(--hm-cat-2, #f7c76a)",
+  bank: "var(--hm-cat-3, #ff7ab6)",
 };
-export const FALLBACK_COLOR = "#94a3b8";
+export const FALLBACK_COLOR = "var(--hm-cat-7, #8fd8ff)";
 export const KIND_ORDER = ["fact", "entity", "category", "bank"];
 
 /** `bold` matches the heavier stroke "bundles" edges get in the graph below. */

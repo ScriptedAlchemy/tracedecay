@@ -63,6 +63,37 @@ fn tracedecay_command_with_stdin(home: &std::path::Path, project: &std::path::Pa
     command
 }
 
+fn git(project: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(["-c", "core.hooksPath=.git/no-hooks"])
+        .args(args)
+        .current_dir(project)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run git {args:?}: {e}"));
+    assert!(
+        output.status.success(),
+        "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn commit_all(project: &Path, message: &str) {
+    git(project, &["add", "."]);
+    git(
+        project,
+        &[
+            "-c",
+            "user.name=TraceDecay Test",
+            "-c",
+            "user.email=tracedecay-test@example.com",
+            "commit",
+            "-m",
+            message,
+        ],
+    );
+}
+
 #[test]
 fn init_accepts_relative_current_directory() {
     let home = TempDir::new().unwrap();
@@ -121,6 +152,23 @@ fn write_profile_sharded_fixture(home: &std::path::Path, project: &std::path::Pa
         serde_json::to_string_pretty(&manifest).unwrap(),
     )
     .unwrap();
+}
+
+fn write_profile_sharded_branch_fixture(home: &std::path::Path, project: &std::path::Path) {
+    write_profile_sharded_fixture(home, project);
+    let project = canonical_temp_path(project);
+    let shard_root = profile_shard_root(home);
+    git(&project, &["init", "-b", "main"]);
+    std::fs::write(project.join("lib.rs"), "pub fn indexed() {}\n").unwrap();
+    commit_all(&project, "initial commit");
+    git(&project, &["checkout", "-b", "feature/new"]);
+    std::fs::remove_file(shard_root.join("tracedecay.db")).unwrap();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(Database::initialize(&shard_root.join("tracedecay.db")))
+        .unwrap();
 }
 
 fn write_sqlite_placeholder(path: &Path) {
@@ -550,7 +598,7 @@ fn branch_list_reads_profile_sharded_branch_meta() {
 fn branch_add_writes_new_branch_db_into_profile_shard() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
-    write_profile_sharded_fixture(home.path(), project.path());
+    write_profile_sharded_branch_fixture(home.path(), project.path());
     let shard_root = profile_shard_root(home.path());
     write_branch_meta(&shard_root, &[], false);
 

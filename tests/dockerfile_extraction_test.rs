@@ -130,15 +130,84 @@ fn test_dockerfile_copy_from_creates_uses_edge() {
     let source = std::fs::read_to_string("tests/fixtures/sample.dockerfile").unwrap();
     let result = DockerfileExtractor.extract("sample.dockerfile", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    // COPY --from=builder creates a Uses edge referencing the builder stage
+    let builder = result
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::Module && n.name == "builder")
+        .unwrap_or_else(|| panic!("expected builder stage module"));
+    // COPY --from=builder creates a Uses edge referencing the actual builder stage node.
     let uses_edges: Vec<_> = result
         .edges
         .iter()
-        .filter(|e| e.kind == EdgeKind::Uses)
+        .filter(|e| e.kind == EdgeKind::Uses && e.target == builder.id)
         .collect();
     assert!(
         !uses_edges.is_empty(),
-        "COPY --from=builder should create a Uses edge"
+        "COPY --from=builder should create a Uses edge to the builder stage node"
+    );
+}
+
+#[test]
+fn test_dockerfile_copy_from_numeric_stage_uses_unnamed_stage_node() {
+    let source = r#"
+FROM alpine
+RUN apk add --no-cache curl
+FROM scratch
+COPY --from=0 /bin/curl /bin/curl
+"#;
+    let result = DockerfileExtractor.extract("Dockerfile", source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let first_stage = result
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::Module && n.name == "stage0")
+        .unwrap_or_else(|| panic!("expected unnamed stage representation"));
+    assert_eq!(
+        first_stage.signature.as_deref(),
+        Some("FROM alpine"),
+        "numeric COPY --from should target the stage, not the base image"
+    );
+    assert!(
+        result
+            .edges
+            .iter()
+            .any(|e| e.kind == EdgeKind::Uses && e.target == first_stage.id),
+        "COPY --from=0 should create a Uses edge to the unnamed stage node"
+    );
+    assert!(
+        !result.edges.iter().any(|e| e.kind == EdgeKind::Uses
+            && result
+                .nodes
+                .iter()
+                .any(|n| n.id == e.target && n.kind == NodeKind::Use && n.name == "alpine")),
+        "COPY --from=0 should not use the base image node directly"
+    );
+}
+
+#[test]
+fn test_dockerfile_copy_from_external_image_creates_backed_use_node() {
+    let source = r#"
+FROM alpine AS runtime
+COPY --from=nginx:alpine /etc/nginx/nginx.conf /tmp/nginx.conf
+"#;
+    let result = DockerfileExtractor.extract("Dockerfile", source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let external = result
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::Use && n.name == "nginx:alpine")
+        .unwrap_or_else(|| panic!("expected external COPY --from image use node"));
+    assert_eq!(
+        external.start_line, 2,
+        "external COPY --from image should be located on the COPY line"
+    );
+    assert!(
+        result
+            .edges
+            .iter()
+            .any(|e| e.kind == EdgeKind::Uses && e.target == external.id),
+        "COPY --from external image should use the explicit external node"
     );
 }
 

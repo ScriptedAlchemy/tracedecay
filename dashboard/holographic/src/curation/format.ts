@@ -30,8 +30,12 @@ export function describe(a: MemoryCurateAction): string {
       return `Retag #${a.fact_id}`;
     case "recategorize":
       return `Recategorize #${a.fact_id} → ${a.category}`;
-    case "reflect":
-      return `Reflect (replaces ${(a.supersedes ?? []).map((s) => `#${s}`).join(", ")})`;
+    case "reflect": {
+      const supersedes = a.supersedes ?? [];
+      return supersedes.length
+        ? `Reflect (replaces ${supersedes.map((s) => `#${s}`).join(", ")})`
+        : "Reflect";
+    }
     default:
       return a.op;
   }

@@ -51,12 +51,29 @@ function classificationLabel(classification: string) {
 
 function classificationClass(classification: string) {
   if (classification === "likely_duplicate") {
-    return "border-destructive/30 bg-destructive/10 text-destructive";
+    return "border-destructive/30 bg-destructive/10";
   }
   if (classification === "merge_candidate") {
-    return "border-primary/30 bg-primary/10 text-primary";
+    return "border-primary/30 bg-primary/10";
   }
   return "border-border bg-muted/40 text-text-secondary";
+}
+
+/**
+ * Theme-aware badge text color. `text-primary`/`text-destructive` (cyan/red)
+ * over a near-white 10%-tint fail AA in the light theme. Blending the semantic
+ * color toward the theme-flipping `--color-foreground` (near-white on dark,
+ * near-black on light) darkens the label in light — clearing AA — while
+ * keeping it bright and on-hue in dark.
+ */
+function classificationColor(classification: string): string | undefined {
+  if (classification === "likely_duplicate") {
+    return "color-mix(in srgb, var(--color-destructive), var(--color-foreground) 30%)";
+  }
+  if (classification === "merge_candidate") {
+    return "color-mix(in srgb, var(--color-primary), var(--color-foreground) 30%)";
+  }
+  return undefined;
 }
 
 /* ----------------------------------------------------------- diff fact card */
@@ -119,7 +136,8 @@ function PairRow({
     <div className="hv-pair border border-border p-3">
       <div className="mb-2 flex min-w-0 flex-wrap items-center gap-2">
         <span
-          className={`border px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.08em] ${classificationClass(pair.classification)}`}
+          className={`border px-2 py-0.5 text-[11px] font-medium uppercase tracking-[0.08em] ${classificationClass(pair.classification)}`}
+          style={{ color: classificationColor(pair.classification) }}
         >
           {classificationLabel(pair.classification)}
         </span>
@@ -164,7 +182,7 @@ function PairRow({
           side="b"
         />
       </div>
-      <p className="mt-2 font-mono-ui text-[0.65rem] text-text-tertiary">
+      <p className="mt-2 font-mono-ui text-[11px] text-text-tertiary">
         shared {pair.shared_token_count ?? 0}/
         {Math.min(pair.a_token_count ?? 0, pair.b_token_count ?? 0)} tokens ·
         highlighted words appear in both facts
@@ -377,7 +395,7 @@ export default function SimilarityPanel({
 
             {pairs.length > 0 && (
               <div className="mb-3 border border-border bg-background/30 p-2">
-                <div className="mb-1 flex flex-wrap items-center justify-between gap-2 font-mono-ui text-[0.65rem] text-text-tertiary">
+                <div className="mb-1 flex flex-wrap items-center justify-between gap-2 font-mono-ui text-[11px] text-text-tertiary">
                   <span>
                     {METRIC_LABEL[metric]} distribution
                     {distribution
@@ -430,7 +448,7 @@ export default function SimilarityPanel({
                 {visibleCount < filtered.length && (
                   <div
                     ref={setSentinel}
-                    className="py-2 text-center font-mono-ui text-[0.65rem] text-text-tertiary"
+                    className="py-2 text-center font-mono-ui text-[11px] text-text-tertiary"
                   >
                     {filtered.length - visibleCount} more…
                   </div>

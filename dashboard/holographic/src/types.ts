@@ -9,7 +9,8 @@
 /**
  * Provider/engine discovery block embedded in `GET /api/plugins/holographic/`
  * responses. Mirrors the Hermes `providers` payload; the standalone tracedecay
- * server fills it with a static "tracedecay" stub.
+ * server reports its built-in TraceDecay provider and no external curator
+ * tool host.
  */
 export interface MemoryProviderStatus {
   memory_provider: string;
@@ -408,8 +409,13 @@ export interface MemoryCuratorStatusResponse {
     max_entities_per_run?: number | string | null;
   };
   snapshots: Array<{
+    id?: string;
     name: string;
     path: string;
+    ts?: string | null;
+    summary?: string | null;
+    provider?: string;
+    mode?: string;
   }>;
 }
 

@@ -23,6 +23,7 @@ Quality-scorecard companion to `tracedecay:architecture-overview` (which maps st
 ## Guardrails
 
 - Discovery/analysis tools are read-only and parallel-safe. `tracedecay_session_start` / `tracedecay_session_end` write/remove `.tracedecay/session_baseline.json`; use them only when a before/after delta is relevant and respect Cursor approval/run-mode.
+- For large audits, use scoped read-only subagents by path, weak health dimension, or requested scan. Keep any `tracedecay_session_start` / `tracedecay_session_end` calls in the parent agent; subagents only gather cited analysis.
 - `tracedecay_redundancy` is computed lazily and cached; the first call on a fresh index can be slow on large repos — keep `path`/`max_pairs` tight.
 - This skill reports and prioritizes; it does not edit. To fix findings, hand off to `tracedecay:atomic-code-edits` / `tracedecay:cleaning-up-dead-code`; to verify, `tracedecay:running-impacted-tests`. For a focused ship-readiness sweep (panic sites, risk markers, dead code, untested high-risk symbols) use `tracedecay:auditing-code-safety` instead of the full scorecard.
 

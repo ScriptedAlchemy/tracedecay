@@ -150,15 +150,22 @@ async function runViewportSmoke(browser, baseUrl, profile, expectLcmMode) {
   await search.fill("cache");
   await page.waitForTimeout(500);
 
-  const similarityViewButton = page.getByRole("button", { name: "Similarity" });
+  // The holographic view switcher renders ARIA tabs (older builds used plain
+  // buttons), so match either role.
+  const similarityViewButton = page
+    .getByRole("tab", { name: "Similarity", exact: true })
+    .or(page.getByRole("button", { name: "Similarity", exact: true }));
   await similarityViewButton.waitFor({ state: "visible" });
   await assertNoHorizontalOverflow(page);
+  await assertSpacingTokenResolves(page);
   await assertViewSwitcherLayout(page, profile.name);
   await similarityViewButton.click();
   await page.getByText("Similar Pairs").waitFor({ state: "visible" });
 
   // --- Curation tab: check the panel renders and Preview button is present ---
-  const curationViewButton = page.getByRole("button", { name: "Curation" });
+  const curationViewButton = page
+    .getByRole("tab", { name: "Curation", exact: true })
+    .or(page.getByRole("button", { name: "Curation", exact: true }));
   await curationViewButton.waitFor({ state: "visible" });
   await curationViewButton.click();
   await page.getByText("Curation").first().waitFor({ state: "visible" });
@@ -230,6 +237,20 @@ async function assertNoHorizontalOverflow(page) {
   if (overflow.scrollWidth > overflow.clientWidth + 1) {
     throw new Error(
       `dashboard has horizontal overflow: ${JSON.stringify(overflow)}`,
+    );
+  }
+}
+
+// Defense in depth against the `@layer theme` regression: if Tailwind's
+// structural `--spacing` token is missing, every spacing utility collapses.
+// Assert it resolves to a non-empty value in the real, fully-loaded page.
+async function assertSpacingTokenResolves(page) {
+  const spacing = await page.evaluate(() =>
+    getComputedStyle(document.documentElement).getPropertyValue("--spacing").trim(),
+  );
+  if (!spacing) {
+    throw new Error(
+      "dashboard is missing the --spacing design token; spacing utilities will collapse",
     );
   }
 }

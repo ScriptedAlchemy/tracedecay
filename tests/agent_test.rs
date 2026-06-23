@@ -181,7 +181,15 @@ fn read_json(path: &Path) -> serde_json::Value {
 }
 
 fn expected_tracedecay_bin() -> String {
-    env!("CARGO_BIN_EXE_tracedecay").replace('\\', "/")
+    let path_match = std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path).find_map(|dir| {
+            let candidate = dir.join("tracedecay");
+            candidate
+                .exists()
+                .then(|| candidate.to_string_lossy().replace('\\', "/"))
+        })
+    });
+    path_match.unwrap_or_else(|| env!("CARGO_BIN_EXE_tracedecay").replace('\\', "/"))
 }
 
 fn assert_python_compiles(paths: &[&Path]) {
@@ -226,6 +234,24 @@ fn codex_repo_marketplace_path(project: &Path) -> std::path::PathBuf {
 
 fn codex_project_plugin_install_dir(project: &Path) -> std::path::PathBuf {
     project.join("plugins/tracedecay")
+}
+
+fn write_codex_plugin_manifest(plugin_dir: &Path, version: &str) {
+    std::fs::create_dir_all(plugin_dir.join(".codex-plugin")).unwrap();
+    std::fs::write(
+        plugin_dir.join(".codex-plugin/plugin.json"),
+        format!(r#"{{"name":"tracedecay","version":"{version}"}}"#),
+    )
+    .unwrap();
+}
+
+fn write_stale_codex_skill(plugin_dir: &Path) {
+    std::fs::create_dir_all(plugin_dir.join("skills/stale-skill")).unwrap();
+    std::fs::write(
+        plugin_dir.join("skills/stale-skill/SKILL.md"),
+        "---\nname: tracedecay:stale-skill\n---\n",
+    )
+    .unwrap();
 }
 
 fn assert_codex_plugin_bundle(
@@ -296,16 +322,21 @@ fn assert_codex_marketplace_entry(
     assert_eq!(entry["category"], "Productivity");
 }
 
-fn assert_codex_marketplace_has_no_tracedecay(marketplace_path: &Path) {
-    if !marketplace_path.exists() {
-        return;
-    }
-    let marketplace = read_json(marketplace_path);
-    assert!(
-        marketplace["plugins"]
-            .as_array()
-            .is_none_or(|plugins| plugins.iter().all(|entry| entry["name"] != "tracedecay")),
-        "Codex marketplace should not keep a tracedecay source entry after cache install"
+fn assert_codex_personal_marketplace_entry(home: &Path) {
+    assert_codex_marketplace_entry(
+        &codex_personal_marketplace_path(home),
+        "personal",
+        "Personal",
+        "./plugins/tracedecay",
+    );
+}
+
+fn assert_codex_repo_marketplace_entry(project: &Path) {
+    assert_codex_marketplace_entry(
+        &codex_repo_marketplace_path(project),
+        "local-repo",
+        "Local Repo",
+        "./plugins/tracedecay",
     );
 }
 
@@ -386,7 +417,7 @@ fn assert_cursor_plugin_bundle(plugin_dir: &Path, expected_command: &str, expect
         assert!(
             hook["command"]
                 .as_str()
-                .is_some_and(|command| command.starts_with(&format!("{expected_command} "))),
+                .is_some_and(|command| command.contains(expected_command)),
             "plugin hook commands should use the installed tracedecay binary"
         );
         assert!(
@@ -603,6 +634,37 @@ fn test_cursor_install_installs_local_plugin_without_global_mcp() {
         !home.path().join(".cursor/mcp.json").exists(),
         "Cursor plugin install should not write legacy ~/.cursor/mcp.json"
     );
+}
+
+#[test]
+fn test_cursor_plugin_hooks_quote_binary_paths_with_spaces() {
+    let home = TempDir::new().unwrap();
+    let tracedecay_bin = home.path().join("bin with spaces/tracedecay");
+    let ctx = InstallContext {
+        home: home.path().to_path_buf(),
+        tracedecay_bin: tracedecay_bin.to_string_lossy().to_string(),
+        tool_permissions: expected_tool_perms(),
+        profile: None,
+        project_root: None,
+        dashboard: true,
+    };
+
+    CursorIntegration.install(&ctx).unwrap();
+
+    let hooks = read_json(&cursor_plugin_install_dir(home.path()).join("hooks/hooks.json"));
+    let command = hooks["hooks"]["sessionStart"][0]["command"]
+        .as_str()
+        .expect("sessionStart command should be a string");
+    let expected_bin = tracedecay_bin.to_string_lossy();
+    let expected = if cfg!(windows) {
+        format!(
+            "\"{}\" hook-cursor-session-start",
+            expected_bin.replace('\\', "/")
+        )
+    } else {
+        format!("'{}' hook-cursor-session-start", expected_bin)
+    };
+    assert_eq!(command, expected);
 }
 
 #[test]
@@ -2873,12 +2935,7 @@ fn test_codex_install_creates_plugin_bundle_and_marketplace() {
         serde_json::json!(["serve"]),
         true,
     );
-    assert_codex_marketplace_entry(
-        &codex_personal_marketplace_path(home),
-        "personal",
-        "Personal",
-        "./plugins/tracedecay",
-    );
+    assert_codex_personal_marketplace_entry(home);
 
     assert!(
         !home.join(".codex/config.toml").exists(),
@@ -2895,31 +2952,16 @@ fn test_codex_install_creates_plugin_bundle_and_marketplace() {
 }
 
 #[test]
-fn test_codex_install_refreshes_existing_cache_and_removes_bootstrap_source() {
+fn test_codex_install_refreshes_existing_cache_and_keeps_bootstrap_source_listable() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let ctx = make_install_ctx(home);
     let stale_plugin_dir = codex_stale_cached_plugin_install_dir(home);
-    std::fs::create_dir_all(stale_plugin_dir.join(".codex-plugin")).unwrap();
-    std::fs::write(
-        stale_plugin_dir.join(".codex-plugin/plugin.json"),
-        r#"{"name":"tracedecay","version":"0.0.0"}"#,
-    )
-    .unwrap();
+    write_codex_plugin_manifest(&stale_plugin_dir, "0.0.0");
 
     let bootstrap_dir = codex_plugin_install_dir(home);
-    std::fs::create_dir_all(bootstrap_dir.join(".codex-plugin")).unwrap();
-    std::fs::write(
-        bootstrap_dir.join(".codex-plugin/plugin.json"),
-        r#"{"name":"tracedecay","version":"0.0.0"}"#,
-    )
-    .unwrap();
-    std::fs::create_dir_all(bootstrap_dir.join("skills/stale-skill")).unwrap();
-    std::fs::write(
-        bootstrap_dir.join("skills/stale-skill/SKILL.md"),
-        "---\nname: tracedecay:stale-skill\n---\n",
-    )
-    .unwrap();
+    write_codex_plugin_manifest(&bootstrap_dir, "0.0.0");
+    write_stale_codex_skill(&bootstrap_dir);
     std::fs::create_dir_all(home.join(".agents/plugins")).unwrap();
     std::fs::write(
         codex_personal_marketplace_path(home),
@@ -2936,15 +2978,60 @@ fn test_codex_install_refreshes_existing_cache_and_removes_bootstrap_source() {
         serde_json::json!(["serve"]),
         true,
     );
+    assert_codex_plugin_bundle(
+        &bootstrap_dir,
+        &ctx.tracedecay_bin,
+        serde_json::json!(["serve"]),
+        true,
+    );
     assert!(
-        !bootstrap_dir.exists(),
-        "global Codex install should remove the loose marketplace source once a cache install exists"
+        !bootstrap_dir.join("skills/stale-skill/SKILL.md").exists(),
+        "global Codex install should refresh the bootstrap source so plugin list/add sees current skills"
     );
     assert!(
         !stale_plugin_dir.exists(),
         "global Codex install should migrate managed cache installs to the current plugin version"
     );
-    assert_codex_marketplace_has_no_tracedecay(&codex_personal_marketplace_path(home));
+    assert_codex_personal_marketplace_entry(home);
+}
+
+#[test]
+fn test_codex_install_refreshes_existing_cache_and_prunes_stale_skills() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let ctx = make_install_ctx(home);
+    let cached_plugin_dir = codex_cached_plugin_install_dir(home);
+    let bootstrap_dir = codex_plugin_install_dir(home);
+    write_codex_plugin_manifest(&cached_plugin_dir, "0.0.0");
+    write_stale_codex_skill(&cached_plugin_dir);
+    std::fs::write(cached_plugin_dir.join("user-note.txt"), "mine\n").unwrap();
+
+    CodexIntegration.install(&ctx).unwrap();
+
+    assert_codex_plugin_bundle(
+        &cached_plugin_dir,
+        &ctx.tracedecay_bin,
+        serde_json::json!(["serve"]),
+        true,
+    );
+    assert_codex_plugin_bundle(
+        &bootstrap_dir,
+        &ctx.tracedecay_bin,
+        serde_json::json!(["serve"]),
+        true,
+    );
+    assert!(
+        !cached_plugin_dir
+            .join("skills/stale-skill/SKILL.md")
+            .exists(),
+        "refreshing an installed Codex plugin cache must prune obsolete managed skills"
+    );
+    assert_eq!(
+        std::fs::read_to_string(cached_plugin_dir.join("user-note.txt")).unwrap(),
+        "mine\n",
+        "refresh should preserve unmanaged root-level user files"
+    );
+    assert_codex_personal_marketplace_entry(home);
 }
 
 #[test]
@@ -3006,12 +3093,7 @@ fn test_codex_local_install_creates_repo_plugin_bundle_and_marketplace() {
         serde_json::json!(["serve", "--path", "."]),
         false,
     );
-    assert_codex_marketplace_entry(
-        &codex_repo_marketplace_path(project.path()),
-        "local-repo",
-        "Local Repo",
-        "./plugins/tracedecay",
-    );
+    assert_codex_repo_marketplace_entry(project.path());
     assert!(
         !project.path().join(".codex/config.toml").exists(),
         "local Codex install should use the repo plugin marketplace, not write .codex/config.toml"
@@ -3607,12 +3689,7 @@ fn test_codex_install_then_uninstall() {
     CodexIntegration.install(&ctx).unwrap();
     let plugin_dir = codex_plugin_install_dir(home);
     assert!(plugin_dir.exists());
-    assert_codex_marketplace_entry(
-        &codex_personal_marketplace_path(home),
-        "personal",
-        "Personal",
-        "./plugins/tracedecay",
-    );
+    assert_codex_personal_marketplace_entry(home);
 
     CodexIntegration.uninstall(&ctx).unwrap();
 
@@ -4218,6 +4295,25 @@ fn test_healthcheck_codex_local_install_checks_project_config() {
     assert_eq!(
         dc.issues, 0,
         "local Codex healthcheck should pass without global ~/.codex config"
+    );
+}
+
+#[test]
+fn test_healthcheck_codex_local_install_warns_when_repo_marketplace_missing() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    assert_local_install_success("codex", project.path(), home.path());
+    std::fs::remove_file(codex_repo_marketplace_path(project.path())).unwrap();
+
+    let mut dc = DoctorCounters::new();
+    let hctx = HealthcheckContext {
+        home: home.path().to_path_buf(),
+        project_path: project.path().to_path_buf(),
+    };
+    CodexIntegration.healthcheck(&mut dc, &hctx);
+    assert!(
+        dc.issues > 0 || dc.warnings > 0,
+        "local Codex healthcheck should flag a missing repo plugin marketplace"
     );
 }
 

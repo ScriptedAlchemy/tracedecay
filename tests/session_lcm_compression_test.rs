@@ -1,10 +1,12 @@
+use std::time::Duration;
+
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::sessions::lcm::compression_decision::{
-    compression_plan, effective_assembly_token_cap, overflow_recovery_assembly_cap,
-    preflight_decision, AssemblyCapInput, CompressionPlanInput, OverflowRecoveryCapInput,
-    PreflightDecisionInput,
+    bounded_leaf_chunk_len, compression_plan, effective_assembly_token_cap,
+    overflow_recovery_assembly_cap, preflight_decision, AssemblyCapInput, CompressionPlanInput,
+    OverflowRecoveryCapInput, PreflightDecisionInput,
 };
 use tracedecay::sessions::lcm::{
     LcmCompressionRequest, LcmGrepRequest, LcmGrepSort, LcmLifecycleState, LcmLifecycleUpdate,
@@ -808,6 +810,16 @@ fn compression_decision_seam_preserves_token_budget_contract() {
     );
 }
 
+#[test]
+fn bounded_leaf_chunk_len_returns_zero_when_first_message_exceeds_token_cap() {
+    let backlog = vec![
+        lcm_raw_message(1, "assistant", "one two three"),
+        lcm_raw_message(2, "assistant", "four"),
+    ];
+
+    assert_eq!(bounded_leaf_chunk_len(&backlog, Some(2), None), 0);
+}
+
 #[tokio::test]
 async fn lifecycle_frontier_survives_reopen() {
     let tmp = TempDir::new().unwrap();
@@ -916,6 +928,101 @@ async fn noop_summarizer_ingests_without_summary_nodes() {
 
     let status = db.lcm_status("cursor", Some("session-1")).await.unwrap();
     assert_eq!(status.summary_node_count, 0);
+}
+
+#[tokio::test]
+async fn replay_assembly_terminates_when_existing_summary_sources_contain_cycle() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(&db, "cursor", "cycle-session", &["alpha"]).await;
+    let leaf = db
+        .lcm_insert_summary_node(summary_draft(
+            "cursor",
+            "cycle-session",
+            0,
+            "leaf summary",
+            vec![LcmSourceRef::RawMessage {
+                store_id: store_ids[0],
+            }],
+        ))
+        .await
+        .expect("leaf summary insert should succeed");
+    let middle = db
+        .lcm_insert_summary_node(summary_draft(
+            "cursor",
+            "cycle-session",
+            1,
+            "middle summary",
+            vec![LcmSourceRef::SummaryNode {
+                node_id: leaf.node_id.clone(),
+            }],
+        ))
+        .await
+        .expect("middle summary insert should succeed");
+    let _root = db
+        .lcm_insert_summary_node(summary_draft(
+            "cursor",
+            "cycle-session",
+            2,
+            "root summary",
+            vec![LcmSourceRef::SummaryNode {
+                node_id: middle.node_id.clone(),
+            }],
+        ))
+        .await
+        .expect("root summary insert should succeed");
+
+    let conn = open_lcm_conn(&tmp).await;
+    conn.execute(
+        "DELETE FROM lcm_summary_sources WHERE node_id = ?1",
+        libsql::params![leaf.node_id.as_str()],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO lcm_summary_sources (node_id, source_kind, source_id, ordinal)
+         VALUES (?1, 'summary_node', ?2, 0)",
+        libsql::params![leaf.node_id.as_str(), middle.node_id.as_str()],
+    )
+    .await
+    .unwrap();
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(2),
+        db.lcm_compress(LcmCompressionRequest {
+            provider: "cursor".into(),
+            session_id: "cycle-session".into(),
+            messages: vec![json!({
+                "id": "active-after-cycle",
+                "role": "user",
+                "content": "active after corrupt summary cycle"
+            })],
+            current_tokens: Some(100),
+            focus_topic: None,
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+            ignore_message_patterns: Vec::new(),
+            expected_current_frontier_store_id: None,
+            threshold_tokens: None,
+            max_assembly_tokens: None,
+            leaf_chunk_tokens: None,
+            max_source_messages: None,
+            summary_fan_in: None,
+            incremental_max_depth: None,
+            fresh_tail_count: None,
+            dynamic_leaf_chunk_enabled: None,
+            dynamic_leaf_chunk_max: None,
+            context_length: None,
+            reserve_tokens_floor: None,
+            summarizer: LcmSummarizerMode::Noop,
+        }),
+    )
+    .await
+    .expect("replay assembly should terminate despite corrupt summary cycle")
+    .expect("compression should succeed");
+
+    assert_eq!(response.status, "ok");
+    assert!(!response.replay_messages.is_empty());
 }
 
 #[tokio::test]

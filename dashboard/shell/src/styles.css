@@ -6,6 +6,14 @@
  * same variables and keep their own class names.
  */
 
+/* Layer order: host element resets must lose to the plugin's compiled Tailwind
+ * output, which the build wraps in `@layer hermes-plugin{…}`. Declaring the
+ * order up front means our unlayered `.ts-*` component classes still win
+ * (unlayered beats any layer), while the bare element resets below — moved into
+ * `@layer host-reset` — yield to plugin utilities like `.text-xs`/`.font-mono-ui`
+ * and `border`/`bg-*` on raw buttons. */
+@layer host-reset, hermes-plugin;
+
 :root {
   color-scheme: dark;
 
@@ -26,7 +34,15 @@
   --ts-pink: #ff7ab6;
   --ts-red: #ff6b7a;
   --ts-green: #67e8a9;
-  --ts-shadow: 0 24px 80px rgba(0, 0, 0, 0.42);
+  --ts-purple: #b18aff;
+  /* Elevation scale (two-layer: tight contact + soft ambient). Consumed by
+     other workers — keep the token names stable. */
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.28);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.24), 0 2px 4px rgba(0, 0, 0, 0.18);
+  --shadow-md: 0 2px 4px rgba(0, 0, 0, 0.24), 0 6px 14px rgba(0, 0, 0, 0.22);
+  --shadow-lg: 0 4px 10px rgba(0, 0, 0, 0.26), 0 14px 32px rgba(0, 0, 0, 0.28);
+  --shadow-xl: 0 8px 18px rgba(0, 0, 0, 0.30), 0 28px 60px rgba(0, 0, 0, 0.32);
+  --ts-shadow: var(--shadow-lg);
   --ts-radius: 18px;
 
   /* Semantic component tokens — flip with [data-theme="light"] (see the matching
@@ -44,7 +60,7 @@
   --ts-header-bg:
     linear-gradient(90deg, rgba(7, 16, 15, 0.92), rgba(13, 27, 26, 0.82)),
     rgba(7, 16, 15, 0.78);
-  --ts-header-shadow: 0 12px 36px rgba(0, 0, 0, 0.28);
+  --ts-header-shadow: var(--shadow-md);
   --ts-logo-bg: radial-gradient(circle at 35% 25%, rgba(117, 244, 210, 0.35), transparent 55%);
   --ts-logo-border: rgba(117, 244, 210, 0.35);
   --ts-logo-shadow: 0 0 28px rgba(117, 244, 210, 0.16);
@@ -142,19 +158,24 @@ body {
   min-height: 100%;
 }
 
-button,
-input,
-select {
-  font: inherit;
-}
+/* Element resets live in `host-reset` so layered plugin utilities outrank them:
+ * `font: inherit` must not defeat `.text-xs`/`.font-mono-ui`, and the button
+ * border/background reset must not strip `border`/`bg-*` off raw buttons. */
+@layer host-reset {
+  button,
+  input,
+  select {
+    font: inherit;
+  }
 
-/* Neutralize UA button chrome (dark-mode ButtonFace gray) so raw <button>
- * elements in plugin bundles inherit the theme instead of gray slabs. */
-button {
-  background: none;
-  border: 0;
-  color: inherit;
-  cursor: pointer;
+  /* Neutralize UA button chrome (dark-mode ButtonFace gray) so raw <button>
+   * elements in plugin bundles inherit the theme instead of gray slabs. */
+  button {
+    background: none;
+    border: 0;
+    color: inherit;
+    cursor: pointer;
+  }
 }
 
 button:focus-visible,
@@ -682,7 +703,15 @@ select:focus-visible {
   --ts-pink: #c03878;
   --ts-red: #c0283a;
   --ts-green: #1a7a48;
-  --ts-shadow: 0 24px 80px rgba(0, 0, 0, 0.1);
+  --ts-purple: #7b3fd4;
+
+  /* Elevation scale — light tint (base rgba(15,40,35,α), α scaling by tier). */
+  --shadow-xs: 0 1px 2px rgba(15, 40, 35, 0.05);
+  --shadow-sm: 0 1px 2px rgba(15, 40, 35, 0.06), 0 2px 4px rgba(15, 40, 35, 0.05);
+  --shadow-md: 0 2px 4px rgba(15, 40, 35, 0.07), 0 6px 14px rgba(15, 40, 35, 0.06);
+  --shadow-lg: 0 4px 10px rgba(15, 40, 35, 0.08), 0 14px 32px rgba(15, 40, 35, 0.08);
+  --shadow-xl: 0 8px 18px rgba(15, 40, 35, 0.10), 0 28px 60px rgba(15, 40, 35, 0.10);
+  --ts-shadow: var(--shadow-lg);
 
   /* Semantic component tokens — light values (verbatim from the former
      per-component [data-theme="light"] overrides, now removed). */
@@ -697,7 +726,7 @@ select:focus-visible {
   --ts-header-bg:
     linear-gradient(90deg, rgba(245, 250, 248, 0.96), rgba(235, 248, 243, 0.9)),
     rgba(245, 250, 248, 0.88);
-  --ts-header-shadow: 0 6px 24px rgba(0, 0, 0, 0.08);
+  --ts-header-shadow: var(--shadow-md);
   --ts-logo-bg: radial-gradient(circle at 35% 25%, rgba(0, 137, 123, 0.25), transparent 55%);
   --ts-logo-border: rgba(0, 137, 123, 0.3);
   --ts-logo-shadow: 0 0 20px rgba(0, 137, 123, 0.1);
@@ -788,5 +817,26 @@ select:focus-visible {
 
   .ts-shell-main {
     padding: 0.9rem;
+  }
+}
+
+/* ------------------------------------------------------- reduced motion */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* The connection dot pulses on a loop; pin it fully opaque so it never
+     animates for motion-sensitive users. */
+  .ts-conn-indicator-error .ts-conn-dot,
+  .ts-conn-indicator-connecting .ts-conn-dot {
+    animation: none !important;
+    opacity: 1;
   }
 }

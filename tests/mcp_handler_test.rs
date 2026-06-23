@@ -3,6 +3,8 @@
 //! Each test exercises a real `TraceDecay` instance with indexed test data,
 //! ensuring that the MCP dispatch layer formats results correctly.
 
+mod common;
+
 use std::ffi::OsString;
 use std::fs;
 #[cfg(unix)]
@@ -159,6 +161,12 @@ struct TestEnv {
     _global_db_guard: GlobalDbEnvGuard,
 }
 
+struct CrossProjectMemoryEnv {
+    _dir: TempDir,
+    _env_lock: MutexGuard<'static, ()>,
+    _storage_guard: common::TraceDecayStorageEnvGuard,
+}
+
 /// Creates a temporary Rust project with cross-file calls, structs, impls,
 /// test files, and doc comments, then initialises and indexes a `TraceDecay`.
 async fn setup_project() -> (TraceDecay, TestProject) {
@@ -237,6 +245,52 @@ async fn init_test_project(project: &Path) -> (TraceDecay, TestEnv) {
             _env_lock: env_lock,
             _home_guard: home_guard,
             _global_db_guard: global_db_guard,
+        },
+    )
+}
+
+async fn setup_generated_dir_project(include_dist: bool) -> (TraceDecay, TestEnv, TempDir) {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::create_dir_all(project.join("dist")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn kept() {}\n").unwrap();
+    fs::write(
+        project.join("dist/generated.js"),
+        "export function generatedOnly() {}\n",
+    )
+    .unwrap();
+
+    let (mut cg, env) = init_test_project(project).await;
+    if include_dist {
+        cg.add_include_folders(&["dist".to_string()]);
+    }
+    cg.index_all().await.unwrap();
+    (cg, env, dir)
+}
+
+async fn setup_cross_project_memory_projects() -> (TraceDecay, TraceDecay, CrossProjectMemoryEnv) {
+    let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let storage_guard = common::isolated_tracedecay_storage(&dir);
+
+    let active_project = dir.path().join("active");
+    let target_project = dir.path().join("target");
+    fs::create_dir_all(active_project.join("src")).unwrap();
+    fs::create_dir_all(target_project.join("src")).unwrap();
+    fs::write(active_project.join("src/lib.rs"), "pub fn active() {}\n").unwrap();
+    fs::write(target_project.join("src/lib.rs"), "pub fn target() {}\n").unwrap();
+
+    let active = TraceDecay::init(&active_project).await.unwrap();
+    let target = TraceDecay::init(&target_project).await.unwrap();
+
+    (
+        active,
+        target,
+        CrossProjectMemoryEnv {
+            _dir: dir,
+            _env_lock: env_lock,
+            _storage_guard: storage_guard,
         },
     )
 }
@@ -441,8 +495,25 @@ fn extract_text(value: &Value) -> &str {
         .unwrap_or("<missing text>")
 }
 
+fn extract_json(value: &Value) -> Value {
+    serde_json::from_str(extract_text(value)).unwrap()
+}
+
+fn assert_fact_results(payload: &Value, included: &str, excluded: &str, context: &str) {
+    assert_eq!(payload["count"].as_u64(), Some(1), "{context}: {payload}");
+    let results = payload["results"].to_string();
+    assert!(
+        results.contains(included),
+        "{context} should include {included:?}: {payload}"
+    );
+    assert!(
+        !results.contains(excluded),
+        "{context} should not include {excluded:?}: {payload}"
+    );
+}
+
 async fn extract_lcm_json_following_handle(cg: &TraceDecay, value: &Value) -> Value {
-    let payload: Value = serde_json::from_str(extract_text(value)).unwrap();
+    let payload = extract_json(value);
     if payload.get("truncated").and_then(Value::as_bool) != Some(true) {
         return payload;
     }
@@ -458,7 +529,7 @@ async fn extract_lcm_json_following_handle(cg: &TraceDecay, value: &Value) -> Va
     )
     .await
     .unwrap();
-    let retrieved_payload: Value = serde_json::from_str(extract_text(&retrieved.value)).unwrap();
+    let retrieved_payload = extract_json(&retrieved.value);
     serde_json::from_str(
         retrieved_payload["content"]
             .as_str()
@@ -1124,25 +1195,39 @@ async fn find_node_id(cg: &TraceDecay, name: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+fn tool_properties<'a>(
+    tools: &'a [tracedecay::mcp::ToolDefinition],
+    name: &str,
+) -> &'a serde_json::Map<String, Value> {
+    tools
+        .iter()
+        .find(|tool| tool.name == name)
+        .unwrap_or_else(|| panic!("{name} definition"))
+        .input_schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| panic!("{name} properties"))
+}
+
 #[test]
-fn retrieve_tool_schema_uses_handle_only() {
+fn retrieve_tool_schema_requires_handle_and_accepts_project_selector() {
     let tools = get_tool_definitions();
     let retrieve = tools
         .iter()
         .find(|tool| tool.name == "tracedecay_retrieve")
         .expect("tracedecay_retrieve definition");
-    let properties = retrieve
-        .input_schema
-        .get("properties")
-        .and_then(Value::as_object)
-        .expect("retrieve properties");
+    let properties = tool_properties(&tools, "tracedecay_retrieve");
 
     assert!(properties.contains_key("handle"));
+    assert!(properties.contains_key("project_selector"));
+    assert!(properties.contains_key("project_id"));
+    assert!(properties.contains_key("project_path"));
     assert!(!properties.contains_key("retrieve_handle"));
     assert_eq!(retrieve.input_schema["required"], json!(["handle"]));
 
     assert!(retrieve.description.contains("tracedecay_retrieve"));
     assert!(retrieve.description.contains("required argument `handle`"));
+    assert!(retrieve.description.contains("pass the same selector"));
     assert!(retrieve
         .description
         .contains("Only call it when the missing details are needed"));
@@ -1150,6 +1235,45 @@ fn retrieve_tool_schema_uses_handle_only() {
         .as_str()
         .unwrap_or_default()
         .contains("required `handle` argument"));
+}
+
+#[test]
+fn always_loaded_graph_tool_schemas_advertise_project_selectors() {
+    let tools = get_tool_definitions();
+    for name in ["tracedecay_search", "tracedecay_context"] {
+        let properties = tool_properties(&tools, name);
+        assert!(
+            properties.contains_key("project_selector"),
+            "{name} should advertise nested project_selector"
+        );
+        assert!(
+            properties.contains_key("project_id"),
+            "{name} should advertise project_id"
+        );
+        assert!(
+            properties.contains_key("project_path"),
+            "{name} should advertise project_path"
+        );
+    }
+}
+
+#[test]
+fn lcm_compress_public_schema_excludes_test_summarizer_modes() {
+    let tools = get_tool_definitions();
+    let compress = tools
+        .iter()
+        .find(|tool| tool.name == "tracedecay_lcm_compress")
+        .expect("tracedecay_lcm_compress definition");
+    let modes = compress.input_schema["properties"]["summarizer"]["properties"]["mode"]["enum"]
+        .as_array()
+        .expect("summarizer mode enum");
+
+    assert!(modes.iter().any(|mode| mode == "provided"));
+    assert!(modes.iter().any(|mode| mode == "hermes_auxiliary"));
+    assert!(
+        modes.iter().all(|mode| mode != "noop" && mode != "fake"),
+        "public MCP schema should not advertise test/control summarizers: {modes:?}"
+    );
 }
 
 // 1. tracedecay_search
@@ -1172,6 +1296,77 @@ async fn test_search() {
     assert!(
         text.contains("helper"),
         "search results should contain 'helper'"
+    );
+}
+
+#[tokio::test]
+async fn test_search_returns_index_coverage_hint_for_skipped_generated_dirs() {
+    let (cg, _env, _dir) = setup_generated_dir_project(false).await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_search",
+        json!({"query": "generatedOnly", "limit": 5}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let parsed: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(parsed["results"].as_array().map(Vec::len), Some(0));
+    assert_eq!(
+        parsed["index_coverage_hint"]["suggested_command"].as_str(),
+        Some("tracedecay sync --include-folder dist")
+    );
+    assert_eq!(
+        parsed["index_coverage_hint"]["skipped_dirs"][0].as_str(),
+        Some("dist")
+    );
+}
+
+#[tokio::test]
+async fn test_context_appends_index_coverage_hint_for_skipped_generated_dirs() {
+    let (cg, _env, _dir) = setup_generated_dir_project(false).await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_context",
+        json!({"task": "generatedOnly", "max_nodes": 5}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    assert!(
+        text.contains("### Index Coverage Hint"),
+        "context miss should include coverage hint, got: {text}"
+    );
+    assert!(
+        text.contains("tracedecay sync --include-folder dist"),
+        "hint should include opt-in command, got: {text}"
+    );
+}
+
+#[tokio::test]
+async fn test_search_omits_index_coverage_hint_when_generated_dir_is_included() {
+    let (cg, _env, _dir) = setup_generated_dir_project(true).await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_search",
+        json!({"query": "missingAfterInclude", "limit": 5}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let parsed: Value = serde_json::from_str(text).unwrap();
+    assert!(
+        parsed.as_array().is_some(),
+        "search should keep array shape when there is no coverage hint, got: {text}"
     );
 }
 
@@ -1436,6 +1631,55 @@ async fn fact_store_large_list_response_reports_store_failure_actionably() {
         .as_str()
         .unwrap_or_default()
         .contains("re-run the original MCP tool"));
+}
+
+#[tokio::test]
+async fn search_large_response_uses_retrievable_truncation_handle() {
+    let (cg, project) = setup_project().await;
+    let mut source = String::new();
+    for i in 0..420 {
+        source.push_str(&format!(
+            "pub fn reversible_search_marker_{i:03}() -> &'static str {{ \"marker-{i:03}\" }}\n"
+        ));
+    }
+    fs::write(project.path().join("src/large_search.rs"), source).unwrap();
+    index_all_retrying_sync_lock(&cg).await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_search",
+        json!({"query": "reversible_search_marker", "limit": 420}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let envelope: Value =
+        serde_json::from_str(extract_text(&result.value)).expect("large search response envelope");
+    assert_eq!(envelope["truncated"], true);
+    assert_eq!(envelope["retrieve_tool"], "tracedecay_retrieve");
+    let handle = envelope["handle"]
+        .as_str()
+        .expect("large search response should include a handle");
+
+    let retrieved = handle_tool_call(
+        &cg,
+        "tracedecay_retrieve",
+        json!({ "handle": handle }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let retrieved_payload: Value = serde_json::from_str(extract_text(&retrieved.value)).unwrap();
+    assert_eq!(retrieved_payload["expired"], false);
+    let full_json = retrieved_payload["content"]
+        .as_str()
+        .expect("retrieve response should contain full search JSON");
+    assert!(
+        full_json.contains("reversible_search_marker_419"),
+        "retrieved search response should include the tail result"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1815,6 +2059,55 @@ async fn test_diff_context() {
     );
 }
 
+#[tokio::test]
+async fn diff_context_large_response_uses_retrievable_truncation_handle() {
+    let (cg, project) = setup_project().await;
+    let mut source = String::new();
+    for i in 0..420 {
+        source.push_str(&format!(
+            "pub fn reversible_diff_context_marker_{i:03}() -> &'static str {{ \"marker-{i:03}\" }}\n"
+        ));
+    }
+    fs::write(project.path().join("src/large_diff.rs"), source).unwrap();
+    index_all_retrying_sync_lock(&cg).await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_diff_context",
+        json!({"files": ["src/large_diff.rs"], "depth": 1}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let envelope: Value =
+        serde_json::from_str(extract_text(&result.value)).expect("large diff_context envelope");
+    assert_eq!(envelope["truncated"], true);
+    assert_eq!(envelope["retrieve_tool"], "tracedecay_retrieve");
+    let handle = envelope["handle"]
+        .as_str()
+        .expect("large diff_context response should include a handle");
+
+    let retrieved = handle_tool_call(
+        &cg,
+        "tracedecay_retrieve",
+        json!({ "handle": handle }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let retrieved_payload: Value = serde_json::from_str(extract_text(&retrieved.value)).unwrap();
+    assert_eq!(retrieved_payload["expired"], false);
+    let full_json = retrieved_payload["content"]
+        .as_str()
+        .expect("retrieve response should contain full diff_context JSON");
+    assert!(
+        full_json.contains("reversible_diff_context_marker_419"),
+        "retrieved diff_context response should include the tail result"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 16. tracedecay_module_api
 // ---------------------------------------------------------------------------
@@ -2160,8 +2453,8 @@ async fn test_god_class() {
 #[tokio::test]
 async fn test_changelog_no_git() {
     let (cg, _dir) = setup_project().await;
-    // The temp dir is not a git repo, so this should return a "git diff failed"
-    // message rather than a hard error.
+    // The temp dir is not a git repo, so this should return a structured git
+    // error in the tool payload rather than success-looking prose.
     let result = handle_tool_call(
         &cg,
         "tracedecay_changelog",
@@ -2172,11 +2465,53 @@ async fn test_changelog_no_git() {
     .await
     .unwrap();
     let text = extract_text(&result.value);
+    let output: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(output["error"]["kind"].as_str(), Some("git"));
+    assert_eq!(output["error"]["operation"].as_str(), Some("diff"));
+    assert!(output["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("failed to open git repo"));
+}
+
+#[tokio::test]
+async fn run_affected_tests_reports_git_failure_without_changed_paths() {
+    let (cg, _dir) = setup_project().await;
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_run_affected_tests",
+        json!({"timeout_secs": 1}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let output: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(output["error"]["kind"].as_str(), Some("git"));
+    assert_eq!(output["error"]["operation"].as_str(), Some("diff"));
     assert!(
-        text.contains("git diff failed"),
-        "changelog on non-git dir should report git diff failure, got: {}",
-        text,
+        output["note"].is_null(),
+        "git failure must not be reported as a no-change note: {output}"
     );
+}
+
+#[tokio::test]
+async fn pr_context_no_git_returns_structured_git_error() {
+    let (cg, _dir) = setup_project().await;
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_pr_context",
+        json!({"base_ref": "HEAD~1", "head_ref": "HEAD"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let output: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(output["error"]["kind"].as_str(), Some("git"));
+    assert_eq!(output["error"]["operation"].as_str(), Some("diff"));
 }
 
 // ---------------------------------------------------------------------------
@@ -3180,8 +3515,65 @@ async fn project_selector_is_rejected_before_write_tool_parsing() {
     let message = expect_tool_error(result);
 
     assert!(
-        message.contains("does not accept project_selector"),
+        message.contains("does not accept project selectors"),
         "write tool should reject project_selector before parser errors, got {message}"
+    );
+}
+
+#[tokio::test]
+async fn lcm_project_root_storage_arg_is_not_rejected_as_selector() {
+    let (cg, _dir) = setup_project().await;
+    let project_root = cg.project_root().to_string_lossy().to_string();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_preflight",
+        json!({
+            "session_id": "stock-check-session",
+            "project_root": project_root,
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "hi there"}
+            ],
+            "current_tokens": 50
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&result.value);
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["session_id"], "stock-check-session");
+}
+
+#[tokio::test]
+async fn lcm_project_path_selector_is_rejected_before_dispatch() {
+    let (cg, _dir) = setup_project().await;
+    let project_path = cg.project_root().to_string_lossy().to_string();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_preflight",
+        json!({
+            "session_id": "stock-check-session",
+            "project_path": project_path,
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "hi there"}
+            ],
+            "current_tokens": 50
+        }),
+        None,
+        None,
+    )
+    .await;
+    let message = expect_tool_error(result);
+
+    assert!(
+        message.contains("does not accept project selectors"),
+        "LCM preflight should reject project_path selectors before dispatch, got {message}"
     );
 }
 
@@ -3429,8 +3821,7 @@ async fn ast_grep_rewrite_has_literal_fallback_when_binary_missing() {
     .await
     .unwrap();
 
-    let text = extract_text(&result.value);
-    let output: Value = serde_json::from_str(text).unwrap();
+    let output = extract_json(&result.value);
     assert_eq!(output["success"].as_bool(), Some(true), "{output}");
     assert!(
         fs::read_to_string(project.join("src/lib.rs"))
@@ -4922,6 +5313,293 @@ async fn memory_fact_store_add_search_update_remove_and_wrappers() {
 }
 
 #[tokio::test]
+async fn memory_fact_store_project_selector_targets_registered_project() {
+    let (active, target, _env) = setup_cross_project_memory_projects().await;
+    let target_project_id = target
+        .store_layout()
+        .identity
+        .project_id
+        .as_deref()
+        .expect("target project should have a profile project_id");
+    let target_project_path = target.project_root().to_string_lossy().to_string();
+
+    handle_tool_call(
+        &target,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": "Target selector fact stays with the registered target project",
+            "category": "project",
+            "entity": "Target selector"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    handle_tool_call(
+        &active,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": "Active selector fact stays with the active project",
+            "category": "project",
+            "entity": "Active selector"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let target_list = handle_tool_call(
+        &active,
+        "tracedecay_fact_store",
+        json!({
+            "action": "list",
+            "project_path": target_project_path,
+            "category": "project",
+            "min_trust": 0.0
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let target_list = extract_json(&target_list.value);
+    assert_fact_results(
+        &target_list,
+        "Target selector fact",
+        "Active selector fact",
+        "project_path selector should read target-project facts",
+    );
+
+    let target_list_by_nested_project_path = handle_tool_call(
+        &active,
+        "tracedecay_fact_store",
+        json!({
+            "action": "list",
+            "project_selector": {"project_path": target_project_path},
+            "category": "project",
+            "min_trust": 0.0
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let target_list_by_nested_project_path =
+        extract_json(&target_list_by_nested_project_path.value);
+    assert_fact_results(
+        &target_list_by_nested_project_path,
+        "Target selector fact",
+        "Active selector fact",
+        "nested project_path selector should read target-project facts",
+    );
+
+    let active_list = handle_tool_call(
+        &active,
+        "tracedecay_fact_store",
+        json!({"action": "list", "category": "project", "min_trust": 0.0}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let active_list = extract_json(&active_list.value);
+    assert_fact_results(
+        &active_list,
+        "Active selector fact",
+        "Target selector fact",
+        "default fact_store scope should remain the active project",
+    );
+
+    let cross_project_write = handle_tool_call(
+        &active,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "project_selector": {"project_id": target_project_id},
+            "content": "Cross-project writes should be rejected",
+            "category": "project"
+        }),
+        None,
+        None,
+    )
+    .await;
+    let Err(err) = cross_project_write else {
+        panic!("expected cross-project fact_store add to be rejected");
+    };
+    assert!(
+        format!("{err}").contains("cross-project fact_store writes are not supported"),
+        "unexpected cross-project write error: {err}"
+    );
+
+    let cross_project_feedback = handle_tool_call(
+        &active,
+        "tracedecay_fact_feedback",
+        json!({
+            "fact_id": 1,
+            "action": "helpful",
+            "project_selector": {"project_id": target_project_id}
+        }),
+        None,
+        None,
+    )
+    .await;
+    let Err(err) = cross_project_feedback else {
+        panic!("expected cross-project fact feedback to be rejected");
+    };
+    assert!(
+        format!("{err}").contains("does not accept project selectors"),
+        "unexpected cross-project feedback error: {err}"
+    );
+
+    let typo_selector = handle_tool_call(
+        &active,
+        "tracedecay_fact_store",
+        json!({
+            "action": "list",
+            "project_id": "proj_does_not_exist",
+            "category": "project",
+            "min_trust": 0.0
+        }),
+        None,
+        None,
+    )
+    .await;
+    let Err(err) = typo_selector else {
+        panic!("expected unresolved explicit selector to fail");
+    };
+    assert!(
+        format!("{err}").contains("registered project not found for selector"),
+        "unresolved selector must not fall back to active project: {err}"
+    );
+
+    let hidden_top_level_path = handle_tool_call(
+        &active,
+        "tracedecay_fact_store",
+        json!({
+            "action": "list",
+            "path": target_project_path,
+            "category": "project",
+            "min_trust": 0.0
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let hidden_top_level_path = extract_json(&hidden_top_level_path.value);
+    assert_fact_results(
+        &hidden_top_level_path,
+        "Active selector fact",
+        "Target selector fact",
+        "top-level path should not act as an undocumented project selector",
+    );
+}
+
+#[tokio::test]
+async fn memory_status_project_selector_reports_registered_project_memory() {
+    let (active, target, _env) = setup_cross_project_memory_projects().await;
+    let target_project_id = target
+        .store_layout()
+        .identity
+        .project_id
+        .as_deref()
+        .expect("target project should have a profile project_id");
+    let target_project_path = target.project_root().to_string_lossy().to_string();
+
+    for content in ["Active status fact one", "Active status fact two"] {
+        handle_tool_call(
+            &active,
+            "tracedecay_fact_store",
+            json!({
+                "action": "add",
+                "content": content,
+                "category": "project"
+            }),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    }
+
+    handle_tool_call(
+        &target,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": "Target status fact",
+            "category": "project"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let active_status =
+        handle_tool_call(&active, "tracedecay_memory_status", json!({}), None, None)
+            .await
+            .unwrap();
+    let active_status = extract_json(&active_status.value);
+    assert_eq!(active_status["status"], "ok");
+    assert_eq!(active_status["memory"]["fact_count"].as_u64(), Some(2));
+
+    let target_status_by_id = handle_tool_call(
+        &active,
+        "tracedecay_memory_status",
+        json!({"project_id": target_project_id}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let target_status_by_id = extract_json(&target_status_by_id.value);
+    assert_eq!(target_status_by_id["status"], "ok");
+    assert_eq!(
+        target_status_by_id["memory"]["fact_count"].as_u64(),
+        Some(1),
+        "project_id selector should report the target project's memory: {target_status_by_id}"
+    );
+
+    let target_status_by_path = handle_tool_call(
+        &active,
+        "tracedecay_memory_status",
+        json!({"project_selector": {"path": target_project_path}}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let target_status_by_path = extract_json(&target_status_by_path.value);
+    assert_eq!(
+        target_status_by_path["memory"]["fact_count"].as_u64(),
+        Some(1),
+        "nested path selector should report the target project's memory: {target_status_by_path}"
+    );
+
+    let missing_status = handle_tool_call(
+        &active,
+        "tracedecay_memory_status",
+        json!({"project_id": "proj_does_not_exist"}),
+        None,
+        None,
+    )
+    .await;
+    let Err(err) = missing_status else {
+        panic!("expected unresolved memory_status selector to fail");
+    };
+    assert!(
+        format!("{err}").contains("registered project not found for selector"),
+        "unresolved memory_status selector must not fall back to active project: {err}"
+    );
+}
+
+#[tokio::test]
 async fn memory_fact_store_update_rejects_secret_like_content_with_diff_report() {
     let (cg, _dir) = setup_project().await;
     let added = handle_tool_call(
@@ -5382,7 +6060,7 @@ async fn message_search_reads_project_local_session_db() {
     )
     .await
     .unwrap();
-    let parsed: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    let parsed = extract_json(&result.value);
     assert_eq!(parsed["status"], "ok");
     assert_eq!(parsed["count"], 1);
     assert_eq!(
@@ -5408,8 +6086,7 @@ async fn message_search_reads_project_local_session_db() {
     )
     .await
     .unwrap();
-    let subagent_parsed: Value =
-        serde_json::from_str(extract_text(&subagent_result.value)).unwrap();
+    let subagent_parsed = extract_json(&subagent_result.value);
     assert_eq!(subagent_parsed["status"], "ok");
     assert_eq!(subagent_parsed["scope"], "subagents_only");
     assert_eq!(subagent_parsed["parent_session_id"], "cursor-session");
@@ -5503,7 +6180,7 @@ async fn message_search_reads_profile_sharded_session_db() {
     )
     .await
     .unwrap();
-    let parsed: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    let parsed = extract_json(&result.value);
 
     assert_eq!(parsed["status"], "ok");
     assert_eq!(parsed["count"], 1);
@@ -10942,4 +11619,223 @@ async fn type_hierarchy_surfaces_store_failure_instead_of_empty_tree() {
         result.is_err(),
         "a failing store query must produce a tool error, not an empty hierarchy"
     );
+}
+
+#[tokio::test]
+async fn message_search_selects_registered_project_session_db_by_project_id() {
+    let (cg, _dir) = setup_project().await;
+    let profile_root = cg.project_root().join("home/.tracedecay");
+    let target_project = cg.project_root().join("registered-target");
+    let target_project_path = target_project.to_string_lossy().to_string();
+    let target_store_relpath = "projects/proj_cross_messages";
+    let target_store_root = profile_root.join(target_store_relpath);
+    let target_session_db = target_store_root.join("sessions.db");
+    fs::create_dir_all(&target_project).unwrap();
+    fs::create_dir_all(&target_store_root).unwrap();
+
+    let active_db = open_project_session_db(cg.project_root())
+        .await
+        .expect("active project session db should open");
+    assert!(
+        active_db
+            .upsert_session(&SessionRecord {
+                provider: "cursor".to_string(),
+                session_id: "active-session".to_string(),
+                project_key: cg.project_root().to_string_lossy().to_string(),
+                project_path: cg.project_root().to_string_lossy().to_string(),
+                title: Some("Active project".to_string()),
+                started_at: Some(1),
+                ended_at: None,
+                transcript_path: Some("active-session.jsonl".to_string()),
+                metadata_json: None,
+                parent_session_id: None,
+                is_subagent: false,
+                agent_id: None,
+                parent_tool_use_id: None,
+            })
+            .await
+    );
+    assert!(
+        active_db
+            .upsert_session_message(&SessionMessageRecord {
+                provider: "cursor".to_string(),
+                message_id: "active-message".to_string(),
+                session_id: "active-session".to_string(),
+                role: "user".to_string(),
+                timestamp: Some(2),
+                ordinal: 1,
+                text: "Cross project dragonfruit belongs to the active database.".to_string(),
+                kind: Some("message".to_string()),
+                model: Some("test-model".to_string()),
+                tool_names: None,
+                source_path: Some("active-session.jsonl".to_string()),
+                source_offset: Some(0),
+                metadata_json: None,
+            })
+            .await
+    );
+
+    let registry = GlobalDb::open().await.expect("global registry should open");
+    let project = registry
+        .upsert_code_project(
+            "proj_cross_messages",
+            &target_project,
+            None,
+            None,
+            Some("main"),
+        )
+        .await
+        .expect("registered project should upsert");
+    let store = registry
+        .upsert_store_instance(tracedecay::global_db::StoreInstanceUpsert {
+            store_id: "store_cross_messages".to_string(),
+            project_id: project.project_id,
+            store_kind: "code_project".to_string(),
+            storage_mode: "profile_sharded".to_string(),
+            store_relpath: target_store_relpath.to_string(),
+            manifest_relpath: Some(format!("{target_store_relpath}/store_manifest.json")),
+            last_verified_at: Some(1_800_000_010),
+            last_write_at: Some(1_800_000_011),
+        })
+        .await
+        .expect("registered store should upsert");
+    registry
+        .upsert_store_artifact(tracedecay::global_db::StoreArtifactUpsert {
+            store_id: store.store_id,
+            artifact_kind: "sessions_db".to_string(),
+            relpath: format!("{target_store_relpath}/sessions.db"),
+            size_bytes: None,
+            schema_version: Some("1".to_string()),
+            updated_at: Some(1_800_000_012),
+        })
+        .await
+        .expect("session artifact should upsert");
+
+    let target_db = GlobalDb::open_at(&target_session_db)
+        .await
+        .expect("registered project session db should open");
+    assert!(
+        target_db
+            .upsert_session(&SessionRecord {
+                provider: "cursor".to_string(),
+                session_id: "target-session".to_string(),
+                project_key: target_project_path.clone(),
+                project_path: target_project_path.clone(),
+                title: Some("Registered project".to_string()),
+                started_at: Some(10),
+                ended_at: None,
+                transcript_path: Some("target-session.jsonl".to_string()),
+                metadata_json: None,
+                parent_session_id: None,
+                is_subagent: false,
+                agent_id: None,
+                parent_tool_use_id: None,
+            })
+            .await
+    );
+    assert!(
+        target_db
+            .upsert_session_message(&SessionMessageRecord {
+                provider: "cursor".to_string(),
+                message_id: "target-message".to_string(),
+                session_id: "target-session".to_string(),
+                role: "assistant".to_string(),
+                timestamp: Some(11),
+                ordinal: 1,
+                text: "Cross project dragonfruit belongs to the registered database.".to_string(),
+                kind: Some("message".to_string()),
+                model: Some("test-model".to_string()),
+                tool_names: None,
+                source_path: Some("target-session.jsonl".to_string()),
+                source_offset: Some(0),
+                metadata_json: None,
+            })
+            .await
+    );
+
+    fn message_search_args(selector: Value) -> Value {
+        let mut args = json!({
+            "query": "dragonfruit",
+            "provider": "cursor",
+            "limit": 5
+        });
+        args.as_object_mut()
+            .unwrap()
+            .extend(selector.as_object().unwrap().clone());
+        args
+    }
+
+    for (label, selector) in [
+        ("project_id", json!({"project_id": "proj_cross_messages"})),
+        (
+            "project_path",
+            json!({"project_path": target_project_path.clone()}),
+        ),
+        (
+            "project_root",
+            json!({"project_root": target_project_path.clone()}),
+        ),
+        (
+            "nested path",
+            json!({"project_selector": {"path": target_project_path.clone()}}),
+        ),
+        (
+            "nested project_path",
+            json!({"project_selector": {"project_path": target_project_path.clone()}}),
+        ),
+    ] {
+        let result = handle_tool_call(
+            &cg,
+            "tracedecay_message_search",
+            message_search_args(selector),
+            None,
+            None,
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{label} selector should resolve target project: {err}"));
+        let parsed = extract_json(&result.value);
+
+        assert_eq!(parsed["status"], "ok", "{label}: {parsed}");
+        assert_eq!(
+            parsed["selected_project_root"],
+            target_project_path.as_str(),
+            "{label}: {parsed}"
+        );
+        assert_eq!(parsed["count"], 1, "{label}: {parsed}");
+        assert_eq!(
+            parsed["results"][0]["message"]["message_id"], "target-message",
+            "{label}: {parsed}"
+        );
+        assert_eq!(
+            parsed["results"][0]["session"]["project_key"],
+            target_project_path.as_str(),
+            "{label}: {parsed}"
+        );
+    }
+
+    for (label, selector) in [
+        (
+            "missing project_id",
+            json!({"project_id": "proj_missing_messages"}),
+        ),
+        (
+            "missing nested path",
+            json!({"project_selector": {"path": cg.project_root().join("missing-project").to_string_lossy().to_string()}}),
+        ),
+    ] {
+        let err = expect_tool_error(
+            handle_tool_call(
+                &cg,
+                "tracedecay_message_search",
+                message_search_args(selector),
+                None,
+                None,
+            )
+            .await,
+        );
+        assert!(
+            err.contains("registered project not found for selector"),
+            "{label} must fail closed instead of searching the active session DB: {err}"
+        );
+    }
 }

@@ -24,6 +24,7 @@
  */
 
 import { createRsbuild } from "@rsbuild/core";
+import chokidar from "chokidar";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -53,10 +54,57 @@ const url = `http://${host}:${actualPort}/`;
 console.log(`tracedecay dev listening on ${url}`);
 console.log(`tracedecay dev proxying /api -> ${apiTarget}`);
 
+// The holographic plugin's CSS is Tailwind-compiled into dist/style.css (which
+// dev/main.tsx imports), so editing its source does not by itself trigger HMR.
+// Watch the holographic source and re-run the compile on change; rewriting
+// dist/style.css makes Rsbuild's HMR pick the new CSS up. Debounced so a burst
+// of saves coalesces into a single recompile, and serialized so an in-flight
+// compile never overlaps a queued one.
+const holographicSrc = path.join(dashboardRoot, "holographic/src");
+let recompileTimer = null;
+let recompiling = false;
+let recompilePending = false;
+
+async function recompileHolographic() {
+  if (recompiling) {
+    recompilePending = true;
+    return;
+  }
+  recompiling = true;
+  try {
+    await compileHolographicTailwindCss();
+    console.log("tracedecay dev recompiled holographic CSS");
+  } catch (err) {
+    console.error("tracedecay dev failed to recompile holographic CSS:", err);
+  } finally {
+    recompiling = false;
+    if (recompilePending) {
+      recompilePending = false;
+      scheduleHolographicRecompile();
+    }
+  }
+}
+
+function scheduleHolographicRecompile() {
+  if (recompileTimer) clearTimeout(recompileTimer);
+  recompileTimer = setTimeout(() => {
+    recompileTimer = null;
+    void recompileHolographic();
+  }, 150);
+}
+
+const holographicWatcher = chokidar.watch("**/*.{css,tsx,ts}", {
+  cwd: holographicSrc,
+  ignoreInitial: true,
+});
+holographicWatcher.on("all", scheduleHolographicRecompile);
+
 function shutdown() {
-  Promise.resolve(handle && typeof handle.close === "function" ? handle.close() : undefined)
-    .catch(() => {})
-    .finally(() => process.exit(0));
+  if (recompileTimer) clearTimeout(recompileTimer);
+  Promise.allSettled([
+    Promise.resolve(handle && typeof handle.close === "function" ? handle.close() : undefined),
+    Promise.resolve(holographicWatcher.close()),
+  ]).finally(() => process.exit(0));
 }
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);

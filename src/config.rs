@@ -19,6 +19,38 @@ pub const USER_DATA_DIR_ENV: &str = "TRACEDECAY_DATA_DIR";
 /// Project graph database filename inside a `.tracedecay/` data dir.
 pub const DB_FILENAME: &str = "tracedecay.db";
 
+const DEFAULT_EXCLUDE_PATTERNS: &[&str] = &[
+    "target/**",
+    ".git/**",
+    ".tracedecay/**",
+    "**/node_modules/**",
+    "vendor/**",
+    "**/vendor/**",
+    "**/*.min.*",
+    "bin/**",
+    "build/**",
+    "**/build/**",
+    "dist/**",
+    "**/dist/**",
+    "out/**",
+    "**/out/**",
+    "coverage/**",
+    "**/coverage/**",
+    ".cache/**",
+    "**/.cache/**",
+    ".next/**",
+    "**/.next/**",
+    ".turbo/**",
+    "**/.turbo/**",
+    ".gradle/**",
+    "**/.gradle/**",
+    ".venv/**",
+    "**/.venv/**",
+    "venv/**",
+    "**/venv/**",
+    "**/__pycache__/**",
+];
+
 /// Configuration for a `TraceDecay` project.
 ///
 /// Controls which files are indexed, size limits, and feature toggles.
@@ -32,9 +64,10 @@ pub struct TraceDecayConfig {
     pub root_dir: String,
     /// Glob patterns for files to exclude during indexing.
     pub exclude: Vec<String>,
-    /// Glob patterns for hidden (dot-prefixed) paths to include despite the
-    /// default hidden-directory filter.  For example, `[".github/**"]` indexes
-    /// files under `.github/` that would otherwise be skipped.
+    /// Glob patterns for paths to include despite the default hidden-directory,
+    /// generated-directory, and gitignore filters. For example,
+    /// `[".github/**"]` indexes files under `.github/` that would otherwise be
+    /// skipped.
     #[serde(default)]
     pub include: Vec<String>,
     /// Maximum file size in bytes; files larger than this are skipped.
@@ -44,8 +77,12 @@ pub struct TraceDecayConfig {
     /// Whether to track call-site locations for edges.
     pub track_call_sites: bool,
     /// Whether to respect `.gitignore` rules when scanning files.
-    #[serde(default)]
+    #[serde(default = "default_git_ignore")]
     pub git_ignore: bool,
+}
+
+fn default_git_ignore() -> bool {
+    true
 }
 
 impl Default for TraceDecayConfig {
@@ -53,23 +90,15 @@ impl Default for TraceDecayConfig {
         Self {
             version: 1,
             root_dir: String::new(),
-            exclude: vec![
-                "target/**".to_string(),
-                ".git/**".to_string(),
-                ".tracedecay/**".to_string(),
-                "**/node_modules/**".to_string(),
-                "vendor/**".to_string(),
-                "**/*.min.*".to_string(),
-                "bin/**".to_string(),
-                "build/**".to_string(),
-                "out/**".to_string(),
-                ".gradle/**".to_string(),
-            ],
+            exclude: DEFAULT_EXCLUDE_PATTERNS
+                .iter()
+                .map(|pattern| (*pattern).to_string())
+                .collect(),
             include: Vec::new(),
             max_file_size: 1_048_576,
             extract_docstrings: true,
             track_call_sites: true,
-            git_ignore: false,
+            git_ignore: default_git_ignore(),
         }
     }
 }
@@ -395,6 +424,28 @@ pub fn is_included(path: &str, config: &TraceDecayConfig) -> bool {
     false
 }
 
+/// Returns `true` if a directory should be entered because it or one of its
+/// descendants matches an explicit include glob.
+pub fn is_included_dir(dir_path: &str, config: &TraceDecayConfig) -> bool {
+    let match_opts = glob::MatchOptions {
+        case_sensitive: true,
+        require_literal_separator: false,
+        require_literal_leading_dot: false,
+    };
+
+    for pattern_str in &config.include {
+        if let Ok(pattern) = Pattern::new(pattern_str) {
+            if pattern.matches_with(dir_path, match_opts)
+                || pattern.matches_with(&format!("{dir_path}/_"), match_opts)
+            {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 /// Returns `true` if a directory should be pruned during scanning.
 ///
 /// Matches `dir/_` against exclude patterns (for `dir/**`-style globs) and
@@ -503,16 +554,20 @@ mod tests {
     }
 
     #[test]
-    fn test_include_does_not_override_exclude() {
+    fn test_include_records_explicit_override_even_when_excluded() {
         let config = TraceDecayConfig {
             include: vec![".config/**".to_string()],
             exclude: vec![".config/secret/**".to_string()],
             ..TraceDecayConfig::default()
         };
-        // Included by include glob
         assert!(is_included(".config/secret/key.rs", &config));
-        // But also matched by exclude glob
         assert!(is_excluded(".config/secret/key.rs", &config));
+    }
+
+    #[test]
+    fn test_default_gitignore_is_enabled() {
+        let config = TraceDecayConfig::default();
+        assert!(config.git_ignore);
     }
 
     #[test]
@@ -529,6 +584,10 @@ mod tests {
             "packages/web/node_modules/react/index.js",
             &config
         ));
+        assert!(is_excluded("dist/main.js", &config));
+        assert!(is_excluded("packages/web/dist/main.js", &config));
+        assert!(is_excluded("coverage/lcov.js", &config));
+        assert!(is_excluded("packages/web/.next/server/app.js", &config));
     }
 
     #[test]

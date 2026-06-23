@@ -172,7 +172,7 @@ impl KotlinExtractor {
     /// Parse source code into a tree-sitter AST.
     fn parse_source(source: &str) -> Result<Tree, String> {
         let mut parser = Parser::new();
-        let language = crate::extraction::ts_provider::language("kotlin");
+        let language = crate::extraction::ts_provider::try_language("kotlin")?;
         parser
             .set_language(&language)
             .map_err(|e| format!("failed to load Kotlin grammar: {e}"))?;

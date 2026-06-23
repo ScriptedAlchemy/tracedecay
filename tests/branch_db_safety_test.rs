@@ -306,3 +306,102 @@ async fn add_branch_tracking_copies_from_nearest_tracked_ancestor() {
         "new branch tracking should still sync the current branch's own files"
     );
 }
+
+#[tokio::test]
+async fn add_branch_tracking_refuses_corrupt_metadata_without_overwriting() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+
+    git(project, &["init", "-b", "main"]);
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn main_only() {}\n").unwrap();
+    commit_all(project, "initial commit");
+
+    let main = TraceDecay::init(project).await.unwrap();
+    main.index_all().await.unwrap();
+    drop(main);
+
+    let tracedecay_dir = project_data_dir(project);
+    let meta_path = tracedecay_dir.join("branch-meta.json");
+    fs::write(&meta_path, b"{not valid json").unwrap();
+
+    git(project, &["checkout", "-b", "feature/corrupt-meta"]);
+    fs::write(
+        project.join("src/feature_only.rs"),
+        "pub fn feature_only() {}\n",
+    )
+    .unwrap();
+    commit_all(project, "feature commit");
+
+    let err = branch::add_branch_tracking(project, "feature/corrupt-meta")
+        .await
+        .expect_err("corrupt metadata must stop branch tracking instead of being replaced");
+
+    assert!(
+        err.to_string().contains("corrupt branch metadata"),
+        "unexpected error: {err}"
+    );
+    assert_eq!(
+        fs::read(&meta_path).unwrap(),
+        b"{not valid json",
+        "failed branch add must preserve the original corrupt metadata for repair"
+    );
+}
+
+#[test]
+fn cli_branch_add_refuses_corrupt_metadata_without_overwriting() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+
+    git(project, &["init", "-b", "main"]);
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn main_only() {}\n").unwrap();
+    commit_all(project, "initial commit");
+
+    let init = Command::new(env!("CARGO_BIN_EXE_tracedecay"))
+        .arg("init")
+        .arg(project)
+        .output()
+        .expect("tracedecay init");
+    assert!(
+        init.status.success(),
+        "tracedecay init failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&init.stdout),
+        String::from_utf8_lossy(&init.stderr)
+    );
+
+    let tracedecay_dir = project_data_dir(project);
+    let meta_path = tracedecay_dir.join("branch-meta.json");
+    fs::write(&meta_path, b"{not valid json").unwrap();
+
+    git(project, &["checkout", "-b", "feature/corrupt-meta"]);
+    fs::write(
+        project.join("src/feature_only.rs"),
+        "pub fn feature_only() {}\n",
+    )
+    .unwrap();
+    commit_all(project, "feature commit");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_tracedecay"))
+        .args(["branch", "add", "feature/corrupt-meta", "--path"])
+        .arg(project)
+        .output()
+        .expect("tracedecay branch add");
+
+    assert!(
+        !output.status.success(),
+        "corrupt metadata must fail CLI branch add\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("corrupt branch metadata"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read(&meta_path).unwrap(),
+        b"{not valid json",
+        "failed CLI branch add must preserve corrupt metadata for repair"
+    );
+}

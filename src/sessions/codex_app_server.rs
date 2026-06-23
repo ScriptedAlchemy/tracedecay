@@ -123,10 +123,7 @@ pub fn summarize_with_codex_app_server(
     wait_for_response(&line_rx, deadline, 0)?;
     send_json(&mut stdin, &json!({"method": "initialized", "params": {}}))?;
 
-    let mut thread_params = json!({});
-    if let Some(model) = model {
-        thread_params["model"] = json!(model);
-    }
+    let thread_params = build_summary_thread_start_params(model);
     send_json(
         &mut stdin,
         &json!({"method": "thread/start", "id": 1, "params": thread_params}),
@@ -172,6 +169,17 @@ pub fn summarize_with_codex_app_server(
     }
     summary.text = text.to_string();
     Ok(summary)
+}
+
+fn build_summary_thread_start_params(model: Option<&str>) -> Value {
+    let mut params = json!({
+        "ephemeral": true,
+        "threadSource": "tracedecay_codex_summary"
+    });
+    if let Some(model) = model {
+        params["model"] = json!(model);
+    }
+    params
 }
 
 struct ChildGuard {
@@ -463,5 +471,14 @@ mod tests {
         };
         assert_eq!(summary.text, "summary text");
         assert_eq!(summary.model.as_deref(), Some("gpt-5.5-codex-actual"));
+    }
+
+    #[test]
+    fn summary_thread_start_params_are_ephemeral_and_identified() {
+        let params = build_summary_thread_start_params(Some("gpt-5.5-codex"));
+
+        assert_eq!(params["ephemeral"], json!(true));
+        assert_eq!(params["threadSource"], json!("tracedecay_codex_summary"));
+        assert_eq!(params["model"], json!("gpt-5.5-codex"));
     }
 }

@@ -21,6 +21,7 @@ description: 'Use when estimating blast radius: what depends on a symbol or file
 
 - Read-only analysis. This skill identifies impact and the test set; it does **not** run tests.
 - Start with a shallow `max_depth` and widen only when the picture is incomplete.
+- For broad changes, use scoped read-only subagents per changed file group, target symbol, or subsystem. Subagents should return cited dependents, affected tests, and depth/tool parameters; the parent agent owns the final blast-radius and test-set synthesis.
 
 ## Handoff
 

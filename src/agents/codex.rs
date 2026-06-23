@@ -11,7 +11,9 @@
 //! `/hooks` CLI before they run — newly installed or changed hooks are skipped
 //! until trusted. The installer prints that guidance after writing `hooks.json`.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
 
@@ -89,10 +91,14 @@ impl AgentIntegration for CodexIntegration {
     fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
         let cached_dirs = codex_plugin_cached_install_dirs(&ctx.home);
         let plugin_dir = codex_plugin_install_dir(&ctx.home);
+        let mut refreshed = Vec::new();
         if !cached_dirs.is_empty() {
             let target = install_codex_cached_plugin(&ctx.home, &ctx.tracedecay_bin)?;
-            cleanup_codex_plugin_bootstrap(&ctx.home)?;
-            return Ok(UpdatePluginOutcome::Refreshed(vec![target]));
+            refreshed.push(target);
+            refreshed.push(install_codex_personal_bootstrap(
+                &ctx.home,
+                &ctx.tracedecay_bin,
+            )?);
         }
 
         if let Some(project_path) = codex_update_project_path(ctx) {
@@ -105,8 +111,18 @@ impl AgentIntegration for CodexIntegration {
                     &ctx.tracedecay_bin,
                     InstallScope::ProjectLocal,
                 )?;
-                return Ok(UpdatePluginOutcome::Refreshed(vec![repo_dir]));
+                install_codex_marketplace_entry(
+                    &codex_repo_marketplace_path(&project_path),
+                    "local-repo",
+                    "Local Repo",
+                    "./plugins/tracedecay",
+                )?;
+                refreshed.push(repo_dir);
             }
+        }
+
+        if !refreshed.is_empty() {
+            return Ok(UpdatePluginOutcome::Refreshed(refreshed));
         }
 
         let target = if codex_plugin_manifest_path(&ctx.home).exists() {
@@ -120,7 +136,7 @@ impl AgentIntegration for CodexIntegration {
         let Some(target) = target else {
             return Ok(UpdatePluginOutcome::NotInstalled);
         };
-        write_codex_plugin_files(&target, &ctx.tracedecay_bin, InstallScope::Global)?;
+        install_codex_personal_bootstrap(&ctx.home, &ctx.tracedecay_bin)?;
         Ok(UpdatePluginOutcome::Refreshed(vec![target]))
     }
 
@@ -130,6 +146,13 @@ impl AgentIntegration for CodexIntegration {
         let local_plugin_dir = codex_repo_plugin_install_dir(&ctx.project_path);
         if local_plugin_dir.join(".codex-plugin/plugin.json").exists() {
             doctor_check_plugin_dir(dc, &local_plugin_dir);
+            doctor_check_marketplace_entry(
+                dc,
+                &codex_repo_marketplace_path(&ctx.project_path),
+                "repo marketplace",
+                "./plugins/tracedecay",
+                "tracedecay install --local --agent codex",
+            );
         } else if local_codex_dir.join("config.toml").exists()
             || local_codex_dir.join("hooks.json").exists()
         {
@@ -346,11 +369,162 @@ fn codex_update_project_path(ctx: &InstallContext) -> Option<PathBuf> {
         .or_else(|| std::env::current_dir().ok())
 }
 
+const CODEX_TRACEDECAY_AUTOMATION_ID: &str = "watch-tracedecay-memory";
+const CODEX_TRACEDECAY_AUTOMATION_NAME: &str = "Watch TraceDecay Memory";
+const CODEX_TRACEDECAY_AUTOMATION_RRULE: &str = "FREQ=HOURLY;INTERVAL=1;BYMINUTE=0,15,30,45";
+
+pub fn install_codex_native_automation(home: &Path, project_path: &Path) -> Result<PathBuf> {
+    let automation_dir = home
+        .join(".codex/automations")
+        .join(CODEX_TRACEDECAY_AUTOMATION_ID);
+    let automation_path = automation_dir.join("automation.toml");
+    let now_ms = unix_timestamp_millis();
+    let created_at = existing_codex_automation_created_at(&automation_path).unwrap_or(now_ms);
+
+    std::fs::create_dir_all(&automation_dir).map_err(|e| TraceDecayError::Config {
+        message: format!(
+            "cannot create Codex automation directory {}: {e}",
+            automation_dir.display()
+        ),
+    })?;
+    set_private_dir_permissions(&automation_dir);
+
+    let mut table = toml::map::Map::new();
+    table.insert("version".to_string(), toml::Value::Integer(1));
+    table.insert(
+        "id".to_string(),
+        toml::Value::String(CODEX_TRACEDECAY_AUTOMATION_ID.to_string()),
+    );
+    table.insert("kind".to_string(), toml::Value::String("cron".to_string()));
+    table.insert(
+        "name".to_string(),
+        toml::Value::String(CODEX_TRACEDECAY_AUTOMATION_NAME.to_string()),
+    );
+    table.insert(
+        "prompt".to_string(),
+        toml::Value::String(codex_native_automation_prompt(project_path)),
+    );
+    table.insert(
+        "status".to_string(),
+        toml::Value::String("ACTIVE".to_string()),
+    );
+    table.insert(
+        "rrule".to_string(),
+        toml::Value::String(CODEX_TRACEDECAY_AUTOMATION_RRULE.to_string()),
+    );
+    table.insert(
+        "model".to_string(),
+        toml::Value::String("gpt-5.5".to_string()),
+    );
+    table.insert(
+        "reasoning_effort".to_string(),
+        toml::Value::String("medium".to_string()),
+    );
+    table.insert(
+        "execution_environment".to_string(),
+        toml::Value::String("local".to_string()),
+    );
+    table.insert(
+        "cwds".to_string(),
+        toml::Value::Array(vec![toml::Value::String(
+            project_path.display().to_string(),
+        )]),
+    );
+    table.insert("created_at".to_string(), toml::Value::Integer(created_at));
+    table.insert("updated_at".to_string(), toml::Value::Integer(now_ms));
+
+    let contents =
+        toml::to_string(&toml::Value::Table(table)).map_err(|e| TraceDecayError::Config {
+            message: format!("failed to serialize Codex automation TOML: {e}"),
+        })?;
+    safe_write_private_text_file(&automation_path, &contents)?;
+    eprintln!(
+        "\x1b[32m✔\x1b[0m Installed Codex automation {}",
+        automation_path.display()
+    );
+    Ok(automation_path)
+}
+
+fn existing_codex_automation_created_at(path: &Path) -> Option<i64> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    let parsed = toml::from_str::<toml::Table>(&contents).ok()?;
+    parsed.get("created_at")?.as_integer()
+}
+
+fn safe_write_private_text_file(path: &Path, contents: &str) -> Result<()> {
+    let new_path = PathBuf::from(format!("{}.new", path.display()));
+    if let Err(e) = std::fs::write(&new_path, contents) {
+        std::fs::remove_file(&new_path).ok();
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "failed to write new Codex automation file {}: {e}",
+                new_path.display()
+            ),
+        });
+    }
+    set_private_file_permissions(&new_path);
+    if let Err(e) = std::fs::rename(&new_path, path) {
+        std::fs::remove_file(&new_path).ok();
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "failed to rename {} → {}: {e}",
+                new_path.display(),
+                path.display()
+            ),
+        });
+    }
+    set_private_file_permissions(path);
+    Ok(())
+}
+
+fn unix_timestamp_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
+}
+
+#[cfg(unix)]
+fn set_private_dir_permissions(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+}
+
+#[cfg(not(unix))]
+fn set_private_dir_permissions(_path: &Path) {}
+
+#[cfg(unix)]
+fn set_private_file_permissions(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+}
+
+#[cfg(not(unix))]
+fn set_private_file_permissions(_path: &Path) {}
+
+pub fn codex_native_automation_prompt(project_path: &Path) -> String {
+    format!(
+        "Watch the TraceDecay project at {}. Monitor TraceDecay project memory \
+         and relevant session context for stale, duplicate, contradictory, or \
+         useful durable facts. Use the installed TraceDecay plugin and the \
+         user/profile-level TraceDecay store scoped to this project. Do not \
+         create repo-local TraceDecay storage or automation files. Start \
+         read-only: inspect memory health/status and search/list/probe/contradict \
+         related facts before proposing changes. Do not delete or destructively \
+         mutate facts without explicit user confirmation. If nothing important \
+         changed, report briefly. If there is a useful maintenance action, \
+         explain what changed or what needs review, including fact ids and \
+         reasons when applicable.",
+        project_path.display()
+    )
+}
+
 fn install_codex_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
     let cached_dirs = codex_plugin_cached_install_dirs(home);
     if !cached_dirs.is_empty() {
         let install_dir = install_codex_cached_plugin(home, tracedecay_bin)?;
-        cleanup_codex_plugin_bootstrap(home)?;
+        install_codex_personal_bootstrap(home, tracedecay_bin)?;
         eprintln!(
             "\x1b[32m✔\x1b[0m Refreshed installed Codex plugin bundle at {}",
             install_dir.display()
@@ -358,6 +532,15 @@ fn install_codex_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
         return Ok(());
     }
 
+    let install_dir = install_codex_personal_bootstrap(home, tracedecay_bin)?;
+    eprintln!(
+        "\x1b[32m✔\x1b[0m Installed Codex plugin source at {}",
+        install_dir.display()
+    );
+    Ok(())
+}
+
+fn install_codex_personal_bootstrap(home: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
     let install_dir = codex_plugin_install_dir(home);
     install_codex_plugin_bundle(&install_dir, tracedecay_bin, InstallScope::Global)?;
     install_codex_marketplace_entry(
@@ -366,11 +549,7 @@ fn install_codex_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
         "Personal",
         "./plugins/tracedecay",
     )?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Installed Codex plugin source at {}",
-        install_dir.display()
-    );
-    Ok(())
+    Ok(install_dir)
 }
 
 fn install_codex_cached_plugin(home: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
@@ -589,7 +768,7 @@ fn install_codex_marketplace_entry(
     }));
     safe_write_json_file(marketplace_path, &marketplace, None)?;
     eprintln!(
-        "\x1b[32m✔\x1b[0m Added tracedecay to Codex personal marketplace at {}",
+        "\x1b[32m✔\x1b[0m Added tracedecay to Codex {marketplace_name} marketplace at {}",
         marketplace_path.display()
     );
     Ok(())
@@ -618,12 +797,6 @@ fn uninstall_codex_repo_plugin_if_present(ctx: &InstallContext) -> Result<()> {
     Ok(())
 }
 
-fn cleanup_codex_plugin_bootstrap(home: &Path) -> Result<()> {
-    remove_codex_plugin_bootstrap_source(&codex_plugin_install_dir(home))?;
-    remove_codex_marketplace_entry(home)?;
-    Ok(())
-}
-
 fn remove_codex_plugin_bootstrap_source(install_dir: &Path) -> Result<()> {
     if install_dir.exists() && codex_plugin_dir_is_tracedecay(install_dir) {
         remove_codex_plugin_skills_dir(install_dir)?;
@@ -641,9 +814,52 @@ fn remove_codex_plugin_skills_dir(install_dir: &Path) -> Result<()> {
             message: format!("failed to remove {}: {e}", skills_dir.display()),
         })?;
     } else if metadata.is_dir() {
-        std::fs::remove_dir_all(&skills_dir).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to remove {}: {e}", skills_dir.display()),
-        })?;
+        remove_codex_plugin_managed_skills(install_dir, &skills_dir)?;
+    }
+    Ok(())
+}
+
+fn remove_codex_plugin_managed_skills(install_dir: &Path, skills_dir: &Path) -> Result<()> {
+    let managed: HashSet<PathBuf> = codex_plugin_managed_paths(install_dir)
+        .into_iter()
+        .filter(|path| path.starts_with(skills_dir))
+        .collect();
+    let mut files = collect_regular_files(skills_dir).map_err(|e| TraceDecayError::Config {
+        message: format!("failed to list {}: {e}", skills_dir.display()),
+    })?;
+    files.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    for file in files {
+        if managed.contains(&file) || codex_skill_file_is_legacy_tracedecay_managed(&file) {
+            std::fs::remove_file(&file).map_err(|e| TraceDecayError::Config {
+                message: format!("failed to remove {}: {e}", file.display()),
+            })?;
+        }
+    }
+    prune_empty_dirs(skills_dir).map_err(|e| TraceDecayError::Config {
+        message: format!("failed to prune empty Codex skill directories: {e}"),
+    })
+}
+
+fn codex_skill_file_is_legacy_tracedecay_managed(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "SKILL.md")
+        && std::fs::read_to_string(path).is_ok_and(|contents| {
+            contents
+                .lines()
+                .any(|line| line.starts_with("name: tracedecay:"))
+        })
+}
+
+fn prune_empty_dirs(root: &Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            prune_empty_dirs(&entry.path())?;
+        }
+    }
+    if std::fs::read_dir(root)?.next().is_none() {
+        std::fs::remove_dir(root)?;
     }
     Ok(())
 }
@@ -674,6 +890,7 @@ fn remove_codex_plugin_install(install_dir: &Path) -> Result<()> {
             ),
         });
     }
+    remove_codex_plugin_skills_dir(install_dir)?;
     if codex_plugin_dir_has_only_managed_files(install_dir) {
         std::fs::remove_dir_all(install_dir).map_err(|e| TraceDecayError::Config {
             message: format!("failed to remove {}: {e}", install_dir.display()),
@@ -1002,7 +1219,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
     match manifest.get("version").and_then(|value| value.as_str()) {
         Some(env!("CARGO_PKG_VERSION")) => dc.pass("Codex plugin version matches tracedecay"),
         Some(version) => dc.warn(&format!(
-            "Codex plugin version {version} does not match tracedecay {} — run `tracedecay update-plugin --agent codex`",
+            "Codex plugin version {version} does not match tracedecay {} — run `tracedecay update-plugin`",
             env!("CARGO_PKG_VERSION")
         )),
         None => dc.warn("Codex plugin manifest does not contain a version"),
@@ -1027,24 +1244,49 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
     }
     doctor_check_hooks(dc, &plugin_dir.join("hooks/hooks.json"));
 
-    let marketplace_path = codex_personal_marketplace_path(home);
-    let marketplace = load_json_file(&marketplace_path);
+    doctor_check_marketplace_entry(
+        dc,
+        &codex_personal_marketplace_path(home),
+        "personal marketplace",
+        "./plugins/tracedecay",
+        "tracedecay install --agent codex",
+    );
+}
+
+fn doctor_check_marketplace_entry(
+    dc: &mut DoctorCounters,
+    marketplace_path: &Path,
+    label: &str,
+    expected_source_path: &str,
+    install_command: &str,
+) {
+    let marketplace = load_json_file(marketplace_path);
     let has_entry = marketplace
         .get("plugins")
         .and_then(|value| value.as_array())
         .is_some_and(|plugins| {
             plugins.iter().any(|entry| {
                 entry.get("name").and_then(|value| value.as_str()) == Some("tracedecay")
+                    && entry
+                        .get("source")
+                        .and_then(|source| source.get("source"))
+                        .and_then(|value| value.as_str())
+                        == Some("local")
+                    && entry
+                        .get("source")
+                        .and_then(|source| source.get("path"))
+                        .and_then(|value| value.as_str())
+                        == Some(expected_source_path)
             })
         });
     if has_entry {
         dc.pass(&format!(
-            "Codex personal marketplace contains tracedecay in {}",
+            "Codex {label} contains tracedecay in {}",
             marketplace_path.display()
         ));
     } else {
         dc.warn(&format!(
-            "Codex personal marketplace missing tracedecay in {} — run `tracedecay install --agent codex`",
+            "Codex {label} missing tracedecay in {} — run `{install_command}`",
             marketplace_path.display()
         ));
     }
@@ -1067,7 +1309,7 @@ fn doctor_check_plugin_dir(dc: &mut DoctorCounters, plugin_dir: &Path) {
     match manifest.get("version").and_then(|value| value.as_str()) {
         Some(env!("CARGO_PKG_VERSION")) => dc.pass("Codex plugin version matches tracedecay"),
         Some(version) => dc.warn(&format!(
-            "Codex plugin version {version} does not match tracedecay {} — run `tracedecay update-plugin --agent codex`",
+            "Codex plugin version {version} does not match tracedecay {} — run `tracedecay update-plugin`",
             env!("CARGO_PKG_VERSION")
         )),
         None => dc.warn("Codex plugin manifest does not contain a version"),
@@ -1400,5 +1642,95 @@ mod tests {
             dangling.is_empty(),
             "Codex skill bodies reference skills absent from the bundle: {dangling:?}"
         );
+    }
+
+    #[test]
+    fn codex_native_automation_installs_global_project_scoped_record() {
+        let home = tempfile::TempDir::new().expect("temp home");
+        let project = Path::new("/work/project");
+
+        let path =
+            install_codex_native_automation(home.path(), project).expect("automation install");
+        assert_eq!(
+            path,
+            home.path()
+                .join(".codex/automations/watch-tracedecay-memory/automation.toml")
+        );
+        assert!(
+            !project.join(".codex/automations").exists(),
+            "Codex automations must live in the global user profile, not the project"
+        );
+
+        let contents = std::fs::read_to_string(&path).expect("automation toml");
+        let parsed = toml::from_str::<toml::Table>(&contents).expect("valid toml");
+        assert_eq!(
+            parsed.get("id").and_then(|value| value.as_str()),
+            Some("watch-tracedecay-memory")
+        );
+        assert_eq!(
+            parsed.get("name").and_then(|value| value.as_str()),
+            Some("Watch TraceDecay Memory")
+        );
+        assert_eq!(
+            parsed.get("rrule").and_then(|value| value.as_str()),
+            Some("FREQ=HOURLY;INTERVAL=1;BYMINUTE=0,15,30,45")
+        );
+        assert_eq!(
+            parsed
+                .get("cwds")
+                .and_then(|value| value.as_array())
+                .and_then(|values| values.first())
+                .and_then(|value| value.as_str()),
+            Some("/work/project")
+        );
+        assert_eq!(
+            parsed.get("model").and_then(|value| value.as_str()),
+            Some("gpt-5.5")
+        );
+        assert_eq!(
+            parsed
+                .get("reasoning_effort")
+                .and_then(|value| value.as_str()),
+            Some("medium")
+        );
+        assert!(parsed
+            .get("prompt")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .contains("Do not create repo-local TraceDecay storage or automation files"));
+
+        let created_at = parsed
+            .get("created_at")
+            .and_then(|value| value.as_integer())
+            .expect("created_at");
+        install_codex_native_automation(home.path(), project).expect("automation reinstall");
+        let reparsed = std::fs::read_to_string(&path)
+            .expect("automation toml")
+            .parse::<toml::Table>()
+            .expect("valid toml");
+        assert_eq!(
+            reparsed
+                .get("created_at")
+                .and_then(|value| value.as_integer()),
+            Some(created_at),
+            "reinstall should preserve created_at for the existing Codex automation"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir_mode = std::fs::metadata(path.parent().unwrap())
+                .expect("automation dir metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            let file_mode = std::fs::metadata(&path)
+                .expect("automation file metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(dir_mode, 0o700);
+            assert_eq!(file_mode, 0o600);
+        }
     }
 }

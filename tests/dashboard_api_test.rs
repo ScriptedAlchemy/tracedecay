@@ -942,6 +942,47 @@ fn graph_bad_params_and_missing_neighbors_return_json_errors() {
 }
 
 #[test]
+fn dashboard_plugin_manifest_assets_are_served() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture(false).await;
+        let agent = http_agent();
+
+        let (status, plugins) = get_json(
+            &agent,
+            &format!("{}/api/dashboard/plugins", fixture.base_url),
+        );
+        assert_eq!(status, 200);
+        for plugin in plugins
+            .as_array()
+            .unwrap_or_else(|| panic!("expected plugin manifest array"))
+        {
+            let name = plugin["name"]
+                .as_str()
+                .unwrap_or_else(|| panic!("plugin name should be a string: {plugin}"));
+            for key in ["entry", "css"] {
+                let Some(asset) = plugin[key].as_str() else {
+                    continue;
+                };
+                let url = format!("{}/dashboard-plugins/{name}/{asset}", fixture.base_url);
+                let response = agent
+                    .get(&url)
+                    .call()
+                    .unwrap_or_else(|err| panic!("GET {url} failed: {err}"));
+                assert_eq!(
+                    response.status().as_u16(),
+                    200,
+                    "advertised plugin asset should be served: {name} {asset}"
+                );
+            }
+        }
+    });
+}
+
+#[test]
 fn holographic_dashboard_endpoints_return_seeded_payloads() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
@@ -1524,6 +1565,39 @@ fn curation_delete_lifecycle() {
             "last_preview_at should be set after dry-run"
         );
 
+        let (status, dry_activity) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/holographic/curation/activity?limit=75",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(dry_activity["error"], "");
+        assert_eq!(dry_activity["limit"], 75);
+        let dry_events = dry_activity["events"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected dry-run activity events array"));
+        assert_eq!(
+            dry_activity["count"].as_u64(),
+            Some(dry_events.len() as u64)
+        );
+        assert!(
+            !dry_events.is_empty(),
+            "dry-run curation should emit activity events"
+        );
+        assert!(
+            dry_events.iter().any(|event| {
+                event["phase"] == "finish"
+                    && event["dry_run"] == true
+                    && event["message"]
+                        .as_str()
+                        .is_some_and(|message| !message.is_empty())
+                    && event["ts"].as_str().is_some_and(|ts| !ts.is_empty())
+            }),
+            "dry-run curation should emit a finish activity event"
+        );
+
         // --- Apply curation: hard-delete the duplicate ---
         let (status, applied) = post_json_body(
             &agent,
@@ -1536,6 +1610,61 @@ fn curation_delete_lifecycle() {
         assert!(
             applied["applied_counts"]["delete"].as_i64().unwrap_or(0) > 0,
             "apply should report at least one deleted fact"
+        );
+
+        let (status, apply_activity) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/holographic/curation/activity?limit=75",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        let apply_events = apply_activity["events"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected apply activity events array"));
+        assert_eq!(
+            apply_activity["count"].as_u64(),
+            Some(apply_events.len() as u64)
+        );
+        assert!(
+            apply_events.len() > dry_events.len(),
+            "apply should append activity events after dry-run events"
+        );
+        assert!(
+            apply_events
+                .iter()
+                .rev()
+                .any(|event| event["phase"] == "finish" && event["dry_run"] == false),
+            "apply curation should emit a finish activity event"
+        );
+
+        let (status, status_after_apply) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/holographic/curation/status",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(status_after_apply["state"]["run_count"], 1);
+        assert!(
+            status_after_apply["state"]["last_run_at"]
+                .as_str()
+                .is_some_and(|ts| !ts.is_empty()),
+            "last_run_at should be set after apply"
+        );
+        assert!(
+            status_after_apply["state"]["last_run_summary"]
+                .as_str()
+                .is_some_and(|summary| summary.contains("deleted")),
+            "last_run_summary should describe the apply result"
+        );
+        assert!(
+            status_after_apply["snapshots"]
+                .as_array()
+                .is_some_and(|snapshots| !snapshots.is_empty()),
+            "status snapshots should include recent apply history"
         );
 
         // --- Overview should show fewer facts and not contain the deleted one ---
@@ -1785,6 +1914,70 @@ fn curate_apply_ops_contract() {
         assert_eq!(response["counts"]["deleted"], 1);
         assert_eq!(response["counts"]["merged"], 1);
         assert_eq!(response["counts"]["errors"], 2);
+
+        let (status, apply_activity) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/holographic/curation/activity?limit=25",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        let apply_events = apply_activity["events"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected generic apply activity events array"));
+        assert!(
+            apply_events.iter().any(|event| {
+                event["phase"] == "finish"
+                    && event["dry_run"] == false
+                    && event["message"].as_str().is_some_and(|message| {
+                        message.contains("Explicit apply completed")
+                            && message.contains("1 delete")
+                            && message.contains("1 merge")
+                            && message.contains("2 op(s) errored")
+                    })
+                    && event["ts"].as_str().is_some_and(|ts| !ts.is_empty())
+            }),
+            "/curate/apply should emit a finish activity event: {apply_activity}"
+        );
+
+        let (status, apply_status) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/holographic/curation/status",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(apply_status["state"]["run_count"], 1);
+        assert!(
+            apply_status["state"]["last_run_at"]
+                .as_str()
+                .is_some_and(|ts| !ts.is_empty()),
+            "last_run_at should be set after /curate/apply"
+        );
+        let summary = apply_status["state"]["last_run_summary"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            summary.contains("Explicit apply completed")
+                && summary.contains("1 delete")
+                && summary.contains("1 merge")
+                && summary.contains("2 op(s) errored"),
+            "/curate/apply should drive the status summary: {apply_status}"
+        );
+        assert!(
+            apply_status["snapshots"]
+                .as_array()
+                .is_some_and(|snapshots| {
+                    snapshots.iter().any(|snapshot| {
+                        snapshot["summary"]
+                            .as_str()
+                            .is_some_and(|summary| summary.contains("Explicit apply completed"))
+                    })
+                }),
+            "/curate/apply should appear in status snapshots: {apply_status}"
+        );
 
         // Hard deletes: rows + entity links gone from the project DB.
         for gone_id in [102_i64, 103] {

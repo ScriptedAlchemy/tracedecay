@@ -2,6 +2,7 @@
 // Updated 2026-03-23: compact bordered table for status output
 use clap::Parser;
 use std::io::{self, BufRead, IsTerminal, Write};
+use std::path::{Path, PathBuf};
 use std::process;
 
 use tracedecay::tracedecay::TraceDecay;
@@ -9,8 +10,9 @@ use tracedecay::tracedecay::TraceDecay;
 mod cli;
 mod commands;
 mod global;
-mod serve;
 mod tool_command;
+
+pub use tracedecay::serve;
 
 use cli::*;
 
@@ -195,6 +197,34 @@ fn validate_hermes_project_root_flag(
     Ok(Some(path))
 }
 
+fn validate_codex_automation_flags(
+    agent: Option<&str>,
+    automation: bool,
+) -> tracedecay::errors::Result<()> {
+    if !automation {
+        return Ok(());
+    }
+    if agent != Some("codex") {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: "`--automation` is only supported with `--agent codex`".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_codex_automation_project_path() -> tracedecay::errors::Result<std::path::PathBuf> {
+    let project_path =
+        std::env::current_dir().map_err(|e| tracedecay::errors::TraceDecayError::Config {
+            message: format!("could not determine current project directory: {e}"),
+        })?;
+    std::fs::canonicalize(&project_path).map_err(|e| tracedecay::errors::TraceDecayError::Config {
+        message: format!(
+            "could not canonicalize project directory {}: {e}",
+            project_path.display()
+        ),
+    })
+}
+
 fn hermes_selected_profile_targets(
     home: &std::path::Path,
     profile: &Option<String>,
@@ -372,8 +402,8 @@ fn maybe_run_silent_reinstall(user_config: &mut tracedecay::user_config::UserCon
     }
 }
 
-async fn largest_memory_bank_fact_count(cg: &TraceDecay) -> tracedecay::errors::Result<usize> {
-    let db = libsql::Builder::new_local(cg.db_path()).build().await?;
+async fn largest_memory_bank_fact_count_at(db_path: &Path) -> tracedecay::errors::Result<usize> {
+    let db = libsql::Builder::new_local(db_path).build().await?;
     let conn = db.connect()?;
     let mut rows = conn
         .query("SELECT COALESCE(MAX(fact_count), 0) FROM memory_banks", ())
@@ -382,6 +412,44 @@ async fn largest_memory_bank_fact_count(cg: &TraceDecay) -> tracedecay::errors::
         return Ok(0);
     };
     Ok(row.get::<i64>(0).unwrap_or(0).max(0) as usize)
+}
+
+async fn resolve_registered_project_root(
+    project_id: Option<String>,
+    project_path: Option<String>,
+) -> tracedecay::errors::Result<Option<PathBuf>> {
+    let db = tracedecay::global_db::GlobalDb::open()
+        .await
+        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+            message: "could not open tracedecay project registry; run tracedecay init first"
+                .to_string(),
+        })?;
+    let context = if let Some(project_id) = project_id.as_deref() {
+        db.project_registry_context_by_id(project_id).await
+    } else if let Some(project_path) = project_path.as_deref() {
+        db.project_registry_context_by_alias(Path::new(project_path))
+            .await
+    } else {
+        return Ok(None);
+    };
+
+    context
+        .map(|context| PathBuf::from(context.project.display_root))
+        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+            message: "registered project not found for selector".to_string(),
+        })
+        .map(Some)
+}
+
+async fn resolve_cli_project_root(
+    path: Option<String>,
+    project_id: Option<String>,
+    project_path: Option<String>,
+) -> tracedecay::errors::Result<PathBuf> {
+    if let Some(root) = resolve_registered_project_root(project_id, project_path).await? {
+        return Ok(root);
+    }
+    Ok(tracedecay::config::resolve_path_with_discovery(path))
 }
 
 fn format_memory_status_report(
@@ -437,26 +505,34 @@ fn format_memory_status_report(
 
 async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
     match command {
-        Commands::Init { path, skip_folders } => {
-            commands::handle_init(path, skip_folders).await?;
+        Commands::Init {
+            path,
+            skip_folders,
+            include_folders,
+        } => {
+            commands::handle_init(path, skip_folders, include_folders).await?;
         }
         Commands::Sync {
             path,
             force,
             skip_folders,
+            include_folders,
             doctor,
             verbose,
         } => {
-            commands::handle_sync(path, force, skip_folders, doctor, verbose).await?;
+            commands::handle_sync(path, force, skip_folders, include_folders, doctor, verbose)
+                .await?;
         }
         Commands::Status {
             path,
+            project_id,
+            project_path,
             json,
             short,
             details,
             runtime,
         } => {
-            let project_path = tracedecay::config::resolve_path_with_discovery(path);
+            let project_path = resolve_cli_project_root(path, project_id, project_path).await?;
             let cg = if TraceDecay::is_initialized(&project_path) {
                 match TraceDecay::open(&project_path).await {
                     Ok(cg) => cg,
@@ -482,7 +558,7 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                 })?;
                 let answer = answer.trim();
                 if answer.is_empty() || answer.eq_ignore_ascii_case("y") {
-                    commands::init_and_index(&project_path, &[], false).await?
+                    commands::init_and_index(&project_path, &[], &[], false).await?
                 } else {
                     return Ok(());
                 }
@@ -639,10 +715,12 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
             all_profiles,
             project_root,
             no_dashboard,
+            automation,
         } => {
             validate_hermes_profile_flags(agent.as_deref(), &profile, all_profiles)?;
             let pinned_project_root =
                 validate_hermes_project_root_flag(agent.as_deref(), &project_root)?;
+            validate_codex_automation_flags(agent.as_deref(), automation)?;
             let home = tracedecay::agents::home_dir().ok_or_else(|| {
                 tracedecay::errors::TraceDecayError::Config {
                     message: "could not determine home directory".to_string(),
@@ -687,6 +765,13 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                         };
                         ag.install_local(&ctx, &project_path)?;
                         ag.post_install(Some(&project_path)).await;
+                        if automation && id == "codex" {
+                            let scoped_project_path = validate_codex_automation_project_path()?;
+                            tracedecay::agents::codex::install_codex_native_automation(
+                                &home,
+                                &scoped_project_path,
+                            )?;
+                        }
                     }
                     installed_names.push(ag.name().to_string());
                 } else {
@@ -741,6 +826,13 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                     };
                     ag.install(&ctx)?;
                     ag.post_install(project_path.as_deref()).await;
+                    if automation && id == "codex" {
+                        let scoped_project_path = validate_codex_automation_project_path()?;
+                        tracedecay::agents::codex::install_codex_native_automation(
+                            &home,
+                            &scoped_project_path,
+                        )?;
+                    }
                 }
                 if !user_cfg.installed_agents.contains(&id) {
                     user_cfg.installed_agents.push(id);
@@ -1380,11 +1472,17 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
             commands::handle_branch_action(action).await?;
         }
         Commands::Memory { action } => match action {
-            MemoryAction::Status { json, path } => {
-                let project_path = tracedecay::config::resolve_path_with_discovery(path);
+            MemoryAction::Status {
+                json,
+                path,
+                project_id,
+                project_path,
+            } => {
+                let project_path = resolve_cli_project_root(path, project_id, project_path).await?;
                 let cg = crate::serve::ensure_initialized(&project_path).await?;
-                let status = cg.memory_status().await?;
-                let largest_bank_fact_count = largest_memory_bank_fact_count(&cg).await?;
+                let status = cg.project_memory_status().await?;
+                let largest_bank_fact_count =
+                    largest_memory_bank_fact_count_at(&cg.store_layout().graph_db_path).await?;
                 let largest_bank_utilization_pct = if status.estimated_capacity > 0 {
                     largest_bank_fact_count as f64 / status.estimated_capacity as f64 * 100.0
                 } else {
@@ -1433,8 +1531,12 @@ enum SessionProvider {
 
 async fn handle_sessions_action(action: SessionsAction) -> tracedecay::errors::Result<()> {
     match action {
-        SessionsAction::Ingest { provider } => {
-            let project_path = tracedecay::config::resolve_path_with_discovery(None);
+        SessionsAction::Ingest {
+            provider,
+            project_id,
+            project_path,
+        } => {
+            let project_path = resolve_cli_project_root(None, project_id, project_path).await?;
             let db = tracedecay::sessions::cursor::open_project_session_db(&project_path)
                 .await
                 .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
@@ -1454,8 +1556,10 @@ async fn handle_sessions_action(action: SessionsAction) -> tracedecay::errors::R
             query,
             provider,
             limit,
+            project_id,
+            project_path,
         } => {
-            let project_path = tracedecay::config::resolve_path_with_discovery(None);
+            let project_path = resolve_cli_project_root(None, project_id, project_path).await?;
             let db = tracedecay::sessions::cursor::open_project_session_db(&project_path)
                 .await
                 .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
@@ -1629,6 +1733,7 @@ mod startup_tests {
             all_profiles: false,
             project_root: None,
             no_dashboard: false,
+            automation: false,
         }));
         assert!(should_skip_startup_maintenance(&Commands::Reinstall));
         assert!(should_skip_startup_maintenance(&Commands::UpdatePlugin));
@@ -1643,6 +1748,8 @@ mod startup_tests {
     fn normal_commands_keep_startup_maintenance() {
         assert!(!should_skip_startup_maintenance(&Commands::Status {
             path: None,
+            project_id: None,
+            project_path: None,
             json: false,
             short: false,
             details: false,
@@ -1666,6 +1773,7 @@ mod startup_tests {
             all_profiles: false,
             project_root: None,
             no_dashboard: false,
+            automation: false,
         }));
         assert!(should_skip_agent_install_maintenance(&Commands::Reinstall));
         // `update-plugin` promises byte-identical configs; the implicit
@@ -1697,9 +1805,12 @@ mod startup_tests {
         assert!(!should_skip_agent_install_maintenance(&Commands::Init {
             path: None,
             skip_folders: Vec::new(),
+            include_folders: Vec::new(),
         }));
         assert!(!should_skip_agent_install_maintenance(&Commands::Status {
             path: None,
+            project_id: None,
+            project_path: None,
             json: false,
             short: false,
             details: false,
@@ -1749,6 +1860,7 @@ mod startup_tests {
             all_profiles: false,
             project_root: None,
             no_dashboard: false,
+            automation: false,
         };
         let global = Commands::Install {
             agent: Some("hermes".to_string()),
@@ -1757,6 +1869,7 @@ mod startup_tests {
             all_profiles: false,
             project_root: None,
             no_dashboard: false,
+            automation: false,
         };
 
         assert!(is_local_install_command(&local));

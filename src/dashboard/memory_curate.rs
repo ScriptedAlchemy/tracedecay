@@ -130,6 +130,7 @@ async fn cli_state(cg: &TraceDecay) -> DashboardState {
         store_root: store_layout.data_root.clone(),
         dashboard_root: store_layout.dashboard_root.clone(),
         curate_preview: Arc::new(RwLock::new(None)),
+        curation_activity: Arc::new(RwLock::new(Vec::new())),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
     }
 }

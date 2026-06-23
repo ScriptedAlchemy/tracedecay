@@ -446,6 +446,13 @@ pub struct SearchResult {
     pub score: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexCoverageHint {
+    pub message: String,
+    pub skipped_dirs: Vec<String>,
+    pub suggested_command: String,
+}
+
 /// Direction for graph traversal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TraversalDirection {

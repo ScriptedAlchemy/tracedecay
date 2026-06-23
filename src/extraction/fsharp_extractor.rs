@@ -108,7 +108,7 @@ impl FSharpExtractor {
 
     fn parse_source(source: &str) -> Result<Tree, String> {
         let mut parser = Parser::new();
-        let language = crate::extraction::ts_provider::language("fsharp");
+        let language = crate::extraction::ts_provider::try_language("fsharp")?;
         parser
             .set_language(&language)
             .map_err(|e| format!("failed to load F# grammar: {e}"))?;

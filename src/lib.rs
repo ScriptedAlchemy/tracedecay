@@ -17,6 +17,7 @@
 
 pub mod accounting;
 pub mod agents;
+mod analytics;
 pub mod bench;
 pub mod branch;
 pub mod branch_meta;
@@ -43,6 +44,7 @@ pub mod monitor;
 pub mod redundancy;
 pub mod resolution;
 pub mod runtime_telemetry;
+pub mod serve;
 pub mod sessions;
 pub mod storage;
 pub mod sync;

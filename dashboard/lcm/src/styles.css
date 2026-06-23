@@ -1282,3 +1282,34 @@
     font-size: 1.25rem;
   }
 }
+
+/* ===================================================================== *
+ * Light-theme corrections.
+ *
+ * The graphite skin is authored for the dark palette: its sheen highlight is
+ * derived from --color-foreground and its elevation shadows are hard-coded
+ * heavy black. Under :root[data-theme="light"] the foreground flips dark
+ * (turning every sheen into a dark wash) and pure-black shadows read as muddy
+ * smears. Repin the sheen to a near-white highlight and swap the shadows for a
+ * cool-dark low-alpha base (~30% of the dark alpha), matching how the shell /
+ * holographic skins cut shadow strength in light. Dark values stay untouched.
+ * ===================================================================== */
+:root[data-theme="light"] .hermes-lcm {
+  --lcm-sheen: #ffffff;
+}
+
+:root[data-theme="light"] .hermes-lcm-empty-panel {
+  box-shadow: 0 22px 70px rgba(15, 40, 35, 0.09);
+}
+
+:root[data-theme="light"] .hermes-lcm-stat {
+  box-shadow: 0 16px 48px rgba(15, 40, 35, 0.07);
+}
+
+:root[data-theme="light"] .hermes-lcm-card {
+  box-shadow: 0 18px 60px rgba(15, 40, 35, 0.08);
+}
+
+:root[data-theme="light"] .hermes-lcm-drawer {
+  box-shadow: -28px 0 80px rgba(15, 40, 35, 0.12);
+}

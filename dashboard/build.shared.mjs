@@ -1,6 +1,7 @@
-import { createRsbuild, rspack } from "@rsbuild/core";
+import { createRsbuild } from "@rsbuild/core";
 import { pluginReact } from "@rsbuild/plugin-react";
 import { pluginTypeCheck } from "@rsbuild/plugin-type-check";
+import postcss from "postcss";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -60,25 +61,25 @@ function rsbuildEntry(importPath) {
   return { import: importPath, html: false };
 }
 
-function applySingleBundleOutput(config, bannerLabel) {
+function applySingleBundleOutput(config) {
   config.optimization = {
     ...(config.optimization || {}),
     splitChunks: false,
     runtimeChunk: false,
   };
   config.performance = { ...(config.performance || {}), hints: false };
-
-  if (bannerLabel) {
-    config.plugins.push(
-      new rspack.BannerPlugin({
-        banner: `tracedecay ${bannerLabel} dashboard plugin - bundled with Rsbuild/Rspack. Do not edit; see src/.`,
-        entryOnly: true,
-      }),
-    );
-  }
 }
 
-function createBundleConfig({ entryName, entry, outDir, filename, alias = {}, bannerLabel }) {
+/**
+ * Provenance banner prepended to a built plugin bundle. A BannerPlugin banner
+ * is emitted as a comment and would be removed by `legalComments: "none"`, so
+ * we prepend it to the emitted JS as a post-build step instead (see buildPlugin).
+ */
+function pluginBannerComment(bannerLabel) {
+  return `/*! tracedecay ${bannerLabel} dashboard plugin - bundled with Rsbuild/Rspack. Do not edit; see src/. */`;
+}
+
+function createBundleConfig({ entryName, entry, outDir, filename, alias = {} }) {
   return {
     root: dashboardRoot,
     mode: "production",
@@ -105,7 +106,7 @@ function createBundleConfig({ entryName, entry, outDir, filename, alias = {}, ba
     plugins: [pluginReact(), pluginTypeCheck()],
     tools: {
       rspack(config) {
-        applySingleBundleOutput(config, bannerLabel);
+        applySingleBundleOutput(config);
       },
     },
   };
@@ -120,16 +121,12 @@ export function createShellBuildConfig() {
   });
 }
 
-export function createPluginBuildConfig(
-  dir,
-  bannerLabel,
-) {
+export function createPluginBuildConfig(dir) {
   return createBundleConfig({
     entryName: "index",
     entry: `./${dir}/src/entry.tsx`,
     outDir: path.join(dashboardRoot, dir, "dist"),
     filename: "index.js",
-    bannerLabel,
     alias: {
       "react$": path.join(SHIM_DIR, "react-shim.ts"),
       "react/jsx-runtime$": path.join(SHIM_DIR, "jsx-runtime.ts"),
@@ -155,6 +152,34 @@ export function createDashboardDevConfig({ apiTarget, host, port }) {
         "/api": {
           target: apiTarget,
           changeOrigin: true,
+          // Long-running backend calls (e.g. graph scans) can exceed the
+          // default proxy timeout; raise both the upstream connect/idle
+          // timeout and the response timeout so they aren't cut short.
+          proxyTimeout: 120000,
+          timeout: 120000,
+          // Surface upstream failures instead of letting them surface as an
+          // opaque 504. `res` is a ServerResponse for HTTP and a Socket for
+          // upgrade/websocket failures, so handle both shapes.
+          on: {
+            error(err, _req, res) {
+              console.error(
+                `tracedecay dev /api proxy error -> ${apiTarget}: ${err.message}`,
+              );
+              if (res && typeof res.writeHead === "function") {
+                if (!res.headersSent) {
+                  res.writeHead(502, { "Content-Type": "application/json" });
+                  res.end(
+                    JSON.stringify({
+                      error: `dev proxy failed to reach ${apiTarget}`,
+                      detail: err.message,
+                    }),
+                  );
+                }
+              } else if (res && typeof res.destroy === "function") {
+                res.destroy(err);
+              }
+            },
+          },
         },
       },
     },
@@ -187,7 +212,12 @@ export async function buildPlugin(
   bannerLabel,
   { tailwind = false, primitives = false } = {},
 ) {
-  await runRsbuildConfig(createPluginBuildConfig(dir, bannerLabel));
+  await runRsbuildConfig(createPluginBuildConfig(dir));
+  if (bannerLabel) {
+    const distJs = path.join(dashboardRoot, dir, "dist/index.js");
+    const js = await fs.readFile(distJs, "utf8");
+    await fs.writeFile(distJs, `${pluginBannerComment(bannerLabel)}\n${js}`, "utf8");
+  }
   const distCss = path.join(dashboardRoot, dir, "dist/style.css");
   await fs.mkdir(path.dirname(distCss), { recursive: true });
   if (tailwind) {
@@ -231,41 +261,130 @@ export async function compileTailwindCss(srcDir, outFile) {
   const scanner = new Scanner({ sources: sources.concat(compiler.sources ?? []) });
   const candidates = scanner.scan();
   let css = compiler.build(candidates);
-  css = stripTopLevelAtLayer(css, "theme");
-  css = stripTopLevelAtLayer(css, "base");
+  // Let host colors win while preserving Tailwind's structural tokens
+  // (--spacing, --text-*, --ease-*, etc.) used by utilities.
+  css = prepareTailwindPluginCss(css);
   css = `@layer hermes-plugin{\n${css}\n}`;
   css = minifyCss(css);
   await fs.mkdir(path.dirname(outFile), { recursive: true });
   await fs.writeFile(outFile, css, "utf8");
 }
 
+/**
+ * Whitespace-collapsing CSS minifier that is string/comment/url aware: braces,
+ * semicolons, commas and `/*…*\/` sequences that live inside string literals or
+ * `url(...)` tokens are copied verbatim instead of being treated as syntax, so
+ * `content:"a;b{}"`, `url(a;b)` and the like survive intact. Whitespace handling
+ * outside those spans matches the previous regex pass (collapse runs, drop space
+ * around `{}:;,>`, fold `;}`), and `@layer a, b, c;` ordering is preserved.
+ */
 export function minifyCss(css) {
-  return css
-    .replace(/\/\*[^*]*\*+(?:[^/*][^*]*\*+)*\//g, "")
-    .replace(/\s+/g, " ")
-    .replace(/\s*([{}:;,>])\s*/g, "$1")
-    .replace(/;}/g, "}")
-    .trim();
+  let out = "";
+  let buffer = "";
+  let i = 0;
+  const flush = () => {
+    if (buffer) {
+      out += collapseCssWhitespace(buffer);
+      buffer = "";
+    }
+  };
+  while (i < css.length) {
+    const ch = css[i];
+    if (ch === "/" && css[i + 1] === "*") {
+      const end = css.indexOf("*/", i + 2);
+      i = end === -1 ? css.length : end + 2;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      flush();
+      const end = skipCssString(css, i);
+      out += css.slice(i, end);
+      i = end;
+      continue;
+    }
+    if (
+      (ch === "u" || ch === "U") &&
+      (i === 0 || !/[\w-]/.test(css[i - 1])) &&
+      /^url\(/i.test(css.slice(i, i + 4))
+    ) {
+      flush();
+      const end = skipCssUrl(css, i);
+      out += css.slice(i, end);
+      i = end;
+      continue;
+    }
+    buffer += ch;
+    i++;
+  }
+  flush();
+  return out.trim();
 }
 
-export function stripTopLevelAtLayer(css, name) {
-  const re = new RegExp(`@layer\\s+${name}\\s*\\{`, "g");
-  let out = css;
-  let match;
-  while ((match = re.exec(out)) !== null) {
-    const idx = match.index;
-    let i = idx + match[0].length;
-    let depth = 1;
-    while (i < out.length && depth > 0) {
-      const ch = out[i];
-      if (ch === "{") depth++;
-      else if (ch === "}") depth--;
-      i++;
+function collapseCssWhitespace(segment) {
+  return segment
+    .replace(/\s+/g, " ")
+    .replace(/\s*([{}:;,>])\s*/g, "$1")
+    .replace(/;}/g, "}");
+}
+
+/** Returns the index just past the string literal that begins at `i`. */
+function skipCssString(css, i) {
+  const quote = css[i];
+  let j = i + 1;
+  while (j < css.length) {
+    const ch = css[j];
+    if (ch === "\\") {
+      j += 2;
+      continue;
     }
-    out = out.slice(0, idx) + out.slice(i);
-    re.lastIndex = idx;
+    if (ch === quote) return j + 1;
+    j++;
   }
-  return out;
+  return j;
+}
+
+/** Returns the index just past the `url(...)` token that begins at `i`. */
+function skipCssUrl(css, i) {
+  let j = i + 3;
+  while (j < css.length && /\s/.test(css[j])) j++;
+  if (css[j] !== "(") return i + 1;
+  j++;
+  while (j < css.length && /\s/.test(css[j])) j++;
+  if (css[j] === '"' || css[j] === "'") {
+    j = skipCssString(css, j);
+  } else {
+    while (j < css.length && css[j] !== ")") {
+      if (css[j] === "\\") {
+        j += 2;
+        continue;
+      }
+      j++;
+    }
+  }
+  while (j < css.length && css[j] !== ")") j++;
+  return j < css.length ? j + 1 : j;
+}
+
+export function prepareTailwindPluginCss(css) {
+  const root = postcss.parse(css, { from: undefined });
+  root.walkAtRules("layer", (rule) => {
+    if (rule.parent !== root || !rule.nodes) return;
+    if (matchesLayerName(rule, "base")) {
+      rule.remove();
+      return;
+    }
+    if (matchesLayerName(rule, "theme")) {
+      rule.walkDecls(/^--color-/, (decl) => decl.remove());
+    }
+  });
+  return root.toString();
+}
+
+function matchesLayerName(rule, name) {
+  return rule.params
+    .split(",")
+    .map((layerName) => layerName.trim())
+    .includes(name);
 }
 
 export async function buildHermesWrapper() {

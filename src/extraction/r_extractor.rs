@@ -108,7 +108,7 @@ impl RExtractor {
 
     fn parse_source(source: &str) -> Result<Tree, String> {
         let mut parser = Parser::new();
-        let language = crate::extraction::ts_provider::language("r");
+        let language = crate::extraction::ts_provider::try_language("r")?;
         parser
             .set_language(&language)
             .map_err(|e| format!("failed to load R grammar: {e}"))?;

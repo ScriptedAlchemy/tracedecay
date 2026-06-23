@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::GlobalDb;
+use crate::global_db::{AnalyticsEventInsert, GlobalDb};
 use crate::mcp::response_handles::{
     cleanup_expired_response_handles, response_handle_stats_json, RESPONSE_RETRIEVE_TOOL,
 };
@@ -356,6 +356,36 @@ fn tool_error_response(id: Value, tool_name: &str, error: &TraceDecayError) -> J
         ErrorCode::InternalError,
         format!("tool execution failed: {error}"),
     )
+}
+
+fn hardcoded_internal_error_response(id: &Value, detail: &str) -> String {
+    let id_json = serde_json::to_string(id).unwrap_or_else(|_| "null".to_string());
+    let detail_json = serde_json::to_string(detail)
+        .unwrap_or_else(|_| "\"response serialization failed\"".to_string());
+    format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":{id_json},\"error\":{{\"code\":-32603,\"message\":\"failed to serialize JSON-RPC response\",\"data\":{{\"reason_code\":\"response_serialization_failed\",\"detail\":{detail_json}}}}}}}"
+    )
+}
+
+fn serialize_response_line(resp: &JsonRpcResponse) -> String {
+    match serde_json::to_string(resp) {
+        Ok(line) => line,
+        Err(e) => {
+            eprintln!("failed to serialize response: {e}");
+            let fallback = JsonRpcResponse::error_with_data(
+                resp.id.clone(),
+                ErrorCode::InternalError,
+                "failed to serialize JSON-RPC response".to_string(),
+                Some(json!({
+                    "reason_code": "response_serialization_failed",
+                    "detail": e.to_string(),
+                })),
+            );
+            serde_json::to_string(&fallback).unwrap_or_else(|fallback_err| {
+                hardcoded_internal_error_response(&resp.id, &fallback_err.to_string())
+            })
+        }
+    }
 }
 
 /// Cached result of a latest-version check against GitHub releases.
@@ -956,7 +986,7 @@ impl McpServer {
             )),
         };
         if let Some(resp) = response {
-            let mut json_str = serde_json::to_string(&resp).unwrap_or_default();
+            let mut json_str = serialize_response_line(&resp);
             json_str.push('\n');
             transport.write_line(&json_str).await?;
             transport.flush().await?;
@@ -1054,13 +1084,7 @@ impl McpServer {
 
             // Write response (if any) as a single line to stdout
             if let Some(resp) = response {
-                let json_line = match serde_json::to_string(&resp) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("failed to serialize response: {e}");
-                        continue;
-                    }
-                };
+                let json_line = serialize_response_line(&resp);
                 let output = format!("{json_line}\n");
                 if let Err(e) = transport.write_line(&output).await {
                     eprintln!("failed to write response: {e}");
@@ -1501,6 +1525,7 @@ impl McpServer {
         };
 
         let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+        let analytics_session_id = mcp_analytics_session_id(&arguments);
 
         // Branch-drift hot-swap: if the working tree switched branches since
         // the served instance opened, reopen onto the live branch's DB so
@@ -1533,6 +1558,7 @@ impl McpServer {
         let dispatch_outcome =
             handle_tool_call(&cg, tool_name, arguments, server_stats, self.scope_prefix()).await;
         let handler_elapsed_us = handler_start.map(|t| t.elapsed().as_micros() as u64);
+        let request_id = id.clone();
         match dispatch_outcome {
             Ok(mut result) => {
                 if let Some(us) = handler_elapsed_us {
@@ -1586,6 +1612,11 @@ impl McpServer {
                         )}));
                     }
                 }
+                let analytics_outcome = if tool_result_has_semantic_error(&result.value) {
+                    "error"
+                } else {
+                    "success"
+                };
 
                 // Persist to the cross-project savings ledger (best-effort, non-blocking).
                 // Clone the Arc — no new connection is opened. The counters
@@ -1593,13 +1624,21 @@ impl McpServer {
                 // [`Self::ledger_writes_settled`] without making it awaited
                 // anywhere on the request path.
                 if let Some(gdb) = self.global_db.clone() {
-                    let project_path_str = cg.project_root().to_string_lossy().to_string();
+                    let project_path_str = GlobalDb::canonical_project_key(cg.project_root());
                     let tool_name_owned = tool_name.to_string();
                     let ts = crate::tracedecay::current_timestamp();
-                    self.ledger_writes_started.fetch_add(1, Ordering::SeqCst);
-                    let finished = self.ledger_writes_finished.clone();
-                    let notify = self.ledger_write_notify.clone();
-                    tokio::spawn(async move {
+                    let analytics_event = mcp_tool_analytics_event(McpToolAnalyticsEvent {
+                        project_root: cg.project_root(),
+                        session_id: analytics_session_id.clone(),
+                        tool_name,
+                        outcome: analytics_outcome,
+                        raw_file_tokens,
+                        response_tokens,
+                        net_saved_tokens,
+                        timestamp: ts,
+                        request_id: &request_id,
+                    });
+                    self.spawn_observed_ledger_write(async move {
                         gdb.record_savings(
                             &project_path_str,
                             &tool_name_owned,
@@ -1608,8 +1647,9 @@ impl McpServer {
                             ts,
                         )
                         .await;
-                        finished.fetch_add(1, Ordering::SeqCst);
-                        notify.notify_waiters();
+                        if let Err(e) = gdb.append_analytics_event(&analytics_event).await {
+                            eprintln!("[tracedecay] analytics_events insert failed: {e}");
+                        }
                     });
                 }
 
@@ -1743,8 +1783,58 @@ impl McpServer {
                 mark_semantic_tool_error(&mut result.value);
                 JsonRpcResponse::success(id, result.value)
             }
-            Err(e) => tool_error_response(id, tool_name, &e),
+            Err(e) => {
+                self.record_mcp_tool_error_analytics(
+                    cg.project_root(),
+                    analytics_session_id,
+                    tool_name,
+                    &request_id,
+                );
+                tool_error_response(id, tool_name, &e)
+            }
         }
+    }
+
+    fn record_mcp_tool_error_analytics(
+        &self,
+        project_root: &std::path::Path,
+        session_id: Option<String>,
+        tool_name: &str,
+        request_id: &Value,
+    ) {
+        let Some(gdb) = self.global_db.clone() else {
+            return;
+        };
+        let event = mcp_tool_analytics_event(McpToolAnalyticsEvent {
+            project_root,
+            session_id,
+            tool_name,
+            outcome: "error",
+            raw_file_tokens: 0,
+            response_tokens: 0,
+            net_saved_tokens: 0,
+            timestamp: crate::tracedecay::current_timestamp(),
+            request_id,
+        });
+        self.spawn_observed_ledger_write(async move {
+            if let Err(e) = gdb.append_analytics_event(&event).await {
+                eprintln!("[tracedecay] analytics_events insert failed: {e}");
+            }
+        });
+    }
+
+    fn spawn_observed_ledger_write<F>(&self, future: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.ledger_writes_started.fetch_add(1, Ordering::SeqCst);
+        let finished = self.ledger_writes_finished.clone();
+        let notify = self.ledger_write_notify.clone();
+        tokio::spawn(async move {
+            future.await;
+            finished.fetch_add(1, Ordering::SeqCst);
+            notify.notify_waiters();
+        });
     }
 
     /// Returns the current server runtime statistics as a JSON value.
@@ -1787,6 +1877,63 @@ impl McpServer {
         }
 
         stats
+    }
+}
+
+fn mcp_analytics_session_id(arguments: &Value) -> Option<String> {
+    fn string_field(value: &Value, key: &str) -> Option<String> {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned)
+    }
+
+    [Some(arguments), arguments.get("_meta")]
+        .into_iter()
+        .flatten()
+        .find_map(|value| {
+            string_field(value, "session_id").or_else(|| string_field(value, "sessionId"))
+        })
+}
+
+struct McpToolAnalyticsEvent<'a> {
+    project_root: &'a std::path::Path,
+    session_id: Option<String>,
+    tool_name: &'a str,
+    outcome: &'a str,
+    raw_file_tokens: u64,
+    response_tokens: u64,
+    net_saved_tokens: u64,
+    timestamp: i64,
+    request_id: &'a Value,
+}
+
+fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> AnalyticsEventInsert {
+    let category = crate::accounting::classifier::classify(&[input.tool_name], &[]);
+    AnalyticsEventInsert {
+        provider: "mcp".to_string(),
+        project_id: GlobalDb::canonical_project_key(input.project_root),
+        session_id: input.session_id,
+        timestamp: input.timestamp,
+        event_kind: "mcp_tool_call".to_string(),
+        hook_name: None,
+        tool_name: Some(input.tool_name.to_string()),
+        tool_category: Some(category.as_str().to_string()),
+        skill_name: None,
+        hint_category: None,
+        hint_id: None,
+        outcome: Some(input.outcome.to_string()),
+        metadata_json: Some(
+            json!({
+                "request_id": input.request_id,
+                "before_tokens": input.raw_file_tokens,
+                "after_tokens": input.response_tokens,
+                "tokens_saved": input.net_saved_tokens,
+            })
+            .to_string(),
+        ),
     }
 }
 

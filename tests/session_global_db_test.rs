@@ -1,6 +1,6 @@
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use tracedecay::global_db::GlobalDb;
+use tracedecay::global_db::{AnalyticsEventInsert, AnalyticsEventQuery, GlobalDb};
 use tracedecay::sessions::lcm::LcmStorageKind;
 use tracedecay::sessions::{SessionRecord, SessionSearchScope};
 
@@ -78,6 +78,70 @@ async fn lcm_fts_count(db_path: &std::path::Path, query: &str) -> i64 {
     count
 }
 
+async fn raw_analytics_event_count(
+    db_path: &std::path::Path,
+    provider: &str,
+    session_id: &str,
+    event_kind: &str,
+) -> i64 {
+    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*)
+             FROM analytics_events
+             WHERE provider = ?1 AND session_id = ?2 AND event_kind = ?3",
+            libsql::params![provider, session_id, event_kind],
+        )
+        .await
+        .unwrap();
+    let count = rows.next().await.unwrap().unwrap().get(0).unwrap();
+    drop(rows);
+    drop(conn);
+    drop(db);
+    count
+}
+
+fn analytics_event(
+    session_id: Option<&str>,
+    timestamp: i64,
+    event_kind: &str,
+) -> AnalyticsEventInsert {
+    AnalyticsEventInsert {
+        provider: "codex".to_string(),
+        project_id: "project-a".to_string(),
+        session_id: session_id.map(ToOwned::to_owned),
+        timestamp,
+        event_kind: event_kind.to_string(),
+        hook_name: None,
+        tool_name: None,
+        tool_category: None,
+        skill_name: None,
+        hint_category: None,
+        hint_id: None,
+        outcome: None,
+        metadata_json: None,
+    }
+}
+
+fn analytics_query(
+    session_id: Option<&str>,
+    event_kind: Option<&str>,
+    limit: usize,
+) -> AnalyticsEventQuery {
+    AnalyticsEventQuery {
+        provider: Some("codex".to_string()),
+        project_id: Some("project-a".to_string()),
+        session_id: session_id.map(ToOwned::to_owned),
+        event_kind: event_kind.map(ToOwned::to_owned),
+        limit,
+    }
+}
+
+async fn append_analytics_event(db: &GlobalDb, event: &AnalyticsEventInsert, label: &str) -> i64 {
+    db.append_analytics_event(event).await.expect(label)
+}
+
 #[tokio::test]
 async fn global_db_opens_with_session_schema() {
     let tmp = TempDir::new().unwrap();
@@ -88,6 +152,256 @@ async fn global_db_opens_with_session_schema() {
         .search_session_messages("cursor", None, "not-present", 10)
         .await
         .is_empty());
+}
+
+#[tokio::test]
+async fn project_registry_path_aliases_resolve_exactly_without_active_fallback() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_isolated_db(&tmp).await;
+    let active_root = tmp.path().join("active");
+    let target_root = tmp.path().join("target");
+    let nested_target_alias = target_root.join("nested/worktree");
+    let missing_root = tmp.path().join("missing");
+    std::fs::create_dir_all(&active_root).unwrap();
+    std::fs::create_dir_all(&target_root).unwrap();
+    std::fs::create_dir_all(&nested_target_alias).unwrap();
+
+    db.upsert_code_project("proj_active", &active_root, None, None, Some("main"))
+        .await
+        .expect("active project should upsert");
+    let target = db
+        .upsert_code_project("proj_target", &target_root, None, None, Some("main"))
+        .await
+        .expect("target project should upsert");
+    db.upsert_project_alias(&nested_target_alias, &target.project_id)
+        .await
+        .expect("nested target alias should upsert");
+
+    let by_root = db
+        .project_registry_context_by_alias(&target_root)
+        .await
+        .expect("target root alias should resolve");
+    assert_eq!(by_root.project.project_id, "proj_target");
+
+    let by_nested_alias = db
+        .project_registry_context_by_alias(&nested_target_alias)
+        .await
+        .expect("nested target alias should resolve");
+    assert_eq!(by_nested_alias.project.project_id, "proj_target");
+
+    assert!(
+        db.project_registry_context_by_id("proj_missing")
+            .await
+            .is_none(),
+        "unresolved project_id selectors must not synthesize an active-project context"
+    );
+    assert!(
+        db.project_registry_context_by_alias(&missing_root)
+            .await
+            .is_none(),
+        "unresolved path selectors must not fall back to the active registered project"
+    );
+}
+
+#[tokio::test]
+async fn analytics_events_append_and_query_by_provider_project_session_and_kind() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_isolated_db(&tmp).await;
+
+    let tool_event = AnalyticsEventInsert {
+        tool_name: Some("tracedecay_context".to_string()),
+        tool_category: Some("mcp".to_string()),
+        hint_category: Some("search".to_string()),
+        hint_id: Some("hint-1".to_string()),
+        outcome: Some("success".to_string()),
+        metadata_json: Some(r#"{"tokens_saved":42}"#.to_string()),
+        ..analytics_event(Some("session-a"), 1_715_000_123, "tool")
+    };
+    let first_id = append_analytics_event(&db, &tool_event, "append analytics event").await;
+    let second_id =
+        append_analytics_event(&db, &tool_event, "append identical analytics event").await;
+    assert_ne!(first_id, second_id, "analytics storage must be append-only");
+
+    append_analytics_event(
+        &db,
+        &AnalyticsEventInsert {
+            hook_name: Some("pre-tool-use".to_string()),
+            skill_name: Some("tracedecay:searching-for-code".to_string()),
+            outcome: Some("shown".to_string()),
+            metadata_json: Some(r#"{"source":"test"}"#.to_string()),
+            ..analytics_event(Some("session-a"), 1_715_000_124, "skill")
+        },
+        "append skill analytics event",
+    )
+    .await;
+    append_analytics_event(
+        &db,
+        &AnalyticsEventInsert {
+            provider: "cursor".to_string(),
+            project_id: "project-b".to_string(),
+            tool_name: Some("other_tool".to_string()),
+            tool_category: Some("local".to_string()),
+            outcome: Some("success".to_string()),
+            ..analytics_event(Some("session-b"), 1_715_000_125, "tool")
+        },
+        "append filtered analytics event",
+    )
+    .await;
+
+    let events = db
+        .query_analytics_events(&analytics_query(Some("session-a"), Some("tool"), 10))
+        .await
+        .expect("query analytics events");
+
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].id, first_id);
+    assert_eq!(events[1].id, second_id);
+    assert_eq!(events[0].provider, "codex");
+    assert_eq!(events[0].project_id, "project-a");
+    assert_eq!(events[0].session_id.as_deref(), Some("session-a"));
+    assert_eq!(events[0].timestamp, 1_715_000_123);
+    assert_eq!(events[0].event_kind, "tool");
+    assert_eq!(events[0].tool_name.as_deref(), Some("tracedecay_context"));
+    assert_eq!(events[0].tool_category.as_deref(), Some("mcp"));
+    assert_eq!(events[0].hint_category.as_deref(), Some("search"));
+    assert_eq!(events[0].hint_id.as_deref(), Some("hint-1"));
+    assert_eq!(events[0].outcome.as_deref(), Some("success"));
+    assert_eq!(
+        events[0].metadata_json.as_deref(),
+        Some(r#"{"tokens_saved":42}"#)
+    );
+}
+
+#[tokio::test]
+async fn open_at_upgrades_existing_global_db_with_analytics_events_table() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join(".tracedecay").join("global.db");
+    std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+    let old_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+    let conn = old_db.connect().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE sessions (
+            provider TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            project_key TEXT NOT NULL,
+            project_path TEXT NOT NULL,
+            title TEXT,
+            started_at INTEGER,
+            ended_at INTEGER,
+            transcript_path TEXT,
+            metadata_json TEXT,
+            PRIMARY KEY(provider, session_id)
+        );",
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    drop(old_db);
+
+    let db = GlobalDb::open_at(&db_path).await.expect("global db open");
+    let event = AnalyticsEventInsert {
+        hook_name: Some("post-tool-use".to_string()),
+        tool_name: Some("shell".to_string()),
+        tool_category: Some("local".to_string()),
+        outcome: Some("recorded".to_string()),
+        metadata_json: Some(r#"{"upgraded":true}"#.to_string()),
+        ..analytics_event(None, 1_715_000_126, "hook")
+    };
+    let id = append_analytics_event(&db, &event, "append analytics event after upgrade").await;
+
+    let events = db
+        .query_analytics_events(&analytics_query(None, Some("hook"), 5))
+        .await
+        .expect("query analytics events after upgrade");
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].id, id);
+    assert_eq!(events[0].hook_name.as_deref(), Some("post-tool-use"));
+}
+
+#[tokio::test]
+async fn analytics_events_preserve_assistant_hook_tool_and_skill_fields() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
+    let db = open_isolated_db(&tmp).await;
+
+    let assistant_id = append_analytics_event(
+        &db,
+        &AnalyticsEventInsert {
+            hint_category: Some("workflow".to_string()),
+            hint_id: Some("hint-assistant".to_string()),
+            outcome: Some("shown".to_string()),
+            metadata_json: Some(r#"{"model":"gpt-5-codex","turn":1}"#.to_string()),
+            ..analytics_event(Some("session-required-fields"), 1_715_000_200, "assistant")
+        },
+        "append assistant analytics event",
+    )
+    .await;
+    append_analytics_event(
+        &db,
+        &AnalyticsEventInsert {
+            hook_name: Some("post-tool-use".to_string()),
+            outcome: Some("ok".to_string()),
+            metadata_json: Some(r#"{"exit_code":0}"#.to_string()),
+            ..analytics_event(Some("session-required-fields"), 1_715_000_201, "hook")
+        },
+        "append hook analytics event",
+    )
+    .await;
+    append_analytics_event(
+        &db,
+        &AnalyticsEventInsert {
+            tool_name: Some("tracedecay_context".to_string()),
+            tool_category: Some("mcp".to_string()),
+            outcome: Some("accepted".to_string()),
+            metadata_json: Some(r#"{"tokens_saved":42}"#.to_string()),
+            ..analytics_event(Some("session-required-fields"), 1_715_000_202, "tool")
+        },
+        "append tool analytics event",
+    )
+    .await;
+    append_analytics_event(
+        &db,
+        &AnalyticsEventInsert {
+            skill_name: Some("superpowers:test-driven-development".to_string()),
+            outcome: Some("used".to_string()),
+            metadata_json: Some(r#"{"stage":"red"}"#.to_string()),
+            ..analytics_event(Some("session-required-fields"), 1_715_000_203, "skill")
+        },
+        "append skill analytics event",
+    )
+    .await;
+
+    let events = db
+        .query_analytics_events(&analytics_query(Some("session-required-fields"), None, 10))
+        .await
+        .expect("query analytics events");
+
+    assert_eq!(events.len(), 4);
+    assert_eq!(events[0].id, assistant_id);
+    assert_eq!(events[0].event_kind, "assistant");
+    assert_eq!(events[0].hint_category.as_deref(), Some("workflow"));
+    assert_eq!(events[0].hint_id.as_deref(), Some("hint-assistant"));
+    assert_eq!(events[0].outcome.as_deref(), Some("shown"));
+    assert_eq!(
+        events[0].metadata_json.as_deref(),
+        Some(r#"{"model":"gpt-5-codex","turn":1}"#)
+    );
+    assert_eq!(events[1].event_kind, "hook");
+    assert_eq!(events[1].hook_name.as_deref(), Some("post-tool-use"));
+    assert_eq!(events[2].event_kind, "tool");
+    assert_eq!(events[2].tool_name.as_deref(), Some("tracedecay_context"));
+    assert_eq!(events[2].tool_category.as_deref(), Some("mcp"));
+    assert_eq!(events[3].event_kind, "skill");
+    assert_eq!(
+        events[3].skill_name.as_deref(),
+        Some("superpowers:test-driven-development")
+    );
+    assert_eq!(
+        raw_analytics_event_count(&db_path, "codex", "session-required-fields", "assistant").await,
+        1
+    );
 }
 
 #[tokio::test]

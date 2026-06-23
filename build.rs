@@ -156,9 +156,15 @@ fn dashboard_source_stamp(source_inputs: &[PathBuf]) -> Option<String> {
         return None;
     }
     // Hash in a stable path order so the stamp depends only on file content,
-    // not on the unspecified `read_dir` traversal order.
+    // not on the unspecified `read_dir` traversal order. Sort by the same
+    // normalized forward-slash string key the JS builder uses
+    // (build.shared.mjs `normalizedSourcePath`) so the two stamps stay
+    // byte-identical; `PathBuf`'s default component-wise ordering can diverge
+    // from JS string ordering.
     let mut paths: Vec<&PathBuf> = source_inputs.iter().collect();
-    paths.sort();
+    paths.sort_by(|a, b| {
+        normalized_dashboard_source_path(a).cmp(&normalized_dashboard_source_path(b))
+    });
     let mut hasher = FNV_OFFSET_BASIS;
     for path in paths {
         // Hashing the path makes adds/removes/renames flip the stamp even when
