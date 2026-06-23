@@ -280,7 +280,16 @@ async fn inspect_data_dir_candidate(
     }
     let brand = StoreBrand::TraceDecay;
     let db_path = data_dir.join(db_filename(&data_dir));
-    let store = inspect_project_store(project_root, &data_dir, db_path, brand, role).await?;
+    let store = inspect_project_store(
+        project_root,
+        &data_dir,
+        db_path,
+        brand,
+        role,
+        follow_symlinks,
+        skipped,
+    )
+    .await?;
     stores.push(store);
     Ok(())
 }
@@ -291,6 +300,8 @@ async fn inspect_project_store(
     db_path: PathBuf,
     brand: StoreBrand,
     role: StoreRole,
+    follow_symlinks: bool,
+    skipped: &mut Vec<SkippedPath>,
 ) -> Result<StoreInventory> {
     let mut statuses = Vec::new();
     let mut artifacts = Vec::new();
@@ -320,6 +331,14 @@ async fn inspect_project_store(
         BRANCH_META_FILENAME,
         &mut artifacts,
     );
+    record_branch_db_artifacts(
+        data_dir,
+        follow_symlinks,
+        skipped,
+        &mut statuses,
+        &mut artifacts,
+    )
+    .await;
     record_optional_artifact(data_dir, "config", "config.json", &mut artifacts);
     record_optional_artifact(
         data_dir,
@@ -676,6 +695,81 @@ fn record_optional_artifact(
         artifacts.push(StoreArtifact {
             kind: kind.to_string(),
             size_bytes,
+            path,
+        });
+    }
+}
+
+async fn record_branch_db_artifacts(
+    data_dir: &Path,
+    follow_symlinks: bool,
+    skipped: &mut Vec<SkippedPath>,
+    statuses: &mut Vec<StoreStatus>,
+    artifacts: &mut Vec<StoreArtifact>,
+) {
+    let mut branches_dir = data_dir.join("branches");
+    let Ok(meta) = std::fs::symlink_metadata(&branches_dir) else {
+        return;
+    };
+    if meta.file_type().is_symlink() {
+        if !follow_symlinks {
+            skipped.push(SkippedPath {
+                path: branches_dir,
+                reason: "symlink".to_string(),
+            });
+            return;
+        }
+        if !branches_dir.is_dir() {
+            return;
+        }
+        branches_dir = branches_dir.canonicalize().unwrap_or(branches_dir);
+    } else if !meta.is_dir() {
+        return;
+    }
+
+    let Ok(entries) = std::fs::read_dir(branches_dir) else {
+        return;
+    };
+    let mut db_paths = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            entry
+                .file_type()
+                .is_ok_and(|file_type| file_type.is_file())
+                .then_some(path)
+        })
+        .filter(|path| path.extension().is_some_and(|extension| extension == "db"))
+        .collect::<Vec<_>>();
+    db_paths.sort();
+
+    for path in db_paths {
+        artifacts.push(StoreArtifact {
+            kind: "branch_graph_db".to_string(),
+            size_bytes: file_size(&path),
+            path: path.clone(),
+        });
+        record_sqlite_sidecar_artifact(&path, "-wal", "branch_graph_db_wal", artifacts);
+        record_sqlite_sidecar_artifact(&path, "-shm", "branch_graph_db_shm", artifacts);
+        if !sqlite_quick_check(&path).await && !statuses.contains(&StoreStatus::Corrupt) {
+            statuses.push(StoreStatus::Corrupt);
+        }
+    }
+}
+
+fn record_sqlite_sidecar_artifact(
+    db_path: &Path,
+    suffix: &str,
+    kind: &str,
+    artifacts: &mut Vec<StoreArtifact>,
+) {
+    let mut path = db_path.as_os_str().to_os_string();
+    path.push(suffix);
+    let path = PathBuf::from(path);
+    if path.is_file() {
+        artifacts.push(StoreArtifact {
+            kind: kind.to_string(),
+            size_bytes: file_size(&path),
             path,
         });
     }
