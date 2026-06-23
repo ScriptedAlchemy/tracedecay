@@ -923,9 +923,6 @@ fn assert_action_schema_requires(
 
 #[test]
 fn outline_schema_requires_file_without_provider_property() {
-    if !tracedecay::mcp::tools::ast_grep_outline_available() {
-        return;
-    }
     let tools = get_tool_definitions();
     let schema = tool_schema(&tools, "tracedecay_outline");
 

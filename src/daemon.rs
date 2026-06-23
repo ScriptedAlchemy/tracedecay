@@ -49,7 +49,6 @@ impl DaemonHandshake {
         })
     }
 
-    #[cfg(unix)]
     fn open_options(&self) -> crate::tracedecay::TraceDecayOpenOptions {
         crate::tracedecay::TraceDecayOpenOptions {
             profile_root: Some(self.client_identity.profile_root.clone()),
@@ -294,10 +293,11 @@ pub async fn call_tool(
 
     let mut lines = tokio::io::BufReader::new(reader).lines();
     while let Some(line) = lines.next_line().await? {
-        let response: JsonRpcResponse = serde_json::from_str(&line)?;
-        if response.id != id {
+        let value: serde_json::Value = serde_json::from_str(&line)?;
+        if value.get("id") != Some(&id) {
             continue;
         }
+        let response: JsonRpcResponse = serde_json::from_value(value)?;
         if let Some(error) = response.error {
             return Err(TraceDecayError::Config {
                 message: format!("daemon tool call failed: {}", error.message),
@@ -337,16 +337,21 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
     use tokio::net::UnixListener;
 
     if let Some(parent) = socket_path.parent() {
+        let parent_existed = parent.exists();
         std::fs::create_dir_all(parent).map_err(|e| TraceDecayError::Config {
             message: format!(
                 "failed to create socket directory '{}': {e}",
                 parent.display()
             ),
         })?;
+        if !parent_existed {
+            set_owner_only_permissions(parent, 0o700)?;
+        }
     }
     prepare_socket_path(&socket_path).await?;
 
     let listener = UnixListener::bind(&socket_path)?;
+    set_owner_only_permissions(&socket_path, 0o600)?;
     eprintln!("[tracedecay] daemon listening on {}", socket_path.display());
     let engine = DaemonEngine::default();
     #[allow(clippy::expect_used)]
@@ -369,6 +374,19 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
     engine.shutdown_all().await;
     let _ = std::fs::remove_file(&socket_path);
     Ok(())
+}
+
+#[cfg(unix)]
+fn set_owner_only_permissions(path: &Path, mode: u32) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let permissions = std::fs::Permissions::from_mode(mode);
+    std::fs::set_permissions(path, permissions).map_err(|e| TraceDecayError::Config {
+        message: format!(
+            "failed to restrict permissions on '{}': {e}",
+            path.display()
+        ),
+    })
 }
 
 #[cfg(unix)]
@@ -679,8 +697,7 @@ async fn projectless_tools_call_response(
         }
     };
 
-    match crate::mcp::tools::handle_profile_scoped_lcm_tool_call(tool_name, arguments).await
-    {
+    match crate::mcp::tools::handle_profile_scoped_lcm_tool_call(tool_name, arguments).await {
         Ok(result) => JsonRpcResponse::success(id, result.value),
         Err(e) => JsonRpcResponse::error(id, ErrorCode::InternalError, e.to_string()),
     }

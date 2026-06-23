@@ -512,9 +512,6 @@ mod tests {
         if !super::super::definitions::ast_grep_available() {
             handler_names.remove("tracedecay_ast_grep_rewrite");
         }
-        if !super::super::definitions::ast_grep_outline_available() {
-            handler_names.remove("tracedecay_outline");
-        }
 
         assert_set_empty(
             definition_names
@@ -880,11 +877,7 @@ mod tests {
         assert!(tool_names.contains(&"tracedecay_lcm_compress"));
         assert!(tool_names.contains(&"tracedecay_lcm_session_boundary"));
         assert!(tool_names.contains(&"tracedecay_read"));
-        if super::super::definitions::ast_grep_outline_available() {
-            assert!(tool_names.contains(&"tracedecay_outline"));
-        } else {
-            assert!(!tool_names.contains(&"tracedecay_outline"));
-        }
+        assert!(tool_names.contains(&"tracedecay_outline"));
         assert!(tool_names.contains(&"tracedecay_implementations"));
         assert!(tool_names.contains(&"tracedecay_unsafe_patterns"));
         assert!(tool_names.contains(&"tracedecay_diagnostics"));

@@ -16,6 +16,37 @@ pub use tracedecay::serve;
 
 use cli::*;
 
+struct ReplayStdioTransport {
+    replay_line: Option<String>,
+    inner: tracedecay::mcp::StdioTransport,
+}
+
+impl ReplayStdioTransport {
+    fn new(replay_line: Option<String>) -> Self {
+        Self {
+            replay_line,
+            inner: tracedecay::mcp::StdioTransport::new(),
+        }
+    }
+}
+
+impl tracedecay::mcp::McpTransport for ReplayStdioTransport {
+    async fn read_line(&mut self) -> std::io::Result<Option<String>> {
+        if self.replay_line.is_some() {
+            return Ok(self.replay_line.take());
+        }
+        self.inner.read_line().await
+    }
+
+    async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
+        self.inner.write_line(line).await
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush().await
+    }
+}
+
 /// Alias for the shared timestamp utility.
 pub(crate) fn current_unix_timestamp() -> i64 {
     tracedecay::tracedecay::current_timestamp()
@@ -1271,7 +1302,16 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                 timings,
                 false,
             )?;
-            tracedecay::daemon::proxy_stdio_to_default_daemon(&handshake, peeked_line).await?;
+            let socket_path = tracedecay::daemon::default_socket_path()?;
+            if socket_path.exists() {
+                tracedecay::daemon::proxy_stdio_to_daemon(&socket_path, &handshake, peeked_line)
+                    .await?;
+            } else {
+                let server =
+                    tracedecay::mcp::McpServer::new(cg, handshake.scope_prefix.clone()).await;
+                let mut transport = ReplayStdioTransport::new(peeked_line);
+                server.run(&mut transport).await?;
+            }
         }
         Commands::Daemon { action } => match action {
             DaemonAction::Run { socket } => {

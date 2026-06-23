@@ -280,30 +280,47 @@ async fn explicit_uninitialized_path_reports_error_instead_of_global_fallback() 
 }
 
 #[tokio::test]
-async fn serve_without_daemon_socket_reports_client_only_error() {
+async fn serve_without_daemon_socket_falls_back_to_in_process_mcp() {
     let home = TempDir::new().unwrap();
     let project = init_project_with_file(home.path(), "pub fn client_only_marker() {}\n").await;
 
-    let output = tracedecay_command_with_home(home.path())
+    let mut child = tracedecay_command_with_home(home.path())
         .arg("serve")
         .arg("--path")
         .arg(project.path())
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
+        .spawn()
         .expect("tracedecay serve should run");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin should be piped");
+        writeln!(
+            stdin,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {}
+            })
+        )
+        .unwrap();
+    }
+    let output = child
+        .wait_with_output()
+        .expect("tracedecay serve should exit after stdin closes");
 
     assert!(
-        !output.status.success(),
-        "serve must not run an in-process MCP engine when the daemon socket is missing\nstdout:\n{}\nstderr:\n{}",
+        output.status.success(),
+        "serve should fall back to an in-process MCP engine when the daemon socket is missing\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stderr.contains("daemon") && stderr.contains("socket"),
-        "error should explain that the daemon socket is unavailable\nstderr:\n{stderr}"
+        stdout.contains("\"protocolVersion\":\"2024-11-05\""),
+        "serve fallback should answer initialize over stdio\nstdout:\n{stdout}"
     );
 }
 

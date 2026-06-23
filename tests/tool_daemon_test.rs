@@ -3,6 +3,7 @@
 mod common;
 
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -107,6 +108,24 @@ fn spawn_sentinel_daemon(
     expect_allow_init: bool,
     sentinel: &'static str,
 ) -> mpsc::Receiver<Value> {
+    spawn_sentinel_daemon_with_notification(
+        socket_path,
+        expected_tool_name,
+        expect_project_path,
+        expect_allow_init,
+        sentinel,
+        false,
+    )
+}
+
+fn spawn_sentinel_daemon_with_notification(
+    socket_path: PathBuf,
+    expected_tool_name: &'static str,
+    expect_project_path: bool,
+    expect_allow_init: bool,
+    sentinel: &'static str,
+    emit_notification: bool,
+) -> mpsc::Receiver<Value> {
     let (ready_tx, ready_rx) = mpsc::channel();
     let (request_tx, request_rx) = mpsc::channel();
 
@@ -175,6 +194,18 @@ fn spawn_sentinel_daemon(
             }
         });
         let mut writer = stream;
+        if emit_notification {
+            let notification = json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/message",
+                "params": {
+                    "level": "warning",
+                    "data": "daemon notice before response"
+                }
+            });
+            writeln!(writer, "{}", serde_json::to_string(&notification).unwrap())
+                .expect("write fake daemon notification");
+        }
         writeln!(writer, "{}", serde_json::to_string(&response).unwrap())
             .expect("write fake daemon response");
     });
@@ -253,6 +284,45 @@ fn daemon_sigterm_exits_while_project_client_is_connected() {
 }
 
 #[test]
+fn daemon_socket_is_owner_only() {
+    let home = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let socket_path = common::daemon_socket_path(&home_path);
+    let _ = std::fs::remove_file(&socket_path);
+    let mut child = tracedecay_command_with_home(&home_path)
+        .arg("daemon")
+        .arg("run")
+        .arg("--socket")
+        .arg(&socket_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("tracedecay daemon should start");
+
+    wait_for_daemon_socket(&socket_path);
+    let mode = std::fs::metadata(&socket_path)
+        .expect("socket metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "daemon socket should be owner-only");
+
+    let pid = child.id().to_string();
+    let status = std::process::Command::new("kill")
+        .args(["-TERM", pid.as_str()])
+        .status()
+        .expect("send SIGTERM to daemon");
+    assert!(status.success(), "kill -TERM should succeed");
+
+    if !wait_for_child_exit(&mut child, Duration::from_secs(3)) {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("daemon should exit after socket permission test");
+    }
+}
+
+#[test]
 fn tool_cli_invokes_mcp_tool_through_daemon_socket() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
@@ -288,6 +358,49 @@ fn tool_cli_invokes_mcp_tool_through_daemon_socket() {
     assert!(
         stdout.contains(sentinel),
         "tool CLI should print daemon response, got:\n{stdout}"
+    );
+    observed_request
+        .recv_timeout(Duration::from_secs(2))
+        .expect("fake daemon should receive tools/call request");
+}
+
+#[test]
+fn tool_cli_skips_daemon_notifications_until_matching_response() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let socket_dir = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+
+    let sentinel = "daemon response after notification";
+    let socket_path = socket_dir.path().join("tracedecay.sock");
+    let observed_request = spawn_sentinel_daemon_with_notification(
+        socket_path.clone(),
+        "tracedecay_status",
+        true,
+        false,
+        sentinel,
+        true,
+    );
+    let project_arg = project_path.to_string_lossy().to_string();
+    let output = tracedecay_command_with_home(&home_path)
+        .current_dir(&project_path)
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+        .args(["tool", "--project", &project_arg, "status", "--json"])
+        .output()
+        .expect("tracedecay tool should run");
+
+    assert!(
+        output.status.success(),
+        "tool CLI should skip daemon notifications before the response\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(sentinel),
+        "tool CLI should print daemon response after notification, got:\n{stdout}"
     );
     observed_request
         .recv_timeout(Duration::from_secs(2))
