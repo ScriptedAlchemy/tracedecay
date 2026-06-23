@@ -5,6 +5,9 @@ description: 'Use when recalling prior decisions, durable facts, user/project pr
 
 # Recalling project memory
 
+Prefer TraceDecay-native registered-project selectors whenever a recall spans or targets a project other than the active checkout. Codex skill guidance may describe how to choose selectors, but selector support should live progressively in TraceDecay MCP and CLI tools themselves.
+
+
 Recall memory **before** reaching for external or web search — prior sessions often already answered the question, and a memory hit is cheaper and project-specific.
 
 ## Workflow

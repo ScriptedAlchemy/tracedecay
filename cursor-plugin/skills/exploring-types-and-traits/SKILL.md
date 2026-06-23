@@ -20,6 +20,7 @@ Call-graph questions ("who calls X") belong in `tracedecay:tracing-functions`; t
 ## Guardrails
 
 - All read-only and parallel-safe. `tracedecay_constructors` is best-effort for Rust (ignores `match` arms and `if let` patterns); `tracedecay_field_sites` pattern-matches `.<field>` references, so same-named fields on other types can appear — prefer the `Struct::field` form to narrow. Unknown proc-macro derives surface with `well_known: false` (name only, no synthesized-method info).
+- For several independent type/trait questions, use scoped read-only subagents per type, trait, field, or implementor cluster. Require exact symbol ids/qualified names and tool evidence; the parent agent synthesizes the type-level answer.
 - This skill maps types; it does not edit. Hand renames/edits to `tracedecay:refactoring-safely` / `tracedecay:atomic-code-edits`.
 
 ## Output

@@ -17,6 +17,7 @@ Read-only coverage intelligence from the graph (structural test↔source edges, 
 ## Guardrails
 
 - All read-only and parallel-safe; nothing here executes tests. Coverage is structural (call/use edges), so integration tests that reach code indirectly (through a binary, fixture, or IO boundary) can be missed — an empty `test_map` is strong but not absolute evidence of "untested".
+- For many targets or changed paths, use scoped read-only subagents per file group, package, or risk bucket. Require each subagent to return the exact target, TraceDecay coverage tools used, affected tests, and uncertainty; the parent agent chooses the final recommendation.
 
 ## Output
 
