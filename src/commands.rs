@@ -547,7 +547,7 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::er
 
             let spinner = Spinner::new();
             spinner.set_message("syncing changes");
-            match branch::add_branch_tracking(&project_path, &branch_name).await? {
+            match TraceDecay::add_branch_tracking(&project_path, &branch_name).await? {
                 branch::BranchAddOutcome::NotIndexed => {
                     spinner.done("no TraceDecay index found; run `tracedecay init` first");
                 }

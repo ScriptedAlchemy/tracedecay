@@ -24,7 +24,7 @@ use tracedecay::storage::{
     read_enrollment_marker, write_enrollment_marker, EnrollmentMarker, StorageMode, StoreKind,
     StoreManifest, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION,
 };
-use tracedecay::tracedecay::TraceDecay;
+use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 static HOME_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -497,6 +497,97 @@ async fn trace_decay_init_uses_profile_shard_when_enrolled() {
 }
 
 #[tokio::test]
+async fn trace_decay_init_with_options_uses_explicit_profile_identity() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let root = canonical_temp_path(dir.path());
+    let daemon_home = root.join("daemon-home");
+    let client_profile = root.join("client-profile");
+    let project = root.join("repo");
+    fs::create_dir_all(&project).unwrap();
+    let _home_guard = HomeEnvGuard::set(&daemon_home);
+    write_enrollment_marker(
+        &project,
+        &EnrollmentMarker {
+            project_id: "proj_explicit".to_string(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(client_profile.clone()),
+        global_db_path: Some(client_profile.join("global.db")),
+    };
+
+    assert!(
+        !TraceDecay::is_initialized_with_options(&project, &open_options),
+        "a marker alone must not initialize an explicit client profile"
+    );
+
+    let cg = TraceDecay::init_with_options(&project, open_options.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        cg.store_layout().data_root,
+        client_profile.join("projects/proj_explicit")
+    );
+    assert!(cg.store_layout().config_path.is_file());
+    assert!(cg.db_path().is_file());
+    assert!(TraceDecay::is_initialized_with_options(
+        &project,
+        &open_options
+    ));
+    assert!(
+        !daemon_home.join(".tracedecay").exists(),
+        "explicit client profile init must not create a store in the daemon/default profile"
+    );
+}
+
+#[tokio::test]
+async fn trace_decay_options_global_db_path_implies_profile_root() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let root = canonical_temp_path(dir.path());
+    let daemon_home = root.join("daemon-home");
+    let client_profile = root.join("client-profile");
+    let project = root.join("repo");
+    fs::create_dir_all(&project).unwrap();
+    let _home_guard = HomeEnvGuard::set(&daemon_home);
+    write_enrollment_marker(
+        &project,
+        &EnrollmentMarker {
+            project_id: "proj_db_only".to_string(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    let open_options = TraceDecayOpenOptions {
+        profile_root: None,
+        global_db_path: Some(client_profile.join("global.db")),
+    };
+
+    let cg = TraceDecay::init_with_options(&project, open_options.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        cg.store_layout().data_root,
+        client_profile.join("projects/proj_db_only")
+    );
+    assert!(cg.store_layout().config_path.is_file());
+    assert!(cg.db_path().is_file());
+    assert!(TraceDecay::is_initialized_with_options(
+        &project,
+        &open_options
+    ));
+    assert!(
+        !daemon_home.join(".tracedecay").exists(),
+        "global_db_path-only options must not fall back to the daemon/default profile"
+    );
+}
+
+#[tokio::test]
 async fn trace_decay_open_matches_renamed_git_checkout_by_registered_remote() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
@@ -590,4 +681,65 @@ async fn trace_decay_open_branch_uses_profile_shard_branch_db() {
     assert_eq!(cg.store_layout().data_root, shard_root);
     assert_eq!(cg.db_path(), branch_db);
     assert_eq!(cg.serving_branch(), Some("feature/profile"));
+}
+
+#[tokio::test]
+async fn trace_decay_open_with_options_auto_tracks_branch_in_explicit_profile() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let root = canonical_temp_path(dir.path());
+    let daemon_home = root.join("daemon-home");
+    let client_profile = root.join("client-profile");
+    let project = root.join("repo");
+    fs::create_dir_all(&project).unwrap();
+    run_git(&project, &["init"]);
+    run_git(&project, &["config", "user.email", "test@example.com"]);
+    run_git(&project, &["config", "user.name", "TraceDecay Test"]);
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
+    run_git(&project, &["add", "."]);
+    run_git(&project, &["commit", "-m", "initial"]);
+    run_git(&project, &["checkout", "-b", "feature/client-profile"]);
+    fs::write(
+        project.join("src/main.rs"),
+        "fn main() { println!(\"feature\"); }\n",
+    )
+    .unwrap();
+    run_git(&project, &["add", "."]);
+    run_git(&project, &["commit", "-m", "feature"]);
+    run_git(&project, &["checkout", "-"]);
+
+    let _home_guard = HomeEnvGuard::set(&daemon_home);
+    write_enrollment_marker(
+        &project,
+        &EnrollmentMarker {
+            project_id: "proj_auto_branch".to_string(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(client_profile.clone()),
+        global_db_path: Some(client_profile.join("global.db")),
+    };
+    let main = TraceDecay::init_with_options(&project, open_options.clone())
+        .await
+        .unwrap();
+    let shard_root = main.store_layout().data_root.clone();
+    assert_eq!(shard_root, client_profile.join("projects/proj_auto_branch"));
+    drop(main);
+
+    run_git(&project, &["checkout", "feature/client-profile"]);
+    let cg = TraceDecay::open_with_options(&project, open_options)
+        .await
+        .unwrap();
+
+    assert_eq!(cg.store_layout().data_root, shard_root);
+    assert_eq!(cg.serving_branch(), Some("feature/client-profile"));
+    assert!(cg.db_path().starts_with(shard_root.join("branches")));
+    assert!(cg.db_path().is_file());
+    assert!(
+        !daemon_home.join(".tracedecay").exists(),
+        "auto-tracking with explicit options must not create branch storage in the daemon/default profile"
+    );
 }

@@ -11,7 +11,7 @@ use crate::branch;
 use crate::branch_meta::{self, BranchMeta};
 use crate::config::{
     brand_env, db_filename, is_excluded, is_excluded_dir, is_included, is_included_dir,
-    load_config_from_path, save_config, TraceDecayConfig,
+    load_config_from_path, save_config_to_path, TraceDecayConfig,
 };
 use crate::context::ContextBuilder;
 use crate::db::Database;
@@ -274,6 +274,7 @@ pub struct TraceDecay {
     config: TraceDecayConfig,
     project_root: PathBuf,
     store_layout: StoreLayout,
+    open_options: TraceDecayOpenOptions,
     registry: LanguageRegistry,
     /// The active git branch (None if detached HEAD or not a git repo).
     active_branch: Option<String>,
@@ -282,6 +283,35 @@ pub struct TraceDecay {
     /// Set when serving from a fallback (ancestor) DB instead of the exact branch.
     fallback_warning: Option<String>,
     read_only: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TraceDecayOpenOptions {
+    pub profile_root: Option<PathBuf>,
+    pub global_db_path: Option<PathBuf>,
+}
+
+impl TraceDecayOpenOptions {
+    fn resolved_profile_root(&self) -> Result<PathBuf> {
+        if let Some(profile_root) = &self.profile_root {
+            return Ok(profile_root.clone());
+        }
+        if let Some(parent) = self
+            .global_db_path
+            .as_deref()
+            .and_then(std::path::Path::parent)
+        {
+            return Ok(parent.to_path_buf());
+        }
+        storage::default_profile_root()
+    }
+
+    async fn open_global_db(&self) -> Option<GlobalDb> {
+        match self.global_db_path.as_deref() {
+            Some(path) => GlobalDb::open_at(path).await,
+            None => GlobalDb::open().await,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -379,12 +409,20 @@ impl TraceDecay {
     /// Writes a default configuration to the resolved project store and
     /// initializes a fresh `SQLite` database.
     pub async fn init(project_root: &Path) -> Result<Self> {
-        let store_layout = Self::resolve_store_layout_for_project(project_root).await?;
+        Self::init_with_options(project_root, TraceDecayOpenOptions::default()).await
+    }
+
+    pub async fn init_with_options(
+        project_root: &Path,
+        open_options: TraceDecayOpenOptions,
+    ) -> Result<Self> {
+        let store_layout =
+            Self::resolve_store_layout_for_project(project_root, &open_options).await?;
         let config = TraceDecayConfig {
             root_dir: project_root.to_string_lossy().to_string(),
             ..TraceDecayConfig::default()
         };
-        save_config(project_root, &config)?;
+        save_config_to_path(&store_layout.config_path, &config)?;
 
         let (db, _migrated) = Database::initialize(&store_layout.graph_db_path).await?;
         if store_layout.storage_mode == storage::StorageMode::ProfileSharded {
@@ -405,6 +443,7 @@ impl TraceDecay {
             config,
             project_root: project_root.to_path_buf(),
             store_layout,
+            open_options,
             registry: LanguageRegistry::new(),
             active_branch,
             serving_branch: None,
@@ -484,15 +523,18 @@ impl TraceDecay {
         Ok(())
     }
 
-    async fn resolve_store_layout_for_project(project_root: &Path) -> Result<StoreLayout> {
+    async fn resolve_store_layout_for_project(
+        project_root: &Path,
+        open_options: &TraceDecayOpenOptions,
+    ) -> Result<StoreLayout> {
+        let profile_root = open_options.resolved_profile_root()?;
         if storage::read_enrollment_marker(project_root)?.is_some() {
-            return storage::resolve_layout_for_current_profile(project_root);
+            return storage::resolve_layout(project_root, &profile_root);
         }
 
-        let profile_root = storage::default_profile_root()?;
         let git_common_dir = git_common_dir(project_root);
         let git_remote_url = git_remote_url(project_root);
-        if let Some(global_db) = GlobalDb::open().await {
+        if let Some(global_db) = open_options.open_global_db().await {
             let resolution = match global_db
                 .resolve_project_store_by_identity(project_root, git_common_dir.as_deref())
                 .await
@@ -532,10 +574,24 @@ impl TraceDecay {
     /// If the previous operation was interrupted (dirty sentinel exists),
     /// the database is integrity-checked and rebuilt if corrupted.
     pub async fn open(project_root: &Path) -> Result<Self> {
-        let store_layout = Self::resolve_store_layout_for_project(project_root).await?;
+        Self::open_with_options(project_root, TraceDecayOpenOptions::default()).await
+    }
+
+    pub async fn open_with_options(
+        project_root: &Path,
+        open_options: TraceDecayOpenOptions,
+    ) -> Result<Self> {
+        let store_layout =
+            Self::resolve_store_layout_for_project(project_root, &open_options).await?;
         let config = load_config_from_path(project_root, &store_layout.config_path)?;
         let active_branch = branch::current_branch(project_root);
-        Self::auto_track_active_branch(project_root, active_branch.as_deref()).await?;
+        Self::auto_track_active_branch(
+            project_root,
+            &store_layout.data_root,
+            active_branch.as_deref(),
+            open_options.clone(),
+        )
+        .await?;
 
         let (db_path, serving_branch, fallback_warning) = Self::resolve_db_for_branch(
             project_root,
@@ -576,6 +632,7 @@ impl TraceDecay {
                     config,
                     project_root: project_root.to_path_buf(),
                     store_layout: store_layout.clone(),
+                    open_options: open_options.clone(),
                     registry: LanguageRegistry::new(),
                     active_branch: active_branch.clone(),
                     serving_branch: serving_branch.clone(),
@@ -608,6 +665,7 @@ impl TraceDecay {
                     config,
                     project_root: project_root.to_path_buf(),
                     store_layout: store_layout.clone(),
+                    open_options: open_options.clone(),
                     registry: LanguageRegistry::new(),
                     active_branch: active_branch.clone(),
                     serving_branch: serving_branch.clone(),
@@ -631,6 +689,7 @@ impl TraceDecay {
             config,
             project_root: project_root.to_path_buf(),
             store_layout,
+            open_options,
             registry: LanguageRegistry::new(),
             active_branch,
             serving_branch,
@@ -658,7 +717,15 @@ impl TraceDecay {
     /// status/verification commands that must be able to inspect read-only
     /// stores without mutating them.
     pub async fn open_read_only(project_root: &Path) -> Result<Self> {
-        let store_layout = Self::resolve_store_layout_for_project(project_root).await?;
+        Self::open_read_only_with_options(project_root, TraceDecayOpenOptions::default()).await
+    }
+
+    pub async fn open_read_only_with_options(
+        project_root: &Path,
+        open_options: TraceDecayOpenOptions,
+    ) -> Result<Self> {
+        let store_layout =
+            Self::resolve_store_layout_for_project(project_root, &open_options).await?;
         let config = load_config_from_path(project_root, &store_layout.config_path)?;
         let active_branch = branch::current_branch(project_root);
 
@@ -683,6 +750,7 @@ impl TraceDecay {
             config,
             project_root: project_root.to_path_buf(),
             store_layout,
+            open_options,
             registry: LanguageRegistry::new(),
             active_branch,
             serving_branch,
@@ -693,13 +761,115 @@ impl TraceDecay {
 
     async fn auto_track_active_branch(
         project_root: &Path,
+        tracedecay_dir: &Path,
         active_branch: Option<&str>,
+        open_options: TraceDecayOpenOptions,
     ) -> Result<()> {
         let Some(branch_name) = active_branch else {
             return Ok(());
         };
-        let _ = branch::add_branch_tracking(project_root, branch_name).await?;
+        let _ = Self::add_branch_tracking_in_layout(
+            project_root,
+            branch_name,
+            tracedecay_dir,
+            open_options,
+        )
+        .await?;
         Ok(())
+    }
+
+    /// Silently bootstraps/maintains tracedecay branch tracking for `branch_name`.
+    ///
+    /// This is the library-level core shared with the `tracedecay branch add`
+    /// CLI command and hook integrations. It loads or bootstraps branch
+    /// metadata, no-ops when the branch is already tracked, otherwise copies
+    /// the nearest tracked ancestor's DB and runs an incremental sync against
+    /// the new branch DB.
+    pub async fn add_branch_tracking(
+        project_root: &Path,
+        branch_name: &str,
+    ) -> Result<branch::BranchAddOutcome> {
+        Self::add_branch_tracking_with_options(
+            project_root,
+            branch_name,
+            TraceDecayOpenOptions::default(),
+        )
+        .await
+    }
+
+    pub async fn add_branch_tracking_with_options(
+        project_root: &Path,
+        branch_name: &str,
+        open_options: TraceDecayOpenOptions,
+    ) -> Result<branch::BranchAddOutcome> {
+        let store_layout = match Self::resolve_store_layout_for_project(project_root, &open_options)
+            .await
+        {
+            Ok(layout) => layout,
+            Err(TraceDecayError::Config { .. }) => return Ok(branch::BranchAddOutcome::NotIndexed),
+            Err(err) => return Err(err),
+        };
+
+        Self::add_branch_tracking_in_layout(
+            project_root,
+            branch_name,
+            &store_layout.data_root,
+            open_options,
+        )
+        .await
+    }
+
+    async fn add_branch_tracking_in_layout(
+        project_root: &Path,
+        branch_name: &str,
+        tracedecay_dir: &Path,
+        open_options: TraceDecayOpenOptions,
+    ) -> Result<branch::BranchAddOutcome> {
+        let prepared =
+            branch::prepare_branch_tracking_in_layout(project_root, branch_name, tracedecay_dir)
+                .await?;
+        let branch::BranchTrackingPreparation::Added(prepared) = prepared else {
+            return Ok(match prepared {
+                branch::BranchTrackingPreparation::AlreadyTracked => {
+                    branch::BranchAddOutcome::AlreadyTracked
+                }
+                branch::BranchTrackingPreparation::Deferred => branch::BranchAddOutcome::Deferred,
+                branch::BranchTrackingPreparation::Added(_) => unreachable!(),
+            });
+        };
+
+        let sync_result =
+            Self::sync_new_branch_with_retries(project_root, branch_name, open_options).await;
+        if let Err(TraceDecayError::SyncLock { .. }) = sync_result {
+            return Ok(branch::BranchAddOutcome::Deferred);
+        } else if let Err(e) = sync_result {
+            branch::rollback_prepared_branch_tracking(tracedecay_dir, &prepared);
+            return Err(e);
+        }
+
+        branch::finalize_prepared_branch_tracking(tracedecay_dir, &prepared);
+        Ok(branch::BranchAddOutcome::Added)
+    }
+
+    async fn sync_new_branch_with_retries(
+        project_root: &Path,
+        branch_name: &str,
+        open_options: TraceDecayOpenOptions,
+    ) -> Result<()> {
+        let mut attempts = 0;
+        loop {
+            let cg =
+                Self::open_branch_with_options(project_root, branch_name, open_options.clone())
+                    .await?;
+            match cg.sync().await {
+                Ok(_) => return Ok(()),
+                Err(TraceDecayError::SyncLock { .. }) if attempts < 20 => {
+                    attempts += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// Resolves which DB file to open for a given branch.
@@ -768,7 +938,17 @@ impl TraceDecay {
     ///
     /// Returns an error if the branch is not tracked or the DB doesn't exist.
     pub async fn open_branch(project_root: &Path, branch_name: &str) -> Result<Self> {
-        let store_layout = Self::resolve_store_layout_for_project(project_root).await?;
+        Self::open_branch_with_options(project_root, branch_name, TraceDecayOpenOptions::default())
+            .await
+    }
+
+    pub async fn open_branch_with_options(
+        project_root: &Path,
+        branch_name: &str,
+        open_options: TraceDecayOpenOptions,
+    ) -> Result<Self> {
+        let store_layout =
+            Self::resolve_store_layout_for_project(project_root, &open_options).await?;
         let config = load_config_from_path(project_root, &store_layout.config_path)?;
 
         let meta = branch_meta::load_branch_meta(&store_layout.data_root).ok_or_else(|| {
@@ -798,6 +978,7 @@ impl TraceDecay {
             config,
             project_root: project_root.to_path_buf(),
             store_layout,
+            open_options,
             registry: LanguageRegistry::new(),
             active_branch: Some(branch_name.to_string()),
             serving_branch: Some(branch_name.to_string()),
@@ -813,6 +994,7 @@ impl TraceDecay {
         Some(meta.branches.keys().cloned().collect())
     }
 
+    #[allow(clippy::items_after_statements)]
     async fn register_project_store_in_global_registry(&self) {
         if self.store_layout.storage_mode != storage::StorageMode::ProfileSharded {
             return;
@@ -832,7 +1014,7 @@ impl TraceDecay {
         static REGISTRY_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
         let _registry_write = REGISTRY_WRITE_LOCK.lock().await;
 
-        let Some(global_db) = GlobalDb::open().await else {
+        let Some(global_db) = self.open_options.open_global_db().await else {
             return;
         };
 
@@ -946,14 +1128,26 @@ impl TraceDecay {
 
     /// Returns `true` if a `TraceDecay` project has been initialized at the given root.
     pub fn is_initialized(project_root: &Path) -> bool {
-        crate::config::has_project_database(project_root)
+        Self::is_initialized_with_options(project_root, &TraceDecayOpenOptions::default())
+    }
+
+    pub fn is_initialized_with_options(
+        project_root: &Path,
+        open_options: &TraceDecayOpenOptions,
+    ) -> bool {
+        let option_resolved_store_exists = open_options
+            .resolved_profile_root()
+            .and_then(|profile_root| crate::storage::resolve_layout(project_root, &profile_root))
+            .is_ok_and(|layout| {
+                layout.storage_mode == crate::storage::StorageMode::ProfileSharded
+                    && layout.graph_db_path.exists()
+            });
+        if open_options.profile_root.is_some() || open_options.global_db_path.is_some() {
+            return option_resolved_store_exists;
+        }
+        option_resolved_store_exists
+            || crate::config::has_project_database(project_root)
             || crate::storage::has_enrollment_marker(project_root)
-            || crate::storage::resolve_layout_for_current_profile(project_root).is_ok_and(
-                |layout| {
-                    layout.storage_mode == crate::storage::StorageMode::ProfileSharded
-                        && layout.graph_db_path.exists()
-                },
-            )
     }
 }
 
@@ -2354,6 +2548,7 @@ impl TraceDecay {
         dirs
     }
 
+    #[allow(clippy::items_after_statements)]
     fn is_skipped_dir_hint(rel_str: &str, name: &str, config: &TraceDecayConfig) -> bool {
         if is_included_dir(rel_str, config) || is_included(rel_str, config) {
             return false;
@@ -3603,7 +3798,7 @@ impl TraceDecay {
     /// bound to the correct branch DB. Use after [`branch_drifted`](Self::branch_drifted)
     /// reports drift so subsequent reads and writes target the right DB.
     pub async fn reopen_for_current_branch(&self) -> Result<Self> {
-        Self::open(&self.project_root).await
+        Self::open_with_options(&self.project_root, self.open_options.clone()).await
     }
 
     /// Recompute the on-disk path to the `SQLite` DB this instance is

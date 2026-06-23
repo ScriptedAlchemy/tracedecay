@@ -853,6 +853,9 @@ async fn test_codex_user_prompt_submit_generic_workspace_suppresses_code_hints()
 }
 
 #[tokio::test]
+// Intentional: this test pins process-wide TraceDecay profile env while awaited
+// hook context generation resolves profile storage and records analytics.
+#[allow(clippy::await_holding_lock)]
 async fn test_codex_user_prompt_submit_records_workspace_status_and_missing_session_hint() {
     let _lock = GLOBAL_DB_ENV_LOCK.lock().unwrap();
     let project = tempfile::tempdir().unwrap();

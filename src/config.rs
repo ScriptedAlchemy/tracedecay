@@ -206,6 +206,10 @@ pub fn load_config_from_path(project_root: &Path, config_path: &Path) -> Result<
 /// ensuring that a partial write never corrupts the configuration.
 pub fn save_config(project_root: &Path, config: &TraceDecayConfig) -> Result<()> {
     let config_path = get_config_path(project_root);
+    save_config_to_path(&config_path, config)
+}
+
+pub fn save_config_to_path(config_path: &Path, config: &TraceDecayConfig) -> Result<()> {
     let data_dir = config_path
         .parent()
         .ok_or_else(|| TraceDecayError::Config {
@@ -236,7 +240,7 @@ pub fn save_config(project_root: &Path, config: &TraceDecayConfig) -> Result<()>
         ),
     })?;
 
-    fs::rename(&tmp_path, &config_path).map_err(|e| TraceDecayError::Config {
+    fs::rename(&tmp_path, config_path).map_err(|e| TraceDecayError::Config {
         message: format!(
             "failed to rename temporary config file '{}' to '{}': {}",
             tmp_path.display(),

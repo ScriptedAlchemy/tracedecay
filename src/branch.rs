@@ -1,6 +1,6 @@
 //! Git branch resolution utilities for multi-branch indexing.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::branch_meta::BranchMeta;
 
@@ -288,7 +288,7 @@ pub fn find_nearest_tracked_ancestor(
         .or_else(|| best_merge_base.map(|(name, _)| name))
 }
 
-/// Outcome of [`add_branch_tracking`].
+/// Outcome of `TraceDecay` branch tracking.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BranchAddOutcome {
     /// The project has no `.tracedecay/` index; nothing was done.
@@ -302,44 +302,41 @@ pub enum BranchAddOutcome {
     Deferred,
 }
 
-/// Silently bootstraps/maintains tracedecay branch tracking for `branch_name`.
+pub enum BranchTrackingPreparation {
+    AlreadyTracked,
+    Deferred,
+    Added(PreparedBranchTracking),
+}
+
+pub struct PreparedBranchTracking {
+    branch_name: String,
+    db_file: String,
+    new_db_path: PathBuf,
+    _branch_lock: std::fs::File,
+}
+
+/// Copies the nearest tracked ancestor DB and writes branch metadata.
 ///
-/// This is the library-level core shared with the `tracedecay branch add` CLI
-/// command, callable from hooks without shelling out to a second process. It:
-/// loads or bootstraps [`BranchMeta`] (via [`detect_default_branch`]), no-ops
-/// when the branch is already tracked, otherwise copies the nearest tracked
-/// ancestor's DB and runs an incremental sync against the new branch DB.
-///
-/// No-ops (returns [`BranchAddOutcome::NotIndexed`]) when the project has no
-/// `.tracedecay/` index, so it never bootstraps indexing in an unindexed repo.
-/// Idempotent: a re-add of a tracked branch returns
-/// [`BranchAddOutcome::AlreadyTracked`] without re-copying.
-pub async fn add_branch_tracking(
+/// The returned [`PreparedBranchTracking`] owns the branch-add lock and must be
+/// kept alive until the caller either finalizes or rolls back the new branch.
+pub async fn prepare_branch_tracking_in_layout(
     project_root: &Path,
     branch_name: &str,
-) -> crate::errors::Result<BranchAddOutcome> {
+    tracedecay_dir: &Path,
+) -> crate::errors::Result<BranchTrackingPreparation> {
     use crate::branch_meta;
 
-    if !crate::tracedecay::TraceDecay::is_initialized(project_root) {
-        return Ok(BranchAddOutcome::NotIndexed);
-    }
-    let tracedecay_dir = crate::storage::resolve_layout_for_current_profile(project_root)
-        .map_or_else(
-            |_| crate::config::get_tracedecay_dir(project_root),
-            |layout| layout.data_root,
-        );
-
-    let _branch_lock = {
+    let branch_lock = {
         let mut attempts = 0;
         loop {
-            match try_acquire_branch_add_lock(&tracedecay_dir) {
+            match try_acquire_branch_add_lock(tracedecay_dir) {
                 Ok(lock) => break lock,
                 Err(crate::errors::TraceDecayError::SyncLock { .. }) if attempts < 20 => {
                     attempts += 1;
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
                 Err(crate::errors::TraceDecayError::SyncLock { .. }) => {
-                    return Ok(BranchAddOutcome::Deferred);
+                    return Ok(BranchTrackingPreparation::Deferred);
                 }
                 Err(e) => return Err(e),
             }
@@ -347,7 +344,7 @@ pub async fn add_branch_tracking(
     };
 
     let meta_path = tracedecay_dir.join("branch-meta.json");
-    let mut meta = match branch_meta::load_branch_meta(&tracedecay_dir) {
+    let mut meta = match branch_meta::load_branch_meta(tracedecay_dir) {
         Some(meta) => meta,
         None if meta_path.exists() => {
             return Err(crate::errors::TraceDecayError::Config {
@@ -359,13 +356,13 @@ pub async fn add_branch_tracking(
         }
         None => {
             let default = detect_default_branch(project_root).unwrap_or_else(|| "main".to_string());
-            branch_meta::BranchMeta::new_for_dir(&tracedecay_dir, &default)
+            branch_meta::BranchMeta::new_for_dir(tracedecay_dir, &default)
         }
     };
-    prune_missing_branch_dbs(&tracedecay_dir, &mut meta);
+    prune_missing_branch_dbs(tracedecay_dir, &mut meta);
 
     if meta.is_tracked(branch_name) {
-        return Ok(BranchAddOutcome::AlreadyTracked);
+        return Ok(BranchTrackingPreparation::AlreadyTracked);
     }
 
     // Fail fast (before parent resolution) when the name sanitizes to empty —
@@ -380,7 +377,7 @@ pub async fn add_branch_tracking(
 
     let parent = find_nearest_tracked_ancestor(project_root, branch_name, &meta)
         .unwrap_or_else(|| meta.default_branch.clone());
-    let parent_db = resolve_branch_db_path(&tracedecay_dir, &parent, &meta).ok_or_else(|| {
+    let parent_db = resolve_branch_db_path(tracedecay_dir, &parent, &meta).ok_or_else(|| {
         crate::errors::TraceDecayError::Config {
             message: format!("parent branch '{parent}' has no DB"),
         }
@@ -391,7 +388,7 @@ pub async fn add_branch_tracking(
         });
     }
 
-    let branches_dir = branch_meta::ensure_branches_dir(&tracedecay_dir)?;
+    let branches_dir = branch_meta::ensure_branches_dir(tracedecay_dir)?;
     // Pick a collision-free stem so a branch whose sanitized name matches an
     // already-tracked branch gets its own DB instead of overwriting it (#3).
     let stem = unique_branch_db_stem(&meta, &branches_dir, branch_name).ok_or_else(|| {
@@ -407,46 +404,36 @@ pub async fn add_branch_tracking(
         return Err(e.into());
     }
 
-    // Save metadata BEFORE open_branch() so it resolves the new branch DB.
+    // Save metadata before the caller opens the new branch DB for sync.
     let db_file = format!("branches/{stem}.db");
     meta.add_branch(branch_name, &db_file, &parent);
-    if let Err(e) = branch_meta::save_branch_meta(&tracedecay_dir, &meta) {
+    if let Err(e) = branch_meta::save_branch_meta(tracedecay_dir, &meta) {
         remove_branch_db_files(&new_db_path);
         return Err(e.into());
     }
 
-    let sync_result = sync_new_branch_with_retries(project_root, branch_name).await;
-    if let Err(crate::errors::TraceDecayError::SyncLock { .. }) = sync_result {
-        return Ok(BranchAddOutcome::Deferred);
-    } else if let Err(e) = sync_result {
-        rollback_branch_tracking(&tracedecay_dir, branch_name, &db_file, &new_db_path);
-        return Err(e);
-    }
-
-    if let Some(mut meta) = branch_meta::load_branch_meta(&tracedecay_dir) {
-        meta.touch_synced(branch_name);
-        let _ = branch_meta::save_branch_meta(&tracedecay_dir, &meta);
-    }
-
-    Ok(BranchAddOutcome::Added)
+    Ok(BranchTrackingPreparation::Added(PreparedBranchTracking {
+        branch_name: branch_name.to_string(),
+        db_file,
+        new_db_path,
+        _branch_lock: branch_lock,
+    }))
 }
 
-async fn sync_new_branch_with_retries(
-    project_root: &Path,
-    branch_name: &str,
-) -> crate::errors::Result<()> {
-    let mut attempts = 0;
-    loop {
-        let cg = crate::tracedecay::TraceDecay::open_branch(project_root, branch_name).await?;
-        match cg.sync().await {
-            Ok(_) => return Ok(()),
-            Err(crate::errors::TraceDecayError::SyncLock { .. }) if attempts < 20 => {
-                attempts += 1;
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-            Err(e) => return Err(e),
-        }
+pub fn finalize_prepared_branch_tracking(tracedecay_dir: &Path, prepared: &PreparedBranchTracking) {
+    if let Some(mut meta) = crate::branch_meta::load_branch_meta(tracedecay_dir) {
+        meta.touch_synced(&prepared.branch_name);
+        let _ = crate::branch_meta::save_branch_meta(tracedecay_dir, &meta);
     }
+}
+
+pub fn rollback_prepared_branch_tracking(tracedecay_dir: &Path, prepared: &PreparedBranchTracking) {
+    rollback_branch_tracking(
+        tracedecay_dir,
+        &prepared.branch_name,
+        &prepared.db_file,
+        &prepared.new_db_path,
+    );
 }
 
 fn rollback_branch_tracking(

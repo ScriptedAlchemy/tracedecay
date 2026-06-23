@@ -11,6 +11,7 @@ use tracedecay::hooks::{
     cursor_shell_sync_plan_with_current_branch, CursorShellSyncPlan,
 };
 use tracedecay::storage::{write_enrollment_marker, EnrollmentMarker, StorageMode};
+use tracedecay::tracedecay::TraceDecay;
 
 static HOME_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -199,7 +200,7 @@ async fn hook_branch_tracking_writes_profile_sharded_branch_db() {
     git(&project, &["init", "-b", "main"]);
     git(&project, &["checkout", "-b", "feature/hook"]);
 
-    let outcome = tracedecay::branch::add_branch_tracking(&project, "feature/hook")
+    let outcome = TraceDecay::add_branch_tracking(&project, "feature/hook")
         .await
         .unwrap();
 

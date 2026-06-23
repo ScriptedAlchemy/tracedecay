@@ -35,31 +35,18 @@ No branch data is stored in git. Branch DBs are plain files on disk keyed by
 and that mapping must be stable (the same branch always re-resolves to the same
 file).
 
-Two code paths compute the stem, and **they disagree**:
+The branch-tracking path is centralized through
+`TraceDecay::add_branch_tracking`, which keeps sync orchestration in the engine
+and branch metadata/copy work in `branch.rs`.
 
-- **Library path** (`branch::add_branch_tracking`, `branch.rs:251`): uses
-  `unique_branch_db_stem` (`branch.rs:118`), which returns the bare sanitized
-  stem only when it is free, otherwise appends a short content hash of the
-  *unsanitized* name. Guards against `sanitize_branch_name` being many-to-one
-  (`feature/foo` ≡ `feature_foo`) and against re-`fs::copy`-overwriting an
-  existing branch index. Used by the Cursor/Codex hooks (`hooks.rs:1077,1129`)
-  and `agents/cursor.rs:149`.
-- **CLI path** (`commands.rs` `BranchAction::Add`, `commands.rs:192-202`):
-  computes `sanitized = branch::sanitize_branch_name(&branch_name)` directly and
-  uses `branches/{sanitized}.db` for both the `fs::copy` target and the meta
-  `db_file`. It does **not** call `add_branch_tracking` or
-  `unique_branch_db_stem` (`commands.rs` has zero references to either).
-
-> ⚠️ **Risk A — CLI `branch add` DB-stem collision (data loss + aliasing).**
-> Adding a branch whose sanitized name collides with an existing tracked branch
-> (e.g. `feature/foo` then `feature_foo`; `fix/1` then `fix_1`) overwrites the
-> first branch's `.db` via `fs::copy`, and both meta entries then point at the
-> same file. Subsequent syncs to either branch write into the shared DB
-> (cross-contamination). The library path was hardened (issue #3 /
-> `unique_branch_db_stem`) but the CLI path was never updated. The doc comment
-> on `add_branch_tracking` claiming it is "shared with the `tracedecay branch
-> add` CLI command" is **inaccurate** — the CLI reimplements inline.
-> **No test exercises the CLI `branch add` path at all** (see §6).
+- **Branch metadata path** (`branch::prepare_branch_tracking_in_layout`): uses
+  `unique_branch_db_stem`, which returns the bare sanitized stem only when it is
+  free, otherwise appends a short content hash of the *unsanitized* name. This
+  guards against `sanitize_branch_name` being many-to-one (`feature/foo` ≡
+  `feature_foo`) and against re-`fs::copy`-overwriting an existing branch index.
+- **CLI/hook path** (`TraceDecay::add_branch_tracking`): calls the
+  same preparation path, so CLI `branch add`, Cursor/Codex hooks, and Cursor
+  install branch tracking share DB-stem collision behavior.
 
 **Empty-name guard:** both paths reject a name that sanitizes to empty
 (library: `branch.rs:274,298`; would otherwise produce a hidden
@@ -114,9 +101,9 @@ Iterates tracked branches, computes `git merge-base` with the target, picks the
 
 > ⚠️ **Risk B — silent default-seed when the branch ref is unresolvable.**
 > `find_nearest_tracked_ancestor` requires the *target* branch ref to peel to a
-> commit via gix (`branch.rs:184-188`); if gix can't see it (just-created ref,
+> commit via gix; if gix can't see it (just-created ref,
 > worktree-local ref, gix ref-store not refreshed), it returns `None` and both
-> `add_branch_tracking` (`branch.rs:282`) and the CLI (`commands.rs:132`) fall
+> branch tracking entry points fall
 > back to seeding from `default_branch`. Result: a branch whose files are
 > closest to a non-default ancestor gets seeded from `main`/`master` instead —
 > a larger initial sync and a worse first-query experience, not data loss.
@@ -196,7 +183,7 @@ variants: `List | Add | Remove | Removeall | Gc`.
 | Op | Behavior | Meta write |
 |---|---|---|
 | `list` (`:73`) | Print default + tracked branches; `*` marks current; shows size/parent/synced. | read-only |
-| `add` (`:152`) | Detect-or-arg branch; bootstrap meta if absent; seed from nearest ancestor (or default); `fs::copy` parent DB → `branches/<sanitized>.db`; save meta; `open`+`sync`; `touch_synced`. | write (**unsafe stem** — Risk A) |
+| `add` | Detect-or-arg branch; delegate through `TraceDecay::add_branch_tracking`; bootstrap meta if absent; seed from nearest ancestor (or default); `fs::copy` parent DB → collision-safe `branches/<stem>.db`; save meta; open+sync; `touch_synced`. | write |
 | `remove` (`:236`) | Refuse on default branch; else `meta.remove_branch`, `remove_file` (+WAL/SHM), save. | write |
 | `removeall` (`:262`) | Remove every non-default branch + its DB sidecars; save. | write |
 | `gc` (`:290`) | Detect branches in meta whose ref no longer exists in git; remove them + DBs; save. | write |
@@ -271,8 +258,7 @@ open below are intentional documented gaps rather than silent omissions.
 
 | # | Risk | Severity | Where | Suggested test |
 |---|---|---|---|---|
-| A | CLI `branch add` DB-stem collision overwrites/aliases branch DBs | **High** (data loss) | `commands.rs:192-202` | Integration test: `tracedecay branch add feature/foo` then `feature_foo` via the CLI binary; assert two distinct `.db` files and two distinct meta entries; assert a sync to one doesn't appear in the other. (Mirror the `unique_branch_db_stem` unit tests in `branch.rs:362`.) |
-| B | Fresh branch ref invisible to gix silently seeds from default | Med | `branch.rs:282`, `commands.rs:180` | Unit/integration: create branch, force gix ref-store lag (or mock), assert seeding source and that the warning/retry path is correct. |
+| B | Fresh branch ref invisible to gix silently seeds from default | Med | `branch.rs` ancestor lookup, `TraceDecay::add_branch_tracking` callers | Unit/integration: create branch, force gix ref-store lag (or mock), assert seeding source and that the warning/retry path is correct. |
 | C | `branch gc` filesystem-heuristic ref detection mis-handles worktrees/bare | Med (destructive) | `commands.rs:303-312` | Integration test in a linked worktree and a bare repo: assert `gc` does not delete a still-existing branch. Consider reimplementing on gix. |
 | D | Corrupt `branch-meta.json` → silent single-DB mode leaves orphaned `branches/*.db` | Low | `branch_meta.rs:130`, `resolve_db_for_branch` | `gc`/a new `doctor` check should detect `branches/*.db` not referenced by any meta entry. |
 | E | Path-traversal guard skipped when target doesn't exist | Low | `branch.rs:162-168` | Unit test with a crafted meta `db_file` containing `..` pointing at a missing path; assert it's rejected, not returned unchecked. |
