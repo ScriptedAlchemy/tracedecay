@@ -4,6 +4,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -144,6 +145,10 @@ fn canonicalize_test_db_path(path: &Path) -> PathBuf {
     )
 }
 
+pub fn canonical_existing_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
 pub fn tempdir_or_panic() -> TempDir {
     match TempDir::new() {
         Ok(dir) => dir,
@@ -208,6 +213,24 @@ pub fn http_agent() -> ureq::Agent {
         .timeout_global(Some(Duration::from_secs(4)))
         .build()
         .into()
+}
+
+#[cfg(unix)]
+pub struct DaemonProcess;
+
+pub fn apply_tracedecay_home_env(command: &mut Command, home: &Path) {
+    let home = canonical_existing_path(home);
+    command
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env(USER_DATA_DIR_ENV, home.join(".tracedecay"))
+        .env(GLOBAL_DB_ENV, home.join(".tracedecay/global.db"));
+}
+
+#[cfg(unix)]
+pub fn spawn_tracedecay_daemon(_home: &Path) -> DaemonProcess {
+    DaemonProcess
 }
 
 pub fn response_to_json(mut response: ureq::http::Response<ureq::Body>) -> (u16, Value) {
