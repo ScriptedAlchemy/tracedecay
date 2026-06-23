@@ -252,11 +252,6 @@ impl MmapReader {
         })
     }
 
-    /// The ring buffer capacity.
-    pub fn capacity(&self) -> usize {
-        RING_CAPACITY
-    }
-
     /// Re-read the mmap to pick up new writes.
     pub fn refresh(&mut self) -> std::io::Result<()> {
         let mmap_path = self.dir.join(MMAP_FILENAME);

@@ -1,7 +1,7 @@
 // Rust guideline compliant 2025-10-17
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rayon::prelude::*;
 use serde::Serialize;
@@ -227,6 +227,7 @@ pub struct TraceDecay {
     serving_branch: Option<String>,
     /// Set when serving from a fallback (ancestor) DB instead of the exact branch.
     fallback_warning: Option<String>,
+    read_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -354,6 +355,7 @@ impl TraceDecay {
             active_branch,
             serving_branch: None,
             fallback_warning: None,
+            read_only: false,
         };
         ts.register_project_store_in_global_registry().await;
         Ok(ts)
@@ -362,6 +364,70 @@ impl TraceDecay {
     /// Returns a reference to the underlying database.
     pub fn db(&self) -> &Database {
         &self.db
+    }
+
+    async fn schema_version(db: &Database, operation: &str) -> Result<u32> {
+        let mut rows = db
+            .conn()
+            .query("PRAGMA user_version", ())
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("{operation}: failed to read user_version: {e}"),
+                operation: operation.to_string(),
+            })?;
+        let row = rows.next().await.map_err(|e| TraceDecayError::Database {
+            message: format!("{operation}: failed to read user_version row: {e}"),
+            operation: operation.to_string(),
+        })?;
+        match row {
+            Some(row) => {
+                let version: i64 = row.get(0).map_err(|e| TraceDecayError::Database {
+                    message: format!("{operation}: failed to read user_version value: {e}"),
+                    operation: operation.to_string(),
+                })?;
+                Ok(version as u32)
+            }
+            None => Ok(0),
+        }
+    }
+
+    async fn latest_schema_version() -> Result<u32> {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let db_path = std::env::temp_dir().join(format!(
+            "tracedecay-current-schema-{}-{stamp}.db",
+            std::process::id()
+        ));
+        let (db, _) = Database::initialize(&db_path).await?;
+        let version = Self::schema_version(&db, "latest_schema_version").await;
+        db.close();
+        delete_db_files(&db_path);
+        version
+    }
+
+    pub async fn ensure_schema_current(&self) -> Result<()> {
+        let current = Self::schema_version(&self.db, "ensure_schema_current").await?;
+        let latest = Self::latest_schema_version().await?;
+        if current < latest {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "read-only TraceDecay database schema is v{current}, but this binary requires \
+                     v{latest}; open the project with write access to run migrations before serving \
+                     it read-only"
+                ),
+            });
+        }
+        if current > latest {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "TraceDecay database schema v{current} is newer than this binary supports \
+                     (v{latest}); upgrade tracedecay before serving this store"
+                ),
+            });
+        }
+        Ok(())
     }
 
     async fn resolve_store_layout_for_project(project_root: &Path) -> Result<StoreLayout> {
@@ -460,6 +526,7 @@ impl TraceDecay {
                     active_branch: active_branch.clone(),
                     serving_branch: serving_branch.clone(),
                     fallback_warning: fallback_warning.clone(),
+                    read_only: false,
                 };
                 ts.index_all_with_progress(|c, t, f| {
                     eprintln!("[tracedecay] re-indexing [{c}/{t}] {f}");
@@ -491,6 +558,7 @@ impl TraceDecay {
                     active_branch: active_branch.clone(),
                     serving_branch: serving_branch.clone(),
                     fallback_warning: fallback_warning.clone(),
+                    read_only: false,
                 };
                 ts.index_all_with_progress(|c, t, f| {
                     eprintln!("[tracedecay] re-indexing [{c}/{t}] {f}");
@@ -513,6 +581,7 @@ impl TraceDecay {
             active_branch,
             serving_branch,
             fallback_warning,
+            read_only: false,
         };
 
         if migrated {
@@ -564,6 +633,7 @@ impl TraceDecay {
             active_branch,
             serving_branch,
             fallback_warning,
+            read_only: true,
         })
     }
 
@@ -678,6 +748,7 @@ impl TraceDecay {
             active_branch: Some(branch_name.to_string()),
             serving_branch: Some(branch_name.to_string()),
             fallback_warning: None,
+            read_only: false,
         })
     }
 
@@ -3263,6 +3334,12 @@ impl TraceDecay {
     }
 
     fn ensure_branch_writable(&self, operation: &str) -> Result<()> {
+        if self.read_only {
+            return Err(TraceDecayError::Config {
+                message: format!("cannot {operation}: active TraceDecay store is open read-only"),
+            });
+        }
+
         if self.is_fallback() {
             let active = self.active_branch.as_deref().unwrap_or("detached HEAD");
             let serving = self.serving_branch.as_deref().unwrap_or("default branch");
@@ -3346,6 +3423,12 @@ impl TraceDecay {
     }
 
     pub async fn open_project_store_db(&self) -> Result<Database> {
+        if self.read_only {
+            return Err(TraceDecayError::Config {
+                message: "cannot open project store for writing: active TraceDecay store is open read-only"
+                    .to_string(),
+            });
+        }
         let (db, _) = Database::open(&self.store_layout.graph_db_path).await?;
         Ok(db)
     }
@@ -3604,6 +3687,10 @@ impl TraceDecay {
     /// Returns true if serving from a fallback (ancestor) DB.
     pub fn is_fallback(&self) -> bool {
         self.fallback_warning.is_some()
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
     }
 }
 

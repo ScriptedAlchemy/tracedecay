@@ -1,5 +1,8 @@
 use std::path::Path;
-use tracedecay::tracedecay::TraceDecay;
+
+use crate::errors::{Result, TraceDecayError};
+use crate::global_db::GlobalDb;
+use crate::tracedecay::TraceDecay;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServeGlobalDbResolution {
@@ -19,11 +22,20 @@ pub fn global_db_ambiguity_message(paths: &[String]) -> String {
 }
 
 /// Opens an existing project, or tells the user to run `tracedecay init` first.
-pub async fn ensure_initialized(project_path: &Path) -> tracedecay::errors::Result<TraceDecay> {
+pub async fn ensure_initialized(project_path: &Path) -> Result<TraceDecay> {
     if TraceDecay::is_initialized(project_path) {
-        return TraceDecay::open(project_path).await;
+        return match TraceDecay::open(project_path).await {
+            Ok(cg) => Ok(cg),
+            Err(open_err) => match TraceDecay::open_read_only(project_path).await {
+                Ok(cg) => {
+                    cg.ensure_schema_current().await?;
+                    Ok(cg)
+                }
+                Err(_) => Err(open_err),
+            },
+        };
     }
-    Err(tracedecay::errors::TraceDecayError::Config {
+    Err(TraceDecayError::Config {
         message: format!(
             "no TraceDecay index found at '{}' — run 'tracedecay init' first",
             project_path.display()
@@ -42,7 +54,7 @@ fn initialized_project_paths(mut paths: Vec<String>) -> Vec<String> {
 /// project), then a project that is a descendant of cwd (project is under cwd).
 /// Ties at the winning depth are ambiguous and require an explicit path.
 pub async fn resolve_serve_from_global_db() -> ServeGlobalDbResolution {
-    let Some(gdb) = tracedecay::global_db::GlobalDb::open().await else {
+    let Some(gdb) = GlobalDb::open().await else {
         return ServeGlobalDbResolution::None;
     };
     let mut paths = initialized_project_paths(gdb.list_project_paths().await);
@@ -115,7 +127,7 @@ pub async fn resolve_serve_from_mcp_roots(out: &mut Option<String>) -> Option<st
     let parsed: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     let roots = parsed.pointer("/params/roots").and_then(|v| v.as_array())?;
 
-    let registered = match tracedecay::global_db::GlobalDb::open().await {
+    let registered = match GlobalDb::open().await {
         Some(gdb) => initialized_project_paths(gdb.list_project_paths().await),
         None => Vec::new(),
     };
@@ -134,7 +146,7 @@ pub async fn resolve_serve_from_mcp_roots(out: &mut Option<String>) -> Option<st
             return Some(std::path::PathBuf::from(hit));
         }
         // Walk up from the root to find the nearest enclosing project.
-        if let Some(discovered) = tracedecay::config::discover_project_root(&root_path) {
+        if let Some(discovered) = crate::config::discover_project_root(&root_path) {
             return Some(discovered);
         }
     }

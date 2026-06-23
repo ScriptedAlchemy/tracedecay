@@ -3,9 +3,22 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use libsql::Builder;
 use serde_json::{json, Value};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
+#[cfg(unix)]
+use tokio::sync::Mutex;
+use tracedecay::db::Database;
 use tracedecay::global_db::GlobalDb;
+use tracedecay::mcp::handle_tool_call;
+use tracedecay::serve;
+use tracedecay::storage::{write_enrollment_marker, EnrollmentMarker, StorageMode};
+use tracedecay::tracedecay::TraceDecay;
+
+#[cfg(unix)]
+static READ_ONLY_SERVE_ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
 async fn init_project_with_file(home: &Path, contents: &str) -> TempDir {
     let dir = TempDir::new().unwrap();
@@ -88,6 +101,81 @@ fn canonical_path_string(path: &Path) -> String {
         .into_owned()
 }
 
+fn profile_root(home: &Path) -> PathBuf {
+    canonical_existing_path(home).join(".tracedecay")
+}
+
+async fn set_user_version(db_path: &Path, version: u32) {
+    let db = Builder::new_local(db_path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    conn.execute(&format!("PRAGMA user_version = {version}"), ())
+        .await
+        .unwrap();
+}
+
+#[cfg(unix)]
+async fn drop_memory_facts(db_path: &Path) {
+    let mut permissions = fs::metadata(db_path).unwrap().permissions();
+    permissions.set_mode(0o644);
+    fs::set_permissions(db_path, permissions).unwrap();
+
+    let db = Builder::new_local(db_path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    conn.execute("DROP TABLE memory_facts", ()).await.unwrap();
+
+    let mut permissions = fs::metadata(db_path).unwrap().permissions();
+    permissions.set_mode(0o444);
+    fs::set_permissions(db_path, permissions).unwrap();
+}
+
+fn extract_tool_text(value: &Value) -> &str {
+    value["content"][0]["text"]
+        .as_str()
+        .expect("tool result should include text content")
+}
+
+#[cfg(unix)]
+async fn create_read_only_project_db(
+    home: &Path,
+    project: &Path,
+    project_id: &str,
+    user_version: Option<u32>,
+) -> (PathBuf, PathBuf) {
+    let project_root = canonical_existing_path(project);
+    let profile_root = profile_root(home);
+    let data_root = profile_root.join(format!("projects/{project_id}"));
+    let db_path = data_root.join("tracedecay.db");
+
+    unsafe {
+        std::env::set_var("HOME", canonical_existing_path(home));
+        std::env::set_var("USERPROFILE", canonical_existing_path(home));
+        std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+        std::env::set_var("TRACEDECAY_DATA_DIR", &profile_root);
+        std::env::set_var("TRACEDECAY_GLOBAL_DB", profile_root.join("global.db"));
+    }
+
+    write_enrollment_marker(
+        &project_root,
+        &EnrollmentMarker {
+            project_id: project_id.to_string(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    let (db, _) = Database::initialize(&db_path).await.unwrap();
+    db.checkpoint().await.unwrap();
+    db.close();
+    if let Some(version) = user_version {
+        set_user_version(&db_path, version).await;
+    }
+
+    let mut permissions = fs::metadata(&db_path).unwrap().permissions();
+    permissions.set_mode(0o444);
+    fs::set_permissions(&db_path, permissions).unwrap();
+
+    (project_root, db_path)
+}
+
 #[cfg(unix)]
 fn file_uri_localhost_percent_encoded(path: &Path) -> String {
     let encoded = path.to_string_lossy().replace(' ', "%20");
@@ -132,6 +220,80 @@ async fn explicit_uninitialized_path_reports_error_instead_of_global_fallback() 
     assert!(
         stderr.contains(&explicit.path().display().to_string()),
         "error should name the explicit project path\nstderr:\n{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ensure_initialized_rejects_read_only_db_with_pending_migrations() {
+    let _env_guard = READ_ONLY_SERVE_ENV_LOCK.lock().await;
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let (project_root, db_path) = create_read_only_project_db(
+        home.path(),
+        project.path(),
+        "proj_serve_readonly_old_schema",
+        Some(14),
+    )
+    .await;
+    drop_memory_facts(&db_path).await;
+
+    assert!(
+        TraceDecay::open(&project_root).await.is_err(),
+        "normal TraceDecay::open should fail against the read-only DB fixture"
+    );
+
+    let error = match serve::ensure_initialized(&project_root).await {
+        Ok(_) => panic!("read-only fallback must reject old schemas instead of serving them"),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("schema") && message.contains("migrat"),
+        "error should explain that the read-only DB needs migration, got: {message}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ensure_initialized_read_only_fallback_reports_and_guards_read_only_store() {
+    let _env_guard = READ_ONLY_SERVE_ENV_LOCK.lock().await;
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    fs::create_dir_all(project.path().join("src")).unwrap();
+    fs::write(
+        project.path().join("src/lib.rs"),
+        "pub fn readonly_marker() {}\n",
+    )
+    .unwrap();
+    let (project_root, _db_path) = create_read_only_project_db(
+        home.path(),
+        project.path(),
+        "proj_serve_readonly_current_schema",
+        None,
+    )
+    .await;
+
+    let cg = TraceDecay::open_read_only(&project_root)
+        .await
+        .expect("current-schema read-only DB should open for read-only serving");
+
+    let status = handle_tool_call(&cg, "tracedecay_storage_status", json!({}), None, None)
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_str(extract_tool_text(&status.value)).unwrap();
+    assert_eq!(payload["status"].as_str(), Some("ok"));
+    assert_eq!(payload["writable"].as_bool(), Some(false));
+    assert_eq!(payload["read_only"].as_bool(), Some(true));
+
+    let error = match cg.index_all().await {
+        Ok(_) => panic!("mutating operations should be guarded before SQLite rejects writes"),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("read-only"),
+        "write guard should report read-only state, got: {message}"
     );
 }
 

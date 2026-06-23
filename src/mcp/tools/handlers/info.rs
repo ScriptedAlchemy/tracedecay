@@ -236,7 +236,8 @@ pub(super) async fn handle_storage_status(
     let graph_db_size_bytes = graph_db_path
         .metadata()
         .map_or(0, |metadata| metadata.len());
-    let writable = branch.serving_db_exists && !branch.is_fallback;
+    let read_only = cg.is_read_only();
+    let writable = branch.serving_db_exists && !branch.is_fallback && !read_only;
     let mut warnings = branch.warnings.clone();
     if let Some(warning) = branch.fallback_warning.as_ref() {
         warnings.push(warning.clone());
@@ -273,6 +274,7 @@ pub(super) async fn handle_storage_status(
             "graph_db_size_limit_bytes": Value::Null,
         },
         "writable": writable,
+        "read_only": read_only,
         "warnings": warnings,
         "stats": stats,
     });
