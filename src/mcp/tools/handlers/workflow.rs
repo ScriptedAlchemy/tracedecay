@@ -17,12 +17,56 @@ use crate::tracedecay::{is_test_file, TraceDecay};
 use crate::types::NodeKind;
 
 use super::super::ToolResult;
-use super::{truncate_response, unique_file_paths};
+use super::{truncated_json_envelope_with_handle, unique_file_paths};
+
+fn project_response_text(cg: &TraceDecay, text: &str) -> String {
+    truncated_json_envelope_with_handle(Some(cg.project_root()), text)
+}
 
 /// Maximum tests we'll allow `cargo test` to receive in one call. A loose
 /// cap — libtest filters are passed as positional args so very long lists
 /// can blow past OS argv limits on some platforms.
 const MAX_TESTS_HARD_CAP: usize = 500;
+
+#[derive(Debug, Clone)]
+struct TestTarget {
+    filter: String,
+    qualified_name: String,
+    node_id: String,
+    covers_source_ids: Vec<String>,
+}
+
+impl TestTarget {
+    fn new(node: &crate::types::Node) -> Self {
+        Self {
+            filter: node.name.clone(),
+            qualified_name: node.qualified_name.clone(),
+            node_id: node.id.clone(),
+            covers_source_ids: Vec::new(),
+        }
+    }
+
+    fn add_source(&mut self, source_id: &str) {
+        if !self.covers_source_ids.iter().any(|id| id == source_id) {
+            self.covers_source_ids.push(source_id.to_string());
+        }
+    }
+
+    fn matches_libtest_name(&self, name: &str) -> bool {
+        name == self.filter
+            || name.rsplit("::").next() == Some(self.filter.as_str())
+            || (!self.qualified_name.is_empty() && name == self.qualified_name)
+            || name == self.node_id
+    }
+}
+
+fn test_target_key(node: &crate::types::Node) -> String {
+    if node.qualified_name.is_empty() {
+        node.id.clone()
+    } else {
+        node.qualified_name.clone()
+    }
+}
 
 /// Handles `tracedecay_diagnose`.
 pub(super) async fn handle_diagnose(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
@@ -121,7 +165,7 @@ pub(super) async fn handle_diagnose(cg: &TraceDecay, args: Value) -> Result<Tool
     let formatted = serde_json::to_string_pretty(&body).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files: touched.into_iter().collect(),
     })
@@ -164,7 +208,12 @@ pub(super) async fn handle_run_affected_tests(cg: &TraceDecay, args: Value) -> R
     // 1) Resolve changed paths — explicit list, or fall back to `git diff`.
     let changed_paths = match explicit_paths {
         Some(p) => p,
-        None => git_changed_paths(&project_root).await,
+        None => match git_changed_paths(&project_root).await {
+            Ok(paths) => paths,
+            Err(message) => {
+                return Ok(error_result("git", "diff", &message));
+            }
+        },
     };
     if changed_paths.is_empty() {
         return Ok(empty_result("no changed files detected"));
@@ -182,8 +231,7 @@ pub(super) async fn handle_run_affected_tests(cg: &TraceDecay, args: Value) -> R
     //       directly. `#[test]` fns are leaves with no callers, so the
     //       indirect-coverage walk above always misses them and the tool
     //       used to silently skip PRs that only edit `tests/foo.rs`.
-    let mut test_targets: HashMap<String, Vec<String>> = HashMap::new();
-    let mut covered_sources: HashSet<String> = HashSet::new();
+    let mut test_targets: HashMap<String, TestTarget> = HashMap::new();
     for path in &changed_paths {
         let nodes = cg.get_nodes_by_file(path).await?;
 
@@ -209,10 +257,9 @@ pub(super) async fn handle_run_affected_tests(cg: &TraceDecay, args: Value) -> R
                 // source so the per-test `covers_source_ids` field
                 // remains useful.
                 test_targets
-                    .entry(node.name.clone())
-                    .or_default()
-                    .push(node.id.clone());
-                covered_sources.insert(node.id.clone());
+                    .entry(test_target_key(node))
+                    .or_insert_with(|| TestTarget::new(node))
+                    .add_source(&node.id);
             }
         }
 
@@ -232,10 +279,9 @@ pub(super) async fn handle_run_affected_tests(cg: &TraceDecay, args: Value) -> R
                     continue;
                 }
                 test_targets
-                    .entry(caller.name.clone())
-                    .or_default()
-                    .push(node.id.clone());
-                covered_sources.insert(node.id.clone());
+                    .entry(test_target_key(&caller))
+                    .or_insert_with(|| TestTarget::new(&caller))
+                    .add_source(&node.id);
             }
         }
     }
@@ -247,10 +293,21 @@ pub(super) async fn handle_run_affected_tests(cg: &TraceDecay, args: Value) -> R
         )));
     }
 
-    let mut test_names: Vec<String> = test_targets.keys().cloned().collect();
+    let mut selected_targets: Vec<TestTarget> = test_targets.into_values().collect();
+    selected_targets.sort_by(|a, b| {
+        a.qualified_name
+            .cmp(&b.qualified_name)
+            .then(a.node_id.cmp(&b.node_id))
+    });
+    let total_tests = selected_targets.len();
+    selected_targets.truncate(max_tests);
+    let truncated = total_tests > selected_targets.len();
+    let mut test_names: Vec<String> = selected_targets
+        .iter()
+        .map(|target| target.filter.clone())
+        .collect();
     test_names.sort();
-    let total_tests = test_names.len();
-    test_names.truncate(max_tests);
+    test_names.dedup();
 
     // 3) Run cargo test --no-fail-fast with each test name as a libtest
     // filter. We use `--` to pass them through.
@@ -271,12 +328,18 @@ pub(super) async fn handle_run_affected_tests(cg: &TraceDecay, args: Value) -> R
     let output = match timeout(Duration::from_secs(timeout_secs), run).await {
         Ok(Ok(o)) => o,
         Ok(Err(e)) => {
-            return Ok(error_result(&format!("failed to spawn cargo test: {e}")));
+            return Ok(error_result(
+                "cargo",
+                "test",
+                &format!("failed to spawn cargo test: {e}"),
+            ));
         }
         Err(_) => {
-            return Ok(error_result(&format!(
-                "cargo test timed out after {timeout_secs}s"
-            )));
+            return Ok(error_result(
+                "cargo",
+                "test",
+                &format!("cargo test timed out after {timeout_secs}s"),
+            ));
         }
     };
 
@@ -294,19 +357,20 @@ pub(super) async fn handle_run_affected_tests(cg: &TraceDecay, args: Value) -> R
         "failed": failed,
         "total_observed": results.len(),
         "dispatched_tests": test_names,
-        "truncated": total_tests > test_names.len(),
+        "truncated": truncated,
         "results": results
             .iter()
             .map(|(name, ok)| {
-                // libtest emits `module::path::test_fn` while the graph keys
-                // by the short fn name. Look up by both so we resolve either
-                // shape.
-                let short = name.rsplit("::").next().unwrap_or(name);
-                let covers = test_targets
-                    .get(name)
-                    .or_else(|| test_targets.get(short))
-                    .cloned()
-                    .unwrap_or_default();
+                let mut covers = Vec::new();
+                for target in &selected_targets {
+                    if target.matches_libtest_name(name) {
+                        for source_id in &target.covers_source_ids {
+                            if !covers.contains(source_id) {
+                                covers.push(source_id.clone());
+                            }
+                        }
+                    }
+                }
                 json!({
                     "test": name,
                     "passed": ok,
@@ -321,7 +385,7 @@ pub(super) async fn handle_run_affected_tests(cg: &TraceDecay, args: Value) -> R
     let formatted = serde_json::to_string_pretty(&body).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files,
     })
@@ -339,11 +403,18 @@ fn empty_result(message: &str) -> ToolResult {
     }
 }
 
-fn error_result(message: &str) -> ToolResult {
+fn error_result(kind: &str, operation: &str, message: &str) -> ToolResult {
     ToolResult {
         value: json!({
             "content": [{ "type": "text", "text": serde_json::to_string_pretty(&json!({
-                "passed": 0, "failed": 0, "results": [], "error": message
+                "passed": 0,
+                "failed": 0,
+                "results": [],
+                "error": {
+                    "kind": kind,
+                    "operation": operation,
+                    "message": message,
+                }
             })).unwrap_or_default() }]
         }),
         touched_files: vec![],
@@ -363,25 +434,25 @@ fn tail(s: &str, n: usize) -> String {
 }
 
 /// Returns files changed in the working tree relative to HEAD (`git diff
-/// --name-only HEAD`). Empty on git failure — `cargo test` against zero
-/// affected tests is reported as a no-op above.
-async fn git_changed_paths(project_root: &std::path::Path) -> Vec<String> {
-    let Ok(output) = Command::new("git")
+/// --name-only HEAD`).
+async fn git_changed_paths(
+    project_root: &std::path::Path,
+) -> std::result::Result<Vec<String>, String> {
+    let output = Command::new("git")
         .args(["diff", "--name-only", "HEAD"])
         .current_dir(project_root)
         .output()
         .await
-    else {
-        return Vec::new();
-    };
+        .map_err(|e| format!("failed to spawn git diff: {e}"))?;
     if !output.status.success() {
-        return Vec::new();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git diff failed: {}", stderr.trim()));
     }
-    String::from_utf8_lossy(&output.stdout)
+    Ok(String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty())
-        .collect()
+        .collect())
 }
 
 /// Parses libtest stdout for `test <name> ... ok` / `... FAILED` lines.

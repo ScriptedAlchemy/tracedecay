@@ -25,6 +25,9 @@ pub enum Commands {
         /// Folders to skip during indexing (can be repeated)
         #[arg(long = "skip-folder", num_args = 1..)]
         skip_folders: Vec<String>,
+        /// Folders to include even when ignored by default skips or .gitignore (can be repeated)
+        #[arg(long = "include-folder", num_args = 1..)]
+        include_folders: Vec<String>,
     },
     /// Incremental sync (project must already be initialized with `tracedecay init`)
     Sync {
@@ -36,6 +39,9 @@ pub enum Commands {
         /// Folders to skip during indexing (can be repeated)
         #[arg(long = "skip-folder", num_args = 1..)]
         skip_folders: Vec<String>,
+        /// Folders to include even when ignored by default skips or .gitignore (can be repeated)
+        #[arg(long = "include-folder", num_args = 1..)]
+        include_folders: Vec<String>,
         /// List added, modified, and removed files after sync
         #[arg(long)]
         doctor: bool,
@@ -47,6 +53,12 @@ pub enum Commands {
     Status {
         /// Project path (default: current directory)
         path: Option<String>,
+        /// Registered project id to inspect instead of discovering from cwd
+        #[arg(long, conflicts_with = "path")]
+        project_id: Option<String>,
+        /// Registered project root path or alias to inspect instead of discovering from cwd
+        #[arg(long, conflicts_with_all = ["path", "project_id"])]
+        project_path: Option<String>,
         /// Output as JSON
         #[arg(short, long)]
         json: bool,
@@ -120,10 +132,11 @@ pub enum Commands {
     ///
     /// Rewrites only tracedecay-generated artifacts — the Hermes plugin
     /// (.py files, schemas.json, dashboard page) for every detected profile,
-    /// the Cursor plugin bundle, and the Kiro managed agent — re-baking the
-    /// current binary path and version. Config files (Hermes config.yaml and
-    /// its project_root pin, mcp.json, settings, prompt rules) are left
-    /// byte-for-byte intact; use `tracedecay reinstall` to refresh those.
+    /// the Cursor plugin bundle, the Codex plugin bundle/cache, and the Kiro
+    /// managed agent — re-baking the current binary path and version. Config
+    /// files (Hermes config.yaml and its project_root pin, mcp.json, settings,
+    /// prompt rules) are left byte-for-byte intact; use `tracedecay reinstall`
+    /// to refresh those.
     #[command(name = "update-plugin", visible_alias = "update-plugins")]
     UpdatePlugin,
     /// Remove agent integration (MCP server, permissions, hooks, prompt rules)
@@ -361,6 +374,12 @@ pub enum SessionsAction {
         /// Provider to ingest: cursor, codex, or all
         #[arg(long)]
         provider: Option<String>,
+        /// Registered project id whose session store should receive ingested messages
+        #[arg(long)]
+        project_id: Option<String>,
+        /// Registered project root path or alias whose session store should receive ingested messages
+        #[arg(long, conflicts_with = "project_id")]
+        project_path: Option<String>,
     },
     /// Search previously ingested session messages
     Search {
@@ -372,6 +391,12 @@ pub enum SessionsAction {
         /// Maximum number of matches per provider
         #[arg(long, default_value_t = 10)]
         limit: usize,
+        /// Registered project id whose session store should be searched
+        #[arg(long)]
+        project_id: Option<String>,
+        /// Registered project root path or alias whose session store should be searched
+        #[arg(long, conflicts_with = "project_id")]
+        project_path: Option<String>,
     },
 }
 
@@ -385,6 +410,12 @@ pub enum MemoryAction {
         /// Project path (default: current directory, with discovery)
         #[arg(short, long)]
         path: Option<String>,
+        /// Registered project id to inspect instead of discovering from cwd
+        #[arg(long, conflicts_with = "path")]
+        project_id: Option<String>,
+        /// Registered project root path or alias to inspect instead of discovering from cwd
+        #[arg(long, conflicts_with_all = ["path", "project_id"])]
+        project_path: Option<String>,
     },
     /// Similarity-dedup curation (and the LLM-review plan/apply halves),
     /// suitable for a cron job — no dashboard server required.
@@ -448,7 +479,7 @@ pub enum MigrateAction {
     /// Export a profile-sharded project store to a standalone directory.
     Export {
         /// Export from the current profile-sharded store layout.
-        #[arg(long = "from-profile")]
+        #[arg(long = "from-profile", required = true)]
         from_profile: bool,
         /// Project path whose enrollment marker identifies the profile shard.
         #[arg(long, conflicts_with = "project_id")]
@@ -484,6 +515,19 @@ pub enum MigrateAction {
         #[arg(long = "profile-root")]
         profile_root: String,
         /// Apply registry reconstruction plans after scanning manifests.
+        #[arg(long)]
+        apply: bool,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove stale registry rows for projects whose canonical roots no longer exist.
+    #[command(name = "registry-gc")]
+    RegistryGc {
+        /// Only consider registered projects whose canonical root starts with this prefix.
+        #[arg(long)]
+        prefix: Option<String>,
+        /// Apply deletions. Omit for a dry-run preview.
         #[arg(long)]
         apply: bool,
         /// Output as JSON.
@@ -552,6 +596,10 @@ pub enum BranchAction {
 mod cli_parse_tests {
     use super::{BranchAction, Cli, Commands, MemoryAction, MigrateAction, SessionsAction};
     use clap::{error::ErrorKind, Parser};
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
 
     #[test]
     fn tool_command_preserves_trailing_help_and_reserved_args() {
@@ -659,11 +707,15 @@ mod cli_parse_tests {
             status.command,
             Some(Commands::Status {
                 path,
+                project_id,
+                project_path,
                 json,
                 short,
                 details,
                 runtime,
             }) if path.as_deref() == Some("/tmp/project")
+                && project_id.is_none()
+                && project_path.is_none()
                 && json
                 && short
                 && details
@@ -689,6 +741,98 @@ mod cli_parse_tests {
     }
 
     #[test]
+    fn init_and_sync_parse_runtime_skip_and_include_folders() {
+        let init = Cli::try_parse_from([
+            "tracedecay",
+            "init",
+            "/tmp/project",
+            "--skip-folder",
+            "vendor",
+            "dist",
+            "--include-folder",
+            "dist/generated",
+        ])
+        .expect("init skip/include folders should parse");
+        assert!(matches!(
+            init.command,
+            Some(Commands::Init {
+                path,
+                skip_folders,
+                include_folders,
+            }) if path.as_deref() == Some("/tmp/project")
+                && skip_folders == strings(&["vendor", "dist"])
+                && include_folders == strings(&["dist/generated"])
+        ));
+
+        let sync = Cli::try_parse_from([
+            "tracedecay",
+            "sync",
+            "/tmp/project",
+            "--force",
+            "--include-folder",
+            "dist",
+            "vendor/generated",
+        ])
+        .expect("sync include folders should parse");
+        assert!(matches!(
+            sync.command,
+            Some(Commands::Sync {
+                path,
+                force,
+                skip_folders,
+                include_folders,
+                ..
+            }) if path.as_deref() == Some("/tmp/project")
+                && force
+                && skip_folders.is_empty()
+                && include_folders == strings(&["dist", "vendor/generated"])
+        ));
+    }
+
+    #[test]
+    fn init_and_sync_parse_repeated_include_folder_flags() {
+        let init = Cli::try_parse_from([
+            "tracedecay",
+            "init",
+            "/tmp/project",
+            "--include-folder",
+            "dist",
+            "--include-folder",
+            "vendor/generated",
+        ])
+        .expect("repeated init include folders should parse");
+        assert!(matches!(
+            init.command,
+            Some(Commands::Init {
+                path,
+                include_folders,
+                ..
+            }) if path.as_deref() == Some("/tmp/project")
+                && include_folders == strings(&["dist", "vendor/generated"])
+        ));
+
+        let sync = Cli::try_parse_from([
+            "tracedecay",
+            "sync",
+            "/tmp/project",
+            "--include-folder",
+            "dist",
+            "--include-folder",
+            "vendor/generated",
+        ])
+        .expect("repeated sync include folders should parse");
+        assert!(matches!(
+            sync.command,
+            Some(Commands::Sync {
+                path,
+                include_folders,
+                ..
+            }) if path.as_deref() == Some("/tmp/project")
+                && include_folders == strings(&["dist", "vendor/generated"])
+        ));
+    }
+
+    #[test]
     fn memory_status_command_dispatches_to_expected_variant() {
         let cli = Cli::try_parse_from([
             "tracedecay",
@@ -703,8 +847,80 @@ mod cli_parse_tests {
         assert!(matches!(
             cli.command,
             Some(Commands::Memory {
-                action: MemoryAction::Status { json, path }
-            }) if json && path.as_deref() == Some("/tmp/project")
+                action: MemoryAction::Status {
+                    json,
+                    path,
+                    project_id,
+                    project_path,
+                }
+            }) if json
+                && path.as_deref() == Some("/tmp/project")
+                && project_id.is_none()
+                && project_path.is_none()
+        ));
+    }
+
+    #[test]
+    fn project_selector_flags_parse_for_cli_read_surfaces() {
+        let status =
+            Cli::try_parse_from(["tracedecay", "status", "--project-id", "proj_123", "--json"])
+                .expect("status project selector should parse");
+        assert!(matches!(
+            status.command,
+            Some(Commands::Status {
+                path,
+                project_id,
+                project_path,
+                json,
+                ..
+            }) if path.is_none()
+                && project_id.as_deref() == Some("proj_123")
+                && project_path.is_none()
+                && json
+        ));
+
+        let memory = Cli::try_parse_from([
+            "tracedecay",
+            "memory",
+            "status",
+            "--project-path",
+            "/tmp/project",
+        ])
+        .expect("memory status project selector should parse");
+        assert!(matches!(
+            memory.command,
+            Some(Commands::Memory {
+                action:
+                    MemoryAction::Status {
+                        path,
+                        project_id,
+                        project_path,
+                        ..
+                    }
+            }) if path.is_none()
+                && project_id.is_none()
+                && project_path.as_deref() == Some("/tmp/project")
+        ));
+
+        let sessions = Cli::try_parse_from([
+            "tracedecay",
+            "sessions",
+            "search",
+            "needle",
+            "--project-id",
+            "proj_123",
+        ])
+        .expect("sessions search project selector should parse");
+        assert!(matches!(
+            sessions.command,
+            Some(Commands::Sessions {
+                action:
+                    SessionsAction::Search {
+                        project_id,
+                        project_path,
+                        ..
+                    }
+            }) if project_id.as_deref() == Some("proj_123") && project_path.is_none()
         ));
     }
 
@@ -827,6 +1043,50 @@ mod cli_parse_tests {
     }
 
     #[test]
+    fn migrate_export_requires_from_profile_flag() {
+        let err = match Cli::try_parse_from([
+            "tracedecay",
+            "migrate",
+            "export",
+            "--project-id",
+            "proj_123",
+            "--to",
+            "/tmp/exported",
+        ]) {
+            Ok(_) => panic!("migrate export should require --from-profile"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn migrate_registry_gc_parses() {
+        let cli = Cli::try_parse_from([
+            "tracedecay",
+            "migrate",
+            "registry-gc",
+            "--prefix",
+            "/tmp",
+            "--apply",
+            "--json",
+        ])
+        .expect("migrate registry-gc should parse");
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Migrate {
+                action:
+                    MigrateAction::RegistryGc {
+                        prefix,
+                        apply,
+                        json,
+                    }
+            }) if prefix.as_deref() == Some("/tmp") && apply && json
+        ));
+    }
+
+    #[test]
     fn branch_remove_requires_a_branch_name() {
         let err = match Cli::try_parse_from(["tracedecay", "branch", "remove"]) {
             Ok(_) => panic!("branch remove should require a name"),
@@ -843,8 +1103,17 @@ mod cli_parse_tests {
                 .unwrap();
         match ingest.command {
             Some(Commands::Sessions {
-                action: SessionsAction::Ingest { provider },
-            }) => assert_eq!(provider.as_deref(), Some("cursor")),
+                action:
+                    SessionsAction::Ingest {
+                        provider,
+                        project_id,
+                        project_path,
+                    },
+            }) => {
+                assert_eq!(provider.as_deref(), Some("cursor"));
+                assert!(project_id.is_none());
+                assert!(project_path.is_none());
+            }
             _ => panic!("expected sessions ingest command"),
         }
 
@@ -866,11 +1135,15 @@ mod cli_parse_tests {
                         query,
                         provider,
                         limit,
+                        project_id,
+                        project_path,
                     },
             }) => {
                 assert_eq!(query, "needle");
                 assert_eq!(provider.as_deref(), Some("codex"));
                 assert_eq!(limit, 5);
+                assert!(project_id.is_none());
+                assert!(project_path.is_none());
             }
             _ => panic!("expected sessions search command"),
         }

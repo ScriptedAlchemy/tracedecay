@@ -14,7 +14,14 @@ use crate::tracedecay::{BranchDiagnostics, TraceDecay};
 use crate::types::{NodeKind, Visibility};
 
 use super::super::ToolResult;
-use super::{effective_path, require_node_id, truncate_response, unique_file_paths};
+use super::{
+    effective_path, require_node_id, truncate_response, truncated_json_envelope_with_handle,
+    unique_file_paths,
+};
+
+fn project_response_text(cg: &TraceDecay, text: &str) -> String {
+    truncated_json_envelope_with_handle(Some(cg.project_root()), text)
+}
 
 /// Handles `tracedecay_status` tool calls.
 pub(super) async fn handle_status(
@@ -135,7 +142,7 @@ pub(super) async fn handle_status(
     let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files: vec![],
     })
@@ -218,7 +225,7 @@ pub(super) fn handle_active_project(
     let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
     ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files: vec![],
     }
@@ -281,7 +288,7 @@ pub(super) async fn handle_storage_status(
     let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files: vec![],
     })
@@ -310,6 +317,16 @@ async fn open_project_registry_read_only() -> Result<Option<(PathBuf, GlobalDb)>
             ),
         })?;
     Ok(Some((path, db)))
+}
+
+fn project_registry_result(cg: &TraceDecay, payload: &Value) -> ToolResult {
+    let formatted = serde_json::to_string_pretty(&payload).unwrap_or_default();
+    ToolResult {
+        value: json!({
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+        }),
+        touched_files: vec![],
+    }
 }
 
 fn registry_result(payload: &Value) -> ToolResult {
@@ -405,7 +422,7 @@ fn project_context_alias_path<'a>(cg: &'a TraceDecay, args: &'a Value) -> PathBu
 /// Handles `tracedecay_project_context` tool calls.
 pub(super) async fn handle_project_context(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let Some((registry_path, db)) = open_project_registry_read_only().await? else {
-        return Ok(registry_result(&registry_missing_payload()));
+        return Ok(project_registry_result(cg, &registry_missing_payload()));
     };
     let context = if let Some(project_id) = args.get("project_id").and_then(Value::as_str) {
         db.project_registry_context_by_id(project_id).await
@@ -414,21 +431,27 @@ pub(super) async fn handle_project_context(cg: &TraceDecay, args: Value) -> Resu
         db.project_registry_context_by_alias(&alias_path).await
     };
     let Some(context) = context else {
-        return Ok(registry_result(&json!({
-            "status": "not_found",
-            "registry_path": display_path(&registry_path),
-            "project": null,
-            "aliases": [],
-            "stores": [],
-        })));
+        return Ok(project_registry_result(
+            cg,
+            &json!({
+                "status": "not_found",
+                "registry_path": display_path(&registry_path),
+                "project": null,
+                "aliases": [],
+                "stores": [],
+            }),
+        ));
     };
-    Ok(registry_result(&json!({
-        "status": "ok",
-        "registry_path": display_path(&registry_path),
-        "project": registry_project_value(&context.project),
-        "aliases": context.aliases,
-        "stores": context.stores,
-    })))
+    Ok(project_registry_result(
+        cg,
+        &json!({
+            "status": "ok",
+            "registry_path": display_path(&registry_path),
+            "project": registry_project_value(&context.project),
+            "aliases": context.aliases,
+            "stores": context.stores,
+        }),
+    ))
 }
 
 /// Handles `tracedecay_files` tool calls.
@@ -731,7 +754,7 @@ pub(super) async fn handle_port_status(cg: &TraceDecay, args: Value) -> Result<T
     let formatted = serde_json::to_string_pretty(&result).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files,
     })
@@ -1103,7 +1126,7 @@ pub(super) async fn handle_port_order(cg: &TraceDecay, args: Value) -> Result<To
     let formatted = serde_json::to_string_pretty(&result).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files,
     })
@@ -1225,7 +1248,7 @@ pub(super) async fn handle_simplify_scan(
 
     let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
     Ok(ToolResult {
-        value: json!({"content": [{"type": "text", "text": truncate_response(&formatted)}]}),
+        value: json!({"content": [{"type": "text", "text": project_response_text(cg, &formatted)}]}),
         touched_files: files,
     })
 }
@@ -1414,7 +1437,7 @@ pub(super) async fn handle_body(
     let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files: touched,
     })
@@ -1590,7 +1613,7 @@ pub(super) async fn handle_todos(
     let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files: touched,
     })
@@ -1825,7 +1848,7 @@ pub(super) async fn handle_read(cg: &TraceDecay, args: Value) -> Result<ToolResu
 
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files: vec![display_file],
     })
@@ -1857,7 +1880,7 @@ pub(super) async fn handle_outline(cg: &TraceDecay, args: Value) -> Result<ToolR
 
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files: vec![display_file],
     })
@@ -1971,7 +1994,7 @@ pub(super) fn handle_config(cg: &TraceDecay, args: &Value) -> Result<ToolResult>
     let formatted = serde_json::to_string_pretty(&payload).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files: touched,
     })
@@ -2147,7 +2170,7 @@ pub(super) async fn handle_signature_search(
     let formatted = serde_json::to_string_pretty(&payload).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files: touched,
     })

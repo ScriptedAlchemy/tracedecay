@@ -7,9 +7,36 @@ use std::collections::{HashMap, HashSet};
 use serde_json::{json, Value};
 
 use super::super::ToolResult;
-use super::{truncate_response, unique_file_paths};
+use super::{truncated_json_envelope_with_handle, unique_file_paths};
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GitFileChange {
+    path: String,
+    status: &'static str,
+}
+
+fn project_response_text(cg: &TraceDecay, text: &str) -> String {
+    truncated_json_envelope_with_handle(Some(cg.project_root()), text)
+}
+
+fn git_error_result(cg: &TraceDecay, operation: &str, message: String) -> ToolResult {
+    let output = json!({
+        "error": {
+            "kind": "git",
+            "operation": operation,
+            "message": message,
+        }
+    });
+    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    ToolResult {
+        value: json!({
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+        }),
+        touched_files: vec![],
+    }
+}
 
 /// Handles `tracedecay_affected` tool calls.
 pub(super) async fn handle_affected(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
@@ -86,7 +113,7 @@ pub(super) async fn handle_affected(cg: &TraceDecay, args: Value) -> Result<Tool
     let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files,
     })
@@ -238,18 +265,18 @@ pub(super) async fn handle_diff_context(cg: &TraceDecay, args: Value) -> Result<
     let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files,
     })
 }
 
-/// Diff two git refs and return the list of changed file paths.
-fn git_diff_files(
+/// Diff two git refs and return changed file paths with coarse status.
+fn git_diff_file_changes(
     project_root: &std::path::Path,
     from_ref: &str,
     to_ref: &str,
-) -> std::result::Result<Vec<String>, String> {
+) -> std::result::Result<Vec<GitFileChange>, String> {
     let repo = gix::open(project_root).map_err(|e| format!("failed to open git repo: {e}"))?;
 
     let from_tree = repo
@@ -285,19 +312,36 @@ fn git_diff_files(
                     location,
                     entry_mode,
                     ..
+                } => {
+                    if !entry_mode.is_tree() {
+                        changed.push(GitFileChange {
+                            path: location.to_string(),
+                            status: "added",
+                        });
+                    }
                 }
-                | Change::Modification {
-                    location,
-                    entry_mode,
-                    ..
-                }
-                | Change::Deletion {
+                Change::Modification {
                     location,
                     entry_mode,
                     ..
                 } => {
                     if !entry_mode.is_tree() {
-                        changed.push(location.to_string());
+                        changed.push(GitFileChange {
+                            path: location.to_string(),
+                            status: "modified",
+                        });
+                    }
+                }
+                Change::Deletion {
+                    location,
+                    entry_mode,
+                    ..
+                } => {
+                    if !entry_mode.is_tree() {
+                        changed.push(GitFileChange {
+                            path: location.to_string(),
+                            status: "deleted",
+                        });
                     }
                 }
                 Change::Rewrite {
@@ -308,10 +352,16 @@ fn git_diff_files(
                     ..
                 } => {
                     if !source_entry_mode.is_tree() {
-                        changed.push(source_location.to_string());
+                        changed.push(GitFileChange {
+                            path: source_location.to_string(),
+                            status: "deleted",
+                        });
                     }
                     if !entry_mode.is_tree() {
-                        changed.push(location.to_string());
+                        changed.push(GitFileChange {
+                            path: location.to_string(),
+                            status: "added",
+                        });
                     }
                 }
             }
@@ -323,7 +373,7 @@ fn git_diff_files(
     // path that resolves to a directory on disk for additions/modifications.
     // Pure deletions can't be checked this way (the path is gone), which is
     // exactly why entry_mode.is_tree() above is the load-bearing filter.
-    changed.retain(|p| !project_root.join(p).is_dir());
+    changed.retain(|change| !project_root.join(&change.path).is_dir());
     Ok(changed)
 }
 
@@ -557,24 +607,22 @@ pub(super) async fn handle_changelog(cg: &TraceDecay, args: Value) -> Result<Too
             })?;
 
     // Use gix to diff the two trees
-    let changed_files: Vec<String> = match git_diff_files(cg.project_root(), from_ref, to_ref) {
+    let changes = match git_diff_file_changes(cg.project_root(), from_ref, to_ref) {
         Ok(files) => files,
         Err(e) => {
-            return Ok(ToolResult {
-                value: json!({
-                    "content": [{ "type": "text", "text": format!("git diff failed: {}", e) }]
-                }),
-                touched_files: vec![],
-            });
+            return Ok(git_error_result(cg, "diff", e));
         }
     };
+    let changed_files: Vec<String> = changes.iter().map(|change| change.path.clone()).collect();
 
     // For each changed file, get current symbols from the graph
-    let mut added: Vec<Value> = Vec::new();
+    let mut symbols_added: Vec<Value> = Vec::new();
+    let mut symbols_modified: Vec<Value> = Vec::new();
     let mut modified: Vec<Value> = Vec::new();
     let mut file_symbols: HashMap<String, Vec<Value>> = HashMap::new();
 
-    for file in &changed_files {
+    for change in &changes {
+        let file = &change.path;
         let nodes = cg.get_nodes_by_file(file).await?;
         let symbols: Vec<Value> = nodes
             .iter()
@@ -594,12 +642,12 @@ pub(super) async fn handle_changelog(cg: &TraceDecay, args: Value) -> Result<Too
             // File was likely removed or not indexed
             modified.push(json!({
                 "file": file,
-                "status": "removed_or_not_indexed",
+                "status": change.status,
             }));
+        } else if change.status == "added" {
+            symbols_added.extend(symbols.iter().cloned());
         } else {
-            for sym in &symbols {
-                added.push(sym.clone());
-            }
+            symbols_modified.extend(symbols.iter().cloned());
         }
         file_symbols.insert(file.clone(), symbols);
     }
@@ -611,14 +659,20 @@ pub(super) async fn handle_changelog(cg: &TraceDecay, args: Value) -> Result<Too
         "to_ref": to_ref,
         "changed_file_count": changed_files.len(),
         "changed_files": changed_files,
-        "symbols_in_changed_files": added,
+        "symbols_added": symbols_added,
+        "symbols_modified": symbols_modified,
+        "symbols_in_changed_files": file_symbols
+            .values()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>(),
         "files_not_indexed": modified,
     });
 
     let formatted = serde_json::to_string_pretty(&result).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files,
     })
@@ -634,10 +688,7 @@ pub(super) async fn handle_commit_context(cg: &TraceDecay, args: Value) -> Resul
     let changed_files = match git_changed_files(cg.project_root(), staged_only) {
         Ok(files) => files,
         Err(e) => {
-            return Ok(ToolResult {
-                value: json!({"content": [{"type": "text", "text": format!("git error: {}", e)}]}),
-                touched_files: vec![],
-            });
+            return Ok(git_error_result(cg, "status", e));
         }
     };
 
@@ -703,7 +754,7 @@ pub(super) async fn handle_commit_context(cg: &TraceDecay, args: Value) -> Resul
 
     let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
     Ok(ToolResult {
-        value: json!({"content": [{"type": "text", "text": truncate_response(&formatted)}]}),
+        value: json!({"content": [{"type": "text", "text": project_response_text(cg, &formatted)}]}),
         touched_files: changed_files,
     })
 }
@@ -719,15 +770,13 @@ pub(super) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<To
         .and_then(|v| v.as_str())
         .unwrap_or("HEAD");
 
-    let changed_files = match git_diff_files(cg.project_root(), base, head) {
+    let changes = match git_diff_file_changes(cg.project_root(), base, head) {
         Ok(files) => files,
         Err(e) => {
-            return Ok(ToolResult {
-                value: json!({"content": [{"type": "text", "text": format!("git error: {}", e)}]}),
-                touched_files: vec![],
-            });
+            return Ok(git_error_result(cg, "diff", e));
         }
     };
+    let changed_files: Vec<String> = changes.iter().map(|change| change.path.clone()).collect();
 
     let commits = git_commit_log(cg.project_root(), base, head).unwrap_or_default();
 
@@ -742,7 +791,8 @@ pub(super) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<To
         crate::tracedecay::is_test_file(path) || files_with_inline_tests.contains(path)
     };
 
-    for file in &changed_files {
+    for change in &changes {
+        let file = &change.path;
         if has_tests(file) {
             test_files_changed.push(file.clone());
         }
@@ -770,15 +820,21 @@ pub(super) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<To
                 "line": node.start_line,
             });
 
-            // Check if this symbol has callers outside changed files — if so, it's
-            // a modification to an existing API. Otherwise it's likely new.
+            // Only brand symbols as added when the file itself is added. For
+            // modified files the graph only has the post-change symbol set, so
+            // per-symbol added/modified inference would overstate additions.
             let callers = cg.get_callers(&node.id, 1).await?;
             let has_external_callers = callers
                 .iter()
                 .any(|(c, _)| !changed_files.contains(&c.file_path));
 
-            if has_external_callers {
+            if change.status == "added" {
+                symbols_added.push(sym);
+            } else {
                 symbols_modified.push(sym);
+            }
+
+            if has_external_callers {
                 // Track impacted modules
                 for (caller, _) in &callers {
                     if !changed_files.contains(&caller.file_path) {
@@ -791,8 +847,6 @@ pub(super) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<To
                         impacted_modules.insert(dir.to_string());
                     }
                 }
-            } else {
-                symbols_added.push(sym);
             }
         }
     }
@@ -835,7 +889,7 @@ pub(super) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<To
 
     let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
     Ok(ToolResult {
-        value: json!({"content": [{"type": "text", "text": truncate_response(&formatted)}]}),
+        value: json!({"content": [{"type": "text", "text": project_response_text(cg, &formatted)}]}),
         touched_files: changed_files,
     })
 }
@@ -856,7 +910,7 @@ pub(super) fn handle_branch_list(cg: &TraceDecay) -> ToolResult {
     let output = serde_json::to_string_pretty(&result).unwrap_or_default();
     ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&output) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &output) }]
         }),
         touched_files: vec![],
     }
@@ -903,7 +957,7 @@ pub(super) async fn handle_branch_search(cg: &TraceDecay, args: Value) -> Result
     let output = serde_json::to_string_pretty(&items).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&output) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &output) }]
         }),
         touched_files: vec![],
     })
@@ -953,7 +1007,7 @@ pub(super) async fn handle_branch_diff(cg: &TraceDecay, args: Value) -> Result<T
         let output = serde_json::to_string_pretty(&result).unwrap_or_default();
         return Ok(ToolResult {
             value: json!({
-                "content": [{ "type": "text", "text": truncate_response(&output) }]
+                "content": [{ "type": "text", "text": project_response_text(cg, &output) }]
             }),
             touched_files: vec![],
         });
@@ -1085,7 +1139,7 @@ pub(super) async fn handle_branch_diff(cg: &TraceDecay, args: Value) -> Result<T
     let touched_files = unique_file_paths(touched.iter().map(std::string::String::as_str));
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&output) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &output) }]
         }),
         touched_files,
     })

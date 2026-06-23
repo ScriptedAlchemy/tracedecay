@@ -1,7 +1,7 @@
 // Rust guideline compliant 2025-10-17
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 use serde::Serialize;
@@ -10,8 +10,8 @@ use walkdir::WalkDir;
 use crate::branch;
 use crate::branch_meta::{self, BranchMeta};
 use crate::config::{
-    brand_env, db_filename, is_excluded, is_excluded_dir, is_included, load_config_from_path,
-    save_config, TraceDecayConfig,
+    brand_env, db_filename, is_excluded, is_excluded_dir, is_included, is_included_dir,
+    load_config_from_path, save_config, TraceDecayConfig,
 };
 use crate::context::ContextBuilder;
 use crate::db::Database;
@@ -54,6 +54,60 @@ fn normalize_rel_path(path: &str) -> String {
 /// the caller's existing `Vec`.
 fn normalize_rel_paths(paths: &[String]) -> Vec<String> {
     paths.iter().map(|p| normalize_rel_path(p)).collect()
+}
+
+fn normalize_include_folder(project_root: &Path, folder: &str) -> String {
+    let trimmed = folder.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let raw_path = Path::new(trimmed);
+    let project_relative = if raw_path.is_absolute() {
+        raw_path.strip_prefix(project_root).unwrap_or(raw_path)
+    } else {
+        raw_path
+    };
+
+    let mut parts = Vec::new();
+    for component in project_relative.components() {
+        match component {
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+            Component::Normal(part) => parts.push(part.to_string_lossy().replace('\\', "/")),
+            Component::ParentDir => parts.push("..".to_string()),
+        }
+    }
+
+    parts.join("/").trim_matches('/').to_string()
+}
+
+fn include_may_match_descendant(dir_path: &str, config: &TraceDecayConfig) -> bool {
+    if is_included_dir(dir_path, config) || is_included(dir_path, config) {
+        return true;
+    }
+
+    let dir_prefix = format!("{}/", dir_path.trim_end_matches('/'));
+    for pattern in &config.include {
+        let normalized = pattern.trim_start_matches('/').replace('\\', "/");
+        if normalized.starts_with("**/") {
+            return true;
+        }
+        if normalized.starts_with(&dir_prefix) {
+            return true;
+        }
+        let literal_prefix = normalized
+            .split(['*', '?', '['])
+            .next()
+            .unwrap_or("")
+            .trim_end_matches('/');
+        if !literal_prefix.is_empty()
+            && (literal_prefix == dir_path || literal_prefix.starts_with(&dir_prefix))
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Metadata flag recording that the *complete* extracted reference set has
@@ -1204,6 +1258,19 @@ impl TraceDecay {
         }
     }
 
+    /// Appends runtime include-folder patterns to the include list.
+    ///
+    /// Includes are explicit user intent and override the built-in generated
+    /// folder/gitignore filters for the requested subtree.
+    pub fn add_include_folders(&mut self, folders: &[String]) {
+        for folder in folders {
+            let normalized = normalize_include_folder(&self.project_root, folder);
+            if !normalized.is_empty() {
+                self.config.include.push(format!("{normalized}/**"));
+            }
+        }
+    }
+
     /// Performs a full index: clears existing data, scans all Rust files,
     /// extracts nodes and edges, resolves references, and stores everything
     /// in the database.
@@ -2077,7 +2144,7 @@ impl TraceDecay {
                     // Allow if the relative path matches an include glob.
                     if let Ok(rel) = e.path().strip_prefix(root) {
                         let rel_str = rel.to_string_lossy().replace('\\', "/");
-                        return is_included(&rel_str, config);
+                        return is_included_dir(&rel_str, config) || is_included(&rel_str, config);
                     }
                     return false;
                 }
@@ -2087,7 +2154,10 @@ impl TraceDecay {
                 if e.file_type().is_dir() {
                     if let Ok(rel) = e.path().strip_prefix(root) {
                         let rel_str = rel.to_string_lossy().replace('\\', "/");
-                        if is_excluded_dir(&rel_str, config) {
+                        if is_excluded_dir(&rel_str, config)
+                            && !is_included_dir(&rel_str, config)
+                            && !is_included(&rel_str, config)
+                        {
                             return false;
                         }
                     }
@@ -2143,7 +2213,9 @@ impl TraceDecay {
                 if name.starts_with('.') {
                     if let Ok(rel) = entry.path().strip_prefix(&self.project_root) {
                         let rel_str = rel.to_string_lossy().replace('\\', "/");
-                        if !is_included(&rel_str, &self.config) {
+                        if !is_included(&rel_str, &self.config)
+                            && !is_included_dir(&rel_str, &self.config)
+                        {
                             continue;
                         }
                     } else {
@@ -2157,6 +2229,50 @@ impl TraceDecay {
             }
             if let Some(rel_str) = self.accept_file(entry.path(), supported_exts) {
                 files.push(rel_str);
+            }
+        }
+        if has_includes {
+            let mut seen: HashSet<String> = files.iter().cloned().collect();
+            for rel_str in self.scan_included_files(supported_exts) {
+                if seen.insert(rel_str.clone()) {
+                    files.push(rel_str);
+                }
+            }
+        }
+        files
+    }
+
+    /// Walk all files and add only explicit include matches. This lets
+    /// `include` pierce gitignore/default excludes without turning the whole
+    /// ignore-aware walker into an include-only walk.
+    fn scan_included_files(&self, supported_exts: &[&str]) -> Vec<String> {
+        let mut files = Vec::new();
+        if self.config.include.is_empty() {
+            return files;
+        }
+
+        for entry in WalkDir::new(&self.project_root)
+            .follow_links(true)
+            .into_iter()
+            .filter_entry(|entry| {
+                if entry.depth() == 0 || !entry.file_type().is_dir() {
+                    return true;
+                }
+                let Ok(rel) = entry.path().strip_prefix(&self.project_root) else {
+                    return true;
+                };
+                let rel_str = rel.to_string_lossy().replace('\\', "/");
+                include_may_match_descendant(&rel_str, &self.config)
+            })
+        {
+            let Ok(entry) = entry else { continue };
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            if let Some(rel_str) = self.accept_file(entry.path(), supported_exts) {
+                if is_included(&rel_str, &self.config) {
+                    files.push(rel_str);
+                }
             }
         }
         files
@@ -2173,7 +2289,7 @@ impl TraceDecay {
         // Normalize to forward slashes so paths are consistent across
         // platforms and between different directory walkers on Windows.
         let rel_str = relative.to_string_lossy().replace('\\', "/");
-        if is_excluded(&rel_str, &self.config) {
+        if is_excluded(&rel_str, &self.config) && !is_included(&rel_str, &self.config) {
             return None;
         }
         let metadata = std::fs::metadata(path).ok()?;
@@ -2181,6 +2297,86 @@ impl TraceDecay {
             return None;
         }
         Some(rel_str)
+    }
+
+    /// Returns a low-noise hint when a graph lookup may be incomplete because
+    /// generated/vendor/cache folders are intentionally excluded from the index.
+    pub fn index_coverage_hint(&self, result_count: usize) -> Option<IndexCoverageHint> {
+        if result_count > 0 {
+            return None;
+        }
+
+        let skipped_dirs = self.existing_skipped_dirs(5);
+        if skipped_dirs.is_empty() {
+            return None;
+        }
+
+        let first = skipped_dirs[0].clone();
+        let message = if self.config.git_ignore {
+            "No indexed symbols matched. This project respects .gitignore and default generated/vendor folder skips; the target may be under a skipped tree."
+        } else {
+            "No indexed symbols matched. This project uses default generated/vendor folder skips; the target may be under a skipped tree."
+        };
+
+        Some(IndexCoverageHint {
+            message: message.to_string(),
+            skipped_dirs,
+            suggested_command: format!("tracedecay sync --include-folder {first}"),
+        })
+    }
+
+    fn existing_skipped_dirs(&self, limit: usize) -> Vec<String> {
+        let mut dirs = Vec::new();
+        let mut seen = HashSet::new();
+        let root = &self.project_root;
+
+        for entry in WalkDir::new(root).follow_links(false).max_depth(5) {
+            if dirs.len() >= limit {
+                break;
+            }
+            let Ok(entry) = entry else {
+                continue;
+            };
+            if entry.depth() == 0 || !entry.file_type().is_dir() {
+                continue;
+            }
+            let Ok(rel) = entry.path().strip_prefix(root) else {
+                continue;
+            };
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            let name = entry.file_name().to_string_lossy();
+            if Self::is_skipped_dir_hint(&rel_str, &name, &self.config)
+                && seen.insert(rel_str.clone())
+            {
+                dirs.push(rel_str);
+            }
+        }
+
+        dirs
+    }
+
+    fn is_skipped_dir_hint(rel_str: &str, name: &str, config: &TraceDecayConfig) -> bool {
+        if is_included_dir(rel_str, config) || is_included(rel_str, config) {
+            return false;
+        }
+
+        const HINTABLE_DIRS: &[&str] = &[
+            "node_modules",
+            "vendor",
+            "build",
+            "dist",
+            "out",
+            "coverage",
+            ".cache",
+            ".next",
+            ".turbo",
+            ".gradle",
+            ".venv",
+            "venv",
+            "__pycache__",
+        ];
+
+        HINTABLE_DIRS.contains(&name) && is_excluded_dir(rel_str, config)
     }
 
     /// Resolves a path to a relative path string.
@@ -4093,7 +4289,7 @@ impl TraceDecay {
         })
     }
 
-    async fn memory_status_for_conn(conn: &libsql::Connection) -> Result<MemoryStatus> {
+    pub(crate) async fn memory_status_for_conn(conn: &libsql::Connection) -> Result<MemoryStatus> {
         let operation = "memory_status";
         let repair = Self::repair_derived_memory_for_conn(conn).await?;
         let hrr_dim = HolographicEncoder::DIMENSIONS;

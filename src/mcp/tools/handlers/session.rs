@@ -4,9 +4,12 @@ use std::sync::{LazyLock, Mutex};
 
 use serde_json::{json, Map, Value};
 
-use super::truncated_json_envelope_with_handle;
+use super::{
+    global_db_profile_root, project_registry_context, safe_profile_relpath,
+    truncated_json_envelope_with_handle,
+};
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::GlobalDb;
+use crate::global_db::{GlobalDb, ProjectRegistryContext};
 use crate::mcp::tools::{ToolResult, MAX_RESPONSE_CHARS};
 use crate::sessions::cursor::HermesProfileDbReadOnly;
 use crate::sessions::lcm::compression_decision::{self, AssemblyCapInput};
@@ -41,6 +44,56 @@ fn tool_json(project_root: Option<&Path>, value: &Value) -> ToolResult {
         value: json!({ "content": [{ "type": "text", "text": text }] }),
         touched_files: Vec::new(),
     }
+}
+
+async fn selected_project_session_db_path(
+    project_root: &Path,
+    args: &Value,
+) -> Result<Option<(PathBuf, PathBuf)>> {
+    let Some(context) = project_registry_context(args, &["project_path", "project_root"]).await?
+    else {
+        return Ok(
+            crate::sessions::cursor::resolved_project_session_db_path(project_root)
+                .await
+                .map(|db_path| (db_path, project_root.to_path_buf())),
+        );
+    };
+    let profile_root = global_db_profile_root()?;
+    let candidates = registry_session_db_candidates(&context, &profile_root)?;
+    let target_root = PathBuf::from(context.project.display_root);
+    for db_path in candidates {
+        if db_path.is_file() {
+            return Ok(Some((db_path, target_root)));
+        }
+    }
+    Ok(None)
+}
+
+fn registry_session_db_candidates(
+    context: &ProjectRegistryContext,
+    profile_root: &Path,
+) -> Result<Vec<PathBuf>> {
+    let mut candidates = Vec::new();
+    if let Some(artifact) = context
+        .stores
+        .iter()
+        .flat_map(|store| store.artifacts.iter())
+        .find(|artifact| artifact.artifact_kind == "sessions_db")
+    {
+        candidates.push(profile_root.join(safe_profile_relpath(&artifact.relpath)?));
+    }
+    if let Some(store) = context
+        .stores
+        .iter()
+        .find(|store| store.store.storage_mode == "profile_sharded")
+    {
+        candidates.push(
+            profile_root
+                .join(safe_profile_relpath(&store.store.store_relpath)?)
+                .join(crate::storage::SESSIONS_DB_FILENAME),
+        );
+    }
+    Ok(candidates)
 }
 
 fn lcm_preflight_tool_json(value: &Value) -> ToolResult {
@@ -1319,14 +1372,14 @@ pub(super) async fn handle_message_search(cg: &TraceDecay, args: Value) -> Resul
         .unwrap_or(10)
         .clamp(1, 50) as usize;
 
-    let Some(db_path) =
-        crate::sessions::cursor::resolved_project_session_db_path(cg.project_root()).await
+    let Some((db_path, target_root)) =
+        selected_project_session_db_path(cg.project_root(), &args).await?
     else {
         return Ok(tool_json(
             Some(cg.project_root()),
             &json!({
                 "status": "unavailable",
-                "message": "could not resolve active project tracedecay session database",
+                "message": "could not resolve selected project tracedecay session database",
                 "results": [],
                 "count": 0
             }),
@@ -1337,7 +1390,7 @@ pub(super) async fn handle_message_search(cg: &TraceDecay, args: Value) -> Resul
             Some(cg.project_root()),
             &json!({
                 "status": "unavailable",
-                "message": "could not open active project tracedecay session database",
+                "message": "could not open selected project tracedecay session database",
                 "results": [],
                 "count": 0
             }),
@@ -1348,7 +1401,7 @@ pub(super) async fn handle_message_search(cg: &TraceDecay, args: Value) -> Resul
         // by the serve/dashboard startup catch-ups; an incremental
         // search-time catch-up makes the `tracedecay tool` / generated-plugin
         // path self-sufficient (cursor-based, so it is cheap when fresh).
-        let _ = crate::sessions::hermes::ingest_for_project(&db, cg.project_root()).await;
+        let _ = crate::sessions::hermes::ingest_for_project(&db, &target_root).await;
     }
     let results = db
         .search_session_messages_filtered(
@@ -1362,10 +1415,11 @@ pub(super) async fn handle_message_search(cg: &TraceDecay, args: Value) -> Resul
         .await;
 
     Ok(tool_json(
-        Some(cg.project_root()),
+        Some(&target_root),
         &json!({
             "status": "ok",
             "provider": provider,
+            "selected_project_root": target_root,
             "project_key": project_key,
             "parent_session_id": parent_session_id,
             "include_subagents": include_subagents,

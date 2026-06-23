@@ -299,6 +299,51 @@ async fn test_get_code_returns_none_for_missing_file() {
 }
 
 #[tokio::test]
+async fn test_get_code_returns_none_for_reversed_line_range() {
+    use std::fs;
+    use tempfile::TempDir;
+    use tracedecay::context::ContextBuilder;
+    use tracedecay::db::Database;
+
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "line 1\nline 2\nline 3\n").unwrap();
+
+    let (db, _) = Database::initialize(&project.join(".tracedecay/tracedecay.db"))
+        .await
+        .unwrap();
+
+    let node = context_test_node("src/lib.rs", 3, 1);
+    let builder = ContextBuilder::new(&db, project);
+    let code = builder.get_code(&node).unwrap();
+    assert!(code.is_none());
+}
+
+#[tokio::test]
+async fn test_get_code_rejects_absolute_path_when_root_is_not_canonical() {
+    use std::fs;
+    use tempfile::TempDir;
+    use tracedecay::context::ContextBuilder;
+    use tracedecay::db::Database;
+
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+    let outside = project.join("outside.rs");
+    fs::write(&outside, "fn secret() {}\n").unwrap();
+
+    let (db, _) = Database::initialize(&project.join(".tracedecay/tracedecay.db"))
+        .await
+        .unwrap();
+
+    let missing_root = project.join("missing-root");
+    let node = context_test_node(outside.to_string_lossy().as_ref(), 1, 1);
+    let builder = ContextBuilder::new(&db, &missing_root);
+    let code = builder.get_code(&node).unwrap();
+    assert!(code.is_none());
+}
+
+#[tokio::test]
 async fn test_find_relevant_context() {
     use tempfile::TempDir;
     use tracedecay::context::ContextBuilder;
@@ -507,4 +552,32 @@ async fn test_merge_adjacent_code_blocks() {
     );
     assert!(ctx.code_blocks[0].content.contains("alpha"));
     assert!(ctx.code_blocks[0].content.contains("beta"));
+}
+
+fn context_test_node(file_path: &str, start_line: u32, end_line: u32) -> Node {
+    Node {
+        id: format!("function:{file_path}:{start_line}:{end_line}"),
+        kind: NodeKind::Function,
+        name: "test_node".to_string(),
+        qualified_name: format!("{file_path}::test_node"),
+        file_path: file_path.to_string(),
+        start_line,
+        attrs_start_line: start_line,
+        end_line,
+        start_column: 0,
+        end_column: 1,
+        signature: Some("fn test_node()".to_string()),
+        docstring: None,
+        visibility: Visibility::Private,
+        is_async: false,
+        branches: 0,
+        loops: 0,
+        returns: 0,
+        max_nesting: 0,
+        unsafe_blocks: 0,
+        unchecked_calls: 0,
+        assertions: 0,
+        updated_at: 0,
+        parent_id: None,
+    }
 }
