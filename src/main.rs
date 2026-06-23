@@ -9,8 +9,9 @@ use tracedecay::tracedecay::TraceDecay;
 mod cli;
 mod commands;
 mod global;
-mod serve;
 mod tool_command;
+
+pub use tracedecay::serve;
 
 use cli::*;
 

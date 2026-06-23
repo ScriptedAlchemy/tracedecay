@@ -43,6 +43,7 @@ pub mod monitor;
 pub mod redundancy;
 pub mod resolution;
 pub mod runtime_telemetry;
+pub mod serve;
 pub mod sessions;
 pub mod storage;
 pub mod sync;
