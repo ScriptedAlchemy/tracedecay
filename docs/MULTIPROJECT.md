@@ -82,6 +82,9 @@ The query signature churn is mechanical -- every `path_prefix: Option<&str>` met
 
 ## Cross-Project Query Ideas
 
+Registered-project selector support belongs in TraceDecay itself, not only in host-specific Codex plugin skills. Add selectors progressively to TraceDecay MCP tools and CLI surfaces as each operation can honor project boundaries safely; plugin skills may document usage, but they should not be the only enforcement or routing layer.
+
+
 These are new queries enabled by having `project` as a column:
 
 - **Project summary**: node/file/edge counts per project

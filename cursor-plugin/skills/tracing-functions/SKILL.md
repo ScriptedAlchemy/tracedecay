@@ -18,6 +18,7 @@ description: 'Use when tracing call relationships: who calls a function, what it
 ## Guardrails
 
 - Read-only and parallel-safe. Keep `max_depth` small (1–2) first; widen only when the chain is not yet clear. `tracedecay_rename_preview` only previews references — it does not rename.
+- For several independent symbols or call paths, use scoped read-only subagents per symbol, direction, or path hypothesis. Require node ids, depth/tool parameters, and dispatch notes; the parent agent owns the final trace.
 - If a trace response is truncated and includes a `handle`, narrow depth or target set first when possible; call `tracedecay_retrieve` with that `handle` when the omitted chain details are needed.
 
 ## Output

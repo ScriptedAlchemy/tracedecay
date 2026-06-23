@@ -18,6 +18,7 @@ description: 'Use when reviewing a PR, branch diff, or working-tree diff for imp
 ## Guardrails
 
 - Read-only review. Do not edit or run tests from this skill; to verify behavior, hand off to the `tracedecay:running-impacted-tests` skill.
+- For large diffs, use scoped read-only subagents by file group, subsystem, or risk category. Require cited TraceDecay findings and changed paths; the parent agent owns severity, deduplication, and the final review call.
 - If diff context is truncated and includes a `handle`, narrow by file/symbol first when possible; call `tracedecay_retrieve` with that `handle` only when the omitted risk detail is needed.
 
 ## Output

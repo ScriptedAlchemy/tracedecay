@@ -18,6 +18,7 @@ Climb this ladder cheapest-first; stop as soon as the question is answered. For 
 ## Guardrails
 
 - Steps 1–5 are read-only. `tracedecay_lcm_compress`, `tracedecay_lcm_preflight`, and `tracedecay_lcm_session_boundary` are **lifecycle-integration tools for host agents** — never invoke them casually during recall.
+- For multi-step recall, dispatch scoped read-only subagents by session id, time window, provider, role, or query variant. Subagents must not call lifecycle or repair tools; the parent agent validates cited messages/summaries and produces the final timeline.
 - If the LCM store itself looks wrong (missing sessions, broken FTS, stale counts) → `tracedecay_lcm_doctor` (`mode: "diagnose"` first; `repair`/`clean` mutate and need explicit user intent).
 - All LCM tools default to `storage_scope: "project_local"`; only pass `hermes_profile` (with an absolute `hermes_home`) when the user asks about a Hermes profile store.
 
