@@ -16,12 +16,9 @@ use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::{is_test_file, TraceDecay};
 use crate::types::NodeKind;
 
+use super::super::render;
 use super::super::ToolResult;
-use super::{truncated_json_envelope_with_handle, unique_file_paths};
-
-fn project_response_text(cg: &TraceDecay, text: &str) -> String {
-    truncated_json_envelope_with_handle(Some(cg.project_root()), text)
-}
+use super::unique_file_paths;
 
 /// Maximum tests we'll allow `cargo test` to receive in one call. A loose
 /// cap — libtest filters are passed as positional args so very long lists
@@ -162,10 +159,12 @@ pub(super) async fn handle_diagnose(cg: &TraceDecay, args: Value) -> Result<Tool
         "truncated": total > items.len(),
         "diagnostics": items,
     });
-    let formatted = serde_json::to_string_pretty(&body).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &body, || {
+        render::generic_md(&body)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files: touched.into_iter().collect(),
     })
@@ -382,10 +381,12 @@ pub(super) async fn handle_run_affected_tests(cg: &TraceDecay, args: Value) -> R
         "stdout_tail": tail(&stdout, 2000),
     });
 
-    let formatted = serde_json::to_string_pretty(&body).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &body, || {
+        render::generic_md(&body)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
@@ -395,7 +396,7 @@ pub(super) async fn handle_run_affected_tests(cg: &TraceDecay, args: Value) -> R
 fn empty_result(message: &str) -> ToolResult {
     ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": serde_json::to_string_pretty(&json!({
+            "content": [{ "type": "text", "text": serde_json::to_string(&json!({
                 "passed": 0, "failed": 0, "results": [], "note": message
             })).unwrap_or_default() }]
         }),
@@ -406,7 +407,7 @@ fn empty_result(message: &str) -> ToolResult {
 fn error_result(kind: &str, operation: &str, message: &str) -> ToolResult {
     ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": serde_json::to_string_pretty(&json!({
+            "content": [{ "type": "text", "text": serde_json::to_string(&json!({
                 "passed": 0,
                 "failed": 0,
                 "results": [],

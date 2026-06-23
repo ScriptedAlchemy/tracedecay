@@ -279,9 +279,15 @@ async fn ensure_initialized_read_only_fallback_reports_and_guards_read_only_stor
         .await
         .expect("current-schema read-only DB should open for read-only serving");
 
-    let status = handle_tool_call(&cg, "tracedecay_storage_status", json!({}), None, None)
-        .await
-        .unwrap();
+    let status = handle_tool_call(
+        &cg,
+        "tracedecay_storage_status",
+        json!({"format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     let payload: Value = serde_json::from_str(extract_tool_text(&status.value)).unwrap();
     assert_eq!(payload["status"].as_str(), Some("ok"));
     assert_eq!(payload["writable"].as_bool(), Some(false));
@@ -342,7 +348,7 @@ async fn no_explicit_path_prefers_initialize_roots_over_global_fallback() {
                 "method": "tools/call",
                 "params": {
                     "name": "tracedecay_runtime",
-                    "arguments": {}
+                    "arguments": { "format": "json" }
                 }
             })
         )
@@ -409,7 +415,7 @@ async fn no_explicit_path_prefers_discovered_cwd_over_initialize_roots() {
                 "method": "tools/call",
                 "params": {
                     "name": "tracedecay_runtime",
-                    "arguments": {}
+                    "arguments": { "format": "json" }
                 }
             })
         )
@@ -477,7 +483,7 @@ async fn explicit_initialized_path_ignores_initialize_roots() {
                 "method": "tools/call",
                 "params": {
                     "name": "tracedecay_runtime",
-                    "arguments": {}
+                    "arguments": { "format": "json" }
                 }
             })
         )
@@ -584,7 +590,7 @@ async fn initialize_roots_decode_file_uri_localhost_and_percent_escapes() {
                 "method": "tools/call",
                 "params": {
                     "name": "tracedecay_runtime",
-                    "arguments": {}
+                    "arguments": { "format": "json" }
                 }
             })
         )

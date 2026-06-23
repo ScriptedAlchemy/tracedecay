@@ -95,24 +95,15 @@ async fn tracedecay_dashboard_tool_starts_and_returns_url_and_serves_capabilitie
         .and_then(|s| s.as_str())
         .expect("text result");
 
+    let payload: Value = serde_json::from_str(content_text).expect("dashboard payload");
     assert!(
-        content_text.contains("\"status\": \"started\"")
-            || content_text.contains("\"status\": \"already_running\""),
-        "expected started or already: {}",
-        content_text
+        matches!(
+            payload["status"].as_str(),
+            Some("started" | "already_running")
+        ),
+        "expected started or already: {payload}",
     );
-    assert!(
-        content_text.contains("http://127.0.0.1:"),
-        "missing url in {}",
-        content_text
-    );
-
-    // Extract the URL (simple parse of our json output)
-    let start = content_text.find("http://").expect("url start");
-    let end = content_text[start..]
-        .find('"')
-        .unwrap_or(content_text.len() - start);
-    let url = &content_text[start..start + end];
+    let url = payload["url"].as_str().expect("dashboard url");
     let url = if url.ends_with('/') {
         url.to_string()
     } else {

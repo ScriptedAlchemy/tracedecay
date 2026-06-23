@@ -611,83 +611,17 @@ pub async fn hook_cursor_workspace_open() -> i32 {
     0
 }
 
-/// Subagent types shipped by the tracedecay Cursor plugin itself. These are
-/// already tracedecay-first by construction, so the research deny below must
-/// never fire for them. Cursor's hooks docs only enumerate the built-in
-/// subagent types (`generalPurpose`, `explore`, `shell`, …); live Cursor
-/// reports plugin agents under their bare agent-file name (e.g.
-/// `code-explorer`), optionally namespaced (`tracedecay:code-explorer`), so
-/// matching is done on the normalized name after any `:` prefix.
-const TRACEDECAY_PLUGIN_SUBAGENTS: &[&str] =
-    &["codeexplorer", "codehealthauditor", "sessionhistorian"];
-
-fn is_tracedecay_plugin_subagent(subagent_type: &str) -> bool {
-    let bare = subagent_type
-        .rsplit(':')
-        .next()
-        .unwrap_or(subagent_type)
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .collect::<String>()
-        .to_ascii_lowercase();
-    if let Some(configured) = crate::config::brand_env("PLUGIN_SUBAGENTS") {
-        if configured
-            .split(',')
-            .map(|name| {
-                name.chars()
-                    .filter(char::is_ascii_alphanumeric)
-                    .collect::<String>()
-                    .to_ascii_lowercase()
-            })
-            .any(|name| name == bare)
-        {
-            return true;
-        }
-    }
-    TRACEDECAY_PLUGIN_SUBAGENTS.contains(&bare.as_str())
-}
-
 /// Pure decision logic for Cursor `subagentStart` hook events.
 ///
-/// Returns a Cursor hook response only when a research-oriented subagent should
-/// be denied in favor of tracedecay MCP tools. The plugin's own tracedecay-first
-/// agents (code-explorer, code-health-auditor, session-historian) are
-/// allow-listed before the research-prompt check so they are never denied.
+/// Cursor subagents must be allowed to start.
+///
+/// Earlier versions denied research/explore subagents in favor of tracedecay MCP
+/// tools. In Cursor this can surface as a misleading "bubble creation" timeout,
+/// and it prevents explicit user requests to use agents. Keep this handler
+/// fail-open so stale installs that still register `subagentStart` do not block
+/// subagent creation.
 pub fn evaluate_cursor_subagent_start(event_json: &str) -> Option<String> {
-    let parsed: Value = serde_json::from_str(event_json).ok()?;
-    let subagent_type = parsed
-        .get("subagent_type")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if is_tracedecay_plugin_subagent(subagent_type) {
-        return None;
-    }
-    let task = parsed
-        .get("task")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-
-    let hint = decide_hint(&ToolHintInput {
-        agent: HintAgent::Cursor,
-        session_id: event_session_id(&parsed),
-        tool_name: Some("subagentStart".to_string()),
-        command: None,
-        prompt: (!task.is_empty()).then(|| task.to_string()),
-        subagent_type: (!subagent_type.is_empty()).then(|| subagent_type.to_string()),
-        file_path: None,
-        hints_enabled: true,
-    });
-    let is_explore = subagent_type.eq_ignore_ascii_case("explore");
-    if is_explore || is_code_research_prompt(task) {
-        return Some(
-            serde_json::json!({
-                "permission": "deny",
-                "user_message": research_block_reason(hint)
-            })
-            .to_string(),
-        );
-    }
-
+    let _ = event_json;
     None
 }
 

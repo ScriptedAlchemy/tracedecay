@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::{json, Value};
 
+use super::super::render;
 use super::super::ToolResult;
 use super::{truncated_json_envelope_with_handle, unique_file_paths};
 use crate::errors::{Result, TraceDecayError};
@@ -29,7 +30,7 @@ fn git_error_result(cg: &TraceDecay, operation: &str, message: String) -> ToolRe
             "message": message,
         }
     });
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let formatted = serde_json::to_string(&output).unwrap_or_default();
     ToolResult {
         value: json!({
             "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
@@ -110,10 +111,12 @@ pub(super) async fn handle_affected(cg: &TraceDecay, args: Value) -> Result<Tool
         "count": result.len(),
     });
 
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
@@ -262,10 +265,12 @@ pub(super) async fn handle_diff_context(cg: &TraceDecay, args: Value) -> Result<
         "affected_tests": tests_sorted,
     });
 
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
@@ -669,10 +674,12 @@ pub(super) async fn handle_changelog(cg: &TraceDecay, args: Value) -> Result<Too
         "files_not_indexed": modified,
     });
 
-    let formatted = serde_json::to_string_pretty(&result).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &result, || {
+        render::generic_md(&result)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
@@ -693,8 +700,18 @@ pub(super) async fn handle_commit_context(cg: &TraceDecay, args: Value) -> Resul
     };
 
     if changed_files.is_empty() {
+        let output = json!({
+            "changed_files": [],
+            "symbols_by_role": {},
+            "suggested_category": Value::Null,
+            "recent_commits": git_recent_commits(cg.project_root(), 5).unwrap_or_default(),
+            "summary": "No changes detected.",
+        });
+        let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+            render::generic_md(&output)
+        });
         return Ok(ToolResult {
-            value: json!({"content": [{"type": "text", "text": "No changes detected."}]}),
+            value: json!({"content": [{"type": "text", "text": text}]}),
             touched_files: vec![],
         });
     }
@@ -752,9 +769,11 @@ pub(super) async fn handle_commit_context(cg: &TraceDecay, args: Value) -> Resul
         "summary": format!("{} file(s) changed, {} symbol(s) affected", changed_files.len(), total_symbols),
     });
 
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
-        value: json!({"content": [{"type": "text", "text": project_response_text(cg, &formatted)}]}),
+        value: json!({"content": [{"type": "text", "text": text}]}),
         touched_files: changed_files,
     })
 }
@@ -887,9 +906,11 @@ pub(super) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<To
         "impacted_modules": impacted_sorted,
     });
 
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
-        value: json!({"content": [{"type": "text", "text": project_response_text(cg, &formatted)}]}),
+        value: json!({"content": [{"type": "text", "text": text}]}),
         touched_files: changed_files,
     })
 }
@@ -907,7 +928,7 @@ pub(super) fn handle_branch_list(cg: &TraceDecay) -> ToolResult {
         );
     }
 
-    let output = serde_json::to_string_pretty(&result).unwrap_or_default();
+    let output = serde_json::to_string(&result).unwrap_or_default();
     ToolResult {
         value: json!({
             "content": [{ "type": "text", "text": project_response_text(cg, &output) }]
@@ -954,10 +975,13 @@ pub(super) async fn handle_branch_search(cg: &TraceDecay, args: Value) -> Result
         })
         .collect();
 
-    let output = serde_json::to_string_pretty(&items).unwrap_or_default();
+    let items = json!(items);
+    let text = render::finalize(Some(cg.project_root()), &args, &items, || {
+        render::generic_md(&items)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &output) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
     })
@@ -1004,10 +1028,12 @@ pub(super) async fn handle_branch_diff(cg: &TraceDecay, args: Value) -> Result<T
             "removed": [],
             "changed": [],
         });
-        let output = serde_json::to_string_pretty(&result).unwrap_or_default();
+        let text = render::finalize(Some(cg.project_root()), &args, &result, || {
+            render::generic_md(&result)
+        });
         return Ok(ToolResult {
             value: json!({
-                "content": [{ "type": "text", "text": project_response_text(cg, &output) }]
+                "content": [{ "type": "text", "text": text }]
             }),
             touched_files: vec![],
         });
@@ -1135,11 +1161,13 @@ pub(super) async fn handle_branch_diff(cg: &TraceDecay, args: Value) -> Result<T
         "changed": changed,
     });
 
-    let output = serde_json::to_string_pretty(&result).unwrap_or_default();
     let touched_files = unique_file_paths(touched.iter().map(std::string::String::as_str));
+    let text = render::finalize(Some(cg.project_root()), &args, &result, || {
+        render::generic_md(&result)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &output) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })

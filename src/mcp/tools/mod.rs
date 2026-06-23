@@ -6,13 +6,14 @@
 
 mod definitions;
 mod handlers;
+pub(crate) mod render;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use definitions::{
-    ast_grep_available, context_description, explore_call_budget, get_tool_definitions,
-    get_tool_definitions_with_budget,
+    ast_grep_available, context_description, explore_call_budget, format_capable_tool_names,
+    get_tool_definitions, get_tool_definitions_with_budget,
 };
 pub use handlers::{handle_profile_scoped_lcm_tool_call, handle_tool_call};
 

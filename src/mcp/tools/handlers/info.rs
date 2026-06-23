@@ -13,6 +13,7 @@ use crate::storage::{ProjectPath, StorageMode, StoreKind};
 use crate::tracedecay::{BranchDiagnostics, TraceDecay};
 use crate::types::{NodeKind, Visibility};
 
+use super::super::render::{self, Md};
 use super::super::ToolResult;
 use super::{
     effective_path, require_node_id, truncate_response, truncated_json_envelope_with_handle,
@@ -26,6 +27,7 @@ fn project_response_text(cg: &TraceDecay, text: &str) -> String {
 /// Handles `tracedecay_status` tool calls.
 pub(super) async fn handle_status(
     cg: &TraceDecay,
+    args: Value,
     server_stats: Option<Value>,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -139,13 +141,51 @@ pub(super) async fn handle_status(
         output["scope_prefix"] = json!(prefix);
     }
 
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render_status_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
     })
+}
+
+fn render_status_md(value: &Value) -> String {
+    let mut md = Md::new();
+    md.heading(2, "Project Status");
+    if let Some(obj) = value.as_object() {
+        let mut rows: Vec<Vec<String>> = Vec::new();
+        let mut warnings: Vec<String> = Vec::new();
+        let mut keys: Vec<&String> = obj.keys().collect();
+        keys.sort();
+        for k in keys {
+            let v = &obj[k];
+            if k.contains("warning") {
+                if let Some(s) = v.as_str() {
+                    warnings.push(s.to_string());
+                    continue;
+                }
+            }
+            match v {
+                Value::String(s) => rows.push(vec![k.clone(), s.clone()]),
+                Value::Number(n) => rows.push(vec![k.clone(), n.to_string()]),
+                Value::Bool(b) => rows.push(vec![k.clone(), b.to_string()]),
+                Value::Array(a) => rows.push(vec![k.clone(), format!("{} item(s)", a.len())]),
+                Value::Object(o) => rows.push(vec![k.clone(), format!("{{{} field(s)}}", o.len())]),
+                Value::Null => {}
+            }
+        }
+        md.table(&["field", "value"], &rows);
+        if !warnings.is_empty() {
+            md.blank().heading(3, "Warnings");
+            for w in &warnings {
+                md.bullet(w);
+            }
+        }
+    }
+    md.render()
 }
 
 fn display_path(path: &std::path::Path) -> String {
@@ -222,7 +262,7 @@ pub(super) fn handle_active_project(
 ) -> ToolResult {
     let branch = cg.branch_diagnostics();
     let output = active_project_context(cg, &branch, server_stats, scope_prefix);
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let formatted = serde_json::to_string(&output).unwrap_or_default();
     ToolResult {
         value: json!({
             "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
@@ -234,6 +274,7 @@ pub(super) fn handle_active_project(
 /// Handles `tracedecay_storage_status` tool calls.
 pub(super) async fn handle_storage_status(
     cg: &TraceDecay,
+    args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
     let stats = cg.get_stats().await?;
@@ -285,10 +326,12 @@ pub(super) async fn handle_storage_status(
         "warnings": warnings,
         "stats": stats,
     });
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
     })
@@ -319,21 +362,23 @@ async fn open_project_registry_read_only() -> Result<Option<(PathBuf, GlobalDb)>
     Ok(Some((path, db)))
 }
 
-fn project_registry_result(cg: &TraceDecay, payload: &Value) -> ToolResult {
-    let formatted = serde_json::to_string_pretty(&payload).unwrap_or_default();
+fn project_registry_result(cg: &TraceDecay, args: &Value, payload: &Value) -> ToolResult {
+    let text = render::finalize(Some(cg.project_root()), args, payload, || {
+        render::generic_md(payload)
+    });
     ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
     }
 }
 
-fn registry_result(payload: &Value) -> ToolResult {
-    let formatted = serde_json::to_string_pretty(&payload).unwrap_or_default();
+fn registry_result(args: &Value, payload: &Value) -> ToolResult {
+    let text = render::finalize(None, args, payload, || render::generic_md(payload));
     ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
     }
@@ -362,19 +407,22 @@ pub(super) async fn handle_project_list(args: Value) -> Result<ToolResult> {
         let mut payload = registry_missing_payload();
         payload["limit"] = json!(limit);
         payload["truncated"] = json!(false);
-        return Ok(registry_result(&payload));
+        return Ok(registry_result(&args, &payload));
     };
     let mut projects = db.list_code_projects(limit + 1).await;
     let truncated = projects.len() > limit;
     projects.truncate(limit);
     let projects: Vec<Value> = projects.iter().map(registry_project_value).collect();
-    Ok(registry_result(&json!({
-        "status": "ok",
-        "registry_path": display_path(&registry_path),
-        "limit": limit,
-        "truncated": truncated,
-        "projects": projects,
-    })))
+    Ok(registry_result(
+        &args,
+        &json!({
+            "status": "ok",
+            "registry_path": display_path(&registry_path),
+            "limit": limit,
+            "truncated": truncated,
+            "projects": projects,
+        }),
+    ))
 }
 
 /// Handles `tracedecay_project_search` tool calls.
@@ -391,20 +439,23 @@ pub(super) async fn handle_project_search(args: Value) -> Result<ToolResult> {
         payload["query"] = json!(query);
         payload["limit"] = json!(limit);
         payload["truncated"] = json!(false);
-        return Ok(registry_result(&payload));
+        return Ok(registry_result(&args, &payload));
     };
     let mut projects = db.search_code_projects(query, limit + 1).await;
     let truncated = projects.len() > limit;
     projects.truncate(limit);
     let projects: Vec<Value> = projects.iter().map(registry_project_value).collect();
-    Ok(registry_result(&json!({
-        "status": "ok",
-        "registry_path": display_path(&registry_path),
-        "query": query,
-        "limit": limit,
-        "truncated": truncated,
-        "projects": projects,
-    })))
+    Ok(registry_result(
+        &args,
+        &json!({
+            "status": "ok",
+            "registry_path": display_path(&registry_path),
+            "query": query,
+            "limit": limit,
+            "truncated": truncated,
+            "projects": projects,
+        }),
+    ))
 }
 
 fn project_context_alias_path<'a>(cg: &'a TraceDecay, args: &'a Value) -> PathBuf {
@@ -422,7 +473,11 @@ fn project_context_alias_path<'a>(cg: &'a TraceDecay, args: &'a Value) -> PathBu
 /// Handles `tracedecay_project_context` tool calls.
 pub(super) async fn handle_project_context(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let Some((registry_path, db)) = open_project_registry_read_only().await? else {
-        return Ok(project_registry_result(cg, &registry_missing_payload()));
+        return Ok(project_registry_result(
+            cg,
+            &args,
+            &registry_missing_payload(),
+        ));
     };
     let context = if let Some(project_id) = args.get("project_id").and_then(Value::as_str) {
         db.project_registry_context_by_id(project_id).await
@@ -433,6 +488,7 @@ pub(super) async fn handle_project_context(cg: &TraceDecay, args: Value) -> Resu
     let Some(context) = context else {
         return Ok(project_registry_result(
             cg,
+            &args,
             &json!({
                 "status": "not_found",
                 "registry_path": display_path(&registry_path),
@@ -444,6 +500,7 @@ pub(super) async fn handle_project_context(cg: &TraceDecay, args: Value) -> Resu
     };
     Ok(project_registry_result(
         cg,
+        &args,
         &json!({
             "status": "ok",
             "registry_path": display_path(&registry_path),
@@ -751,10 +808,12 @@ pub(super) async fn handle_port_status(cg: &TraceDecay, args: Value) -> Result<T
         "target_only_symbols": target_only,
     });
 
-    let formatted = serde_json::to_string_pretty(&result).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &result, || {
+        render::generic_md(&result)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
@@ -818,10 +877,12 @@ pub(super) async fn handle_port_order(cg: &TraceDecay, args: Value) -> Result<To
             "levels": [],
             "cycles": [],
         });
-        let formatted = serde_json::to_string_pretty(&result).unwrap_or_default();
+        let text = render::finalize(Some(cg.project_root()), &args, &result, || {
+            render::generic_md(&result)
+        });
         return Ok(ToolResult {
             value: json!({
-                "content": [{ "type": "text", "text": formatted }]
+                "content": [{ "type": "text", "text": text }]
             }),
             touched_files: vec![],
         });
@@ -1123,10 +1184,12 @@ pub(super) async fn handle_port_order(cg: &TraceDecay, args: Value) -> Result<To
         "cycles": cycles_json,
     });
 
-    let formatted = serde_json::to_string_pretty(&result).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &result, || {
+        render::generic_md(&result)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
@@ -1246,9 +1309,11 @@ pub(super) async fn handle_simplify_scan(
         "coupling_warnings": coupling_warnings,
     });
 
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
-        value: json!({"content": [{"type": "text", "text": project_response_text(cg, &formatted)}]}),
+        value: json!({"content": [{"type": "text", "text": text}]}),
         touched_files: files,
     })
 }
@@ -1434,10 +1499,12 @@ pub(super) async fn handle_body(
         "match_count": matches.len(),
         "matches": matches,
     });
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files: touched,
     })
@@ -1610,10 +1677,12 @@ pub(super) async fn handle_todos(
         "by_kind": counts,
         "markers": markers,
     });
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files: touched,
     })
@@ -1785,7 +1854,7 @@ pub(super) async fn handle_read(cg: &TraceDecay, args: Value) -> Result<ToolResu
         });
         return Ok(ToolResult {
             value: json!({
-                "content": [{ "type": "text", "text": serde_json::to_string_pretty(&stub).unwrap_or_default() }]
+                "content": [{ "type": "text", "text": serde_json::to_string(&stub).unwrap_or_default() }]
             }),
             touched_files: vec![display_file],
         });
@@ -1846,14 +1915,30 @@ pub(super) async fn handle_read(cg: &TraceDecay, args: Value) -> Result<ToolResu
         "token_count": token_count,
         "body": body_text,
     });
-    let formatted = serde_json::to_string_pretty(&payload).unwrap_or_default();
-
+    let text = render::finalize(Some(cg.project_root()), &args, &payload, || {
+        render_read_md(&payload)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![display_file],
     })
+}
+
+fn render_read_md(value: &Value) -> String {
+    let mut md = Md::new();
+    let file = render::field_str(value, "file");
+    let mode = render::field_str(value, "mode");
+    md.heading(2, &format!("{file} ({mode})"));
+    md.field(
+        "tokens",
+        &render::field_i64(value, "token_count").to_string(),
+    );
+    md.blank();
+    let lang = file.rsplit_once('.').map_or("", |(_, ext)| ext);
+    md.code(lang, render::field_str(value, "body"));
+    md.render()
 }
 
 /// Handles `tracedecay_outline` — flat symbol map for a file with optional
@@ -1878,14 +1963,52 @@ pub(super) async fn handle_outline(cg: &TraceDecay, args: Value) -> Result<ToolR
 
     let kinds_slice: Option<&[String]> = kinds.as_deref();
     let value = render_map(cg.db(), &display_file, kinds_slice).await?;
-    let formatted = serde_json::to_string_pretty(&value).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &value, || {
+        render_outline_md(&value)
+    });
 
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![display_file],
     })
+}
+
+fn render_outline_md(value: &Value) -> String {
+    let mut md = Md::new();
+    let file = render::field_str(value, "file");
+    let count = render::field_i64(value, "symbol_count");
+    md.heading(2, &format!("Outline — {file}"));
+    md.field("symbols", &count.to_string());
+    md.blank();
+    match value.get("symbols").and_then(Value::as_array) {
+        Some(symbols) if !symbols.is_empty() => {
+            let rows: Vec<Vec<String>> = symbols
+                .iter()
+                .map(|s| {
+                    let line = render::field_i64(s, "line");
+                    let end = render::field_i64(s, "end_line");
+                    let span = if end > line {
+                        format!("{line}-{end}")
+                    } else {
+                        line.to_string()
+                    };
+                    vec![
+                        render::field_str(s, "name").to_string(),
+                        render::field_str(s, "kind").to_string(),
+                        span,
+                        render::field_str(s, "visibility").to_string(),
+                    ]
+                })
+                .collect();
+            md.table(&["symbol", "kind", "lines", "visibility"], &rows);
+        }
+        _ => {
+            md.empty_note("No symbols.");
+        }
+    }
+    md.render()
 }
 
 /// Handles `tracedecay_config` — structured TOML / JSON queries by dotted
@@ -1993,10 +2116,12 @@ pub(super) fn handle_config(cg: &TraceDecay, args: &Value) -> Result<ToolResult>
         "match_count": matches.iter().filter(|m| m.get("found") != Some(&Value::Bool(false))).count(),
         "matches": matches,
     });
-    let formatted = serde_json::to_string_pretty(&payload).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), args, &payload, || {
+        render::generic_md(&payload)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files: touched,
     })
@@ -2169,10 +2294,12 @@ pub(super) async fn handle_signature_search(
         "match_count": entries.len(),
         "matches": entries,
     });
-    let formatted = serde_json::to_string_pretty(&payload).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &payload, || {
+        render::generic_md(&payload)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files: touched,
     })

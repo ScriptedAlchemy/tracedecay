@@ -5,7 +5,7 @@
 //! `super::write_plugin_files` focused on filesystem orchestration.
 
 use crate::errors::{Result, TraceDecayError};
-use crate::mcp::tools::get_tool_definitions;
+use crate::mcp::tools::{format_capable_tool_names, get_tool_definitions};
 
 pub(super) fn plugin_manifest() -> String {
     let tools = get_tool_definitions()
@@ -64,6 +64,11 @@ pub(super) fn plugin_schemas_json() -> Result<String> {
 pub(super) fn plugin_tools(tracedecay_bin: &str) -> String {
     let bin =
         serde_json::to_string(tracedecay_bin).unwrap_or_else(|_| "\"tracedecay\"".to_string());
+    let format_tools = format_capable_tool_names()
+        .iter()
+        .map(|name| format!("    {name:?},"))
+        .collect::<Vec<_>>()
+        .join("\n");
     format!(
         r#""""Generated tracedecay tool handlers for Hermes."""
 import json
@@ -110,6 +115,9 @@ PROFILE_STORE_TOOLS = frozenset((
     "tracedecay_lcm_preflight",
     "tracedecay_lcm_compress",
     "tracedecay_lcm_session_boundary",
+))
+JSON_FORMAT_TOOLS = frozenset((
+{format_tools}
 ))
 
 _PLUGIN_CONFIG_CACHE = {{}}
@@ -226,6 +234,9 @@ def call_tracedecay_tool(name: str, args: dict, **kwargs) -> str:
     args_file = None
     try:
         tool_args = args or {{}}
+        if name in JSON_FORMAT_TOOLS and "format" not in tool_args:
+            tool_args = dict(tool_args)
+            tool_args["format"] = "json"
         if "messages" in kwargs and "messages" not in tool_args:
             tool_args = dict(tool_args)
             tool_args["messages"] = kwargs["messages"]

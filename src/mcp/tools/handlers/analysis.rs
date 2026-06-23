@@ -10,14 +10,9 @@ use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 use crate::types::{NodeKind, Visibility};
 
+use super::super::render;
 use super::super::ToolResult;
-use super::{
-    effective_path, filter_by_scope, truncated_json_envelope_with_handle, unique_file_paths,
-};
-
-fn project_response_text(cg: &TraceDecay, text: &str) -> String {
-    truncated_json_envelope_with_handle(Some(cg.project_root()), text)
-}
+use super::{effective_path, filter_by_scope, unique_file_paths};
 
 /// True if `line` contains `identifier` as a whole token (boundaries are
 /// any non-`[A-Za-z0-9_]` char or string ends). Avoids false positives
@@ -198,10 +193,12 @@ pub(super) async fn handle_dead_code(
         "symbols": items,
     });
 
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
@@ -262,17 +259,19 @@ pub(super) async fn handle_module_api(
         "symbols": items,
     });
 
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
 }
 
 /// Handles `tracedecay_circular` tool calls.
-pub(super) async fn handle_circular(cg: &TraceDecay, _args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_circular(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let cycles = cg.find_circular_dependencies().await?;
 
     let items: Vec<Value> = cycles.iter().map(|cycle| json!(cycle)).collect();
@@ -282,10 +281,12 @@ pub(super) async fn handle_circular(cg: &TraceDecay, _args: Value) -> Result<Too
         "cycles": items,
     });
 
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
     })
@@ -360,10 +361,12 @@ pub(super) async fn handle_hotspots(
         "hotspots": items,
     });
 
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
@@ -474,10 +477,12 @@ pub(super) async fn handle_unused_imports(
         "imports": unused,
     });
 
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
@@ -562,10 +567,12 @@ pub(super) async fn handle_rank(
         "ranking": items,
     });
 
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
@@ -616,10 +623,12 @@ pub(super) async fn handle_largest(
         "ranking": items,
     });
 
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
@@ -671,10 +680,12 @@ pub(super) async fn handle_coupling(
         "ranking": items,
     });
 
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
     })
@@ -716,10 +727,12 @@ pub(super) async fn handle_inheritance_depth(
         "ranking": items,
     });
 
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
@@ -790,10 +803,12 @@ pub(super) async fn handle_distribution(
         })
     };
 
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
     })
@@ -889,10 +904,12 @@ pub(super) async fn handle_recursion(
         "cycles": cycle_items,
     });
 
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
@@ -1166,10 +1183,12 @@ pub(super) async fn handle_complexity(
         "ranking": items,
     });
 
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
@@ -1228,10 +1247,12 @@ pub(super) async fn handle_doc_coverage(
         "files": file_items,
     });
 
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
@@ -1275,10 +1296,12 @@ pub(super) async fn handle_god_class(
         "ranking": items,
     });
 
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
@@ -1463,10 +1486,12 @@ pub(super) async fn handle_unsafe_patterns(
         "by_kind": counts,
         "matches": matches,
     });
-    let formatted = serde_json::to_string_pretty(&payload).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &payload, || {
+        render::generic_md(&payload)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files: touched,
     })
@@ -1566,10 +1591,12 @@ pub(super) async fn handle_diagnostics(cg: &TraceDecay, args: Value) -> Result<T
         "warning_count": warning_count,
         "diagnostics": entries,
     });
-    let formatted = serde_json::to_string_pretty(&payload).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &payload, || {
+        render::generic_md(&payload)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files: touched,
     })
@@ -1684,10 +1711,12 @@ pub(super) async fn handle_constructors(
         "match_count": sites.len(),
         "sites": sites,
     });
-    let formatted = serde_json::to_string_pretty(&payload).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &payload, || {
+        render::generic_md(&payload)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files: touched,
     })
@@ -2068,10 +2097,12 @@ pub(super) async fn handle_field_sites(
             "read_sites": reads,
         })
     };
-    let formatted = serde_json::to_string_pretty(&payload).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &payload, || {
+        render::generic_md(&payload)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files: touched,
     })

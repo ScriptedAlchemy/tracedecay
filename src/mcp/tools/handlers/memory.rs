@@ -15,6 +15,7 @@ use crate::memory::types::{
 };
 use crate::tracedecay::TraceDecay;
 
+use super::super::render;
 use super::super::ToolResult;
 use super::{
     global_db_profile_root, project_registry_context, project_selector_present,
@@ -25,7 +26,7 @@ const DEFAULT_FACT_LIMIT: usize = 20;
 const MAX_FACT_LIMIT: usize = 200;
 
 fn tool_json(project_root: Option<&Path>, value: &Value) -> ToolResult {
-    let formatted = serde_json::to_string_pretty(value).unwrap_or_default();
+    let formatted = serde_json::to_string(value).unwrap_or_default();
     ToolResult {
         value: json!({ "content": [{ "type": "text", "text": truncated_json_envelope_with_handle(project_root, &formatted) }] }),
         touched_files: vec![],
@@ -487,8 +488,12 @@ pub(super) async fn handle_fact_feedback(cg: &TraceDecay, args: Value) -> Result
 pub(super) async fn handle_memory_status(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let (db, target_root) = open_target_memory_db(cg, &args).await?;
     let status = TraceDecay::memory_status_for_conn(db.conn()).await?;
-    Ok(tool_json(
-        Some(&target_root),
-        &json!({ "status": "ok", "memory": status }),
-    ))
+    let value = json!({ "status": "ok", "memory": status });
+    let text = render::finalize(Some(&target_root), &args, &value, || {
+        render::generic_md(&value)
+    });
+    Ok(ToolResult {
+        value: json!({ "content": [{ "type": "text", "text": text }] }),
+        touched_files: vec![],
+    })
 }

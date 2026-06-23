@@ -34,7 +34,7 @@ const MAX_LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_CHARS: usize = 1_024;
 const MAX_LCM_EXPAND_QUERY_SYNTHESIS_PROMPT_CHARS: usize = 2_048;
 
 fn tool_json(project_root: Option<&Path>, value: &Value) -> ToolResult {
-    let formatted = serde_json::to_string_pretty(value).unwrap_or_default();
+    let formatted = serde_json::to_string(value).unwrap_or_default();
     let text = if formatted.len() <= MAX_RESPONSE_CHARS {
         formatted
     } else {
@@ -97,17 +97,17 @@ fn registry_session_db_candidates(
 }
 
 fn lcm_preflight_tool_json(value: &Value) -> ToolResult {
-    let formatted = serde_json::to_string_pretty(value).unwrap_or_default();
+    let formatted = serde_json::to_string(value).unwrap_or_default();
     let text = if formatted.len() <= MAX_RESPONSE_CHARS {
         formatted
     } else {
         let compact = compact_lcm_preflight_payload(value, formatted.len(), 8, 512);
-        let compact_text = serde_json::to_string_pretty(&compact).unwrap_or_default();
+        let compact_text = serde_json::to_string(&compact).unwrap_or_default();
         if compact_text.len() <= MAX_RESPONSE_CHARS {
             compact_text
         } else {
             let minimal = compact_lcm_preflight_payload(value, formatted.len(), 4, 256);
-            let minimal_text = serde_json::to_string_pretty(&minimal).unwrap_or_default();
+            let minimal_text = serde_json::to_string(&minimal).unwrap_or_default();
             if minimal_text.len() <= MAX_RESPONSE_CHARS {
                 minimal_text
             } else {
@@ -213,11 +213,11 @@ fn compact_messages_for_mcp(
 }
 
 fn bounded_lcm_contract_text(value: &Value) -> String {
-    let text = serde_json::to_string_pretty(value).unwrap_or_default();
+    let text = serde_json::to_string(value).unwrap_or_default();
     if text.len() <= MAX_RESPONSE_CHARS {
         return text;
     }
-    serde_json::to_string_pretty(&json!({
+    serde_json::to_string(&json!({
         "status": value.get("status").cloned().unwrap_or_else(|| json!("ok")),
         "reason": value.get("reason").cloned().unwrap_or_else(|| json!("mcp_contract_floor_over_budget")),
         "mcp_response_truncated": true,
@@ -246,7 +246,7 @@ fn lcm_response_handle_root(project_root: Option<&Path>, args: &Value) -> Option
 }
 
 fn lcm_expand_query_tool_json(project_root: Option<&Path>, value: &Value) -> ToolResult {
-    let formatted = serde_json::to_string_pretty(value).unwrap_or_default();
+    let formatted = serde_json::to_string(value).unwrap_or_default();
     let needs_synthesis = value
         .get("needs_synthesis")
         .and_then(Value::as_bool)
@@ -256,7 +256,7 @@ fn lcm_expand_query_tool_json(project_root: Option<&Path>, value: &Value) -> Too
     } else if needs_synthesis {
         let compact =
             compact_lcm_expand_query_payload(value, formatted.len(), CompactTier::Standard);
-        let text = serde_json::to_string_pretty(&compact).unwrap_or_default();
+        let text = serde_json::to_string(&compact).unwrap_or_default();
         if text.len() <= MAX_RESPONSE_CHARS {
             text
         } else {
@@ -267,7 +267,7 @@ fn lcm_expand_query_tool_json(project_root: Option<&Path>, value: &Value) -> Too
                     compact_chars: text.len(),
                 },
             );
-            serde_json::to_string_pretty(&fallback).unwrap_or_default()
+            serde_json::to_string(&fallback).unwrap_or_default()
         }
     } else {
         truncated_json_envelope_with_handle(project_root, &formatted)
@@ -580,7 +580,7 @@ fn compact_synthesis_prompt_with_limits(
         .and_then(Value::as_str)
         .unwrap_or_default();
     let (prompt, prompt_truncated) = truncate_chars(prompt, prompt_chars);
-    let context_json = serde_json::to_string_pretty(context_blocks).unwrap_or_else(|_| "[]".into());
+    let context_json = serde_json::to_string(context_blocks).unwrap_or_else(|_| "[]".into());
     let truncation_note = if value
         .get("context_truncated")
         .and_then(Value::as_bool)

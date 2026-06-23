@@ -262,29 +262,14 @@ fn test_kiro_allows_invalid_json() {
 }
 
 #[test]
-fn test_cursor_subagent_start_blocks_explore_research_task() {
+fn test_cursor_subagent_start_allows_explore_research_task() {
     let input = r#"{
         "hook_event_name": "subagentStart",
         "subagent_type": "explore",
         "task": "Explore the codebase architecture and call graph"
     }"#;
 
-    let output = evaluate_cursor_subagent_start(input).expect("should deny research subagent");
-    let v: serde_json::Value = serde_json::from_str(&output).unwrap();
-
-    assert_eq!(v["permission"].as_str(), Some("deny"));
-    assert!(v["user_message"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("tracedecay MCP tools"));
-    assert!(v["user_message"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("tracedecay hint:"));
-    assert!(
-        v.get("hookSpecificOutput").is_none(),
-        "Cursor hook output must use Cursor's documented subagentStart fields"
-    );
+    assert!(evaluate_cursor_subagent_start(input).is_none());
 }
 
 #[test]
