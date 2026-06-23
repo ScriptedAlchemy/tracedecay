@@ -13,3 +13,9 @@ CXXFLAGS = { value = "-DNDEBUG", force = false }
 # back in with TRACEDECAY_ENABLE_GLOBAL_DB=1.
 # Installed binaries run outside cargo and are unaffected.
 TRACEDECAY_DISABLE_GLOBAL_DB = { value = "1", force = false }
+
+[alias]
+# Local default for the full Rust test suite. Requires cargo-nextest:
+# https://nexte.st/docs/installation/pre-built-binaries/
+test-all = "nextest run --workspace --no-fail-fast"
+test-ci = "nextest run --workspace --no-fail-fast"
