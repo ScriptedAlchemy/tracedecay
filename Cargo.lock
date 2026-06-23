@@ -4499,7 +4499,7 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 
 [[package]]
 name = "tracedecay"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "amari-holographic",
  "axum 0.8.9",
