@@ -6,15 +6,16 @@
 //! Each agent sends its own event schema on stdin and expects its own output
 //! shape, so the handlers are kept agent-specific rather than shared blindly.
 
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
 pub mod tool_hints;
 
-use tool_hints::{decide_hint, HintAgent, ToolHint, ToolHintInput};
+use tool_hints::{decide_hint, HintAgent, HintCategory, ToolHint, ToolHintInput};
 
 macro_rules! read_hook_event {
     () => {{
@@ -35,6 +36,17 @@ code research. TraceDecay is faster and more precise for symbol relationships, \
 call paths, and code structure. Only use agents for code exploration if you \
 have already tried tracedecay and it cannot answer the question.";
 
+const CODEX_SUBAGENT_START_CONTEXT: &str = "tracedecay subagent context: this looks like a \
+new/no-history subagent or code-research subagent. Use tracedecay MCP tools and the relevant TraceDecay skill/tool \
+workflow before broad file reads: `tracedecay:searching-for-code` with `tracedecay_context` \
+for code exploration, `tracedecay:reading-code-cheaply` with `tracedecay_outline` or \
+`tracedecay_body` before whole-file reads, `tracedecay:recalling-project-memory` when \
+project decisions/preferences matter, and `tracedecay:recalling-session-context` with \
+`tracedecay_message_search`, `tracedecay_lcm_expand_query`, and `tracedecay_lcm_describe` \
+when prior conversation context may be missing.";
+
+const HOOK_ANALYTICS_FILENAME: &str = "hook_analytics.jsonl";
+
 fn research_block_reason(hint: Option<ToolHint>) -> String {
     let base = crate::config::brand_env("RESEARCH_BLOCK_REASON")
         .unwrap_or_else(|| TRACEDECAY_RESEARCH_BLOCK_REASON.to_string());
@@ -42,6 +54,98 @@ fn research_block_reason(hint: Option<ToolHint>) -> String {
         || base.clone(),
         |hint| format!("{}\n\n{}", base, format_tool_hint(&hint)),
     )
+}
+
+fn record_hook_analytics(root: Option<&Path>, event: &str, mut fields: serde_json::Value) {
+    let Some(path) = hook_analytics_path(root) else {
+        return;
+    };
+    let Some(fields) = fields.as_object_mut() else {
+        return;
+    };
+    fields.insert(
+        "event".to_string(),
+        serde_json::Value::String(event.to_string()),
+    );
+    fields.insert(
+        "ts_unix_ms".to_string(),
+        serde_json::Value::Number(serde_json::Number::from(now_unix_millis())),
+    );
+    let Ok(line) = serde_json::to_string(&fields) else {
+        return;
+    };
+    append_private_jsonl(&path, &line);
+}
+
+fn hook_analytics_path(root: Option<&Path>) -> Option<PathBuf> {
+    match root {
+        Some(root) => crate::storage::resolve_layout_for_current_profile(root)
+            .ok()
+            .map(|layout| layout.data_root.join(HOOK_ANALYTICS_FILENAME)),
+        None => crate::storage::default_profile_root()
+            .ok()
+            .map(|root| root.join(HOOK_ANALYTICS_FILENAME)),
+    }
+}
+
+fn append_private_jsonl(path: &Path, line: &str) {
+    let mut content = std::fs::read_to_string(path).unwrap_or_default();
+    content.push_str(line);
+    content.push('\n');
+    let _ = crate::storage::PrivateStoreIo::write_file(path, content.as_bytes());
+}
+
+fn now_unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or_default()
+}
+
+fn record_hint_analytics(
+    root: Option<&Path>,
+    event: &str,
+    agent: HintAgent,
+    session_id: Option<&str>,
+    hint: &ToolHint,
+) {
+    record_hook_analytics(
+        root,
+        event,
+        serde_json::json!({
+            "agent": agent.as_key(),
+            "session_id": session_id,
+            "category": hint.category.as_key(),
+        }),
+    );
+}
+
+fn record_workspace_status_analytics(
+    root: Option<&Path>,
+    status: HookWorkspaceStatus,
+    session_id: Option<&str>,
+) {
+    record_hook_analytics(
+        root,
+        "workspace_status",
+        serde_json::json!({
+            "agent": HintAgent::Codex.as_key(),
+            "session_id": session_id,
+            "workspace_status": status.as_key(),
+        }),
+    );
+}
+
+fn record_hint_emitted(
+    root: Option<&Path>,
+    agent: HintAgent,
+    session_id: Option<&str>,
+    hint: &ToolHint,
+) {
+    if session_id.is_none() {
+        record_hint_analytics(root, "missing_session", agent, None, hint);
+    }
+    record_hint_analytics(root, "hint_emitted", agent, session_id, hint);
 }
 
 /// `PreToolUse` hook handler for Claude Code's Agent tool matcher.
@@ -461,15 +565,24 @@ async fn cursor_session_context_for_root(root: Option<&Path>) -> String {
 /// Builds the tracedecay steering `additional_context` for Codex session/prompt
 /// hooks. Unlike Cursor, Codex has no always-applied tracedecay rule, so this
 /// context carries the full tool-routing steering plus index freshness.
-async fn codex_session_context_for_root(root: Option<&Path>) -> String {
-    let (initialized, staleness) = match root {
-        Some(r) if crate::tracedecay::TraceDecay::is_initialized(r) => {
+async fn codex_session_context_for_event(event_json: &str) -> (String, HookWorkspaceStatus) {
+    let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
+    let root = codex_project_root_from_parsed_event(&parsed);
+    let cwd = event_cwd_from_parsed(&parsed);
+    let session_id = event_session_id(&parsed);
+    let status = codex_workspace_status(root.as_deref(), cwd.as_deref());
+    record_workspace_status_analytics(root.as_deref(), status, session_id.as_deref());
+    let staleness = match (status, root.as_deref()) {
+        (HookWorkspaceStatus::Initialized, Some(r)) => {
             let (staleness, _) = cursor_index_signals_for_root(r).await;
-            (true, staleness)
+            staleness
         }
-        _ => (false, None),
+        _ => None,
     };
-    build_codex_session_context(initialized, staleness.as_deref())
+    (
+        build_codex_session_context_for_workspace(status, staleness.as_deref()),
+        status,
+    )
 }
 
 /// Cursor `afterShellExecution` hook handler.
@@ -600,6 +713,14 @@ pub fn evaluate_cursor_post_tool_use(event_json: &str) -> Option<String> {
 pub fn cursor_post_tool_use_decision(event_json: &str) -> Option<String> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
     let hint = decide_hint(&cursor_tool_hint_input(&parsed))?;
+    let root = cursor_project_root_candidate_from_parsed_event(&parsed);
+    record_hint_analytics(
+        root.as_deref(),
+        "hint_candidate",
+        HintAgent::Cursor,
+        event_session_id(&parsed).as_deref(),
+        &hint,
+    );
     let hint = deduped_cursor_hint(event_json, hint)?;
     Some(
         serde_json::json!({
@@ -619,17 +740,30 @@ pub fn cursor_post_tool_use_decision(event_json: &str) -> Option<String> {
 /// the hint is emitted as-is — dedupe is impossible but the hint is still
 /// useful (fail-open).
 fn deduped_cursor_hint(event_json: &str, hint: ToolHint) -> Option<ToolHint> {
-    let root = cursor_project_root_from_event(event_json)?;
+    let parsed: Value = serde_json::from_str(event_json).ok()?;
+    let root = cursor_project_root_candidate_from_parsed_event(&parsed)?;
     if !crate::tracedecay::TraceDecay::is_initialized(&root) {
+        record_hint_analytics(
+            Some(&root),
+            "suppressed_uninitialized",
+            HintAgent::Cursor,
+            event_session_id(&parsed).as_deref(),
+            &hint,
+        );
         return None;
     }
-    let parsed: Value = serde_json::from_str(event_json).ok()?;
-    deduped_project_hint(Some(root), event_session_id(&parsed), hint)
+    deduped_project_hint(
+        Some(root),
+        HintAgent::Cursor,
+        event_session_id(&parsed),
+        hint,
+    )
 }
 
 fn deduped_codex_hint(event_json: &str, parsed: &Value, hint: ToolHint) -> Option<ToolHint> {
     deduped_project_hint(
         codex_project_root_from_event(event_json),
+        HintAgent::Codex,
         event_session_id(parsed),
         hint,
     )
@@ -637,33 +771,54 @@ fn deduped_codex_hint(event_json: &str, parsed: &Value, hint: ToolHint) -> Optio
 
 fn deduped_project_hint(
     root: Option<PathBuf>,
+    agent: HintAgent,
     session_id: Option<String>,
     hint: ToolHint,
 ) -> Option<ToolHint> {
     let Some(root) = root else {
+        record_hint_emitted(None, agent, session_id.as_deref(), &hint);
         return Some(hint);
     };
     let Ok(layout) = crate::storage::resolve_layout_for_current_profile(&root) else {
+        record_hint_emitted(Some(&root), agent, session_id.as_deref(), &hint);
         return Some(hint);
     };
     if !layout.data_root.is_dir() {
+        record_hint_emitted(Some(&root), agent, session_id.as_deref(), &hint);
         return Some(hint);
     }
     let Some(session_id) = session_id else {
+        record_hint_emitted(Some(&root), agent, None, &hint);
         return Some(hint);
     };
     let path = layout.data_root.join("tool_hints_seen.json");
     let mut dedupe = tool_hints::ToolHintDedupe::load_or_default(&path);
-    if !dedupe.should_emit(session_id, hint.category) {
+    if !dedupe.should_emit(&session_id, hint.category) {
+        record_hint_analytics(
+            Some(&root),
+            "suppressed_duplicate",
+            agent,
+            Some(&session_id),
+            &hint,
+        );
         return None;
     }
     let _ = dedupe.save(&path);
+    record_hint_analytics(Some(&root), "hint_emitted", agent, Some(&session_id), &hint);
     Some(hint)
 }
 
 pub fn cursor_project_root_from_event(event_json: &str) -> Option<PathBuf> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
     cursor_project_root_from_parsed_event(&parsed)
+}
+
+fn cursor_project_root_candidate_from_parsed_event(parsed: &Value) -> Option<PathBuf> {
+    cursor_project_root_from_parsed_event(parsed).or_else(|| {
+        cursor_event_candidates(parsed)
+            .into_iter()
+            .find_map(|candidate| nearest_project_like_root(&candidate))
+    })
 }
 
 fn cursor_project_root_from_parsed_event(parsed: &Value) -> Option<PathBuf> {
@@ -679,6 +834,21 @@ fn cursor_project_root_from_parsed_event(parsed: &Value) -> Option<PathBuf> {
         (Some(cwd_root), Some(resolved)) if !paths_same(&cwd_root, &resolved) => Some(cwd_root),
         (Some(cwd_root), None) => Some(cwd_root),
         (_, other) => other,
+    }
+}
+
+fn nearest_project_like_root(start: &Path) -> Option<PathBuf> {
+    if let Some(root) = crate::worktree::git_worktree_root(start) {
+        return Some(root);
+    }
+    let mut dir = start.to_path_buf();
+    loop {
+        if project_marker_exists(&dir) {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            return None;
+        }
     }
 }
 
@@ -901,6 +1071,10 @@ fn is_obvious_checkout_pathspec(token: &str) -> bool {
 /// backslash escapes. Shared with `tool_hints` so search-command
 /// classification sees the same tokens as the checkout/sync parsing here.
 pub(crate) fn shell_words(command: &str) -> Vec<String> {
+    shell_words_for_platform(command, cfg!(windows))
+}
+
+fn shell_words_for_platform(command: &str, windows: bool) -> Vec<String> {
     let mut words = Vec::new();
     let mut current = String::new();
     let mut quote: Option<char> = None;
@@ -928,6 +1102,7 @@ pub(crate) fn shell_words(command: &str) -> Vec<String> {
             },
             _ => match c {
                 '\'' | '"' => quote = Some(c),
+                '\\' if windows => current.push(c),
                 '\\' => escaped = true,
                 c if c.is_whitespace() => {
                     if !current.is_empty() {
@@ -1175,28 +1350,71 @@ pub fn build_cursor_session_context(
 /// always-applied tracedecay rule, so the full tool-routing steering lives
 /// here.
 pub fn build_codex_session_context(initialized: bool, staleness_hint: Option<&str>) -> String {
-    let mut s = String::new();
-    s.push_str(
-        "tracedecay is available via MCP. Prefer tracedecay MCP tools \
-         (tracedecay_context, tracedecay_search, tracedecay_callers, tracedecay_callees, \
-         tracedecay_impact, tracedecay_files, tracedecay_affected) over broad file reads \
-         or shell search for codebase exploration, symbol lookup, call graphs, and \
-         impact analysis. Fall back to file reads only when tracedecay cannot answer.\n",
-    );
-    if initialized {
-        match staleness_hint {
-            Some(hint) => {
-                s.push_str("Index status: ");
-                s.push_str(hint);
-                s.push_str(".\n");
-            }
-            None => s.push_str("Index status: initialized.\n"),
-        }
+    let status = if initialized {
+        HookWorkspaceStatus::Initialized
     } else {
-        s.push_str(
-            "Index status: no project index found in this workspace — \
-             run `tracedecay init` to enable tracedecay tools.\n",
-        );
+        HookWorkspaceStatus::UnindexedProject
+    };
+    build_codex_session_context_for_workspace(status, staleness_hint)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookWorkspaceStatus {
+    Initialized,
+    UnindexedProject,
+    Generic,
+}
+
+impl HookWorkspaceStatus {
+    fn as_key(self) -> &'static str {
+        match self {
+            HookWorkspaceStatus::Initialized => "initialized",
+            HookWorkspaceStatus::UnindexedProject => "unindexed_project",
+            HookWorkspaceStatus::Generic => "generic",
+        }
+    }
+}
+
+/// Builds the Codex session/prompt context for the detected workspace kind.
+pub fn build_codex_session_context_for_workspace(
+    status: HookWorkspaceStatus,
+    staleness_hint: Option<&str>,
+) -> String {
+    let mut s = String::new();
+    match status {
+        HookWorkspaceStatus::Initialized | HookWorkspaceStatus::UnindexedProject => {
+            s.push_str(
+                "tracedecay is available via MCP. Prefer tracedecay MCP tools \
+                 (tracedecay_context, tracedecay_search, tracedecay_callers, tracedecay_callees, \
+                 tracedecay_impact, tracedecay_files, tracedecay_affected) over broad file reads \
+                 or shell search for codebase exploration, symbol lookup, call graphs, and \
+                 impact analysis. Fall back to file reads only when tracedecay cannot answer.\n",
+            );
+            match status {
+                HookWorkspaceStatus::Initialized => match staleness_hint {
+                    Some(hint) => {
+                        s.push_str("Index status: ");
+                        s.push_str(hint);
+                        s.push_str(".\n");
+                    }
+                    None => s.push_str("Index status: initialized.\n"),
+                },
+                HookWorkspaceStatus::UnindexedProject => s.push_str(
+                    "Index status: no project index found in this code workspace — \
+                     run `tracedecay init` to enable tracedecay code-graph tools.\n",
+                ),
+                HookWorkspaceStatus::Generic => {}
+            }
+        }
+        HookWorkspaceStatus::Generic => {
+            s.push_str(
+                "TraceDecay session context is available via MCP. For prior conversation \
+                 recovery, use tracedecay_lcm_expand_query, tracedecay_message_search, and \
+                 tracedecay_lcm_describe; use project memory tools only when durable \
+                 preferences or decisions matter.\n",
+            );
+            s.push_str("Workspace status: no active project workspace; no setup guidance needed for this prompt.\n");
+        }
     }
     s
 }
@@ -1312,15 +1530,20 @@ async fn sync_after_cursor_shell_event(event_json: &str) {
         .get("command")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let plan = cursor_shell_sync_plan(command);
-    if matches!(plan, CursorShellSyncPlan::Noop) {
-        return;
-    }
     let Some(root) = cursor_project_root_from_event(event_json) else {
         return;
     };
     // Never bootstrap indexing in an unindexed repo.
     if !crate::tracedecay::TraceDecay::is_initialized(&root) {
+        return;
+    }
+    let cwd = cursor_event_cwd(&parsed).unwrap_or_else(|| root.clone());
+    if !cursor_shell_command_targets_project(command, &cwd, &root) {
+        return;
+    }
+    let current_branch = crate::branch::current_branch(&root);
+    let plan = cursor_shell_sync_plan_with_current_branch(command, current_branch.as_deref());
+    if matches!(plan, CursorShellSyncPlan::Noop) {
         return;
     }
 
@@ -1425,8 +1648,7 @@ fn now_unix_secs() -> i64 {
 /// tracedecay MCP tools and reporting index freshness for the session `cwd`.
 pub async fn hook_codex_session_start() -> i32 {
     let event = read_hook_event!();
-    let root = codex_project_root_from_event(&event);
-    let mut context = codex_session_context_for_root(root.as_deref()).await;
+    let (mut context, _) = codex_session_context_for_event(&event).await;
     if session_start_from_compaction(&event) {
         append_context_recovery_hint(&mut context);
     }
@@ -1443,17 +1665,23 @@ pub async fn hook_codex_session_start() -> i32 {
 /// tracedecay steering context as `SessionStart`. Never blocks the prompt.
 pub async fn hook_codex_user_prompt_submit() -> i32 {
     let event = read_hook_event!();
-    let root = codex_project_root_from_event(&event);
     reset_counter_for_codex_event(&event).await;
-    let mut context = codex_session_context_for_root(root.as_deref()).await;
-    if let Some(hint) = codex_prompt_hint(&event) {
-        append_tool_hint(&mut context, &hint);
-    }
+    let context = codex_user_prompt_submit_context_for_event(&event).await;
     println!(
         "{}",
         codex_additional_context_json("UserPromptSubmit", &context)
     );
     0
+}
+
+pub async fn codex_user_prompt_submit_context_for_event(event: &str) -> String {
+    let (mut context, status) = codex_session_context_for_event(event).await;
+    if !matches!(status, HookWorkspaceStatus::Generic) {
+        if let Some(hint) = codex_prompt_hint(event) {
+            append_tool_hint(&mut context, &hint);
+        }
+    }
+    context
 }
 
 /// Codex `SubagentStart` hook handler.
@@ -1463,7 +1691,13 @@ pub async fn hook_codex_user_prompt_submit() -> i32 {
 /// so this injects `additionalContext` instead of denying.
 pub fn hook_codex_subagent_start() -> i32 {
     let event = read_hook_event!();
-    if let Some(output) = evaluate_codex_subagent_start(&event) {
+    let count = record_codex_subagent_start(&event);
+    let output = evaluate_codex_subagent_start(&event);
+    eprintln!(
+        "{}",
+        codex_subagent_start_log_line(&event, count, output.is_some())
+    );
+    if let Some(output) = output {
         println!("{output}");
     }
     0
@@ -1513,9 +1747,10 @@ pub fn codex_additional_context_json(event_name: &str, additional_context: &str)
 /// Pure decision logic for Codex `SubagentStart` events.
 ///
 /// Returns a Codex `additionalContext` payload steering research/explore
-/// subagents toward tracedecay MCP tools, or `None` for execution-style
-/// subagents. Inspects `agent_type` (Codex's documented field) and any
-/// prompt/task/description text.
+/// or new/no-history subagents toward tracedecay MCP tools and compact memory
+/// recall, or `None` for execution-style subagents that already have history.
+/// Inspects `agent_type` (Codex's documented field), any prompt/task/description
+/// text, and conservative history/newness fields when present.
 pub fn evaluate_codex_subagent_start(event_json: &str) -> Option<String> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
     let agent_type = parsed
@@ -1541,17 +1776,220 @@ pub fn evaluate_codex_subagent_start(event_json: &str) -> Option<String> {
         hints_enabled: true,
     });
     let is_explore = agent_type.eq_ignore_ascii_case("explore");
-    if is_explore || is_code_research_prompt(task) {
-        let context = research_block_reason(hint);
+    let is_research = is_explore || is_code_research_prompt(task);
+    let needs_context = codex_subagent_needs_context(&parsed);
+    if is_research || needs_context {
+        let dedupe_hint = ToolHint {
+            category: if is_research {
+                HintCategory::ExploreSubagent
+            } else {
+                HintCategory::SubagentStartContext
+            },
+            message: "For Codex subagents, add compact TraceDecay context before isolated work."
+                .to_string(),
+            context: CODEX_SUBAGENT_START_CONTEXT.to_string(),
+            nonblocking: true,
+        };
+        let root = codex_project_root_from_event(event_json);
+        record_hint_analytics(
+            root.as_deref(),
+            "hint_candidate",
+            HintAgent::Codex,
+            event_session_id(&parsed).as_deref(),
+            &dedupe_hint,
+        );
+        let _ = deduped_codex_hint(event_json, &parsed, dedupe_hint)?;
+        let context = codex_subagent_start_context(hint, needs_context);
         return Some(codex_additional_context_json("SubagentStart", &context));
     }
     None
 }
 
+/// Records a Codex `SubagentStart` in the current project's profile-sharded
+/// hook state and returns the session-local count. Fail-open: malformed events,
+/// missing roots, and storage errors only disable counting.
+pub fn record_codex_subagent_start(event_json: &str) -> Option<u64> {
+    let parsed: Value = serde_json::from_str(event_json).ok()?;
+    let root = codex_project_root_from_parsed_event(&parsed)?;
+    let layout = crate::storage::resolve_layout_for_current_profile(&root).ok()?;
+    let path = layout.data_root.join("codex_subagent_starts.json");
+    let analytics_session_id = event_session_id(&parsed);
+    let session_id = analytics_session_id
+        .clone()
+        .unwrap_or_else(|| "unknown-codex-session".to_string());
+    let mut counts = read_codex_subagent_start_counts(&path);
+    let count = counts.entry(session_id).or_insert(0);
+    *count = count.saturating_add(1);
+    let next = *count;
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&counts) {
+        let _ = std::fs::write(path, format!("{json}\n"));
+    }
+    let agent_type = parsed
+        .get("agent_type")
+        .or_else(|| parsed.get("subagent_type"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown");
+    record_hook_analytics(
+        Some(&root),
+        "codex_subagent_start",
+        serde_json::json!({
+            "agent": HintAgent::Codex.as_key(),
+            "session_id": analytics_session_id.as_deref(),
+            "agent_type": agent_type,
+            "count": next,
+        }),
+    );
+    Some(next)
+}
+
+pub fn codex_subagent_start_log_line(
+    event_json: &str,
+    count: Option<u64>,
+    emitted_context: bool,
+) -> String {
+    let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
+    let agent_type = parsed
+        .get("agent_type")
+        .or_else(|| parsed.get("subagent_type"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown");
+    let session_id = event_session_id(&parsed).unwrap_or_else(|| "unknown".to_string());
+    let count = count
+        .map(|value| format!("#{value}"))
+        .unwrap_or_else(|| "#?".to_string());
+    format!(
+        "tracedecay Codex SubagentStart {count}: session_id={session_id} agent_type={agent_type} additional_context={emitted_context}"
+    )
+}
+
+fn read_codex_subagent_start_counts(path: &Path) -> BTreeMap<String, u64> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default()
+}
+
+fn codex_subagent_start_context(hint: Option<ToolHint>, no_history: bool) -> String {
+    let mut context = String::new();
+    if no_history {
+        context.push_str("new/no-history subagent: recover only relevant project memory or prior-session context before assuming missing decisions.\n");
+    }
+    context.push_str(CODEX_SUBAGENT_START_CONTEXT);
+    context.push('\n');
+    if let Some(hint) = hint {
+        context.push('\n');
+        context.push_str(&format_tool_hint(&hint));
+        context.push('\n');
+    }
+    context
+}
+
+fn codex_subagent_needs_context(parsed: &Value) -> bool {
+    bool_field(
+        parsed,
+        &["is_new", "new_subagent", "fresh_subagent", "no_history"],
+    ) == Some(true)
+        || bool_field(
+            parsed,
+            &[
+                "has_history",
+                "history_included",
+                "receives_history",
+                "conversation_history_included",
+            ],
+        ) == Some(false)
+        || text_field(
+            parsed,
+            &[
+                "history_mode",
+                "context_mode",
+                "conversation_history",
+                "source",
+                "reason",
+            ],
+        )
+        .is_some_and(|value| matches_no_history_marker(&value))
+        || empty_array_field(parsed, &["history", "messages", "conversation"])
+}
+
+fn bool_field(value: &Value, keys: &[&str]) -> Option<bool> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_bool))
+}
+
+fn empty_array_field(value: &Value, keys: &[&str]) -> bool {
+    keys.iter().any(|key| {
+        value
+            .get(*key)
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+    })
+}
+
+fn matches_no_history_marker(value: &str) -> bool {
+    let normalized = value
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "new" | "fresh" | "none" | "empty" | "nohistory" | "withoutconversationhistory"
+    )
+}
+
 /// Resolves the tracedecay project root for a Codex event from its `cwd`.
 pub fn codex_project_root_from_event(event_json: &str) -> Option<PathBuf> {
-    let cwd = event_cwd(event_json)?;
+    let parsed: Value = serde_json::from_str(event_json).ok()?;
+    codex_project_root_from_parsed_event(&parsed)
+}
+
+fn codex_project_root_from_parsed_event(parsed: &Value) -> Option<PathBuf> {
+    let cwd = event_cwd_from_parsed(parsed)?;
     crate::config::discover_project_root(&cwd)
+}
+
+fn codex_workspace_status(root: Option<&Path>, cwd: Option<&Path>) -> HookWorkspaceStatus {
+    if root.is_some() {
+        return HookWorkspaceStatus::Initialized;
+    }
+    if cwd.is_some_and(is_project_like_workspace) {
+        HookWorkspaceStatus::UnindexedProject
+    } else {
+        HookWorkspaceStatus::Generic
+    }
+}
+
+pub fn codex_workspace_status_from_event(event_json: &str) -> HookWorkspaceStatus {
+    let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
+    let root = codex_project_root_from_parsed_event(&parsed);
+    let cwd = event_cwd_from_parsed(&parsed);
+    codex_workspace_status(root.as_deref(), cwd.as_deref())
+}
+
+fn is_project_like_workspace(cwd: &Path) -> bool {
+    nearest_project_like_root(cwd).is_some()
+}
+
+fn project_marker_exists(dir: &Path) -> bool {
+    const MARKERS: &[&str] = &[
+        ".git",
+        "Cargo.toml",
+        "package.json",
+        "pyproject.toml",
+        "go.mod",
+        "pom.xml",
+        "build.gradle",
+        "build.gradle.kts",
+        "deno.json",
+        "tsconfig.json",
+    ];
+    MARKERS.iter().any(|marker| dir.join(marker).exists())
 }
 
 /// Extracts the project-relative paths touched by a Codex `apply_patch` command.
@@ -1641,7 +2079,11 @@ async fn codex_post_tool_use(event_json: &str) {
             let _ = cg.sync_if_stale_silent(&rels).await;
         }
     } else if is_codex_bash_tool(tool_name) {
-        match cursor_shell_sync_plan(command) {
+        if !cursor_shell_command_targets_project(command, &cwd, &root) {
+            return;
+        }
+        let current_branch = crate::branch::current_branch(&root);
+        match cursor_shell_sync_plan_with_current_branch(command, current_branch.as_deref()) {
             CursorShellSyncPlan::BranchAdd(branch) => {
                 // Idempotent + fail-open: already-tracked branches no-op.
                 let _ = crate::branch::add_branch_tracking(&root, &branch).await;
@@ -2034,6 +2476,9 @@ async fn sync_for_kiro_event(event_json: &str) -> crate::errors::Result<()> {
     let Some(project_root) = kiro_project_root(event_json) else {
         return Ok(());
     };
+    if !crate::tracedecay::TraceDecay::is_initialized(&project_root) {
+        return Ok(());
+    }
     let cg = crate::tracedecay::TraceDecay::open(&project_root).await?;
     match cg.sync().await {
         Ok(_) | Err(crate::errors::TraceDecayError::SyncLock { .. }) => Ok(()),
@@ -2096,6 +2541,14 @@ fn codex_prompt_hint(event_json: &str) -> Option<ToolHint> {
         file_path: None,
         hints_enabled: true,
     })?;
+    let root = codex_project_root_from_event(event_json);
+    record_hint_analytics(
+        root.as_deref(),
+        "hint_candidate",
+        HintAgent::Codex,
+        event_session_id(&parsed).as_deref(),
+        &hint,
+    );
     deduped_codex_hint(event_json, &parsed, hint)
 }
 
@@ -2150,6 +2603,10 @@ fn kiro_project_root(event_json: &str) -> Option<PathBuf> {
 /// Kiro and Codex handlers, both of which send the session working directory.
 fn event_cwd(event_json: &str) -> Option<PathBuf> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
+    event_cwd_from_parsed(&parsed)
+}
+
+fn event_cwd_from_parsed(parsed: &Value) -> Option<PathBuf> {
     let cwd = parsed.get("cwd").and_then(Value::as_str)?;
     let path = Path::new(cwd);
     if path.as_os_str().is_empty() {
@@ -2242,6 +2699,18 @@ mod tests {
     fn env_lock() -> &'static Mutex<()> {
         static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         ENV_LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn shell_words_preserves_unquoted_windows_paths() {
+        assert_eq!(
+            shell_words_for_platform(r"git --work-tree=C:\Users\me\repo pull", true),
+            vec!["git", r"--work-tree=C:\Users\me\repo", "pull"]
+        );
+        assert_eq!(
+            shell_words_for_platform(r"git --work-tree=C:\Users\me\repo pull", false),
+            vec!["git", r"--work-tree=C:Usersmerepo", "pull"]
+        );
     }
 
     #[test]
