@@ -12,18 +12,12 @@ use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 use crate::types::{BuildContextOptions, EdgeKind, NodeKind, Visibility};
 
+use super::super::render::{self, Md};
 use super::super::ToolResult;
-use super::{
-    effective_path, filter_by_scope, require_node_id, truncated_json_envelope_with_handle,
-    unique_file_paths,
-};
+use super::{effective_path, filter_by_scope, require_node_id, unique_file_paths};
 
 fn user_line(line: u32) -> u32 {
     line.saturating_add(1)
-}
-
-fn project_response_text(cg: &TraceDecay, text: &str) -> String {
-    truncated_json_envelope_with_handle(Some(cg.project_root()), text)
 }
 
 /// Handles `tracedecay_search` tool calls.
@@ -73,13 +67,60 @@ pub(super) async fn handle_search(
     } else {
         json!(items)
     };
-    let output = serde_json::to_string_pretty(&output_value).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output_value, || {
+        render_search_md(&output_value)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &output) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
+}
+
+/// Renders `tracedecay_search` results as markdown: one bullet per hit with the
+/// `node_id` and signature preserved in backticks so the model can chain into
+/// `body`/`callers`/`callees`.
+fn render_search_md(value: &Value) -> String {
+    let items = if value.is_array() {
+        value.as_array()
+    } else {
+        value.get("results").and_then(Value::as_array)
+    };
+    let mut md = Md::new();
+    md.heading(2, "Search Results");
+    match items {
+        Some(items) if !items.is_empty() => {
+            for it in items {
+                let name = render::vstr(it, "name");
+                let kind = render::vstr(it, "kind");
+                let file = render::vstr(it, "file");
+                let line = render::vi64(it, "line");
+                let id = render::vstr(it, "id");
+                let score = it.get("score").and_then(Value::as_f64).unwrap_or(0.0);
+                md.bullet(&format!(
+                    "**{name}** ({kind}) — {file}:{line} · score {score:.1}"
+                ));
+                let sig = render::vstr(it, "signature");
+                if sig.is_empty() {
+                    md.line(&format!("  `{id}`"));
+                } else {
+                    md.line(&format!("  `{id}` · `{sig}`"));
+                }
+            }
+        }
+        _ => {
+            md.empty_note("No matching symbols.");
+        }
+    }
+    if let Some(msg) = value
+        .get("index_coverage_hint")
+        .and_then(|h| h.get("message"))
+        .and_then(Value::as_str)
+    {
+        md.blank().heading(3, "Index Coverage Hint").line(msg);
+    }
+    md.render()
 }
 
 /// Handles `tracedecay_context` tool calls.
@@ -262,9 +303,13 @@ pub(super) async fn handle_context(
         );
     }
 
+    // Markdown (default) returns the rendered context document; `format:"json"`
+    // returns the compact serialized TaskContext for programmatic consumers.
+    let value = serde_json::to_value(&context).unwrap_or_else(|_| json!({}));
+    let text = render::finalize(Some(cg.project_root()), &args, &value, || output);
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &output) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
@@ -297,10 +342,13 @@ pub(super) async fn handle_callers(cg: &TraceDecay, args: Value) -> Result<ToolR
         })
         .collect();
 
-    let output = serde_json::to_string_pretty(&items).unwrap_or_default();
+    let value = json!(items);
+    let text = render::finalize(Some(cg.project_root()), &args, &value, || {
+        render::generic_md(&value)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &output) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
@@ -374,10 +422,13 @@ pub(super) async fn handle_callees(cg: &TraceDecay, args: Value) -> Result<ToolR
             .filter_map(|v| v.get("file").and_then(Value::as_str)),
     );
 
-    let output = serde_json::to_string_pretty(&items).unwrap_or_default();
+    let value = json!(items);
+    let text = render::finalize(Some(cg.project_root()), &args, &value, || {
+        render::generic_md(&value)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &output) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
@@ -432,10 +483,12 @@ pub(super) async fn handle_find_exact_symbol(
         "count": items.len(),
         "matches": items,
     });
-    let formatted = serde_json::to_string_pretty(&body).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &body, || {
+        render::generic_md(&body)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
@@ -497,10 +550,12 @@ pub(super) async fn handle_call_chain(cg: &TraceDecay, args: Value) -> Result<To
         )
     };
 
-    let formatted = serde_json::to_string_pretty(&body).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &body, || {
+        render::generic_md(&body)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
@@ -522,10 +577,12 @@ pub(super) async fn handle_file_dependents(cg: &TraceDecay, args: Value) -> Resu
         "count": dependents.len(),
         "dependents": dependents,
     });
-    let formatted = serde_json::to_string_pretty(&body).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &body, || {
+        render::generic_md(&body)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
@@ -564,10 +621,12 @@ pub(super) async fn handle_impact(cg: &TraceDecay, args: Value) -> Result<ToolRe
         "nodes": nodes,
     });
 
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
@@ -635,10 +694,12 @@ pub(super) async fn handle_node(cg: &TraceDecay, args: Value) -> Result<ToolResu
                 "cost_to_expand": cost_to_expand(&n, file_size_bytes),
                 "derives": derives,
             });
-            let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+            let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+                render::generic_md(&output)
+            });
             Ok(ToolResult {
                 value: json!({
-                    "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+                    "content": [{ "type": "text", "text": text }]
                 }),
                 touched_files,
             })
@@ -715,10 +776,13 @@ pub(super) async fn handle_similar(cg: &TraceDecay, args: Value) -> Result<ToolR
         })
         .collect();
 
-    let output = serde_json::to_string_pretty(&items).unwrap_or_default();
+    let value = json!(items);
+    let text = render::finalize(Some(cg.project_root()), &args, &value, || {
+        render::generic_md(&value)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &output) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
@@ -801,10 +865,12 @@ pub(super) async fn handle_rename_preview(cg: &TraceDecay, args: Value) -> Resul
         "references": references,
     });
 
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
@@ -873,10 +939,12 @@ pub(super) async fn handle_callers_for(cg: &TraceDecay, args: Value) -> Result<T
         "truncated": truncated,
         "max_per_item": max_per_item,
     });
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
     })
@@ -910,10 +978,13 @@ pub(super) async fn handle_by_qualified_name(cg: &TraceDecay, args: Value) -> Re
         })
         .collect();
 
-    let output = serde_json::to_string_pretty(&items).unwrap_or_default();
+    let value = json!(items);
+    let text = render::finalize(Some(cg.project_root()), &args, &value, || {
+        render::generic_md(&value)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &output) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
@@ -968,10 +1039,13 @@ pub(super) async fn handle_signature(cg: &TraceDecay, args: Value) -> Result<Too
         }));
     }
 
-    let output = serde_json::to_string_pretty(&items).unwrap_or_default();
+    let value = json!(items);
+    let text = render::finalize(Some(cg.project_root()), &args, &value, || {
+        render::generic_md(&value)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &output) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
@@ -1023,10 +1097,12 @@ pub(super) async fn handle_impls(cg: &TraceDecay, args: Value) -> Result<ToolRes
         "truncated": truncated,
         "impls": items,
     });
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
@@ -1087,10 +1163,13 @@ pub(super) async fn handle_derives(cg: &TraceDecay, args: Value) -> Result<ToolR
         }));
     }
 
-    let output = serde_json::to_string_pretty(&items).unwrap_or_default();
+    let value = json!(items);
+    let text = render::finalize(Some(cg.project_root()), &args, &value, || {
+        render::generic_md(&value)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &output) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
     })
@@ -1248,11 +1327,12 @@ pub(super) async fn handle_implementations(
         "match_count": entries.len(),
         "implementations": entries,
     });
-    let formatted = serde_json::to_string_pretty(&payload).unwrap_or_default();
-
+    let text = render::finalize(Some(cg.project_root()), &args, &payload, || {
+        render::generic_md(&payload)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files: touched,
     })

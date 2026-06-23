@@ -6,6 +6,7 @@
 
 mod definitions;
 mod handlers;
+pub(crate) mod render;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

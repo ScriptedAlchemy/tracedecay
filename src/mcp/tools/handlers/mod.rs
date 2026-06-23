@@ -501,11 +501,11 @@ pub async fn handle_tool_call(
         "tracedecay_callees" => graph::handle_callees(cg, args).await,
         "tracedecay_impact" => graph::handle_impact(cg, args).await,
         "tracedecay_node" => graph::handle_node(cg, args).await,
-        "tracedecay_status" => info::handle_status(cg, server_stats, scope_prefix).await,
+        "tracedecay_status" => info::handle_status(cg, args, server_stats, scope_prefix).await,
         "tracedecay_active_project" => {
             Ok(info::handle_active_project(cg, server_stats, scope_prefix))
         }
-        "tracedecay_storage_status" => info::handle_storage_status(cg, scope_prefix).await,
+        "tracedecay_storage_status" => info::handle_storage_status(cg, args, scope_prefix).await,
         "tracedecay_project_list" => info::handle_project_list(args).await,
         "tracedecay_project_search" => info::handle_project_search(args).await,
         "tracedecay_project_context" => info::handle_project_context(cg, args).await,
@@ -1018,7 +1018,8 @@ mod tests {
             json!({
                 "query": "selected_project_handle_marker",
                 "project_id": target_project_id,
-                "limit": 420
+                "limit": 420,
+                "format": "json"
             }),
             None,
             None,

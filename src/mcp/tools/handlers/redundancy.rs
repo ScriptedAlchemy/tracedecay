@@ -26,12 +26,9 @@ use crate::redundancy::{
 use crate::tracedecay::TraceDecay;
 use crate::types::{Node, NodeKind};
 
+use super::super::render;
 use super::super::ToolResult;
-use super::{effective_path, truncated_json_envelope_with_handle};
-
-fn project_response_text(cg: &TraceDecay, text: &str) -> String {
-    truncated_json_envelope_with_handle(Some(cg.project_root()), text)
-}
+use super::effective_path;
 
 /// `tracedecay_redundancy` handler.
 pub(super) async fn handle_redundancy(
@@ -84,10 +81,12 @@ pub(super) async fn handle_redundancy(
             "include_naming_only": include_naming,
         },
     });
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
     })

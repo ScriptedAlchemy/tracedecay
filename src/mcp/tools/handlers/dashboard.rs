@@ -60,7 +60,7 @@ pub(super) async fn handle_dashboard(cg: &TraceDecay, args: Value) -> Result<Too
             } else {
                 json!({ "status": "not_running" })
             };
-            let formatted = serde_json::to_string_pretty(&payload).unwrap_or_default();
+            let formatted = serde_json::to_string(&payload).unwrap_or_default();
             Ok(ToolResult {
                 value: json!({
                     "content": [{ "type": "text", "text": truncated_json_envelope_with_handle(Some(cg.project_root()), &formatted) }]
@@ -87,7 +87,7 @@ pub(super) async fn handle_dashboard(cg: &TraceDecay, args: Value) -> Result<Too
 
             if let Some(handle) = guard.as_ref() {
                 // already running — idempotent return
-                let formatted = serde_json::to_string_pretty(&json!({
+                let formatted = serde_json::to_string(&json!({
                     "status": "already_running",
                     "url": handle.url
                 }))
@@ -125,7 +125,7 @@ pub(super) async fn handle_dashboard(cg: &TraceDecay, args: Value) -> Result<Too
                 shutdown: shutdown_tx,
             });
 
-            let formatted = serde_json::to_string_pretty(&json!({
+            let formatted = serde_json::to_string(&json!({
                 "status": "started",
                 "url": url,
                 "host": host,

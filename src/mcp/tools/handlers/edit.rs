@@ -34,7 +34,7 @@ pub(super) async fn handle_str_replace(cg: &TraceDecay, args: Value) -> Result<T
     let touched_files = vec![result.file_path.clone()];
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]
+            "content": [{ "type": "text", "text": serde_json::to_string(&result).unwrap_or_default() }]
         }),
         touched_files,
     })
@@ -78,7 +78,7 @@ pub(super) async fn handle_multi_str_replace(cg: &TraceDecay, args: Value) -> Re
     let touched_files = vec![result.file_path.clone()];
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]
+            "content": [{ "type": "text", "text": serde_json::to_string(&result).unwrap_or_default() }]
         }),
         touched_files,
     })
@@ -115,7 +115,7 @@ pub(super) async fn handle_insert_at(cg: &TraceDecay, args: Value) -> Result<Too
     let touched_files = vec![result.file_path.clone()];
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]
+            "content": [{ "type": "text", "text": serde_json::to_string(&result).unwrap_or_default() }]
         }),
         touched_files,
     })
@@ -143,7 +143,7 @@ pub(super) async fn handle_replace_symbol(cg: &TraceDecay, args: Value) -> Resul
     };
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]
+            "content": [{ "type": "text", "text": serde_json::to_string(&result).unwrap_or_default() }]
         }),
         touched_files,
     })
@@ -175,7 +175,7 @@ pub(super) async fn handle_insert_at_symbol(cg: &TraceDecay, args: Value) -> Res
     };
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]
+            "content": [{ "type": "text", "text": serde_json::to_string(&result).unwrap_or_default() }]
         }),
         touched_files,
     })
@@ -211,7 +211,7 @@ pub(super) async fn handle_ast_grep_rewrite(cg: &TraceDecay, args: Value) -> Res
     };
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]
+            "content": [{ "type": "text", "text": serde_json::to_string(&result).unwrap_or_default() }]
         }),
         touched_files,
     })

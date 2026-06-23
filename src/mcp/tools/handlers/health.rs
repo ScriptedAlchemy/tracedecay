@@ -25,12 +25,9 @@ use crate::graph::queries::GraphQueryManager;
 use crate::tracedecay::TraceDecay;
 use crate::types::{EdgeKind, NodeKind};
 
+use super::super::render;
 use super::super::ToolResult;
-use super::{effective_path, truncated_json_envelope_with_handle, unique_file_paths};
-
-fn project_response_text(cg: &TraceDecay, text: &str) -> String {
-    truncated_json_envelope_with_handle(Some(cg.project_root()), text)
-}
+use super::{effective_path, unique_file_paths};
 
 // ---------------------------------------------------------------------------
 // Shared health computation helper
@@ -348,10 +345,12 @@ pub(super) async fn handle_gini(
         "outliers": outliers,
     });
 
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
     })
@@ -395,10 +394,12 @@ pub(super) async fn handle_dependency_depth(
         "chains": chains,
     });
 
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
     })
@@ -471,10 +472,12 @@ pub(super) async fn handle_health(
         })
     };
 
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
     })
@@ -485,12 +488,15 @@ pub(super) async fn handle_health(
 /// Issue #80 — surface process and database telemetry so users hitting
 /// unexpected CPU/RAM pressure can attach a structured snapshot to a
 /// bug report. The MCP wrapper just delegates to `runtime_telemetry`.
-pub(super) async fn handle_runtime(cg: &TraceDecay, _args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_runtime(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let snap = crate::runtime_telemetry::collect(cg).await?;
-    let formatted = crate::runtime_telemetry::to_pretty_json(&snap);
+    let value = serde_json::to_value(&snap).unwrap_or_else(|_| json!({}));
+    let text = render::finalize(Some(cg.project_root()), &args, &value, || {
+        render::generic_md(&value)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
     })
@@ -629,10 +635,12 @@ pub(super) async fn handle_dsm(
         }
     };
 
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
     })
@@ -990,10 +998,12 @@ pub(super) async fn handle_test_risk(
         }
     });
 
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
     })
@@ -1076,10 +1086,12 @@ pub(super) async fn handle_test_map(
         "uncovered": uncovered,
     });
 
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
     let touched_files = unique_file_paths(source_nodes.iter().map(|n| n.file_path.as_str()));
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
-        value: json!({"content": [{"type": "text", "text": project_response_text(cg, &formatted)}]}),
+        value: json!({"content": [{"type": "text", "text": text}]}),
         touched_files,
     })
 }
@@ -1132,10 +1144,12 @@ pub(super) async fn handle_session_start(
         "quality_signal": snap.quality_signal,
         "files_analyzed": snap.files_analyzed,
     });
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
     })
@@ -1156,10 +1170,12 @@ pub(super) async fn handle_session_end(
             "status": "no_baseline",
             "message": "No session baseline found. Call tracedecay_session_start first.",
         });
-        let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+        let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+            render::generic_md(&output)
+        });
         return Ok(ToolResult {
             value: json!({
-                "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+                "content": [{ "type": "text", "text": text }]
             }),
             touched_files: vec![],
         });
@@ -1243,10 +1259,12 @@ pub(super) async fn handle_session_end(
         "degraded_dimensions": degraded_dimensions,
         "dimensions": dimensions,
     });
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
     })

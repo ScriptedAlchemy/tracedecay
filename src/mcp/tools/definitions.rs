@@ -201,6 +201,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_find_exact_symbol(),
     ];
     add_registered_project_selector_properties(&mut definitions);
+    add_format_property(&mut definitions);
     if !ast_grep_available() {
         definitions.retain(|d| d.name != "tracedecay_ast_grep_rewrite");
     }
@@ -252,6 +253,119 @@ fn add_registered_project_selector_properties(definitions: &mut [ToolDefinition]
             continue;
         };
         *properties = with_project_selector_properties(std::mem::take(properties));
+    }
+}
+
+/// Read/list/analysis/context tools whose default output is markdown and which
+/// accept a `format: "markdown" | "json"` argument. Edit, dashboard, retrieve,
+/// and LCM lifecycle/mutation tools are intentionally excluded: their payloads
+/// stay compact JSON because they are consumed programmatically.
+///
+/// This list is the contract for the handler conversion: every tool here MUST
+/// route its output through `render::finalize` so the advertised `format`
+/// argument is actually honored.
+pub(crate) fn format_capable_tool_names() -> &'static [&'static str] {
+    &[
+        // graph
+        "tracedecay_search",
+        "tracedecay_context",
+        "tracedecay_callers",
+        "tracedecay_callees",
+        "tracedecay_impact",
+        "tracedecay_node",
+        "tracedecay_similar",
+        "tracedecay_rename_preview",
+        "tracedecay_implementations",
+        "tracedecay_callers_for",
+        "tracedecay_call_chain",
+        "tracedecay_file_dependents",
+        "tracedecay_find_exact_symbol",
+        "tracedecay_by_qualified_name",
+        "tracedecay_signature",
+        "tracedecay_impls",
+        "tracedecay_derives",
+        // info
+        "tracedecay_status",
+        "tracedecay_storage_status",
+        "tracedecay_project_list",
+        "tracedecay_project_search",
+        "tracedecay_project_context",
+        "tracedecay_body",
+        "tracedecay_todos",
+        "tracedecay_read",
+        "tracedecay_outline",
+        "tracedecay_config",
+        "tracedecay_signature_search",
+        "tracedecay_port_status",
+        "tracedecay_port_order",
+        "tracedecay_simplify_scan",
+        // git
+        "tracedecay_affected",
+        "tracedecay_diff_context",
+        "tracedecay_changelog",
+        "tracedecay_commit_context",
+        "tracedecay_pr_context",
+        "tracedecay_branch_search",
+        "tracedecay_branch_diff",
+        // analysis
+        "tracedecay_dead_code",
+        "tracedecay_module_api",
+        "tracedecay_circular",
+        "tracedecay_hotspots",
+        "tracedecay_unused_imports",
+        "tracedecay_rank",
+        "tracedecay_largest",
+        "tracedecay_coupling",
+        "tracedecay_inheritance_depth",
+        "tracedecay_distribution",
+        "tracedecay_recursion",
+        "tracedecay_complexity",
+        "tracedecay_doc_coverage",
+        "tracedecay_god_class",
+        "tracedecay_unsafe_patterns",
+        "tracedecay_diagnostics",
+        "tracedecay_constructors",
+        "tracedecay_field_sites",
+        // health
+        "tracedecay_test_map",
+        "tracedecay_gini",
+        "tracedecay_dependency_depth",
+        "tracedecay_health",
+        "tracedecay_runtime",
+        "tracedecay_test_risk",
+        "tracedecay_session_start",
+        "tracedecay_session_end",
+        // redundancy
+        "tracedecay_redundancy",
+        // memory
+        "tracedecay_memory_status",
+        // workflow
+        "tracedecay_diagnose",
+        "tracedecay_run_affected_tests",
+    ]
+}
+
+/// Injects the `format` enum property into every markdown-capable tool schema.
+fn add_format_property(definitions: &mut [ToolDefinition]) {
+    for definition in definitions {
+        if !format_capable_tool_names().contains(&definition.name.as_str()) {
+            continue;
+        }
+        let Some(properties) = definition
+            .input_schema
+            .get_mut("properties")
+            .and_then(Value::as_object_mut)
+        else {
+            continue;
+        };
+        properties.insert(
+            "format".to_string(),
+            json!({
+                "type": "string",
+                "enum": ["markdown", "json"],
+                "description": "Output format. Default 'markdown' (compact, LLM-optimized prose/tables). Pass 'json' for compact machine-readable JSON when a program will parse the result."
+            }),
+        );
     }
 }
 
