@@ -3,8 +3,9 @@
 > Terminology note: this document describes the older **monorepo multiproject**
 > design: one indexed repository, several logical subprojects, and a `project`
 > column used as an in-database filter. Profile-storage **code projects** are
-> registered repositories with stable `project_id` values and active project
-> stores; cross-repository tools should use `project_id` or `project_root`.
+> registered repositories with stable project identities and active project
+> stores. Current CLI commands mostly discover the active project from the
+> working directory; use command-specific path selectors where documented.
 
 ## Problem
 

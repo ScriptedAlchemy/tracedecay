@@ -110,12 +110,14 @@ If you ever need to rebuild the entire index from scratch (for example, after a 
 tracedecay sync --force
 ```
 
-### Skipping folders
+### Default Skips
 
-If there are directories you never want indexed (vendored code, generated output, etc.), pass `--skip-folder`:
+TraceDecay respects `.gitignore` by default and skips common generated, vendored, and cache directories such as `node_modules`, `vendor`, `dist`, `build`, `coverage`, `.next`, `.turbo`, `.cache`, virtualenvs, and `__pycache__`.
+
+If there are additional directories you never want indexed for a run, pass `--skip-folder`:
 
 ```bash
-tracedecay sync --skip-folder vendor --skip-folder generated
+tracedecay sync --skip-folder generated-fixtures
 ```
 
 ### Seeing what changed
@@ -202,17 +204,11 @@ tracedecay install --agent kimi        # Moonshot Kimi CLI
 tracedecay install --agent vibe        # Mistral Vibe
 ```
 
-Each agent gets an appropriate configuration: MCP server registration or native plugin tools, tool permissions (where the agent supports them), and prompt rules in the agent's instruction file. Hermes installs a native profile plugin that registers tracedecay tools through Hermes' plugin API. Cursor installs a local Cursor plugin into `~/.cursor/plugins/local/tracedecay`; the plugin bundles MCP, hooks, and the tracedecay rule. Codex installs a Codex plugin source bundle into `~/plugins/tracedecay` and registers it in the personal marketplace at `~/.agents/plugins/marketplace.json`; the plugin owns MCP and skills.
+Each agent gets the configuration its host supports: MCP registration or native plugin tools, permissions where available, and prompt rules where applicable.
 
-Codex setup also writes prompt rules to `~/.codex/AGENTS.md` and installs a
-Claude-style lifecycle hook set in `~/.codex/hooks.json` (SessionStart,
-UserPromptSubmit, SubagentStart, and PostToolUse). Hooks remain config-managed
-because the current Codex plugin manifest schema supports MCP servers and skills,
-but not plugin-declared hooks. After install, run
-`codex plugin add tracedecay@personal` so Codex installs the marketplace plugin.
-Codex requires you to **trust** new or changed command hooks before they run —
-run `/hooks` inside Codex to review and trust the tracedecay hooks. See "Codex
-lifecycle hooks" below for what each one does and the known blind spots.
+- Hermes installs a native profile plugin through Hermes' plugin API.
+- Cursor installs a local plugin in `~/.cursor/plugins/local/tracedecay` that bundles MCP, hooks, and the tracedecay rule.
+- Codex uses Codex's plugin source, marketplace, and installed-cache flow: TraceDecay writes the source bundle and marketplace entry, then `codex plugin add tracedecay@personal` installs Codex's cache from that source. The plugin owns MCP, hooks, and skills. Codex global install does not write `~/.codex/AGENTS.md` or `~/.codex/hooks.json`.
 
 Hermes setup writes a `tracedecay` plugin into the selected Hermes profile and
 enables it in that profile's `config.yaml` under `plugins.enabled`. Without
@@ -293,7 +289,7 @@ tracedecay install --local --agent cursor
 tracedecay install --local --agent copilot
 ```
 
-Local installs write workspace files instead of user-level agent config. Supported local targets are Claude Code, Codex, Gemini, Hermes, Kiro, OpenCode, GitHub Copilot / VS Code, Cursor, Zed, Roo Code, Kimi, Kilo, and Mistral Vibe. Examples include `.mcp.json`, `.claude/settings.json`, `.codex/config.toml`, `.vscode/mcp.json`, `.kiro/settings/mcp.json`, `.hermes/plugins/tracedecay/`, `opencode.json`, `.roo/mcp.json`, `.kimi-code/mcp.json`, `kilo.json`, and `.vibe/config.toml`. Hermes project-local plugins are loaded by launching Hermes with `HERMES_HOME=<project>/.hermes`. Passing `--profile <name>` with `--local --agent hermes` is a deliberate mixed-scope mode: it installs into the named Hermes profile instead of the project plugin directory.
+Local installs write workspace files instead of user-level agent config. Supported local targets are Claude Code, Codex, Gemini, Hermes, Kiro, OpenCode, GitHub Copilot / VS Code, Cursor, Zed, Roo Code, Kimi, Kilo, and Mistral Vibe. Examples include `.mcp.json`, `.claude/settings.json`, `.vscode/mcp.json`, `.kiro/settings/mcp.json`, `.hermes/plugins/tracedecay/`, `plugins/tracedecay`, `.agents/plugins/marketplace.json`, `opencode.json`, `.roo/mcp.json`, `.kimi-code/mcp.json`, `kilo.json`, and `.vibe/config.toml`. Hermes project-local plugins are loaded by launching Hermes with `HERMES_HOME=<project>/.hermes`. Passing `--profile <name>` with `--local --agent hermes` is a deliberate mixed-scope mode: it installs into the named Hermes profile instead of the project plugin directory.
 
 Cursor install is plugin-based:
 
@@ -321,35 +317,32 @@ ln -s /path/to/tracedecay/cursor-plugin ~/.cursor/plugins/local/tracedecay
 
 Reload Cursor after installing or replacing the plugin. The plugin expects the `tracedecay` binary to be available on `PATH`; when dogfooding a checkout, run the installer from that checkout or ensure your shell PATH resolves the intended binary.
 
-Codex global install is plugin-based for MCP/skills: it writes
-`~/plugins/tracedecay/` and updates `~/.agents/plugins/marketplace.json`, then
-prints `codex plugin add tracedecay@personal`. It still writes
-`~/.codex/AGENTS.md` and `~/.codex/hooks.json` because those surfaces are not
-currently represented in accepted Codex plugin manifests. Codex local install
-remains project-config based: it writes `<root>/.codex/config.toml` (MCP),
-`<root>/AGENTS.md` (prompt rules), and `<root>/.codex/hooks.json` (lifecycle
-hooks, using the resolved absolute `tracedecay` path). The local hooks are
-identical to the global Codex install described under "Codex lifecycle hooks"
-below.
+Codex global install is plugin-based for MCP, hooks, and skills. TraceDecay
+writes the plugin source bundle and marketplace entry; Codex CLI installs the
+installed cache from that source. First install writes
+`~/plugins/tracedecay/`, updates `~/.agents/plugins/marketplace.json`, and prints
+`codex plugin add tracedecay@personal`. Run that command in Codex to copy the
+source into `~/.codex/plugins/cache/personal/tracedecay/<version>`. If you are
+working from a branch or release that adds Codex plugin refresh support, refresh
+the source bundle first and then rerun `codex plugin add tracedecay@personal`
+when you need Codex to recopy the bundle.
 
-Pass `--automation` with `--agent codex` to install or update the Codex-native
-`Watch TraceDecay Memory` automation. TraceDecay writes the native global record
-at `~/.codex/automations/watch-tracedecay-memory/automation.toml` and scopes it
-to the current project with that record's `cwds` field; it does not write
-project-local automation files.
+Skill visibility follows Codex's plugin model. `codex plugin list` and
+`codex plugin add` inspect the marketplace source bundle. Active Codex sessions
+load skills, MCP config, and bundled hooks from the installed cache, not directly
+from `~/plugins/tracedecay`; start a new Codex session after adding the plugin or
+recopying it. Codex also skips new or changed command hooks until you trust them,
+so run `/hooks` inside Codex after install or recopy.
 
-#### Codex lifecycle hooks
+Codex local install writes the repository plugin bundle to `plugins/tracedecay`
+and the repository marketplace to `.agents/plugins/marketplace.json`. It does
+not write `~/.codex/AGENTS.md`, `~/.codex/hooks.json`, project
+`.codex/config.toml`, project `.codex/hooks.json`, or `AGENTS.md`.
 
-Codex supports a Claude-style lifecycle hook system (enabled by default; verified against Codex 0.136.0). Both global (`~/.codex/hooks.json`) and project-local (`<root>/.codex/hooks.json`) installs register tracedecay hooks using Codex's nested config shape — `hooks[event] -> [ { matcher?, hooks: [ { type: "command", command, timeout } ] } ]` — and reconcile them idempotently while preserving any foreign hooks. Each hook reads Codex's single stdin JSON event (`session_id`, `cwd`, `hook_event_name`, plus event-specific fields) and writes Codex-shaped stdout. The project root is resolved from the event `cwd`, and every hook is fail-open and only acts when it finds an initialized project store.
-
-- `SessionStart` — emits `hookSpecificOutput.additionalContext` steering the agent toward tracedecay MCP tools and reporting index freshness (suggests `tracedecay init` when uninitialized).
-- `UserPromptSubmit` — resets the per-project local token counter for the new turn and injects the same steering context.
-- `SubagentStart` — redirects research/explore subagents toward tracedecay MCP tools via `additionalContext`. Codex's `SubagentStart` cannot hard-stop a subagent (`continue: false` is ignored for this event), so this steers rather than denies.
-- `PostToolUse` (matcher `Bash|apply_patch`) — for `apply_patch` edits, runs a targeted single-file sync of just the patched files (parsed from the patch envelope); for `Bash` git commands, branch switches bootstrap/maintain branch tracking (`branch add`) and other state-changing git commands run a coalesced incremental sync.
-
-**Trust gate:** Codex records trust against each hook's hash and skips new or changed non-managed command hooks until trusted. After install, run `/hooks` inside Codex to review and trust the tracedecay hooks (the installer prints this reminder). For one-off non-interactive runs you can pass `--dangerously-bypass-hook-trust`, but trusting via `/hooks` is recommended. `tracedecay doctor --agent codex` reports whether the hooks are registered and repeats the trust reminder.
-
-**Blind spots:** `PostToolUse` only fires for `apply_patch` edits and "simple" Bash commands — file edits made through raw shell, the newer `unified_exec` mechanism, and `WebSearch` are not observed. There is no first-class branch-switch event, so branch switches are derived from Bash `git` commands. `PreToolUse` is intentionally not installed: Codex documents it as a partial guardrail (it can't intercept `unified_exec`/`WebSearch`/raw-shell edits), so installing a redundant-exploration blocker there would be unreliable.
+Current Codex limitations: TraceDecay can write and refresh the plugin source,
+marketplace entry, and known managed cache directories, but it cannot force
+Codex to run `plugin add`, reload an active session, or trust plugin command
+hooks for you. The legacy Codex config surfaces are intentionally left alone.
 
 The generated MCP entries use the resolved absolute path to the current `tracedecay` executable. A local install does not update `~/.tracedecay/config.toml`, installed-agent tracking, the last installed version, or the global git post-commit hook prompt. Antigravity and Cline do not currently have documented project-local config paths, so `tracedecay install --local --agent antigravity` and `tracedecay install --local --agent cline` are rejected with unsupported-agent errors.
 
@@ -357,8 +350,6 @@ The generated MCP entries use the resolved absolute path to the current `tracede
 
 Whenever tracedecay rewrites an agent config file — on `install`, on `uninstall`, or when the `doctor` auto-repairs hooks — it first copies the original to a sibling `.bak` file in the same directory. For example:
 
-- `~/.codex/config.toml` → `~/.codex/config.toml.bak`
-- `~/.codex/hooks.json` → `~/.codex/hooks.json.bak`
 - `~/.claude.json` → `~/.claude.json.bak`
 
 If anything goes wrong (a typo, an unexpected rewrite, an unknown bug), restore with `cp <path>.bak <path>`. The `.bak` is always the **exact bytes** of whatever was on disk just before the write; tracedecay never deletes or rotates it, so the most recent backup is the file you want.
@@ -794,6 +785,17 @@ Add `.tracedecay` to your `.gitignore` so enrollment markers are not committed.
 
 Projects indexed before the TraceDecay rename should be migrated into the user-level profile store; runtime storage no longer falls back to `.tracedecay/`.
 
+### Cross-project reads
+
+Most commands still default to the active project discovered from your current directory. For intentional cross-project reads, run commands from the target checkout or use the path selectors supported by each command:
+
+```bash
+tracedecay status /path/to/project --json
+tracedecay memory status --path /path/to/project --json
+```
+
+`tracedecay sessions search` searches previously ingested sessions for the current context and does not accept a project selector in this branch.
+
 ### Per-user: `~/.tracedecay/`
 
 Created in your home directory. Contains:
@@ -856,7 +858,7 @@ If you see a warning about your install being stale after an upgrade, run:
 tracedecay install
 ```
 
-This updates tool permissions, hooks, and prompt rules to match the new version.
+This updates tool permissions, hooks, prompt rules, and plugin bundles where applicable to match the new version.
 
 ### Getting help
 
