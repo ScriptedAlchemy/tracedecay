@@ -23,6 +23,11 @@ async fn setup_db() -> (Database, TempDir, std::path::PathBuf) {
     (db, dir, db_path)
 }
 
+async fn close_db(db: Database) {
+    db.checkpoint().await.unwrap();
+    db.close();
+}
+
 /// Helper: create a sample node.
 fn sample_node(id: &str, name: &str) -> Node {
     Node {
@@ -61,6 +66,7 @@ async fn quick_check_passes_on_healthy_db() {
         db.quick_check().await.unwrap(),
         "fresh database should pass quick_check"
     );
+    close_db(db).await;
 }
 
 #[tokio::test]
@@ -74,6 +80,7 @@ async fn quick_check_passes_after_inserts() {
         db.quick_check().await.unwrap(),
         "database with data should pass quick_check"
     );
+    close_db(db).await;
 }
 
 #[tokio::test]
@@ -86,7 +93,7 @@ async fn quick_check_detects_page_level_corruption() {
         .collect();
     db.insert_nodes(&nodes).await.unwrap();
     db.checkpoint().await.unwrap();
-    drop(db);
+    db.close();
 
     // Corrupt the database by overwriting bytes in the middle of the file.
     // This simulates what happens when a crash leaves partially-written pages.
@@ -110,6 +117,7 @@ async fn quick_check_detects_page_level_corruption() {
         .expect("open should succeed even with corruption");
     let intact = db2.quick_check().await.unwrap();
     assert!(!intact, "quick_check should detect page-level corruption");
+    db2.close();
 }
 
 // ─── FTS rebuild ─────────────────────────────────────────────────────────
@@ -119,6 +127,7 @@ async fn rebuild_fts_on_fresh_db() {
     let (db, _dir, _path) = setup_db().await;
     // rebuild on empty db should not error
     db.rebuild_fts().await.unwrap();
+    close_db(db).await;
 }
 
 #[tokio::test]
@@ -153,6 +162,7 @@ async fn rebuild_fts_restores_search_after_fts_damage() {
     let results = db.search_nodes("process_data", 10).await.unwrap();
     assert!(!results.is_empty(), "search should work after FTS rebuild");
     assert_eq!(results[0].node.id, "a1");
+    close_db(db).await;
 }
 
 // ─── search_nodes self-healing ───────────────────────────────────────────
@@ -175,6 +185,8 @@ async fn search_nodes_falls_back_to_like_when_fts_empty() {
     let results = db.search_nodes("my_function", 10).await.unwrap();
     assert!(!results.is_empty(), "LIKE fallback should find the node");
     assert_eq!(results[0].node.id, "b1");
+    db.rebuild_fts().await.unwrap();
+    close_db(db).await;
 }
 
 // ─── begin_bulk_load no longer disables synchronous ──────────────────────
@@ -186,9 +198,11 @@ async fn bulk_load_preserves_synchronous_normal() {
     db.begin_bulk_load().await.unwrap();
 
     // Check that synchronous is still NORMAL (1) not OFF (0)
-    let mut rows = db.conn().query("PRAGMA synchronous", ()).await.unwrap();
-    let row = rows.next().await.unwrap().unwrap();
-    let sync_value: i64 = row.get(0).unwrap();
+    let sync_value: i64 = {
+        let mut rows = db.conn().query("PRAGMA synchronous", ()).await.unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        row.get(0).unwrap()
+    };
     // NORMAL = 1, OFF = 0, FULL = 2
     assert_eq!(
         sync_value, 1,
@@ -196,6 +210,7 @@ async fn bulk_load_preserves_synchronous_normal() {
     );
 
     db.end_bulk_load().await.unwrap();
+    close_db(db).await;
 }
 
 #[tokio::test]
@@ -213,6 +228,7 @@ async fn bulk_load_round_trip_preserves_data() {
     let results = db.search_nodes("alpha", 10).await.unwrap();
     assert!(!results.is_empty());
     assert_eq!(results[0].node.id, "c1");
+    close_db(db).await;
 }
 
 // ─── is_corruption_error ─────────────────────────────────────────────────
@@ -313,7 +329,7 @@ async fn corrupt_db_detected_and_repaired_on_reopen() {
         .collect();
     db.insert_nodes(&nodes).await.unwrap();
     db.checkpoint().await.unwrap();
-    drop(db);
+    db.close();
 
     // Corrupt the database file
     {
@@ -334,6 +350,7 @@ async fn corrupt_db_detected_and_repaired_on_reopen() {
         Ok((db2, _)) => {
             let intact = db2.quick_check().await.unwrap();
             assert!(!intact, "corrupted db should fail quick_check");
+            db2.close();
         }
         Err(e) => {
             // Some corruption is severe enough to prevent open — that's also
@@ -360,6 +377,7 @@ async fn corrupt_db_detected_and_repaired_on_reopen() {
         db3.quick_check().await.unwrap(),
         "fresh db after recovery should be healthy"
     );
+    close_db(db3).await;
 }
 
 #[tokio::test]
@@ -394,4 +412,5 @@ async fn fts_corruption_healed_by_search_nodes() {
         !results.is_empty(),
         "search should recover via self-healing or LIKE fallback"
     );
+    close_db(db).await;
 }

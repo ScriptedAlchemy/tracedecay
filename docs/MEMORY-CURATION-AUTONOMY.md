@@ -283,10 +283,10 @@ Telemetry should measure usefulness without overstating savings:
 Existing code already covers core dry-run/apply behavior. When curation logic
 changes, run the focused tests that match the touched surface:
 
-- `cargo test curation_delete_lifecycle`
-- `cargo test curation_preview_persists_across_dashboard_restarts`
-- `cargo test curate_apply_merge_with_missing_loser_is_atomic`
-- `cargo test validate_llm_ops_allows_delete_and_merge_with_candidate_evidence`
+- `cargo nextest run curation_delete_lifecycle`
+- `cargo nextest run curation_preview_persists_across_dashboard_restarts`
+- `cargo nextest run curate_apply_merge_with_missing_loser_is_atomic`
+- `cargo nextest run validate_llm_ops_allows_delete_and_merge_with_candidate_evidence`
 
 For docs-only changes, at minimum inspect the scoped diff and run a Markdown or
 spell/style check if the project has one. Do not skip flaky tests to make CI

@@ -253,6 +253,11 @@ fn test_helper() { assert!(!helper().is_empty()); }
     )
 }
 
+async fn close_test_graph(cg: TraceDecay) {
+    cg.checkpoint().await.unwrap();
+    cg.close();
+}
+
 async fn init_test_project(project: &Path) -> (TraceDecay, TestEnv) {
     let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
     let home = project.join("home");
@@ -1432,6 +1437,7 @@ async fn test_search_omits_index_coverage_hint_when_generated_dir_is_included() 
         parsed.as_array().is_some(),
         "search should keep array shape when there is no coverage hint, got: {text}"
     );
+    close_test_graph(cg).await;
 }
 
 #[tokio::test]
@@ -1662,7 +1668,8 @@ async fn fact_store_large_list_response_reports_store_failure_actionably() {
         .unwrap();
     }
 
-    fs::write(response_handle_dir(&cg), "not-a-directory").unwrap();
+    let handle_dir = response_handle_dir(&cg);
+    fs::write(&handle_dir, "not-a-directory").unwrap();
 
     let listed = handle_tool_call(
         &cg,
@@ -1695,6 +1702,9 @@ async fn fact_store_large_list_response_reports_store_failure_actionably() {
         .as_str()
         .unwrap_or_default()
         .contains("re-run the original MCP tool"));
+    fs::remove_file(&handle_dir).unwrap();
+    fs::create_dir_all(&handle_dir).unwrap();
+    close_test_graph(cg).await;
 }
 
 #[tokio::test]
@@ -2491,6 +2501,7 @@ async fn test_doc_coverage() {
         text.contains("total_undocumented"),
         "should have total_undocumented key"
     );
+    close_test_graph(cg).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -2599,6 +2610,7 @@ async fn test_port_status() {
         text.contains("coverage_percent"),
         "should have coverage_percent key"
     );
+    close_test_graph(cg).await;
 }
 
 /// Regression: port_status used to match symbols purely on (name,
@@ -2903,6 +2915,7 @@ async fn test_rank_outgoing() {
         text.contains("outgoing"),
         "should reflect outgoing direction"
     );
+    close_test_graph(cg).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -2995,6 +3008,51 @@ async fn test_port_order_missing_source_dir() {
 // ---------------------------------------------------------------------------
 // Extra: tracedecay_changelog with a real git repo
 // ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn commit_context_clean_worktree_returns_json() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+    fn git(cwd: &std::path::Path, args: &[&str]) {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap_or_else(|_| panic!("git {args:?} failed"));
+    }
+
+    git(project, &["init"]);
+    git(project, &["config", "user.email", "t@t"]);
+    git(project, &["config", "user.name", "t"]);
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join(".gitignore"), ".tracedecay/\nhome/\n").unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn clean() {}\n").unwrap();
+    git(project, &["add", "."]);
+    git(project, &["commit", "-m", "init"]);
+
+    let (cg, _env) = init_test_project(project).await;
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_commit_context",
+        json!({"format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let text = extract_text(&result.value);
+    let output: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(output["summary"].as_str(), Some("No changes detected."));
+    assert_eq!(output["changed_files"].as_array().map(Vec::len), Some(0));
+    assert_eq!(
+        output["symbols_by_role"]
+            .as_object()
+            .map(serde_json::Map::len),
+        Some(0)
+    );
+    assert!(output["recent_commits"].as_array().is_some());
+}
 
 #[tokio::test]
 async fn test_changelog_with_real_git() {
@@ -3358,6 +3416,7 @@ async fn test_status_reports_scope_prefix() {
         text.contains("src/mcp"),
         "status should show the actual prefix value"
     );
+    close_test_graph(cg).await;
 }
 
 #[tokio::test]
@@ -3446,6 +3505,7 @@ async fn path_containment_config_rejects_parent_traversal_before_serving_config(
         result.is_err(),
         "config read should reject parent traversal, got {result:?}"
     );
+    close_test_graph(cg).await;
 }
 
 #[tokio::test]
@@ -3969,6 +4029,7 @@ async fn branch_diff_returns_empty_when_base_equals_head() {
     assert_eq!(output["added"].as_array().map(Vec::len), Some(0));
     assert_eq!(output["removed"].as_array().map(Vec::len), Some(0));
     assert_eq!(output["changed"].as_array().map(Vec::len), Some(0));
+    close_test_graph(cg).await;
 }
 
 /// Regression: when ast-grep exits non-zero with empty stderr (no language
@@ -4055,6 +4116,9 @@ async fn test_multi_str_replace_unsupported_file_type_succeeds() {
     assert!(content.contains("1rem"));
     assert!(!content.contains("14px"));
     assert!(!content.contains("16px"));
+
+    cg.checkpoint().await.unwrap();
+    cg.close();
 }
 
 #[tokio::test]
@@ -4784,6 +4848,7 @@ async fn test_test_risk_distinguishes_direct_and_closure_attribution() {
         "confidence note should explain the conservative closure signal, got: {}",
         text
     );
+    close_test_graph(cg).await;
 }
 
 #[tokio::test]
@@ -5065,6 +5130,7 @@ async fn test_todos_empty_when_clean() {
     let text = extract_text(&result.value);
     let output: Value = serde_json::from_str(text).unwrap();
     assert_eq!(output["match_count"].as_u64().unwrap(), 0);
+    close_test_graph(cg).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -5183,6 +5249,7 @@ async fn test_callers_for_rejects_unknown_kind() {
         panic!("expected error for unknown edge kind");
     };
     assert!(format!("{err}").contains("unknown edge kind"));
+    close_test_graph(cg).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -7109,6 +7176,7 @@ async fn lcm_doctor_counts_nested_externalized_payload_refs_as_referenced() {
         payload["diagnostics"]["payloads"]["missing_placeholder_files"],
         0
     );
+    close_test_graph(cg).await;
 }
 
 #[tokio::test]
@@ -7437,6 +7505,7 @@ async fn lcm_doctor_repair_dry_run_reports_fts_rebuild_without_mutating() {
         .iter()
         .any(|action| action["kind"] == "rebuild_raw_fts"));
     assert_eq!(lcm_fts_match_count(&cg, "needle").await, 0);
+    close_test_graph(cg).await;
 }
 
 #[tokio::test]
@@ -8022,6 +8091,7 @@ async fn lcm_compress_oversized_needs_summary_uses_retrievable_full_payload() {
     assert!(full_payload["summary_request"]
         .get("source_messages_truncated_for_mcp")
         .is_none());
+    close_test_graph(cg).await;
 }
 
 #[tokio::test]
@@ -9116,6 +9186,7 @@ async fn lcm_expand_query_large_response_preserves_synthesis_contract() {
         "MCP expand-query context should stay compact"
     );
     assert!(text.len() <= 15_000);
+    close_test_graph(cg).await;
 }
 
 #[tokio::test]

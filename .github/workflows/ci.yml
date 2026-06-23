@@ -32,13 +32,14 @@ jobs:
             runner: '"ubuntu-latest"'
           - name: macOS
             runner: '"macos-14"'
-          - name: Windows
-            runner: '"windows-latest"'
 
     steps:
       - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
 
       - name: Cache Cargo
         uses: actions/cache@v4
@@ -53,7 +54,87 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Run tests
-        run: cargo test --workspace
+        run: cargo nextest run --workspace --profile ci
+
+  windows-test-shards:
+    name: Test Windows ${{ matrix.partition }}/4
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3, 4]
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-
+            ${{ runner.os }}-cargo-
+
+      - name: Run Windows test shard
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $partition = [int]"${{ matrix.partition }}"
+          $partitions = 4
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $package = $metadata.packages | Where-Object { $_.name -eq "tracedecay" } | Select-Object -First 1
+          $targets = @($package.targets | Where-Object { $_.kind -contains "test" } | Sort-Object name)
+          $selected = New-Object System.Collections.Generic.List[string]
+          for ($i = 0; $i -lt $targets.Count; $i++) {
+            if (($i % $partitions) -eq ($partition - 1)) {
+              $selected.Add($targets[$i].name)
+            }
+          }
+          if ($selected.Count -eq 0) {
+            throw "No integration test targets selected for Windows shard $partition/$partitions"
+          }
+          Write-Host "Windows shard $partition/$partitions running $($selected.Count) integration test targets"
+          $nextestArgs = @("nextest", "run", "-p", "tracedecay", "--profile", "ci")
+          if ($partition -eq 1) {
+            $nextestArgs += @("--lib", "--bin", "tracedecay")
+          }
+          foreach ($target in $selected) {
+            $nextestArgs += @("--test", $target)
+          }
+          cargo @nextestArgs
+
+      - name: Show sccache stats
+        if: always()
+        shell: pwsh
+        run: '& $env:SCCACHE_PATH --show-stats'
+
+  windows-test:
+    name: Test Windows
+    if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref)) }}
+    needs: [windows-test-shards]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Windows shards
+        run: |
+          if [ "${{ needs.windows-test-shards.result }}" != "success" ]; then
+            echo "Windows test shards finished with: ${{ needs.windows-test-shards.result }}" >&2
+            exit 1
+          fi
 
   clippy:
     name: Clippy
@@ -145,6 +226,9 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
@@ -158,7 +242,7 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Run dashboard integration tests
-        run: cargo test --test dashboard_api_test
+        run: cargo nextest run --test dashboard_api_test --no-fail-fast
 
       - name: Cache Playwright browsers
         uses: actions/cache@v5

@@ -14,6 +14,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **JSON output is never pretty-printed anymore.** Tools that intentionally stay JSON (edit primitives, `dashboard`, `fact_store`/`fact_feedback`, retrieval handles, and the LCM/session lifecycle tools) now emit compact `serde_json::to_string` rather than `to_string_pretty`, a ~30–40% byte reduction with no semantic change. `tracedecay_files` (grouped/flat text) and `tracedecay_type_hierarchy` (text tree) already returned dense text and are unchanged.
 - Shared `src/mcp/tools/render.rs` module centralizes format selection, format-aware truncation, and the generic JSON→markdown renderer used by tools without a bespoke layout.
 
+## [0.0.8](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.7...v0.0.8) - 2026-06-23
+
+### Other
+
+- Address aggregate review follow-ups
+- Stabilize hook hint dedupe across layout races
+- Stabilize merged PR stack
+- Honor git work-tree after -C in hooks
+- Record hook hints and steer new subagents
+
 ## [0.0.7](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.6...v0.0.7) - 2026-06-22
 
 ### Fixed
