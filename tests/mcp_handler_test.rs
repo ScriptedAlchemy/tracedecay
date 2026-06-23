@@ -9643,8 +9643,8 @@ async fn lcm_status_cli_profile_scope_dispatches_without_initialized_project() {
     );
     let stderr = String::from_utf8_lossy(&project_output.stderr);
     assert!(
-        stderr.contains("daemon tool call failed") && stderr.contains("TraceDecay index"),
-        "project-local failure should return a daemon JSON-RPC error:\n{stderr}"
+        stderr.contains("no TraceDecay index found") && stderr.contains("tracedecay init"),
+        "project-local failure should report the missing cwd project:\n{stderr}"
     );
     drop(env_lock);
 }

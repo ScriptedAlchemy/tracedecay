@@ -2167,7 +2167,15 @@ pub(super) async fn handle_outline(cg: &TraceDecay, args: Value) -> Result<ToolR
 
     let kinds_slice: Option<&[String]> = kinds.as_deref();
     let mut value = render_map(cg.db(), &display_file, kinds_slice).await?;
-    value["ast_grep_outline"] = ast_grep_outline(&abs_path)?;
+    match ast_grep_outline(&abs_path) {
+        Ok(outline) => {
+            value["ast_grep_outline"] = outline;
+        }
+        Err(err) => {
+            value["ast_grep_outline"] = Value::Null;
+            value["ast_grep_outline_error"] = json!(err.to_string());
+        }
+    }
     let text = render::finalize(Some(cg.project_root()), &args, &value, || {
         render_outline_md(&value)
     });
