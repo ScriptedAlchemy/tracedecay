@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.9](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.8...v0.0.9) - 2026-06-23
+
+### Other
+
+- Fix Hermes JSON dispatch and Windows fixture teardown
+- Merge master into MCP response rendering
+- Return structured clean commit context
+- Deslop MCP response rendering
+- Allow Cursor subagents with TraceDecay installed
+- Compact remaining machine-tool JSON for format consistency
+- Green the suite after MCP markdown-default change
+- Document MCP response format changes
+- Add markdown rendering for MCP tool responses
+
 ### Changed
 
 - **Markdown is now the default MCP tool output format.** Read/list/analysis/context tools (≈70 tools across `search`, `callers`, `callees`, `impact`, `outline`, `body`, `status`, `complexity`, `hotspots`, `health`, `test_map`, `pr_context`, …) now return compact markdown — bullets and GitHub-flavored tables — instead of pretty-printed JSON. Markdown is denser (no per-row key repetition, no brace/indentation overhead), scans better for models, and pushes responses away from the 15K-char truncation cliff. Symbol identifiers (`node_id`, `qualified_name`, `signature`) are preserved inline in backticks so follow-up calls (`body`/`callers`/`callees`) still chain cleanly. `tracedecay_context` was already markdown and is unchanged for the default path.
