@@ -56,7 +56,7 @@ pub async fn ensure_initialized_with_options(
     project_path: &Path,
     open_options: TraceDecayOpenOptions,
 ) -> Result<TraceDecay> {
-    if TraceDecay::is_initialized_with_options(project_path, &open_options) {
+    if TraceDecay::has_initialized_store_with_options(project_path, &open_options).await {
         return match TraceDecay::open_with_options(project_path, open_options.clone()).await {
             Ok(cg) => Ok(cg),
             Err(open_err) => {

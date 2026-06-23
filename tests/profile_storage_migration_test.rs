@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
+use tracedecay::branch::BranchAddOutcome;
 use tracedecay::branch_meta::{self, BranchMeta};
 use tracedecay::config::{TraceDecayConfig, USER_DATA_DIR_ENV};
 use tracedecay::db::Database;
@@ -19,6 +20,7 @@ use tracedecay::migrate::registry::{
     apply_registry_reconstruction_report, reconstruct_registry_from_store_manifest,
     scan_profile_store_manifests,
 };
+use tracedecay::serve;
 use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::storage::{
     read_enrollment_marker, write_enrollment_marker, EnrollmentMarker, StorageMode, StoreKind,
@@ -588,6 +590,30 @@ async fn trace_decay_options_global_db_path_implies_profile_root() {
 }
 
 #[tokio::test]
+async fn trace_decay_add_branch_tracking_returns_not_indexed_for_uninitialized_profile_store() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let root = canonical_temp_path(dir.path());
+    let home = root.join("home");
+    let project = root.join("repo");
+    fs::create_dir_all(&project).unwrap();
+    let _home_guard = HomeEnvGuard::set(&home);
+
+    let outcome = TraceDecay::add_branch_tracking(&project, "feature/unindexed")
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, BranchAddOutcome::NotIndexed);
+    assert!(
+        !home
+            .join(".tracedecay/projects")
+            .join(tracedecay::storage::default_profile_project_id(&project))
+            .exists(),
+        "branch add must not create project profile storage before tracedecay init"
+    );
+}
+
+#[tokio::test]
 async fn trace_decay_open_matches_renamed_git_checkout_by_registered_remote() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
@@ -633,6 +659,58 @@ async fn trace_decay_open_matches_renamed_git_checkout_by_registered_remote() {
             .join("tracedecay.db")
             .exists(),
         "renamed checkout must not create a second path-hash profile shard"
+    );
+}
+
+#[tokio::test]
+async fn ensure_initialized_with_options_uses_registered_remote_store() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let root = canonical_temp_path(dir.path());
+    let daemon_home = root.join("daemon-home");
+    let client_profile = root.join("client-profile");
+    let project = root.join("repo-before-rename");
+    let renamed = root.join("repo-after-rename");
+    fs::create_dir_all(&project).unwrap();
+    run_git(&project, &["init"]);
+    run_git(
+        &project,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:ScriptedAlchemy/tracedecay.git",
+        ],
+    );
+    let _home_guard = HomeEnvGuard::set(&daemon_home);
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(client_profile.clone()),
+        global_db_path: Some(client_profile.join("global.db")),
+    };
+
+    let initialized = TraceDecay::init_with_options(&project, open_options.clone())
+        .await
+        .unwrap();
+    let original_data_root = initialized.store_layout().data_root.clone();
+    drop(initialized);
+    fs::rename(&project, &renamed).unwrap();
+
+    assert!(
+        !TraceDecay::is_initialized_with_options(&renamed, &open_options),
+        "the synchronous marker check cannot see renamed registered stores"
+    );
+    let reopened = serve::ensure_initialized_with_options(&renamed, open_options)
+        .await
+        .unwrap();
+
+    assert_eq!(reopened.store_layout().data_root, original_data_root);
+    assert!(
+        !client_profile
+            .join("projects")
+            .join(tracedecay::storage::default_profile_project_id(&renamed))
+            .join("tracedecay.db")
+            .exists(),
+        "serve must not create or require a second path-hash profile shard"
     );
 }
 

@@ -306,7 +306,7 @@ async fn add_branch_tracking_refuses_empty_sanitized_name() {
     cg.index_all().await.unwrap();
 
     // ".." sanitizes to "" — must be refused, never mapped to branches/.db.
-    let result = tracedecay::branch::add_branch_tracking(project, "..").await;
+    let result = TraceDecay::add_branch_tracking(project, "..").await;
     assert!(
         result.is_err(),
         "a branch name that sanitizes to empty must be refused, got: {result:?}"
