@@ -111,15 +111,32 @@ impl TranscriptSource for ClineLikeSource {
         _max_new_bytes: Option<u64>,
     ) -> Option<ParsedTranscript> {
         let task_dir = path.parent()?;
+        let ui_path = task_dir.join("ui_messages.json");
+        let changed = read_changed_with_companion(path, &ui_path, prev)?;
         let metadata = read_task_metadata(task_dir)?;
         if !metadata_belongs_to_project(&metadata, project_root) {
             return None;
         }
 
-        let ui_path = task_dir.join("ui_messages.json");
-        let changed = read_changed_with_companion(path, &ui_path, prev)?;
-        let document: Value = serde_json::from_str(&changed.contents).ok()?;
-        let entries = document.as_array()?;
+        let document: Value = match serde_json::from_str(&changed.contents) {
+            Ok(document) => document,
+            Err(_) => {
+                return Some(empty_changed_transcript(
+                    self.provider,
+                    path,
+                    project_root,
+                    changed.new_cursor,
+                ));
+            }
+        };
+        let Some(entries) = document.as_array() else {
+            return Some(empty_changed_transcript(
+                self.provider,
+                path,
+                project_root,
+                changed.new_cursor,
+            ));
+        };
         let task_id = task_dir
             .file_name()
             .and_then(|name| name.to_str())
@@ -129,18 +146,19 @@ impl TranscriptSource for ClineLikeSource {
         let mut messages = Vec::new();
         let mut assistant_index = 0_usize;
         for (index, entry) in entries.iter().enumerate() {
-            let usage = if entry.get("role").and_then(Value::as_str) == Some("assistant")
-                || entry.get("role").and_then(Value::as_str) == Some("model")
-            {
-                let usage = usage_by_assistant.get(assistant_index).cloned();
-                assistant_index += 1;
-                usage
+            let is_assistant = entry.get("role").and_then(Value::as_str) == Some("assistant")
+                || entry.get("role").and_then(Value::as_str) == Some("model");
+            let usage = if is_assistant {
+                usage_by_assistant.get(assistant_index).cloned()
             } else {
                 None
             };
             if let Some(message) =
                 message_from_entry(self.provider, entry, task_id, path, index, usage.as_ref())
             {
+                if message.role == "assistant" {
+                    assistant_index += 1;
+                }
                 messages.push(message);
             }
         }
@@ -167,6 +185,38 @@ impl TranscriptSource for ClineLikeSource {
             messages,
             new_cursor: changed.new_cursor,
         })
+    }
+}
+
+fn empty_changed_transcript(
+    provider: &str,
+    path: &Path,
+    project_root: &Path,
+    new_cursor: StoredCursor,
+) -> ParsedTranscript {
+    let project = project_root.to_string_lossy().to_string();
+    ParsedTranscript {
+        draft: SessionDraft {
+            session_id: path
+                .parent()
+                .and_then(|dir| dir.file_name())
+                .and_then(|name| name.to_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            project_key: project.clone(),
+            project_path: project,
+            title: None,
+            metadata_json: serde_json::to_string(&serde_json::json!({
+                "source": format!("{provider}_task_history"),
+            }))
+            .ok(),
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        },
+        messages: Vec::new(),
+        new_cursor,
     }
 }
 

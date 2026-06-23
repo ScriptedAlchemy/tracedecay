@@ -14,6 +14,10 @@
 //! `workspace-sessions`, by base64-decoding the directory name. The source uses
 //! the shared **`ContentHash`** reader because Kiro writes full snapshot files.
 
+#[cfg(unix)]
+use std::ffi::OsString;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -89,16 +93,33 @@ impl TranscriptSource for KiroSource {
         }
 
         let changed = read_changed_file(path, prev)?;
-        let value: Value = serde_json::from_str(&changed.contents).ok()?;
+        let value: Value = match serde_json::from_str(&changed.contents) {
+            Ok(value) => value,
+            Err(_) => {
+                return Some(empty_changed_transcript(
+                    path,
+                    project_root,
+                    changed.new_cursor,
+                ));
+            }
+        };
         if value.get("executions").and_then(Value::as_array).is_some() {
-            return None;
+            return Some(empty_changed_transcript(
+                path,
+                project_root,
+                changed.new_cursor,
+            ));
         }
 
         let session_id = session_id_from_transcript(path, &value);
         let model = model_from_transcript(&value);
         let messages = messages_from_transcript(&value, &session_id, path, model.as_deref());
         if messages.is_empty() {
-            return None;
+            return Some(empty_changed_transcript(
+                path,
+                project_root,
+                changed.new_cursor,
+            ));
         }
 
         let project = project_root.to_string_lossy().to_string();
@@ -135,6 +156,36 @@ pub async fn ingest_kiro_for_project(
         return TranscriptIngestStats::default();
     };
     crate::sessions::source::ingest_source(db, &source, project_root, max_new_bytes).await
+}
+
+fn empty_changed_transcript(
+    path: &Path,
+    project_root: &Path,
+    new_cursor: StoredCursor,
+) -> ParsedTranscript {
+    let project = project_root.to_string_lossy().to_string();
+    ParsedTranscript {
+        draft: SessionDraft {
+            session_id: path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            project_key: project.clone(),
+            project_path: project,
+            title: None,
+            metadata_json: serde_json::to_string(&serde_json::json!({
+                "source": "kiro_transcript",
+            }))
+            .ok(),
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        },
+        messages: Vec::new(),
+        new_cursor,
+    }
 }
 
 fn collect_workspace_session_files(sessions_root: &Path, project_root: &Path) -> Vec<PathBuf> {
@@ -294,7 +345,7 @@ fn folder_field_to_path(folder: &str) -> Option<PathBuf> {
 }
 
 fn percent_decode_path(value: &str) -> PathBuf {
-    let mut out = String::new();
+    let mut out = Vec::new();
     let bytes = value.as_bytes();
     let mut index = 0;
     while index < bytes.len() {
@@ -303,15 +354,25 @@ fn percent_decode_path(value: &str) -> PathBuf {
                 std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap_or(""),
                 16,
             ) {
-                out.push(byte as char);
+                out.push(byte);
                 index += 3;
                 continue;
             }
         }
-        out.push(bytes[index] as char);
+        out.push(bytes[index]);
         index += 1;
     }
-    PathBuf::from(out)
+    pathbuf_from_decoded_bytes(out)
+}
+
+#[cfg(unix)]
+fn pathbuf_from_decoded_bytes(bytes: Vec<u8>) -> PathBuf {
+    PathBuf::from(OsString::from_vec(bytes))
+}
+
+#[cfg(not(unix))]
+fn pathbuf_from_decoded_bytes(bytes: Vec<u8>) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn decode_workspace_sessions_dir(name: &str) -> Option<PathBuf> {
