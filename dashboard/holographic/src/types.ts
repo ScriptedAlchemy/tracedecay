@@ -409,8 +409,13 @@ export interface MemoryCuratorStatusResponse {
     max_entities_per_run?: number | string | null;
   };
   snapshots: Array<{
+    id?: string;
     name: string;
     path: string;
+    ts?: string | null;
+    summary?: string | null;
+    provider?: string;
+    mode?: string;
   }>;
 }
 

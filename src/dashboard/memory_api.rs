@@ -254,7 +254,7 @@ pub(crate) async fn overview(
     let holographic = Value::Object(obj);
 
     Json(json!({
-        "providers": memory_service::providers_stub(),
+        "providers": memory_service::providers_payload(),
         "query": params.q,
         "limit": limit,
         "holographic": holographic,
@@ -349,10 +349,13 @@ pub(crate) async fn curation_status(State(state): State<DashboardState>) -> Json
     Json(memory_service::curation_status_payload(&state).await)
 }
 
-/// `GET /api/plugins/holographic/curation/activity` — no live event stream.
-pub(crate) async fn curation_activity(JsonQuery(params): JsonQuery<LimitParams>) -> Json<Value> {
+/// `GET /api/plugins/holographic/curation/activity` — recent deterministic curator events.
+pub(crate) async fn curation_activity(
+    State(state): State<DashboardState>,
+    JsonQuery(params): JsonQuery<LimitParams>,
+) -> Json<Value> {
     let limit = coerce_limit(params.limit, 100, 300);
-    Json(memory_service::curation_activity_payload(limit))
+    Json(memory_service::curation_activity_payload(&state, limit).await)
 }
 
 /// `GET /api/plugins/holographic/curation/preview` — returns the last saved

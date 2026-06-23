@@ -104,6 +104,8 @@ pub(crate) struct DashboardState {
     pub(crate) dashboard_root: PathBuf,
     /// Last saved dry-run curation preview (shared across all clones of the state).
     pub(crate) curate_preview: Arc<RwLock<Option<CuratePreviewEntry>>>,
+    /// Recent deterministic curation activity emitted by the standalone dashboard.
+    pub(crate) curation_activity: Arc<RwLock<Vec<Value>>>,
     /// In-process BPE token-count cache for the Savings & Cost tab (backed
     /// by the `dashboard_token_counts` sidecar in the global accounting DB).
     pub(crate) token_counts: Arc<token_count::TokenCountCache>,
@@ -232,6 +234,7 @@ pub(crate) async fn build_state(cg: &TraceDecay) -> DashboardState {
         store_root,
         dashboard_root,
         curate_preview: Arc::new(RwLock::new(persisted_preview)),
+        curation_activity: Arc::new(RwLock::new(Vec::new())),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
     };
     if let Err(err) = memory_api::repair_derived_memory(&state).await {
