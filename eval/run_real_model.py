@@ -4,7 +4,7 @@
 Seeds a throwaway fixture project, points a REAL agent (Hermes by default,
 optionally `cursor-agent`) at it through the generated tracedecay plugin /
 MCP server, sends the scenario prompts, then asserts on end-state with plain
-SQL against the fixture's `.tracedecay/tracedecay.db`.
+SQL against the TraceDecay store resolved by the CLI.
 
 Real model turns consume credits/quota, so the run is gated behind BOTH
 `--agent-turn` and `--i-understand-model-cost` (pattern adopted from the
@@ -143,6 +143,52 @@ class HermesProfileSelection:
             self._temp_dir = None
 
 
+@dataclass
+class EvalEnvironment:
+    root: Path
+    home: Path
+    data_dir: Path
+    global_db: Path
+    env: dict[str, str]
+    _temp_dir: tempfile.TemporaryDirectory
+
+    def cleanup(self):
+        self._temp_dir.cleanup()
+
+
+def cleanup_eval_artifacts(args, fixture, eval_env):
+    if fixture is not None and not args.keep_fixture:
+        shutil.rmtree(fixture, ignore_errors=True)
+    if not args.keep_fixture:
+        eval_env.cleanup()
+
+
+def create_eval_environment(scenario_id):
+    safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", scenario_id)
+    temp_dir = tempfile.TemporaryDirectory(prefix=f"tracedecay-eval-env-{safe_id}-")
+    root = Path(temp_dir.name)
+    home = root / "home"
+    data_dir = root / ".tracedecay"
+    global_db = data_dir / "global.db"
+    home.mkdir(parents=True, exist_ok=True)
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
+    env["XDG_CONFIG_HOME"] = str(home / ".config")
+    env["TRACEDECAY_DATA_DIR"] = str(data_dir)
+    env["TRACEDECAY_GLOBAL_DB"] = str(global_db)
+    return EvalEnvironment(
+        root=root,
+        home=home,
+        data_dir=data_dir,
+        global_db=global_db,
+        env=env,
+        _temp_dir=temp_dir,
+    )
+
+
 def resolve_hermes_profile(args):
     profile = args.profile or DEFAULT_PROFILE
     if args.hermes_home is not None:
@@ -213,19 +259,49 @@ def run(cmd, cwd=None, env=None, timeout=None, check=True):
     return result
 
 
-def build_fixture(scenario, tracedecay_bin):
+def resolve_store_db_path(tracedecay_bin, fixture, env):
+    result = run(
+        [tracedecay_bin, "status", "--runtime", "--json"],
+        cwd=fixture,
+        env=env,
+        timeout=120,
+        check=False,
+    )
+    if result.returncode != 0:
+        sys.exit(
+            "failed to resolve TraceDecay store path with status --runtime --json\n"
+            f"{result.stdout}"
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        sys.exit(f"invalid status --runtime --json output while resolving store path: {exc}")
+
+    db_path = payload.get("database", {}).get("db_path") or payload.get("db_path")
+    if not db_path:
+        sys.exit("status --runtime --json did not report database.db_path")
+    return Path(db_path)
+
+
+def build_fixture(scenario, tracedecay_bin, env):
     fixture = Path(tempfile.mkdtemp(prefix=f"tracedecay-eval-{scenario['id']}-"))
     (fixture / "src").mkdir()
     (fixture / "src/lib.rs").write_text("pub fn eval_fixture_marker() {}\n")
     for name, contents in scenario["setup"].get("files", {}).items():
         (fixture / name).write_text(contents)
-    run([tracedecay_bin, "init"], cwd=fixture, timeout=300)
+    run([tracedecay_bin, "init"], cwd=fixture, env=env, timeout=300)
     for fact in scenario["setup"].get("facts", []):
         args = json.dumps(
             {"action": "add", "content": fact["content"], "category": fact["category"]}
         )
-        run([tracedecay_bin, "tool", "fact_store", "--args", args], cwd=fixture, timeout=120)
-    db = sqlite3.connect(fixture / ".tracedecay/tracedecay.db")
+        run(
+            [tracedecay_bin, "tool", "fact_store", "--args", args],
+            cwd=fixture,
+            env=env,
+            timeout=120,
+        )
+    db_path = resolve_store_db_path(tracedecay_bin, fixture, env)
+    db = sqlite3.connect(db_path)
     with db:
         for fact in scenario["setup"].get("facts", []):
             db.execute(
@@ -234,7 +310,7 @@ def build_fixture(scenario, tracedecay_bin):
                 (fact["trust"], fact["retrieval_count"], fact["source"], fact["content"]),
             )
     db.close()
-    return fixture
+    return fixture, db_path
 
 
 def provider_env_passthrough(env):
@@ -252,7 +328,7 @@ def provider_env_passthrough(env):
             env[key] = value.strip().strip('"').strip("'")
 
 
-def ensure_hermes_profile(selection, model, provider, tracedecay_bin, fixture):
+def ensure_hermes_profile(selection, model, provider, tracedecay_bin, fixture, eval_env):
     profile = selection.profile
     profile_dir = selection.profile_dir
     profile_dir.mkdir(parents=True, exist_ok=True)
@@ -265,8 +341,9 @@ def ensure_hermes_profile(selection, model, provider, tracedecay_bin, fixture):
         "  max_turns: 16\n"
     )
     if selection.install_home is not None:
-        install_env = dict(os.environ)
+        install_env = dict(eval_env)
         install_env["HOME"] = str(selection.install_home)
+        install_env["USERPROFILE"] = str(selection.install_home)
         run(
             [
                 tracedecay_bin,
@@ -291,12 +368,12 @@ def ensure_hermes_profile(selection, model, provider, tracedecay_bin, fixture):
     return profile_dir
 
 
-def drive_hermes(args, scenario, fixture, log_dir):
+def drive_hermes(args, scenario, fixture, log_dir, eval_env):
     profile_dir = ensure_hermes_profile(
-        args.hermes_profile, args.model, args.provider, args.tracedecay_bin, fixture
+        args.hermes_profile, args.model, args.provider, args.tracedecay_bin, fixture, eval_env
     )
     max_turns = args.max_turns or scenario["real_model"].get("max_turns", 8)
-    env = dict(os.environ)
+    env = dict(eval_env)
     env["HERMES_HOME"] = str(profile_dir)
     provider_env_passthrough(env)
     transcripts = []
@@ -366,18 +443,19 @@ def read_hermes_usage(profile_dir, started_after):
     }
 
 
-def drive_cursor_agent(args, scenario, fixture, log_dir):
+def drive_cursor_agent(args, scenario, fixture, log_dir, eval_env):
     """Experimental: drives `cursor-agent -p` against the fixture's local MCP setup."""
     run(
         [args.tracedecay_bin, "install", "--agent", "cursor", "--local"],
         cwd=fixture,
+        env=eval_env,
         timeout=120,
     )
     transcripts = []
     for index, prompt in enumerate(scenario["real_model"]["prompts"], start=1):
         cmd = ["cursor-agent", "-p", "--output-format", "text", "--model", args.model, prompt]
         started = datetime.datetime.now(datetime.timezone.utc)
-        result = run(cmd, cwd=fixture, timeout=900, check=False)
+        result = run(cmd, cwd=fixture, env=eval_env, timeout=900, check=False)
         elapsed = (datetime.datetime.now(datetime.timezone.utc) - started).total_seconds()
         log_path = log_dir / f"{scenario['id']}-prompt{index}.log"
         log_path.write_text(result.stdout)
@@ -421,28 +499,119 @@ def extract_token_hints(output):
     return unique[:10]
 
 
-def evaluate_assertions(scenario, fixture):
-    db = sqlite3.connect(fixture / ".tracedecay/tracedecay.db")
+def assertion_applies_to_real_model(assertion):
+    if assertion.get("deterministic_only"):
+        return False
+    phase = assertion.get("phase", "both")
+    return phase in ("both", "well-behaved-only", "real-model", "real-model-only")
+
+
+def failed_assertion(assertion, error, error_type="assertion", **extra):
+    outcome = {
+        "name": assertion.get("name", "(unnamed assertion)"),
+        "kind": assertion.get("kind"),
+        "passed": False,
+        "error": error,
+        "error_type": error_type,
+    }
+    outcome.update(extra)
+    return outcome
+
+
+def compare_assertion_value(actual, expected, op):
+    if op == "eq":
+        return actual == expected
+    if op == "ne":
+        return actual != expected
+    if op == "gt":
+        return actual > expected
+    if op == "gte":
+        return actual >= expected
+    if op == "lt":
+        return actual < expected
+    if op == "lte":
+        return actual <= expected
+    return None
+
+
+def evaluate_assertions(scenario, db_path):
     outcomes = []
+    assertions = [
+        assertion
+        for assertion in scenario["assertions"]
+        if assertion_applies_to_real_model(assertion)
+    ]
+    if not assertions:
+        return outcomes
+
+    try:
+        db = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        return [
+            failed_assertion(
+                assertion,
+                f"failed to open TraceDecay store: {exc}",
+                error_type="sqlite",
+            )
+            for assertion in assertions
+        ]
+
     for assertion in scenario["assertions"]:
-        if assertion["kind"] != "sql":
-            continue  # curate-report assertions are deterministic-layer-only
-        if assertion.get("deterministic_only"):
+        if not assertion_applies_to_real_model(assertion):
             continue
-        actual = db.execute(assertion["sql"]).fetchone()[0]
+        if assertion["kind"] != "sql":
+            outcomes.append(
+                failed_assertion(
+                    assertion,
+                    f"unsupported assertion kind for real-model eval: {assertion['kind']}",
+                )
+            )
+            continue
         expected = assertion["value"]
         op = assertion["op"]
-        passed = {
-            "eq": actual == expected,
-            "ne": actual != expected,
-            "gt": actual > expected,
-            "gte": actual >= expected,
-            "lt": actual < expected,
-            "lte": actual <= expected,
-        }[op]
+        try:
+            row = db.execute(assertion["sql"]).fetchone()
+            actual = row[0] if row is not None else None
+        except sqlite3.Error as exc:
+            outcomes.append(
+                failed_assertion(
+                    assertion,
+                    str(exc),
+                    error_type="sqlite",
+                    actual=None,
+                    op=op,
+                    expected=expected,
+                )
+            )
+            continue
+        try:
+            passed = compare_assertion_value(actual, expected, op)
+        except TypeError as exc:
+            outcomes.append(
+                failed_assertion(
+                    assertion,
+                    f"could not compare assertion values: {exc}",
+                    actual=actual,
+                    op=op,
+                    expected=expected,
+                )
+            )
+            continue
+        if passed is None:
+            outcomes.append(
+                failed_assertion(
+                    assertion,
+                    f"unsupported assertion op: {op}",
+                    actual=actual,
+                    op=op,
+                    expected=expected,
+                )
+            )
+            continue
         outcomes.append(
             {
                 "name": assertion["name"],
+                "kind": assertion["kind"],
                 "passed": passed,
                 "actual": actual,
                 "op": op,
@@ -485,47 +654,50 @@ def main(argv):
         print(f"\nblocked report written to {report_path}", file=sys.stderr)
         return 2
 
-    args.hermes_profile = resolve_hermes_profile(args)
     overall_ok = True
-    try:
-        for scenario in scenarios:
-            fixture = build_fixture(scenario, args.tracedecay_bin)
-            try:
-                if args.driver == "hermes":
-                    transcripts = drive_hermes(args, scenario, fixture, run_dir)
+    for scenario in scenarios:
+        eval_env = create_eval_environment(scenario["id"])
+        args.hermes_profile = resolve_hermes_profile(args)
+        fixture = None
+        try:
+            fixture, db_path = build_fixture(scenario, args.tracedecay_bin, eval_env.env)
+            if args.driver == "hermes":
+                transcripts = drive_hermes(args, scenario, fixture, run_dir, eval_env.env)
+            else:
+                transcripts = drive_cursor_agent(args, scenario, fixture, run_dir, eval_env.env)
+            outcomes = evaluate_assertions(scenario, db_path)
+            failed = [o for o in outcomes if not o["passed"]]
+            status = "pass" if not failed else "fail"
+            if failed and scenario.get("contract") == "pending-sibling":
+                status = "fail (note: scenario contract is pending-sibling — see contract_notes)"
+            if not all(t["turn_valid"] for t in transcripts):
+                status = "error (agent turn invalid — see transcript logs)"
+                failed = failed or [{"name": "agent-turn", "passed": False}]
+            report["scenarios"].append(
+                {
+                    "id": scenario["id"],
+                    "contract": scenario.get("contract", "stable"),
+                    "status": status,
+                    "assertions": outcomes,
+                    "transcripts": transcripts,
+                    "fixture": str(fixture) if args.keep_fixture else "(removed)",
+                    "store": str(eval_env.data_dir) if args.keep_fixture else "(removed)",
+                }
+            )
+            overall_ok &= not failed
+            print(f"[{scenario['id']}] {status}")
+            for outcome in outcomes:
+                marker = "pass" if outcome["passed"] else "FAIL"
+                if outcome.get("error"):
+                    print(f"  [{marker}] {outcome['name']} — {outcome['error']}")
                 else:
-                    transcripts = drive_cursor_agent(args, scenario, fixture, run_dir)
-                outcomes = evaluate_assertions(scenario, fixture)
-                failed = [o for o in outcomes if not o["passed"]]
-                status = "pass" if not failed else "fail"
-                if failed and scenario.get("contract") == "pending-sibling":
-                    status = "fail (note: scenario contract is pending-sibling — see contract_notes)"
-                if not all(t["turn_valid"] for t in transcripts):
-                    status = "error (agent turn invalid — see transcript logs)"
-                    failed = failed or [{"name": "agent-turn", "passed": False}]
-                report["scenarios"].append(
-                    {
-                        "id": scenario["id"],
-                        "contract": scenario.get("contract", "stable"),
-                        "status": status,
-                        "assertions": outcomes,
-                        "transcripts": transcripts,
-                        "fixture": str(fixture) if args.keep_fixture else "(removed)",
-                    }
-                )
-                overall_ok &= not failed
-                print(f"[{scenario['id']}] {status}")
-                for outcome in outcomes:
-                    marker = "pass" if outcome["passed"] else "FAIL"
                     print(
                         f"  [{marker}] {outcome['name']} — actual {outcome['actual']} "
                         f"{outcome['op']} expected {outcome['expected']}"
                     )
-            finally:
-                if not args.keep_fixture:
-                    shutil.rmtree(fixture, ignore_errors=True)
-    finally:
-        args.hermes_profile.cleanup()
+        finally:
+            args.hermes_profile.cleanup()
+            cleanup_eval_artifacts(args, fixture, eval_env)
 
     report["status"] = "pass" if overall_ok else "fail"
     report_path = run_dir / "report.json"

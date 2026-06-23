@@ -27,6 +27,7 @@ import resource
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import tracemalloc
 from pathlib import Path
@@ -61,6 +62,8 @@ def clone_repo(name: str, url: str, skip_clone: bool) -> Path:
     if dest.exists():
         log(f"{name}: reusing existing clone at {dest}")
         return dest
+    if skip_clone:
+        raise FileNotFoundError(f"{name}: --skip-clone requested but {dest} does not exist")
     CLONE_DIR.mkdir(parents=True, exist_ok=True)
     log(f"{name}: cloning {url} (shallow, depth=1) ...")
     subprocess.run(
@@ -167,10 +170,14 @@ def ru_maxrss_bytes() -> int:
     return r if sys.platform == "darwin" else r * 1024
 
 
-def run_timed(cmd: list[str], cwd: str | None = None) -> tuple[float, int, subprocess.CompletedProcess]:
+def run_timed(
+    cmd: list[str],
+    cwd: str | None = None,
+    env: dict[str, str] | None = None,
+) -> tuple[float, int, subprocess.CompletedProcess]:
     before = ru_maxrss_bytes()
     t0 = time.perf_counter()
-    cp = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    cp = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True)
     dt = time.perf_counter() - t0
     after = ru_maxrss_bytes()
     return dt, max(0, after - before), cp
@@ -184,8 +191,9 @@ class TraceDecayMcp:
     Length framing — see src/mcp/transport.rs.
     """
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, env: dict[str, str] | None = None):
         self.root = root
+        self.env = env
         self.proc: subprocess.Popen | None = None
         self._next_id = 1
 
@@ -195,6 +203,7 @@ class TraceDecayMcp:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
+            env=self.env,
             text=True,
             bufsize=1,
         )
@@ -269,85 +278,94 @@ def benchmark_tracedecay(name: str, root: Path, sample_symbols: list[str]) -> di
     if ts_dir.exists():
         shutil.rmtree(ts_dir)
 
-    log(f"[tk] {name}: init (cold) ...")
-    dt, mem, cp = run_timed([TRACEDECAY_BIN, "init"], cwd=str(root))
-    if cp.returncode != 0:
-        log(f"[tk] init failed: {cp.stderr[-400:]}")
-        out["error"] = cp.stderr[-2000:]
-        return out
-    out["cold_index_seconds"] = round(dt, 3)
-    out["cold_index_peak_memory_bytes"] = mem
+    with tempfile.TemporaryDirectory(prefix=f"tracedecay-bench-{name}-") as tmp:
+        data_dir = Path(tmp) / ".tracedecay"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        env = dict(os.environ)
+        env["TRACEDECAY_DATA_DIR"] = str(data_dir)
+        env["TRACEDECAY_GLOBAL_DB"] = str(data_dir / "global.db")
 
-    log(f"[tk] {name}: sync (warm) ...")
-    dt, _, cp = run_timed([TRACEDECAY_BIN, "sync"], cwd=str(root))
-    out["warm_index_seconds"] = round(dt, 3) if cp.returncode == 0 else None
+        log(f"[tk] {name}: init (cold) ...")
+        dt, mem, cp = run_timed([TRACEDECAY_BIN, "init"], cwd=str(root), env=env)
+        if cp.returncode != 0:
+            log(f"[tk] init failed: {cp.stderr[-400:]}")
+            out["error"] = cp.stderr[-2000:]
+            return out
+        out["cold_index_seconds"] = round(dt, 3)
+        out["cold_index_peak_memory_bytes"] = mem
 
-    _, _, cp = run_timed([TRACEDECAY_BIN, "status", "--json"], cwd=str(root))
-    if cp.returncode == 0:
-        try:
-            status = json.loads(cp.stdout)
-            out["node_count"] = status.get("node_count")
-            out["edge_count"] = status.get("edge_count")
-            out["file_count"] = status.get("file_count")
-            out["files_by_language"] = status.get("files_by_language")
-        except json.JSONDecodeError:
-            pass
+        log(f"[tk] {name}: sync (warm) ...")
+        dt, _, cp = run_timed([TRACEDECAY_BIN, "sync"], cwd=str(root), env=env)
+        out["warm_index_seconds"] = round(dt, 3) if cp.returncode == 0 else None
 
-    log(f"[tk] {name}: query benchmarks via MCP ({len(sample_symbols)} symbols) ...")
-    queries = [sym.split(".")[-1] for sym in sample_symbols]
+        status: dict = {}
+        _, _, cp = run_timed([TRACEDECAY_BIN, "status", "--json"], cwd=str(root), env=env)
+        if cp.returncode == 0:
+            try:
+                status = json.loads(cp.stdout)
+                out["node_count"] = status.get("node_count")
+                out["edge_count"] = status.get("edge_count")
+                out["file_count"] = status.get("file_count")
+                out["files_by_language"] = status.get("files_by_language")
+            except json.JSONDecodeError:
+                pass
 
-    def handler_us(resp: dict) -> int | None:
-        meta = resp.get("result", {}).get("_meta", {})
-        v = meta.get("duration_us")
-        return int(v) if isinstance(v, (int, float)) else None
+        log(f"[tk] {name}: query benchmarks via MCP ({len(sample_symbols)} symbols) ...")
+        queries = [sym.split(".")[-1] for sym in sample_symbols]
 
-    def avg_ms(samples: list[int]) -> float | None:
-        return round(sum(samples) / len(samples) / 1000.0, 3) if samples else None
+        def handler_us(resp: dict) -> int | None:
+            meta = resp.get("result", {}).get("_meta", {})
+            v = meta.get("duration_us")
+            return int(v) if isinstance(v, (int, float)) else None
 
-    with TraceDecayMcp(root) as mcp:
-        # Warm-up so first-query DB/cache fill doesn't skew the averages.
-        # `_meta.duration_us` already excludes transport overhead, but the
-        # first call also pays one-time index warmup we want to drop.
-        if queries:
-            mcp.call_tool("tracedecay_search", {"query": queries[0], "limit": 5})
+        def avg_ms(samples: list[int]) -> float | None:
+            return round(sum(samples) / len(samples) / 1000.0, 3) if samples else None
 
-        # Apples-to-apples vs token-savior's find_symbol: bare-name index
-        # probe via `tracedecay_find_exact_symbol`, not BM25-ranked `search`.
-        find_us = [
-            d
-            for q in queries
-            if (
-                d := handler_us(
-                    mcp.call_tool("tracedecay_find_exact_symbol", {"name": q})
+        with TraceDecayMcp(root, env=env) as mcp:
+            # Warm-up so first-query DB/cache fill doesn't skew the averages.
+            # `_meta.duration_us` already excludes transport overhead, but the
+            # first call also pays one-time index warmup we want to drop.
+            if queries:
+                mcp.call_tool("tracedecay_search", {"query": queries[0], "limit": 5})
+
+            # Apples-to-apples vs token-savior's find_symbol: bare-name index
+            # probe via `tracedecay_find_exact_symbol`, not BM25-ranked `search`.
+            find_us = [
+                d
+                for q in queries
+                if (
+                    d := handler_us(
+                        mcp.call_tool("tracedecay_find_exact_symbol", {"name": q})
+                    )
                 )
-            )
-            is not None
-        ]
-        out["find_symbol_avg_ms"] = avg_ms(find_us)
+                is not None
+            ]
+            out["find_symbol_avg_ms"] = avg_ms(find_us)
 
-        body_us = [
-            d
-            for q in queries
-            if (d := handler_us(mcp.call_tool("tracedecay_body", {"symbol": q, "limit": 1})))
-            is not None
-        ]
-        out["get_function_source_avg_ms"] = avg_ms(body_us)
+            body_us = [
+                d
+                for q in queries
+                if (
+                    d := handler_us(mcp.call_tool("tracedecay_body", {"symbol": q, "limit": 1}))
+                )
+                is not None
+            ]
+            out["get_function_source_avg_ms"] = avg_ms(body_us)
 
-        impact_us: list[int] = []
-        for q in queries:
-            sresp = mcp.call_tool("tracedecay_search", {"query": q, "limit": 1})
-            search_us = handler_us(sresp) or 0
-            node_id = TraceDecayMcp.first_node_id(sresp)
-            if node_id is None:
-                continue
-            iresp = mcp.call_tool("tracedecay_impact", {"node_id": node_id, "max_depth": 3})
-            ius = handler_us(iresp)
-            if ius is not None:
-                impact_us.append(search_us + ius)
-        out["get_change_impact_avg_ms"] = avg_ms(impact_us)
+            impact_us: list[int] = []
+            for q in queries:
+                sresp = mcp.call_tool("tracedecay_search", {"query": q, "limit": 1})
+                search_us = handler_us(sresp) or 0
+                node_id = TraceDecayMcp.first_node_id(sresp)
+                if node_id is None:
+                    continue
+                iresp = mcp.call_tool("tracedecay_impact", {"node_id": node_id, "max_depth": 3})
+                ius = handler_us(iresp)
+                if ius is not None:
+                    impact_us.append(search_us + ius)
+            out["get_change_impact_avg_ms"] = avg_ms(impact_us)
 
-    db = ts_dir / "tracedecay.db"
-    out["cache_size_bytes"] = os.path.getsize(db) if db.exists() else 0
+        out["cache_size_bytes"] = status.get("db_size_bytes", 0)
 
     return out
 
@@ -486,8 +504,9 @@ def main() -> None:
     for name in args.repos:
         try:
             root = clone_repo(name, REPOS[name], skip_clone=args.skip_clone)
-        except subprocess.CalledProcessError as exc:
-            log(f"SKIP {name}: clone failed -- {exc.stderr.strip()[:200]}")
+        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            detail = getattr(exc, "stderr", None) or str(exc)
+            log(f"SKIP {name}: clone failed -- {detail.strip()[:200]}")
             continue
 
         naive_sizes[name] = naive_source_size(str(root))
