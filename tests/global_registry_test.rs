@@ -21,6 +21,11 @@ async fn upsert_test_store(db: &GlobalDb, project_id: &str, store_id: &str) {
     .unwrap();
 }
 
+async fn close_global_db(db: GlobalDb) {
+    db.checkpoint().await;
+    db.close();
+}
+
 async fn upsert_registry_fixture(db: &GlobalDb, project_root: &Path) {
     let project = db
         .upsert_code_project(
@@ -82,20 +87,29 @@ async fn table_exists(db_path: &Path, table: &str) -> bool {
         )
         .await
         .unwrap();
-    rows.next().await.unwrap().is_some()
+    let exists = rows.next().await.unwrap().is_some();
+    drop(rows);
+    drop(conn);
+    drop(db);
+    exists
 }
 
 async fn project_column_exists(db_path: &Path, column: &str) -> bool {
     let db = libsql::Builder::new_local(db_path).build().await.unwrap();
     let conn = db.connect().unwrap();
     let mut rows = conn.query("PRAGMA table_info(projects)", ()).await.unwrap();
+    let mut exists = false;
     while let Some(row) = rows.next().await.unwrap() {
         let name: String = row.get(1).unwrap();
         if name == column {
-            return true;
+            exists = true;
+            break;
         }
     }
-    false
+    drop(rows);
+    drop(conn);
+    drop(db);
+    exists
 }
 
 #[tokio::test]
@@ -135,6 +149,7 @@ async fn open_at_migrates_existing_project_rows_to_canonical_keys() {
         db.list_project_paths().await,
         vec![project_root.canonicalize().unwrap().to_string_lossy()]
     );
+    close_global_db(db).await;
 }
 
 #[tokio::test]
@@ -159,6 +174,7 @@ async fn delete_project_paths_use_same_canonical_key_as_upsert() {
     assert_eq!(deleted, 1);
     assert_eq!(db.get_project_tokens(&project_two).await, 0);
     assert_eq!(db.global_tokens_saved().await, Some(0));
+    close_global_db(db).await;
 }
 
 #[tokio::test]
@@ -176,6 +192,7 @@ async fn upsert_preserves_highest_known_tokens_saved() {
 
     db.upsert(&project, 12_100_000).await;
     assert_eq!(db.get_project_tokens(&project).await, 12_100_000);
+    close_global_db(db).await;
 }
 
 #[tokio::test]
@@ -236,6 +253,7 @@ async fn open_at_creates_registry_tables_and_round_trips_registry_records() {
         context.stores[0].artifacts[0].artifact_kind,
         "store_manifest"
     );
+    close_global_db(db).await;
 }
 
 #[tokio::test]
@@ -263,6 +281,7 @@ async fn delete_code_projects_cascades_registry_rows_without_touching_legacy_pro
     assert!(db.list_code_projects(10).await.is_empty());
     assert_eq!(db.get_project_tokens(&project_root).await, 42);
     assert_eq!(db.global_tokens_saved().await, Some(42));
+    close_global_db(db).await;
 }
 
 #[tokio::test]
@@ -303,6 +322,7 @@ async fn registry_resolves_store_by_repo_identity_aliases() {
         .await
         .unwrap();
     assert_eq!(by_remote.store.store_id, "store_repo_identity");
+    close_global_db(db).await;
 }
 
 #[tokio::test]
@@ -344,6 +364,7 @@ async fn registry_remote_resolution_is_conservative_when_ambiguous() {
         )
         .await
         .is_none());
+    close_global_db(db).await;
 }
 
 #[tokio::test]
@@ -368,4 +389,5 @@ async fn legacy_projects_tokens_saved_schema_and_queries_still_work() {
     assert_eq!(db.get_project_tokens(&project_two.join(".")).await, 22);
     assert_eq!(db.global_tokens_saved().await, Some(55));
     assert_eq!(db.list_project_paths().await.len(), 2);
+    close_global_db(db).await;
 }
