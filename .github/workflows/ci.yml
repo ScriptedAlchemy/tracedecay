@@ -18,6 +18,7 @@ env:
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
+  AST_GREP_VERSION: "0.44.0"
 
 jobs:
   commit-messages:
@@ -71,6 +72,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Install ast-grep
+        run: |
+          npm install --global "@ast-grep/cli@${AST_GREP_VERSION}"
+          ast-grep --version
+
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
@@ -104,6 +110,12 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install ast-grep
+        shell: pwsh
+        run: |
+          npm install --global "@ast-grep/cli@$env:AST_GREP_VERSION"
+          ast-grep --version
 
       - name: Install sccache
         uses: mozilla-actions/sccache-action@v0.0.10
@@ -259,6 +271,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Install ast-grep
+        run: |
+          npm install --global "@ast-grep/cli@${AST_GREP_VERSION}"
+          ast-grep --version
+
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
@@ -338,6 +355,11 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install ast-grep
+        run: |
+          npm install --global "@ast-grep/cli@${AST_GREP_VERSION}"
+          ast-grep --version
 
       - name: Cache Cargo
         uses: actions/cache@v4
