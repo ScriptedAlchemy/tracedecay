@@ -635,12 +635,13 @@ pub(super) async fn handle_dsm(
         }
     };
 
-    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-        render::generic_md(&output)
-    });
+    // `dsm` owns its `format` argument (stats/clusters/list/matrix) for data
+    // shaping, so it stays compact JSON rather than routing through the
+    // markdown/json `render::finalize` selector.
+    let formatted = serde_json::to_string(&output).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": text }]
+            "content": [{ "type": "text", "text": super::truncated_json_envelope_with_handle(Some(cg.project_root()), &formatted) }]
         }),
         touched_files: vec![],
     })

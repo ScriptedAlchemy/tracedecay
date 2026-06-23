@@ -30,7 +30,7 @@ fn git_error_result(cg: &TraceDecay, operation: &str, message: String) -> ToolRe
             "message": message,
         }
     });
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let formatted = serde_json::to_string(&output).unwrap_or_default();
     ToolResult {
         value: json!({
             "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]

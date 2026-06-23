@@ -19,7 +19,7 @@ use tokio::sync::{Mutex, MutexGuard};
 use tracedecay::db::Database;
 use tracedecay::errors::TraceDecayError;
 use tracedecay::global_db::GlobalDb;
-use tracedecay::mcp::{get_tool_definitions, handle_tool_call};
+use tracedecay::mcp::{get_tool_definitions, ToolResult};
 use tracedecay::memory::store::MemoryStore;
 use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::sessions::lcm::{
@@ -33,6 +33,37 @@ use tracedecay::storage::{
 use tracedecay::tracedecay::TraceDecay;
 
 static GLOBAL_DB_ENV_LOCK: Mutex<()> = Mutex::const_new(());
+
+/// Test shim for `tracedecay::mcp::handle_tool_call` that defaults tools to
+/// `format: "json"`. These handler tests assert on structured JSON fields;
+/// since markdown became the default output format, this wrapper keeps every
+/// existing call site parsing JSON without per-call edits. An explicit
+/// `format` in `args` is preserved.
+async fn handle_tool_call(
+    cg: &TraceDecay,
+    tool_name: &str,
+    mut args: serde_json::Value,
+    server_stats: Option<serde_json::Value>,
+    scope_prefix: Option<&str>,
+) -> tracedecay::errors::Result<ToolResult> {
+    // `context` is markdown-native; `dsm`/`files` own their `format` argument;
+    // `type_hierarchy` returns a text tree. Leave those untouched so their tests
+    // exercise the real default behavior.
+    let owns_format = matches!(
+        tool_name,
+        "tracedecay_context"
+            | "tracedecay_dsm"
+            | "tracedecay_files"
+            | "tracedecay_type_hierarchy"
+    );
+    if !owns_format {
+        if let Some(obj) = args.as_object_mut() {
+            obj.entry("format".to_string())
+                .or_insert_with(|| serde_json::json!("json"));
+        }
+    }
+    tracedecay::mcp::handle_tool_call(cg, tool_name, args, server_stats, scope_prefix).await
+}
 
 async fn index_all_retrying_sync_lock(cg: &TraceDecay) {
     for attempt in 0..20 {

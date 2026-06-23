@@ -286,7 +286,6 @@ pub(crate) fn format_capable_tool_names() -> &'static [&'static str] {
         "tracedecay_derives",
         // info
         "tracedecay_status",
-        "tracedecay_storage_status",
         "tracedecay_project_list",
         "tracedecay_project_search",
         "tracedecay_project_context",

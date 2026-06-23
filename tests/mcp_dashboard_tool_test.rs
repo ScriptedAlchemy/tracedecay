@@ -96,8 +96,8 @@ async fn tracedecay_dashboard_tool_starts_and_returns_url_and_serves_capabilitie
         .expect("text result");
 
     assert!(
-        content_text.contains("\"status\": \"started\"")
-            || content_text.contains("\"status\": \"already_running\""),
+        content_text.contains("\"status\":\"started\"")
+            || content_text.contains("\"status\":\"already_running\""),
         "expected started or already: {}",
         content_text
     );
