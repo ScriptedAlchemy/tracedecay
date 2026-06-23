@@ -233,6 +233,11 @@ fn test_helper() { assert!(!helper().is_empty()); }
     )
 }
 
+async fn close_test_graph(cg: TraceDecay) {
+    cg.checkpoint().await.unwrap();
+    cg.close();
+}
+
 async fn init_test_project(project: &Path) -> (TraceDecay, TestEnv) {
     let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
     let home = project.join("home");
@@ -5048,6 +5053,7 @@ async fn test_todos_empty_when_clean() {
     let text = extract_text(&result.value);
     let output: Value = serde_json::from_str(text).unwrap();
     assert_eq!(output["match_count"].as_u64().unwrap(), 0);
+    close_test_graph(cg).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -5166,6 +5172,7 @@ async fn test_callers_for_rejects_unknown_kind() {
         panic!("expected error for unknown edge kind");
     };
     assert!(format!("{err}").contains("unknown edge kind"));
+    close_test_graph(cg).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -9099,6 +9106,7 @@ async fn lcm_expand_query_large_response_preserves_synthesis_contract() {
         "MCP expand-query context should stay compact"
     );
     assert!(text.len() <= 15_000);
+    close_test_graph(cg).await;
 }
 
 #[tokio::test]

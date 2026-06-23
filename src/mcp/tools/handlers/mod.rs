@@ -921,7 +921,8 @@ mod tests {
             .identity
             .project_id
             .as_deref()
-            .expect("target project should be registered");
+            .expect("target project should be registered")
+            .to_string();
 
         let result = handle_tool_call(
             &active,
@@ -946,6 +947,11 @@ mod tests {
             !text.contains("active_only_symbol"),
             "selected registered project search should not query the active graph: {text}"
         );
+
+        active.checkpoint().await.unwrap();
+        target.checkpoint().await.unwrap();
+        active.close();
+        target.close();
     }
 
     #[tokio::test]
