@@ -2481,6 +2481,7 @@ async fn test_doc_coverage() {
         text.contains("total_undocumented"),
         "should have total_undocumented key"
     );
+    close_test_graph(cg).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -3963,6 +3964,7 @@ async fn branch_diff_returns_empty_when_base_equals_head() {
     assert_eq!(output["added"].as_array().map(Vec::len), Some(0));
     assert_eq!(output["removed"].as_array().map(Vec::len), Some(0));
     assert_eq!(output["changed"].as_array().map(Vec::len), Some(0));
+    close_test_graph(cg).await;
 }
 
 /// Regression: when ast-grep exits non-zero with empty stderr (no language
