@@ -1346,64 +1346,76 @@ impl GlobalDb {
         git_remote_url: &str,
     ) -> Option<ProjectStoreResolution> {
         let remote = normalize_git_remote_url(git_remote_url)?;
-        let mut rows = self
-            .conn
-            .query(
-                "SELECT project_id, canonical_root, display_root, git_common_dir,
-                        git_remote_url, default_branch, created_at, last_seen_at
-                 FROM code_projects
-                 WHERE git_remote_url IS NOT NULL AND git_remote_url != ''
-                 ORDER BY project_id",
-                (),
-            )
-            .await
-            .ok()?;
-        let mut match_project = None;
-        while let Some(row) = rows.next().await.ok()? {
-            let project = row_to_code_project(&row, 0)?;
-            let Some(stored_remote) = project
-                .git_remote_url
-                .as_deref()
-                .and_then(normalize_git_remote_url)
-            else {
-                continue;
-            };
-            if stored_remote == remote {
-                if match_project.is_some() {
-                    return None;
+        let match_project = {
+            let mut rows = self
+                .conn
+                .query(
+                    "SELECT project_id, canonical_root, display_root, git_common_dir,
+                            git_remote_url, default_branch, created_at, last_seen_at
+                     FROM code_projects
+                     WHERE git_remote_url IS NOT NULL AND git_remote_url != ''
+                     ORDER BY project_id",
+                    (),
+                )
+                .await
+                .ok()?;
+            let mut match_project = None;
+            let mut ambiguous = false;
+            while let Some(row) = rows.next().await.ok()? {
+                let project = row_to_code_project(&row, 0)?;
+                let Some(stored_remote) = project
+                    .git_remote_url
+                    .as_deref()
+                    .and_then(normalize_git_remote_url)
+                else {
+                    continue;
+                };
+                if stored_remote == remote {
+                    if match_project.is_some() {
+                        ambiguous = true;
+                        break;
+                    }
+                    match_project = Some(project);
                 }
-                match_project = Some(project);
             }
-        }
-        self.resolve_project_store_for_project(&match_project?)
-            .await
+            if ambiguous {
+                None
+            } else {
+                match_project
+            }
+        }?;
+        self.resolve_project_store_for_project(&match_project).await
     }
 
     async fn resolve_project_store_by_alias_key(
         &self,
         alias: &str,
     ) -> Option<ProjectStoreResolution> {
-        let mut rows = self
-            .conn
-            .query(
-                "SELECT
-                    cp.project_id, cp.canonical_root, cp.display_root, cp.git_common_dir,
-                    cp.git_remote_url, cp.default_branch, cp.created_at, cp.last_seen_at,
-                    si.store_id, si.project_id, si.store_kind, si.storage_mode, si.store_relpath,
-                    si.manifest_relpath, si.created_at, si.last_verified_at, si.last_write_at
-                 FROM project_aliases pa
-                 JOIN code_projects cp ON cp.project_id = pa.project_id
-                 JOIN store_instances si ON si.project_id = cp.project_id
-                 WHERE pa.alias_path = ?1
-                 ORDER BY COALESCE(si.last_verified_at, si.created_at) DESC, si.store_id
-                 LIMIT 1",
-                params![alias],
+        let (project, store) = {
+            let mut rows = self
+                .conn
+                .query(
+                    "SELECT
+                        cp.project_id, cp.canonical_root, cp.display_root, cp.git_common_dir,
+                        cp.git_remote_url, cp.default_branch, cp.created_at, cp.last_seen_at,
+                        si.store_id, si.project_id, si.store_kind, si.storage_mode, si.store_relpath,
+                        si.manifest_relpath, si.created_at, si.last_verified_at, si.last_write_at
+                     FROM project_aliases pa
+                     JOIN code_projects cp ON cp.project_id = pa.project_id
+                     JOIN store_instances si ON si.project_id = cp.project_id
+                     WHERE pa.alias_path = ?1
+                     ORDER BY COALESCE(si.last_verified_at, si.created_at) DESC, si.store_id
+                     LIMIT 1",
+                    params![alias],
+                )
+                .await
+                .ok()?;
+            let row = rows.next().await.ok()??;
+            (
+                row_to_code_project(&row, 0)?,
+                row_to_store_instance(&row, 8)?,
             )
-            .await
-            .ok()?;
-        let row = rows.next().await.ok()??;
-        let project = row_to_code_project(&row, 0)?;
-        let store = row_to_store_instance(&row, 8)?;
+        };
         let graph_scopes = self.list_graph_scopes_for_store(&store.store_id).await;
         let artifacts = self.list_store_artifacts(&store.store_id).await;
         Some(ProjectStoreResolution {
@@ -1418,20 +1430,22 @@ impl GlobalDb {
         &self,
         project: &CodeProjectRecord,
     ) -> Option<ProjectStoreResolution> {
-        let mut rows = self
-            .conn
-            .query(
-                "SELECT store_id, project_id, store_kind, storage_mode, store_relpath,
-                        manifest_relpath, created_at, last_verified_at, last_write_at
-                 FROM store_instances
-                 WHERE project_id = ?1
-                 ORDER BY COALESCE(last_verified_at, created_at) DESC, store_id
-                 LIMIT 1",
-                params![project.project_id.as_str()],
-            )
-            .await
-            .ok()?;
-        let store = row_to_store_instance(&rows.next().await.ok()??, 0)?;
+        let store = {
+            let mut rows = self
+                .conn
+                .query(
+                    "SELECT store_id, project_id, store_kind, storage_mode, store_relpath,
+                            manifest_relpath, created_at, last_verified_at, last_write_at
+                     FROM store_instances
+                     WHERE project_id = ?1
+                     ORDER BY COALESCE(last_verified_at, created_at) DESC, store_id
+                     LIMIT 1",
+                    params![project.project_id.as_str()],
+                )
+                .await
+                .ok()?;
+            row_to_store_instance(&rows.next().await.ok()??, 0)?
+        };
         let graph_scopes = self.list_graph_scopes_for_store(&store.store_id).await;
         let artifacts = self.list_store_artifacts(&store.store_id).await;
         Some(ProjectStoreResolution {
@@ -1545,15 +1559,17 @@ impl GlobalDb {
         alias_path: &Path,
     ) -> Option<ProjectRegistryContext> {
         let alias = Self::canonical_project_key(alias_path);
-        let mut rows = self
-            .conn
-            .query(
-                "SELECT project_id FROM project_aliases WHERE alias_path = ?1",
-                params![alias],
-            )
-            .await
-            .ok()?;
-        let project_id: String = rows.next().await.ok()??.get(0).ok()?;
+        let project_id: String = {
+            let mut rows = self
+                .conn
+                .query(
+                    "SELECT project_id FROM project_aliases WHERE alias_path = ?1",
+                    params![alias],
+                )
+                .await
+                .ok()?;
+            rows.next().await.ok()??.get(0).ok()?
+        };
         self.project_registry_context_by_id(&project_id).await
     }
 
@@ -1596,30 +1612,37 @@ impl GlobalDb {
     }
 
     async fn list_store_contexts_for_project(&self, project_id: &str) -> Vec<ProjectStoreContext> {
-        let Ok(mut rows) = self
-            .conn
-            .query(
-                "SELECT store_id, project_id, store_kind, storage_mode, store_relpath,
-                        manifest_relpath, created_at, last_verified_at, last_write_at
-                 FROM store_instances WHERE project_id = ?1
-                 ORDER BY COALESCE(last_verified_at, created_at) DESC, store_id",
-                params![project_id],
-            )
-            .await
-        else {
-            return Vec::new();
-        };
-        let mut stores = Vec::new();
-        while let Ok(Some(row)) = rows.next().await {
-            if let Some(store) = row_to_store_instance(&row, 0) {
-                stores.push(ProjectStoreContext {
-                    graph_scopes: self.list_graph_scopes_for_store(&store.store_id).await,
-                    artifacts: self.list_store_artifacts(&store.store_id).await,
-                    store,
-                });
+        let stores = {
+            let Ok(mut rows) = self
+                .conn
+                .query(
+                    "SELECT store_id, project_id, store_kind, storage_mode, store_relpath,
+                            manifest_relpath, created_at, last_verified_at, last_write_at
+                     FROM store_instances WHERE project_id = ?1
+                     ORDER BY COALESCE(last_verified_at, created_at) DESC, store_id",
+                    params![project_id],
+                )
+                .await
+            else {
+                return Vec::new();
+            };
+            let mut stores = Vec::new();
+            while let Ok(Some(row)) = rows.next().await {
+                if let Some(store) = row_to_store_instance(&row, 0) {
+                    stores.push(store);
+                }
             }
+            stores
+        };
+        let mut contexts = Vec::new();
+        for store in stores {
+            contexts.push(ProjectStoreContext {
+                graph_scopes: self.list_graph_scopes_for_store(&store.store_id).await,
+                artifacts: self.list_store_artifacts(&store.store_id).await,
+                store,
+            });
         }
-        stores
+        contexts
     }
 
     async fn get_store_instance(&self, store_id: &str) -> Option<StoreInstanceRecord> {
@@ -3222,6 +3245,11 @@ impl GlobalDb {
             .conn
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
             .await;
+    }
+
+    /// Consumes the `GlobalDb`, closing the underlying connection.
+    pub fn close(self) {
+        drop(self.conn);
     }
 }
 

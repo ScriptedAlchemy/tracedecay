@@ -16,7 +16,7 @@
 
 ## Test plan
 
-- [ ] `cargo test` passes
+- [ ] `cargo nextest run --workspace --no-fail-fast` passes
 - [ ] `cargo clippy` has no new warnings
 - [ ] Tested manually (describe below if applicable)
 

@@ -996,7 +996,8 @@ pub(crate) async fn handle_init(
     }
 
     let version_handle = std::thread::spawn(tracedecay::cloud::fetch_latest_version);
-    init_and_index(&project_path, &skip_folders, &include_folders, false).await?;
+    let cg = init_and_index(&project_path, &skip_folders, &include_folders, false).await?;
+    close_project_graph(cg).await?;
     maybe_print_parallel_update_notice(version_handle);
     Ok(())
 }
@@ -1029,7 +1030,8 @@ pub(crate) async fn handle_sync(
     let version_handle = std::thread::spawn(tracedecay::cloud::fetch_latest_version);
 
     if force {
-        init_and_index(&project_path, &skip_folders, &include_folders, verbose).await?;
+        let cg = init_and_index(&project_path, &skip_folders, &include_folders, verbose).await?;
+        close_project_graph(cg).await?;
     } else {
         let mut cg = TraceDecay::open(&project_path).await?;
         cg.add_skip_folders(&skip_folders);
@@ -1087,9 +1089,16 @@ pub(crate) async fn handle_sync(
             print_sync_doctor(&result);
         }
         global::update_global_db(&cg).await;
+        close_project_graph(cg).await?;
     }
 
     maybe_print_parallel_update_notice(version_handle);
+    Ok(())
+}
+
+async fn close_project_graph(cg: TraceDecay) -> tracedecay::errors::Result<()> {
+    cg.checkpoint().await?;
+    cg.close();
     Ok(())
 }
 

@@ -1039,9 +1039,9 @@ cargo build --release                          # full (50+ languages, default)
 cargo build --release --features medium        # medium tier
 cargo build --release --no-default-features    # lite (smallest binary)
 
-cargo test                                     # run all tests (requires full)
+cargo nextest run --workspace --no-fail-fast  # run all tests (requires full)
 cargo check --no-default-features              # verify lite compiles
-cargo clippy --all
+cargo clippy --workspace --all-targets
 ```
 
 ## Star History
