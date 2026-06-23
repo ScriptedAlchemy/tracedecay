@@ -1,6 +1,7 @@
 use tempfile::TempDir;
+use tracedecay::global_db::{GlobalDb, ParseOffset};
 use tracedecay::sessions::cline_like::ClineLikeSource;
-use tracedecay::sessions::cursor::open_project_session_db;
+use tracedecay::sessions::cursor::{open_project_session_db, project_session_db_path};
 use tracedecay::sessions::source::ingest_source;
 
 fn setup(tmp: &TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -17,6 +18,68 @@ fn vscode_storage_root(home: &std::path::Path, extension_id: &str) -> std::path:
         .join("User/globalStorage")
         .join(extension_id)
         .join("tasks")
+}
+
+async fn parse_offset_for_path(db: &GlobalDb, path: &std::path::Path) -> Option<ParseOffset> {
+    let path = path.to_string_lossy();
+    if let Some(offset) = db.get_parse_offset(path.as_ref()).await {
+        return Some(offset);
+    }
+
+    #[cfg(windows)]
+    {
+        let alternate = if path.contains('/') {
+            path.replace('/', "\\")
+        } else {
+            path.replace('\\', "/")
+        };
+        if alternate != path {
+            return db.get_parse_offset(&alternate).await;
+        }
+    }
+
+    None
+}
+
+async fn parse_offset_for_task_history(
+    db: &GlobalDb,
+    project: &std::path::Path,
+    path: &std::path::Path,
+) -> Option<ParseOffset> {
+    if let Some(offset) = parse_offset_for_path(db, path).await {
+        return Some(offset);
+    }
+
+    let task_dir = path.parent()?.file_name()?.to_string_lossy();
+    let file_name = path.file_name()?.to_string_lossy();
+    let expected_suffix = format!("{task_dir}/{file_name}");
+    let raw_db = libsql::Builder::new_local(project_session_db_path(project))
+        .build()
+        .await
+        .ok()?;
+    let conn = raw_db.connect().ok()?;
+    let mut rows = conn
+        .query(
+            "SELECT file_path, byte_offset, mtime, file_id FROM parse_offsets",
+            (),
+        )
+        .await
+        .ok()?;
+    while let Some(row) = rows.next().await.ok()? {
+        let file_path: String = row.get(0).ok()?;
+        let normalized = file_path.replace('\\', "/");
+        if normalized.ends_with(&expected_suffix) {
+            let offset: i64 = row.get(1).ok()?;
+            let mtime: i64 = row.get(2).ok()?;
+            let file_id: i64 = row.get(3).ok()?;
+            return Some(ParseOffset {
+                byte_offset: offset as u64,
+                mtime: mtime as u64,
+                file_id: file_id as u64,
+            });
+        }
+    }
+    None
 }
 
 fn write_task(
@@ -265,6 +328,135 @@ async fn cline_ui_messages_only_change_triggers_usage_refresh() {
     let metadata: serde_json::Value =
         serde_json::from_str(assistant.message.metadata_json.as_deref().unwrap()).unwrap();
     assert_eq!(metadata["usage"]["input_tokens"], 2200);
+}
+
+#[tokio::test]
+async fn cline_usage_index_skips_unemitted_assistant_entries() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let root = vscode_storage_root(&home, "saoudrizwan.claude-dev");
+    let dir = root.join("cline-skipped-assistant");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("task_metadata.json"),
+        serde_json::json!({
+            "task": "Usage indexing",
+            "workspacePath": project
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("api_conversation_history.json"),
+        serde_json::json!([
+            {"role": "assistant", "content": ""},
+            {"role": "assistant", "content": "Emitted assistant usage target"}
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("ui_messages.json"),
+        serde_json::json!([
+            {
+                "type": "say",
+                "say": "api_req_started",
+                "text": serde_json::json!({"tokensIn": 777}).to_string()
+            }
+        ])
+        .to_string(),
+    )
+    .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = ClineLikeSource::cline_with_home(&home);
+    assert_eq!(
+        ingest_source(&db, &source, &project, None)
+            .await
+            .messages_upserted,
+        1
+    );
+    let hits = db
+        .search_session_messages("cline", None, "usage target", 10)
+        .await;
+    assert_eq!(hits.len(), 1);
+    let metadata: serde_json::Value =
+        serde_json::from_str(hits[0].message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["usage"]["input_tokens"], 777);
+}
+
+#[tokio::test]
+async fn cline_parse_failures_advance_content_hash_cursor() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let root = vscode_storage_root(&home, "saoudrizwan.claude-dev");
+    let dir = root.join("cline-invalid-json");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("task_metadata.json"),
+        serde_json::json!({"workspacePath": project}).to_string(),
+    )
+    .unwrap();
+    let api = dir.join("api_conversation_history.json");
+    std::fs::write(&api, "{not json").unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = ClineLikeSource::cline_with_home(&home);
+    let stats = ingest_source(&db, &source, &project, None).await;
+    assert_eq!(stats.messages_upserted, 0);
+
+    let offset = parse_offset_for_task_history(&db, &project, &api)
+        .await
+        .expect("invalid changed task history should still advance its cursor");
+    assert_ne!(offset.byte_offset, 0);
+}
+
+#[tokio::test]
+async fn cline_missing_metadata_waits_for_later_metadata_before_advancing_cursor() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let root = vscode_storage_root(&home, "saoudrizwan.claude-dev");
+    let dir = root.join("cline-missing-metadata");
+    std::fs::create_dir_all(&dir).unwrap();
+    let api = dir.join("api_conversation_history.json");
+    std::fs::write(
+        &api,
+        serde_json::json!([
+            {"role": "user", "content": "Metadata missing prompt"}
+        ])
+        .to_string(),
+    )
+    .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = ClineLikeSource::cline_with_home(&home);
+    let stats = ingest_source(&db, &source, &project, None).await;
+    assert_eq!(stats.messages_upserted, 0);
+
+    assert!(
+        parse_offset_for_task_history(&db, &project, &api)
+            .await
+            .is_none(),
+        "metadata-less task should not advance its cursor"
+    );
+
+    std::fs::write(
+        dir.join("task_metadata.json"),
+        serde_json::json!({
+            "task": "Metadata arrived later",
+            "workspacePath": project
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let stats = ingest_source(&db, &source, &project, None).await;
+    assert_eq!(stats.messages_upserted, 1);
+
+    let offset = parse_offset_for_task_history(&db, &project, &api)
+        .await
+        .expect("task should advance once metadata is available");
+    assert_ne!(offset.byte_offset, 0);
 }
 
 #[tokio::test]

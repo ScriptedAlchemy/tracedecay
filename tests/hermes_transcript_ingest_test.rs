@@ -260,6 +260,34 @@ async fn hermes_state_db_populates_projection_for_pinned_project() {
 }
 
 #[tokio::test]
+async fn hermes_parent_session_id_marks_subagent_session() {
+    let tmp = TempDir::new().unwrap();
+    let (hermes_home, project) = setup(&tmp);
+    let state_db = write_hermes_profile(&hermes_home, "test", Some(&project)).await;
+    let conn = open_state_db(&state_db).await;
+    conn.execute(
+        "UPDATE sessions SET parent_session_id = 'parent-hermes-session' WHERE id = ?1",
+        libsql::params![SESSION_ID],
+    )
+    .await
+    .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &project).await;
+    assert_eq!(stats.messages_upserted, 4);
+
+    let session = db
+        .get_session("hermes", SESSION_ID)
+        .await
+        .expect("hermes child session should be stored");
+    assert_eq!(
+        session.parent_session_id.as_deref(),
+        Some("parent-hermes-session")
+    );
+    assert!(session.is_subagent);
+}
+
+#[tokio::test]
 async fn hermes_projection_sweep_does_not_mutate_runtime_owned_raw_messages() {
     let tmp = TempDir::new().unwrap();
     let (hermes_home, project) = setup(&tmp);

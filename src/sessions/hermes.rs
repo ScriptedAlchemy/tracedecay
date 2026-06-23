@@ -380,6 +380,12 @@ fn session_from_row(
         metadata.insert("usage".to_string(), usage);
     }
     let project = project_root.to_string_lossy().to_string();
+    let parent_session_id = row
+        .parent_session_id
+        .as_deref()
+        .filter(|parent| !parent.is_empty())
+        .map(str::to_string);
+    let is_subagent = parent_session_id.is_some();
     SessionRecord {
         provider: PROVIDER.to_string(),
         session_id: row.session_id.clone(),
@@ -394,12 +400,8 @@ fn session_from_row(
         ended_at: row.session_ended_at.map(|secs| secs as i64),
         transcript_path: Some(state_db_path.to_string()),
         metadata_json: Some(Value::Object(metadata).to_string()),
-        parent_session_id: row
-            .parent_session_id
-            .as_deref()
-            .filter(|parent| !parent.is_empty())
-            .map(str::to_string),
-        is_subagent: false,
+        parent_session_id,
+        is_subagent,
         agent_id: None,
         parent_tool_use_id: None,
     }
