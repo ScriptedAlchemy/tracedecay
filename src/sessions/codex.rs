@@ -30,6 +30,7 @@
 //! read with the shared byte-offset machinery and scoped to the current project
 //! by `session_meta.cwd`.
 
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -192,7 +193,6 @@ impl TranscriptSource for CodexSource {
 
 /// Read the leading `session_meta` line of a rollout for cwd/session-id/model.
 fn session_meta(path: &Path) -> Option<CodexMeta> {
-    use std::io::BufRead;
     let file = std::fs::File::open(path).ok()?;
     let reader = std::io::BufReader::new(file);
     for line in reader.lines().take(4).map_while(Result::ok) {
@@ -273,7 +273,6 @@ fn prior_compaction_depth(path: &Path, before_offset: u64) -> i64 {
     if before_offset == 0 {
         return 0;
     }
-    use std::io::BufRead;
     let Ok(file) = std::fs::File::open(path) else {
         return 0;
     };

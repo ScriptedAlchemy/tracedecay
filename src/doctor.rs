@@ -40,6 +40,7 @@ pub async fn run_doctor(agent_filter: Option<&str>) {
     check_global_db(&mut dc);
     check_stale_stores(&mut dc).await;
     check_user_config(&mut dc);
+    check_external_tools(&mut dc);
 
     // Agent-specific health checks
     if let Some(ref home) = agents::home_dir() {
@@ -462,6 +463,51 @@ fn check_user_config(dc: &mut DoctorCounters) {
     } else {
         dc.fail("Could not determine home directory for config");
     }
+}
+
+/// Check optional external tools that gate optional MCP capabilities.
+fn check_external_tools(dc: &mut DoctorCounters) {
+    eprintln!("\n\x1b[1mExternal tools\x1b[0m");
+    let diagnostics = crate::mcp::tools::ast_grep_diagnostics_json();
+    let installed = json_bool(&diagnostics, "installed");
+    let rewrite_available = json_bool(&diagnostics, "rewrite_available");
+    let outline_available = json_bool(&diagnostics, "outline_available");
+    let version = diagnostics
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let message = diagnostics
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("ast-grep status unavailable");
+
+    if outline_available {
+        dc.pass(&format!(
+            "ast-grep {version}: rewrite and outline support available"
+        ));
+        return;
+    }
+
+    if rewrite_available {
+        dc.warn(&format!(
+            "ast-grep {version}: rewrite support available, but outline support is missing"
+        ));
+    } else if installed {
+        dc.warn(&format!(
+            "ast-grep {version}: optional ast-grep-backed tools are unavailable"
+        ));
+    } else {
+        dc.warn("ast-grep not found on PATH; optional ast-grep-backed tools are hidden");
+    }
+    dc.info(message);
+    dc.info("Install or update ast-grep to >= 0.44, then rerun `tracedecay install` or `tracedecay update-plugin` if your agent integration caches tool metadata.");
+}
+
+fn json_bool(value: &serde_json::Value, key: &str) -> bool {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// Check network connectivity.

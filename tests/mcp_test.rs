@@ -96,16 +96,31 @@ fn test_all_error_codes() {
 #[test]
 fn test_tool_definitions_count() {
     let tools = get_tool_definitions();
-    // `tracedecay_ast_grep_rewrite` is registered conditionally on whether
-    // the external `ast-grep` binary is on PATH — hide-when-missing so
-    // agents never receive a tool that will instantly fail.
+    // ast-grep-backed tools are registered only when the host CLI capability
+    // they need is available — hide-when-missing so agents never receive a
+    // tool that will instantly fail.
     // LCM comparison and profile-storage registry support add extra tools.
-    let expected = if tracedecay::mcp::tools::ast_grep_available() {
-        94
-    } else {
-        93
-    };
+    let expected = 92
+        + usize::from(tracedecay::mcp::tools::ast_grep_available())
+        + usize::from(tracedecay::mcp::tools::ast_grep_outline_available());
     assert_eq!(tools.len(), expected);
+}
+
+#[test]
+fn test_ast_grep_tools_follow_capability_gates() {
+    let tools = get_tool_definitions();
+    let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+
+    assert_eq!(
+        tool_names.contains(&"tracedecay_ast_grep_rewrite"),
+        tracedecay::mcp::tools::ast_grep_available(),
+        "rewrite should be gated on the external ast-grep CLI"
+    );
+    assert_eq!(
+        tool_names.contains(&"tracedecay_outline"),
+        tracedecay::mcp::tools::ast_grep_outline_available(),
+        "outline should be gated on ast-grep outline >= 0.44 support"
+    );
 }
 
 #[test]

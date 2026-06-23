@@ -4,10 +4,8 @@ use std::sync::{LazyLock, Mutex};
 
 use serde_json::{json, Map, Value};
 
-use super::{
-    global_db_profile_root, project_registry_context, safe_profile_relpath,
-    truncated_json_envelope_with_handle,
-};
+use super::super::render::truncated_json_envelope_with_handle;
+use super::support::{profile_root_for_global_db, project_registry_context, safe_profile_relpath};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::{GlobalDb, ProjectRegistryContext};
 use crate::mcp::tools::{ToolResult, MAX_RESPONSE_CHARS};
@@ -46,19 +44,49 @@ fn tool_json(project_root: Option<&Path>, value: &Value) -> ToolResult {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct LcmHandlerContext<'a> {
+    project_root: Option<&'a Path>,
+    project_session_db_path: Option<&'a Path>,
+}
+
+impl<'a> LcmHandlerContext<'a> {
+    pub(super) fn active(cg: &'a TraceDecay) -> Self {
+        Self {
+            project_root: Some(cg.project_root()),
+            project_session_db_path: Some(cg.store_layout().sessions_db_path.as_path()),
+        }
+    }
+
+    pub(super) const fn projectless() -> Self {
+        Self {
+            project_root: None,
+            project_session_db_path: None,
+        }
+    }
+}
+
 async fn selected_project_session_db_path(
     project_root: &Path,
+    project_session_db_path: &Path,
     args: &Value,
+    global_db: Option<&GlobalDb>,
+    allow_default_registry_fallback: bool,
 ) -> Result<Option<(PathBuf, PathBuf)>> {
-    let Some(context) = project_registry_context(args, &["project_path", "project_root"]).await?
+    let Some(context) = project_registry_context(
+        args,
+        &["project_path", "project_root"],
+        global_db,
+        allow_default_registry_fallback,
+    )
+    .await?
     else {
-        return Ok(
-            crate::sessions::cursor::resolved_project_session_db_path(project_root)
-                .await
-                .map(|db_path| (db_path, project_root.to_path_buf())),
-        );
+        return Ok(Some((
+            project_session_db_path.to_path_buf(),
+            project_root.to_path_buf(),
+        )));
     };
-    let profile_root = global_db_profile_root()?;
+    let profile_root = profile_root_for_global_db(global_db, allow_default_registry_fallback)?;
     let candidates = registry_session_db_candidates(&context, &profile_root)?;
     let target_root = PathBuf::from(context.project.display_root);
     for db_path in candidates {
@@ -1004,6 +1032,10 @@ struct LcmStorage {
     scope: &'static str,
 }
 
+fn available_lcm_storage(db: GlobalDb, scope: &'static str) -> LcmStorageResolution {
+    LcmStorageResolution::Available(Box::new(LcmStorage { db, scope }))
+}
+
 /// Database paths whose schema (sessions DDL + LCM migrations) has already
 /// been ensured by this process. In `tracedecay serve`, every LCM tool call
 /// re-opens the project session DB; once `GlobalDb::open_at` has ensured the
@@ -1108,9 +1140,18 @@ enum LcmOpenMode {
     ReadOnlyOrMissing,
 }
 
+async fn open_lcm_db_at(db_path: &Path, mode: LcmOpenMode) -> Option<GlobalDb> {
+    match mode {
+        LcmOpenMode::Writable => open_session_db_with_cached_ensure(db_path).await,
+        LcmOpenMode::ReadOnlyExisting | LcmOpenMode::ReadOnlyOrMissing => {
+            GlobalDb::open_read_only_at(db_path).await
+        }
+    }
+}
+
 macro_rules! lcm_open_storage {
-    ($project_root:expr, $args:expr) => {
-        match open_lcm_storage($project_root, $args, LcmOpenMode::Writable).await {
+    ($context:expr, $args:expr) => {
+        match open_lcm_storage($context, $args, LcmOpenMode::Writable).await {
             LcmStorageResolution::Available(storage) => storage,
             LcmStorageResolution::Unavailable(result) => return Ok(result),
         }
@@ -1120,8 +1161,8 @@ macro_rules! lcm_open_storage {
 /// Like `lcm_open_storage!` but with [`LcmOpenMode::ReadOnlyOrMissing`]
 /// semantics for `readOnlyHint` handlers.
 macro_rules! lcm_open_storage_ro {
-    ($project_root:expr, $args:expr) => {
-        match open_lcm_storage($project_root, $args, LcmOpenMode::ReadOnlyOrMissing).await {
+    ($context:expr, $args:expr) => {
+        match open_lcm_storage($context, $args, LcmOpenMode::ReadOnlyOrMissing).await {
             LcmStorageResolution::Available(storage) => storage,
             LcmStorageResolution::Unavailable(result) => return Ok(result),
         }
@@ -1129,40 +1170,27 @@ macro_rules! lcm_open_storage_ro {
 }
 
 async fn open_lcm_storage(
-    project_root: Option<&Path>,
+    context: LcmHandlerContext<'_>,
     args: &Value,
     mode: LcmOpenMode,
 ) -> LcmStorageResolution {
     let storage_scope = string_arg(args, "storage_scope").unwrap_or("project_local");
     match storage_scope {
         "project_local" => {
-            let Some(project_root) = project_root else {
+            if context.project_root.is_none() {
+                return LcmStorageResolution::Unavailable(project_local_storage_without_project());
+            }
+            let Some(db_path) = context.project_session_db_path else {
                 return LcmStorageResolution::Unavailable(project_local_storage_without_project());
             };
-            let Some(db_path) =
-                crate::sessions::cursor::resolved_project_session_db_path(project_root).await
-            else {
-                return LcmStorageResolution::Unavailable(project_local_storage_without_project());
-            };
-            let db = match mode {
-                LcmOpenMode::Writable => open_session_db_with_cached_ensure(&db_path).await,
-                LcmOpenMode::ReadOnlyExisting => GlobalDb::open_read_only_at(&db_path).await,
-                LcmOpenMode::ReadOnlyOrMissing => {
-                    if !db_path.is_file() {
-                        return LcmStorageResolution::Unavailable(lcm_not_yet_ingested(
-                            "project_local",
-                        ));
-                    }
-                    GlobalDb::open_read_only_at(&db_path).await
-                }
-            };
-            let Some(db) = db else {
+            let db_path = db_path.to_path_buf();
+            if mode == LcmOpenMode::ReadOnlyOrMissing && !db_path.is_file() {
+                return LcmStorageResolution::Unavailable(lcm_not_yet_ingested("project_local"));
+            }
+            let Some(db) = open_lcm_db_at(&db_path, mode).await else {
                 return LcmStorageResolution::Unavailable(lcm_unavailable());
             };
-            LcmStorageResolution::Available(Box::new(LcmStorage {
-                db,
-                scope: "project_local",
-            }))
+            available_lcm_storage(db, "project_local")
         }
         "hermes_profile" => {
             let hermes_home = match hermes_profile_home(args) {
@@ -1206,21 +1234,12 @@ async fn open_lcm_storage(
                     }
                 }
             };
-            let db = match mode {
-                LcmOpenMode::Writable => open_session_db_with_cached_ensure(&db_path).await,
-                LcmOpenMode::ReadOnlyExisting | LcmOpenMode::ReadOnlyOrMissing => {
-                    GlobalDb::open_read_only_at(&db_path).await
-                }
-            };
-            let Some(db) = db else {
+            let Some(db) = open_lcm_db_at(&db_path, mode).await else {
                 return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
                     "could not open hermes_profile tracedecay session database",
                 ));
             };
-            LcmStorageResolution::Available(Box::new(LcmStorage {
-                db,
-                scope: "hermes_profile",
-            }))
+            available_lcm_storage(db, "hermes_profile")
         }
         other => LcmStorageResolution::Unavailable(lcm_storage_scope_unavailable(other)),
     }
@@ -1333,7 +1352,12 @@ fn parse_message_search_scope(args: &Value) -> Result<SessionSearchScope> {
     }
 }
 
-pub(super) async fn handle_message_search(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_message_search(
+    cg: &TraceDecay,
+    args: Value,
+    global_db: Option<&GlobalDb>,
+    allow_default_registry_fallback: bool,
+) -> Result<ToolResult> {
     let query = args
         .get("query")
         .and_then(Value::as_str)
@@ -1372,8 +1396,14 @@ pub(super) async fn handle_message_search(cg: &TraceDecay, args: Value) -> Resul
         .unwrap_or(10)
         .clamp(1, 50) as usize;
 
-    let Some((db_path, target_root)) =
-        selected_project_session_db_path(cg.project_root(), &args).await?
+    let Some((db_path, target_root)) = selected_project_session_db_path(
+        cg.project_root(),
+        &cg.store_layout().sessions_db_path,
+        &args,
+        global_db,
+        allow_default_registry_fallback,
+    )
+    .await?
     else {
         return Ok(tool_json(
             Some(cg.project_root()),
@@ -1436,14 +1466,14 @@ pub(super) async fn handle_message_search(cg: &TraceDecay, args: Value) -> Resul
 }
 
 pub(super) async fn handle_lcm_status(
-    project_root: Option<&Path>,
+    context: LcmHandlerContext<'_>,
     args: Value,
 ) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = string_arg(&args, "session_id");
     let deep = bool_arg(&args, "deep")?.unwrap_or(false);
     let gc_config = lcm_gc_config(&args)?;
-    let storage = lcm_open_storage_ro!(project_root, &args);
+    let storage = lcm_open_storage_ro!(context, &args);
     let mut status = storage
         .db
         .lcm_status_with_options(provider, session_id, deep, &gc_config)
@@ -1451,7 +1481,7 @@ pub(super) async fn handle_lcm_status(
         .map_err(lcm_error)?;
     status.storage_scope = Some(storage.scope.to_string());
     Ok(tool_json(
-        project_root,
+        context.project_root,
         &json!({
             "status": "ok",
             "provider": provider,
@@ -1463,7 +1493,7 @@ pub(super) async fn handle_lcm_status(
 }
 
 pub(super) async fn handle_lcm_doctor(
-    project_root: Option<&Path>,
+    context: LcmHandlerContext<'_>,
     args: Value,
 ) -> Result<ToolResult> {
     let provider = provider_arg(&args);
@@ -1474,7 +1504,7 @@ pub(super) async fn handle_lcm_doctor(
     let gc_apply_enabled = lcm_gc_apply_enabled(&args)?;
     if mode == "clean" && apply && !clean_apply_enabled {
         return Ok(tool_json(
-            project_root,
+            context.project_root,
             &json!({
                 "status": "denied",
                 "provider": provider,
@@ -1501,7 +1531,7 @@ pub(super) async fn handle_lcm_doctor(
     }
     if mode == "gc" && apply && !gc_apply_enabled {
         return Ok(tool_json(
-            project_root,
+            context.project_root,
             &json!({
                 "status": "denied",
                 "provider": provider,
@@ -1533,7 +1563,7 @@ pub(super) async fn handle_lcm_doctor(
     } else {
         LcmOpenMode::ReadOnlyExisting
     };
-    let storage = match open_lcm_storage(project_root, &args, open_mode).await {
+    let storage = match open_lcm_storage(context, &args, open_mode).await {
         LcmStorageResolution::Available(storage) => storage,
         LcmStorageResolution::Unavailable(result) => return Ok(result),
     };
@@ -1544,18 +1574,27 @@ pub(super) async fn handle_lcm_doctor(
         .map_err(lcm_error)?;
     if let Some(object) = payload.as_object_mut() {
         object.insert("storage_scope".to_string(), json!(storage.scope));
+        if let Some(diagnostics) = object
+            .get_mut("diagnostics")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            diagnostics.insert(
+                "ast_grep".to_string(),
+                super::super::definitions::ast_grep_diagnostics_json(),
+            );
+        }
     }
-    Ok(tool_json(project_root, &payload))
+    Ok(tool_json(context.project_root, &payload))
 }
 
 pub(super) async fn handle_lcm_load_session(
-    project_root: Option<&Path>,
+    context: LcmHandlerContext<'_>,
     args: Value,
 ) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = required_string_arg(&args, "session_id")?;
     let (content_slice, content_limit_clamped_from) = lcm_load_content_slice(&args)?;
-    let storage = lcm_open_storage_ro!(project_root, &args);
+    let storage = lcm_open_storage_ro!(context, &args);
     let page = storage
         .db
         .lcm_load_session(LcmLoadSessionRequest {
@@ -1594,11 +1633,11 @@ pub(super) async fn handle_lcm_load_session(
             );
         }
     }
-    Ok(tool_json(project_root, &payload))
+    Ok(tool_json(context.project_root, &payload))
 }
 
 pub(super) async fn handle_lcm_grep(
-    project_root: Option<&Path>,
+    context: LcmHandlerContext<'_>,
     args: Value,
 ) -> Result<ToolResult> {
     let provider = provider_arg(&args);
@@ -1606,7 +1645,7 @@ pub(super) async fn handle_lcm_grep(
     // Validate scope before opening storage so argument errors are reported
     // even when the sessions DB does not exist yet.
     let scope = parse_lcm_scope(&args)?;
-    let storage = lcm_open_storage_ro!(project_root, &args);
+    let storage = lcm_open_storage_ro!(context, &args);
     let hits = storage
         .db
         .lcm_grep(LcmGrepRequest {
@@ -1628,7 +1667,7 @@ pub(super) async fn handle_lcm_grep(
         .await
         .map_err(lcm_error)?;
     Ok(tool_json(
-        project_root,
+        context.project_root,
         &json!({
             "status": "ok",
             "provider": provider,
@@ -1641,7 +1680,7 @@ pub(super) async fn handle_lcm_grep(
 }
 
 pub(super) async fn handle_lcm_describe(
-    project_root: Option<&Path>,
+    context: LcmHandlerContext<'_>,
     args: Value,
 ) -> Result<ToolResult> {
     let provider = provider_arg(&args);
@@ -1649,7 +1688,7 @@ pub(super) async fn handle_lcm_describe(
     // Validate target before opening storage so argument errors are reported
     // even when the sessions DB does not exist yet.
     let target = parse_lcm_describe_target(&args)?;
-    let storage = lcm_open_storage_ro!(project_root, &args);
+    let storage = lcm_open_storage_ro!(context, &args);
     let description = storage
         .db
         .lcm_describe(LcmDescribeRequest {
@@ -1660,7 +1699,7 @@ pub(super) async fn handle_lcm_describe(
         .await
         .map_err(lcm_error)?;
     Ok(tool_json(
-        project_root,
+        context.project_root,
         &json!({
             "status": "ok",
             "provider": provider,
@@ -1671,13 +1710,13 @@ pub(super) async fn handle_lcm_describe(
 }
 
 pub(super) async fn handle_lcm_expand(
-    project_root: Option<&Path>,
+    context: LcmHandlerContext<'_>,
     args: Value,
 ) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = required_string_arg(&args, "session_id")?;
     let target = parse_lcm_expand_target(&args)?;
-    let storage = lcm_open_storage_ro!(project_root, &args);
+    let storage = lcm_open_storage_ro!(context, &args);
     let expansion = storage
         .db
         .lcm_expand(LcmExpandRequest {
@@ -1691,7 +1730,7 @@ pub(super) async fn handle_lcm_expand(
         .await
         .map_err(lcm_error)?;
     Ok(tool_json(
-        project_root,
+        context.project_root,
         &json!({
             "status": "ok",
             "provider": provider,
@@ -1702,7 +1741,7 @@ pub(super) async fn handle_lcm_expand(
 }
 
 pub(super) async fn handle_lcm_expand_query(
-    project_root: Option<&Path>,
+    context: LcmHandlerContext<'_>,
     args: Value,
 ) -> Result<ToolResult> {
     let provider = provider_arg(&args);
@@ -1727,7 +1766,7 @@ pub(super) async fn handle_lcm_expand_query(
         MAX_LCM_EXPAND_QUERY_CONTEXT_LIMIT,
     )?
     .unwrap_or(DEFAULT_LCM_EXPAND_QUERY_CONTEXT_LIMIT);
-    let storage = lcm_open_storage_ro!(project_root, &args);
+    let storage = lcm_open_storage_ro!(context, &args);
     let response = storage
         .db
         .lcm_expand_query(LcmExpandQueryRequest {
@@ -1751,16 +1790,16 @@ pub(super) async fn handle_lcm_expand_query(
         object.insert("session_id".to_string(), json!(session_id));
         object.insert("storage_scope".to_string(), json!(storage.scope));
     }
-    Ok(lcm_expand_query_tool_json(project_root, &payload))
+    Ok(lcm_expand_query_tool_json(context.project_root, &payload))
 }
 
 pub(super) async fn handle_lcm_session_boundary(
-    project_root: Option<&Path>,
+    context: LcmHandlerContext<'_>,
     args: Value,
 ) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = required_string_arg(&args, "session_id")?;
-    let storage = lcm_open_storage!(project_root, &args);
+    let storage = lcm_open_storage!(context, &args);
     let response = storage
         .db
         .lcm_session_boundary(LcmSessionBoundaryRequest {
@@ -1774,7 +1813,7 @@ pub(super) async fn handle_lcm_session_boundary(
         .await
         .map_err(lcm_error)?;
     Ok(tool_json(
-        project_root,
+        context.project_root,
         &json!({
             "status": response.status,
             "provider": provider,
@@ -1786,12 +1825,12 @@ pub(super) async fn handle_lcm_session_boundary(
 }
 
 pub(super) async fn handle_lcm_preflight(
-    project_root: Option<&Path>,
+    context: LcmHandlerContext<'_>,
     args: Value,
 ) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = required_string_arg(&args, "session_id")?;
-    let storage = lcm_open_storage!(project_root, &args);
+    let storage = lcm_open_storage!(context, &args);
     let response = storage
         .db
         .lcm_preflight(LcmPreflightRequest {
@@ -1827,13 +1866,13 @@ pub(super) async fn handle_lcm_preflight(
 }
 
 pub(super) async fn handle_lcm_compress(
-    project_root: Option<&Path>,
+    context: LcmHandlerContext<'_>,
     args: Value,
 ) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = required_string_arg(&args, "session_id")?;
-    let response_handle_root = lcm_response_handle_root(project_root, &args);
-    let storage = lcm_open_storage!(project_root, &args);
+    let response_handle_root = lcm_response_handle_root(context.project_root, &args);
+    let storage = lcm_open_storage!(context, &args);
     let response = storage
         .db
         .lcm_compress(LcmCompressionRequest {

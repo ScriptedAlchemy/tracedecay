@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 
 use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
+use crate::global_db::GlobalDb;
 use crate::memory::retrieval::FactRetriever;
 use crate::memory::store::MemoryStore;
 use crate::memory::trust::DEFAULT_TRUST;
@@ -15,32 +16,59 @@ use crate::memory::types::{
 };
 use crate::tracedecay::TraceDecay;
 
-use super::super::render;
+use super::super::render::{self, truncated_json_envelope_with_handle};
 use super::super::ToolResult;
-use super::{
-    global_db_profile_root, project_registry_context, project_selector_present,
-    safe_profile_relpath, truncated_json_envelope_with_handle,
+use super::support::{
+    profile_root_for_global_db, project_registry_context, project_selector_present,
+    safe_profile_relpath, string_array_values,
 };
 
 const DEFAULT_FACT_LIMIT: usize = 20;
 const MAX_FACT_LIMIT: usize = 200;
 
-fn tool_json(project_root: Option<&Path>, value: &Value) -> ToolResult {
-    let formatted = serde_json::to_string(value).unwrap_or_default();
+struct TargetMemoryDb {
+    db: Database,
+    project_root: PathBuf,
+}
+
+fn text_tool_result(text: &str) -> ToolResult {
     ToolResult {
-        value: json!({ "content": [{ "type": "text", "text": truncated_json_envelope_with_handle(project_root, &formatted) }] }),
+        value: json!({ "content": [{ "type": "text", "text": text }] }),
         touched_files: vec![],
     }
 }
 
-async fn open_target_memory_db(cg: &TraceDecay, args: &Value) -> Result<(Database, PathBuf)> {
-    let Some(context) = project_registry_context(args, &["project_path"]).await? else {
-        return Ok((
-            cg.open_project_store_db().await?,
-            cg.project_root().to_path_buf(),
-        ));
+fn tool_json(project_root: Option<&Path>, value: &Value) -> ToolResult {
+    let formatted = serde_json::to_string(value).unwrap_or_default();
+    let text = truncated_json_envelope_with_handle(project_root, &formatted);
+    text_tool_result(&text)
+}
+
+fn rendered_tool_json(project_root: Option<&Path>, args: &Value, value: &Value) -> ToolResult {
+    let text = render::finalize(project_root, args, value, || render::generic_md(value));
+    text_tool_result(&text)
+}
+
+async fn open_target_memory_db(
+    cg: &TraceDecay,
+    args: &Value,
+    global_db: Option<&GlobalDb>,
+    allow_default_registry_fallback: bool,
+) -> Result<TargetMemoryDb> {
+    let Some(context) = project_registry_context(
+        args,
+        &["project_path"],
+        global_db,
+        allow_default_registry_fallback,
+    )
+    .await?
+    else {
+        return Ok(TargetMemoryDb {
+            db: cg.open_project_store_db().await?,
+            project_root: cg.project_root().to_path_buf(),
+        });
     };
-    let profile_root = global_db_profile_root()?;
+    let profile_root = profile_root_for_global_db(global_db, allow_default_registry_fallback)?;
     let graph_relpath = context
         .stores
         .iter()
@@ -61,7 +89,10 @@ async fn open_target_memory_db(cg: &TraceDecay, args: &Value) -> Result<(Databas
         )));
     }
     let (db, _) = Database::open(&db_path).await?;
-    Ok((db, PathBuf::from(context.project.display_root)))
+    Ok(TargetMemoryDb {
+        db,
+        project_root: PathBuf::from(context.project.display_root),
+    })
 }
 
 fn config_error(message: impl Into<String>) -> TraceDecayError {
@@ -96,18 +127,6 @@ fn optional_f64(args: &Value, key: &str) -> Option<f64> {
     args.get(key).and_then(Value::as_f64)
 }
 
-fn string_array(args: &Value, key: &str) -> Vec<String> {
-    args.get(key)
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.as_str().map(ToOwned::to_owned))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 fn fact_id(args: &Value) -> Result<i64> {
     let value = args
         .get("fact_id")
@@ -128,7 +147,7 @@ fn metadata_with_tags(args: &Value) -> Value {
         .cloned()
         .filter(Value::is_object)
         .unwrap_or_else(|| json!({}));
-    let tags = string_array(args, "tags");
+    let tags = string_array_values(args, "tags");
     if !tags.is_empty() {
         if let Some(map) = metadata.as_object_mut() {
             map.insert("tags".to_string(), json!(tags));
@@ -138,7 +157,7 @@ fn metadata_with_tags(args: &Value) -> Value {
 }
 
 fn request_entities(args: &Value) -> Vec<String> {
-    let mut entities = string_array(args, "entities");
+    let mut entities = string_array_values(args, "entities");
     if let Some(entity) = args.get("entity").and_then(Value::as_str) {
         entities.push(entity.to_string());
     }
@@ -250,7 +269,12 @@ async fn update_trust(args: &Value, store: &MemoryStore<'_>, fact_id: i64) -> Re
     Ok(Some((existing.trust_score + delta).clamp(0.0, 1.0)))
 }
 
-pub(super) async fn handle_fact_store(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_fact_store(
+    cg: &TraceDecay,
+    args: Value,
+    global_db: Option<&GlobalDb>,
+    allow_default_registry_fallback: bool,
+) -> Result<ToolResult> {
     let action = required_str(&args, "action")?;
     let cross_project_selector = project_selector_present(&args, &["project_path"]);
     if action_mutates_memory(action) && cross_project_selector {
@@ -258,8 +282,9 @@ pub(super) async fn handle_fact_store(cg: &TraceDecay, args: Value) -> Result<To
             "cross-project fact_store writes are not supported; omit project_selector to write the active project",
         ));
     }
-    let (db, target_root) = open_target_memory_db(cg, &args).await?;
-    let conn = db.conn();
+    let target_memory =
+        open_target_memory_db(cg, &args, global_db, allow_default_registry_fallback).await?;
+    let conn = target_memory.db.conn();
     let store = MemoryStore::new(conn);
     let out = match action {
         "add" => {
@@ -272,7 +297,7 @@ pub(super) async fn handle_fact_store(cg: &TraceDecay, args: Value) -> Result<To
                             .get("source")
                             .and_then(Value::as_str)
                             .map(ToOwned::to_owned),
-                        tags: string_array(&args, "tags"),
+                        tags: string_array_values(&args, "tags"),
                         entities: request_entities(&args),
                         trust: optional_f64(&args, "trust"),
                         metadata: metadata_with_tags(&args),
@@ -415,7 +440,7 @@ pub(super) async fn handle_fact_store(cg: &TraceDecay, args: Value) -> Result<To
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned),
                 category: optional_category(&args)?,
-                tags: args.get("tags").map(|_| string_array(&args, "tags")),
+                tags: args.get("tags").map(|_| string_array_values(&args, "tags")),
                 entities: args.get("entities").map(|_| request_entities(&args)),
                 trust: update_trust(&args, &store, id).await?,
                 source: args
@@ -458,7 +483,7 @@ pub(super) async fn handle_fact_store(cg: &TraceDecay, args: Value) -> Result<To
         }
         other => return Err(config_error(format!("unknown fact_store action: {other}"))),
     };
-    Ok(tool_json(Some(&target_root), &out))
+    Ok(tool_json(Some(&target_memory.project_root), &out))
 }
 
 pub(super) async fn handle_fact_feedback(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
@@ -485,15 +510,19 @@ pub(super) async fn handle_fact_feedback(cg: &TraceDecay, args: Value) -> Result
     ))
 }
 
-pub(super) async fn handle_memory_status(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
-    let (db, target_root) = open_target_memory_db(cg, &args).await?;
-    let status = TraceDecay::memory_status_for_conn(db.conn()).await?;
+pub(super) async fn handle_memory_status(
+    cg: &TraceDecay,
+    args: Value,
+    global_db: Option<&GlobalDb>,
+    allow_default_registry_fallback: bool,
+) -> Result<ToolResult> {
+    let target_memory =
+        open_target_memory_db(cg, &args, global_db, allow_default_registry_fallback).await?;
+    let status = TraceDecay::memory_status_for_conn(target_memory.db.conn()).await?;
     let value = json!({ "status": "ok", "memory": status });
-    let text = render::finalize(Some(&target_root), &args, &value, || {
-        render::generic_md(&value)
-    });
-    Ok(ToolResult {
-        value: json!({ "content": [{ "type": "text", "text": text }] }),
-        touched_files: vec![],
-    })
+    Ok(rendered_tool_json(
+        Some(&target_memory.project_root),
+        &args,
+        &value,
+    ))
 }

@@ -711,6 +711,89 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
 }
 
 #[tokio::test]
+async fn project_registry_tools_prefer_injected_registry_over_process_default() {
+    let (cg, _project_dir) = setup_project().await;
+    let process_registry_dir = TempDir::new().unwrap();
+    let process_registry_path = process_registry_dir.path().join("global.db");
+    let client_registry_dir = TempDir::new().unwrap();
+    let client_registry_path = client_registry_dir.path().join("global.db");
+    let _env_guard = GlobalDbEnvGuard::set(&process_registry_path);
+
+    let process_db = GlobalDb::open_at(&process_registry_path).await.unwrap();
+    process_db
+        .upsert_code_project(
+            "proj_process_default",
+            &cg.project_root().with_file_name("process-default"),
+            None,
+            None,
+            Some("main"),
+        )
+        .await
+        .unwrap();
+    seed_project_registry(&client_registry_path, cg.project_root()).await;
+    let client_db = GlobalDb::open_at(&client_registry_path).await.unwrap();
+
+    let list = tracedecay::mcp::tools::handle_tool_call_with_registry(
+        &cg,
+        "tracedecay_project_list",
+        json!({"limit": 10, "format": "json"}),
+        None,
+        None,
+        Some(&client_db),
+        false,
+    )
+    .await
+    .unwrap();
+    let list_payload: Value = serde_json::from_str(extract_text(&list.value)).unwrap();
+    assert_eq!(
+        list_payload["registry_path"],
+        client_registry_path.display().to_string()
+    );
+    let list_text = extract_text(&list.value);
+    assert!(list_text.contains("proj_alpha"));
+    assert!(
+        !list_text.contains("proj_process_default"),
+        "project list should not read process-default registry: {list_text}"
+    );
+
+    let search = tracedecay::mcp::tools::handle_tool_call_with_registry(
+        &cg,
+        "tracedecay_project_search",
+        json!({"query": "alpha", "limit": 10, "format": "json"}),
+        None,
+        None,
+        Some(&client_db),
+        false,
+    )
+    .await
+    .unwrap();
+    let search_text = extract_text(&search.value);
+    assert!(search_text.contains("proj_alpha"));
+    assert!(
+        !search_text.contains("proj_process_default"),
+        "project search should not read process-default registry: {search_text}"
+    );
+
+    let context = tracedecay::mcp::tools::handle_tool_call_with_registry(
+        &cg,
+        "tracedecay_project_context",
+        json!({"project_id": "proj_alpha", "format": "json"}),
+        None,
+        None,
+        Some(&client_db),
+        false,
+    )
+    .await
+    .unwrap();
+    let context_payload: Value = serde_json::from_str(extract_text(&context.value)).unwrap();
+    assert_eq!(context_payload["project"]["project_id"], "proj_alpha");
+    assert_eq!(
+        context_payload["registry_path"],
+        client_registry_path.display().to_string()
+    );
+}
+
+#[tokio::test]
 async fn selected_project_read_skips_cache_write_for_read_only_store() {
     let (cg, _project_dir) = setup_project().await;
     let registry_dir = TempDir::new().unwrap();
@@ -835,6 +918,23 @@ fn assert_action_schema_requires(
     assert_eq!(
         actual, expected_required,
         "{tool_name} schema conditional requirements for action={action} drifted from handler parser expectations"
+    );
+}
+
+#[test]
+fn outline_schema_requires_file_without_provider_property() {
+    if !tracedecay::mcp::tools::ast_grep_outline_available() {
+        return;
+    }
+    let tools = get_tool_definitions();
+    let schema = tool_schema(&tools, "tracedecay_outline");
+
+    assert_eq!(required_args_at(schema, &[]), vec!["file"]);
+    assert!(
+        schema["properties"]
+            .as_object()
+            .is_some_and(|properties| !properties.contains_key("provider")),
+        "tracedecay_outline should not advertise a provider property: {schema}"
     );
 }
 
@@ -3577,6 +3677,10 @@ async fn read_and_outline_preserve_symlink_indexed_file_key() {
         "read should serve indexed source behind symlink: {read_payload:?}"
     );
 
+    if !tracedecay::mcp::tools::ast_grep_outline_available() {
+        return;
+    }
+
     let outline = handle_tool_call(
         &cg,
         "tracedecay_outline",
@@ -3596,6 +3700,43 @@ async fn read_and_outline_preserve_symlink_indexed_file_key() {
             .iter()
             .any(|symbol| symbol["name"] == "through_symlink"),
         "outline should query graph by indexed symlink path: {outline_payload:?}"
+    );
+}
+
+#[tokio::test]
+async fn outline_preserves_db_payload_and_adds_ast_grep_outline_when_available() {
+    if !tracedecay::mcp::tools::ast_grep_outline_available() {
+        return;
+    }
+
+    let (cg, _dir) = setup_project().await;
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_outline",
+        json!({"file": "src/utils.rs"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.touched_files, vec!["src/utils.rs"]);
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    assert_eq!(payload["file"], "src/utils.rs");
+    assert!(payload["symbol_count"].as_u64().is_some());
+    assert!(
+        payload["symbols"]
+            .as_array()
+            .is_some_and(|symbols| symbols.iter().any(|symbol| symbol["name"] == "helper")),
+        "DB-backed symbols should still be present: {payload}"
+    );
+    assert!(
+        payload["ast_grep_outline"]
+            .as_array()
+            .is_some_and(|files| files.iter().any(|file| file["items"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["name"] == "helper")))),
+        "ast-grep outline should be attached under ast_grep_outline: {payload}"
     );
 }
 
@@ -7476,6 +7617,18 @@ async fn lcm_doctor_repair_dry_run_does_not_run_schema_migration() {
     assert_eq!(payload["mode"], "repair");
     assert_eq!(payload["dry_run"], true);
     assert_eq!(payload["diagnostics"]["schema"]["migration_present"], false);
+    assert_eq!(
+        payload["diagnostics"]["ast_grep"]["rewrite_available"].as_bool(),
+        Some(tracedecay::mcp::tools::ast_grep_available())
+    );
+    assert_eq!(
+        payload["diagnostics"]["ast_grep"]["outline_available"].as_bool(),
+        Some(tracedecay::mcp::tools::ast_grep_outline_available())
+    );
+    assert!(
+        payload["diagnostics"]["ast_grep"]["message"].is_string(),
+        "doctor should include ast-grep install/update guidance"
+    );
     assert_eq!(lcm_schema_migration_count(&cg).await, 0);
 }
 
@@ -9374,12 +9527,17 @@ async fn message_search_preserves_provider_project_parent_scope_shape_after_lcm(
     assert_eq!(payload["results"][0]["session"]["is_subagent"], true);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn lcm_status_cli_bridge_accepts_json_args() {
     let (cg, _dir) = setup_project().await;
+    let home = _dir.path().join("home");
+    let _daemon = common::spawn_tracedecay_daemon(&home);
     let outside_cwd = TempDir::new().unwrap();
     let project_arg = cg.project_root().display().to_string();
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay"))
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+    common::apply_tracedecay_home_env(&mut command, &home);
+    let output = command
         .current_dir(outside_cwd.path())
         .args([
             "tool",
@@ -9413,8 +9571,13 @@ async fn lcm_status_cli_bridge_accepts_json_args() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn lcm_status_cli_profile_scope_dispatches_without_initialized_project() {
+    let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
+    let home = TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard::set(home.path());
+    let _global_db_guard = GlobalDbEnvGuard::set(&home.path().join(".tracedecay/global.db"));
     let outside_cwd = TempDir::new().unwrap();
     let hermes_home = TempDir::new().unwrap();
     let profile_db = open_hermes_profile_session_db(hermes_home.path()).await;
@@ -9434,7 +9597,10 @@ async fn lcm_status_cli_profile_scope_dispatches_without_initialized_project() {
         "hermes_home": hermes_home.path(),
     })
     .to_string();
-    let profile_output = std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay"))
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
+    let mut profile_command = std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+    common::apply_tracedecay_home_env(&mut profile_command, home.path());
+    let profile_output = profile_command
         .current_dir(outside_cwd.path())
         .args([
             "tool",
@@ -9459,7 +9625,9 @@ async fn lcm_status_cli_profile_scope_dispatches_without_initialized_project() {
     assert_eq!(profile_payload["lcm"]["storage_scope"], "hermes_profile");
     assert_eq!(profile_payload["lcm"]["raw_message_count"], 1);
 
-    let project_output = std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay"))
+    let mut project_command = std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+    common::apply_tracedecay_home_env(&mut project_command, home.path());
+    let project_output = project_command
         .current_dir(outside_cwd.path())
         .args([
             "tool",
@@ -9478,9 +9646,10 @@ async fn lcm_status_cli_profile_scope_dispatches_without_initialized_project() {
     );
     let stderr = String::from_utf8_lossy(&project_output.stderr);
     assert!(
-        stderr.contains("run 'tracedecay init' first"),
-        "project-local failure should continue to require initialization:\n{stderr}"
+        stderr.contains("daemon tool call failed") && stderr.contains("TraceDecay index"),
+        "project-local failure should return a daemon JSON-RPC error:\n{stderr}"
     );
+    drop(env_lock);
 }
 
 #[test]
@@ -11745,6 +11914,48 @@ async fn simplify_scan_surfaces_store_failure_instead_of_no_findings() {
     assert!(
         result.is_err(),
         "a failing store query must produce a tool error, not an empty findings list"
+    );
+}
+
+#[tokio::test]
+async fn simplify_scan_markdown_visible_output_is_not_escaped_blob() {
+    let (cg, dir) = setup_project().await;
+    fs::write(
+        dir.path().join("src/dead.rs"),
+        r#"
+fn abandoned_helper() -> usize {
+    7
+}
+"#,
+    )
+    .unwrap();
+    index_all_retrying_sync_lock(&cg).await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_simplify_scan",
+        json!({"files": ["src/dead.rs"], "format": "markdown"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let text = extract_text(&result.value);
+    assert!(text.contains("# Simplify Scan"), "got: {text}");
+    assert!(text.contains("## Potential Dead Code"), "got: {text}");
+    assert!(text.contains("abandoned_helper"), "got: {text}");
+    assert!(
+        serde_json::from_str::<Value>(text).is_err(),
+        "visible markdown should not be a JSON envelope: {text}"
+    );
+    assert!(
+        !text.contains("\\n") && !text.contains("\\\""),
+        "visible markdown should not contain escaped markdown/json: {text}"
+    );
+    assert!(
+        !text.contains("\"content\""),
+        "visible markdown should not contain a nested MCP envelope: {text}"
     );
 }
 

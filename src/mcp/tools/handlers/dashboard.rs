@@ -10,8 +10,8 @@ use serde_json::{json, Value};
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
+use super::super::render::truncated_json_envelope_with_handle;
 use super::super::ToolResult;
-use super::truncated_json_envelope_with_handle;
 
 use crate::dashboard::{bind_dashboard, build_state, router, DEFAULT_PORT};
 
@@ -43,6 +43,16 @@ fn validate_mcp_dashboard_host(host: &str) -> Result<&str> {
     })
 }
 
+fn dashboard_tool_result(cg: &TraceDecay, payload: &Value) -> ToolResult {
+    let formatted = serde_json::to_string(payload).unwrap_or_default();
+    ToolResult {
+        value: json!({
+            "content": [{ "type": "text", "text": truncated_json_envelope_with_handle(Some(cg.project_root()), &formatted) }]
+        }),
+        touched_files: vec![],
+    }
+}
+
 /// Handles `tracedecay_dashboard` tool calls.
 pub(super) async fn handle_dashboard(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let action = args
@@ -60,13 +70,7 @@ pub(super) async fn handle_dashboard(cg: &TraceDecay, args: Value) -> Result<Too
             } else {
                 json!({ "status": "not_running" })
             };
-            let formatted = serde_json::to_string(&payload).unwrap_or_default();
-            Ok(ToolResult {
-                value: json!({
-                    "content": [{ "type": "text", "text": truncated_json_envelope_with_handle(Some(cg.project_root()), &formatted) }]
-                }),
-                touched_files: vec![],
-            })
+            Ok(dashboard_tool_result(cg, &payload))
         }
         "start" | "" => {
             let host = args
@@ -87,17 +91,13 @@ pub(super) async fn handle_dashboard(cg: &TraceDecay, args: Value) -> Result<Too
 
             if let Some(handle) = guard.as_ref() {
                 // already running — idempotent return
-                let formatted = serde_json::to_string(&json!({
-                    "status": "already_running",
-                    "url": handle.url
-                }))
-                .unwrap_or_default();
-                return Ok(ToolResult {
-                    value: json!({
-                        "content": [{ "type": "text", "text": truncated_json_envelope_with_handle(Some(cg.project_root()), &formatted) }]
+                return Ok(dashboard_tool_result(
+                    cg,
+                    &json!({
+                        "status": "already_running",
+                        "url": handle.url
                     }),
-                    touched_files: vec![],
-                });
+                ));
             }
 
             // Shared construction with the CLI path: resolved LCM/session store
@@ -125,20 +125,15 @@ pub(super) async fn handle_dashboard(cg: &TraceDecay, args: Value) -> Result<Too
                 shutdown: shutdown_tx,
             });
 
-            let formatted = serde_json::to_string(&json!({
-                "status": "started",
-                "url": url,
-                "host": host,
-                "port": addr.port()
-            }))
-            .unwrap_or_default();
-
-            Ok(ToolResult {
-                value: json!({
-                        "content": [{ "type": "text", "text": truncated_json_envelope_with_handle(Some(cg.project_root()), &formatted) }]
+            Ok(dashboard_tool_result(
+                cg,
+                &json!({
+                    "status": "started",
+                    "url": url,
+                    "host": host,
+                    "port": addr.port()
                 }),
-                touched_files: vec![],
-            })
+            ))
         }
         other => Err(TraceDecayError::Config {
             message: format!(

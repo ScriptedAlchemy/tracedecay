@@ -11,7 +11,6 @@ use common::{
 };
 use serde_json::Value;
 use tempfile::TempDir;
-use tracedecay::branch;
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::dashboard;
 use tracedecay::errors::TraceDecayError;
@@ -753,7 +752,8 @@ fn dashboard_reports_resolved_branch_db_path() {
             "pub fn feature_branch_symbol() {}\n",
         )
         .unwrap_or_else(|err| panic!("failed to write feature fixture: {err}"));
-        if let Err(err) = branch::add_branch_tracking(&project_root, "feature/dashboard-path").await
+        if let Err(err) =
+            TraceDecay::add_branch_tracking(&project_root, "feature/dashboard-path").await
         {
             panic!("failed to track feature branch: {err}");
         }
@@ -815,7 +815,8 @@ fn dashboard_uses_project_memory_db_and_branch_graph_db() {
             "pub fn feature_branch_symbol() {}\n",
         )
         .unwrap_or_else(|err| panic!("failed to write feature fixture: {err}"));
-        if let Err(err) = branch::add_branch_tracking(&project_root, "feature/dashboard-storage").await
+        if let Err(err) =
+            TraceDecay::add_branch_tracking(&project_root, "feature/dashboard-storage").await
         {
             panic!("failed to track feature branch: {err}");
         }

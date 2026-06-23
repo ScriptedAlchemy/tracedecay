@@ -837,25 +837,28 @@ Expected: The second call returns `{"unchanged": true, "digest": ..., "mtime_ns"
 
 ## tracedecay_outline
 
-> Flat list of every top-level symbol in a file, with optional kind filter.
+> Optional `ast-grep` CLI outline of every top-level symbol in a file, with optional kind
+> filter. Requires `ast-grep` >= 0.44 on `PATH`. The response preserves DB-backed
+> TraceDecay symbols in the same payload for follow-up graph calls and has no
+> backend-selection argument.
 
 Test default (all kinds):
 ```
 tracedecay_outline(file="src/mcp/tools/handlers/info.rs")
 ```
-Expected: Returns `{file, symbol_count, symbols: [{kind, name, line, end_line, visibility}]}` sorted by line.
+Expected: Returns `{file, symbol_count, symbols: [{kind, name, line, end_line, visibility}], ast_grep_outline: [...]}` sorted by line. `symbols` keeps the DB-backed TraceDecay symbol map; `ast_grep_outline` carries the optional CLI outline payload.
 
 Test kinds filter:
 ```
 tracedecay_outline(file="src/mcp/tools/handlers/info.rs", kinds=["function"])
 ```
-Expected: Only function-kind entries. Filter is case-insensitive (`["FUNCTION"]` works the same).
+Expected: Only function-kind DB-backed `symbols`, with `ast_grep_outline` still present in the same payload. Filter is case-insensitive (`["FUNCTION"]` works the same).
 
 Unknown kind returns empty:
 ```
 tracedecay_outline(file="src/mcp/tools/handlers/info.rs", kinds=["banana"])
 ```
-Expected: `symbol_count: 0`.
+Expected: `symbol_count: 0` for DB-backed `symbols`; `ast_grep_outline` still carries the CLI outline payload when the host supports it.
 
 ---
 

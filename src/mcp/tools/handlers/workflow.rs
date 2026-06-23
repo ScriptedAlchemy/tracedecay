@@ -5,6 +5,8 @@
 //! already attached to the symbols they affect.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
+use std::process::Output;
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -14,11 +16,11 @@ use tokio::time::timeout;
 use crate::diagnose::{parse_cargo_output, Severity};
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::{is_test_file, TraceDecay};
-use crate::types::NodeKind;
+use crate::types::{Node, NodeKind};
 
 use super::super::render;
 use super::super::ToolResult;
-use super::unique_file_paths;
+use super::support::unique_file_paths;
 
 /// Maximum tests we'll allow `cargo test` to receive in one call. A loose
 /// cap — libtest filters are passed as positional args so very long lists
@@ -34,7 +36,7 @@ struct TestTarget {
 }
 
 impl TestTarget {
-    fn new(node: &crate::types::Node) -> Self {
+    fn new(node: &Node) -> Self {
         Self {
             filter: node.name.clone(),
             qualified_name: node.qualified_name.clone(),
@@ -57,11 +59,51 @@ impl TestTarget {
     }
 }
 
-fn test_target_key(node: &crate::types::Node) -> String {
+fn test_target_key(node: &Node) -> String {
     if node.qualified_name.is_empty() {
         node.id.clone()
     } else {
         node.qualified_name.clone()
+    }
+}
+
+#[derive(Debug)]
+struct RunAffectedArgs {
+    explicit_paths: Option<Vec<String>>,
+    profile: String,
+    timeout_secs: u64,
+    max_tests: usize,
+}
+
+impl RunAffectedArgs {
+    fn parse(args: &Value) -> Self {
+        let explicit_paths = args.get("changed_paths").and_then(|v| {
+            v.as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+        });
+        let profile = args
+            .get("profile")
+            .and_then(|v| v.as_str())
+            .unwrap_or("debug")
+            .to_string();
+        let timeout_secs = args
+            .get("timeout_secs")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(300);
+        let max_tests = args
+            .get("max_tests")
+            .and_then(serde_json::Value::as_u64)
+            .map_or(100_usize, |v| (v as usize).min(MAX_TESTS_HARD_CAP));
+
+        Self {
+            explicit_paths,
+            profile,
+            timeout_secs,
+            max_tests,
+        }
     }
 }
 
@@ -181,109 +223,19 @@ fn severity_string(s: Severity) -> &'static str {
 
 /// Handles `tracedecay_run_affected_tests`.
 pub(super) async fn handle_run_affected_tests(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
-    let explicit_paths: Option<Vec<String>> = args.get("changed_paths").and_then(|v| {
-        v.as_array().map(|arr| {
-            arr.iter()
-                .filter_map(|x| x.as_str().map(String::from))
-                .collect()
-        })
-    });
-    let profile = args
-        .get("profile")
-        .and_then(|v| v.as_str())
-        .unwrap_or("debug")
-        .to_string();
-    let timeout_secs = args
-        .get("timeout_secs")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(300);
-    let max_tests = args
-        .get("max_tests")
-        .and_then(serde_json::Value::as_u64)
-        .map_or(100_usize, |v| (v as usize).min(MAX_TESTS_HARD_CAP));
-
+    let run_args = RunAffectedArgs::parse(&args);
     let project_root = cg.project_root().to_path_buf();
 
     // 1) Resolve changed paths — explicit list, or fall back to `git diff`.
-    let changed_paths = match explicit_paths {
-        Some(p) => p,
-        None => match git_changed_paths(&project_root).await {
-            Ok(paths) => paths,
-            Err(message) => {
-                return Ok(error_result("git", "diff", &message));
-            }
-        },
+    let changed_paths = match resolve_changed_paths(&project_root, run_args.explicit_paths).await {
+        Ok(paths) => paths,
+        Err(result) => return Ok(result),
     };
     if changed_paths.is_empty() {
         return Ok(empty_result("no changed files detected"));
     }
 
-    // 2) Find tests that cover the changed paths.
-    //
-    //    Two paths feed into the test set:
-    //    a) Indirect coverage — for every callable in a changed file, walk
-    //       callers and keep test-shaped ones (test file or `#[test]`
-    //       annotated). This is the common case when source changes are
-    //       what's being tested.
-    //    b) Direct change — when a changed path itself is a test file (or
-    //       holds `#[test]` annotations), dispatch its test functions
-    //       directly. `#[test]` fns are leaves with no callers, so the
-    //       indirect-coverage walk above always misses them and the tool
-    //       used to silently skip PRs that only edit `tests/foo.rs`.
-    let mut test_targets: HashMap<String, TestTarget> = HashMap::new();
-    for path in &changed_paths {
-        let nodes = cg.get_nodes_by_file(path).await?;
-
-        // (b) Direct dispatch from changed test files.
-        let path_is_test_file = is_test_file(path);
-        if path_is_test_file || !nodes.is_empty() {
-            let candidate_ids: Vec<String> = nodes
-                .iter()
-                .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
-                .map(|n| n.id.clone())
-                .collect();
-            let test_annotated_in_file = cg.get_test_annotated_node_ids(&candidate_ids).await?;
-            for node in &nodes {
-                if !matches!(node.kind, NodeKind::Function | NodeKind::Method) {
-                    continue;
-                }
-                let looks_like_test =
-                    path_is_test_file || test_annotated_in_file.contains(&node.id);
-                if !looks_like_test {
-                    continue;
-                }
-                // The test "covers itself" — record the node id as the
-                // source so the per-test `covers_source_ids` field
-                // remains useful.
-                test_targets
-                    .entry(test_target_key(node))
-                    .or_insert_with(|| TestTarget::new(node))
-                    .add_source(&node.id);
-            }
-        }
-
-        // (a) Indirect coverage — walk callers of every callable in the file.
-        for node in &nodes {
-            if !matches!(node.kind, NodeKind::Function | NodeKind::Method) {
-                continue;
-            }
-            let callers = cg.get_callers(&node.id, 3).await?;
-            let caller_ids: Vec<String> = callers.iter().map(|(n, _)| n.id.clone()).collect();
-            let test_annotated = cg.get_test_annotated_node_ids(&caller_ids).await?;
-            for (caller, _) in callers {
-                if !is_test_file(&caller.file_path) && !test_annotated.contains(&caller.id) {
-                    continue;
-                }
-                if !matches!(caller.kind, NodeKind::Function | NodeKind::Method) {
-                    continue;
-                }
-                test_targets
-                    .entry(test_target_key(&caller))
-                    .or_insert_with(|| TestTarget::new(&caller))
-                    .add_source(&node.id);
-            }
-        }
-    }
+    let test_targets = collect_affected_test_targets(cg, &changed_paths).await?;
 
     if test_targets.is_empty() {
         return Ok(empty_result(&format!(
@@ -292,39 +244,14 @@ pub(super) async fn handle_run_affected_tests(cg: &TraceDecay, args: Value) -> R
         )));
     }
 
-    let mut selected_targets: Vec<TestTarget> = test_targets.into_values().collect();
-    selected_targets.sort_by(|a, b| {
-        a.qualified_name
-            .cmp(&b.qualified_name)
-            .then(a.node_id.cmp(&b.node_id))
-    });
-    let total_tests = selected_targets.len();
-    selected_targets.truncate(max_tests);
-    let truncated = total_tests > selected_targets.len();
-    let mut test_names: Vec<String> = selected_targets
-        .iter()
-        .map(|target| target.filter.clone())
-        .collect();
-    test_names.sort();
-    test_names.dedup();
+    let (selected_targets, test_names, truncated) =
+        select_test_targets(test_targets, run_args.max_tests);
 
     // 3) Run cargo test --no-fail-fast with each test name as a libtest
     // filter. We use `--` to pass them through.
-    let mut cmd = Command::new("cargo");
-    cmd.current_dir(&project_root)
-        .arg("test")
-        .arg("--no-fail-fast");
-    if profile == "release" {
-        cmd.arg("--release");
-    }
-    cmd.arg("--");
-    for name in &test_names {
-        cmd.arg(name);
-    }
-    cmd.kill_on_drop(true);
-
+    let mut cmd = cargo_test_command(&project_root, &run_args.profile, &test_names);
     let run = cmd.output();
-    let output = match timeout(Duration::from_secs(timeout_secs), run).await {
+    let output = match timeout(Duration::from_secs(run_args.timeout_secs), run).await {
         Ok(Ok(o)) => o,
         Ok(Err(e)) => {
             return Ok(error_result(
@@ -337,7 +264,7 @@ pub(super) async fn handle_run_affected_tests(cg: &TraceDecay, args: Value) -> R
             return Ok(error_result(
                 "cargo",
                 "test",
-                &format!("cargo test timed out after {timeout_secs}s"),
+                &format!("cargo test timed out after {}s", run_args.timeout_secs),
             ));
         }
     };
@@ -346,40 +273,16 @@ pub(super) async fn handle_run_affected_tests(cg: &TraceDecay, args: Value) -> R
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let results = parse_libtest_output(&stdout);
 
-    let passed = results.iter().filter(|(_, ok)| *ok).count();
-    let failed = results.iter().filter(|(_, ok)| !*ok).count();
     let touched_files: Vec<String> = unique_file_paths(changed_paths.iter().map(String::as_str));
-
-    let body = json!({
-        "exit_code": output.status.code(),
-        "passed": passed,
-        "failed": failed,
-        "total_observed": results.len(),
-        "dispatched_tests": test_names,
-        "truncated": truncated,
-        "results": results
-            .iter()
-            .map(|(name, ok)| {
-                let mut covers = Vec::new();
-                for target in &selected_targets {
-                    if target.matches_libtest_name(name) {
-                        for source_id in &target.covers_source_ids {
-                            if !covers.contains(source_id) {
-                                covers.push(source_id.clone());
-                            }
-                        }
-                    }
-                }
-                json!({
-                    "test": name,
-                    "passed": ok,
-                    "covers_source_ids": covers,
-                })
-            })
-            .collect::<Vec<_>>(),
-        "stderr_tail": tail(&stderr, 2000),
-        "stdout_tail": tail(&stdout, 2000),
-    });
+    let body = run_affected_tests_body(
+        &output,
+        &results,
+        &test_names,
+        truncated,
+        &selected_targets,
+        &stderr,
+        &stdout,
+    );
 
     let text = render::finalize(Some(cg.project_root()), &args, &body, || {
         render::generic_md(&body)
@@ -390,6 +293,195 @@ pub(super) async fn handle_run_affected_tests(cg: &TraceDecay, args: Value) -> R
         }),
         touched_files,
     })
+}
+
+async fn resolve_changed_paths(
+    project_root: &Path,
+    explicit_paths: Option<Vec<String>>,
+) -> std::result::Result<Vec<String>, ToolResult> {
+    match explicit_paths {
+        Some(paths) => Ok(paths),
+        None => git_changed_paths(project_root)
+            .await
+            .map_err(|message| error_result("git", "diff", &message)),
+    }
+}
+
+async fn collect_affected_test_targets(
+    cg: &TraceDecay,
+    changed_paths: &[String],
+) -> Result<HashMap<String, TestTarget>> {
+    // Two paths feed into the test set:
+    // a) Indirect coverage: for each changed callable, walk callers and keep
+    //    test-shaped ones.
+    // b) Direct changes: when a changed path is itself a test file or contains
+    //    `#[test]` functions, dispatch those tests directly.
+    let mut test_targets = HashMap::new();
+    for path in changed_paths {
+        let nodes = cg.get_nodes_by_file(path).await?;
+        add_direct_test_targets(cg, path, &nodes, &mut test_targets).await?;
+        add_indirect_test_targets(cg, &nodes, &mut test_targets).await?;
+    }
+    Ok(test_targets)
+}
+
+async fn add_direct_test_targets(
+    cg: &TraceDecay,
+    path: &str,
+    nodes: &[Node],
+    test_targets: &mut HashMap<String, TestTarget>,
+) -> Result<()> {
+    let path_is_test_file = is_test_file(path);
+    if !path_is_test_file && nodes.is_empty() {
+        return Ok(());
+    }
+
+    let candidate_ids: Vec<String> = nodes
+        .iter()
+        .filter(|n| is_callable(n))
+        .map(|n| n.id.clone())
+        .collect();
+    let test_annotated_in_file = cg.get_test_annotated_node_ids(&candidate_ids).await?;
+
+    for node in nodes {
+        if !is_callable(node) {
+            continue;
+        }
+        if !path_is_test_file && !test_annotated_in_file.contains(&node.id) {
+            continue;
+        }
+        // The test "covers itself" so the per-test `covers_source_ids` field
+        // remains useful.
+        test_targets
+            .entry(test_target_key(node))
+            .or_insert_with(|| TestTarget::new(node))
+            .add_source(&node.id);
+    }
+
+    Ok(())
+}
+
+async fn add_indirect_test_targets(
+    cg: &TraceDecay,
+    nodes: &[Node],
+    test_targets: &mut HashMap<String, TestTarget>,
+) -> Result<()> {
+    for node in nodes {
+        if !is_callable(node) {
+            continue;
+        }
+
+        let callers = cg.get_callers(&node.id, 3).await?;
+        let caller_ids: Vec<String> = callers.iter().map(|(n, _)| n.id.clone()).collect();
+        let test_annotated = cg.get_test_annotated_node_ids(&caller_ids).await?;
+
+        for (caller, _) in callers {
+            if !is_test_file(&caller.file_path) && !test_annotated.contains(&caller.id) {
+                continue;
+            }
+            if !is_callable(&caller) {
+                continue;
+            }
+            test_targets
+                .entry(test_target_key(&caller))
+                .or_insert_with(|| TestTarget::new(&caller))
+                .add_source(&node.id);
+        }
+    }
+
+    Ok(())
+}
+
+fn is_callable(node: &Node) -> bool {
+    matches!(node.kind, NodeKind::Function | NodeKind::Method)
+}
+
+fn select_test_targets(
+    test_targets: HashMap<String, TestTarget>,
+    max_tests: usize,
+) -> (Vec<TestTarget>, Vec<String>, bool) {
+    let mut selected_targets: Vec<TestTarget> = test_targets.into_values().collect();
+    selected_targets.sort_by(|a, b| {
+        a.qualified_name
+            .cmp(&b.qualified_name)
+            .then(a.node_id.cmp(&b.node_id))
+    });
+    let total_tests = selected_targets.len();
+    selected_targets.truncate(max_tests);
+    let truncated = total_tests > selected_targets.len();
+
+    let mut test_names: Vec<String> = selected_targets
+        .iter()
+        .map(|target| target.filter.clone())
+        .collect();
+    test_names.sort();
+    test_names.dedup();
+
+    (selected_targets, test_names, truncated)
+}
+
+fn cargo_test_command(project_root: &Path, profile: &str, test_names: &[String]) -> Command {
+    let mut cmd = Command::new("cargo");
+    cmd.current_dir(project_root)
+        .arg("test")
+        .arg("--no-fail-fast");
+    if profile == "release" {
+        cmd.arg("--release");
+    }
+    cmd.arg("--");
+    for name in test_names {
+        cmd.arg(name);
+    }
+    cmd.kill_on_drop(true);
+    cmd
+}
+
+fn run_affected_tests_body(
+    output: &Output,
+    results: &[(String, bool)],
+    test_names: &[String],
+    truncated: bool,
+    selected_targets: &[TestTarget],
+    stderr: &str,
+    stdout: &str,
+) -> Value {
+    let passed = results.iter().filter(|(_, ok)| *ok).count();
+    let failed = results.iter().filter(|(_, ok)| !*ok).count();
+
+    json!({
+        "exit_code": output.status.code(),
+        "passed": passed,
+        "failed": failed,
+        "total_observed": results.len(),
+        "dispatched_tests": test_names,
+        "truncated": truncated,
+        "results": results
+            .iter()
+            .map(|(name, ok)| {
+                json!({
+                    "test": name,
+                    "passed": ok,
+                    "covers_source_ids": covered_source_ids(name, selected_targets),
+                })
+            })
+            .collect::<Vec<_>>(),
+        "stderr_tail": tail(stderr, 2000),
+        "stdout_tail": tail(stdout, 2000),
+    })
+}
+
+fn covered_source_ids(name: &str, selected_targets: &[TestTarget]) -> Vec<String> {
+    let mut covers = Vec::new();
+    for target in selected_targets {
+        if target.matches_libtest_name(name) {
+            for source_id in &target.covers_source_ids {
+                if !covers.contains(source_id) {
+                    covers.push(source_id.clone());
+                }
+            }
+        }
+    }
+    covers
 }
 
 /// Wraps a short status message in a normal `ToolResult`.

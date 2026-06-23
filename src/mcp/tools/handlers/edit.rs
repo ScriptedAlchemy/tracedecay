@@ -1,6 +1,7 @@
 //! File editing tool handlers: `str_replace`, `multi_str_replace`, `insert_at`,
 //! `ast_grep_rewrite`.
 
+use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::errors::{Result, TraceDecayError};
@@ -8,52 +9,46 @@ use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
 
+fn missing_required_param(name: &str) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!("missing required parameter: {name}"),
+    }
+}
+
+fn required_str<'a>(args: &'a Value, name: &str) -> Result<&'a str> {
+    args.get(name)
+        .and_then(Value::as_str)
+        .ok_or_else(|| missing_required_param(name))
+}
+
+fn required_array<'a>(args: &'a Value, name: &str) -> Result<&'a Vec<Value>> {
+    args.get(name)
+        .and_then(Value::as_array)
+        .ok_or_else(|| missing_required_param(name))
+}
+
+fn text_tool_result<T: Serialize>(result: &T, touched_files: Vec<String>) -> ToolResult {
+    ToolResult {
+        value: json!({
+            "content": [{ "type": "text", "text": serde_json::to_string(result).unwrap_or_default() }]
+        }),
+        touched_files,
+    }
+}
+
 pub(super) async fn handle_str_replace(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
-    let path =
-        args.get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "missing required parameter: path".to_string(),
-            })?;
-
-    let old_str = args
-        .get("old_str")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "missing required parameter: old_str".to_string(),
-        })?;
-
-    let new_str = args
-        .get("new_str")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "missing required parameter: new_str".to_string(),
-        })?;
+    let path = required_str(&args, "path")?;
+    let old_str = required_str(&args, "old_str")?;
+    let new_str = required_str(&args, "new_str")?;
 
     let result = cg.str_replace(path, old_str, new_str).await?;
     let touched_files = vec![result.file_path.clone()];
-    Ok(ToolResult {
-        value: json!({
-            "content": [{ "type": "text", "text": serde_json::to_string(&result).unwrap_or_default() }]
-        }),
-        touched_files,
-    })
+    Ok(text_tool_result(&result, touched_files))
 }
 
 pub(super) async fn handle_multi_str_replace(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
-    let path =
-        args.get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "missing required parameter: path".to_string(),
-            })?;
-
-    let replacements = args
-        .get("replacements")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "missing required parameter: replacements".to_string(),
-        })?;
+    let path = required_str(&args, "path")?;
+    let replacements = required_array(&args, "replacements")?;
 
     let parsed_replacements: Vec<(&str, &str)> = replacements
         .iter()
@@ -76,35 +71,13 @@ pub(super) async fn handle_multi_str_replace(cg: &TraceDecay, args: Value) -> Re
 
     let result = cg.multi_str_replace(path, &parsed_replacements).await?;
     let touched_files = vec![result.file_path.clone()];
-    Ok(ToolResult {
-        value: json!({
-            "content": [{ "type": "text", "text": serde_json::to_string(&result).unwrap_or_default() }]
-        }),
-        touched_files,
-    })
+    Ok(text_tool_result(&result, touched_files))
 }
 
 pub(super) async fn handle_insert_at(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
-    let path =
-        args.get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "missing required parameter: path".to_string(),
-            })?;
-
-    let anchor =
-        args.get("anchor")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "missing required parameter: anchor".to_string(),
-            })?;
-
-    let content = args
-        .get("content")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "missing required parameter: content".to_string(),
-        })?;
+    let path = required_str(&args, "path")?;
+    let anchor = required_str(&args, "anchor")?;
+    let content = required_str(&args, "content")?;
 
     let before = args
         .get("before")
@@ -113,27 +86,12 @@ pub(super) async fn handle_insert_at(cg: &TraceDecay, args: Value) -> Result<Too
 
     let result = cg.insert_at(path, anchor, content, before).await?;
     let touched_files = vec![result.file_path.clone()];
-    Ok(ToolResult {
-        value: json!({
-            "content": [{ "type": "text", "text": serde_json::to_string(&result).unwrap_or_default() }]
-        }),
-        touched_files,
-    })
+    Ok(text_tool_result(&result, touched_files))
 }
 
 pub(super) async fn handle_replace_symbol(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
-    let symbol =
-        args.get("symbol")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "missing required parameter: symbol".to_string(),
-            })?;
-    let new_source = args
-        .get("new_source")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "missing required parameter: new_source".to_string(),
-        })?;
+    let symbol = required_str(&args, "symbol")?;
+    let new_source = required_str(&args, "new_source")?;
 
     let result = cg.replace_symbol(symbol, new_source).await?;
     let touched_files = if result.success {
@@ -141,27 +99,12 @@ pub(super) async fn handle_replace_symbol(cg: &TraceDecay, args: Value) -> Resul
     } else {
         vec![]
     };
-    Ok(ToolResult {
-        value: json!({
-            "content": [{ "type": "text", "text": serde_json::to_string(&result).unwrap_or_default() }]
-        }),
-        touched_files,
-    })
+    Ok(text_tool_result(&result, touched_files))
 }
 
 pub(super) async fn handle_insert_at_symbol(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
-    let symbol =
-        args.get("symbol")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "missing required parameter: symbol".to_string(),
-            })?;
-    let content = args
-        .get("content")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "missing required parameter: content".to_string(),
-        })?;
+    let symbol = required_str(&args, "symbol")?;
+    let content = required_str(&args, "content")?;
     let position = args
         .get("position")
         .and_then(|v| v.as_str())
@@ -173,35 +116,13 @@ pub(super) async fn handle_insert_at_symbol(cg: &TraceDecay, args: Value) -> Res
     } else {
         vec![]
     };
-    Ok(ToolResult {
-        value: json!({
-            "content": [{ "type": "text", "text": serde_json::to_string(&result).unwrap_or_default() }]
-        }),
-        touched_files,
-    })
+    Ok(text_tool_result(&result, touched_files))
 }
 
 pub(super) async fn handle_ast_grep_rewrite(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
-    let path =
-        args.get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "missing required parameter: path".to_string(),
-            })?;
-
-    let pattern = args
-        .get("pattern")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "missing required parameter: pattern".to_string(),
-        })?;
-
-    let rewrite = args
-        .get("rewrite")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "missing required parameter: rewrite".to_string(),
-        })?;
+    let path = required_str(&args, "path")?;
+    let pattern = required_str(&args, "pattern")?;
+    let rewrite = required_str(&args, "rewrite")?;
 
     let result = cg.ast_grep_rewrite(path, pattern, rewrite).await?;
     let touched_files = if result.success {
@@ -209,10 +130,5 @@ pub(super) async fn handle_ast_grep_rewrite(cg: &TraceDecay, args: Value) -> Res
     } else {
         vec![]
     };
-    Ok(ToolResult {
-        value: json!({
-            "content": [{ "type": "text", "text": serde_json::to_string(&result).unwrap_or_default() }]
-        }),
-        touched_files,
-    })
+    Ok(text_tool_result(&result, touched_files))
 }

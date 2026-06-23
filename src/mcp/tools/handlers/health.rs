@@ -25,36 +25,47 @@ use crate::graph::queries::GraphQueryManager;
 use crate::tracedecay::TraceDecay;
 use crate::types::{EdgeKind, NodeKind};
 
-use super::super::render;
+use super::super::render::{self, truncated_json_envelope_with_handle};
 use super::super::ToolResult;
-use super::{effective_path, unique_file_paths};
+use super::support::{effective_path, unique_file_paths};
 
 // ---------------------------------------------------------------------------
 // Shared health computation helper
 // ---------------------------------------------------------------------------
 
-pub(super) struct HealthSnapshot {
-    pub(super) quality_signal: u32,
-    pub(super) files_analyzed: usize,
-    pub(super) acyclicity: f64,
-    pub(super) depth: f64,
-    pub(super) equality: f64,
-    pub(super) redundancy: f64,
-    pub(super) modularity: f64,
-    pub(super) coverage_discipline: f64,
+struct HealthSnapshot {
+    quality_signal: u32,
+    files_analyzed: usize,
+    acyclicity: f64,
+    depth: f64,
+    equality: f64,
+    redundancy: f64,
+    modularity: f64,
+    coverage_discipline: f64,
     /// Raw signals retained for `details=true` (#82).
-    pub(super) gini: f64,
-    pub(super) edges_in_cycles: usize,
-    pub(super) max_chain: usize,
-    pub(super) ideal_chain: usize,
-    pub(super) modularity_components: usize,
-    pub(super) dead_count: usize,
-    pub(super) total_fns: usize,
-    pub(super) skip_coverage_count: usize,
+    gini: f64,
+    edges_in_cycles: usize,
+    max_chain: usize,
+    ideal_chain: usize,
+    modularity_components: usize,
+    dead_count: usize,
+    total_fns: usize,
+    skip_coverage_count: usize,
+}
+
+fn file_matches_scope(file_path: &str, path_prefix: Option<&str>) -> bool {
+    path_prefix.is_none_or(|pfx| {
+        let with_slash = if pfx.ends_with('/') {
+            pfx.to_string()
+        } else {
+            format!("{pfx}/")
+        };
+        file_path.starts_with(&with_slash) || file_path == pfx
+    })
 }
 
 /// Computes all 5 health dimensions and the composite signal for a given scope.
-pub(super) async fn compute_health_snapshot(
+async fn compute_health_snapshot(
     cg: &TraceDecay,
     path_prefix: Option<&str>,
 ) -> Result<HealthSnapshot> {
@@ -70,16 +81,7 @@ pub(super) async fn compute_health_snapshot(
     let all_nodes = cg.get_all_nodes().await?;
     let nodes: Vec<_> = all_nodes
         .iter()
-        .filter(|n| {
-            path_prefix.is_none_or(|pfx| {
-                let with_slash = if pfx.ends_with('/') {
-                    pfx.to_string()
-                } else {
-                    format!("{pfx}/")
-                };
-                n.file_path.starts_with(&with_slash) || n.file_path == pfx
-            })
-        })
+        .filter(|n| file_matches_scope(&n.file_path, path_prefix))
         .collect();
 
     let mut per_file_complexity: HashMap<String, f64> = HashMap::new();
@@ -99,16 +101,9 @@ pub(super) async fn compute_health_snapshot(
     let dead = cg
         .find_dead_code(&[NodeKind::Function, NodeKind::Method], false)
         .await?;
-    let dead_in_scope = dead.iter().filter(|n| {
-        path_prefix.is_none_or(|pfx| {
-            let with_slash = if pfx.ends_with('/') {
-                pfx.to_string()
-            } else {
-                format!("{pfx}/")
-            };
-            n.file_path.starts_with(&with_slash) || n.file_path == pfx
-        })
-    });
+    let dead_in_scope = dead
+        .iter()
+        .filter(|n| file_matches_scope(&n.file_path, path_prefix));
     let dead_count = dead_in_scope.count();
     let total_fns = nodes
         .iter()
@@ -193,16 +188,7 @@ pub(super) async fn handle_gini(
     // Apply path filter
     let nodes: Vec<_> = all_nodes
         .into_iter()
-        .filter(|n| {
-            path_prefix.is_none_or(|pfx| {
-                let with_slash = if pfx.ends_with('/') {
-                    pfx.to_string()
-                } else {
-                    format!("{pfx}/")
-                };
-                n.file_path.starts_with(&with_slash) || n.file_path == pfx
-            })
-        })
+        .filter(|n| file_matches_scope(&n.file_path, path_prefix))
         .collect();
 
     // Build named_values per metric+scope
@@ -641,7 +627,7 @@ pub(super) async fn handle_dsm(
     let formatted = serde_json::to_string(&output).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": super::truncated_json_envelope_with_handle(Some(cg.project_root()), &formatted) }]
+            "content": [{ "type": "text", "text": truncated_json_envelope_with_handle(Some(cg.project_root()), &formatted) }]
         }),
         touched_files: vec![],
     })
@@ -806,16 +792,7 @@ pub(super) async fn handle_test_risk(
                 && !skip_coverage.contains(&n.id)
                 && !n.qualified_name.contains("::tests::")
         })
-        .filter(|n| {
-            path_prefix.is_none_or(|pfx| {
-                let with_slash = if pfx.ends_with('/') {
-                    pfx.to_string()
-                } else {
-                    format!("{pfx}/")
-                };
-                n.file_path.starts_with(&with_slash) || n.file_path == pfx
-            })
-        })
+        .filter(|n| file_matches_scope(&n.file_path, path_prefix))
         .collect();
 
     // Phase-1 honest bucketing: non-`src/` code (dashboard Python, scripts,
@@ -1101,16 +1078,19 @@ pub(super) async fn handle_test_map(
 // Session start / end handlers
 // ---------------------------------------------------------------------------
 
-/// Handles `tracedecay_session_start` tool calls.
-pub(super) async fn handle_session_start(
-    cg: &TraceDecay,
-    args: Value,
-    scope_prefix: Option<&str>,
-) -> Result<ToolResult> {
-    let path_prefix = effective_path(&args, scope_prefix);
-    let snap = compute_health_snapshot(cg, path_prefix).await?;
+fn session_dimension_values(snap: &HealthSnapshot) -> [(&'static str, f64); 6] {
+    [
+        ("acyclicity", snap.acyclicity),
+        ("depth", snap.depth),
+        ("equality", snap.equality),
+        ("redundancy", snap.redundancy),
+        ("modularity", snap.modularity),
+        ("coverage_discipline", snap.coverage_discipline),
+    ]
+}
 
-    let baseline = json!({
+fn session_baseline_snapshot(snap: &HealthSnapshot) -> Value {
+    json!({
         "quality_signal": snap.quality_signal,
         "files_analyzed": snap.files_analyzed,
         "dimensions": {
@@ -1122,7 +1102,63 @@ pub(super) async fn handle_session_start(
             "coverage_discipline": snap.coverage_discipline,
         },
         "timestamp": crate::tracedecay::current_timestamp(),
+    })
+}
+
+fn session_dimension_deltas(
+    dims_before: &Value,
+    snap: &HealthSnapshot,
+) -> (serde_json::Map<String, Value>, Vec<String>) {
+    let mut dimensions = serde_json::Map::new();
+    let mut degraded_dimensions: Vec<String> = vec![];
+
+    for (name, after_val) in session_dimension_values(snap) {
+        let before_val = dims_before[name].as_f64().unwrap_or(0.0);
+        let dim_delta = after_val - before_val;
+        let status = if dim_delta > 0.001 {
+            "improved"
+        } else if dim_delta < -0.001 {
+            degraded_dimensions.push(name.to_string());
+            "degraded"
+        } else {
+            "unchanged"
+        };
+        dimensions.insert(
+            name.to_string(),
+            json!({
+                "before": (before_val * 10000.0).round() / 10000.0,
+                "after": (after_val * 10000.0).round() / 10000.0,
+                "delta": (dim_delta * 10000.0).round() / 10000.0,
+                "status": status,
+            }),
+        );
+    }
+
+    (dimensions, degraded_dimensions)
+}
+
+fn session_tool_result(cg: &TraceDecay, args: &Value, output: &Value) -> ToolResult {
+    let text = render::finalize(Some(cg.project_root()), args, output, || {
+        render::generic_md(output)
     });
+    ToolResult {
+        value: json!({
+            "content": [{ "type": "text", "text": text }]
+        }),
+        touched_files: vec![],
+    }
+}
+
+/// Handles `tracedecay_session_start` tool calls.
+pub(super) async fn handle_session_start(
+    cg: &TraceDecay,
+    args: Value,
+    scope_prefix: Option<&str>,
+) -> Result<ToolResult> {
+    let path_prefix = effective_path(&args, scope_prefix);
+    let snap = compute_health_snapshot(cg, path_prefix).await?;
+
+    let baseline = session_baseline_snapshot(&snap);
 
     // Write baseline to the active project store.
     let tracedecay_dir = &cg.store_layout().data_root;
@@ -1145,15 +1181,7 @@ pub(super) async fn handle_session_start(
         "quality_signal": snap.quality_signal,
         "files_analyzed": snap.files_analyzed,
     });
-    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-        render::generic_md(&output)
-    });
-    Ok(ToolResult {
-        value: json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
-        touched_files: vec![],
-    })
+    Ok(session_tool_result(cg, &args, &output))
 }
 
 /// Handles `tracedecay_session_end` tool calls.
@@ -1171,15 +1199,7 @@ pub(super) async fn handle_session_end(
             "status": "no_baseline",
             "message": "No session baseline found. Call tracedecay_session_start first.",
         });
-        let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-            render::generic_md(&output)
-        });
-        return Ok(ToolResult {
-            value: json!({
-                "content": [{ "type": "text", "text": text }]
-            }),
-            touched_files: vec![],
-        });
+        return Ok(session_tool_result(cg, &args, &output));
     }
 
     // Read baseline
@@ -1209,47 +1229,7 @@ pub(super) async fn handle_session_end(
     let pass = signal_after >= signal_before;
 
     // Compute per-dimension deltas
-    let dim_names = [
-        "acyclicity",
-        "depth",
-        "equality",
-        "redundancy",
-        "modularity",
-        "coverage_discipline",
-    ];
-    let after_vals = [
-        snap.acyclicity,
-        snap.depth,
-        snap.equality,
-        snap.redundancy,
-        snap.modularity,
-        snap.coverage_discipline,
-    ];
-
-    let mut dimensions = serde_json::Map::new();
-    let mut degraded_dimensions: Vec<String> = vec![];
-
-    for (name, after_val) in dim_names.iter().zip(after_vals.iter()) {
-        let before_val = dims_before[name].as_f64().unwrap_or(0.0);
-        let dim_delta = after_val - before_val;
-        let status = if dim_delta > 0.001 {
-            "improved"
-        } else if dim_delta < -0.001 {
-            degraded_dimensions.push((*name).to_string());
-            "degraded"
-        } else {
-            "unchanged"
-        };
-        dimensions.insert(
-            (*name).to_string(),
-            json!({
-                "before": (before_val * 10000.0).round() / 10000.0,
-                "after": (after_val * 10000.0).round() / 10000.0,
-                "delta": (dim_delta * 10000.0).round() / 10000.0,
-                "status": status,
-            }),
-        );
-    }
+    let (dimensions, degraded_dimensions) = session_dimension_deltas(dims_before, &snap);
 
     let output = json!({
         "pass": pass,
@@ -1260,13 +1240,5 @@ pub(super) async fn handle_session_end(
         "degraded_dimensions": degraded_dimensions,
         "dimensions": dimensions,
     });
-    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-        render::generic_md(&output)
-    });
-    Ok(ToolResult {
-        value: json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
-        touched_files: vec![],
-    })
+    Ok(session_tool_result(cg, &args, &output))
 }
