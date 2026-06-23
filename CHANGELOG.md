@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.8](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.7...v0.0.8) - 2026-06-23
+
+### Other
+
+- Address aggregate review follow-ups
+- Stabilize hook hint dedupe across layout races
+- Stabilize merged PR stack
+- Honor git work-tree after -C in hooks
+- Record hook hints and steer new subagents
+
 ## [0.0.7](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.6...v0.0.7) - 2026-06-22
 
 ### Fixed
