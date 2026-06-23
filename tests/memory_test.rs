@@ -1,5 +1,6 @@
 use tempfile::TempDir;
 use tracedecay::db::Database;
+use tracedecay::memory::diff::vector_similarity;
 use tracedecay::memory::encoding::HolographicEncoder;
 use tracedecay::memory::entities::{extract_entities, normalize_entity};
 use tracedecay::memory::retrieval::FactRetriever;
@@ -411,9 +412,24 @@ fn holographic_encoding_is_deterministic_and_round_trips() {
     );
     assert!(
         encoder.similarity(&decoded, &first) > 0.999_999_999,
-        "phase-cosine similarity should be preserved across f32 serialization"
+        "holographic similarity should be preserved across f32 serialization"
     );
     assert!(HolographicEncoder::deserialize(b"not bincode").is_err());
+}
+
+#[test]
+fn write_time_vector_similarity_uses_real_cosine_for_normalized_vectors() {
+    let mut left = vec![0.0; HolographicEncoder::DIMENSIONS];
+    let mut right = vec![0.0; HolographicEncoder::DIMENSIONS];
+    left[0] = 1.0;
+    right[1] = 1.0;
+
+    let sim = vector_similarity(&left, &right);
+
+    assert!(
+        sim.abs() < f64::EPSILON,
+        "expected orthogonal vectors to score near 0, got {sim}"
+    );
 }
 
 #[test]
