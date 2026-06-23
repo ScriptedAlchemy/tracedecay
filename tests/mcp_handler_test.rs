@@ -1417,6 +1417,7 @@ async fn test_search_omits_index_coverage_hint_when_generated_dir_is_included() 
         parsed.as_array().is_some(),
         "search should keep array shape when there is no coverage hint, got: {text}"
     );
+    close_test_graph(cg).await;
 }
 
 #[tokio::test]
@@ -1647,7 +1648,8 @@ async fn fact_store_large_list_response_reports_store_failure_actionably() {
         .unwrap();
     }
 
-    fs::write(response_handle_dir(&cg), "not-a-directory").unwrap();
+    let handle_dir = response_handle_dir(&cg);
+    fs::write(&handle_dir, "not-a-directory").unwrap();
 
     let listed = handle_tool_call(
         &cg,
@@ -1680,6 +1682,9 @@ async fn fact_store_large_list_response_reports_store_failure_actionably() {
         .as_str()
         .unwrap_or_default()
         .contains("re-run the original MCP tool"));
+    fs::remove_file(&handle_dir).unwrap();
+    fs::create_dir_all(&handle_dir).unwrap();
+    close_test_graph(cg).await;
 }
 
 #[tokio::test]
@@ -2476,6 +2481,7 @@ async fn test_doc_coverage() {
         text.contains("total_undocumented"),
         "should have total_undocumented key"
     );
+    close_test_graph(cg).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -2584,6 +2590,7 @@ async fn test_port_status() {
         text.contains("coverage_percent"),
         "should have coverage_percent key"
     );
+    close_test_graph(cg).await;
 }
 
 /// Regression: port_status used to match symbols purely on (name,
@@ -2888,6 +2895,7 @@ async fn test_rank_outgoing() {
         text.contains("outgoing"),
         "should reflect outgoing direction"
     );
+    close_test_graph(cg).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -3343,6 +3351,7 @@ async fn test_status_reports_scope_prefix() {
         text.contains("src/mcp"),
         "status should show the actual prefix value"
     );
+    close_test_graph(cg).await;
 }
 
 #[tokio::test]
@@ -3431,6 +3440,7 @@ async fn path_containment_config_rejects_parent_traversal_before_serving_config(
         result.is_err(),
         "config read should reject parent traversal, got {result:?}"
     );
+    close_test_graph(cg).await;
 }
 
 #[tokio::test]
@@ -3954,6 +3964,7 @@ async fn branch_diff_returns_empty_when_base_equals_head() {
     assert_eq!(output["added"].as_array().map(Vec::len), Some(0));
     assert_eq!(output["removed"].as_array().map(Vec::len), Some(0));
     assert_eq!(output["changed"].as_array().map(Vec::len), Some(0));
+    close_test_graph(cg).await;
 }
 
 /// Regression: when ast-grep exits non-zero with empty stderr (no language
@@ -4772,6 +4783,7 @@ async fn test_test_risk_distinguishes_direct_and_closure_attribution() {
         "confidence note should explain the conservative closure signal, got: {}",
         text
     );
+    close_test_graph(cg).await;
 }
 
 #[tokio::test]
@@ -7099,6 +7111,7 @@ async fn lcm_doctor_counts_nested_externalized_payload_refs_as_referenced() {
         payload["diagnostics"]["payloads"]["missing_placeholder_files"],
         0
     );
+    close_test_graph(cg).await;
 }
 
 #[tokio::test]
@@ -7427,6 +7440,7 @@ async fn lcm_doctor_repair_dry_run_reports_fts_rebuild_without_mutating() {
         .iter()
         .any(|action| action["kind"] == "rebuild_raw_fts"));
     assert_eq!(lcm_fts_match_count(&cg, "needle").await, 0);
+    close_test_graph(cg).await;
 }
 
 #[tokio::test]
@@ -8012,6 +8026,7 @@ async fn lcm_compress_oversized_needs_summary_uses_retrievable_full_payload() {
     assert!(full_payload["summary_request"]
         .get("source_messages_truncated_for_mcp")
         .is_none());
+    close_test_graph(cg).await;
 }
 
 #[tokio::test]

@@ -1,0 +1,18 @@
+[profile.ci]
+fail-fast = false
+retries = 0
+flaky-result = "fail"
+slow-timeout = { period = "90s", terminate-after = 4 }
+
+[test-groups]
+windows-global-state = { max-threads = 1 }
+
+[[profile.ci.overrides]]
+filter = 'binary_id(tracedecay::mcp_handler_test)'
+platform = { host = 'cfg(windows)' }
+test-group = 'windows-global-state'
+
+[[profile.ci.overrides]]
+filter = 'test(/^doctor::tests::/)'
+platform = { host = 'cfg(windows)' }
+test-group = 'windows-global-state'
