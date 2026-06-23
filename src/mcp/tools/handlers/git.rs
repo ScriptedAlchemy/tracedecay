@@ -700,8 +700,18 @@ pub(super) async fn handle_commit_context(cg: &TraceDecay, args: Value) -> Resul
     };
 
     if changed_files.is_empty() {
+        let output = json!({
+            "changed_files": [],
+            "symbols_by_role": {},
+            "suggested_category": Value::Null,
+            "recent_commits": git_recent_commits(cg.project_root(), 5).unwrap_or_default(),
+            "summary": "No changes detected.",
+        });
+        let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+            render::generic_md(&output)
+        });
         return Ok(ToolResult {
-            value: json!({"content": [{"type": "text", "text": "No changes detected."}]}),
+            value: json!({"content": [{"type": "text", "text": text}]}),
             touched_files: vec![],
         });
     }
