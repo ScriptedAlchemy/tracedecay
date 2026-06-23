@@ -3,6 +3,7 @@ use std::path::Path;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+use tracedecay::sessions::lcm::payload::{delete_external_payload, DeleteOpts};
 use tracedecay::sessions::lcm::{LcmError, LcmStorageKind, LCM_SCHEMA_VERSION};
 
 mod common;
@@ -956,6 +957,74 @@ async fn denies_cross_session_payload_expansion() {
         .lcm_expand_payload("cursor", "session-b", &payload_ref, 0, 100)
         .await;
     assert!(matches!(denied, Err(LcmError::PayloadNotOwnedBySession)));
+}
+
+#[tokio::test]
+async fn delete_external_payload_rejects_referenced_payload_without_hash_verification() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
+    let storage_root = tmp.path().join(".tracedecay");
+    let db = open_lcm_db(&tmp).await;
+    assert!(
+        db.upsert_session(&sample_session("cursor", "session-1"))
+            .await
+    );
+
+    let payload = format!("active referenced payload\n{}", "R".repeat(300_000));
+    let message = raw_message(
+        "cursor",
+        "referenced-payload",
+        "session-1",
+        "tool",
+        &payload,
+    );
+    let store = db.lcm_store(&storage_root);
+    store
+        .ingest_raw_message(&message)
+        .await
+        .expect("payload should ingest");
+    let payload_ref = db
+        .lcm_load_raw_message("cursor", "referenced-payload")
+        .await
+        .unwrap()
+        .payload_ref
+        .expect("payload ref");
+    let payload_path =
+        tracedecay::sessions::lcm::payload::payload_dir(&storage_root).join(&payload_ref);
+    assert!(payload_path.exists());
+
+    let direct_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+    let conn = direct_db.connect().unwrap();
+    let result = delete_external_payload(
+        &conn,
+        &storage_root,
+        &payload_ref,
+        &DeleteOpts {
+            rewrite_placeholders: true,
+            remove_file: true,
+            verify_hash: false,
+        },
+    )
+    .await;
+
+    assert!(matches!(result, Err(LcmError::StillReferenced)));
+    assert!(payload_path.exists());
+    let raw = db
+        .lcm_load_raw_message("cursor", "referenced-payload")
+        .await
+        .expect("referenced raw message should remain");
+    assert_eq!(raw.payload_ref.as_deref(), Some(payload_ref.as_str()));
+    let expanded = store
+        .lcm_expand_payload(
+            "cursor",
+            "session-1",
+            &payload_ref,
+            0,
+            payload.chars().count(),
+        )
+        .await
+        .expect("referenced payload should still expand");
+    assert_eq!(expanded.content, payload);
 }
 
 #[tokio::test]

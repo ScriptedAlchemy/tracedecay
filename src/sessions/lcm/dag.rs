@@ -130,15 +130,34 @@ pub(crate) async fn load_uncondensed_summary_nodes(
                      AND s.source_id = n.node_id
                  )
              ),
-             lineage(root_id, source_kind, source_id) AS (
-               SELECT s.node_id, s.source_kind, s.source_id
+             lineage(root_id, source_kind, source_id, path, depth) AS (
+               SELECT s.node_id,
+                      s.source_kind,
+                      s.source_id,
+                      '|' || s.node_id || CASE
+                          WHEN s.source_kind = 'summary_node' THEN '|' || s.source_id || '|'
+                          ELSE '|'
+                      END,
+                      0
                FROM lcm_summary_sources s
                JOIN unparented u ON u.node_id = s.node_id
                UNION ALL
-               SELECT l.root_id, s.source_kind, s.source_id
+               SELECT l.root_id,
+                      s.source_kind,
+                      s.source_id,
+                      l.path || CASE
+                          WHEN s.source_kind = 'summary_node' THEN s.source_id || '|'
+                          ELSE ''
+                      END,
+                      l.depth + 1
                FROM lineage l
                JOIN lcm_summary_sources s
                  ON l.source_kind = 'summary_node' AND s.node_id = l.source_id
+               WHERE l.depth < 128
+                 AND (
+                   s.source_kind != 'summary_node'
+                   OR instr(l.path, '|' || s.source_id || '|') = 0
+                 )
              ),
              first_raw AS (
                SELECT root_id, MIN(CAST(source_id AS INTEGER)) AS first_source_store_id
@@ -305,10 +324,14 @@ async fn validate_summary_sources(
 
     let child_owners = load_summary_node_owners_by_ids(conn, &child_node_ids).await?;
     for child_node_id in child_node_ids {
-        let Some((provider, session_id)) = child_owners.get(child_node_id.as_str()) else {
+        let Some((provider, session_id, child_depth)) = child_owners.get(child_node_id.as_str())
+        else {
             return Err(LcmError::SummaryNodeNotFound);
         };
         if provider != &draft.provider || session_id != &draft.session_id {
+            return Err(LcmError::SummarySourceNotOwnedBySession);
+        }
+        if *child_depth >= draft.depth {
             return Err(LcmError::SummarySourceNotOwnedBySession);
         }
     }
@@ -574,7 +597,7 @@ async fn load_raw_message_owners_by_store_ids(
 async fn load_summary_node_owners_by_ids(
     conn: &Connection,
     node_ids: &[String],
-) -> Result<BTreeMap<String, (String, String)>, LcmError> {
+) -> Result<BTreeMap<String, (String, String, i64)>, LcmError> {
     let unique_node_ids = node_ids
         .iter()
         .cloned()
@@ -588,7 +611,7 @@ async fn load_summary_node_owners_by_ids(
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
-        "SELECT node_id, provider, session_id
+        "SELECT node_id, provider, session_id, depth
          FROM lcm_summary_nodes
          WHERE node_id IN ({placeholders})"
     );
@@ -606,7 +629,8 @@ async fn load_summary_node_owners_by_ids(
         let node_id: String = row.get(0)?;
         let provider: String = row.get(1)?;
         let session_id: String = row.get(2)?;
-        out.insert(node_id, (provider, session_id));
+        let depth: i64 = row.get(3)?;
+        out.insert(node_id, (provider, session_id, depth));
     }
     Ok(out)
 }

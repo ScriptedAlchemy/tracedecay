@@ -83,7 +83,7 @@ pub(crate) async fn rebuild_raw_fts(conn: &Connection) -> Option<()> {
     Some(())
 }
 
-pub(crate) async fn ensure_lcm_schema(conn: &Connection) -> Option<()> {
+pub(crate) async fn ensure_lcm_schema(conn: &Connection) -> Result<(), LcmError> {
     // Mirrors hermes-lcm `run_versioned_migrations`: version steps are
     // monotonic, so a database written by a newer release is left untouched
     // (no marker downgrade, no carry-forward re-run against newer data).
@@ -91,7 +91,7 @@ pub(crate) async fn ensure_lcm_schema(conn: &Connection) -> Option<()> {
         .await
         .is_some_and(|version| version >= LCM_SCHEMA_VERSION)
     {
-        return Some(());
+        return Ok(());
     }
 
     conn.execute_batch(
@@ -244,8 +244,7 @@ pub(crate) async fn ensure_lcm_schema(conn: &Connection) -> Option<()> {
                 VALUES (NEW.rowid, NEW.summary_text, NEW.expand_hint, NEW.metadata_json);
             END;",
     )
-    .await
-    .ok()?;
+    .await?;
 
     // Schema v3: the raw-message FTS index dropped the role and
     // metadata_json columns (see RAW_FTS_DDL). The rebuild is gated on the
@@ -262,10 +261,16 @@ pub(crate) async fn ensure_lcm_schema(conn: &Connection) -> Option<()> {
         (),
         "raw FTS presence query returned no rows",
     )
-    .await
-    .is_ok_and(|count| count > 0);
-    if !fts_exists || !raw_fts_structure_is_current(conn).await.unwrap_or(false) {
-        rebuild_raw_fts(conn).await?;
+    .await?
+        > 0;
+    if !fts_exists
+        || !raw_fts_structure_is_current(conn)
+            .await
+            .ok_or_else(|| LcmError::Db("raw FTS structure check failed".to_string()))?
+    {
+        rebuild_raw_fts(conn)
+            .await
+            .ok_or_else(|| LcmError::Db("raw FTS rebuild failed".to_string()))?;
     }
 
     // Schema v2: lifecycle rows gained the compression-boundary cooldown
@@ -287,9 +292,8 @@ pub(crate) async fn ensure_lcm_schema(conn: &Connection) -> Option<()> {
             applied_at = unixepoch()",
         params![MIGRATION_NAME, LCM_SCHEMA_VERSION],
     )
-    .await
-    .ok()?;
-    Some(())
+    .await?;
+    Ok(())
 }
 
 pub(crate) async fn schema_version(conn: &Connection) -> Option<i64> {
@@ -368,23 +372,26 @@ pub(crate) async fn load_raw_message(
     })
 }
 
-async fn carry_forward_legacy_messages(conn: &Connection) -> Option<()> {
-    conn.execute("BEGIN IMMEDIATE", ()).await.ok()?;
+async fn carry_forward_legacy_messages(conn: &Connection) -> Result<(), LcmError> {
+    conn.execute("BEGIN IMMEDIATE", ()).await?;
     let carry_forward = carry_forward_legacy_messages_in_transaction(conn).await;
-    if let Some(()) = carry_forward {
-        if conn.execute("COMMIT", ()).await.is_ok() {
-            Some(())
-        } else {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            None
+    match carry_forward {
+        Ok(()) => {
+            if let Err(err) = conn.execute("COMMIT", ()).await {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(err.into())
+            } else {
+                Ok(())
+            }
         }
-    } else {
-        let _ = conn.execute("ROLLBACK", ()).await;
-        None
+        Err(err) => {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            Err(err)
+        }
     }
 }
 
-async fn carry_forward_legacy_messages_in_transaction(conn: &Connection) -> Option<()> {
+async fn carry_forward_legacy_messages_in_transaction(conn: &Connection) -> Result<(), LcmError> {
     let mut rows = conn
         .query(
             "SELECT provider, message_id, session_id, role, timestamp, ordinal,
@@ -393,17 +400,16 @@ async fn carry_forward_legacy_messages_in_transaction(conn: &Connection) -> Opti
              ORDER BY provider, session_id, ordinal, message_id",
             (),
         )
-        .await
-        .ok()?;
-    while let Some(row) = rows.next().await.ok()? {
-        let provider: String = row.get(0).ok()?;
-        let message_id: String = row.get(1).ok()?;
-        let session_id: String = row.get(2).ok()?;
-        let role: String = row.get(3).ok()?;
-        let timestamp: Option<i64> = row.get(4).ok()?;
-        let ordinal: i64 = row.get(5).ok()?;
-        let content: String = row.get(6).ok()?;
-        let metadata_json: Option<String> = row.get(7).ok()?;
+        .await?;
+    while let Some(row) = rows.next().await? {
+        let provider: String = row.get(0)?;
+        let message_id: String = row.get(1)?;
+        let session_id: String = row.get(2)?;
+        let role: String = row.get(3)?;
+        let timestamp: Option<i64> = row.get(4)?;
+        let ordinal: i64 = row.get(5)?;
+        let content: String = row.get(6)?;
+        let metadata_json: Option<String> = row.get(7)?;
         let legacy_truncated = content.contains(TRUNCATION_MARKER);
         let content_hash = raw::sha256_hex(&content);
         let snippet_text = raw::derived_text_for_snippet(&content);
@@ -432,8 +438,118 @@ async fn carry_forward_legacy_messages_in_transaction(conn: &Connection) -> Opti
                 util::opt_text(metadata_json.as_deref()),
             ],
         )
-        .await
-        .ok()?;
+        .await?;
     }
-    Some(())
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use libsql::Builder;
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn ensure_lcm_schema_errors_and_rolls_back_failed_legacy_carry_forward(
+    ) -> Result<(), String> {
+        let tmp = TempDir::new().map_err(|err| err.to_string())?;
+        let db_path = tmp.path().join("sessions.db");
+        let db = Builder::new_local(&db_path)
+            .build()
+            .await
+            .map_err(|err| err.to_string())?;
+        let conn = db.connect().map_err(|err| err.to_string())?;
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                provider TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                project_key TEXT NOT NULL,
+                project_path TEXT NOT NULL,
+                title TEXT,
+                started_at INTEGER,
+                ended_at INTEGER,
+                transcript_path TEXT,
+                metadata_json TEXT,
+                PRIMARY KEY(provider, session_id)
+            );
+            CREATE TABLE session_messages (
+                provider TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                timestamp INTEGER,
+                ordinal INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                kind TEXT,
+                model TEXT,
+                tool_names TEXT,
+                source_path TEXT,
+                source_offset INTEGER,
+                metadata_json TEXT,
+                PRIMARY KEY(provider, message_id)
+            );
+            CREATE TABLE lcm_raw_messages (
+                provider TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                store_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                role TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                timestamp INTEGER,
+                content TEXT,
+                content_hash TEXT NOT NULL,
+                storage_kind TEXT NOT NULL CHECK(storage_kind IN ('inline', 'external')),
+                payload_ref TEXT,
+                snippet_text TEXT NOT NULL,
+                index_text TEXT NOT NULL,
+                legacy_source INTEGER NOT NULL DEFAULT 0,
+                legacy_truncated INTEGER NOT NULL DEFAULT 0,
+                metadata_json TEXT,
+                UNIQUE(provider, message_id)
+            );
+            CREATE TRIGGER lcm_raw_messages_fail_second
+            BEFORE INSERT ON lcm_raw_messages
+            WHEN NEW.message_id = 'legacy-message-2'
+            BEGIN
+                SELECT RAISE(ABORT, 'legacy carry-forward insert failed');
+            END;
+            INSERT INTO sessions(provider, session_id, project_key, project_path)
+            VALUES ('cursor', 'legacy-session', '/tmp/project', '/tmp/project');
+            INSERT INTO session_messages(provider, message_id, session_id, role, ordinal, text)
+            VALUES
+              ('cursor', 'legacy-message-1', 'legacy-session', 'assistant', 1, 'legacy one'),
+              ('cursor', 'legacy-message-2', 'legacy-session', 'assistant', 2, 'legacy two');",
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+
+        let Err(err) = ensure_lcm_schema(&conn).await else {
+            return Err("failed carry-forward insert should propagate".to_string());
+        };
+        assert!(matches!(err, LcmError::Db(_)));
+        assert_eq!(
+            util::fetch_i64(
+                &conn,
+                "SELECT COUNT(*) FROM lcm_raw_messages",
+                (),
+                "raw count",
+            )
+            .await
+            .map_err(|err| err.to_string())?,
+            0
+        );
+        assert_eq!(
+            util::fetch_i64(
+                &conn,
+                "SELECT COUNT(*) FROM session_schema_migrations WHERE name = 'lcm'",
+                (),
+                "migration marker count",
+            )
+            .await
+            .map_err(|err| err.to_string())?,
+            0
+        );
+        Ok(())
+    }
 }

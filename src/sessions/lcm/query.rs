@@ -1616,17 +1616,22 @@ pub(crate) async fn payload_health_detail(
         i64::try_from(gc_config.reap_missing_after).unwrap_or(i64::MAX);
 
     let last_gc_at = gc_meta_i64(conn, "last_gc_at").await?;
+    let last_gc_duration_ms = gc_meta_i64(conn, "last_gc_duration_ms")
+        .await?
+        .map(|value| value.max(0) as u64);
     let last_gc_error = schema::get_gc_meta(conn, "last_error").await?;
     let last_reaped_refs = gc_meta_i64(conn, "last_reaped_refs").await?;
     let last_reaped_bytes = gc_meta_i64(conn, "last_reaped_bytes")
         .await?
         .map(|value| value.max(0) as u64);
-    let last_gc_status = match (last_gc_at, last_gc_error.as_deref()) {
-        (None, _) => None,
-        (Some(_), None | Some("")) => Some("ok".to_string()),
-        (Some(_), Some("partial")) => Some("partial".to_string()),
-        (Some(_), Some(_)) => Some("failed".to_string()),
-    };
+    let last_gc_status = schema::get_gc_meta(conn, "last_gc_status")
+        .await?
+        .or_else(|| match (last_gc_at, last_gc_error.as_deref()) {
+            (None, _) => None,
+            (Some(_), None | Some("")) => Some("ok".to_string()),
+            (Some(_), Some("partial")) => Some("partial".to_string()),
+            (Some(_), Some(_)) => Some("failed".to_string()),
+        });
 
     let mut missing_count = 0_i64;
     let mut missing_payload_refs = Vec::new();
@@ -1778,7 +1783,7 @@ pub(crate) async fn payload_health_detail(
         },
         payload_gc: LcmPayloadGcStatus {
             last_gc_at,
-            last_gc_duration_ms: None,
+            last_gc_duration_ms,
             last_gc_status,
             last_gc_error,
             last_reaped_refs,
