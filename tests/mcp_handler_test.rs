@@ -34,11 +34,6 @@ use tracedecay::tracedecay::TraceDecay;
 
 static GLOBAL_DB_ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
-/// Test shim for `tracedecay::mcp::handle_tool_call` that defaults tools to
-/// `format: "json"`. These handler tests assert on structured JSON fields;
-/// since markdown became the default output format, this wrapper keeps every
-/// existing call site parsing JSON without per-call edits. An explicit
-/// `format` in `args` is preserved.
 async fn handle_tool_call(
     cg: &TraceDecay,
     tool_name: &str,
@@ -46,15 +41,9 @@ async fn handle_tool_call(
     server_stats: Option<serde_json::Value>,
     scope_prefix: Option<&str>,
 ) -> tracedecay::errors::Result<ToolResult> {
-    // `context` is markdown-native; `dsm`/`files` own their `format` argument;
-    // `type_hierarchy` returns a text tree. Leave those untouched so their tests
-    // exercise the real default behavior.
     let owns_format = matches!(
         tool_name,
-        "tracedecay_context"
-            | "tracedecay_dsm"
-            | "tracedecay_files"
-            | "tracedecay_type_hierarchy"
+        "tracedecay_context" | "tracedecay_dsm" | "tracedecay_files" | "tracedecay_type_hierarchy"
     );
     if !owns_format {
         if let Some(obj) = args.as_object_mut() {

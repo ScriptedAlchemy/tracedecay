@@ -152,10 +152,6 @@ pub(super) async fn handle_status(
     })
 }
 
-/// Renders `tracedecay_status` as a compact markdown summary: scalar fields in a
-/// table, warning-shaped fields surfaced as bullets, and large nested objects
-/// summarized by size instead of dumped (the JSON form routinely hit the 15K
-/// truncation cliff).
 fn render_status_md(value: &Value) -> String {
     let mut md = Md::new();
     md.heading(2, "Project Status");
@@ -477,7 +473,11 @@ fn project_context_alias_path<'a>(cg: &'a TraceDecay, args: &'a Value) -> PathBu
 /// Handles `tracedecay_project_context` tool calls.
 pub(super) async fn handle_project_context(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let Some((registry_path, db)) = open_project_registry_read_only().await? else {
-        return Ok(project_registry_result(cg, &args, &registry_missing_payload()));
+        return Ok(project_registry_result(
+            cg,
+            &args,
+            &registry_missing_payload(),
+        ));
     };
     let context = if let Some(project_id) = args.get("project_id").and_then(Value::as_str) {
         db.project_registry_context_by_id(project_id).await
@@ -1926,17 +1926,18 @@ pub(super) async fn handle_read(cg: &TraceDecay, args: Value) -> Result<ToolResu
     })
 }
 
-/// Renders a `tracedecay_read` payload as markdown: a metadata line plus the
-/// file body in a fenced code block (language inferred from the extension).
 fn render_read_md(value: &Value) -> String {
     let mut md = Md::new();
-    let file = render::vstr(value, "file");
-    let mode = render::vstr(value, "mode");
+    let file = render::field_str(value, "file");
+    let mode = render::field_str(value, "mode");
     md.heading(2, &format!("{file} ({mode})"));
-    md.field("tokens", &render::vi64(value, "token_count").to_string());
+    md.field(
+        "tokens",
+        &render::field_i64(value, "token_count").to_string(),
+    );
     md.blank();
     let lang = file.rsplit_once('.').map_or("", |(_, ext)| ext);
-    md.code(lang, render::vstr(value, "body"));
+    md.code(lang, render::field_str(value, "body"));
     md.render()
 }
 
@@ -1974,12 +1975,10 @@ pub(super) async fn handle_outline(cg: &TraceDecay, args: Value) -> Result<ToolR
     })
 }
 
-/// Renders a `tracedecay_outline` map as a markdown table (symbol / kind /
-/// lines / visibility) — far denser than the per-row JSON object form.
 fn render_outline_md(value: &Value) -> String {
     let mut md = Md::new();
-    let file = render::vstr(value, "file");
-    let count = render::vi64(value, "symbol_count");
+    let file = render::field_str(value, "file");
+    let count = render::field_i64(value, "symbol_count");
     md.heading(2, &format!("Outline — {file}"));
     md.field("symbols", &count.to_string());
     md.blank();
@@ -1988,18 +1987,18 @@ fn render_outline_md(value: &Value) -> String {
             let rows: Vec<Vec<String>> = symbols
                 .iter()
                 .map(|s| {
-                    let line = render::vi64(s, "line");
-                    let end = render::vi64(s, "end_line");
+                    let line = render::field_i64(s, "line");
+                    let end = render::field_i64(s, "end_line");
                     let span = if end > line {
                         format!("{line}-{end}")
                     } else {
                         line.to_string()
                     };
                     vec![
-                        render::vstr(s, "name").to_string(),
-                        render::vstr(s, "kind").to_string(),
+                        render::field_str(s, "name").to_string(),
+                        render::field_str(s, "kind").to_string(),
                         span,
-                        render::vstr(s, "visibility").to_string(),
+                        render::field_str(s, "visibility").to_string(),
                     ]
                 })
                 .collect();

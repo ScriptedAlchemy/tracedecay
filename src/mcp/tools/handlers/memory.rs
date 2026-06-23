@@ -489,7 +489,9 @@ pub(super) async fn handle_memory_status(cg: &TraceDecay, args: Value) -> Result
     let (db, target_root) = open_target_memory_db(cg, &args).await?;
     let status = TraceDecay::memory_status_for_conn(db.conn()).await?;
     let value = json!({ "status": "ok", "memory": status });
-    let text = render::finalize(Some(&target_root), &args, &value, || render::generic_md(&value));
+    let text = render::finalize(Some(&target_root), &args, &value, || {
+        render::generic_md(&value)
+    });
     Ok(ToolResult {
         value: json!({ "content": [{ "type": "text", "text": text }] }),
         touched_files: vec![],

@@ -78,9 +78,6 @@ pub(super) async fn handle_search(
     })
 }
 
-/// Renders `tracedecay_search` results as markdown: one bullet per hit with the
-/// `node_id` and signature preserved in backticks so the model can chain into
-/// `body`/`callers`/`callees`.
 fn render_search_md(value: &Value) -> String {
     let items = if value.is_array() {
         value.as_array()
@@ -92,16 +89,16 @@ fn render_search_md(value: &Value) -> String {
     match items {
         Some(items) if !items.is_empty() => {
             for it in items {
-                let name = render::vstr(it, "name");
-                let kind = render::vstr(it, "kind");
-                let file = render::vstr(it, "file");
-                let line = render::vi64(it, "line");
-                let id = render::vstr(it, "id");
+                let name = render::field_str(it, "name");
+                let kind = render::field_str(it, "kind");
+                let file = render::field_str(it, "file");
+                let line = render::field_i64(it, "line");
+                let id = render::field_str(it, "id");
                 let score = it.get("score").and_then(Value::as_f64).unwrap_or(0.0);
                 md.bullet(&format!(
                     "**{name}** ({kind}) — {file}:{line} · score {score:.1}"
                 ));
-                let sig = render::vstr(it, "signature");
+                let sig = render::field_str(it, "signature");
                 if sig.is_empty() {
                     md.line(&format!("  `{id}`"));
                 } else {
@@ -303,8 +300,6 @@ pub(super) async fn handle_context(
         );
     }
 
-    // Markdown (default) returns the rendered context document; `format:"json"`
-    // returns the compact serialized TaskContext for programmatic consumers.
     let value = serde_json::to_value(&context).unwrap_or_else(|_| json!({}));
     let text = render::finalize(Some(cg.project_root()), &args, &value, || output);
     Ok(ToolResult {

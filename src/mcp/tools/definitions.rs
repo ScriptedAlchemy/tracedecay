@@ -256,14 +256,6 @@ fn add_registered_project_selector_properties(definitions: &mut [ToolDefinition]
     }
 }
 
-/// Read/list/analysis/context tools whose default output is markdown and which
-/// accept a `format: "markdown" | "json"` argument. Edit, dashboard, retrieve,
-/// and LCM lifecycle/mutation tools are intentionally excluded: their payloads
-/// stay compact JSON because they are consumed programmatically.
-///
-/// This list is the contract for the handler conversion: every tool here MUST
-/// route its output through `render::finalize` so the advertised `format`
-/// argument is actually honored.
 pub(crate) fn format_capable_tool_names() -> &'static [&'static str] {
     &[
         // graph
@@ -344,19 +336,16 @@ pub(crate) fn format_capable_tool_names() -> &'static [&'static str] {
     ]
 }
 
-/// Injects the `format` enum property into every markdown-capable tool schema.
 fn add_format_property(definitions: &mut [ToolDefinition]) {
     for definition in definitions {
         if !format_capable_tool_names().contains(&definition.name.as_str()) {
             continue;
         }
-        let Some(properties) = definition
+        let properties = definition
             .input_schema
             .get_mut("properties")
             .and_then(Value::as_object_mut)
-        else {
-            continue;
-        };
+            .unwrap_or_else(|| panic!("{} must define object properties", definition.name));
         properties.insert(
             "format".to_string(),
             json!({
