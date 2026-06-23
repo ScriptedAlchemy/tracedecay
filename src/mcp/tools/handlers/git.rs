@@ -22,7 +22,7 @@ fn project_response_text(cg: &TraceDecay, text: &str) -> String {
     truncated_json_envelope_with_handle(Some(cg.project_root()), text)
 }
 
-fn git_error_result(cg: &TraceDecay, operation: &str, message: String) -> ToolResult {
+fn git_error_result(cg: &TraceDecay, operation: &str, message: &str) -> ToolResult {
     let output = json!({
         "error": {
             "kind": "git",
@@ -615,7 +615,7 @@ pub(super) async fn handle_changelog(cg: &TraceDecay, args: Value) -> Result<Too
     let changes = match git_diff_file_changes(cg.project_root(), from_ref, to_ref) {
         Ok(files) => files,
         Err(e) => {
-            return Ok(git_error_result(cg, "diff", e));
+            return Ok(git_error_result(cg, "diff", &e));
         }
     };
     let changed_files: Vec<String> = changes.iter().map(|change| change.path.clone()).collect();
@@ -695,7 +695,7 @@ pub(super) async fn handle_commit_context(cg: &TraceDecay, args: Value) -> Resul
     let changed_files = match git_changed_files(cg.project_root(), staged_only) {
         Ok(files) => files,
         Err(e) => {
-            return Ok(git_error_result(cg, "status", e));
+            return Ok(git_error_result(cg, "status", &e));
         }
     };
 
@@ -792,7 +792,7 @@ pub(super) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<To
     let changes = match git_diff_file_changes(cg.project_root(), base, head) {
         Ok(files) => files,
         Err(e) => {
-            return Ok(git_error_result(cg, "diff", e));
+            return Ok(git_error_result(cg, "diff", &e));
         }
     };
     let changed_files: Vec<String> = changes.iter().map(|change| change.path.clone()).collect();
