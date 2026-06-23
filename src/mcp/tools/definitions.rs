@@ -200,6 +200,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_insert_at_symbol(),
         def_find_exact_symbol(),
     ];
+    add_registered_project_selector_properties(&mut definitions);
     if !ast_grep_available() {
         definitions.retain(|d| d.name != "tracedecay_ast_grep_rewrite");
     }
@@ -214,6 +215,44 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         "all tool definitions must have 'tracedecay_' prefix"
     );
     definitions
+}
+
+fn registered_project_selector_tool_names() -> &'static [&'static str] {
+    &[
+        "tracedecay_search",
+        "tracedecay_context",
+        "tracedecay_retrieve",
+        "tracedecay_callers",
+        "tracedecay_callees",
+        "tracedecay_impact",
+        "tracedecay_node",
+        "tracedecay_files",
+        "tracedecay_body",
+        "tracedecay_read",
+        "tracedecay_outline",
+        "tracedecay_signature_search",
+        "tracedecay_implementations",
+        "tracedecay_callers_for",
+        "tracedecay_call_chain",
+        "tracedecay_file_dependents",
+        "tracedecay_find_exact_symbol",
+        "tracedecay_by_qualified_name",
+        "tracedecay_signature",
+        "tracedecay_impls",
+        "tracedecay_derives",
+    ]
+}
+
+fn add_registered_project_selector_properties(definitions: &mut [ToolDefinition]) {
+    for definition in definitions {
+        if !registered_project_selector_tool_names().contains(&definition.name.as_str()) {
+            continue;
+        }
+        let Some(properties) = definition.input_schema.get_mut("properties") else {
+            continue;
+        };
+        *properties = with_project_selector_properties(std::mem::take(properties));
+    }
 }
 
 /// Returns true when the external `ast-grep` binary is on PATH. Result is
@@ -236,10 +275,10 @@ fn def_search() -> ToolDefinition {
     def_always_load(
         "tracedecay_search",
         "Search Symbols",
-        "Search for symbols (functions, structs, traits, etc.) in the code graph by name or keyword.",
+        "Search for symbols (functions, structs, traits, etc.) in the code graph by name or keyword. Defaults to the active project; pass project_id/project_path only when intentionally searching another registered project.",
         json!({
             "type": "object",
-            "properties": {
+            "properties": with_project_selector_properties(json!({
                 "query": {
                     "type": "string",
                     "description": "Search query string to match against symbol names"
@@ -248,7 +287,7 @@ fn def_search() -> ToolDefinition {
                     "type": "number",
                     "description": "Maximum number of results to return (default: 10)"
                 }
-            },
+            })),
             "required": ["query"]
         }),
     )
@@ -258,15 +297,15 @@ fn def_retrieve() -> ToolDefinition {
     def(
         "tracedecay_retrieve",
         "Retrieve Truncated Response",
-        "Use `tracedecay_retrieve` with required argument `handle` to retrieve the exact cached original text for a local response handle emitted by a truncated MCP response. This does not re-run the source tool or read a file/session/node again; handles are scoped to the active project store, expire automatically, and never reference remote storage. Only call it when the missing details are needed to answer the user's request.",
+        "Use `tracedecay_retrieve` with required argument `handle` to retrieve the exact cached original text for a local response handle emitted by a truncated MCP response. This does not re-run the source tool or read a file/session/node again; handles are scoped to the active project store, expire automatically, and never reference remote storage. If the original truncated response used project_id/project_path, pass the same selector here. Only call it when the missing details are needed to answer the user's request.",
         json!({
             "type": "object",
-            "properties": {
+            "properties": with_project_selector_properties(json!({
                 "handle": {
                     "type": "string",
                     "description": "The required `handle` argument copied exactly from a truncated MCP response envelope."
                 }
-            },
+            })),
             "required": ["handle"]
         }),
     )
@@ -279,7 +318,7 @@ fn def_context() -> ToolDefinition {
         &context_description(0, 3),
         json!({
             "type": "object",
-            "properties": {
+            "properties": with_project_selector_properties(json!({
                 "task": {
                     "type": "string",
                     "description": "Natural language description of the task or question"
@@ -319,7 +358,7 @@ fn def_context() -> ToolDefinition {
                     "type": "number",
                     "description": "Maximum symbols from a single file in results. Prevents one large file from dominating (default: max_nodes/3, minimum 3)"
                 }
-            },
+            })),
             "required": ["task"]
         }),
     )
@@ -419,6 +458,56 @@ fn def_project_context() -> ToolDefinition {
             }
         }),
     )
+}
+
+fn project_selector_properties() -> Value {
+    json!({
+        "project_selector": project_selector_object(
+            "Optional registered project selector. Omit to use the active project.",
+            "query",
+        ),
+        "project_id": {
+            "type": "string",
+            "description": "Convenience selector: registered project id to query instead of the active project."
+        },
+        "project_path": {
+            "type": "string",
+            "description": "Convenience selector: registered project root path or alias to query instead of the active project."
+        }
+    })
+}
+
+fn with_project_selector_properties(mut properties: Value) -> Value {
+    let Some(target) = properties.as_object_mut() else {
+        return properties;
+    };
+    if let Some(selector_props) = project_selector_properties().as_object() {
+        for (key, value) in selector_props {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+    properties
+}
+
+fn project_selector_object(description: &str, verb: &str) -> Value {
+    json!({
+        "type": "object",
+        "description": description,
+        "properties": {
+            "project_id": {
+                "type": "string",
+                "description": format!("Registered project id to {verb}.")
+            },
+            "path": {
+                "type": "string",
+                "description": format!("Registered project root path or alias to {verb}.")
+            },
+            "project_path": {
+                "type": "string",
+                "description": "Alias for path."
+            }
+        }
+    })
 }
 
 fn def_callers_for() -> ToolDefinition {
@@ -1748,6 +1837,18 @@ fn memory_fact_properties() -> Value {
         "note": {
             "type": "string",
             "description": "Human-readable feedback note or action context."
+        },
+        "project_selector": project_selector_object(
+            "Advanced optional registered project selector. Omit to use the active project.",
+            "query",
+        ),
+        "project_id": {
+            "type": "string",
+            "description": "Optional registered project id to query instead of the active project."
+        },
+        "project_path": {
+            "type": "string",
+            "description": "Optional registered project root path or alias to query instead of the active project."
         }
     })
 }
@@ -1811,6 +1912,7 @@ fn def_fact_store() -> ToolDefinition {
         "tracedecay_fact_store",
         "Fact Store",
         "Add, search, probe, relate, reason over, get, update, remove, or list holographic memory facts. The action field selects the operation. \
+         Defaults to the active project; project_id/project_path selectors are supported for read-only retrieval actions only (search/probe/related/reason/contradict/get/list). \
          The add result carries a write-time diff report (diff/closest_fact_id/similarity/reason): near_duplicate = a very similar fact exists \
          (prefer updating it), possible_conflict = a negation/state-change cue suggests supersession (confirm which fact is current), \
          rejected_secret_like = credential-like content was NOT stored. The get action returns the full fact plus trust_history so operators can answer \
@@ -1829,7 +1931,7 @@ fn def_fact_feedback() -> ToolDefinition {
     def_rw(
         "tracedecay_fact_feedback",
         "Fact Feedback",
-        "Record helpful/unhelpful feedback for a memory fact and adjust its trust score.",
+        "Record helpful/unhelpful feedback for an active-project memory fact and adjust its trust score.",
         json!({
             "type": "object",
             "properties": {
@@ -1887,10 +1989,10 @@ fn def_memory_status() -> ToolDefinition {
     def_rw(
         "tracedecay_memory_status",
         "Memory Status",
-        "Repair derived holographic memory vectors and banks, then return fact/entity counts, trust distribution, below-threshold and missing-vector signals, capacity-per-bank, and repair stats. Human/operator equivalents: `tracedecay memory status` and `GET /api/plugins/holographic/status`.",
+        "Repair derived holographic memory vectors and banks, then return fact/entity counts, trust distribution, below-threshold and missing-vector signals, capacity-per-bank, and repair stats. Defaults to the active project; pass project_id or project_path only when intentionally checking another registered project. Human/operator equivalents: `tracedecay memory status` and `GET /api/plugins/holographic/status`.",
         json!({
             "type": "object",
-            "properties": {}
+            "properties": project_selector_properties()
         }),
     )
 }
@@ -1899,7 +2001,7 @@ fn def_message_search() -> ToolDefinition {
     def(
         "tracedecay_message_search",
         "Message Search",
-        "Search ingested Cursor/Codex/agent transcript messages stored in tracedecay's active project session-message FTS index.",
+        "Search ingested Cursor/Codex/agent transcript messages. Defaults to the active project's session-message FTS index; pass project_id or project_path only when intentionally searching another registered project.",
         json!({
             "type": "object",
             "properties": {
@@ -1914,7 +2016,7 @@ fn def_message_search() -> ToolDefinition {
                 },
                 "project_key": {
                     "type": "string",
-                    "description": "Optional project key/path filter. For Cursor transcripts this is the project root path."
+                    "description": "Optional provider-level project key/path filter within the selected session-message store. This is not a registered-project selector; use project_id or project_path to search another registered project's store."
                 },
                 "include_subagents": {
                     "type": "boolean",
@@ -1932,6 +2034,18 @@ fn def_message_search() -> ToolDefinition {
                 "limit": {
                     "type": "number",
                     "description": "Maximum number of messages to return (default: 10, max: 50)."
+                },
+                "project_selector": project_selector_object(
+                    "Advanced optional registered project selector. Omit to use the active project.",
+                    "search",
+                ),
+                "project_id": {
+                    "type": "string",
+                    "description": "Optional registered project id to search instead of the active project."
+                },
+                "project_path": {
+                    "type": "string",
+                    "description": "Optional registered project root path or alias to search instead of the active project."
                 }
             },
             "required": ["query"]
@@ -2557,11 +2671,11 @@ fn def_lcm_compress() -> ToolDefinition {
                 },
                 "summarizer": {
                     "type": "object",
-                    "description": "Deterministic summarizer mode: noop, fake, provided, or hermes_auxiliary.",
+                    "description": "Runtime summarizer mode: provided or hermes_auxiliary.",
                     "properties": {
                         "mode": {
                             "type": "string",
-                            "enum": ["noop", "fake", "provided", "hermes_auxiliary"]
+                            "enum": ["provided", "hermes_auxiliary"]
                         },
                         "summary_text": {"type": "string"},
                         "route": {"type": "string"}

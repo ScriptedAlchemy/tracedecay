@@ -116,8 +116,12 @@ def main():
     ok("should_compress_preflight honors the bool ABC contract")
 
     status = unwrap_tool_json(engine.handle_tool_call("lcm_status", {}))
-    assert status.get("session_id") == "stock-check-session", status
-    ok("lcm_status dispatch round-trips")
+    if status.get("status") == "not_ingested":
+        assert status.get("store_exists") is False, status
+        ok("lcm_status dispatch round-trips", "not_ingested before compress")
+    else:
+        assert status.get("session_id") == "stock-check-session", status
+        ok("lcm_status dispatch round-trips")
 
     messages = [
         {"role": "user", "content": "hello"},

@@ -153,16 +153,11 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
             }
         }
         MigrateAction::Export {
-            from_profile,
+            from_profile: _,
             project,
             project_id,
             to,
         } => {
-            if !from_profile {
-                return Err(tracedecay::errors::TraceDecayError::Config {
-                    message: "migrate export currently supports only --from-profile".to_string(),
-                });
-            }
             let project_id = match project_id {
                 Some(project_id) => project_id,
                 None => {
@@ -344,6 +339,66 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
                     report.issues.len()
                 );
                 println!("apply supported: yes (re-run with --apply after review)");
+            }
+        }
+        MigrateAction::RegistryGc {
+            prefix,
+            apply,
+            json,
+        } => {
+            let global_db = tracedecay::global_db::GlobalDb::open()
+                .await
+                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                    message: "could not open global DB for registry cleanup".to_string(),
+                })?;
+            let projects = global_db.list_code_projects(usize::MAX).await;
+            let prefix_path = prefix.as_deref().map(PathBuf::from);
+            let stale: Vec<_> = projects
+                .into_iter()
+                .filter(|project| {
+                    prefix_path.as_ref().is_none_or(|prefix| {
+                        PathBuf::from(&project.canonical_root).starts_with(prefix)
+                    })
+                })
+                .filter(|project| !PathBuf::from(&project.canonical_root).exists())
+                .collect();
+            let deleted = if apply {
+                let project_ids: Vec<String> = stale
+                    .iter()
+                    .map(|project| project.project_id.clone())
+                    .collect();
+                global_db.delete_code_projects(&project_ids).await
+            } else {
+                0
+            };
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "apply": apply,
+                        "prefix": prefix,
+                        "candidate_count": stale.len(),
+                        "deleted_count": deleted,
+                        "candidates": stale,
+                    }))?
+                );
+            } else {
+                println!(
+                    "registry-gc: {} stale project(s){}",
+                    stale.len(),
+                    if apply { " selected" } else { " found" }
+                );
+                if apply {
+                    println!("deleted: {deleted}");
+                } else {
+                    println!("dry run: re-run with --apply to delete registry metadata");
+                }
+                for project in stale.iter().take(20) {
+                    println!("{} {}", project.project_id, project.canonical_root);
+                }
+                if stale.len() > 20 {
+                    println!("... {} more", stale.len() - 20);
+                }
             }
         }
         MigrateAction::Rollback {
@@ -971,7 +1026,7 @@ pub(crate) async fn handle_no_command() -> tracedecay::errors::Result<()> {
     })?;
     let answer = answer.trim();
     if answer.is_empty() || answer.eq_ignore_ascii_case("y") {
-        init_and_index(&project_path, &[], false).await?;
+        init_and_index(&project_path, &[], &[], false).await?;
     }
     Ok(())
 }
@@ -979,6 +1034,7 @@ pub(crate) async fn handle_no_command() -> tracedecay::errors::Result<()> {
 pub(crate) async fn handle_init(
     path: Option<String>,
     skip_folders: Vec<String>,
+    include_folders: Vec<String>,
 ) -> tracedecay::errors::Result<()> {
     let project_path = tracedecay::config::resolve_path(path);
     if TraceDecay::is_initialized(&project_path) {
@@ -992,7 +1048,7 @@ pub(crate) async fn handle_init(
     }
 
     let version_handle = std::thread::spawn(tracedecay::cloud::fetch_latest_version);
-    init_and_index(&project_path, &skip_folders, false).await?;
+    init_and_index(&project_path, &skip_folders, &include_folders, false).await?;
     maybe_print_parallel_update_notice(version_handle);
     Ok(())
 }
@@ -1001,6 +1057,7 @@ pub(crate) async fn handle_sync(
     path: Option<String>,
     force: bool,
     skip_folders: Vec<String>,
+    include_folders: Vec<String>,
     doctor: bool,
     verbose: bool,
 ) -> tracedecay::errors::Result<()> {
@@ -1024,10 +1081,11 @@ pub(crate) async fn handle_sync(
     let version_handle = std::thread::spawn(tracedecay::cloud::fetch_latest_version);
 
     if force {
-        init_and_index(&project_path, &skip_folders, verbose).await?;
+        init_and_index(&project_path, &skip_folders, &include_folders, verbose).await?;
     } else {
         let mut cg = TraceDecay::open(&project_path).await?;
         cg.add_skip_folders(&skip_folders);
+        cg.add_include_folders(&include_folders);
         let spinner = Spinner::new();
         let sync_start = std::time::Instant::now();
         let result = cg
@@ -1195,6 +1253,7 @@ fn maybe_print_parallel_update_notice(version_handle: std::thread::JoinHandle<Op
 pub(crate) async fn init_and_index(
     project_path: &Path,
     skip_folders: &[String],
+    include_folders: &[String],
     verbose: bool,
 ) -> tracedecay::errors::Result<TraceDecay> {
     if !project_path.is_dir() {
@@ -1242,6 +1301,7 @@ pub(crate) async fn init_and_index(
         cg
     };
     cg.add_skip_folders(skip_folders);
+    cg.add_include_folders(include_folders);
     let spinner = Spinner::new();
     let index_start = std::time::Instant::now();
     let result = cg

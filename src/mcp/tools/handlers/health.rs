@@ -26,7 +26,11 @@ use crate::tracedecay::TraceDecay;
 use crate::types::{EdgeKind, NodeKind};
 
 use super::super::ToolResult;
-use super::{effective_path, truncate_response, unique_file_paths};
+use super::{effective_path, truncated_json_envelope_with_handle, unique_file_paths};
+
+fn project_response_text(cg: &TraceDecay, text: &str) -> String {
+    truncated_json_envelope_with_handle(Some(cg.project_root()), text)
+}
 
 // ---------------------------------------------------------------------------
 // Shared health computation helper
@@ -347,7 +351,7 @@ pub(super) async fn handle_gini(
     let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files: vec![],
     })
@@ -394,7 +398,7 @@ pub(super) async fn handle_dependency_depth(
     let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files: vec![],
     })
@@ -470,7 +474,7 @@ pub(super) async fn handle_health(
     let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files: vec![],
     })
@@ -486,7 +490,7 @@ pub(super) async fn handle_runtime(cg: &TraceDecay, _args: Value) -> Result<Tool
     let formatted = crate::runtime_telemetry::to_pretty_json(&snap);
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files: vec![],
     })
@@ -628,7 +632,7 @@ pub(super) async fn handle_dsm(
     let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files: vec![],
     })
@@ -989,7 +993,7 @@ pub(super) async fn handle_test_risk(
     let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files: vec![],
     })
@@ -1075,7 +1079,7 @@ pub(super) async fn handle_test_map(
     let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
     let touched_files = unique_file_paths(source_nodes.iter().map(|n| n.file_path.as_str()));
     Ok(ToolResult {
-        value: json!({"content": [{"type": "text", "text": truncate_response(&formatted)}]}),
+        value: json!({"content": [{"type": "text", "text": project_response_text(cg, &formatted)}]}),
         touched_files,
     })
 }
@@ -1131,7 +1135,7 @@ pub(super) async fn handle_session_start(
     let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files: vec![],
     })
@@ -1155,7 +1159,7 @@ pub(super) async fn handle_session_end(
         let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
         return Ok(ToolResult {
             value: json!({
-                "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+                "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
             }),
             touched_files: vec![],
         });
@@ -1242,7 +1246,7 @@ pub(super) async fn handle_session_end(
     let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files: vec![],
     })

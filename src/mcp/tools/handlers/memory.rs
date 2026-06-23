@@ -1,21 +1,25 @@
 //! Cross-session and holographic memory handlers.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
+use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::retrieval::FactRetriever;
 use crate::memory::store::MemoryStore;
 use crate::memory::trust::DEFAULT_TRUST;
 use crate::memory::types::{
-    AddFactRequest, FeedbackAction, FeedbackRequest, MemoryCategory, SearchFactsRequest,
-    UpdateFactRequest,
+    AddFactRequest, FactRecord, FactSearchResult, FeedbackAction, FeedbackRequest, MemoryCategory,
+    SearchFactsRequest, UpdateFactRequest,
 };
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
-use super::truncated_json_envelope_with_handle;
+use super::{
+    global_db_profile_root, project_registry_context, project_selector_present,
+    safe_profile_relpath, truncated_json_envelope_with_handle,
+};
 
 const DEFAULT_FACT_LIMIT: usize = 20;
 const MAX_FACT_LIMIT: usize = 200;
@@ -26,6 +30,37 @@ fn tool_json(project_root: Option<&Path>, value: &Value) -> ToolResult {
         value: json!({ "content": [{ "type": "text", "text": truncated_json_envelope_with_handle(project_root, &formatted) }] }),
         touched_files: vec![],
     }
+}
+
+async fn open_target_memory_db(cg: &TraceDecay, args: &Value) -> Result<(Database, PathBuf)> {
+    let Some(context) = project_registry_context(args, &["project_path"]).await? else {
+        return Ok((
+            cg.open_project_store_db().await?,
+            cg.project_root().to_path_buf(),
+        ));
+    };
+    let profile_root = global_db_profile_root()?;
+    let graph_relpath = context
+        .stores
+        .iter()
+        .flat_map(|store| store.artifacts.iter())
+        .find(|artifact| artifact.artifact_kind == "graph_db")
+        .map(|artifact| artifact.relpath.as_str())
+        .ok_or_else(|| {
+            config_error(format!(
+                "project {} has no registered graph_db artifact",
+                context.project.project_id
+            ))
+        })?;
+    let db_path = profile_root.join(safe_profile_relpath(graph_relpath)?);
+    if !db_path.is_file() {
+        return Err(config_error(format!(
+            "registered graph_db artifact does not exist: {}",
+            db_path.display()
+        )));
+    }
+    let (db, _) = Database::open(&db_path).await?;
+    Ok((db, PathBuf::from(context.project.display_root)))
 }
 
 fn config_error(message: impl Into<String>) -> TraceDecayError {
@@ -142,11 +177,11 @@ fn results_envelope(action: &str, results: &Value, count: usize) -> Value {
     })
 }
 
-fn fact_result_ids(results: &[crate::memory::types::FactSearchResult]) -> Vec<i64> {
+fn fact_result_ids(results: &[FactSearchResult]) -> Vec<i64> {
     results.iter().map(|result| result.fact.fact_id).collect()
 }
 
-fn fact_ids(facts: &[crate::memory::types::FactRecord]) -> Vec<i64> {
+fn fact_ids(facts: &[FactRecord]) -> Vec<i64> {
     facts.iter().map(|fact| fact.fact_id).collect()
 }
 
@@ -159,6 +194,45 @@ fn update_rejected_secret_like(err: &TraceDecayError) -> Option<String> {
         }
         _ => None,
     }
+}
+
+fn action_mutates_memory(action: &str) -> bool {
+    matches!(action, "add" | "update" | "remove")
+}
+
+async fn record_retrieval_counts(
+    store: &MemoryStore<'_>,
+    cross_project_selector: bool,
+    ids: &[i64],
+) -> Result<()> {
+    if !cross_project_selector {
+        store.increment_retrieval_counts(ids).await?;
+    }
+    Ok(())
+}
+
+async fn search_results_envelope(
+    store: &MemoryStore<'_>,
+    cross_project_selector: bool,
+    action: &str,
+    facts: Vec<FactSearchResult>,
+) -> Result<Value> {
+    let ids = fact_result_ids(&facts);
+    record_retrieval_counts(store, cross_project_selector, &ids).await?;
+    let count = facts.len();
+    Ok(results_envelope(action, &json!(facts), count))
+}
+
+async fn fact_records_envelope(
+    store: &MemoryStore<'_>,
+    cross_project_selector: bool,
+    action: &str,
+    facts: Vec<FactRecord>,
+) -> Result<Value> {
+    let ids = fact_ids(&facts);
+    record_retrieval_counts(store, cross_project_selector, &ids).await?;
+    let count = facts.len();
+    Ok(results_envelope(action, &json!(facts), count))
 }
 
 async fn update_trust(args: &Value, store: &MemoryStore<'_>, fact_id: i64) -> Result<Option<f64>> {
@@ -177,7 +251,13 @@ async fn update_trust(args: &Value, store: &MemoryStore<'_>, fact_id: i64) -> Re
 
 pub(super) async fn handle_fact_store(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let action = required_str(&args, "action")?;
-    let db = cg.open_project_store_db().await?;
+    let cross_project_selector = project_selector_present(&args, &["project_path"]);
+    if action_mutates_memory(action) && cross_project_selector {
+        return Err(config_error(
+            "cross-project fact_store writes are not supported; omit project_selector to write the active project",
+        ));
+    }
+    let (db, target_root) = open_target_memory_db(cg, &args).await?;
     let conn = db.conn();
     let store = MemoryStore::new(conn);
     let out = match action {
@@ -228,10 +308,7 @@ pub(super) async fn handle_fact_store(cg: &TraceDecay, args: Value) -> Result<To
                     request.limit.unwrap_or(DEFAULT_FACT_LIMIT),
                 )
                 .await?;
-            let ids = fact_result_ids(&facts);
-            store.increment_retrieval_counts(&ids).await?;
-            let count = facts.len();
-            results_envelope(action, &json!(facts), count)
+            search_results_envelope(&store, cross_project_selector, action, facts).await?
         }
         "probe" => {
             let facts = FactRetriever::new(conn)
@@ -242,10 +319,7 @@ pub(super) async fn handle_fact_store(cg: &TraceDecay, args: Value) -> Result<To
                     limit(&args),
                 )
                 .await?;
-            let ids = fact_result_ids(&facts);
-            store.increment_retrieval_counts(&ids).await?;
-            let count = facts.len();
-            results_envelope(action, &json!(facts), count)
+            search_results_envelope(&store, cross_project_selector, action, facts).await?
         }
         "related" => {
             let limit = limit(&args);
@@ -276,10 +350,7 @@ pub(super) async fn handle_fact_store(cg: &TraceDecay, args: Value) -> Result<To
                     break;
                 }
             }
-            let ids = fact_result_ids(&facts);
-            store.increment_retrieval_counts(&ids).await?;
-            let count = facts.len();
-            results_envelope(action, &json!(facts), count)
+            search_results_envelope(&store, cross_project_selector, action, facts).await?
         }
         "reason" => {
             let entities = request_entities(&args);
@@ -291,10 +362,7 @@ pub(super) async fn handle_fact_store(cg: &TraceDecay, args: Value) -> Result<To
                     limit(&args),
                 )
                 .await?;
-            let ids = fact_result_ids(&facts);
-            store.increment_retrieval_counts(&ids).await?;
-            let count = facts.len();
-            results_envelope(action, &json!(facts), count)
+            search_results_envelope(&store, cross_project_selector, action, facts).await?
         }
         "contradict" => {
             let threshold = optional_f64(&args, "threshold").unwrap_or(0.3);
@@ -385,14 +453,11 @@ pub(super) async fn handle_fact_store(cg: &TraceDecay, args: Value) -> Result<To
                     limit(&args),
                 )
                 .await?;
-            let ids = fact_ids(&facts);
-            store.increment_retrieval_counts(&ids).await?;
-            let count = facts.len();
-            results_envelope(action, &json!(facts), count)
+            fact_records_envelope(&store, cross_project_selector, action, facts).await?
         }
         other => return Err(config_error(format!("unknown fact_store action: {other}"))),
     };
-    Ok(tool_json(Some(cg.project_root()), &out))
+    Ok(tool_json(Some(&target_root), &out))
 }
 
 pub(super) async fn handle_fact_feedback(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
@@ -419,10 +484,11 @@ pub(super) async fn handle_fact_feedback(cg: &TraceDecay, args: Value) -> Result
     ))
 }
 
-pub(super) async fn handle_memory_status(cg: &TraceDecay) -> Result<ToolResult> {
-    let status = cg.project_memory_status().await?;
+pub(super) async fn handle_memory_status(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+    let (db, target_root) = open_target_memory_db(cg, &args).await?;
+    let status = TraceDecay::memory_status_for_conn(db.conn()).await?;
     Ok(tool_json(
-        Some(cg.project_root()),
+        Some(&target_root),
         &json!({ "status": "ok", "memory": status }),
     ))
 }

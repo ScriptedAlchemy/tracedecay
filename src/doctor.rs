@@ -177,6 +177,7 @@ async fn check_stale_stores(dc: &mut DoctorCounters) {
     }
 
     check_orphan_store_manifests(dc, &project_paths);
+    check_stale_code_projects(dc, &gdb).await;
     if stale.is_empty() {
         dc.pass("No stale projects in global DB");
         return;
@@ -219,6 +220,70 @@ async fn check_stale_stores(dc: &mut DoctorCounters) {
 
     let purged = gdb.delete_projects(&stale).await;
     dc.pass(&format!("Purged {purged} stale project(s)"));
+}
+
+async fn check_stale_code_projects(dc: &mut DoctorCounters, gdb: &crate::global_db::GlobalDb) {
+    use std::io::{IsTerminal, Write};
+
+    let stale: Vec<_> = gdb
+        .list_code_projects(usize::MAX)
+        .await
+        .into_iter()
+        .filter(|project| !code_project_root_exists(project))
+        .collect();
+
+    if stale.is_empty() {
+        dc.pass("No stale code project registry rows");
+        return;
+    }
+
+    dc.warn(&format!(
+        "{} stale code project registry row(s) (registered but project root is gone):",
+        stale.len()
+    ));
+    let preview = stale.len().min(10);
+    for project in &stale[..preview] {
+        dc.info(&format!(
+            "  • {} ({})",
+            project.project_id, project.display_root
+        ));
+    }
+    if stale.len() > preview {
+        dc.info(&format!("  … and {} more", stale.len() - preview));
+    }
+
+    if !std::io::stdin().is_terminal() {
+        dc.info("    Re-run `tracedecay doctor` interactively to purge registry rows.");
+        return;
+    }
+
+    eprint!(
+        "  Purge {} stale code project registry row(s)? [Y/n] ",
+        stale.len()
+    );
+    std::io::stderr().flush().ok();
+    let mut answer = String::new();
+    if std::io::stdin().read_line(&mut answer).is_err() {
+        return;
+    }
+    let answer = answer.trim();
+    if !answer.is_empty() && !answer.eq_ignore_ascii_case("y") {
+        dc.info("Skipped code project registry purge.");
+        return;
+    }
+
+    let project_ids: Vec<String> = stale
+        .into_iter()
+        .map(|project| project.project_id)
+        .collect();
+    let purged = gdb.delete_code_projects(&project_ids).await;
+    dc.pass(&format!(
+        "Purged {purged} stale code project registry row(s)"
+    ));
+}
+
+fn code_project_root_exists(project: &crate::global_db::CodeProjectRecord) -> bool {
+    Path::new(&project.canonical_root).exists() || Path::new(&project.display_root).exists()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

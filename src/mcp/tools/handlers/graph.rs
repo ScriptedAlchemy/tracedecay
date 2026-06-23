@@ -14,8 +14,17 @@ use crate::types::{BuildContextOptions, EdgeKind, NodeKind, Visibility};
 
 use super::super::ToolResult;
 use super::{
-    effective_path, filter_by_scope, require_node_id, truncate_response, unique_file_paths,
+    effective_path, filter_by_scope, require_node_id, truncated_json_envelope_with_handle,
+    unique_file_paths,
 };
+
+fn user_line(line: u32) -> u32 {
+    line.saturating_add(1)
+}
+
+fn project_response_text(cg: &TraceDecay, text: &str) -> String {
+    truncated_json_envelope_with_handle(Some(cg.project_root()), text)
+}
 
 /// Handles `tracedecay_search` tool calls.
 pub(super) async fn handle_search(
@@ -37,6 +46,7 @@ pub(super) async fn handle_search(
 
     let results = cg.search(query, limit).await?;
     let results = filter_by_scope(results, scope_prefix, |r| &r.node.file_path);
+    let coverage_hint = cg.index_coverage_hint(results.len());
 
     let touched_files = unique_file_paths(results.iter().map(|r| r.node.file_path.as_str()));
 
@@ -48,17 +58,25 @@ pub(super) async fn handle_search(
                 "name": r.node.name,
                 "kind": r.node.kind.as_str(),
                 "file": r.node.file_path,
-                "line": r.node.start_line,
+                "line": user_line(r.node.start_line),
                 "signature": r.node.signature,
                 "score": r.score,
             })
         })
         .collect();
 
-    let output = serde_json::to_string_pretty(&items).unwrap_or_default();
+    let output_value = if let Some(hint) = coverage_hint {
+        json!({
+            "results": items,
+            "index_coverage_hint": hint,
+        })
+    } else {
+        json!(items)
+    };
+    let output = serde_json::to_string_pretty(&output_value).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&output) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &output) }]
         }),
         touched_files,
     })
@@ -157,6 +175,15 @@ pub(super) async fn handle_context(
             ),
     );
     let mut output = format_context_as_markdown(&context);
+    if let Some(hint) = cg.index_coverage_hint(context.subgraph.nodes.len()) {
+        let _ = writeln!(
+            output,
+            "\n### Index Coverage Hint\n{}\nSkipped trees seen: {}\nTo opt in, run: `{}`\n",
+            hint.message,
+            hint.skipped_dirs.join(", "),
+            hint.suggested_command,
+        );
+    }
 
     // Plan mode: append extension points, test coverage, and dependency info
     if mode == "plan" {
@@ -177,7 +204,7 @@ pub(super) async fn handle_context(
                     node.name,
                     node.kind.as_str(),
                     node.file_path,
-                    node.start_line,
+                    user_line(node.start_line),
                     impl_count,
                 );
                 found_extension = true;
@@ -237,7 +264,7 @@ pub(super) async fn handle_context(
 
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&output) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &output) }]
         }),
         touched_files,
     })
@@ -264,7 +291,7 @@ pub(super) async fn handle_callers(cg: &TraceDecay, args: Value) -> Result<ToolR
                 "name": node.name,
                 "kind": node.kind.as_str(),
                 "file": node.file_path,
-                "line": node.start_line,
+                "line": user_line(node.start_line),
                 "edge_kind": edge.kind.as_str(),
             })
         })
@@ -273,7 +300,7 @@ pub(super) async fn handle_callers(cg: &TraceDecay, args: Value) -> Result<ToolR
     let output = serde_json::to_string_pretty(&items).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&output) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &output) }]
         }),
         touched_files,
     })
@@ -313,7 +340,7 @@ pub(super) async fn handle_callees(cg: &TraceDecay, args: Value) -> Result<ToolR
                 "name": node.name,
                 "kind": node.kind.as_str(),
                 "file": node.file_path,
-                "line": node.start_line,
+                "line": user_line(node.start_line),
                 "edge_kind": edge.kind.as_str(),
                 "dispatch_via_trait": false,
             })
@@ -332,7 +359,7 @@ pub(super) async fn handle_callees(cg: &TraceDecay, args: Value) -> Result<ToolR
                     "name": impl_method.name,
                     "kind": impl_method.kind.as_str(),
                     "file": impl_method.file_path,
-                    "line": impl_method.start_line,
+                    "line": user_line(impl_method.start_line),
                     "edge_kind": "calls",
                     "dispatch_via_trait": true,
                     "dispatch_from": callee.id.clone(),
@@ -350,7 +377,7 @@ pub(super) async fn handle_callees(cg: &TraceDecay, args: Value) -> Result<ToolR
     let output = serde_json::to_string_pretty(&items).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&output) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &output) }]
         }),
         touched_files,
     })
@@ -394,7 +421,7 @@ pub(super) async fn handle_find_exact_symbol(
                 "qualified_name": n.qualified_name,
                 "kind": n.kind.as_str(),
                 "file": n.file_path,
-                "line": n.start_line,
+                "line": user_line(n.start_line),
                 "signature": n.signature,
             })
         })
@@ -408,7 +435,7 @@ pub(super) async fn handle_find_exact_symbol(
     let formatted = serde_json::to_string_pretty(&body).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files,
     })
@@ -445,7 +472,7 @@ pub(super) async fn handle_call_chain(cg: &TraceDecay, args: Value) -> Result<To
                     "name": n.name,
                     "kind": n.kind.as_str(),
                     "file": n.file_path,
-                    "line": n.start_line,
+                    "line": user_line(n.start_line),
                     "edge_kind": edge.as_ref().map(|e| e.kind.as_str()),
                 })
             })
@@ -473,7 +500,7 @@ pub(super) async fn handle_call_chain(cg: &TraceDecay, args: Value) -> Result<To
     let formatted = serde_json::to_string_pretty(&body).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files,
     })
@@ -498,7 +525,7 @@ pub(super) async fn handle_file_dependents(cg: &TraceDecay, args: Value) -> Resu
     let formatted = serde_json::to_string_pretty(&body).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files,
     })
@@ -526,7 +553,7 @@ pub(super) async fn handle_impact(cg: &TraceDecay, args: Value) -> Result<ToolRe
                 "name": n.name,
                 "kind": n.kind.as_str(),
                 "file": n.file_path,
-                "line": n.start_line,
+                "line": user_line(n.start_line),
             })
         })
         .collect();
@@ -540,7 +567,7 @@ pub(super) async fn handle_impact(cg: &TraceDecay, args: Value) -> Result<ToolRe
     let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files,
     })
@@ -591,8 +618,8 @@ pub(super) async fn handle_node(cg: &TraceDecay, args: Value) -> Result<ToolResu
                 "kind": n.kind.as_str(),
                 "qualified_name": n.qualified_name,
                 "file": n.file_path,
-                "start_line": n.start_line,
-                "end_line": n.end_line,
+                "start_line": user_line(n.start_line),
+                "end_line": user_line(n.end_line),
                 "signature": n.signature,
                 "docstring": n.docstring,
                 "visibility": n.visibility.as_str(),
@@ -611,7 +638,7 @@ pub(super) async fn handle_node(cg: &TraceDecay, args: Value) -> Result<ToolResu
             let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
             Ok(ToolResult {
                 value: json!({
-                    "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+                    "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
                 }),
                 touched_files,
             })
@@ -681,7 +708,7 @@ pub(super) async fn handle_similar(cg: &TraceDecay, args: Value) -> Result<ToolR
                 "name": r.node.name,
                 "kind": r.node.kind.as_str(),
                 "file": r.node.file_path,
-                "line": r.node.start_line,
+                "line": user_line(r.node.start_line),
                 "signature": r.node.signature,
                 "score": r.score,
             })
@@ -691,7 +718,7 @@ pub(super) async fn handle_similar(cg: &TraceDecay, args: Value) -> Result<ToolR
     let output = serde_json::to_string_pretty(&items).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&output) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &output) }]
         }),
         touched_files,
     })
@@ -709,7 +736,7 @@ pub(super) async fn handle_rename_preview(cg: &TraceDecay, args: Value) -> Resul
             "name": n.name,
             "kind": n.kind.as_str(),
             "file": n.file_path,
-            "line": n.start_line,
+            "line": user_line(n.start_line),
         }),
         None => {
             return Ok(ToolResult {
@@ -742,7 +769,7 @@ pub(super) async fn handle_rename_preview(cg: &TraceDecay, args: Value) -> Resul
                 "name": source_node.name,
                 "kind": source_node.kind.as_str(),
                 "file": source_node.file_path,
-                "line": source_node.start_line,
+                "line": user_line(source_node.start_line),
                 "edge_kind": edge.kind.as_str(),
                 "edge_line": edge.line,
             }));
@@ -759,7 +786,7 @@ pub(super) async fn handle_rename_preview(cg: &TraceDecay, args: Value) -> Resul
                 "name": target_node.name,
                 "kind": target_node.kind.as_str(),
                 "file": target_node.file_path,
-                "line": target_node.start_line,
+                "line": user_line(target_node.start_line),
                 "edge_kind": edge.kind.as_str(),
                 "edge_line": edge.line,
             }));
@@ -777,7 +804,7 @@ pub(super) async fn handle_rename_preview(cg: &TraceDecay, args: Value) -> Resul
     let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files,
     })
@@ -849,7 +876,7 @@ pub(super) async fn handle_callers_for(cg: &TraceDecay, args: Value) -> Result<T
     let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files: vec![],
     })
@@ -876,9 +903,9 @@ pub(super) async fn handle_by_qualified_name(cg: &TraceDecay, args: Value) -> Re
                 "qualified_name": n.qualified_name,
                 "kind": n.kind.as_str(),
                 "file": n.file_path,
-                "start_line": n.start_line,
-                "attrs_start_line": n.attrs_start_line,
-                "end_line": n.end_line,
+                "start_line": user_line(n.start_line),
+                "attrs_start_line": user_line(n.attrs_start_line),
+                "end_line": user_line(n.end_line),
             })
         })
         .collect();
@@ -886,7 +913,7 @@ pub(super) async fn handle_by_qualified_name(cg: &TraceDecay, args: Value) -> Re
     let output = serde_json::to_string_pretty(&items).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&output) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &output) }]
         }),
         touched_files,
     })
@@ -934,9 +961,9 @@ pub(super) async fn handle_signature(cg: &TraceDecay, args: Value) -> Result<Too
             "signature": n.signature,
             "docstring": n.docstring,
             "file": n.file_path,
-            "start_line": n.start_line,
-            "attrs_start_line": n.attrs_start_line,
-            "end_line": n.end_line,
+            "start_line": user_line(n.start_line),
+            "attrs_start_line": user_line(n.attrs_start_line),
+            "end_line": user_line(n.end_line),
             "cost_to_expand": cost_to_expand(n, file_size_bytes),
         }));
     }
@@ -944,7 +971,7 @@ pub(super) async fn handle_signature(cg: &TraceDecay, args: Value) -> Result<Too
     let output = serde_json::to_string_pretty(&items).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&output) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &output) }]
         }),
         touched_files,
     })
@@ -984,8 +1011,8 @@ pub(super) async fn handle_impls(cg: &TraceDecay, args: Value) -> Result<ToolRes
                 "trait_qualified_name": trait_node.as_ref().map(|t| t.qualified_name.clone()),
                 "trait_id": trait_node.as_ref().map(|t| t.id.clone()),
                 "file": impl_node.file_path,
-                "start_line": impl_node.start_line,
-                "end_line": impl_node.end_line,
+                "start_line": user_line(impl_node.start_line),
+                "end_line": user_line(impl_node.end_line),
                 "signature": impl_node.signature,
             })
         })
@@ -999,7 +1026,7 @@ pub(super) async fn handle_impls(cg: &TraceDecay, args: Value) -> Result<ToolRes
     let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files,
     })
@@ -1055,7 +1082,7 @@ pub(super) async fn handle_derives(cg: &TraceDecay, args: Value) -> Result<ToolR
             "kind": n.kind.as_str(),
             "qualified_name": n.qualified_name,
             "file": n.file_path,
-            "start_line": n.start_line,
+            "start_line": user_line(n.start_line),
             "derives": derives,
         }));
     }
@@ -1063,7 +1090,7 @@ pub(super) async fn handle_derives(cg: &TraceDecay, args: Value) -> Result<ToolR
     let output = serde_json::to_string_pretty(&items).unwrap_or_default();
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&output) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &output) }]
         }),
         touched_files,
     })
@@ -1164,7 +1191,7 @@ pub(super) async fn handle_implementations(
                     "qualified_name": impl_node.qualified_name,
                     "kind": impl_node.kind.as_str(),
                     "file": impl_node.file_path,
-                    "line": impl_node.start_line,
+                    "line": user_line(impl_node.start_line),
                     "trait": trait_node.qualified_name,
                     "methods": methods,
                 }));
@@ -1209,8 +1236,8 @@ pub(super) async fn handle_implementations(
                 "qualified_name": n.qualified_name,
                 "kind": n.kind.as_str(),
                 "file": n.file_path,
-                "line": n.start_line,
-                "end_line": n.end_line,
+                "line": user_line(n.start_line),
+                "end_line": user_line(n.end_line),
                 "signature": n.signature,
                 "body": body,
             }));
@@ -1225,7 +1252,7 @@ pub(super) async fn handle_implementations(
 
     Ok(ToolResult {
         value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files: touched,
     })
@@ -1250,7 +1277,7 @@ async fn collect_method_bodies(
         out.push(json!({
             "name": child.name,
             "kind": child.kind.as_str(),
-            "line": child.start_line,
+            "line": user_line(child.start_line),
             "signature": child.signature,
             "body": body,
         }));
