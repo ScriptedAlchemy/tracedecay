@@ -193,7 +193,9 @@ async fn ensure_fingerprints(
 
         // At least one node in this file needs a fresh fingerprint —
         // parse once and compute for every miss.
-        let language = crate::extraction::ts_provider::language(lang_key);
+        let Ok(language) = crate::extraction::ts_provider::language(lang_key) else {
+            continue;
+        };
         let Some(tree) = parse_file(&source, &language) else {
             continue;
         };

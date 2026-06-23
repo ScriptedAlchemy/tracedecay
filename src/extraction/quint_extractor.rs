@@ -132,7 +132,7 @@ impl QuintExtractor {
 
     fn parse(source: &str) -> Result<Tree, String> {
         let mut parser = Parser::new();
-        let language = crate::extraction::ts_provider::language("quint");
+        let language = crate::extraction::ts_provider::try_language("quint")?;
         parser
             .set_language(&language)
             .map_err(|e| format!("failed to load Quint grammar: {e}"))?;

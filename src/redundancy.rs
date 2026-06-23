@@ -478,7 +478,7 @@ mod tests {
 
     /// Helper that parses a Rust snippet and returns the first function body.
     fn fingerprint_for_rust_fn(snippet: &str) -> Fingerprint {
-        let lang = crate::extraction::ts_provider::language("rust");
+        let lang = crate::extraction::ts_provider::language("rust").expect("rust grammar");
         let tree = parse_file(snippet, &lang).expect("parse failed");
         let root = tree.root_node();
         let fn_node = find_first_kind(root, "function_item").expect("no function in snippet");

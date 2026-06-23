@@ -107,7 +107,7 @@ impl ElixirExtractor {
 
     fn parse_source(source: &str) -> Result<Tree, String> {
         let mut parser = Parser::new();
-        let language = crate::extraction::ts_provider::language("elixir");
+        let language = crate::extraction::ts_provider::try_language("elixir")?;
         parser
             .set_language(&language)
             .map_err(|e| format!("failed to load Elixir grammar: {e}"))?;

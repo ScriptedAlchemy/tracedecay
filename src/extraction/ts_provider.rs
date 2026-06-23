@@ -40,20 +40,21 @@ static LANGUAGES: LazyLock<HashMap<&'static str, Language>> = LazyLock::new(|| {
 });
 
 /// Returns the `tree_sitter::Language` for the given extractor language key.
-///
-/// # Panics
-///
-/// Panics if `key` is not recognised.
-pub fn language(key: &str) -> Language {
+pub fn try_language(key: &str) -> Result<Language, String> {
     LANGUAGES
         .get(key)
         .cloned()
-        .unwrap_or_else(|| panic!("ts_provider: unknown language key '{key}'"))
+        .ok_or_else(|| format!("ts_provider: unknown language key '{key}'"))
+}
+
+/// Backward-compatible fallible alias for extractor parser call sites.
+pub fn language(key: &str) -> Result<Language, String> {
+    try_language(key)
 }
 
 #[cfg(test)]
 mod tests {
-    /// Every key that an extractor passes to `language()` must be present in the
+    /// Every key that an extractor passes to `try_language()` must be present in the
     /// grammar table. Add new entries here whenever a new extractor is added.
     #[test]
     fn all_extractor_keys_are_registered() {
@@ -87,5 +88,23 @@ mod tests {
             missing.is_empty(),
             "grammar keys missing from LANGUAGES: {missing:?}"
         );
+    }
+
+    #[test]
+    fn language_reports_unknown_key() -> Result<(), String> {
+        let Err(err) = super::language("definitely-not-registered") else {
+            return Err("unknown key should return an error".to_string());
+        };
+        assert!(err.contains("unknown language key"));
+        Ok(())
+    }
+
+    #[test]
+    fn try_language_reports_unknown_key() -> Result<(), String> {
+        let Err(err) = super::try_language("definitely-not-registered") else {
+            return Err("unknown key should return an error".to_string());
+        };
+        assert!(err.contains("unknown language key"));
+        Ok(())
     }
 }
