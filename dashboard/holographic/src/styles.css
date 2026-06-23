@@ -2,13 +2,15 @@
  * Holographic memory dashboard styles.
  *
  * Utilities come from real Tailwind v4 (compiled by dashboard/build.mjs via
- * @tailwindcss/node + @tailwindcss/oxide). The build strips @layer theme and
- * @layer base so this sheet never clobbers the host's :root theme vars or
- * preflight; color utilities resolve --color-* against the HOST (standalone
- * shell or Hermes). Plugin-only tokens the host doesn't provide
- * (text-primary/secondary/tertiary, midground, shadow-*) are defined in the
- * surviving :root below. The hv-* section is dashboard-specific component
- * polish layered over the utilities.
+ * @tailwindcss/node + @tailwindcss/oxide). The build strips only the --color-*
+ * declarations out of @layer theme so this sheet never clobbers the host's
+ * :root color vars; structural Tailwind theme tokens (spacing, radius, the
+ * shadow scale, etc.) survive. Color utilities resolve --color-* against the
+ * HOST (standalone shell or Hermes). Plugin-only tokens the host doesn't
+ * provide (text-primary/secondary/tertiary, midground) are defined in the
+ * surviving :root below; the shared --shadow-* elevation scale is owned by the
+ * shell and only consumed here. The hv-* section is dashboard-specific
+ * component polish layered over the utilities.
  */
 
 @import "tailwindcss";
@@ -53,7 +55,9 @@
   --hm-muted: color-mix(in srgb, var(--hm-primary) 10%, transparent);
   --hm-secondary: color-mix(in srgb, var(--hm-blue) 10%, transparent);
   --hm-radius: 16px;
-  --hm-shadow: 0 18px 70px rgba(0, 0, 0, 0.34);
+  /* Alias the shell-owned large-elevation token; fall back to the historical
+   * hardcoded value when the shell isn't providing the scale. */
+  --hm-shadow: var(--shadow-lg, 0 18px 70px rgba(0, 0, 0, 0.34));
   --hm-popover: var(--color-card, #08201d);
 
   /* Categorical chart palette shared by every holographic visualization.
@@ -69,26 +73,29 @@
   --hm-cat-7: #8fd8ff;
 
   /* Plugin-only tokens the host does not provide. Utilities like
-   * text-text-tertiary / bg-midground / shadow-lg resolve these. They live
-   * outside @theme so they survive the build-time @layer-theme strip. */
+   * text-text-tertiary / bg-midground resolve these. They live outside @theme
+   * so they survive the build-time --color-* strip. The --shadow-* elevation
+   * scale (xs/sm/md/lg/xl) is owned by the shell (:root + light); this sheet
+   * only consumes it (see .shadow-* overrides and --hm-shadow above). */
   --color-text-primary: var(--text-primary, var(--color-foreground, #e7fff9));
   --color-text-secondary: var(--text-secondary, #a8c8c0);
   --color-text-tertiary: var(--text-tertiary, #6f9189);
   --color-midground: var(--color-primary, #75f4d2);
-  --shadow-lg: var(--hm-shadow);
-  --shadow-sm: 0 8px 22px rgba(0, 0, 0, 0.18);
 }
 
 :root[data-theme="light"] {
   --hm-cat-4: #7b3fd4;
   --hm-cat-5: #bc5413;
   --hm-cat-7: #0d6f9e;
-  --hm-shadow: 0 18px 70px rgba(0, 0, 0, 0.12);
-  --shadow-lg: var(--hm-shadow);
-  /* The shell's light tertiary (#538880) measures 3.63:1 on the page bg —
-   * below AA for the small labels this plugin leans on. Darken toward the
-   * foreground token (stays theme-driven) to clear 4.5:1. */
-  --hm-text-3: color-mix(in srgb, var(--text-tertiary, #538880) 62%, var(--color-foreground, #0c2420));
+  /* The shell now ships an AA-clearing light tertiary (--ts-text-3: #41706a).
+   * Nudge it only gently toward the foreground so the very small labels this
+   * plugin leans on keep a comfortable AA margin without crushing the hue or
+   * over-darkening. Keep the Tailwind utility token (--color-text-tertiary,
+   * resolved by text-text-tertiary across Curation/Similarity) in parity with
+   * --hm-text-3 so both color paths land on the same value. Light --hm-shadow
+   * now flows from the shell-owned light --shadow-lg via the --hm-shadow alias. */
+  --hm-text-3: color-mix(in srgb, var(--text-tertiary, #41706a) 80%, var(--color-foreground, #0c2420));
+  --color-text-tertiary: color-mix(in srgb, var(--text-tertiary, #41706a) 80%, var(--color-foreground, #0c2420));
 }
 
 /* Custom font classes (unlayered; override Tailwind's defaults). */
@@ -109,8 +116,8 @@
 }
 
 /* Shadow / backdrop overrides (Tailwind's defaults differ from these). */
-.shadow-lg { box-shadow: var(--hm-shadow); }
-.shadow-sm { box-shadow: 0 8px 22px rgba(0, 0, 0, 0.18); }
+.shadow-lg { box-shadow: var(--shadow-lg, 0 18px 70px rgba(0, 0, 0, 0.34)); }
+.shadow-sm { box-shadow: var(--shadow-sm, 0 1px 2px rgba(0, 0, 0, 0.16), 0 2px 6px rgba(0, 0, 0, 0.12)); }
 .backdrop-blur-sm { backdrop-filter: blur(8px); }
 
 mark {
@@ -143,10 +150,13 @@ mark {
   position: relative;
 }
 
-.ts-card-content > .border,
-.ts-card-content section.border,
-.ts-card-content button.border,
-.ts-card-content div.border {
+/* Default radius for bordered structural blocks. Opt out when the element
+ * carries an explicit Tailwind rounded-* utility so those aren't defeated by
+ * this unlayered rule (unlayered always beats @layer utilities). */
+.ts-card-content > .border:not([class*="rounded"]),
+.ts-card-content > section.border:not([class*="rounded"]),
+.ts-card-content > button.border:not([class*="rounded"]),
+.ts-card-content > div.border:not([class*="rounded"]) {
   border-radius: 12px;
 }
 
@@ -200,7 +210,10 @@ input[type="range"] {
   text-transform: lowercase;
 }
 
-.ts-card-content p {
+/* Reset default browser paragraph margins for plain card copy only. Paragraphs
+ * that opt in to Tailwind margin utilities (mt, mb, or my) keep them, since
+ * this unlayered rule would otherwise globally defeat those utilities. */
+.ts-card-content > p:not([class*="mt-"]):not([class*="mb-"]):not([class*="my-"]) {
   margin-top: 0;
   margin-bottom: 0;
 }
@@ -366,7 +379,7 @@ input[type="range"] {
   border: 1px solid var(--hm-line-strong);
   border-radius: 10px;
   background: var(--hm-popover);
-  box-shadow: var(--hm-shadow);
+  box-shadow: var(--shadow-md, 0 18px 70px rgba(0, 0, 0, 0.34));
   color: var(--hm-text-2);
   font-size: 11px;
   line-height: 1.45;
@@ -435,6 +448,7 @@ input[type="range"] {
   align-items: center;
   gap: 0.35rem;
   max-width: 12rem;
+  min-height: 24px;
   padding: 0.16rem 0.5rem;
   border: 1px solid var(--hm-line);
   border-radius: 999px;
@@ -455,6 +469,7 @@ input[type="range"] {
 }
 
 button.hv-legend-toggle {
+  min-height: 24px;
   cursor: pointer;
   transition: border-color 0.16s ease, color 0.16s ease, opacity 0.16s ease;
 }
@@ -473,6 +488,7 @@ button.hv-legend-toggle:hover {
   display: inline-flex;
   align-items: center;
   gap: 0.3rem;
+  min-height: 24px;
   padding: 0.16rem 0.55rem;
   border: 1px solid var(--hm-line);
   border-radius: 999px;
@@ -571,7 +587,7 @@ button.hv-legend-toggle:hover {
   padding: 0.85rem 1.1rem;
   border: 1px solid var(--hm-line-strong);
   background: var(--hm-popover);
-  box-shadow: var(--hm-shadow);
+  box-shadow: var(--shadow-md, 0 18px 70px rgba(0, 0, 0, 0.34));
   color: var(--hm-text-2);
   font-size: 0.75rem;
 }

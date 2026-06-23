@@ -648,7 +648,7 @@ function HrrCoveragePanel({ data }: { data: MemoryDashboardResponse }) {
                       {row.category}
                     </span>
                     <span
-                      className={`truncate font-mono-ui text-[0.65rem] tracking-[0.04em] ${textTone}`}
+                      className={`truncate font-mono-ui text-[11px] tracking-[0.04em] ${textTone}`}
                       title={hint || undefined}
                       style={
                         hint
@@ -662,10 +662,10 @@ function HrrCoveragePanel({ data }: { data: MemoryDashboardResponse }) {
                     >
                       {row.status.replaceAll("_", " ")}
                     </span>
-                    <span className="font-mono-ui text-[0.65rem] text-text-tertiary">
+                    <span className="font-mono-ui text-[11px] text-text-tertiary">
                       {row.hrr_vectors} / {row.facts} vectors
                     </span>
-                    <span className="min-w-0 truncate font-mono-ui text-[0.65rem] text-text-tertiary">
+                    <span className="min-w-0 truncate font-mono-ui text-[11px] text-text-tertiary">
                       {row.bank_name}
                     </span>
                   </div>
@@ -709,7 +709,7 @@ function TrustDistribution({ data }: { data: MemoryDashboardResponse }) {
               format={(v) => v.toFixed(1)}
               tipLabel="facts"
             />
-            <div className="mt-1 flex items-center justify-between font-mono-ui text-[0.65rem] text-text-tertiary">
+            <div className="mt-1 flex items-center justify-between font-mono-ui text-[11px] text-text-tertiary">
               <span>trust score</span>
               <span className="text-text-secondary">
                 {total} facts · mean {mean.toFixed(2)}
@@ -783,7 +783,7 @@ function GrowthSparkline({ data }: { data: MemoryDashboardResponse }) {
                 effectiveMode === "cumulative" ? "var(--hm-cat-1)" : "var(--hm-primary)"
               }
             />
-            <div className="mt-1 flex items-center justify-between font-mono-ui text-[0.65rem] text-text-tertiary">
+            <div className="mt-1 flex items-center justify-between font-mono-ui text-[11px] text-text-tertiary">
               <span>{series[0]?.date}</span>
               <span className="text-text-secondary">
                 {effectiveMode === "cumulative"
@@ -943,14 +943,21 @@ function HolographicView({
     <div className="flex min-w-0 w-full max-w-full flex-col gap-4">
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
         <SearchBox query={query} refreshing={refreshing} setQuery={setQuery} />
-        <div className="hv-viewswitch flex shrink-0 max-w-full border border-border">
+        <div
+          className="hv-viewswitch flex shrink-0 max-w-full border border-border"
+          role="tablist"
+          aria-label="Holographic memory views"
+        >
           {VIEW_TABS.map((tab) => (
             <Button
               key={tab.key}
+              id={`hv-tab-${tab.key}`}
+              role="tab"
               ghost={view !== tab.key}
               size="sm"
               className="gap-2 shrink-0"
-              aria-current={view === tab.key ? "true" : undefined}
+              aria-selected={view === tab.key}
+              aria-controls="hv-tabpanel"
               onClick={() => setView(tab.key)}
             >
               {tab.icon}
@@ -981,44 +988,51 @@ function HolographicView({
         </div>
       )}
 
-      {view === "map" ? (
-        <SemanticMap query={query} focus={mapFocus} />
-      ) : view === "graph" ? (
-        <AssociationGraph graph={data.holographic.graph} />
-      ) : view === "similarity" ? (
-        <SimilarityPanel onShowOnMap={showPairOnMap} />
-      ) : view === "curation" ? (
-        <CurationPanel onApplied={onApplied} />
-      ) : data.query ? (
-        // While searching, results lead; the overview small-multiples follow.
-        <>
-          <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)]">
-            <FactList data={data} />
-            <EntityAndBankLists data={data} />
-          </div>
-          {overview && <OverviewBars overview={overview} data={data} />}
-          {overview && (
-            <div className="grid min-w-0 gap-4 xl:grid-cols-[repeat(2,minmax(0,1fr))]">
-              <TrustDistribution data={data} />
-              <GrowthSparkline data={data} />
+      <div
+        id="hv-tabpanel"
+        role="tabpanel"
+        aria-labelledby={`hv-tab-${view}`}
+        className="flex min-w-0 w-full max-w-full flex-col gap-4"
+      >
+        {view === "map" ? (
+          <SemanticMap query={query} focus={mapFocus} />
+        ) : view === "graph" ? (
+          <AssociationGraph graph={data.holographic.graph} />
+        ) : view === "similarity" ? (
+          <SimilarityPanel onShowOnMap={showPairOnMap} />
+        ) : view === "curation" ? (
+          <CurationPanel onApplied={onApplied} />
+        ) : data.query ? (
+          // While searching, results lead; the overview small-multiples follow.
+          <>
+            <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)]">
+              <FactList data={data} />
+              <EntityAndBankLists data={data} />
             </div>
-          )}
-        </>
-      ) : (
-        <>
-          {overview && <OverviewBars overview={overview} data={data} />}
-          {overview && (
-            <div className="grid min-w-0 gap-4 xl:grid-cols-[repeat(2,minmax(0,1fr))]">
-              <TrustDistribution data={data} />
-              <GrowthSparkline data={data} />
+            {overview && <OverviewBars overview={overview} data={data} />}
+            {overview && (
+              <div className="grid min-w-0 gap-4 xl:grid-cols-[repeat(2,minmax(0,1fr))]">
+                <TrustDistribution data={data} />
+                <GrowthSparkline data={data} />
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            {overview && <OverviewBars overview={overview} data={data} />}
+            {overview && (
+              <div className="grid min-w-0 gap-4 xl:grid-cols-[repeat(2,minmax(0,1fr))]">
+                <TrustDistribution data={data} />
+                <GrowthSparkline data={data} />
+              </div>
+            )}
+            <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)]">
+              <FactList data={data} />
+              <EntityAndBankLists data={data} />
             </div>
-          )}
-          <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)]">
-            <FactList data={data} />
-            <EntityAndBankLists data={data} />
-          </div>
-        </>
-      )}
+          </>
+        )}
+      </div>
     </div>
   );
 }
