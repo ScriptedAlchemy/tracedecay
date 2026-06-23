@@ -450,7 +450,7 @@ fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
             "expires_at": expires_at,
         }),
     };
-    let formatted = serde_json::to_string_pretty(&payload).unwrap_or_default();
+    let formatted = serde_json::to_string(&payload).unwrap_or_default();
     Ok(ToolResult {
         value: json!({ "content": [{ "type": "text", "text": formatted }] }),
         touched_files: Vec::new(),

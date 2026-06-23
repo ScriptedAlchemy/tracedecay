@@ -918,7 +918,7 @@ pub(super) fn handle_branch_list(cg: &TraceDecay) -> ToolResult {
         );
     }
 
-    let output = serde_json::to_string_pretty(&result).unwrap_or_default();
+    let output = serde_json::to_string(&result).unwrap_or_default();
     ToolResult {
         value: json!({
             "content": [{ "type": "text", "text": project_response_text(cg, &output) }]

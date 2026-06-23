@@ -266,7 +266,7 @@ pub(super) fn handle_active_project(
 ) -> ToolResult {
     let branch = cg.branch_diagnostics();
     let output = active_project_context(cg, &branch, server_stats, scope_prefix);
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    let formatted = serde_json::to_string(&output).unwrap_or_default();
     ToolResult {
         value: json!({
             "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
