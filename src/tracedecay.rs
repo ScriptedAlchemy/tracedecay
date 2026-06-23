@@ -3501,6 +3501,11 @@ impl TraceDecay {
         self.db.checkpoint().await
     }
 
+    /// Consumes the code graph and closes the database connection.
+    pub fn close(self) {
+        self.db.close();
+    }
+
     /// Runs VACUUM and ANALYZE to reclaim disk space and update planner stats.
     pub async fn optimize(&self) -> Result<()> {
         self.db.optimize().await

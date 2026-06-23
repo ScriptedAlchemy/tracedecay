@@ -100,6 +100,11 @@ fn project_data_dir(project: &Path) -> PathBuf {
         .data_root
 }
 
+async fn close_graph(cg: TraceDecay) {
+    cg.checkpoint().await.unwrap();
+    cg.close();
+}
+
 #[tokio::test]
 async fn sync_refuses_to_write_after_mid_session_branch_checkout() {
     let _env_lock = HOME_ENV_LOCK.lock().await;
@@ -115,7 +120,7 @@ async fn sync_refuses_to_write_after_mid_session_branch_checkout() {
     // Track `main` so the project is in branch-aware mode (serving_branch=Some).
     let meta = BranchMeta::new("main");
     save_branch_meta(&project_data_dir(project), &meta).unwrap();
-    drop(cg);
+    close_graph(cg).await;
 
     // Reopen so the instance resolves and pins `main`.
     let cg = TraceDecay::open(project).await.unwrap();
@@ -146,8 +151,8 @@ async fn sync_refuses_to_write_after_mid_session_branch_checkout() {
     // Reopening rebinds to the live branch and clears the drift.
     let reopened = cg.reopen_for_current_branch().await.unwrap();
     assert!(!reopened.branch_drifted());
-    drop(reopened);
-    drop(cg);
+    close_graph(reopened).await;
+    close_graph(cg).await;
 }
 
 #[tokio::test]
@@ -161,7 +166,7 @@ async fn no_drift_and_sync_allowed_while_on_opened_branch() {
 
     let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    drop(cg);
+    close_graph(cg).await;
 
     let cg = TraceDecay::open(project).await.unwrap();
 
@@ -171,7 +176,7 @@ async fn no_drift_and_sync_allowed_while_on_opened_branch() {
     cg.sync()
         .await
         .expect("sync on the opened branch must not be blocked");
-    drop(cg);
+    close_graph(cg).await;
 }
 
 #[tokio::test]
@@ -188,7 +193,7 @@ async fn sync_allowed_in_single_db_mode_without_git() {
 
     let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    drop(cg);
+    close_graph(cg).await;
 
     let cg = TraceDecay::open(project).await.unwrap();
     assert_eq!(cg.serving_branch(), None);
@@ -198,7 +203,7 @@ async fn sync_allowed_in_single_db_mode_without_git() {
     cg.sync()
         .await
         .expect("single-DB mode sync must never be blocked by the drift guard");
-    drop(cg);
+    close_graph(cg).await;
 }
 
 #[tokio::test]
@@ -215,7 +220,7 @@ async fn branch_diagnostics_reports_stale_open_and_serving_state_after_checkout(
 
     let meta = BranchMeta::new("main");
     save_branch_meta(&project_data_dir(project), &meta).unwrap();
-    drop(cg);
+    close_graph(cg).await;
 
     let cg = TraceDecay::open(project).await.unwrap();
     git(project, &["checkout", "-b", "feature"]);
@@ -234,7 +239,7 @@ async fn branch_diagnostics_reports_stale_open_and_serving_state_after_checkout(
         "expected branch-drift warning naming both branches, got: {:?}",
         diagnostics.warnings
     );
-    drop(cg);
+    close_graph(cg).await;
 }
 
 #[tokio::test]
@@ -251,7 +256,7 @@ async fn branch_diagnostics_reports_auto_tracked_live_branch() {
 
     let meta = BranchMeta::new("main");
     save_branch_meta(&project_data_dir(project), &meta).unwrap();
-    drop(cg);
+    close_graph(cg).await;
 
     git(project, &["checkout", "-b", "feature/untracked"]);
 
@@ -271,7 +276,7 @@ async fn branch_diagnostics_reports_auto_tracked_live_branch() {
     );
     assert!(diagnostics.live_branch_tracked);
     assert_eq!(diagnostics.live_branch_db_exists, Some(true));
-    drop(cg);
+    close_graph(cg).await;
 }
 
 #[tokio::test]
@@ -288,7 +293,7 @@ async fn open_repairs_missing_tracked_branch_db_before_diagnostics() {
 
     let meta = BranchMeta::new("main");
     save_branch_meta(&project_data_dir(project), &meta).unwrap();
-    drop(cg);
+    close_graph(cg).await;
 
     git(project, &["checkout", "-b", "feature/tracked"]);
     fs::write(project.join("src/lib.rs"), "pub fn f() -> u32 { 2 }\n").unwrap();
@@ -330,5 +335,5 @@ async fn open_repairs_missing_tracked_branch_db_before_diagnostics() {
         !cg.search("tracked_only", 10).await.unwrap().is_empty(),
         "repaired branch DB should be synced with branch-only symbols"
     );
-    drop(cg);
+    close_graph(cg).await;
 }
