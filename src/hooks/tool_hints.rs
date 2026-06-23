@@ -15,6 +15,17 @@ pub enum HintAgent {
     Kiro,
 }
 
+impl HintAgent {
+    pub(crate) fn as_key(self) -> &'static str {
+        match self {
+            HintAgent::Claude => "claude",
+            HintAgent::Cursor => "cursor",
+            HintAgent::Codex => "codex",
+            HintAgent::Kiro => "kiro",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum HintCategory {
     Search,
@@ -26,10 +37,11 @@ pub enum HintCategory {
     SymbolLookup,
     FileLookup,
     ExploreSubagent,
+    SubagentStartContext,
 }
 
 impl HintCategory {
-    fn as_key(self) -> &'static str {
+    pub(crate) fn as_key(self) -> &'static str {
         match self {
             HintCategory::Search => "search",
             HintCategory::SemanticSearch => "semantic_search",
@@ -40,6 +52,7 @@ impl HintCategory {
             HintCategory::SymbolLookup => "symbol_lookup",
             HintCategory::FileLookup => "file_lookup",
             HintCategory::ExploreSubagent => "explore_subagent",
+            HintCategory::SubagentStartContext => "subagent_start_context",
         }
     }
 
@@ -54,6 +67,7 @@ impl HintCategory {
             "symbol_lookup" => Some(HintCategory::SymbolLookup),
             "file_lookup" => Some(HintCategory::FileLookup),
             "explore_subagent" => Some(HintCategory::ExploreSubagent),
+            "subagent_start_context" => Some(HintCategory::SubagentStartContext),
             _ => None,
         }
     }
