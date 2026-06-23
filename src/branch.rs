@@ -346,10 +346,22 @@ pub async fn add_branch_tracking(
         }
     };
 
-    let mut meta = branch_meta::load_branch_meta(&tracedecay_dir).unwrap_or_else(|| {
-        let default = detect_default_branch(project_root).unwrap_or_else(|| "main".to_string());
-        branch_meta::BranchMeta::new_for_dir(&tracedecay_dir, &default)
-    });
+    let meta_path = tracedecay_dir.join("branch-meta.json");
+    let mut meta = match branch_meta::load_branch_meta(&tracedecay_dir) {
+        Some(meta) => meta,
+        None if meta_path.exists() => {
+            return Err(crate::errors::TraceDecayError::Config {
+                message: format!(
+                    "corrupt branch metadata at '{}'; repair or remove it before adding branch tracking",
+                    meta_path.display()
+                ),
+            });
+        }
+        None => {
+            let default = detect_default_branch(project_root).unwrap_or_else(|| "main".to_string());
+            branch_meta::BranchMeta::new_for_dir(&tracedecay_dir, &default)
+        }
+    };
     prune_missing_branch_dbs(&tracedecay_dir, &mut meta);
 
     if meta.is_tracked(branch_name) {
