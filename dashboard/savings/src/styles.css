@@ -384,6 +384,16 @@
   font-size: 0.72rem;
 }
 
+/* ------------------------------------------------------- light contrast */
+
+/* In light theme the shell sets --ts-amber to ~#b07a00 (~3.7:1 on white),
+   which fails AA for these small/bold text uses. Darken the text color only
+   here (≥4.5:1); the amber background/border accents keep using --ts-amber. */
+:root[data-theme="light"] .tss-partial,
+:root[data-theme="light"] .tss-basis-estimated {
+  color: #8a5d00;
+}
+
 /* ------------------------------------------------------------- narrow */
 
 @media (max-width: 560px) {

@@ -96,7 +96,7 @@
 
 .tdp-stat-value {
   color: var(--color-foreground);
-  font-family: var(--font-mono);
+  font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 1.5rem;
   font-weight: 700;
   line-height: 1.15;
@@ -109,7 +109,7 @@
 
 .tdp-stat-hint {
   color: var(--color-muted-foreground);
-  font-family: var(--font-mono);
+  font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 0.68rem;
 }
 
@@ -182,13 +182,13 @@
 
 .tdp-bar-meta {
   color: var(--color-muted-foreground);
-  font-family: var(--font-mono);
+  font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 0.66rem;
 }
 
 .tdp-bar-value {
   color: var(--color-primary);
-  font-family: var(--font-mono);
+  font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 0.68rem;
   white-space: nowrap;
 }
@@ -229,5 +229,5 @@
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: color-mix(in srgb, var(--color-primary, #5a7fff) 65%, white 10%);
+  background: color-mix(in srgb, var(--color-primary, #5a7fff) 90%, white 10%);
 }

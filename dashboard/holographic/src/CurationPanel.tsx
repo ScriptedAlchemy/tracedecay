@@ -1,4 +1,13 @@
-import { type Key, type ReactNode, type RefObject, useState } from "react";
+import {
+  type Key,
+  type ReactNode,
+  type RefObject,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+} from "react";
+import { createPortal } from "react-dom";
 import {
   ChevronDown,
   ChevronRight,
@@ -103,8 +112,10 @@ function activityTone(level?: string) {
 }
 
 function formatActivityTime(ts: string): string {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "--:--:--";
   try {
-    return new Date(ts).toLocaleTimeString([], {
+    return d.toLocaleTimeString([], {
       hour: "2-digit",
       minute: "2-digit",
       second: "2-digit",
@@ -290,7 +301,7 @@ function ActionRow({ action }: { action: MemoryCurateAction; key?: Key }) {
           {risk}
         </span>
         <div className="min-w-0 flex-1">
-          <div className="text-xs font-medium text-foreground">{describe(action)}</div>
+          <div className="text-xs font-medium text-foreground break-words">{describe(action)}</div>
         </div>
         {action.tier && (
           <span className="shrink-0 text-[10px] tracking-[0.08em] text-text-tertiary mt-0.5">
@@ -336,7 +347,7 @@ function ActionRow({ action }: { action: MemoryCurateAction; key?: Key }) {
               </span>
             )}
           </div>
-          <TagBucket label="Kept" tags={kept.length ? kept : newTags} tone="neutral" />
+          <TagBucket label="Kept" tags={kept} tone="neutral" />
           <TagBucket label="Removed" tags={removed} tone="removed" />
           <TagBucket label="Added" tags={added} tone="added" />
           {tagsOnlyReordered && (
@@ -484,9 +495,10 @@ function ActionGroup({
 
 /**
  * Minimal confirm modal — local replacement for the core SPA's `ConfirmDialog`
- * (not exposed on the plugin SDK, and it relies on `react-dom` createPortal,
- * which the plugin's React shim does not provide). Rendered inline; the fixed
- * overlay still covers the viewport.
+ * (not exposed on the plugin SDK). Rendered through a React portal to
+ * `document.body` so the `fixed inset-0` overlay escapes `.ts-card`'s
+ * containing block (`backdrop-filter`) and `overflow-hidden`/`max-h` clipping,
+ * and reliably covers the full viewport.
  */
 function InlineConfirm({
   open,
@@ -507,19 +519,60 @@ function InlineConfirm({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
+  const titleId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const previouslyFocused = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    previouslyFocused.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const dialog = dialogRef.current;
+    const focusTarget =
+      dialog?.querySelector<HTMLElement>(
+        "button:not([disabled]), [href], input, select, textarea, [tabindex]:not([tabindex='-1'])",
+      ) ?? dialog;
+    focusTarget?.focus();
+    return () => {
+      previouslyFocused.current?.focus?.();
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onCancel();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [open, onCancel]);
+
   if (!open) return null;
-  return (
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
     <div
-      role="dialog"
-      aria-modal="true"
       onClick={(e) => {
         if (e.target === e.currentTarget) onCancel();
       }}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
     >
-      <div className="relative mx-4 w-full max-w-md border border-border bg-card shadow-lg">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        className="relative mx-4 w-full max-w-md border border-border bg-card shadow-lg"
+      >
         <div className="flex flex-col gap-1 border-b border-border p-4">
-          <h2 className="font-mondwest text-display text-sm font-bold tracking-[0.12em]">
+          <h2
+            id={titleId}
+            className="font-mondwest text-display text-sm font-bold tracking-[0.12em]"
+          >
             {title}
           </h2>
           {description && (
@@ -538,7 +591,8 @@ function InlineConfirm({
           </Button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -636,6 +690,8 @@ export default function CurationPanel({
 
         <div
           ref={panelRef}
+          role="tablist"
+          aria-label="Curation views"
           className="grid grid-cols-3 gap-1 rounded-sm border border-border bg-secondary/30 p-1 shrink-0"
         >
           {tabs.map(({ id, label, Icon }) => {
@@ -644,10 +700,15 @@ export default function CurationPanel({
               <button
                 key={id}
                 type="button"
+                role="tab"
+                id={`curation-tab-${id}`}
+                aria-selected={active}
+                aria-controls={`curation-panel-${id}`}
+                tabIndex={0}
                 onClick={() => setActiveTab(id)}
                 className={`flex min-w-0 items-center justify-center gap-1.5 px-2 py-1.5 text-xs ${
                   active
-                    ? "bg-background text-foreground shadow-sm"
+                    ? "bg-background text-foreground shadow-sm ring-1 ring-inset ring-primary/60"
                     : "text-text-tertiary hover:text-text-secondary"
                 }`}
               >
@@ -659,7 +720,12 @@ export default function CurationPanel({
         </div>
 
         {activeTab === "plan" ? (
-          <>
+          <div
+            role="tabpanel"
+            id="curation-panel-plan"
+            aria-labelledby="curation-tab-plan"
+            className="flex flex-col gap-3 flex-1 min-h-0 overflow-hidden"
+          >
             {error && (
               <div className="border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive shrink-0">
                 {error}
@@ -744,11 +810,16 @@ export default function CurationPanel({
                 ))}
               </div>
             ) : null}
-          </>
+          </div>
         ) : null}
 
         {activeTab === "activity" ? (
-          <div className="flex flex-1 min-h-0 flex-col gap-3">
+          <div
+            role="tabpanel"
+            id="curation-panel-activity"
+            aria-labelledby="curation-tab-activity"
+            className="flex flex-1 min-h-0 flex-col gap-3"
+          >
             <div className="flex min-w-0 items-center justify-between gap-2 shrink-0">
               <div className="min-w-0">
                 <div className="text-xs font-medium text-foreground">
@@ -784,7 +855,12 @@ export default function CurationPanel({
         ) : null}
 
         {activeTab === "history" ? (
-          <div className="flex flex-1 min-h-0 flex-col gap-3 overflow-y-auto overflow-x-hidden pr-1">
+          <div
+            role="tabpanel"
+            id="curation-panel-history"
+            aria-labelledby="curation-tab-history"
+            className="flex flex-1 min-h-0 flex-col gap-3 overflow-y-auto overflow-x-hidden pr-1"
+          >
             <div className="flex min-w-0 items-center justify-between gap-2 shrink-0">
               <div className="min-w-0">
                 <div className="text-xs font-medium text-foreground">

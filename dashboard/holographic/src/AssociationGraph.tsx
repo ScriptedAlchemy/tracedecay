@@ -130,8 +130,9 @@ export default function AssociationGraph({
   const zoom = GRAPH_WIDTH / view.w;
   // Quantize so panning never changes the label props (keeps GraphNodes
   // memoized → pan is a pure viewBox attribute update); the font/label set only
-  // recompute as you cross a zoom step.
-  const quantZoom = Math.round(zoom * 5) / 5;
+  // recompute as you cross a zoom step. Floor the quantized zoom so extreme
+  // zoom-out never rounds to 0 (which would make worldLabelFont = Infinity).
+  const quantZoom = Math.max(0.2, Math.round(zoom * 5) / 5);
   const worldLabelFont = 10 / quantZoom;
   const labeledIds = useMemo(() => {
     if (settling) return EMPTY_LABELS;

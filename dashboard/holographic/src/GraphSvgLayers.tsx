@@ -170,7 +170,7 @@ export const GraphNodes = memo(function GraphNodes({
               r={isSelected ? r + 2 : r}
               fill={color}
               fillOpacity={isSelected ? 0.95 : inFocus ? 0.6 : 0.45}
-              stroke={isSelected ? "#ffffff" : color}
+              stroke={isSelected ? "var(--hm-primary)" : color}
               strokeWidth={isSelected ? 2.5 : 1}
             />
           </g>

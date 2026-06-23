@@ -521,24 +521,37 @@ export default function SemanticMap({
             y={cell.y}
             width={cell.w}
             height={cell.h}
-            style={{ fill: "var(--hm-primary)", opacity: cell.opacity }}
+            style={{
+              // `--hm-primary` (mint) has no light override, so a low-opacity
+              // mint underlay washes out on the light background. Mix toward
+              // `--hm-text` (the theme foreground) so the heat keeps contrast in
+              // both themes while preserving the mint hue identity.
+              fill: "color-mix(in srgb, var(--hm-primary) 55%, var(--hm-text))",
+              opacity: cell.opacity,
+            }}
           />
         ))}
       </g>
     );
   }, [layout, showDensity]);
 
+  // Rendered INSIDE the zoom group (base space) so the browser transforms the
+  // marker with the dot layer every frame — no detach/snap-back while panning
+  // or zooming. Radius divides by `--hv-k` (like the dots) to stay a constant
+  // screen size, and the stroke is non-scaling so its width matches the CSS.
   const markerFor = (factId: number | undefined, className: string) => {
     if (factId == null) return null;
     const placed = layout.byId.get(factId);
     if (!placed) return null;
-    const { k, tx, ty } = transform;
+    const r = placed.r + 5;
     return (
       <circle
-        cx={placed.x * k + tx}
-        cy={placed.y * k + ty}
-        r={placed.r + 5}
+        cx={placed.x}
+        cy={placed.y}
+        r={r}
+        vectorEffect="non-scaling-stroke"
         className={className}
+        style={{ r: `calc(${r}px / var(--hv-k, 1))` as never }}
       />
     );
   };
@@ -734,9 +747,9 @@ export default function SemanticMap({
                   >
                     {densityLayer}
                     {pointsLayer}
+                    {markerFor(hovered?.point.fact_id, "hv-marker-hover")}
+                    {markerFor(selected?.fact_id, "hv-marker-pin")}
                   </g>
-                  {markerFor(hovered?.point.fact_id, "hv-marker-hover")}
-                  {markerFor(selected?.fact_id, "hv-marker-pin")}
                   {drag?.kind === "select" && (
                     <rect
                       x={Math.min(drag.startX, drag.x)}
@@ -773,7 +786,7 @@ export default function SemanticMap({
                 )}
               </div>
 
-              <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono-ui text-[0.65rem] text-text-tertiary">
+              <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono-ui text-[11px] text-text-tertiary">
                 <span>zoom {(transform.k * 100).toFixed(0)}%</span>
                 <span>
                   {visiblePoints.length}/{points.length} facts · {data.method} · dim {data.dim}

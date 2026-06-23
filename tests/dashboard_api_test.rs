@@ -942,6 +942,47 @@ fn graph_bad_params_and_missing_neighbors_return_json_errors() {
 }
 
 #[test]
+fn dashboard_plugin_manifest_assets_are_served() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture(false).await;
+        let agent = http_agent();
+
+        let (status, plugins) = get_json(
+            &agent,
+            &format!("{}/api/dashboard/plugins", fixture.base_url),
+        );
+        assert_eq!(status, 200);
+        for plugin in plugins
+            .as_array()
+            .unwrap_or_else(|| panic!("expected plugin manifest array"))
+        {
+            let name = plugin["name"]
+                .as_str()
+                .unwrap_or_else(|| panic!("plugin name should be a string: {plugin}"));
+            for key in ["entry", "css"] {
+                let Some(asset) = plugin[key].as_str() else {
+                    continue;
+                };
+                let url = format!("{}/dashboard-plugins/{name}/{asset}", fixture.base_url);
+                let response = agent
+                    .get(&url)
+                    .call()
+                    .unwrap_or_else(|err| panic!("GET {url} failed: {err}"));
+                assert_eq!(
+                    response.status().as_u16(),
+                    200,
+                    "advertised plugin asset should be served: {name} {asset}"
+                );
+            }
+        }
+    });
+}
+
+#[test]
 fn holographic_dashboard_endpoints_return_seeded_payloads() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
