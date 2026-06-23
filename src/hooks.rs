@@ -780,14 +780,6 @@ fn deduped_project_hint(
         record_hint_emitted(None, agent, session_id.as_deref(), &hint);
         return Some(hint);
     };
-    let Ok(layout) = crate::storage::resolve_layout_for_current_profile(&root) else {
-        record_hint_emitted(Some(&root), agent, session_id.as_deref(), &hint);
-        return Some(hint);
-    };
-    if !layout.data_root.is_dir() {
-        record_hint_emitted(Some(&root), agent, session_id.as_deref(), &hint);
-        return Some(hint);
-    }
     let Some(session_id) = session_id else {
         record_hint_emitted(Some(&root), agent, None, &hint);
         return Some(hint);
@@ -801,6 +793,14 @@ fn deduped_project_hint(
             &hint,
         );
         return None;
+    }
+    let Ok(layout) = crate::storage::resolve_layout_for_current_profile(&root) else {
+        record_hint_emitted(Some(&root), agent, Some(&session_id), &hint);
+        return Some(hint);
+    };
+    if !layout.data_root.is_dir() {
+        record_hint_emitted(Some(&root), agent, Some(&session_id), &hint);
+        return Some(hint);
     }
     let path = layout.data_root.join("tool_hints_seen.json");
     let mut dedupe = tool_hints::ToolHintDedupe::load_or_default(&path);
