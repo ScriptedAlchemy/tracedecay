@@ -6,9 +6,10 @@
 //! Each agent sends its own event schema on stdin and expects its own output
 //! shape, so the handlers are kept agent-specific rather than shared blindly.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -791,6 +792,16 @@ fn deduped_project_hint(
         record_hint_emitted(Some(&root), agent, None, &hint);
         return Some(hint);
     };
+    if !remember_hint_in_process(&root, agent, &session_id, hint.category) {
+        record_hint_analytics(
+            Some(&root),
+            "suppressed_duplicate",
+            agent,
+            Some(&session_id),
+            &hint,
+        );
+        return None;
+    }
     let path = layout.data_root.join("tool_hints_seen.json");
     let mut dedupe = tool_hints::ToolHintDedupe::load_or_default(&path);
     if !dedupe.should_emit(&session_id, hint.category) {
@@ -806,6 +817,26 @@ fn deduped_project_hint(
     let _ = dedupe.save(&path);
     record_hint_analytics(Some(&root), "hint_emitted", agent, Some(&session_id), &hint);
     Some(hint)
+}
+
+fn remember_hint_in_process(
+    root: &Path,
+    agent: HintAgent,
+    session_id: &str,
+    category: HintCategory,
+) -> bool {
+    static MEMORY: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let key = format!(
+        "{}\0{}\0{}\0{}",
+        root.display(),
+        agent.as_key(),
+        session_id,
+        category.as_key()
+    );
+    let Ok(mut memory) = MEMORY.get_or_init(|| Mutex::new(HashSet::new())).lock() else {
+        return true;
+    };
+    memory.insert(key)
 }
 
 pub fn cursor_project_root_from_event(event_json: &str) -> Option<PathBuf> {
