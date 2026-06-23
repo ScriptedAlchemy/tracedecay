@@ -2,13 +2,15 @@
 //!
 //! `MemoryStore::add_fact` runs every new fact through this module after the
 //! exact-duplicate check: FTS candidates are scored with lexical overlap plus
-//! phase-cosine similarity, and the strongest match is classified as
-//! `near_duplicate` or `possible_conflict`. The result is a REPORT returned to
-//! the writer — nothing here auto-deletes or auto-merges, and nothing here
-//! calls an LLM; review stays with the caller (agent, human, or the Hermes
+//! real cosine similarity for stored holographic vectors, and the strongest
+//! match is classified as `near_duplicate` or `possible_conflict`. The result
+//! is a REPORT returned to the writer — nothing here auto-deletes or
+//! auto-merges, and nothing here calls an LLM; review stays with the caller
+//! (agent, human, or the Hermes
 //! LLM curation layer).
 
-use super::similarity::{lexical_overlap, phase_cosine_similarity};
+use super::encoding::HolographicEncoder;
+use super::similarity::lexical_overlap;
 use super::types::AddFactDiffKind;
 
 /// A new fact whose strongest candidate scores above this is a near-duplicate.
@@ -17,7 +19,7 @@ pub const NEAR_DUPLICATE_THRESHOLD: f64 = 0.9;
 /// similarity; below it, texts can share domain vocabulary without being
 /// about the same subject.
 pub const CONFLICT_THRESHOLD: f64 = 0.7;
-/// Phase-cosine similarity only contributes to the combined score above this
+/// Vector cosine similarity only contributes to the combined score above this
 /// floor: same-domain content clusters in the 0.70–0.85 band and would
 /// otherwise produce false near-duplicate matches.
 const COSINE_CONTRIBUTION_FLOOR: f64 = 0.85;
@@ -63,9 +65,9 @@ pub fn normalized_equivalent(a: &str, b: &str) -> bool {
 }
 
 /// Combined lexical + holographic similarity between a new fact and one
-/// existing candidate. Token overlap is the baseline; the phase-cosine score
+/// existing candidate. Token overlap is the baseline; real vector cosine
 /// contributes only when it is high enough to be trustworthy (mnemon's
-/// combination rule, adapted to phase vectors).
+/// combination rule, adapted to stored holographic vectors).
 pub fn combined_similarity(new_content: &str, existing_content: &str, cosine: Option<f64>) -> f64 {
     let (_, token_overlap, _) = lexical_overlap(new_content, existing_content);
     let mut similarity = token_overlap;
@@ -77,9 +79,9 @@ pub fn combined_similarity(new_content: &str, existing_content: &str, cosine: Op
     similarity
 }
 
-/// Convenience wrapper for callers holding both phase vectors.
+/// Convenience wrapper for callers holding both stored holographic vectors.
 pub fn vector_similarity(a: &[f64], b: &[f64]) -> f64 {
-    phase_cosine_similarity(a, b)
+    HolographicEncoder::new().similarity(a, b)
 }
 
 /// Classifies how a new fact relates to its strongest existing candidate.
@@ -161,5 +163,20 @@ mod tests {
         // High cosine lifts the score.
         let sim = combined_similarity("alpha beta", "delta epsilon", Some(0.95));
         assert!((sim - 0.95).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn vector_similarity_uses_real_cosine_for_normalized_vectors() {
+        let mut left = vec![0.0; 2048];
+        let mut right = vec![0.0; 2048];
+        left[0] = 1.0;
+        right[1] = 1.0;
+
+        let sim = vector_similarity(&left, &right);
+
+        assert!(
+            sim.abs() < f64::EPSILON,
+            "expected orthogonal vectors to score near 0, got {sim}"
+        );
     }
 }

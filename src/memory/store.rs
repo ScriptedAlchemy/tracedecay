@@ -6,7 +6,8 @@ use std::fmt;
 use libsql::{params, Connection};
 
 use super::diff::{
-    classify_add_diff, combined_similarity, normalized_equivalent, NEAR_DUPLICATE_THRESHOLD,
+    classify_add_diff, combined_similarity, normalized_equivalent, vector_similarity,
+    NEAR_DUPLICATE_THRESHOLD,
 };
 use super::encoding::HolographicEncoder;
 use super::entities::{extract_entities, normalize_entity};
@@ -324,7 +325,7 @@ impl<'a> MemoryStore<'a> {
                 .flatten();
             let cosine = stored_vector
                 .as_deref()
-                .map(|vector| super::similarity::phase_cosine_similarity(phase_vector, vector));
+                .map(|vector| vector_similarity(phase_vector, vector));
             let similarity = combined_similarity(content, &candidate_content, cosine);
             if best
                 .as_ref()
