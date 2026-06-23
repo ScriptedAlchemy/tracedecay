@@ -47,7 +47,8 @@ fn init_project_with_cli(home: &Path, project: &Path) {
         .expect("tracedecay init should run");
     assert!(
         output.status.success(),
-        "tracedecay init failed\nstdout:\n{}\nstderr:\n{}",
+        "tracedecay init failed with status {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

@@ -28,18 +28,41 @@ pub(crate) struct Spinner {
     message: std::sync::Arc<std::sync::Mutex<String>>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
+    interactive: bool,
 }
 
 impl Spinner {
     pub(crate) fn new() -> Self {
         let message = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let interactive = std::io::stderr().is_terminal();
+        let handle = if interactive {
+            Some(Self::spawn_interactive_spinner(
+                message.clone(),
+                stop.clone(),
+            ))
+        } else {
+            None
+        };
+
+        Self {
+            message,
+            stop,
+            handle,
+            interactive,
+        }
+    }
+
+    fn spawn_interactive_spinner(
+        message: std::sync::Arc<std::sync::Mutex<String>>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> std::thread::JoinHandle<()> {
         let msg = message.clone();
         let stp = stop.clone();
         // Hide cursor while spinner is active.
         let _ = write!(std::io::stderr(), "\x1b[?25l");
         let _ = std::io::stderr().flush();
-        let handle = std::thread::spawn(move || {
+        std::thread::spawn(move || {
             let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
             let mut idx = 0usize;
             while !stp.load(std::sync::atomic::Ordering::Relaxed) {
@@ -61,12 +84,7 @@ impl Spinner {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(80));
             }
-        });
-        Self {
-            message,
-            stop,
-            handle: Some(handle),
-        }
+        })
     }
 
     pub(crate) fn set_message(&self, msg: &str) {
@@ -76,15 +94,23 @@ impl Spinner {
     }
 
     pub(crate) fn done(mut self, message: &str) {
+        self.stop();
+        let mut stderr = std::io::stderr();
+        if self.interactive {
+            // Show cursor again, then print the done line.
+            let _ = write!(stderr, "\x1b[?25h");
+            let _ = writeln!(stderr, "\r\x1b[2K\x1b[32m✔\x1b[0m {}", message);
+        } else {
+            let _ = writeln!(stderr, "{message}");
+        }
+        let _ = stderr.flush();
+    }
+
+    fn stop(&mut self) {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
-        let mut stderr = std::io::stderr();
-        // Show cursor again, then print the done line.
-        let _ = write!(stderr, "\x1b[?25h");
-        let _ = writeln!(stderr, "\r\x1b[2K\x1b[32m✔\x1b[0m {}", message);
-        let _ = stderr.flush();
     }
 }
 
@@ -93,13 +119,12 @@ impl Drop for Spinner {
         // If the spinner wasn't explicitly finished (e.g. `?` propagated an
         // error), still stop the thread, clear the line, and restore the
         // cursor so the terminal is left in a sane state.
-        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
+        self.stop();
+        if self.interactive {
+            let mut stderr = std::io::stderr();
+            let _ = write!(stderr, "\r\x1b[2K\x1b[?25h");
+            let _ = stderr.flush();
         }
-        let mut stderr = std::io::stderr();
-        let _ = write!(stderr, "\r\x1b[2K\x1b[?25h");
-        let _ = stderr.flush();
     }
 }
 
