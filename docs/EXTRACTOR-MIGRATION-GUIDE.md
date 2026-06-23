@@ -53,9 +53,9 @@ Validation commands used for the C/C++ pilot:
 
 ```sh
 export CARGO_TARGET_DIR="$PWD/.tracedecay/target/<task-or-lane>"
-cargo test --lib extraction::traversal::tests --no-default-features
-cargo test --test c_extraction_test --no-default-features
-cargo test --test cpp_extraction_test --no-default-features
+cargo nextest run --lib --no-default-features extraction::traversal::tests
+cargo nextest run --test c_extraction_test --no-default-features
+cargo nextest run --test cpp_extraction_test --no-default-features
 cargo check --lib --no-default-features
 ```
 

@@ -8,7 +8,7 @@ Thanks for your interest in contributing! This guide covers everything you need 
 git clone https://github.com/ScriptedAlchemy/tracedecay.git
 cd tracedecay
 cargo build
-cargo test
+cargo nextest run --workspace --no-fail-fast
 ```
 
 Requires **Rust 1.70+** (edition 2021).
@@ -45,7 +45,7 @@ Build with fewer languages for faster compile times during development:
 
 ```bash
 cargo build --no-default-features --features lite
-cargo test --no-default-features --features lite
+cargo nextest run --no-default-features --features lite
 ```
 
 ## Making Changes
@@ -54,7 +54,7 @@ cargo test --no-default-features --features lite
 2. **Write tests.** Every extraction change should have a corresponding test in `tests/`. Follow the existing pattern: create a fixture in `tests/fixtures/` and assert on extracted nodes/edges.
 3. **Run the full test suite** before submitting:
    ```bash
-   cargo test
+   cargo nextest run --workspace --no-fail-fast
    ```
 4. **Format your code** with the standard Rust toolchain:
    ```bash
@@ -100,13 +100,13 @@ section so the contributor command and blocking/advisory split still match CI.
 
 ```bash
 # All tests for a specific language
-cargo test --test rust_extraction_test
+cargo nextest run --test rust_extraction_test
 
 # A single test by name
-cargo test test_find_stale_files
+cargo nextest run test_find_stale_files
 
 # Only sync-related tests
-cargo test sync
+cargo nextest run sync
 ```
 
 ## Commit Messages

@@ -4035,6 +4035,9 @@ async fn test_multi_str_replace_unsupported_file_type_succeeds() {
     assert!(content.contains("1rem"));
     assert!(!content.contains("14px"));
     assert!(!content.contains("16px"));
+
+    cg.checkpoint().await.unwrap();
+    cg.close();
 }
 
 #[tokio::test]
