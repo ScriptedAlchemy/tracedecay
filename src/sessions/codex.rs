@@ -270,6 +270,8 @@ fn string_field(payload: &Value, key: &str) -> Option<String> {
 }
 
 fn prior_compaction_depth(path: &Path, before_offset: u64) -> i64 {
+    use std::io::BufRead;
+
     if before_offset == 0 {
         return 0;
     }

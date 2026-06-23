@@ -810,6 +810,10 @@ impl TraceDecay {
             Err(err) => return Err(err),
         };
 
+        if !store_layout.graph_db_path.is_file() {
+            return Ok(branch::BranchAddOutcome::NotIndexed);
+        }
+
         Self::add_branch_tracking_in_layout(
             project_root,
             branch_name,
@@ -1148,6 +1152,15 @@ impl TraceDecay {
         option_resolved_store_exists
             || crate::config::has_project_database(project_root)
             || crate::storage::has_enrollment_marker(project_root)
+    }
+
+    pub(crate) async fn has_initialized_store_with_options(
+        project_root: &Path,
+        open_options: &TraceDecayOpenOptions,
+    ) -> bool {
+        Self::resolve_store_layout_for_project(project_root, open_options)
+            .await
+            .is_ok_and(|layout| layout.graph_db_path.is_file())
     }
 }
 

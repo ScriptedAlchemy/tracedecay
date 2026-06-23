@@ -62,16 +62,40 @@ async fn selected_registered_project_reader(
         return Ok(None);
     };
 
-    let profile_root = profile_root_for_global_db(global_db, allow_default_registry_fallback)?;
-    TraceDecay::open_read_only_with_options(
-        Path::new(&context.project.canonical_root),
-        crate::tracedecay::TraceDecayOpenOptions {
-            profile_root: Some(profile_root.clone()),
-            global_db_path: global_db.map(|db| db.db_path().to_path_buf()),
-        },
-    )
-    .await
-    .map(Some)
+    let global_db_path = global_db
+        .map(|db| db.db_path().to_path_buf())
+        .or_else(crate::global_db::global_db_path);
+    let mut profile_roots = vec![profile_root_for_global_db(
+        global_db,
+        allow_default_registry_fallback,
+    )?];
+    if let Ok(default_profile_root) = crate::storage::default_profile_root() {
+        if !profile_roots
+            .iter()
+            .any(|root| root == &default_profile_root)
+        {
+            profile_roots.push(default_profile_root);
+        }
+    }
+
+    let mut last_error = None;
+    for profile_root in profile_roots {
+        match TraceDecay::open_read_only_with_options(
+            Path::new(&context.project.canonical_root),
+            crate::tracedecay::TraceDecayOpenOptions {
+                profile_root: Some(profile_root),
+                global_db_path: global_db_path.clone(),
+            },
+        )
+        .await
+        {
+            Ok(cg) => return Ok(Some(cg)),
+            Err(err) => last_error = Some(err),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| TraceDecayError::Config {
+        message: "registered project could not be opened".to_string(),
+    }))
 }
 
 fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
@@ -782,9 +806,7 @@ mod tests {
         // host CLI capabilities they need; agents should never see a tool that
         // will instantly fail. The count and per-tool checks below adapt to
         // the host's capability set.
-        let expected_total = 92
-            + usize::from(super::super::definitions::ast_grep_available())
-            + usize::from(super::super::definitions::ast_grep_outline_available());
+        let expected_total = 93 + usize::from(super::super::definitions::ast_grep_available());
         assert_eq!(tools.len(), expected_total);
 
         let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
