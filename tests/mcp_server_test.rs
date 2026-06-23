@@ -21,6 +21,7 @@ use tracedecay::mcp::response_handles::{
 };
 use tracedecay::mcp::transport::{ChannelTransport, McpTransport};
 use tracedecay::mcp::McpServer;
+use tracedecay::storage::{resolve_layout_for_current_profile, resolve_response_handle_root};
 use tracedecay::tracedecay::{current_timestamp, TraceDecay};
 
 // ---------------------------------------------------------------------------
@@ -77,6 +78,11 @@ fn jsonrpc_request(id: Value, method: &str, params: Value) -> String {
         "params": params
     }))
     .unwrap()
+}
+
+fn response_handle_dir(cg: &TraceDecay) -> PathBuf {
+    resolve_response_handle_root(cg.project_root())
+        .unwrap_or_else(|err| panic!("failed to resolve test response handle root: {err}"))
 }
 
 /// Helper to build a JSON-RPC notification string (no id).
@@ -691,9 +697,7 @@ async fn test_tracedecay_retrieve_corrupt_handle_record_returns_actionable_inter
     let stored =
         store_response_handle(cg.project_root(), "{\"items\":[1]}", current_timestamp()).unwrap();
     fs::write(
-        cg.project_root()
-            .join(".tracedecay/response-handles")
-            .join(format!("{}.json", stored.handle)),
+        response_handle_dir(&cg).join(format!("{}.json", stored.handle)),
         "{not-json",
     )
     .unwrap();
@@ -730,10 +734,7 @@ async fn test_tracedecay_retrieve_handle_read_failure_returns_actionable_interna
     let cg = server.cg().await;
     let stored =
         store_response_handle(cg.project_root(), "{\"items\":[2]}", current_timestamp()).unwrap();
-    let handle_path = cg
-        .project_root()
-        .join(".tracedecay/response-handles")
-        .join(format!("{}.json", stored.handle));
+    let handle_path = response_handle_dir(&cg).join(format!("{}.json", stored.handle));
     fs::remove_file(&handle_path).unwrap();
     fs::create_dir(&handle_path).unwrap();
 
@@ -1031,10 +1032,7 @@ async fn test_server_stats_include_response_handle_metrics() {
 
     let broken =
         store_response_handle(cg.project_root(), "{\"broken\":true}", current_timestamp()).unwrap();
-    let broken_path = cg
-        .project_root()
-        .join(".tracedecay/response-handles")
-        .join(format!("{}.json", broken.handle));
+    let broken_path = response_handle_dir(&cg).join(format!("{}.json", broken.handle));
     fs::remove_file(&broken_path).unwrap();
     fs::create_dir(&broken_path).unwrap();
     assert!(
@@ -1065,7 +1063,9 @@ async fn test_server_stats_include_response_handle_metrics() {
     );
 
     let failure_root = TempDir::new().unwrap();
-    fs::write(failure_root.path().join(".tracedecay"), "not-a-directory").unwrap();
+    let failure_handle_root = resolve_response_handle_root(failure_root.path()).unwrap();
+    fs::create_dir_all(failure_handle_root.parent().unwrap()).unwrap();
+    fs::write(&failure_handle_root, "not-a-directory").unwrap();
     assert!(
         store_response_handle(
             failure_root.path(),
@@ -1823,20 +1823,29 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     );
 }
 
-/// Serializes the savings-accounting tests below: they all mutate
-/// process-wide env vars (`HOME`, `TRACEDECAY_GLOBAL_DB`,
-/// `TRACEDECAY_ENABLE_GLOBAL_DB`). `#[tokio::test]` defaults to a
-/// current-thread runtime, so holding the guard across `.await` is fine.
+/// Serializes the savings-accounting tests below: they mutate process-wide
+/// global-accounting env vars. `#[tokio::test]` defaults to a current-thread
+/// runtime, so holding the guard across `.await` is fine.
 static SAVINGS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static BRANCH_DRIFT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Redirects HOME at an isolated temp dir (so `~/.tracedecay/global.db`
-/// lands there) and enables the global DB. Deliberately does NOT set
-/// `TRACEDECAY_GLOBAL_DB`: that override also wins over project-local
-/// LCM store discovery and would leak into concurrently running tests.
-fn isolated_savings_env(tmp: &TempDir) -> Vec<EnvVarGuard> {
-    let mut guards = vec![EnvVarGuard::set("HOME", tmp.path().as_os_str())];
-    #[cfg(target_os = "windows")]
-    guards.push(EnvVarGuard::set("USERPROFILE", tmp.path().as_os_str()));
+fn persistent_temp_dir() -> std::path::PathBuf {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().to_path_buf();
+    // Other tests can construct servers while global-accounting env is
+    // temporarily redirected here. Keep the directory alive for the process so
+    // those captured paths do not dangle after this test restores the env.
+    std::mem::forget(dir);
+    path
+}
+
+/// Redirects only the global accounting DB, without changing HOME/profile
+/// storage resolution for concurrently running TraceDecay fixtures.
+fn isolated_savings_env(global_db_path: &std::path::Path) -> Vec<EnvVarGuard> {
+    let mut guards = vec![EnvVarGuard::set(
+        "TRACEDECAY_GLOBAL_DB",
+        global_db_path.as_os_str(),
+    )];
     // `.cargo/config.toml` sets TRACEDECAY_DISABLE_GLOBAL_DB=1 to keep
     // cargo-launched processes hermetic; the explicit enable wins.
     guards.push(EnvVarGuard::set(
@@ -1917,6 +1926,81 @@ fn parse_metrics_line(resp: &Value) -> Option<(u64, u64)> {
     Some((before.trim().parse().ok()?, after.trim().parse().ok()?))
 }
 
+async fn mcp_runtime_events(
+    global_db_path: &std::path::Path,
+    session_id: &str,
+) -> Vec<tracedecay::global_db::AnalyticsEventRecord> {
+    let db = tracedecay::global_db::GlobalDb::open_at(global_db_path)
+        .await
+        .expect("global db opens at isolated path");
+    db.query_analytics_events(&tracedecay::global_db::AnalyticsEventQuery {
+        provider: Some("mcp".to_string()),
+        project_id: None,
+        session_id: Some(session_id.to_string()),
+        event_kind: Some("mcp_tool_call".to_string()),
+        limit: 100,
+    })
+    .await
+    .expect("query runtime analytics events")
+}
+
+async fn mcp_runtime_event(
+    global_db_path: &std::path::Path,
+    tool_name: &str,
+    session_id: &str,
+) -> Option<tracedecay::global_db::AnalyticsEventRecord> {
+    mcp_runtime_events(global_db_path, session_id)
+        .await
+        .into_iter()
+        .find(|event| event.tool_name.as_deref() == Some(tool_name))
+}
+
+async fn expect_mcp_runtime_event(
+    global_db_path: &std::path::Path,
+    tool_name: &str,
+    session_id: &str,
+    label: &str,
+) -> tracedecay::global_db::AnalyticsEventRecord {
+    mcp_runtime_event(global_db_path, tool_name, session_id)
+        .await
+        .unwrap_or_else(|| panic!("{label}"))
+}
+
+async fn mcp_runtime_event_count(global_db_path: &std::path::Path, session_id: &str) -> u64 {
+    mcp_runtime_events(global_db_path, session_id).await.len() as u64
+}
+
+fn response_for_id(responses: &[String], id: i64) -> Value {
+    let response = responses
+        .iter()
+        .find(|r| parse_response(r)["id"] == id)
+        .unwrap_or_else(|| panic!("should have a response for id={id}"));
+    parse_response(response)
+}
+
+async fn call_tool(server: Arc<McpServer>, id: i64, tool_name: &str, arguments: Value) -> Value {
+    let responses = run_server_with_messages(
+        server,
+        vec![jsonrpc_request(
+            json!(id),
+            "tools/call",
+            json!({ "name": tool_name, "arguments": arguments }),
+        )],
+    )
+    .await;
+    response_for_id(&responses, id)
+}
+
+fn analytics_metadata(event: &tracedecay::global_db::AnalyticsEventRecord) -> Value {
+    serde_json::from_str(
+        event
+            .metadata_json
+            .as_deref()
+            .expect("analytics event metadata"),
+    )
+    .expect("analytics event metadata is JSON")
+}
+
 #[tokio::test]
 // Intentional: serializes env-mutating savings tests; #[tokio::test]
 // defaults to a current-thread runtime, so no executor thread blocks.
@@ -1925,8 +2009,8 @@ async fn search_call_writes_savings_ledger_row() {
     let _env_guard = SAVINGS_ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let tmp_home = tempfile::tempdir().unwrap();
-    let _env = isolated_savings_env(&tmp_home);
+    let tmp_global = persistent_temp_dir();
+    let _env = isolated_savings_env(&tmp_global.join("global.db"));
 
     let (server, proj_tmp) = setup_server().await;
     let server_handle = server.clone();
@@ -1956,6 +2040,156 @@ async fn search_call_writes_savings_ledger_row() {
     settled_ledger_total(&server_handle, &db_path, proj_tmp.path(), 1).await;
 }
 
+#[tokio::test]
+// Intentional: serializes env-mutating savings tests; #[tokio::test]
+// defaults to a current-thread runtime, so no executor thread blocks.
+#[allow(clippy::await_holding_lock)]
+async fn search_call_writes_mcp_runtime_analytics_event() {
+    let _env_guard = SAVINGS_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tmp_global = persistent_temp_dir();
+    let _env = isolated_savings_env(&tmp_global.join("global.db"));
+
+    let (server, proj_tmp) = setup_savings_project().await;
+    let server_handle = server.clone();
+    let db_path = locked_global_db_path();
+    let project_path = proj_tmp.path().to_string_lossy().to_string();
+
+    let resp = call_tool(
+        server,
+        9002,
+        "tracedecay_search",
+        json!({
+            "query": "helper",
+            "session_id": "mcp-session-9002"
+        }),
+    )
+    .await;
+
+    assert!(resp["error"].is_null(), "search should not error");
+    let (before, after) = parse_metrics_line(&resp).expect("metrics line present");
+
+    settled_ledger_total(&server_handle, &db_path, proj_tmp.path(), 1).await;
+    assert_eq!(
+        mcp_runtime_event_count(&db_path, "mcp-session-9002").await,
+        1,
+        "one MCP runtime analytics event should be recorded per tool call"
+    );
+    let event = expect_mcp_runtime_event(
+        &db_path,
+        "tracedecay_search",
+        "mcp-session-9002",
+        "durable MCP runtime analytics event",
+    )
+    .await;
+    let metadata = analytics_metadata(&event);
+
+    assert_eq!(event.session_id.as_deref(), Some("mcp-session-9002"));
+    assert_eq!(event.project_id, project_path);
+    assert!(
+        event
+            .tool_category
+            .as_deref()
+            .is_some_and(|category| !category.is_empty()),
+        "category should be taxonomy-backed"
+    );
+    assert_eq!(event.outcome.as_deref(), Some("success"));
+    assert_eq!(metadata["before_tokens"], before);
+    assert_eq!(metadata["after_tokens"], after);
+    assert_eq!(metadata["tokens_saved"], before - after);
+}
+
+#[tokio::test]
+// Intentional: serializes env-mutating savings tests; #[tokio::test]
+// defaults to a current-thread runtime, so no executor thread blocks.
+#[allow(clippy::await_holding_lock)]
+async fn failed_tool_call_writes_mcp_runtime_analytics_event() {
+    let _env_guard = SAVINGS_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tmp_global = persistent_temp_dir();
+    let _env = isolated_savings_env(&tmp_global.join("global.db"));
+
+    let (server, _proj_tmp) = setup_server().await;
+    let server_handle = server.clone();
+    let db_path = locked_global_db_path();
+
+    let resp = call_tool(
+        server,
+        9003,
+        "tracedecay_not_a_real_tool",
+        json!({ "session_id": "mcp-session-9003" }),
+    )
+    .await;
+
+    assert!(resp["error"].is_object(), "unknown tool should error");
+
+    server_handle.ledger_writes_settled().await;
+    assert_eq!(
+        mcp_runtime_event_count(&db_path, "mcp-session-9003").await,
+        1,
+        "failed MCP tool calls should still record analytics"
+    );
+    let event = expect_mcp_runtime_event(
+        &db_path,
+        "tracedecay_not_a_real_tool",
+        "mcp-session-9003",
+        "durable failed MCP runtime analytics event",
+    )
+    .await;
+    let metadata = analytics_metadata(&event);
+
+    assert_eq!(event.session_id.as_deref(), Some("mcp-session-9003"));
+    assert_eq!(event.outcome.as_deref(), Some("error"));
+    assert_eq!(metadata["before_tokens"], 0);
+    assert_eq!(metadata["after_tokens"], 0);
+    assert_eq!(metadata["tokens_saved"], 0);
+}
+
+#[tokio::test]
+// Intentional: serializes env-mutating savings tests; #[tokio::test]
+// defaults to a current-thread runtime, so no executor thread blocks.
+#[allow(clippy::await_holding_lock)]
+async fn semantic_tool_failure_writes_error_mcp_runtime_analytics_event() {
+    let _env_guard = SAVINGS_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tmp_global = persistent_temp_dir();
+    let _env = isolated_savings_env(&tmp_global.join("global.db"));
+
+    let (server, _proj_tmp) = setup_server().await;
+    let server_handle = server.clone();
+    let db_path = locked_global_db_path();
+
+    let resp = call_tool(
+        server,
+        9004,
+        "tracedecay_changelog",
+        json!({
+            "from_ref": "definitely-not-a-ref",
+            "to_ref": "also-not-a-ref",
+            "_meta": { "sessionId": "mcp-session-9004" }
+        }),
+    )
+    .await;
+
+    assert!(resp["error"].is_null(), "semantic failures are MCP results");
+    assert_eq!(resp["result"]["isError"], true);
+
+    server_handle.ledger_writes_settled().await;
+    let event = expect_mcp_runtime_event(
+        &db_path,
+        "tracedecay_changelog",
+        "mcp-session-9004",
+        "durable semantic-failure MCP runtime analytics event",
+    )
+    .await;
+
+    assert_eq!(event.session_id.as_deref(), Some("mcp-session-9004"));
+    assert_eq!(event.outcome.as_deref(), Some("error"));
+}
+
 /// Regression test for the empty-ledger bug: the savings ledger must record
 /// **by default**, with no env opt-in. The holographic-fact-store commit
 /// made the global DB opt-in via `TRACEDECAY_ENABLE_GLOBAL_DB`, which
@@ -1970,10 +2204,11 @@ async fn ledger_records_by_default_without_env_opt_in() {
     let _env_guard = SAVINGS_ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let tmp_home = tempfile::tempdir().unwrap();
-    let mut env = vec![EnvVarGuard::set("HOME", tmp_home.path().as_os_str())];
-    #[cfg(target_os = "windows")]
-    env.push(EnvVarGuard::set("USERPROFILE", tmp_home.path().as_os_str()));
+    let tmp_global = persistent_temp_dir();
+    let mut env = vec![EnvVarGuard::set(
+        "TRACEDECAY_GLOBAL_DB",
+        tmp_global.join("global.db").as_os_str(),
+    )];
     // Simulate a real (non-cargo) launch: neither the opt-in nor the
     // cargo-test opt-out is present, so the default-on path is exercised.
     env.push(EnvVarGuard::unset("TRACEDECAY_ENABLE_GLOBAL_DB"));
@@ -2047,8 +2282,8 @@ async fn full_file_read_credits_zero_net_savings() {
     let _env_guard = SAVINGS_ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let tmp_home = tempfile::tempdir().unwrap();
-    let _env = isolated_savings_env(&tmp_home);
+    let tmp_global = persistent_temp_dir();
+    let _env = isolated_savings_env(&tmp_global.join("global.db"));
 
     let (server, proj_tmp) = setup_savings_project().await;
     let server_handle = server.clone();
@@ -2110,8 +2345,8 @@ async fn lifetime_counter_matches_ledger_net_savings() {
     let _env_guard = SAVINGS_ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let tmp_home = tempfile::tempdir().unwrap();
-    let _env = isolated_savings_env(&tmp_home);
+    let tmp_global = persistent_temp_dir();
+    let _env = isolated_savings_env(&tmp_global.join("global.db"));
 
     let (server, proj_tmp) = setup_savings_project().await;
     let server_handle = server.clone();
@@ -2234,14 +2469,14 @@ async fn setup_branch_drift_fixture() -> (TempDir, PathBuf, Arc<McpServer>) {
     }
 
     // Track main + feature, seeding feature's DB from main's.
-    let tracedecay_dir = project.join(".tracedecay");
+    let layout = resolve_layout_for_current_profile(&project).unwrap();
     let mut meta = BranchMeta::new("main");
     meta.add_branch("feature", "branches/feature.db", "main");
-    save_branch_meta(&tracedecay_dir, &meta).unwrap();
-    fs::create_dir_all(tracedecay_dir.join("branches")).unwrap();
+    save_branch_meta(&layout.data_root, &meta).unwrap();
+    fs::create_dir_all(layout.data_root.join("branches")).unwrap();
     fs::copy(
-        tracedecay_dir.join("tracedecay.db"),
-        tracedecay_dir.join("branches/feature.db"),
+        &layout.graph_db_path,
+        layout.data_root.join("branches/feature.db"),
     )
     .unwrap();
 
@@ -2278,6 +2513,7 @@ async fn setup_branch_drift_fixture() -> (TempDir, PathBuf, Arc<McpServer>) {
 
 #[tokio::test]
 async fn tool_calls_reopen_branch_db_after_mid_session_checkout() {
+    let _branch_lock = BRANCH_DRIFT_TEST_LOCK.lock().await;
     let (_dir, project, server) = setup_branch_drift_fixture().await;
 
     // While on main, the feature-only symbol must be invisible.
@@ -2319,6 +2555,7 @@ async fn tool_calls_reopen_branch_db_after_mid_session_checkout() {
 
 #[tokio::test]
 async fn cross_branch_tools_keep_using_explicit_branch_dbs_after_drift_reopen() {
+    let _branch_lock = BRANCH_DRIFT_TEST_LOCK.lock().await;
     let (_dir, project, server) = setup_branch_drift_fixture().await;
 
     git(&project, &["checkout", "feature"]);
