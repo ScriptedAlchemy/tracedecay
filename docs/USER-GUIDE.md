@@ -332,6 +332,12 @@ hooks, using the resolved absolute `tracedecay` path). The local hooks are
 identical to the global Codex install described under "Codex lifecycle hooks"
 below.
 
+Pass `--automation` with `--agent codex` to install or update the Codex-native
+`Watch TraceDecay Memory` automation. TraceDecay writes the native global record
+at `~/.codex/automations/watch-tracedecay-memory/automation.toml` and scopes it
+to the current project with that record's `cwds` field; it does not write
+project-local automation files.
+
 #### Codex lifecycle hooks
 
 Codex supports a Claude-style lifecycle hook system (enabled by default; verified against Codex 0.136.0). Both global (`~/.codex/hooks.json`) and project-local (`<root>/.codex/hooks.json`) installs register tracedecay hooks using Codex's nested config shape — `hooks[event] -> [ { matcher?, hooks: [ { type: "command", command, timeout } ] } ]` — and reconcile them idempotently while preserving any foreign hooks. Each hook reads Codex's single stdin JSON event (`session_id`, `cwd`, `hook_event_name`, plus event-specific fields) and writes Codex-shaped stdout. The project root is resolved from the event `cwd`, and every hook is fail-open and only acts when it finds an initialized project store.

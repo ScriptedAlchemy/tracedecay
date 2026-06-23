@@ -108,6 +108,10 @@ pub enum Commands {
         /// used with --agent hermes).
         #[arg(long)]
         no_dashboard: bool,
+        /// Install/update a Codex-native project automation in ~/.codex
+        /// (only used with --agent codex).
+        #[arg(long)]
+        automation: bool,
     },
     /// Refresh settings for all already-installed agents
     Reinstall,
@@ -605,6 +609,7 @@ mod cli_parse_tests {
                 all_profiles,
                 project_root,
                 no_dashboard,
+                ..
             }) if agent.as_deref() == Some("hermes")
                 && !local
                 && profile.as_deref() == Some("dev")
@@ -620,6 +625,22 @@ mod cli_parse_tests {
             .expect("update-plugin alias should parse");
 
         assert!(matches!(cli.command, Some(Commands::UpdatePlugin)));
+    }
+
+    #[test]
+    fn codex_install_automation_flag_parses_without_extra_knobs() {
+        let cli =
+            Cli::try_parse_from(["tracedecay", "install", "--agent", "codex", "--automation"])
+                .expect("Codex automation install should parse");
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Install {
+                agent,
+                automation,
+                ..
+            }) if agent.as_deref() == Some("codex") && automation
+        ));
     }
 
     #[test]
