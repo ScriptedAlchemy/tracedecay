@@ -479,8 +479,6 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::er
         }
         BranchAction::Add { name, path } => {
             let project_path = tracedecay::config::resolve_path(path);
-            let tracedecay_dir = resolve_branch_data_root(&project_path);
-
             let branch_name = match name {
                 Some(n) => n,
                 None => branch::current_branch(&project_path).ok_or_else(|| {
@@ -492,72 +490,22 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::er
                 })?,
             };
 
-            // Load or bootstrap metadata
-            let mut meta = branch_meta::load_branch_meta(&tracedecay_dir).unwrap_or_else(|| {
-                let default = branch::detect_default_branch(&project_path)
-                    .unwrap_or_else(|| "main".to_string());
-                branch_meta::BranchMeta::new_for_dir(&tracedecay_dir, &default)
-            });
-
-            if meta.is_tracked(&branch_name) {
-                eprintln!("Branch '{branch_name}' is already tracked.");
-                return Ok(());
-            }
-
-            // Find parent DB to copy from
-            let parent = branch::find_nearest_tracked_ancestor(&project_path, &branch_name, &meta)
-                .unwrap_or_else(|| meta.default_branch.clone());
-            let parent_db = branch::resolve_branch_db_path(&tracedecay_dir, &parent, &meta)
-                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-                    message: format!("parent branch '{parent}' has no DB"),
-                })?;
-            if !parent_db.exists() {
-                return Err(tracedecay::errors::TraceDecayError::Config {
-                    message: format!("parent DB not found at '{}'", parent_db.display()),
-                });
-            }
-
-            // Copy DB
-            let sanitized = branch::sanitize_branch_name(&branch_name);
-            let branches_dir = branch_meta::ensure_branches_dir(&tracedecay_dir)?;
-            let new_db_path = branches_dir.join(format!("{sanitized}.db"));
             let spinner = Spinner::new();
-            spinner.set_message(&format!("copying DB from '{parent}'"));
-            std::fs::copy(&parent_db, &new_db_path)?;
-
-            // Save metadata BEFORE open() so it resolves the new branch to its DB
-            let db_file = format!("branches/{sanitized}.db");
-            meta.add_branch(&branch_name, &db_file, &parent);
-            branch_meta::save_branch_meta(&tracedecay_dir, &meta)?;
-
-            // Run incremental sync (hash-based delta) against the new branch DB
             spinner.set_message("syncing changes");
-            let cg = TraceDecay::open(&project_path).await?;
-            let result = cg.sync().await?;
-
-            // Update sync timestamp after successful sync
-            if let Some(mut meta) = branch_meta::load_branch_meta(&tracedecay_dir) {
-                meta.touch_synced(&branch_name);
-                let _ = branch_meta::save_branch_meta(&tracedecay_dir, &meta);
-            }
-
-            let skipped_msg = if result.skipped_paths.is_empty() {
-                String::new()
-            } else {
-                format!(", {} skipped", result.skipped_paths.len())
-            };
-            spinner.done(&format!(
-                "branch '{branch_name}' tracked — {} added, {} modified, {} removed{skipped_msg}",
-                result.files_added, result.files_modified, result.files_removed
-            ));
-            if !result.skipped_paths.is_empty() {
-                eprintln!();
-                eprintln!(
-                    "\x1b[33mSkipped ({}) — files found but not readable:\x1b[0m",
-                    result.skipped_paths.len()
-                );
-                for (path, reason) in &result.skipped_paths {
-                    eprintln!("  ! {path}: {reason}");
+            match branch::add_branch_tracking(&project_path, &branch_name).await? {
+                branch::BranchAddOutcome::NotIndexed => {
+                    spinner.done("no TraceDecay index found; run `tracedecay init` first");
+                }
+                branch::BranchAddOutcome::AlreadyTracked => {
+                    spinner.done(&format!("Branch '{branch_name}' is already tracked."));
+                }
+                branch::BranchAddOutcome::Added => {
+                    spinner.done(&format!("branch '{branch_name}' tracked"));
+                }
+                branch::BranchAddOutcome::Deferred => {
+                    spinner.done(&format!(
+                        "branch '{branch_name}' tracked; sync deferred because another process is active"
+                    ));
                 }
             }
         }
