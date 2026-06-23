@@ -20,6 +20,39 @@ env:
   CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
+  commit-messages:
+    name: Commit Messages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Validate PR commit messages
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: scripts/check-conventional-commits.sh "$BASE_SHA..$HEAD_SHA"
+
+      - name: Validate pushed commit messages
+        if: github.event_name == 'push'
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            if git rev-parse "${HEAD_SHA}^" >/dev/null 2>&1; then
+              RANGE="${HEAD_SHA}^..${HEAD_SHA}"
+            else
+              RANGE="$HEAD_SHA"
+            fi
+          else
+            RANGE="${BEFORE_SHA}..${HEAD_SHA}"
+          fi
+          scripts/check-conventional-commits.sh "$RANGE"
+
   test:
     name: Test ${{ matrix.name }}
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
