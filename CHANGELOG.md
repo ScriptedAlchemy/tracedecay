@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Markdown is now the default MCP tool output format.** Read/list/analysis/context tools (≈70 tools across `search`, `callers`, `callees`, `impact`, `outline`, `body`, `status`, `complexity`, `hotspots`, `health`, `test_map`, `pr_context`, …) now return compact markdown — bullets and GitHub-flavored tables — instead of pretty-printed JSON. Markdown is denser (no per-row key repetition, no brace/indentation overhead), scans better for models, and pushes responses away from the 15K-char truncation cliff. Symbol identifiers (`node_id`, `qualified_name`, `signature`) are preserved inline in backticks so follow-up calls (`body`/`callers`/`callees`) still chain cleanly. `tracedecay_context` was already markdown and is unchanged for the default path.
+- **New `format` argument** on every markdown-capable tool: pass `format: "json"` to get compact machine-readable JSON (for programmatic consumers); the default is `format: "markdown"`. Unrecognized values fall back to markdown.
+- **JSON output is never pretty-printed anymore.** Tools that intentionally stay JSON (edit primitives, `dashboard`, `fact_store`/`fact_feedback`, retrieval handles, and the LCM/session lifecycle tools) now emit compact `serde_json::to_string` rather than `to_string_pretty`, a ~30–40% byte reduction with no semantic change. `tracedecay_files` (grouped/flat text) and `tracedecay_type_hierarchy` (text tree) already returned dense text and are unchanged.
+- Shared `src/mcp/tools/render.rs` module centralizes format selection, format-aware truncation, and the generic JSON→markdown renderer used by tools without a bespoke layout.
+
 ## [0.0.7](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.6...v0.0.7) - 2026-06-22
 
 ### Fixed
