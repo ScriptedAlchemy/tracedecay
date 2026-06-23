@@ -102,7 +102,7 @@ fn find_descendant_by_kind<'tree>(node: TsNode<'tree>, kind: &str) -> Option<TsN
 fn parse_java_method(source: &str) -> TsNode<'_> {
     let mut parser = Parser::new();
     parser
-        .set_language(&ts_provider::language("java"))
+        .set_language(&ts_provider::language("java").expect("java grammar should load"))
         .expect("java grammar should load");
     let tree = parser
         .parse(source, None)
@@ -115,7 +115,7 @@ fn parse_java_method(source: &str) -> TsNode<'_> {
 fn parse_kotlin_function(source: &str) -> TsNode<'_> {
     let mut parser = Parser::new();
     parser
-        .set_language(&ts_provider::language("kotlin"))
+        .set_language(&ts_provider::language("kotlin").expect("kotlin grammar should load"))
         .expect("kotlin grammar should load");
     let tree = parser
         .parse(source, None)

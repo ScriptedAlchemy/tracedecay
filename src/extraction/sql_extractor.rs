@@ -93,7 +93,7 @@ impl SqlExtractor {
 
     fn parse_source(source: &str) -> Result<Tree, String> {
         let mut parser = Parser::new();
-        let language = crate::extraction::ts_provider::language("sql");
+        let language = crate::extraction::ts_provider::try_language("sql")?;
         parser
             .set_language(&language)
             .map_err(|e| format!("failed to load SQL grammar: {e}"))?;

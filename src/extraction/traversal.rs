@@ -77,7 +77,7 @@ mod tests {
     fn parse_c_function(source: &str) -> TsNode<'_> {
         let mut parser = Parser::new();
         parser
-            .set_language(&ts_provider::language("c"))
+            .set_language(&ts_provider::try_language("c").expect("c grammar should load"))
             .expect("c grammar should load");
         let tree = parser.parse(source, None).expect("c source should parse");
         let leaked = Box::leak(Box::new(tree));

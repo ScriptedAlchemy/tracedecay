@@ -67,6 +67,54 @@ function internal(): void {}
 }
 
 #[test]
+fn test_ts_empty_jsdoc_comment_does_not_panic() {
+    let source = r#"
+/**/
+export function documented(): void {}
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract("empty-jsdoc.ts", source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let function = result
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::Function && n.name == "documented")
+        .expect("function should be extracted");
+    assert_eq!(function.docstring.as_deref(), Some(""));
+}
+
+#[test]
+fn test_ts_anonymous_generator_method_does_not_panic() {
+    let source = r#"
+class C {
+    *() {}
+}
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract("anonymous-generator-method.ts", source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert!(result
+        .nodes
+        .iter()
+        .any(|n| n.kind == NodeKind::Method && n.name == "<anonymous>"));
+}
+
+#[test]
+fn test_ts_empty_decorator_name_does_not_panic() {
+    let source = r#"
+@(() => {})
+class C {}
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract("empty-decorator.ts", source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert!(result
+        .nodes
+        .iter()
+        .any(|n| n.kind == NodeKind::Class && n.name == "C"));
+}
+
+#[test]
 fn test_ts_arrow_function() {
     let source = r#"
 const add = (a: number, b: number): number => a + b;
@@ -569,6 +617,25 @@ export default class Foo {
         .collect();
     assert_eq!(methods.len(), 1);
     assert_eq!(methods[0].name, "bar");
+}
+
+#[test]
+fn test_ts_unknown_language_key_surfaces_parse_error() {
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract("test.definitely-not-registered", "const value = 1;");
+
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|err| err.contains("unknown language key 'definitely-not-registered'")),
+        "unknown TypeScript provider keys should be returned as parse errors: {:?}",
+        result.errors
+    );
+    assert!(
+        result.nodes.is_empty(),
+        "parse errors should stop extraction before creating graph nodes"
+    );
 }
 
 #[test]

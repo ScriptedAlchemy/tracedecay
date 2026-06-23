@@ -19,6 +19,9 @@ struct ExtractionState {
     errors: Vec<String>,
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
+    /// COPY --from targets keyed by stage alias or zero-based stage index.
+    stage_targets: Vec<(String, String)>,
+    stage_count: usize,
     file_path: String,
     source: Vec<u8>,
     timestamp: u64,
@@ -35,6 +38,8 @@ impl ExtractionState {
             edges: Vec::new(),
             errors: Vec::new(),
             node_stack: Vec::new(),
+            stage_targets: Vec::new(),
+            stage_count: 0,
             file_path: file_path.to_string(),
             source: source.as_bytes().to_vec(),
             timestamp,
@@ -53,6 +58,18 @@ impl ExtractionState {
     /// Returns the current parent node ID, or None if at file root level.
     fn parent_node_id(&self) -> Option<&str> {
         self.node_stack.last().map(|(_, id)| id.as_str())
+    }
+
+    fn register_stage_target(&mut self, name: impl Into<String>, id: &str) {
+        self.stage_targets.push((name.into(), id.to_string()));
+    }
+
+    fn stage_target(&self, name: &str) -> Option<String> {
+        self.stage_targets
+            .iter()
+            .rev()
+            .find(|(candidate, _)| candidate == name)
+            .map(|(_, id)| id.clone())
     }
 
     /// Gets the text of a tree-sitter node from the source.
@@ -122,7 +139,7 @@ impl DockerfileExtractor {
     /// Parse source code into a tree-sitter AST.
     fn parse_source(source: &str) -> Result<Tree, String> {
         let mut parser = Parser::new();
-        let language = crate::extraction::ts_provider::language("dockerfile");
+        let language = crate::extraction::ts_provider::try_language("dockerfile")?;
         parser
             .set_language(&language)
             .map_err(|e| format!("failed to load Dockerfile grammar: {e}"))?;
@@ -160,8 +177,8 @@ impl DockerfileExtractor {
 
     /// Extract a FROM instruction.
     ///
-    /// `FROM image AS alias` creates a Module node for the stage.
-    /// `FROM image` (no alias) creates a Use node for the base image.
+    /// `FROM image AS alias` creates a Module node for the named stage.
+    /// `FROM image` (no alias) creates a Module node named by stage index.
     ///
     /// When a named stage is created, subsequent instructions until the next
     /// FROM are considered children of that stage.
@@ -170,6 +187,8 @@ impl DockerfileExtractor {
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
+        let stage_index = state.stage_count;
+        state.stage_count += 1;
 
         // If there's a previous stage on the stack (not the file root), pop it
         // so the new FROM starts a new scope. The file root is always at index 0.
@@ -179,11 +198,6 @@ impl DockerfileExtractor {
 
         // Check for AS alias (named stage).
         let alias = node.child_by_field_name("as").map(|n| state.node_text(n));
-
-        // Get the image spec text.
-        let image_spec = Self::find_child_by_kind(node, "image_spec")
-            .map(|n| state.node_text(n))
-            .unwrap_or_default();
 
         let text = state.node_text(node);
 
@@ -219,6 +233,8 @@ impl DockerfileExtractor {
                 parent_id: None,
             };
             state.nodes.push(graph_node);
+            state.register_stage_target(stage_index.to_string(), &id);
+            state.register_stage_target(alias_name.clone(), &id);
 
             // Contains edge from parent.
             if let Some(parent_id) = state.parent_node_id() {
@@ -233,15 +249,16 @@ impl DockerfileExtractor {
             // Push stage onto the stack so subsequent instructions belong to it.
             state.node_stack.push((alias_name, id));
         } else {
-            // Unnamed FROM -> Use node for the base image.
-            let kind = NodeKind::Use;
-            let qualified_name = format!("{}::{}", state.qualified_prefix(), image_spec);
-            let id = generate_node_id(&state.file_path, &kind, &image_spec, start_line);
+            // Unnamed stage -> synthetic Module node keyed by stage index.
+            let stage_name = format!("stage{stage_index}");
+            let kind = NodeKind::Module;
+            let qualified_name = format!("{}::{}", state.qualified_prefix(), stage_name);
+            let id = generate_node_id(&state.file_path, &kind, &stage_name, start_line);
 
             let graph_node = Node {
                 id: id.clone(),
                 kind,
-                name: image_spec,
+                name: stage_name.clone(),
                 qualified_name,
                 file_path: state.file_path.clone(),
                 start_line,
@@ -264,16 +281,20 @@ impl DockerfileExtractor {
                 parent_id: None,
             };
             state.nodes.push(graph_node);
+            state.register_stage_target(stage_index.to_string(), &id);
 
             // Contains edge from parent.
             if let Some(parent_id) = state.parent_node_id() {
                 state.edges.push(Edge {
                     source: parent_id.to_string(),
-                    target: id,
+                    target: id.clone(),
                     kind: EdgeKind::Contains,
                     line: Some(start_line),
                 });
             }
+
+            // Push stage onto the stack so subsequent instructions belong to it.
+            state.node_stack.push((stage_name, id));
         }
     }
 
@@ -550,24 +571,47 @@ impl DockerfileExtractor {
                 if child.kind() == "param" {
                     let param_text = state.node_text(child);
                     if let Some(stage_name) = param_text.strip_prefix("--from=") {
-                        // Create a Uses edge from the current parent to the
-                        // referenced stage. We generate the target ID using the
-                        // same convention as visit_from for Module nodes.
-                        let target_id = generate_node_id(
-                            &state.file_path,
-                            &NodeKind::Module,
-                            stage_name,
-                            0, // We don't know the exact line; use 0 as placeholder
-                        );
-
-                        // Find the actual target node ID by searching existing nodes.
-                        let resolved_target = state
-                            .nodes
-                            .iter()
-                            .find(|n| n.kind == NodeKind::Module && n.name == stage_name)
-                            .map(|n| n.id.clone());
-
-                        let target = resolved_target.unwrap_or(target_id);
+                        let target = if let Some(target) = state.stage_target(stage_name) {
+                            target
+                        } else {
+                            let id = generate_node_id(
+                                &state.file_path,
+                                &NodeKind::Use,
+                                stage_name,
+                                start_line,
+                            );
+                            let text = state.node_text(node);
+                            state.nodes.push(Node {
+                                id: id.clone(),
+                                kind: NodeKind::Use,
+                                name: stage_name.to_string(),
+                                qualified_name: format!(
+                                    "{}::{}",
+                                    state.qualified_prefix(),
+                                    stage_name
+                                ),
+                                file_path: state.file_path.clone(),
+                                start_line,
+                                attrs_start_line: start_line,
+                                end_line: node.end_position().row as u32,
+                                start_column: node.start_position().column as u32,
+                                end_column: node.end_position().column as u32,
+                                signature: Some(text.trim().to_string()),
+                                docstring: None,
+                                visibility: Visibility::Pub,
+                                is_async: false,
+                                branches: 0,
+                                loops: 0,
+                                returns: 0,
+                                max_nesting: 0,
+                                unsafe_blocks: 0,
+                                unchecked_calls: 0,
+                                assertions: 0,
+                                updated_at: state.timestamp,
+                                parent_id: None,
+                            });
+                            id
+                        };
 
                         if let Some(parent_id) = state.parent_node_id() {
                             state.edges.push(Edge {
@@ -584,27 +628,6 @@ impl DockerfileExtractor {
                 }
             }
         }
-    }
-
-    // ----------------------------
-    // Helper methods
-    // ----------------------------
-
-    /// Find the first child of a node with a given kind.
-    fn find_child_by_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == kind {
-                    return Some(child);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        None
     }
 
     /// Build the final `ExtractionResult` from the accumulated state.

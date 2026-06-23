@@ -150,7 +150,7 @@ impl MsBasic2Extractor {
     /// Parse source code into a tree-sitter AST.
     fn parse_source(source: &str) -> Result<Tree, String> {
         let mut parser = Parser::new();
-        let language = crate::extraction::ts_provider::language("msbasic2");
+        let language = crate::extraction::ts_provider::try_language("msbasic2")?;
         parser
             .set_language(&language)
             .map_err(|e| format!("failed to load MS BASIC 2.0 grammar: {e}"))?;
