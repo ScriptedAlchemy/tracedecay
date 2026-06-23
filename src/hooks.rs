@@ -1175,17 +1175,20 @@ pub fn cursor_shell_command_targets_project(
 
 fn git_explicit_work_dir(tokens: &[String], cwd: &Path) -> Option<PathBuf> {
     let mut i = 1;
+    let mut explicit_work_dir = None;
     while i < tokens.len() {
         let token = &tokens[i];
         match token.as_str() {
             "-C" | "--work-tree" => {
                 let value = tokens.get(i + 1)?;
-                return Some(resolve_shell_path(cwd, value));
+                explicit_work_dir = Some(resolve_shell_path(cwd, value));
+                i += 2;
             }
             "-c" | "--git-dir" | "--namespace" | "--config-env" => i += 2,
             _ if token.starts_with("--work-tree=") => {
                 let value = token.trim_start_matches("--work-tree=");
-                return Some(resolve_shell_path(cwd, value));
+                explicit_work_dir = Some(resolve_shell_path(cwd, value));
+                i += 1;
             }
             _ if token.starts_with("--git-dir=")
                 || token.starts_with("--namespace=")
@@ -1197,7 +1200,7 @@ fn git_explicit_work_dir(tokens: &[String], cwd: &Path) -> Option<PathBuf> {
             _ => break,
         }
     }
-    None
+    explicit_work_dir
 }
 
 fn resolve_shell_path(cwd: &Path, value: &str) -> PathBuf {
@@ -2711,6 +2714,26 @@ mod tests {
             shell_words_for_platform(r"git --work-tree=C:\Users\me\repo pull", false),
             vec!["git", r"--work-tree=C:Usersmerepo", "pull"]
         );
+    }
+
+    #[test]
+    fn git_work_tree_overrides_prior_c_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("repo");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let command = format!(
+            "git -C {} --git-dir={}/.git --work-tree={} pull",
+            outside.display(),
+            project.display(),
+            project.display()
+        );
+
+        assert!(cursor_shell_command_targets_project(
+            &command, &outside, &project
+        ));
     }
 
     #[test]
