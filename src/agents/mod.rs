@@ -585,30 +585,57 @@ pub fn backup_and_write_json(path: &Path, value: &serde_json::Value) -> bool {
 /// On Windows the returned path uses forward slashes so it can be safely
 /// embedded in JSON hook commands without backslash-escaping issues.
 pub fn which_tracedecay() -> Option<String> {
-    // Check the current executable first
-    if let Ok(exe) = std::env::current_exe() {
-        if exe
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.starts_with("tracedecay"))
-        {
-            return Some(normalize_path_separators(&exe.to_string_lossy()));
+    let current_exe = std::env::current_exe().ok();
+    let path_var = std::env::var_os("PATH");
+    which_tracedecay_from(current_exe.as_deref(), path_var.as_deref())
+}
+
+fn which_tracedecay_from(
+    current_exe: Option<&Path>,
+    path_var: Option<&std::ffi::OsStr>,
+) -> Option<String> {
+    if let Some(exe) =
+        current_exe.filter(|exe| is_tracedecay_exe(exe) && !is_cargo_target_binary(exe))
+    {
+        return Some(normalize_path_separators(&exe.to_string_lossy()));
+    }
+
+    let path_match = path_var.and_then(|path_var| {
+        std::env::split_paths(path_var).find_map(|dir| {
+            let candidate = dir.join(tracedecay_bin_name());
+            (candidate.exists() && !is_cargo_target_binary(&candidate))
+                .then(|| normalize_path_separators(&candidate.to_string_lossy()))
+        })
+    });
+    path_match.or_else(|| {
+        current_exe
+            .filter(|exe| is_tracedecay_exe(exe))
+            .map(|exe| normalize_path_separators(&exe.to_string_lossy()))
+    })
+}
+
+fn tracedecay_bin_name() -> String {
+    format!("tracedecay{}", std::env::consts::EXE_SUFFIX)
+}
+
+fn is_tracedecay_exe(path: &Path) -> bool {
+    path.file_stem()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "tracedecay")
+}
+
+fn is_cargo_target_binary(path: &Path) -> bool {
+    let mut saw_target = false;
+    for component in path.components() {
+        let value = component.as_os_str();
+        if saw_target && (value == "debug" || value == "release") {
+            return true;
+        }
+        if value == "target" {
+            saw_target = true;
         }
     }
-    // Fall back to PATH lookup
-    let path_var = std::env::var("PATH").ok()?;
-    let separator = if cfg!(windows) { ';' } else { ':' };
-    let bin_name = if cfg!(windows) {
-        "tracedecay.exe"
-    } else {
-        "tracedecay"
-    };
-    path_var.split(separator).find_map(|dir| {
-        let candidate = PathBuf::from(dir).join(bin_name);
-        candidate
-            .exists()
-            .then(|| normalize_path_separators(&candidate.to_string_lossy()))
-    })
+    false
 }
 
 /// Replace backslashes with forward slashes so paths work in JSON/shell
@@ -1229,7 +1256,7 @@ const HOOK_MARKER: &str = "# tracedecay: auto-sync";
 
 /// The hook snippet appended to (or written as) the post-commit script.
 fn post_commit_snippet(tracedecay_bin: &str) -> String {
-    let bin = tracedecay_bin.replace('\\', "/");
+    let bin = quote_posix_command_arg(&tracedecay_bin.replace('\\', "/"));
     format!(
         "{HOOK_MARKER}\n\
          {bin} sync >/dev/null 2>&1 &\n"
@@ -2130,6 +2157,70 @@ mod path_normalize_tests {
             "/usr/local/bin/tracedecay"
         );
     }
+
+    #[test]
+    fn which_tracedecay_prefers_path_when_current_exe_is_cargo_target_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path_bin = dir.path().join("bin").join(tracedecay_bin_name());
+        std::fs::create_dir_all(path_bin.parent().unwrap()).unwrap();
+        std::fs::write(&path_bin, "").unwrap();
+        let current_exe = dir
+            .path()
+            .join("checkout/target/debug")
+            .join(tracedecay_bin_name());
+        let path_var = std::env::join_paths([dir.path().join("bin")]).unwrap();
+
+        let found = which_tracedecay_from(Some(&current_exe), Some(path_var.as_os_str()))
+            .expect("PATH binary should be preferred over cargo target binary");
+
+        assert_eq!(
+            found,
+            normalize_path_separators(&path_bin.to_string_lossy())
+        );
+    }
+
+    #[test]
+    fn which_tracedecay_skips_cargo_target_binary_on_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let target_bin = dir
+            .path()
+            .join("checkout/target/debug")
+            .join(tracedecay_bin_name());
+        let stable_bin = dir.path().join(".cargo/bin").join(tracedecay_bin_name());
+        std::fs::create_dir_all(target_bin.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(stable_bin.parent().unwrap()).unwrap();
+        std::fs::write(&target_bin, "").unwrap();
+        std::fs::write(&stable_bin, "").unwrap();
+        let path_var =
+            std::env::join_paths([target_bin.parent().unwrap(), stable_bin.parent().unwrap()])
+                .unwrap();
+
+        let found = which_tracedecay_from(None, Some(path_var.as_os_str()))
+            .expect("stable PATH binary should be found after skipping cargo target binary");
+
+        assert_eq!(
+            found,
+            normalize_path_separators(&stable_bin.to_string_lossy())
+        );
+    }
+
+    #[test]
+    fn which_tracedecay_keeps_non_target_current_exe() {
+        let dir = tempfile::tempdir().unwrap();
+        let path_bin = dir.path().join("bin").join(tracedecay_bin_name());
+        std::fs::create_dir_all(path_bin.parent().unwrap()).unwrap();
+        std::fs::write(&path_bin, "").unwrap();
+        let current_exe = dir.path().join(".cargo/bin").join(tracedecay_bin_name());
+        let path_var = std::env::join_paths([dir.path().join("bin")]).unwrap();
+
+        let found = which_tracedecay_from(Some(&current_exe), Some(path_var.as_os_str()))
+            .expect("non-target current exe should be accepted");
+
+        assert_eq!(
+            found,
+            normalize_path_separators(&current_exe.to_string_lossy())
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2156,6 +2247,13 @@ mod local_install_safety_tests {
         let command = hook_command_for_platform("/tmp/tracedecay's/bin", "hook-test", false);
 
         assert_eq!(command, "'/tmp/tracedecay'\\''s/bin' hook-test");
+    }
+
+    #[test]
+    fn post_commit_snippet_quotes_posix_binary_paths_with_spaces() {
+        let snippet = post_commit_snippet("/tmp/bin with spaces/tracedecay");
+
+        assert!(snippet.contains("'/tmp/bin with spaces/tracedecay' sync"));
     }
 
     #[cfg(unix)]

@@ -55,6 +55,60 @@ fn text(path: &Path) -> String {
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
 }
 
+fn read_json(path: &Path) -> serde_json::Value {
+    serde_json::from_str(&text(path))
+        .unwrap_or_else(|e| panic!("failed to parse JSON {}: {e}", path.display()))
+}
+
+fn assert_codex_marketplace_entry(marketplace_path: &Path, source_path: &str) {
+    let marketplace = read_json(marketplace_path);
+    let plugins = marketplace["plugins"]
+        .as_array()
+        .expect("marketplace plugins should be an array");
+    let entry = plugins
+        .iter()
+        .find(|entry| entry["name"] == "tracedecay")
+        .expect("marketplace should contain tracedecay");
+    assert_eq!(entry["source"]["source"], "local");
+    assert_eq!(entry["source"]["path"], source_path);
+}
+
+fn assert_codex_bundle_contains_bin(plugin_dir: &Path, tracedecay_bin: &str) {
+    assert!(text(&plugin_dir.join(".mcp.json")).contains(tracedecay_bin));
+    assert!(text(&plugin_dir.join("hooks/hooks.json")).contains(tracedecay_bin));
+}
+
+fn codex_bootstrap_dir(home: &Path) -> PathBuf {
+    home.join("plugins/tracedecay")
+}
+
+fn codex_cached_plugin_dir(home: &Path) -> PathBuf {
+    home.join(".codex/plugins/cache/personal/tracedecay")
+        .join(env!("CARGO_PKG_VERSION"))
+}
+
+fn codex_marketplace_path(home: &Path) -> PathBuf {
+    home.join(".agents/plugins/marketplace.json")
+}
+
+fn write_codex_plugin_manifest(plugin_dir: &Path, version: &str) {
+    std::fs::create_dir_all(plugin_dir.join(".codex-plugin")).unwrap();
+    std::fs::write(
+        plugin_dir.join(".codex-plugin/plugin.json"),
+        format!(r#"{{"name":"tracedecay","version":"{version}"}}"#),
+    )
+    .unwrap();
+}
+
+fn write_stale_codex_skill(plugin_dir: &Path) {
+    std::fs::create_dir_all(plugin_dir.join("skills/stale-skill")).unwrap();
+    std::fs::write(
+        plugin_dir.join("skills/stale-skill/SKILL.md"),
+        "---\nname: tracedecay:stale-skill\n---\n",
+    )
+    .unwrap();
+}
+
 /// Every regular file under `root`, relative to it, sorted.
 fn file_listing(root: &Path) -> Vec<PathBuf> {
     fn walk(dir: &Path, root: &Path, out: &mut Vec<PathBuf>) {
@@ -250,11 +304,17 @@ fn codex_update_plugin_refreshes_bundle_without_touching_config() {
     let codex = get_integration("codex").unwrap();
     codex.install(&ctx(home.path(), OLD_BIN)).unwrap();
 
-    let plugin_dir = home.path().join("plugins/tracedecay");
+    let plugin_dir = codex_bootstrap_dir(home.path());
     let codex_config = home.path().join(".codex/config.toml");
     std::fs::create_dir_all(codex_config.parent().unwrap()).unwrap();
     std::fs::write(&codex_config, "model = \"gpt-5\"\n").unwrap();
     std::fs::write(plugin_dir.join("user-note.txt"), "mine\n").unwrap();
+    std::fs::create_dir_all(plugin_dir.join("skills/private-skill")).unwrap();
+    std::fs::write(
+        plugin_dir.join("skills/private-skill/SKILL.md"),
+        "---\nname: private-skill\n---\n",
+    )
+    .unwrap();
     let config_before = bytes(&codex_config);
 
     let outcome = codex
@@ -267,45 +327,30 @@ fn codex_update_plugin_refreshes_bundle_without_touching_config() {
 
     assert_eq!(bytes(&codex_config), config_before);
     assert_eq!(text(&plugin_dir.join("user-note.txt")), "mine\n");
-    assert!(text(&plugin_dir.join(".mcp.json")).contains(NEW_BIN));
-    assert!(text(&plugin_dir.join("hooks/hooks.json")).contains(NEW_BIN));
+    assert_eq!(
+        text(&plugin_dir.join("skills/private-skill/SKILL.md")),
+        "---\nname: private-skill\n---\n"
+    );
+    assert_codex_bundle_contains_bin(&plugin_dir, NEW_BIN);
     assert!(text(&plugin_dir.join(".codex-plugin/plugin.json")).contains(env!("CARGO_PKG_VERSION")));
 }
 
 #[test]
-fn codex_update_plugin_refreshes_cache_and_removes_bootstrap_source() {
+fn codex_update_plugin_refreshes_cache_and_keeps_bootstrap_source_listable() {
     let home = TempDir::new().unwrap();
     let project_root = home.path().join("workspace");
     let stale_plugin_dir = home
         .path()
         .join(".codex/plugins/cache/personal/tracedecay/0.0.4");
-    let cached_plugin_dir = home
-        .path()
-        .join(".codex/plugins/cache/personal/tracedecay")
-        .join(env!("CARGO_PKG_VERSION"));
-    std::fs::create_dir_all(stale_plugin_dir.join(".codex-plugin")).unwrap();
-    std::fs::write(
-        stale_plugin_dir.join(".codex-plugin/plugin.json"),
-        r#"{"name":"tracedecay","version":"0.0.0"}"#,
-    )
-    .unwrap();
+    let cached_plugin_dir = codex_cached_plugin_dir(home.path());
+    write_codex_plugin_manifest(&stale_plugin_dir, "0.0.0");
 
-    let bootstrap_dir = home.path().join("plugins/tracedecay");
-    std::fs::create_dir_all(bootstrap_dir.join(".codex-plugin")).unwrap();
-    std::fs::write(
-        bootstrap_dir.join(".codex-plugin/plugin.json"),
-        r#"{"name":"tracedecay","version":"0.0.0"}"#,
-    )
-    .unwrap();
-    std::fs::create_dir_all(bootstrap_dir.join("skills/stale-skill")).unwrap();
-    std::fs::write(
-        bootstrap_dir.join("skills/stale-skill/SKILL.md"),
-        "---\nname: tracedecay:stale-skill\n---\n",
-    )
-    .unwrap();
+    let bootstrap_dir = codex_bootstrap_dir(home.path());
+    write_codex_plugin_manifest(&bootstrap_dir, "0.0.0");
+    write_stale_codex_skill(&bootstrap_dir);
     std::fs::create_dir_all(home.path().join(".agents/plugins")).unwrap();
     std::fs::write(
-        home.path().join(".agents/plugins/marketplace.json"),
+        codex_marketplace_path(home.path()),
         r#"{"interface":{"displayName":"Personal"},"name":"personal","plugins":[{"name":"tracedecay","source":{"source":"local","path":"./plugins/tracedecay"}}]}"#,
     )
     .unwrap();
@@ -317,19 +362,113 @@ fn codex_update_plugin_refreshes_cache_and_removes_bootstrap_source() {
     let UpdatePluginOutcome::Refreshed(paths) = outcome else {
         panic!("expected codex update_plugin to refresh the installed cache");
     };
-    assert_eq!(paths, vec![cached_plugin_dir.clone()]);
+    assert_eq!(
+        paths,
+        vec![cached_plugin_dir.clone(), bootstrap_dir.clone()]
+    );
 
-    assert!(text(&cached_plugin_dir.join(".mcp.json")).contains(NEW_BIN));
-    assert!(text(&cached_plugin_dir.join("hooks/hooks.json")).contains(NEW_BIN));
+    assert_codex_bundle_contains_bin(&cached_plugin_dir, NEW_BIN);
+    assert_codex_bundle_contains_bin(&bootstrap_dir, NEW_BIN);
     assert!(
         !stale_plugin_dir.exists(),
         "update-plugin should migrate managed Codex cache installs to the current plugin version"
     );
-    assert!(!bootstrap_dir.exists());
+    assert!(
+        !bootstrap_dir.join("skills/stale-skill/SKILL.md").exists(),
+        "update-plugin should refresh the bootstrap source so plugin list/add sees current skills"
+    );
+    assert_codex_marketplace_entry(&codex_marketplace_path(home.path()), "./plugins/tracedecay");
+}
 
-    let marketplace = text(&home.path().join(".agents/plugins/marketplace.json"));
-    assert!(!marketplace.contains(r#""name": "tracedecay""#));
-    assert!(!marketplace.contains(r#""name":"tracedecay""#));
+#[test]
+fn codex_update_plugin_recreates_bootstrap_source_from_cache_only_state() {
+    let home = TempDir::new().unwrap();
+    let project_root = home.path().join("workspace");
+    let cached_plugin_dir = codex_cached_plugin_dir(home.path());
+    let bootstrap_dir = codex_bootstrap_dir(home.path());
+    write_codex_plugin_manifest(&cached_plugin_dir, "0.0.0");
+    write_stale_codex_skill(&cached_plugin_dir);
+    std::fs::write(cached_plugin_dir.join("user-note.txt"), "mine\n").unwrap();
+
+    let codex = get_integration("codex").unwrap();
+    let outcome = codex
+        .update_plugin(&ctx_with_project(home.path(), NEW_BIN, &project_root))
+        .unwrap();
+    let UpdatePluginOutcome::Refreshed(paths) = outcome else {
+        panic!("expected codex update_plugin to refresh the installed cache");
+    };
+    assert_eq!(
+        paths,
+        vec![cached_plugin_dir.clone(), bootstrap_dir.clone()]
+    );
+
+    assert_codex_bundle_contains_bin(&cached_plugin_dir, NEW_BIN);
+    assert_codex_bundle_contains_bin(&bootstrap_dir, NEW_BIN);
+    assert!(
+        !cached_plugin_dir
+            .join("skills/stale-skill/SKILL.md")
+            .exists(),
+        "update-plugin must prune obsolete skills from installed Codex plugin caches"
+    );
+    assert_eq!(text(&cached_plugin_dir.join("user-note.txt")), "mine\n");
+    assert_codex_marketplace_entry(&codex_marketplace_path(home.path()), "./plugins/tracedecay");
+}
+
+#[test]
+fn codex_update_plugin_refreshes_global_cache_and_repo_local_bundle() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let cached_plugin_dir = codex_cached_plugin_dir(home.path());
+    write_codex_plugin_manifest(&cached_plugin_dir, "0.0.0");
+
+    let repo_plugin_dir = codex_bootstrap_dir(project.path());
+    write_codex_plugin_manifest(&repo_plugin_dir, "0.0.0");
+
+    let codex = get_integration("codex").unwrap();
+    let outcome = codex
+        .update_plugin(&ctx_with_project(home.path(), NEW_BIN, project.path()))
+        .unwrap();
+    let UpdatePluginOutcome::Refreshed(paths) = outcome else {
+        panic!("expected codex update_plugin to refresh both detected bundles");
+    };
+    let bootstrap_dir = codex_bootstrap_dir(home.path());
+    assert_eq!(
+        paths,
+        vec![
+            cached_plugin_dir.clone(),
+            bootstrap_dir.clone(),
+            repo_plugin_dir.clone()
+        ]
+    );
+
+    assert_codex_bundle_contains_bin(&cached_plugin_dir, NEW_BIN);
+    assert_codex_bundle_contains_bin(&bootstrap_dir, NEW_BIN);
+    assert_codex_bundle_contains_bin(&repo_plugin_dir, NEW_BIN);
+    assert_codex_marketplace_entry(&codex_marketplace_path(home.path()), "./plugins/tracedecay");
+    assert_codex_marketplace_entry(
+        &codex_marketplace_path(project.path()),
+        "./plugins/tracedecay",
+    );
+}
+
+#[test]
+fn codex_update_plugin_repairs_personal_marketplace_for_bootstrap_bundle() {
+    let home = TempDir::new().unwrap();
+    let project_root = home.path().join("workspace");
+    let plugin_dir = codex_bootstrap_dir(home.path());
+    write_codex_plugin_manifest(&plugin_dir, "0.0.0");
+
+    let codex = get_integration("codex").unwrap();
+    let outcome = codex
+        .update_plugin(&ctx_with_project(home.path(), NEW_BIN, &project_root))
+        .unwrap();
+    let UpdatePluginOutcome::Refreshed(paths) = outcome else {
+        panic!("expected codex update_plugin to refresh the bootstrap bundle");
+    };
+    assert_eq!(paths, vec![plugin_dir.clone()]);
+
+    assert_codex_bundle_contains_bin(&plugin_dir, NEW_BIN);
+    assert_codex_marketplace_entry(&codex_marketplace_path(home.path()), "./plugins/tracedecay");
 }
 
 #[test]
@@ -340,7 +479,7 @@ fn codex_update_plugin_refreshes_repo_local_bundle_from_project_root() {
     codex
         .install_local(&ctx(home.path(), OLD_BIN), project.path())
         .unwrap();
-    let plugin_dir = project.path().join("plugins/tracedecay");
+    let plugin_dir = codex_bootstrap_dir(project.path());
     std::fs::write(plugin_dir.join("user-note.txt"), "mine\n").unwrap();
 
     let outcome = codex
@@ -352,8 +491,7 @@ fn codex_update_plugin_refreshes_repo_local_bundle_from_project_root() {
 
     assert_eq!(paths, vec![plugin_dir.clone()]);
     assert_eq!(text(&plugin_dir.join("user-note.txt")), "mine\n");
-    assert!(text(&plugin_dir.join(".mcp.json")).contains(NEW_BIN));
-    assert!(text(&plugin_dir.join("hooks/hooks.json")).contains(NEW_BIN));
+    assert_codex_bundle_contains_bin(&plugin_dir, NEW_BIN);
     assert!(text(&plugin_dir.join(".codex-plugin/plugin.json")).contains(env!("CARGO_PKG_VERSION")));
 }
 
@@ -364,8 +502,8 @@ fn codex_uninstall_removes_repo_local_bundle_from_project_root() {
     let codex = get_integration("codex").unwrap();
     let install_ctx = ctx_with_project(home.path(), OLD_BIN, project.path());
     codex.install_local(&install_ctx, project.path()).unwrap();
-    let plugin_dir = project.path().join("plugins/tracedecay");
-    let marketplace = project.path().join(".agents/plugins/marketplace.json");
+    let plugin_dir = codex_bootstrap_dir(project.path());
+    let marketplace = codex_marketplace_path(project.path());
     assert!(plugin_dir.exists());
 
     codex.uninstall(&install_ctx).unwrap();

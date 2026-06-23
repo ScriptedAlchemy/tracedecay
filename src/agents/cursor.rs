@@ -425,7 +425,7 @@ fn cursor_plugin_hooks(raw: &str, tracedecay_bin: &str) -> Result<String> {
                         continue;
                     };
                     if let Some(suffix) = command.strip_prefix("tracedecay ") {
-                        *command_value = json!(format!("{tracedecay_bin} {suffix}"));
+                        *command_value = json!(super::hook_command(tracedecay_bin, suffix));
                     }
                 }
             }

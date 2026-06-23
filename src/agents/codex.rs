@@ -11,6 +11,7 @@
 //! `/hooks` CLI before they run — newly installed or changed hooks are skipped
 //! until trusted. The installer prints that guidance after writing `hooks.json`.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
@@ -89,10 +90,14 @@ impl AgentIntegration for CodexIntegration {
     fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
         let cached_dirs = codex_plugin_cached_install_dirs(&ctx.home);
         let plugin_dir = codex_plugin_install_dir(&ctx.home);
+        let mut refreshed = Vec::new();
         if !cached_dirs.is_empty() {
             let target = install_codex_cached_plugin(&ctx.home, &ctx.tracedecay_bin)?;
-            cleanup_codex_plugin_bootstrap(&ctx.home)?;
-            return Ok(UpdatePluginOutcome::Refreshed(vec![target]));
+            refreshed.push(target);
+            refreshed.push(install_codex_personal_bootstrap(
+                &ctx.home,
+                &ctx.tracedecay_bin,
+            )?);
         }
 
         if let Some(project_path) = codex_update_project_path(ctx) {
@@ -105,8 +110,18 @@ impl AgentIntegration for CodexIntegration {
                     &ctx.tracedecay_bin,
                     InstallScope::ProjectLocal,
                 )?;
-                return Ok(UpdatePluginOutcome::Refreshed(vec![repo_dir]));
+                install_codex_marketplace_entry(
+                    &codex_repo_marketplace_path(&project_path),
+                    "local-repo",
+                    "Local Repo",
+                    "./plugins/tracedecay",
+                )?;
+                refreshed.push(repo_dir);
             }
+        }
+
+        if !refreshed.is_empty() {
+            return Ok(UpdatePluginOutcome::Refreshed(refreshed));
         }
 
         let target = if codex_plugin_manifest_path(&ctx.home).exists() {
@@ -120,7 +135,7 @@ impl AgentIntegration for CodexIntegration {
         let Some(target) = target else {
             return Ok(UpdatePluginOutcome::NotInstalled);
         };
-        write_codex_plugin_files(&target, &ctx.tracedecay_bin, InstallScope::Global)?;
+        install_codex_personal_bootstrap(&ctx.home, &ctx.tracedecay_bin)?;
         Ok(UpdatePluginOutcome::Refreshed(vec![target]))
     }
 
@@ -130,6 +145,13 @@ impl AgentIntegration for CodexIntegration {
         let local_plugin_dir = codex_repo_plugin_install_dir(&ctx.project_path);
         if local_plugin_dir.join(".codex-plugin/plugin.json").exists() {
             doctor_check_plugin_dir(dc, &local_plugin_dir);
+            doctor_check_marketplace_entry(
+                dc,
+                &codex_repo_marketplace_path(&ctx.project_path),
+                "repo marketplace",
+                "./plugins/tracedecay",
+                "tracedecay install --local --agent codex",
+            );
         } else if local_codex_dir.join("config.toml").exists()
             || local_codex_dir.join("hooks.json").exists()
         {
@@ -350,7 +372,7 @@ fn install_codex_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
     let cached_dirs = codex_plugin_cached_install_dirs(home);
     if !cached_dirs.is_empty() {
         let install_dir = install_codex_cached_plugin(home, tracedecay_bin)?;
-        cleanup_codex_plugin_bootstrap(home)?;
+        install_codex_personal_bootstrap(home, tracedecay_bin)?;
         eprintln!(
             "\x1b[32m✔\x1b[0m Refreshed installed Codex plugin bundle at {}",
             install_dir.display()
@@ -358,6 +380,15 @@ fn install_codex_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
         return Ok(());
     }
 
+    let install_dir = install_codex_personal_bootstrap(home, tracedecay_bin)?;
+    eprintln!(
+        "\x1b[32m✔\x1b[0m Installed Codex plugin source at {}",
+        install_dir.display()
+    );
+    Ok(())
+}
+
+fn install_codex_personal_bootstrap(home: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
     let install_dir = codex_plugin_install_dir(home);
     install_codex_plugin_bundle(&install_dir, tracedecay_bin, InstallScope::Global)?;
     install_codex_marketplace_entry(
@@ -366,11 +397,7 @@ fn install_codex_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
         "Personal",
         "./plugins/tracedecay",
     )?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Installed Codex plugin source at {}",
-        install_dir.display()
-    );
-    Ok(())
+    Ok(install_dir)
 }
 
 fn install_codex_cached_plugin(home: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
@@ -589,7 +616,7 @@ fn install_codex_marketplace_entry(
     }));
     safe_write_json_file(marketplace_path, &marketplace, None)?;
     eprintln!(
-        "\x1b[32m✔\x1b[0m Added tracedecay to Codex personal marketplace at {}",
+        "\x1b[32m✔\x1b[0m Added tracedecay to Codex {marketplace_name} marketplace at {}",
         marketplace_path.display()
     );
     Ok(())
@@ -618,12 +645,6 @@ fn uninstall_codex_repo_plugin_if_present(ctx: &InstallContext) -> Result<()> {
     Ok(())
 }
 
-fn cleanup_codex_plugin_bootstrap(home: &Path) -> Result<()> {
-    remove_codex_plugin_bootstrap_source(&codex_plugin_install_dir(home))?;
-    remove_codex_marketplace_entry(home)?;
-    Ok(())
-}
-
 fn remove_codex_plugin_bootstrap_source(install_dir: &Path) -> Result<()> {
     if install_dir.exists() && codex_plugin_dir_is_tracedecay(install_dir) {
         remove_codex_plugin_skills_dir(install_dir)?;
@@ -641,9 +662,52 @@ fn remove_codex_plugin_skills_dir(install_dir: &Path) -> Result<()> {
             message: format!("failed to remove {}: {e}", skills_dir.display()),
         })?;
     } else if metadata.is_dir() {
-        std::fs::remove_dir_all(&skills_dir).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to remove {}: {e}", skills_dir.display()),
-        })?;
+        remove_codex_plugin_managed_skills(install_dir, &skills_dir)?;
+    }
+    Ok(())
+}
+
+fn remove_codex_plugin_managed_skills(install_dir: &Path, skills_dir: &Path) -> Result<()> {
+    let managed: HashSet<PathBuf> = codex_plugin_managed_paths(install_dir)
+        .into_iter()
+        .filter(|path| path.starts_with(skills_dir))
+        .collect();
+    let mut files = collect_regular_files(skills_dir).map_err(|e| TraceDecayError::Config {
+        message: format!("failed to list {}: {e}", skills_dir.display()),
+    })?;
+    files.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    for file in files {
+        if managed.contains(&file) || codex_skill_file_is_legacy_tracedecay_managed(&file) {
+            std::fs::remove_file(&file).map_err(|e| TraceDecayError::Config {
+                message: format!("failed to remove {}: {e}", file.display()),
+            })?;
+        }
+    }
+    prune_empty_dirs(skills_dir).map_err(|e| TraceDecayError::Config {
+        message: format!("failed to prune empty Codex skill directories: {e}"),
+    })
+}
+
+fn codex_skill_file_is_legacy_tracedecay_managed(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "SKILL.md")
+        && std::fs::read_to_string(path).is_ok_and(|contents| {
+            contents
+                .lines()
+                .any(|line| line.starts_with("name: tracedecay:"))
+        })
+}
+
+fn prune_empty_dirs(root: &Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            prune_empty_dirs(&entry.path())?;
+        }
+    }
+    if std::fs::read_dir(root)?.next().is_none() {
+        std::fs::remove_dir(root)?;
     }
     Ok(())
 }
@@ -674,6 +738,7 @@ fn remove_codex_plugin_install(install_dir: &Path) -> Result<()> {
             ),
         });
     }
+    remove_codex_plugin_skills_dir(install_dir)?;
     if codex_plugin_dir_has_only_managed_files(install_dir) {
         std::fs::remove_dir_all(install_dir).map_err(|e| TraceDecayError::Config {
             message: format!("failed to remove {}: {e}", install_dir.display()),
@@ -1002,7 +1067,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
     match manifest.get("version").and_then(|value| value.as_str()) {
         Some(env!("CARGO_PKG_VERSION")) => dc.pass("Codex plugin version matches tracedecay"),
         Some(version) => dc.warn(&format!(
-            "Codex plugin version {version} does not match tracedecay {} — run `tracedecay update-plugin --agent codex`",
+            "Codex plugin version {version} does not match tracedecay {} — run `tracedecay update-plugin`",
             env!("CARGO_PKG_VERSION")
         )),
         None => dc.warn("Codex plugin manifest does not contain a version"),
@@ -1027,24 +1092,49 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
     }
     doctor_check_hooks(dc, &plugin_dir.join("hooks/hooks.json"));
 
-    let marketplace_path = codex_personal_marketplace_path(home);
-    let marketplace = load_json_file(&marketplace_path);
+    doctor_check_marketplace_entry(
+        dc,
+        &codex_personal_marketplace_path(home),
+        "personal marketplace",
+        "./plugins/tracedecay",
+        "tracedecay install --agent codex",
+    );
+}
+
+fn doctor_check_marketplace_entry(
+    dc: &mut DoctorCounters,
+    marketplace_path: &Path,
+    label: &str,
+    expected_source_path: &str,
+    install_command: &str,
+) {
+    let marketplace = load_json_file(marketplace_path);
     let has_entry = marketplace
         .get("plugins")
         .and_then(|value| value.as_array())
         .is_some_and(|plugins| {
             plugins.iter().any(|entry| {
                 entry.get("name").and_then(|value| value.as_str()) == Some("tracedecay")
+                    && entry
+                        .get("source")
+                        .and_then(|source| source.get("source"))
+                        .and_then(|value| value.as_str())
+                        == Some("local")
+                    && entry
+                        .get("source")
+                        .and_then(|source| source.get("path"))
+                        .and_then(|value| value.as_str())
+                        == Some(expected_source_path)
             })
         });
     if has_entry {
         dc.pass(&format!(
-            "Codex personal marketplace contains tracedecay in {}",
+            "Codex {label} contains tracedecay in {}",
             marketplace_path.display()
         ));
     } else {
         dc.warn(&format!(
-            "Codex personal marketplace missing tracedecay in {} — run `tracedecay install --agent codex`",
+            "Codex {label} missing tracedecay in {} — run `{install_command}`",
             marketplace_path.display()
         ));
     }
@@ -1067,7 +1157,7 @@ fn doctor_check_plugin_dir(dc: &mut DoctorCounters, plugin_dir: &Path) {
     match manifest.get("version").and_then(|value| value.as_str()) {
         Some(env!("CARGO_PKG_VERSION")) => dc.pass("Codex plugin version matches tracedecay"),
         Some(version) => dc.warn(&format!(
-            "Codex plugin version {version} does not match tracedecay {} — run `tracedecay update-plugin --agent codex`",
+            "Codex plugin version {version} does not match tracedecay {} — run `tracedecay update-plugin`",
             env!("CARGO_PKG_VERSION")
         )),
         None => dc.warn("Codex plugin manifest does not contain a version"),
