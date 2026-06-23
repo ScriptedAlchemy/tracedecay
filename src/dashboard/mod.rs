@@ -21,6 +21,7 @@
 //! `/api/capabilities` advertises which features are live so hosts (or a
 //! richer Hermes wrapper) can extend the surface without forking the UI.
 
+mod analytics_api;
 pub(crate) mod assets;
 mod curate_preview_store;
 mod graph_api;
@@ -413,6 +414,17 @@ pub(crate) fn router(state: DashboardState) -> Router {
         )
         .route("/api/plugins/graph/subgraph", get(graph_api::subgraph))
         .route("/api/plugins/graph/path", get(graph_api::path))
+        // Durable analytics API (hint lifecycle scaffolds + session usage rollups)
+        .route(
+            "/api/plugins/analytics/overview",
+            get(analytics_api::overview),
+        )
+        .route("/api/plugins/analytics/hints", get(analytics_api::hints))
+        .route("/api/plugins/analytics/usage", get(analytics_api::usage))
+        .route(
+            "/api/plugins/analytics/underused",
+            get(analytics_api::underused),
+        )
         // Savings & Cost API (savings ledger + session cost accounting)
         .route("/api/plugins/savings/overview", get(savings_api::overview))
         .route("/api/plugins/savings/ledger", get(savings_api::ledger))
@@ -444,6 +456,7 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
             "lcm_gc": has_lcm,
             "lcm_payload_health": has_lcm,
             "graph": true,
+            "analytics": true,
             // Similarity-based dedup curation (delete/merge ops via /curate
             // and /curate/apply). LLM-proposed curation is a host-side
             // extension (the Hermes wrapper flips llm_curation when it adds

@@ -1,0 +1,16 @@
+[
+  {
+    "type": "tool_use",
+    "name": "ReadFile",
+    "input": {
+      "path": "/home/zack/.cursor/plugins/local/tracedecay/skills/curating-project-memory/SKILL.md"
+    }
+  },
+  {
+    "type": "tool_use",
+    "name": "ReadFile",
+    "input": {
+      "path": "/home/zack/.codex/plugins/cache/openai-curated/superpowers/c6ea566d/skills/using-superpowers/SKILL.md"
+    }
+  }
+]

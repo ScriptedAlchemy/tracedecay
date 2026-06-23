@@ -1,0 +1,12 @@
+{
+  "tool_calls": [
+    {
+      "function": {
+        "name": "skill_view",
+        "arguments": {
+          "name": "github-pr-workflow"
+        }
+      }
+    }
+  ]
+}

@@ -2094,7 +2094,10 @@ impl GlobalDb {
             i64::try_from(query.limit).unwrap_or(i64::MAX),
         ));
         let limit_param = values.len();
-        let _ = write!(sql, " ORDER BY timestamp, id LIMIT ?{limit_param}");
+        let _ = write!(
+            sql,
+            " ORDER BY timestamp DESC, id DESC LIMIT ?{limit_param}"
+        );
 
         let mut rows = self
             .conn
@@ -2111,6 +2114,7 @@ impl GlobalDb {
                 .ok_or_else(|| "failed to decode analytics event row".to_string())?;
             events.push(event);
         }
+        events.reverse();
         Ok(events)
     }
 
