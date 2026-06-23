@@ -1822,19 +1822,21 @@ pub(super) async fn handle_read(cg: &TraceDecay, args: Value) -> Result<ToolResu
     let token_count = read_modes::estimate_tokens(&body_text);
     let digest = read_cache::digest_bytes(body_text.as_bytes());
 
-    read_cache::put(
-        conn,
-        &project_id,
-        GLOBAL_SESSION,
-        &display_file,
-        mtime_ns,
-        mode.as_str(),
-        &args_hash,
-        &digest,
-        body_text.as_bytes(),
-        token_count,
-    )
-    .await?;
+    if !cg.is_read_only() {
+        read_cache::put(
+            conn,
+            &project_id,
+            GLOBAL_SESSION,
+            &display_file,
+            mtime_ns,
+            mode.as_str(),
+            &args_hash,
+            &digest,
+            body_text.as_bytes(),
+            token_count,
+        )
+        .await?;
+    }
 
     let payload = json!({
         "file": display_file,

@@ -676,6 +676,50 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
     );
 }
 
+#[tokio::test]
+async fn selected_project_read_skips_cache_write_for_read_only_store() {
+    let (cg, _project_dir) = setup_project().await;
+    let registry_dir = TempDir::new().unwrap();
+    let registry_path = registry_dir.path().join("global.db");
+    let _env_guard = GlobalDbEnvGuard::set(&registry_path);
+    let target_dir = TempDir::new().unwrap();
+    let target_project = target_dir.path();
+
+    fs::create_dir_all(target_project.join("src")).unwrap();
+    fs::write(
+        target_project.join("src/main.rs"),
+        "fn main() { println!(\"selected\"); }\n",
+    )
+    .unwrap();
+
+    let registry = GlobalDb::open_at(&registry_path).await.unwrap();
+    registry
+        .upsert_code_project("proj_read", target_project, None, None, Some("main"))
+        .await
+        .unwrap();
+    let target_cg = TraceDecay::init(target_project).await.unwrap();
+    index_all_retrying_sync_lock(&target_cg).await;
+
+    let read_args = json!({
+        "project_id": "proj_read",
+        "file": "src/main.rs",
+        "mode": "full"
+    });
+    for attempt in 1..=2 {
+        let selected_read = handle_tool_call(&cg, "tracedecay_read", read_args.clone(), None, None)
+            .await
+            .unwrap();
+        let read_payload = extract_json(&selected_read.value);
+        assert_eq!(read_payload["file"], "src/main.rs");
+        assert!(
+            read_payload["body"]
+                .as_str()
+                .is_some_and(|body| body.contains("selected")),
+            "attempt {attempt}: selected read should return file content without writing to the read-only cache: {read_payload}"
+        );
+    }
+}
+
 fn tool_schema<'a>(tools: &'a [tracedecay::mcp::ToolDefinition], name: &str) -> &'a Value {
     &tools
         .iter()

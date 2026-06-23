@@ -2144,7 +2144,7 @@ impl TraceDecay {
                     // Allow if the relative path matches an include glob.
                     if let Ok(rel) = e.path().strip_prefix(root) {
                         let rel_str = rel.to_string_lossy().replace('\\', "/");
-                        return is_included_dir(&rel_str, config) || is_included(&rel_str, config);
+                        return include_may_match_descendant(&rel_str, config);
                     }
                     return false;
                 }
@@ -2155,8 +2155,7 @@ impl TraceDecay {
                     if let Ok(rel) = e.path().strip_prefix(root) {
                         let rel_str = rel.to_string_lossy().replace('\\', "/");
                         if is_excluded_dir(&rel_str, config)
-                            && !is_included_dir(&rel_str, config)
-                            && !is_included(&rel_str, config)
+                            && !include_may_match_descendant(&rel_str, config)
                         {
                             return false;
                         }

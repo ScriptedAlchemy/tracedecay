@@ -555,6 +555,45 @@ async fn test_include_folder_indexes_default_excluded_directory() {
 }
 
 #[tokio::test]
+async fn test_nested_include_folder_descends_through_default_excluded_parent() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+
+    fs::create_dir_all(project.join("dist/generated")).unwrap();
+    fs::create_dir_all(project.join("target/generated")).unwrap();
+    fs::write(
+        project.join("dist/generated/client.js"),
+        "export function nestedGeneratedApi() {}\n",
+    )
+    .unwrap();
+    fs::write(
+        project.join("target/generated/build.js"),
+        "export function targetGeneratedApi() {}\n",
+    )
+    .unwrap();
+
+    let mut cg = TraceDecay::init(project).await.unwrap();
+    cg.add_include_folders(&["dist/generated".to_string(), "target/generated".to_string()]);
+    cg.index_all().await.unwrap();
+
+    let results = cg.search("nestedGeneratedApi", 10).await.unwrap();
+    assert!(
+        results
+            .iter()
+            .any(|r| r.node.file_path == "dist/generated/client.js"),
+        "nested include folder should descend through excluded dist parent: {results:?}"
+    );
+
+    let target_results = cg.search("targetGeneratedApi", 10).await.unwrap();
+    assert!(
+        target_results
+            .iter()
+            .any(|r| r.node.file_path == "target/generated/build.js"),
+        "nested include folder should descend through target parent: {target_results:?}"
+    );
+}
+
+#[tokio::test]
 async fn test_include_folder_normalizes_relative_and_project_absolute_prefixes() {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
