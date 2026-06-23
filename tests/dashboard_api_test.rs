@@ -73,10 +73,13 @@ fn spawn_dashboard_server(cg: TraceDecay, port: u16) -> DashboardServer {
     let thread = thread::spawn(move || {
         let runtime = create_runtime();
         runtime.block_on(async move {
-            let _ = dashboard::run_until_shutdown(&cg, "127.0.0.1", port, false, async move {
+            let result = dashboard::run_until_shutdown(&cg, "127.0.0.1", port, false, async move {
                 let _ = shutdown_rx.await;
             })
             .await;
+            let _ = cg.checkpoint().await;
+            cg.close();
+            let _ = result;
         });
     });
     DashboardServer {
