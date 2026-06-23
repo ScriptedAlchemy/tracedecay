@@ -256,7 +256,7 @@ fn add_registered_project_selector_properties(definitions: &mut [ToolDefinition]
     }
 }
 
-pub(crate) fn format_capable_tool_names() -> &'static [&'static str] {
+pub fn format_capable_tool_names() -> &'static [&'static str] {
     &[
         // graph
         "tracedecay_search",

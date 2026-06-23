@@ -161,7 +161,7 @@ fn canonicalize_test_db_path(path: &Path) -> PathBuf {
 // ---------------------------------------------------------------------------
 
 struct TestProject {
-    dir: TempDir,
+    dir: Option<TempDir>,
     _env_lock: MutexGuard<'static, ()>,
     _home_guard: HomeEnvGuard,
     _global_db_guard: GlobalDbEnvGuard,
@@ -171,7 +171,16 @@ impl std::ops::Deref for TestProject {
     type Target = TempDir;
 
     fn deref(&self) -> &Self::Target {
-        &self.dir
+        self.dir.as_ref().expect("test project dir already kept")
+    }
+}
+
+impl Drop for TestProject {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        if let Some(dir) = self.dir.take() {
+            let _ = dir.keep();
+        }
     }
 }
 
@@ -245,7 +254,7 @@ fn test_helper() { assert!(!helper().is_empty()); }
     (
         cg,
         TestProject {
-            dir,
+            dir: Some(dir),
             _env_lock: env_lock,
             _home_guard: home_guard,
             _global_db_guard: global_db_guard,
@@ -415,7 +424,7 @@ fn integration_public_entry() {
     (
         cg,
         TestProject {
-            dir,
+            dir: Some(dir),
             _env_lock: env_lock,
             _home_guard: home_guard,
             _global_db_guard: global_db_guard,
@@ -504,7 +513,7 @@ fn main() {
     (
         cg,
         TestProject {
-            dir,
+            dir: Some(dir),
             _env_lock: env_lock,
             _home_guard: home_guard,
             _global_db_guard: global_db_guard,

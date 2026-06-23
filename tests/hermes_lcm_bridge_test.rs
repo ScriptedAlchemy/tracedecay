@@ -867,6 +867,10 @@ tools.call_tracedecay_tool(
 args = json.loads(calls[0][calls[0].index("--args") + 1])
 assert args["query"] == "orchard"
 assert args["messages"] == [{"role": "user", "content": "current turn"}]
+
+tools.call_tracedecay_tool("tracedecay_status", {})
+args = json.loads(calls[1][calls[1].index("--args") + 1])
+assert args["format"] == "json"
 "#,
         "generated subprocess bridge should preserve messages kwargs in JSON args",
     );
