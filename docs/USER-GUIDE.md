@@ -299,7 +299,6 @@ Cursor install is plugin-based:
 - Cursor install no longer writes `.cursor/mcp.json`, `.cursor/hooks.json`, `.cursor/rules/tracedecay.mdc`, or `.cursor/permissions.json`; approvals are left to Cursor approval/run-mode behavior.
 - The plugin bundles Cursor-specific, fail-open hooks (each acts only when it finds an initialized TraceDecay project store):
   - `sessionStart` injects context steering the Agent toward tracedecay MCP tools and reports index freshness (suggests `tracedecay init` when uninitialized).
-  - `subagentStart` denies research/explore subagents with Cursor's documented hook response shape; the plugin's own `code-explorer`/`code-health-auditor`/`session-historian` agents are allow-listed.
   - `postToolUse` (unmatched) injects a nonblocking `additional_context` hint after broad search/read tools (Grep, Glob, Read, semantic search, shell `rg`) so Cursor can switch to `tracedecay_context`, `tracedecay_search`, `tracedecay_outline`, or `tracedecay_files`; each hint category fires at most once per session.
   - `beforeSubmitPrompt` resets the local token counter and ingests the current Cursor transcript into the active project session store when `transcript_path` is present.
   - `afterFileEdit` (unmatched, so every Agent edit tool counts) runs a **targeted single-file** sync of only the edited path(s) — not a full-tree scan — so it stays cheap on large codebases even when the Agent edits many files per turn.

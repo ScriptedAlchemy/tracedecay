@@ -13,12 +13,6 @@
         "timeout": 30
       }
     ],
-    "subagentStart": [
-      {
-        "command": "tracedecay hook-cursor-subagent-start",
-        "timeout": 5
-      }
-    ],
     "postToolUse": [
       {
         "command": "tracedecay hook-cursor-post-tool-use",

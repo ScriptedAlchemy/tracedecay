@@ -393,7 +393,6 @@ fn assert_cursor_plugin_bundle(plugin_dir: &Path, expected_command: &str, expect
     let expected_hooks = [
         ("sessionStart", "hook-cursor-session-start"),
         ("sessionEnd", "hook-cursor-session-end"),
-        ("subagentStart", "hook-cursor-subagent-start"),
         ("postToolUse", "hook-cursor-post-tool-use"),
         ("preCompact", "hook-cursor-pre-compact"),
         ("beforeSubmitPrompt", "hook-cursor-before-submit-prompt"),
