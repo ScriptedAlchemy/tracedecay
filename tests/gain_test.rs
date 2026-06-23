@@ -1,3 +1,5 @@
+use std::fs;
+
 use tempfile::TempDir;
 use tracedecay::global_db::GlobalDb;
 
@@ -53,4 +55,50 @@ async fn savings_history_buckets_by_day() {
     // Newest first
     assert_eq!(history[0].saved_tokens, 720); // day2: 800 - 80
     assert_eq!(history[1].saved_tokens, 1350); // day1: (1000-100) + (500-50)
+}
+
+#[tokio::test]
+async fn savings_project_filters_canonicalize_read_side() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_isolated_db(&tmp).await;
+    let project_dir = tmp.path().join("project");
+    fs::create_dir(&project_dir).unwrap();
+    let canonical_project = GlobalDb::canonical_project_key(&project_dir);
+    let project_with_trailing_slash = format!("{}/", project_dir.display());
+
+    db.record_savings(&canonical_project, "tracedecay_context", 2000, 250, 86_400)
+        .await;
+
+    let total = db.sum_savings(Some(&project_with_trailing_slash), 0).await;
+    assert_eq!(total.saved_tokens, 1750);
+    assert_eq!(total.calls, 1);
+
+    let history = db
+        .savings_history(Some(&project_with_trailing_slash), 0)
+        .await;
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].saved_tokens, 1750);
+    assert_eq!(history[0].calls, 1);
+}
+
+#[tokio::test]
+async fn record_savings_canonicalizes_project_path_on_write() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_isolated_db(&tmp).await;
+    let project_dir = tmp.path().join("project");
+    fs::create_dir(&project_dir).unwrap();
+    let raw_project = format!("{}/", project_dir.display());
+    let canonical_project = GlobalDb::canonical_project_key(&project_dir);
+
+    db.record_savings(&raw_project, "tracedecay_context", 3000, 400, 86_400)
+        .await;
+
+    let total = db.sum_savings(Some(&canonical_project), 0).await;
+    assert_eq!(total.saved_tokens, 2600);
+    assert_eq!(total.calls, 1);
+
+    let history = db.savings_history(Some(&canonical_project), 0).await;
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].saved_tokens, 2600);
+    assert_eq!(history[0].calls, 1);
 }

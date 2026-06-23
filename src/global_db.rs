@@ -45,6 +45,50 @@ pub struct TokenCountUpsert {
     pub token_count: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalyticsEventInsert {
+    pub provider: String,
+    pub project_id: String,
+    pub session_id: Option<String>,
+    pub timestamp: i64,
+    pub event_kind: String,
+    pub hook_name: Option<String>,
+    pub tool_name: Option<String>,
+    pub tool_category: Option<String>,
+    pub skill_name: Option<String>,
+    pub hint_category: Option<String>,
+    pub hint_id: Option<String>,
+    pub outcome: Option<String>,
+    pub metadata_json: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalyticsEventRecord {
+    pub id: i64,
+    pub provider: String,
+    pub project_id: String,
+    pub session_id: Option<String>,
+    pub timestamp: i64,
+    pub event_kind: String,
+    pub hook_name: Option<String>,
+    pub tool_name: Option<String>,
+    pub tool_category: Option<String>,
+    pub skill_name: Option<String>,
+    pub hint_category: Option<String>,
+    pub hint_id: Option<String>,
+    pub outcome: Option<String>,
+    pub metadata_json: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct AnalyticsEventQuery {
+    pub provider: Option<String>,
+    pub project_id: Option<String>,
+    pub session_id: Option<String>,
+    pub event_kind: Option<String>,
+    pub limit: usize,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PendingCodexCompactionSummary {
     pub node_id: String,
@@ -446,6 +490,37 @@ fn row_to_message(row: &libsql::Row, offset: i32) -> Option<SessionMessageRecord
     })
 }
 
+fn row_to_analytics_event(row: &libsql::Row) -> Option<AnalyticsEventRecord> {
+    Some(AnalyticsEventRecord {
+        id: row.get(0).ok()?,
+        provider: row.get(1).ok()?,
+        project_id: row.get(2).ok()?,
+        session_id: row.get(3).ok()?,
+        timestamp: row.get(4).ok()?,
+        event_kind: row.get(5).ok()?,
+        hook_name: row.get(6).ok()?,
+        tool_name: row.get(7).ok()?,
+        tool_category: row.get(8).ok()?,
+        skill_name: row.get(9).ok()?,
+        hint_category: row.get(10).ok()?,
+        hint_id: row.get(11).ok()?,
+        outcome: row.get(12).ok()?,
+        metadata_json: row.get(13).ok()?,
+    })
+}
+
+fn push_optional_analytics_filter(
+    clauses: &mut Vec<String>,
+    values: &mut Vec<Value>,
+    column: &str,
+    value: Option<&str>,
+) {
+    if let Some(value) = value {
+        values.push(Value::Text(value.to_string()));
+        clauses.push(format!("{column} = ?{}", values.len()));
+    }
+}
+
 fn row_to_code_project(row: &libsql::Row, offset: i32) -> Option<CodeProjectRecord> {
     Some(CodeProjectRecord {
         project_id: row.get(offset).ok()?,
@@ -812,6 +887,26 @@ impl GlobalDb {
             );
             CREATE INDEX IF NOT EXISTS idx_savings_ledger_ts ON savings_ledger(ts);
             CREATE INDEX IF NOT EXISTS idx_savings_ledger_project ON savings_ledger(project_path);
+            CREATE TABLE IF NOT EXISTS analytics_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                session_id TEXT,
+                timestamp INTEGER NOT NULL,
+                event_kind TEXT NOT NULL,
+                hook_name TEXT,
+                tool_name TEXT,
+                tool_category TEXT,
+                skill_name TEXT,
+                hint_category TEXT,
+                hint_id TEXT,
+                outcome TEXT,
+                metadata_json TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_analytics_events_provider_project_session
+                ON analytics_events(provider, project_id, session_id, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_analytics_events_kind
+                ON analytics_events(event_kind, timestamp);
             CREATE TABLE IF NOT EXISTS sessions (
                 provider TEXT NOT NULL,
                 session_id TEXT NOT NULL,
@@ -1370,6 +1465,32 @@ impl GlobalDb {
         projects
     }
 
+    /// Removes registered code-project rows by exact project id.
+    ///
+    /// Dependent registry rows in `project_aliases`, `store_instances`,
+    /// `graph_scopes`, and `store_artifacts` cascade through foreign keys.
+    /// This only removes registry metadata; it never deletes project files or
+    /// profile-sharded store files on disk.
+    pub async fn delete_code_projects(&self, project_ids: &[String]) -> usize {
+        const CHUNK: usize = 256;
+        let mut total: usize = 0;
+        for chunk in project_ids.chunks(CHUNK) {
+            let placeholders = vec!["?"; chunk.len()];
+            let sql = format!(
+                "DELETE FROM code_projects WHERE project_id IN ({})",
+                placeholders.join(",")
+            );
+            let values: Vec<libsql::Value> = chunk
+                .iter()
+                .map(|project_id| libsql::Value::Text(project_id.clone()))
+                .collect();
+            if let Ok(n) = self.conn.execute(&sql, values).await {
+                total = total.saturating_add(n as usize);
+            }
+        }
+        total
+    }
+
     pub async fn search_code_projects(&self, query: &str, limit: usize) -> Vec<CodeProjectRecord> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let pattern = like_pattern(query);
@@ -1627,12 +1748,19 @@ impl GlobalDb {
         after_tokens: u64,
         ts: i64,
     ) {
+        let project_path = Self::canonical_project_key(Path::new(project_path));
         let result = self
             .conn
             .execute(
                 "INSERT INTO savings_ledger (ts, project_path, tool_name, before_tokens, after_tokens) \
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![ts, project_path, tool_name, before_tokens as i64, after_tokens as i64],
+                params![
+                    ts,
+                    project_path,
+                    tool_name,
+                    before_tokens as i64,
+                    after_tokens as i64
+                ],
             )
             .await;
         if let Err(e) = result {
@@ -1641,8 +1769,9 @@ impl GlobalDb {
     }
 
     /// Sum (before-after) across the ledger entries, with `ts >= since`. Optionally
-    /// filter by exact project path. Returns zeros on any DB error.
+    /// filter by canonical project path. Returns zeros on any DB error.
     pub async fn sum_savings(&self, project: Option<&str>, since: i64) -> SavingsTotal {
+        let project = project.map(|p| Self::canonical_project_key(Path::new(p)));
         let sql_with_project =
             "SELECT COALESCE(SUM(CASE WHEN before_tokens > after_tokens THEN before_tokens - after_tokens ELSE 0 END), 0), COUNT(*) \
              FROM savings_ledger WHERE project_path = ?1 AND ts >= ?2";
@@ -1650,7 +1779,7 @@ impl GlobalDb {
             "SELECT COALESCE(SUM(CASE WHEN before_tokens > after_tokens THEN before_tokens - after_tokens ELSE 0 END), 0), COUNT(*) \
              FROM savings_ledger WHERE ts >= ?1";
 
-        let rows = match project {
+        let rows = match project.as_deref() {
             Some(p) => self.conn.query(sql_with_project, params![p, since]).await,
             None => self.conn.query(sql_all, params![since]).await,
         };
@@ -1674,6 +1803,7 @@ impl GlobalDb {
 
     /// Group ledger entries by UTC calendar day. Newest-first.
     pub async fn savings_history(&self, project: Option<&str>, since: i64) -> Vec<SavingsDay> {
+        let project = project.map(|p| Self::canonical_project_key(Path::new(p)));
         let sql_with_project =
             "SELECT (ts/86400)*86400 AS day, \
                     COALESCE(SUM(CASE WHEN before_tokens > after_tokens THEN before_tokens - after_tokens ELSE 0 END), 0), \
@@ -1687,7 +1817,7 @@ impl GlobalDb {
              FROM savings_ledger WHERE ts >= ?1 \
              GROUP BY day ORDER BY day DESC";
 
-        let rows = match project {
+        let rows = match project.as_deref() {
             Some(p) => self.conn.query(sql_with_project, params![p, since]).await,
             None => self.conn.query(sql_all, params![since]).await,
         };
@@ -1890,6 +2020,98 @@ impl GlobalDb {
             .await
             .ok()?;
         row_to_session(&rows.next().await.ok()??)
+    }
+
+    pub async fn append_analytics_event(
+        &self,
+        event: &AnalyticsEventInsert,
+    ) -> Result<i64, String> {
+        let mut rows = self
+            .conn
+            .query(
+                "INSERT INTO analytics_events
+                 (provider, project_id, session_id, timestamp, event_kind, hook_name,
+                  tool_name, tool_category, skill_name, hint_category, hint_id, outcome,
+                  metadata_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 RETURNING id",
+                params![
+                    event.provider.as_str(),
+                    event.project_id.as_str(),
+                    opt_text(event.session_id.as_deref()),
+                    event.timestamp,
+                    event.event_kind.as_str(),
+                    opt_text(event.hook_name.as_deref()),
+                    opt_text(event.tool_name.as_deref()),
+                    opt_text(event.tool_category.as_deref()),
+                    opt_text(event.skill_name.as_deref()),
+                    opt_text(event.hint_category.as_deref()),
+                    opt_text(event.hint_id.as_deref()),
+                    opt_text(event.outcome.as_deref()),
+                    opt_text(event.metadata_json.as_deref()),
+                ],
+            )
+            .await
+            .map_err(|e| format!("failed to append analytics event: {e}"))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|e| format!("failed to read appended analytics event id: {e}"))?
+            .ok_or_else(|| "append analytics event returned no id".to_string())?;
+        row.get::<i64>(0)
+            .map_err(|e| format!("failed to decode appended analytics event id: {e}"))
+    }
+
+    pub async fn query_analytics_events(
+        &self,
+        query: &AnalyticsEventQuery,
+    ) -> Result<Vec<AnalyticsEventRecord>, String> {
+        if query.limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut sql = String::from(
+            "SELECT id, provider, project_id, session_id, timestamp, event_kind,
+                    hook_name, tool_name, tool_category, skill_name, hint_category,
+                    hint_id, outcome, metadata_json
+             FROM analytics_events",
+        );
+        let mut clauses = Vec::new();
+        let mut values = Vec::new();
+        for (column, value) in [
+            ("provider", query.provider.as_deref()),
+            ("project_id", query.project_id.as_deref()),
+            ("session_id", query.session_id.as_deref()),
+            ("event_kind", query.event_kind.as_deref()),
+        ] {
+            push_optional_analytics_filter(&mut clauses, &mut values, column, value);
+        }
+        if !clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&clauses.join(" AND "));
+        }
+        values.push(Value::Integer(
+            i64::try_from(query.limit).unwrap_or(i64::MAX),
+        ));
+        let limit_param = values.len();
+        let _ = write!(sql, " ORDER BY timestamp, id LIMIT ?{limit_param}");
+
+        let mut rows = self
+            .conn
+            .query(&sql, libsql::params_from_iter(values))
+            .await
+            .map_err(|e| format!("failed to query analytics events: {e}"))?;
+        let mut events = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| format!("failed to read analytics events: {e}"))?
+        {
+            let event = row_to_analytics_event(&row)
+                .ok_or_else(|| "failed to decode analytics event row".to_string())?;
+            events.push(event);
+        }
+        Ok(events)
     }
 
     /// Inserts or replaces a provider message. Returns `false` on any DB error.
