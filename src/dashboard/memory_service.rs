@@ -18,7 +18,7 @@ pub(crate) fn projection_point_cap() -> i64 {
     PROJECTION_POINT_CAP
 }
 
-pub(crate) fn providers_stub() -> Value {
+pub(crate) fn providers_payload() -> Value {
     json!({
         "memory_provider": "tracedecay",
         "memory_options": [
@@ -557,6 +557,19 @@ pub(crate) async fn similarity_payload(
     Value::Object(obj)
 }
 
+fn curation_apply_snapshot(index: usize, event: &Value) -> Value {
+    let id = format!("curate-apply-{}", index + 1);
+    json!({
+        "id": id,
+        "name": id,
+        "path": format!("curation://{id}"),
+        "ts": event.get("ts").cloned().unwrap_or(Value::Null),
+        "summary": event.get("message").cloned().unwrap_or(Value::Null),
+        "provider": "tracedecay",
+        "mode": "similarity_dedup",
+    })
+}
+
 pub(crate) async fn curation_status_payload(state: &DashboardState) -> Value {
     let preview = state.curate_preview.read().await;
     let (last_preview_at, last_preview_summary) = match preview.as_ref() {
@@ -574,14 +587,45 @@ pub(crate) async fn curation_status_payload(state: &DashboardState) -> Value {
         ),
         None => (Value::Null, Value::Null),
     };
+    let activity = state.curation_activity.read().await;
+    let apply_finishes: Vec<&Value> = activity
+        .iter()
+        .filter(|event| {
+            event.get("phase").and_then(Value::as_str) == Some("finish")
+                && event.get("dry_run").and_then(Value::as_bool) == Some(false)
+        })
+        .collect();
+    let run_count = apply_finishes.len() as i64;
+    let latest_run = apply_finishes.last().copied();
+    let last_run_at = latest_run
+        .and_then(|event| event.get("ts"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let last_run_summary = latest_run
+        .and_then(|event| event.get("message"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let last_run_id = if run_count > 0 {
+        json!(format!("curate-apply-{run_count}"))
+    } else {
+        Value::Null
+    };
+    let snapshots: Vec<Value> = apply_finishes
+        .iter()
+        .rev()
+        .take(10)
+        .rev()
+        .enumerate()
+        .map(|(index, event)| curation_apply_snapshot(index, event))
+        .collect();
     json!({
         "provider": "tracedecay",
         "state": {
             "paused": false,
-            "last_run_at": null,
-            "run_count": 0,
-            "last_run_summary": null,
-            "last_run_id": null,
+            "last_run_at": last_run_at,
+            "run_count": run_count,
+            "last_run_summary": last_run_summary,
+            "last_run_id": last_run_id,
             "last_preview_at": last_preview_at,
             "last_preview_summary": last_preview_summary,
             "last_preview_run_id": null,
@@ -593,12 +637,37 @@ pub(crate) async fn curation_status_payload(state: &DashboardState) -> Value {
             "mode": "similarity_dedup",
             "dry_run_first": true,
         },
-        "snapshots": [],
+        "snapshots": snapshots,
     })
 }
 
-pub(crate) fn curation_activity_payload(limit: i64) -> Value {
-    json!({ "events": [], "count": 0, "limit": limit, "error": "" })
+async fn push_curation_activity(
+    state: &DashboardState,
+    phase: &str,
+    message: impl Into<String>,
+    dry_run: bool,
+) {
+    let mut events = state.curation_activity.write().await;
+    events.push(json!({
+        "ts": crate::timeutil::now_iso_utc(),
+        "phase": phase,
+        "message": message.into(),
+        "level": "info",
+        "dry_run": dry_run,
+    }));
+    if events.len() > 300 {
+        let overflow = events.len() - 300;
+        events.drain(0..overflow);
+    }
+}
+
+pub(crate) async fn curation_activity_payload(state: &DashboardState, limit: i64) -> Value {
+    let events = state.curation_activity.read().await;
+    let limit = limit.max(0) as usize;
+    let start = events.len().saturating_sub(limit);
+    let visible: Vec<Value> = events[start..].to_vec();
+    let count = visible.len();
+    json!({ "events": visible, "count": count, "limit": limit, "error": "" })
 }
 
 pub(crate) async fn curation_preview_payload(state: &DashboardState) -> Value {
@@ -679,6 +748,17 @@ pub(crate) async fn delete_fact(state: &DashboardState, fact_id: i64) -> Result<
 }
 
 pub(crate) async fn curate_payload(state: &DashboardState, dry_run: bool) -> Result<Value, String> {
+    push_curation_activity(
+        state,
+        "start",
+        if dry_run {
+            "Starting similarity-dedup curation preview"
+        } else {
+            "Starting similarity-dedup curation apply"
+        },
+        dry_run,
+    )
+    .await;
     let (actions, hygiene_candidates, counts, total) = build_delete_plan(state).await?;
 
     let report = json!({
@@ -711,6 +791,17 @@ pub(crate) async fn curate_payload(state: &DashboardState, dry_run: bool) -> Res
         };
         super::curate_preview_store::save(&state.dashboard_root, &entry).await;
         *state.curate_preview.write().await = Some(entry);
+        push_curation_activity(
+            state,
+            "finish",
+            format!(
+                "Preview completed: {} delete action(s), {} active fact(s) scanned",
+                actions.len(),
+                total
+            ),
+            true,
+        )
+        .await;
         return Ok(report);
     }
 
@@ -744,6 +835,13 @@ pub(crate) async fn curate_payload(state: &DashboardState, dry_run: bool) -> Res
     if applied > 0 {
         applied_counts.insert("delete".to_string(), json!(applied));
     }
+    push_curation_activity(
+        state,
+        "finish",
+        format!("Apply completed: {applied} fact(s) deleted, {skipped} action(s) skipped"),
+        false,
+    )
+    .await;
     Ok(json!({
         "ran": true,
         "dry_run": false,
@@ -906,6 +1004,15 @@ pub(crate) async fn curate_apply_payload(state: &DashboardState, ops: &[Value]) 
                 &json!({ "mode": "ops", "deleted": deleted, "merged": merged, "errors": errors }),
             )
             .await;
+        push_curation_activity(
+            state,
+            "finish",
+            format!(
+                "Explicit apply completed: {deleted} delete op(s), {merged} merge op(s), {errors} op(s) errored"
+            ),
+            false,
+        )
+        .await;
     }
 
     json!({
@@ -938,5 +1045,34 @@ pub(crate) async fn oplog_payload(state: &DashboardState, limit: i64) -> Value {
             json!({ "events": events, "count": count, "limit": limit, "error": "" })
         }
         Err(e) => json!({ "events": [], "count": 0, "limit": limit, "error": e }),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn curation_apply_snapshot_keeps_dashboard_history_contract() {
+        let event = json!({
+            "ts": "2026-06-23T00:00:00Z",
+            "phase": "finish",
+            "message": "Apply completed: 2 fact(s) deleted, 0 action(s) skipped",
+            "dry_run": false,
+        });
+
+        let snapshot = curation_apply_snapshot(0, &event);
+
+        assert_eq!(snapshot["id"], "curate-apply-1");
+        assert_eq!(snapshot["name"], "curate-apply-1");
+        assert_eq!(snapshot["path"], "curation://curate-apply-1");
+        assert_eq!(snapshot["ts"], "2026-06-23T00:00:00Z");
+        assert_eq!(
+            snapshot["summary"],
+            "Apply completed: 2 fact(s) deleted, 0 action(s) skipped"
+        );
+        assert_eq!(snapshot["provider"], "tracedecay");
+        assert_eq!(snapshot["mode"], "similarity_dedup");
     }
 }
