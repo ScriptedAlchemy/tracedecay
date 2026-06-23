@@ -222,8 +222,10 @@ pub fn get_tool_definitions_with_budget(node_count: u64, budget: u8) -> Vec<Tool
 ///
 /// Tools whose backing dependency is missing on the current host are
 /// filtered out so the model never sees a tool that will immediately
-/// fail when called. The host `ast-grep` CLI gates rewrite support, and
-/// `ast-grep outline` support gates `tracedecay_outline`.
+/// fail when called. The host `ast-grep` CLI gates rewrite support.
+/// `tracedecay_outline` remains advertised and reports its runtime
+/// `ast-grep outline` requirement from the handler, because the Cursor
+/// plugin docs/rules intentionally teach agents to start there.
 pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     let mut definitions = vec![
         def_search(),
@@ -325,9 +327,6 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     add_format_property(&mut definitions);
     if !ast_grep_available() {
         definitions.retain(|d| d.name != "tracedecay_ast_grep_rewrite");
-    }
-    if !ast_grep_outline_available() {
-        definitions.retain(|d| d.name != "tracedecay_outline");
     }
     debug_assert!(
         !definitions.is_empty(),
