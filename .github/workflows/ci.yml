@@ -90,13 +90,13 @@ jobs:
         run: cargo nextest run --workspace --profile ci
 
   windows-test-shards:
-    name: Test Windows ${{ matrix.partition }}/4
+    name: Test Windows ${{ matrix.partition }}/8
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
-        partition: [1, 2, 3, 4]
+        partition: [1, 2, 3, 4, 5, 6, 7, 8]
     env:
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
@@ -128,7 +128,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $partition = [int]"${{ matrix.partition }}"
-          $partitions = 4
+          $partitions = 8
           $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
           $package = $metadata.packages | Where-Object { $_.name -eq "tracedecay" } | Select-Object -First 1
           $targets = @($package.targets | Where-Object { $_.kind -contains "test" } | Sort-Object name)
