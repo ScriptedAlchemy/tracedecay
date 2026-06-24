@@ -1154,13 +1154,47 @@ impl TraceDecay {
             || crate::storage::has_enrollment_marker(project_root)
     }
 
-    pub(crate) async fn has_initialized_store_with_options(
+    pub async fn has_initialized_store(project_root: &Path) -> bool {
+        Self::has_initialized_store_with_options(project_root, &TraceDecayOpenOptions::default())
+            .await
+    }
+
+    pub async fn has_initialized_store_with_options(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
     ) -> bool {
-        Self::resolve_store_layout_for_project(project_root, open_options)
+        Self::resolve_store_layout_for_local_identity(project_root, open_options)
             .await
             .is_ok_and(|layout| layout.graph_db_path.is_file())
+    }
+
+    async fn resolve_store_layout_for_local_identity(
+        project_root: &Path,
+        open_options: &TraceDecayOpenOptions,
+    ) -> Result<StoreLayout> {
+        let profile_root = open_options.resolved_profile_root()?;
+        if storage::read_enrollment_marker(project_root)?.is_some() {
+            return storage::resolve_layout(project_root, &profile_root);
+        }
+
+        let git_common_dir = git_common_dir(project_root);
+        if let Some(global_db) = open_options.open_global_db().await {
+            if let Some(resolution) = global_db
+                .resolve_project_store_by_identity(project_root, git_common_dir.as_deref())
+                .await
+            {
+                return storage::profile_sharded_layout(
+                    project_root,
+                    &profile_root,
+                    &storage::EnrollmentMarker {
+                        project_id: resolution.project.project_id,
+                        storage_mode: storage::StorageMode::ProfileSharded,
+                    },
+                );
+            }
+        }
+
+        storage::default_profile_sharded_layout(project_root, &profile_root)
     }
 }
 

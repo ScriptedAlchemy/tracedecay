@@ -35,6 +35,38 @@ use tracedecay::tracedecay::TraceDecay;
 
 static GLOBAL_DB_ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
+struct TestDbConnection {
+    _db: libsql::Database,
+    conn: libsql::Connection,
+}
+
+impl Deref for TestDbConnection {
+    type Target = libsql::Connection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.conn
+    }
+}
+
+async fn open_test_db_connection(db_path: &Path) -> TestDbConnection {
+    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    let pragmas = if cfg!(windows) {
+        "PRAGMA mmap_size = 0;
+         PRAGMA journal_mode = DELETE;
+         PRAGMA busy_timeout = 5000;
+         PRAGMA synchronous = FULL;
+         PRAGMA foreign_keys = ON;"
+    } else {
+        "PRAGMA journal_mode = WAL;
+         PRAGMA busy_timeout = 5000;
+         PRAGMA synchronous = NORMAL;
+         PRAGMA foreign_keys = ON;"
+    };
+    conn.execute_batch(pragmas).await.unwrap();
+    TestDbConnection { _db: db, conn }
+}
+
 async fn handle_tool_call(
     cg: &TraceDecay,
     tool_name: &str,
@@ -6734,12 +6766,8 @@ async fn seed_lcm_session_message_in_db(
     );
 }
 
-async fn project_lcm_conn(cg: &TraceDecay) -> libsql::Connection {
-    let db = libsql::Builder::new_local(project_session_db_path(cg))
-        .build()
-        .await
-        .unwrap();
-    db.connect().unwrap()
+async fn project_lcm_conn(cg: &TraceDecay) -> TestDbConnection {
+    open_test_db_connection(&project_session_db_path(cg)).await
 }
 
 async fn lcm_fts_match_count(cg: &TraceDecay, query: &str) -> i64 {
@@ -6779,8 +6807,7 @@ async fn lcm_raw_message_count(cg: &TraceDecay, session_id: &str) -> i64 {
 }
 
 async fn lcm_raw_message_count_at_path(db_path: &Path, session_id: &str) -> i64 {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
+    let conn = open_test_db_connection(db_path).await;
     let mut rows = conn
         .query(
             "SELECT COUNT(*) FROM lcm_raw_messages WHERE session_id = ?1",
@@ -11699,8 +11726,7 @@ async fn repeated_lcm_calls_skip_schema_reensure_per_process() {
 
     let db_path = project_session_db_path(&cg);
     {
-        let db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-        let conn = db.connect().unwrap();
+        let conn = open_test_db_connection(&db_path).await;
         conn.execute(
             "UPDATE session_schema_migrations SET version = 1 WHERE name = 'lcm'",
             (),
@@ -11724,8 +11750,7 @@ async fn repeated_lcm_calls_skip_schema_reensure_per_process() {
     );
 
     // The on-disk marker is untouched as well.
-    let db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
+    let conn = open_test_db_connection(&db_path).await;
     let mut rows = conn
         .query(
             "SELECT version FROM session_schema_migrations WHERE name = 'lcm'",

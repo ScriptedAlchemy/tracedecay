@@ -98,6 +98,11 @@ In short:
 - **`tracedecay init`** -- one-time setup. Creates the active project store and performs a full index. Errors if already initialized.
 - **`tracedecay sync`** -- ongoing updates. Requires an existing project store. Errors if the project was never initialized.
 
+Linked git worktrees do not need their own `tracedecay init`. Once the main
+repository has been initialized, TraceDecay resolves linked worktrees through
+the repository's shared git common directory and uses the existing branch
+database tracking to keep the checked-out branch isolated.
+
 ### Incremental syncs
 
 After the initial full index, every subsequent `tracedecay sync` is incremental. It detects which files changed since the last sync (via content hashing) and only re-indexes those files. On a typical commit-sized change, this takes under a second.

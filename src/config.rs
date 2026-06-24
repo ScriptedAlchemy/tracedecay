@@ -375,6 +375,7 @@ fn absolutize_path(path: PathBuf) -> PathBuf {
 ///    ambiguous and require an explicit path.
 pub fn discover_project_root(start: &Path) -> Option<PathBuf> {
     let mut dir = start.to_path_buf();
+    let worktree_root = crate::worktree::git_worktree_root(start);
     loop {
         if has_project_database(&dir)
             || crate::storage::has_enrollment_marker(&dir)
@@ -384,6 +385,12 @@ pub fn discover_project_root(start: &Path) -> Option<PathBuf> {
             })
         {
             return Some(dir);
+        }
+        if worktree_root
+            .as_ref()
+            .is_some_and(|root| paths_same(&dir, root))
+        {
+            return None;
         }
         if !dir.pop() {
             return None;
@@ -402,8 +409,16 @@ pub fn resolve_path_with_discovery(path: Option<String>) -> PathBuf {
         PathBuf::from(p)
     } else {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        discover_project_root(&cwd).unwrap_or(cwd)
+        discover_project_root(&cwd)
+            .or_else(|| crate::worktree::git_worktree_root(&cwd))
+            .unwrap_or(cwd)
     }
+}
+
+fn paths_same(left: &Path, right: &Path) -> bool {
+    let left = std::fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
+    let right = std::fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
+    left == right
 }
 
 /// Returns `true` if the path matches any of the configured `include` patterns.

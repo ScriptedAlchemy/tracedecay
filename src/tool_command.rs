@@ -234,10 +234,12 @@ async fn call_in_process_tool(
         global_db_path: Some(handshake.client_identity.global_db_path.clone()),
     };
     let cg = if handshake.allow_init
-        && !tracedecay::tracedecay::TraceDecay::is_initialized_with_options(
+        && !tracedecay::tracedecay::TraceDecay::has_initialized_store_with_options(
             project_path,
             &open_options,
-        ) {
+        )
+        .await
+    {
         tracedecay::tracedecay::TraceDecay::init_with_options(project_path, open_options).await?
     } else {
         tracedecay::tracedecay::TraceDecay::open_with_options(project_path, open_options).await?
