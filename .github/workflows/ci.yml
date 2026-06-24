@@ -154,7 +154,7 @@ jobs:
             throw "No integration test targets selected for Windows shard $partition/$partitions"
           }
           Write-Host "Windows shard $partition/$partitions running $($selected.Count) integration test targets"
-          $nextestArgs = @("nextest", "run", "-p", "tracedecay", "--profile", "ci", "--retries", "2", "--flaky-result", "pass")
+          $nextestArgs = @("nextest", "run", "-p", "tracedecay", "--profile", "ci")
           if ($partition -eq 1) {
             $nextestArgs += @("--lib", "--bin", "tracedecay")
           }
