@@ -1270,6 +1270,18 @@ fn parse_lcm_scope(args: &Value) -> Result<LcmScope> {
     }
 }
 
+fn lcm_grep_provider_arg(args: &Value, scope: LcmScope) -> &str {
+    if let Some(provider) = optional_search_provider_arg(args) {
+        return provider;
+    }
+    if matches!(scope, LcmScope::Current | LcmScope::Session)
+        && string_arg(args, "provider").is_none()
+    {
+        return provider_arg(args);
+    }
+    "all"
+}
+
 fn parse_lcm_grep_sort(args: &Value) -> Result<LcmGrepSort> {
     let Some(sort) = string_arg(args, "sort") else {
         return Ok(LcmGrepSort::Recency);
@@ -1651,11 +1663,11 @@ pub(super) async fn handle_lcm_grep(
     context: LcmHandlerContext<'_>,
     args: Value,
 ) -> Result<ToolResult> {
-    let provider = optional_search_provider_arg(&args).unwrap_or("all");
     let query = required_string_arg(&args, "query")?;
     // Validate scope before opening storage so argument errors are reported
     // even when the sessions DB does not exist yet.
     let scope = parse_lcm_scope(&args)?;
+    let provider = lcm_grep_provider_arg(&args, scope);
     let storage = lcm_open_storage_ro!(context, &args);
     let hits = storage
         .db

@@ -6609,12 +6609,24 @@ async fn seed_lcm_session_message(
     text: impl Into<String>,
     ordinal: i64,
 ) {
+    seed_lcm_session_message_for_provider(cg, "cursor", session_id, message_id, text, ordinal)
+        .await;
+}
+
+async fn seed_lcm_session_message_for_provider(
+    cg: &TraceDecay,
+    provider: &str,
+    session_id: &str,
+    message_id: &str,
+    text: impl Into<String>,
+    ordinal: i64,
+) {
     let db = open_project_session_db(cg.project_root())
         .await
         .expect("project-local session db should open");
     assert!(
         db.upsert_session(&SessionRecord {
-            provider: "cursor".to_string(),
+            provider: provider.to_string(),
             session_id: session_id.to_string(),
             project_key: cg.project_root().to_string_lossy().to_string(),
             project_path: cg.project_root().to_string_lossy().to_string(),
@@ -6632,7 +6644,7 @@ async fn seed_lcm_session_message(
     );
     assert!(
         db.upsert_session_message(&SessionMessageRecord {
-            provider: "cursor".to_string(),
+            provider: provider.to_string(),
             message_id: message_id.to_string(),
             session_id: session_id.to_string(),
             role: "assistant".to_string(),
@@ -8011,6 +8023,53 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
             .unwrap()
             .len(),
         1
+    );
+
+    seed_lcm_session_message_for_provider(
+        &cg,
+        "cursor",
+        "provider-local-session",
+        "cursor-provider-local-message",
+        "provider local collision belongs to cursor",
+        2,
+    )
+    .await;
+    seed_lcm_session_message_for_provider(
+        &cg,
+        "codex",
+        "provider-local-session",
+        "codex-provider-local-message",
+        "provider local collision belongs to codex",
+        3,
+    )
+    .await;
+
+    let scoped_default_provider_grep = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_grep",
+        json!({
+            "query": "provider local collision",
+            "scope": "session",
+            "session_id": "provider-local-session",
+            "limit": 5
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let scoped_default_provider_grep_payload: Value =
+        serde_json::from_str(extract_text(&scoped_default_provider_grep.value)).unwrap();
+    assert_eq!(scoped_default_provider_grep_payload["status"], "ok");
+    assert_eq!(scoped_default_provider_grep_payload["provider"], "cursor");
+    assert_eq!(scoped_default_provider_grep_payload["count"], 1);
+    assert_eq!(
+        scoped_default_provider_grep_payload["hits"][0]["provider"],
+        "cursor"
+    );
+    assert_eq!(
+        scoped_default_provider_grep_payload["hits"][0]["message_id"],
+        "cursor-provider-local-message"
     );
 
     let described = handle_tool_call(
