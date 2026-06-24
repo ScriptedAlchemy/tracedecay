@@ -251,6 +251,11 @@ pub enum Commands {
     },
     /// Download and install the latest version from GitHub
     Upgrade,
+    /// Refresh the tracedecay binary, generated plugins, and daemon
+    Update,
+    /// Refresh plugins and daemon after the binary has been updated.
+    #[command(name = "post-update", hide = true)]
+    PostUpdate,
     /// Show or switch the update channel (stable or beta)
     Channel {
         /// Target channel: "stable" or "beta" (omit to show current)
@@ -631,7 +636,7 @@ mod cli_parse_tests {
     use super::{
         BranchAction, Cli, Commands, DaemonAction, MemoryAction, MigrateAction, SessionsAction,
     };
-    use clap::{error::ErrorKind, Parser};
+    use clap::{error::ErrorKind, CommandFactory, Parser};
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
@@ -709,6 +714,29 @@ mod cli_parse_tests {
             .expect("update-plugin alias should parse");
 
         assert!(matches!(cli.command, Some(Commands::UpdatePlugin)));
+    }
+
+    #[test]
+    fn update_upgrade_and_update_plugin_parse_to_distinct_commands() {
+        let update = Cli::try_parse_from(["tracedecay", "update"]).expect("update should parse");
+        let upgrade = Cli::try_parse_from(["tracedecay", "upgrade"]).expect("upgrade should parse");
+        let update_plugin = Cli::try_parse_from(["tracedecay", "update-plugin"])
+            .expect("update-plugin should parse");
+
+        assert!(matches!(update.command, Some(Commands::Update)));
+        assert!(matches!(upgrade.command, Some(Commands::Upgrade)));
+        assert!(matches!(
+            update_plugin.command,
+            Some(Commands::UpdatePlugin)
+        ));
+    }
+
+    #[test]
+    fn update_help_describes_refresh_scope() {
+        let help = Cli::command().render_long_help().to_string();
+
+        assert!(help.contains("update"));
+        assert!(help.contains("Refresh the tracedecay binary, generated plugins, and daemon"));
     }
 
     #[test]
