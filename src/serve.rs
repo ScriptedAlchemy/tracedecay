@@ -56,19 +56,21 @@ pub async fn ensure_initialized_with_options(
     project_path: &Path,
     open_options: TraceDecayOpenOptions,
 ) -> Result<TraceDecay> {
-    if TraceDecay::has_initialized_store_with_options(project_path, &open_options).await {
-        return match TraceDecay::open_with_options(project_path, open_options.clone()).await {
-            Ok(cg) => Ok(cg),
-            Err(open_err) => {
-                match TraceDecay::open_read_only_with_options(project_path, open_options).await {
-                    Ok(cg) => {
-                        cg.ensure_schema_current().await?;
-                        Ok(cg)
+    match TraceDecay::open_with_options(project_path, open_options.clone()).await {
+        Ok(cg) => return Ok(cg),
+        Err(open_err) => {
+            match TraceDecay::open_read_only_with_options(project_path, open_options).await {
+                Ok(cg) => {
+                    cg.ensure_schema_current().await?;
+                    return Ok(cg);
+                }
+                Err(_) => {
+                    if !matches!(open_err, TraceDecayError::Config { .. }) {
+                        return Err(open_err);
                     }
-                    Err(_) => Err(open_err),
                 }
             }
-        };
+        }
     }
     Err(TraceDecayError::Config {
         message: format!(

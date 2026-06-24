@@ -722,7 +722,7 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
             runtime,
         } => {
             let project_path = resolve_cli_project_root(path, project_id, project_path).await?;
-            let cg = if TraceDecay::is_initialized(&project_path) {
+            let cg = if TraceDecay::has_initialized_store(&project_path).await {
                 match TraceDecay::open(&project_path).await {
                     Ok(cg) => cg,
                     Err(_) => TraceDecay::open_read_only(&project_path).await?,

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- support linked git worktrees resolving the initialized repository store by git common directory
+
 ## [0.0.12](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.11...v0.0.12) - 2026-06-24
 
 ### Fixed

@@ -554,7 +554,7 @@ pub async fn hook_cursor_session_start() -> i32 {
 /// tokens-saved counter.
 async fn cursor_session_context_for_root(root: Option<&Path>) -> String {
     let (initialized, staleness, tokens_saved) = match root {
-        Some(r) if crate::tracedecay::TraceDecay::is_initialized(r) => {
+        Some(r) if crate::tracedecay::TraceDecay::has_initialized_store(r).await => {
             let (staleness, tokens_saved) = cursor_index_signals_for_root(r).await;
             (true, staleness, tokens_saved)
         }
@@ -1470,7 +1470,7 @@ async fn targeted_sync_for_cursor_after_file_edit(event_json: &str) {
     let Some(root) = cursor_project_root_from_event(event_json) else {
         return;
     };
-    if !crate::tracedecay::TraceDecay::is_initialized(&root) {
+    if !crate::tracedecay::TraceDecay::has_initialized_store(&root).await {
         return;
     }
     let rels = cursor_after_file_edit_rel_paths(event_json, &root);
@@ -1502,7 +1502,7 @@ async fn sync_after_cursor_shell_event(event_json: &str) {
         return;
     };
     // Never bootstrap indexing in an unindexed repo.
-    if !crate::tracedecay::TraceDecay::is_initialized(&root) {
+    if !crate::tracedecay::TraceDecay::has_initialized_store(&root).await {
         return;
     }
     let cwd = cursor_event_cwd(&parsed).unwrap_or_else(|| root.clone());
@@ -1564,7 +1564,7 @@ async fn workspace_open_for_cursor_event(event_json: &str) {
     let Some(root) = cursor_project_root_from_event(event_json) else {
         return;
     };
-    if !crate::tracedecay::TraceDecay::is_initialized(&root) {
+    if !crate::tracedecay::TraceDecay::has_initialized_store(&root).await {
         return;
     }
 
@@ -2028,11 +2028,13 @@ async fn codex_post_tool_use(event_json: &str) {
     let Some(cwd) = event_cwd(event_json) else {
         return;
     };
-    let Some(root) = crate::config::discover_project_root(&cwd) else {
+    let Some(root) = crate::config::discover_project_root(&cwd)
+        .or_else(|| crate::worktree::git_worktree_root(&cwd))
+    else {
         return;
     };
     // Never bootstrap indexing in an unindexed repo.
-    if !crate::tracedecay::TraceDecay::is_initialized(&root) {
+    if !crate::tracedecay::TraceDecay::has_initialized_store(&root).await {
         return;
     }
 
@@ -2077,7 +2079,7 @@ async fn codex_post_compact(event_json: &str) {
         let Some(project_root) = codex_project_root_from_event(event_json) else {
             return;
         };
-        if !crate::tracedecay::TraceDecay::is_initialized(&project_root) {
+        if !crate::tracedecay::TraceDecay::has_initialized_store(&project_root).await {
             return;
         }
         let Some(db) = crate::sessions::cursor::open_project_session_db(&project_root).await else {
@@ -2442,7 +2444,7 @@ async fn sync_for_kiro_event(event_json: &str) -> crate::errors::Result<()> {
     let Some(project_root) = kiro_project_root(event_json) else {
         return Ok(());
     };
-    if !crate::tracedecay::TraceDecay::is_initialized(&project_root) {
+    if !crate::tracedecay::TraceDecay::has_initialized_store(&project_root).await {
         return Ok(());
     }
     let cg = crate::tracedecay::TraceDecay::open(&project_root).await?;
@@ -2456,7 +2458,7 @@ async fn sync_for_cursor_event(event_json: &str) -> crate::errors::Result<()> {
     let Some(project_root) = cursor_project_root_from_event(event_json) else {
         return Ok(());
     };
-    if !crate::tracedecay::TraceDecay::is_initialized(&project_root) {
+    if !crate::tracedecay::TraceDecay::has_initialized_store(&project_root).await {
         return Ok(());
     }
     let cg = crate::tracedecay::TraceDecay::open(&project_root).await?;

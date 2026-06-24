@@ -49,19 +49,31 @@ pub async fn resolved_project_session_db_path(project_root: &Path) -> Option<Pat
     if is_hermes_profile_home(project_root) {
         return Some(hermes_profile_session_db_path(project_root));
     }
-    if let Ok(layout) = resolve_layout_for_current_profile(project_root) {
-        return Some(layout.sessions_db_path);
+
+    match crate::storage::read_enrollment_marker(project_root) {
+        Ok(Some(_)) => {
+            return resolve_layout_for_current_profile(project_root)
+                .ok()
+                .map(|layout| layout.sessions_db_path);
+        }
+        Ok(None) => {}
+        Err(_) => return None,
     }
     if let Some(db_path) = registry_profile_session_db_path(project_root).await {
         return Some(db_path);
     }
-    None
+    resolve_layout_for_current_profile(project_root)
+        .ok()
+        .map(|layout| layout.sessions_db_path)
 }
 
 async fn registry_profile_session_db_path(project_root: &Path) -> Option<PathBuf> {
     let profile_root = crate::storage::default_profile_root().ok()?;
     let global = GlobalDb::open().await?;
-    let resolution = global.resolve_project_store_by_alias(project_root).await?;
+    let git_common_dir = crate::worktree::git_common_dir(project_root);
+    let resolution = global
+        .resolve_project_store_by_identity(project_root, git_common_dir.as_deref())
+        .await?;
     if resolution.store.storage_mode != "profile_sharded" {
         return None;
     }

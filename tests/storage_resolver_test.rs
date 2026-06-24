@@ -1,6 +1,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
@@ -14,7 +15,7 @@ use tracedecay::global_db::GlobalDb;
 use tracedecay::mcp::response_handles::{
     retrieve_response_handle, store_response_handle, ResponseHandleLookup,
 };
-use tracedecay::sessions::cursor::project_session_db_path;
+use tracedecay::sessions::cursor::{project_session_db_path, resolved_project_session_db_path};
 use tracedecay::storage::{
     default_profile_project_id, default_profile_sharded_layout, profile_sharded_layout,
     read_enrollment_marker, read_store_manifest, resolve_layout, resolve_lcm_payload_root,
@@ -91,6 +92,29 @@ fn test_home(dir: &TempDir) -> PathBuf {
     let home = dir.path().join("home");
     fs::create_dir_all(&home).unwrap();
     canonical_temp_path(&home)
+}
+
+fn git(cwd: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run git {args:?}: {err}"));
+    assert!(
+        output.status.success(),
+        "git {args:?} failed in {}\nstdout:\n{}\nstderr:\n{}",
+        cwd.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn init_repo_with_commit(project: &Path) {
+    git(project, &["init", "-b", "main"]);
+    git(project, &["config", "user.email", "test@example.com"]);
+    git(project, &["config", "user.name", "TraceDecay Test"]);
+    git(project, &["add", "."]);
+    git(project, &["commit", "-m", "initial"]);
 }
 
 #[test]
@@ -643,6 +667,149 @@ async fn trace_decay_init_registers_default_profile_shard_globally() {
     let resolution = db.resolve_project_store_by_alias(&project).await.unwrap();
 
     assert_eq!(resolution.project.project_id, project_id);
+}
+
+#[tokio::test]
+async fn linked_worktree_uses_initialized_git_common_dir_store_without_init() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    let worktree = dir.path().join("repo-wt");
+    let home = test_home(&dir);
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn main_only() {}\n").unwrap();
+    let _home_guard = HomeGuard::set(&home);
+
+    init_repo_with_commit(&project);
+
+    let main = TraceDecay::init(&project).await.unwrap();
+    main.index_all().await.unwrap();
+    let main_store = main.store_layout().data_root.clone();
+    drop(main);
+
+    git(
+        &project,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/worktree-auto",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    fs::write(
+        worktree.join("src/lib.rs"),
+        "pub fn main_only() {}\npub fn worktree_only() {}\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        discover_project_root(&worktree.join("src")),
+        None,
+        "discovery must not walk from a linked worktree into the main checkout"
+    );
+    assert!(
+        TraceDecay::has_initialized_store(&worktree).await,
+        "linked worktree should resolve the already-initialized shared git store"
+    );
+
+    let worktree_cg = TraceDecay::open(&worktree).await.unwrap();
+    assert_eq!(worktree_cg.project_root(), worktree.as_path());
+    assert_eq!(worktree_cg.store_layout().data_root, main_store);
+    assert_eq!(
+        resolved_project_session_db_path(&worktree).await.unwrap(),
+        worktree_cg.store_layout().sessions_db_path,
+        "session storage should follow the shared git-common-dir store too"
+    );
+    assert!(
+        !worktree_cg
+            .search("worktree_only", 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "opening a linked worktree should auto-track and sync its branch DB"
+    );
+    assert!(
+        !worktree.join(".tracedecay").exists(),
+        "automatic worktree support must not require or create a per-worktree marker"
+    );
+
+    let meta = branch_meta::load_branch_meta(&main_store).unwrap();
+    assert!(
+        meta.is_tracked("feature/worktree-auto"),
+        "linked worktree branch should be tracked in the shared store"
+    );
+}
+
+#[tokio::test]
+async fn same_remote_clone_is_not_considered_initialized_without_local_identity() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let remote = dir.path().join("remote.git");
+    let project = dir.path().join("repo");
+    let clone = dir.path().join("repo-clone");
+    let home = test_home(&dir);
+    let _home_guard = HomeGuard::set(&home);
+
+    git(dir.path(), &["init", "--bare", remote.to_str().unwrap()]);
+    git(
+        dir.path(),
+        &["clone", remote.to_str().unwrap(), project.to_str().unwrap()],
+    );
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn main_only() {}\n").unwrap();
+    git(&project, &["config", "user.email", "test@example.com"]);
+    git(&project, &["config", "user.name", "TraceDecay Test"]);
+    git(&project, &["add", "."]);
+    git(&project, &["commit", "-m", "initial"]);
+    git(&project, &["push", "origin", "HEAD:master"]);
+    git(
+        dir.path(),
+        &["clone", remote.to_str().unwrap(), clone.to_str().unwrap()],
+    );
+
+    TraceDecay::init(&project).await.unwrap();
+
+    assert!(
+        !TraceDecay::has_initialized_store(&clone).await,
+        "a separate clone with the same origin is not a linked worktree and must not borrow the initialized store"
+    );
+}
+
+#[tokio::test]
+async fn nested_linked_worktree_does_not_discover_parent_checkout_marker() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    let worktree = project.join(".worktrees/feature-nested");
+    let home = test_home(&dir);
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn main_only() {}\n").unwrap();
+    let _home_guard = HomeGuard::set(&home);
+
+    init_repo_with_commit(&project);
+    TraceDecay::init(&project).await.unwrap();
+
+    git(
+        &project,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/nested",
+            worktree.to_str().unwrap(),
+        ],
+    );
+
+    assert_eq!(
+        discover_project_root(&worktree.join("src")),
+        None,
+        "a linked worktree inside the main checkout must not inherit the parent marker"
+    );
+    assert!(
+        TraceDecay::has_initialized_store(&worktree).await,
+        "nested linked worktree should still find the shared git store"
+    );
 }
 
 #[tokio::test]

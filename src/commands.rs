@@ -455,12 +455,19 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::er
     match action {
         BranchAction::List { path } => {
             let project_path = tracedecay::config::resolve_path(path);
-            let tracedecay_dir = resolve_branch_data_root(&project_path);
+            let opened = TraceDecay::open_read_only(&project_path).await.ok();
+            let tracedecay_dir = opened
+                .as_ref()
+                .map(|cg| cg.store_layout().data_root.clone())
+                .unwrap_or_else(|| fallback_branch_data_root(&project_path));
             let Some(_meta) = branch_meta::load_branch_meta(&tracedecay_dir) else {
                 eprintln!("No branch tracking configured. Run `tracedecay branch add` to start.");
                 return Ok(());
             };
-            let diagnostics = TraceDecay::project_branch_diagnostics(&project_path);
+            let diagnostics = opened
+                .as_ref()
+                .map(TraceDecay::branch_diagnostics)
+                .unwrap_or_else(|| TraceDecay::project_branch_diagnostics(&project_path));
             eprintln!(
                 "Default branch: {}",
                 diagnostics.default_branch.as_deref().unwrap_or("<unknown>")
@@ -566,7 +573,7 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::er
         }
         BranchAction::Remove { name, path } => {
             let project_path = tracedecay::config::resolve_path(path);
-            let tracedecay_dir = resolve_branch_data_root(&project_path);
+            let tracedecay_dir = resolve_branch_data_root(&project_path).await;
             let Some(mut meta) = branch_meta::load_branch_meta(&tracedecay_dir) else {
                 eprintln!("No branch tracking configured.");
                 return Ok(());
@@ -592,7 +599,7 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::er
         }
         BranchAction::Removeall { path } => {
             let project_path = tracedecay::config::resolve_path(path);
-            let tracedecay_dir = resolve_branch_data_root(&project_path);
+            let tracedecay_dir = resolve_branch_data_root(&project_path).await;
             let Some(mut meta) = branch_meta::load_branch_meta(&tracedecay_dir) else {
                 eprintln!("No branch tracking configured.");
                 return Ok(());
@@ -620,7 +627,7 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::er
         }
         BranchAction::Gc { path } => {
             let project_path = tracedecay::config::resolve_path(path);
-            let tracedecay_dir = resolve_branch_data_root(&project_path);
+            let tracedecay_dir = resolve_branch_data_root(&project_path).await;
             let Some(mut meta) = branch_meta::load_branch_meta(&tracedecay_dir) else {
                 eprintln!("No branch tracking configured.");
                 return Ok(());
@@ -669,7 +676,14 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::er
     Ok(())
 }
 
-fn resolve_branch_data_root(project_path: &Path) -> PathBuf {
+async fn resolve_branch_data_root(project_path: &Path) -> PathBuf {
+    TraceDecay::open_read_only(project_path)
+        .await
+        .map(|cg| cg.store_layout().data_root.clone())
+        .unwrap_or_else(|_| fallback_branch_data_root(project_path))
+}
+
+fn fallback_branch_data_root(project_path: &Path) -> PathBuf {
     tracedecay::storage::resolve_layout_for_current_profile(project_path)
         .map(|layout| layout.data_root)
         .unwrap_or_else(|_| tracedecay::config::get_tracedecay_dir(project_path))
@@ -940,7 +954,7 @@ async fn is_fresh_install() -> bool {
 /// When invoked with no subcommand, offer to create the index if none exists.
 pub(crate) async fn handle_no_command() -> tracedecay::errors::Result<()> {
     let project_path = tracedecay::config::resolve_path(None);
-    if TraceDecay::is_initialized(&project_path) {
+    if TraceDecay::has_initialized_store(&project_path).await {
         // Already initialized — show help via clap
         let _ = <crate::cli::Cli as clap::CommandFactory>::command().print_help();
         eprintln!();
@@ -985,7 +999,7 @@ pub(crate) async fn handle_init(
     include_folders: Vec<String>,
 ) -> tracedecay::errors::Result<()> {
     let project_path = tracedecay::config::resolve_path(path);
-    if TraceDecay::is_initialized(&project_path) {
+    if TraceDecay::has_initialized_store(&project_path).await {
         eprintln!(
             "\x1b[31merror:\x1b[0m TraceDecay is already initialized at '{}'.\n\
              Use \x1b[1mtracedecay sync\x1b[0m to update the index, or \
@@ -1011,7 +1025,7 @@ pub(crate) async fn handle_sync(
     verbose: bool,
 ) -> tracedecay::errors::Result<()> {
     let project_path = tracedecay::config::resolve_path_with_discovery(path);
-    if !TraceDecay::is_initialized(&project_path) {
+    if !TraceDecay::has_initialized_store(&project_path).await {
         eprintln!(
             "\x1b[31merror:\x1b[0m no TraceDecay index found at '{}'.\n\
              Run \x1b[1mtracedecay init\x1b[0m to create one first.",
@@ -1226,7 +1240,7 @@ pub(crate) async fn init_and_index(
             message: format!("project path must be absolute: {}", project_path.display()),
         });
     }
-    let mut cg = if TraceDecay::is_initialized(project_path) {
+    let mut cg = if TraceDecay::has_initialized_store(project_path).await {
         TraceDecay::open(project_path).await?
     } else {
         let cg = TraceDecay::init(project_path).await?;
