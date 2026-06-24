@@ -21,9 +21,10 @@ fn required_str<'a>(args: &'a Value, name: &str) -> Result<&'a str> {
         .ok_or_else(|| missing_required_param(name))
 }
 
-fn required_array<'a>(args: &'a Value, name: &str) -> Result<&'a Vec<Value>> {
+fn required_array<'a>(args: &'a Value, name: &str) -> Result<&'a [Value]> {
     args.get(name)
         .and_then(Value::as_array)
+        .map(Vec::as_slice)
         .ok_or_else(|| missing_required_param(name))
 }
 
@@ -79,10 +80,7 @@ pub(super) async fn handle_insert_at(cg: &TraceDecay, args: Value) -> Result<Too
     let anchor = required_str(&args, "anchor")?;
     let content = required_str(&args, "content")?;
 
-    let before = args
-        .get("before")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
+    let before = args.get("before").and_then(Value::as_bool).unwrap_or(false);
 
     let result = cg.insert_at(path, anchor, content, before).await?;
     let touched_files = vec![result.file_path.clone()];

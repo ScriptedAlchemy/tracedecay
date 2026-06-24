@@ -134,19 +134,12 @@ pub(super) fn truncated_json_envelope_with_handle(
         }
         let text = serde_json::to_string_pretty(&envelope).unwrap_or_default();
         if text.len() <= MAX_RESPONSE_CHARS || end == 0 {
-            let handle_status = if handle.record.is_some() {
-                "stored"
-            } else if project_root.is_none() {
-                "no_project_root"
-            } else {
-                "store_failed"
-            };
             observe_response_truncation(
                 formatted.len(),
                 text.len(),
                 true,
                 now,
-                handle_status,
+                truncation_handle_status(project_root, &handle),
                 started.elapsed(),
             );
             return text;
@@ -170,19 +163,12 @@ fn truncated_markdown_with_handle(project_root: Option<&Path>, text: &str) -> St
         let preview = &text[..end];
         let rendered = render_markdown_truncation(preview, text.len(), &handle);
         if rendered.len() <= MAX_RESPONSE_CHARS || end == 0 {
-            let handle_status = if handle.record.is_some() {
-                "stored"
-            } else if project_root.is_none() {
-                "no_project_root"
-            } else {
-                "store_failed"
-            };
             observe_response_truncation(
                 text.len(),
                 rendered.len(),
                 handle.record.is_some(),
                 now,
-                handle_status,
+                truncation_handle_status(project_root, &handle),
                 started.elapsed(),
             );
             return rendered;
@@ -194,6 +180,19 @@ fn truncated_markdown_with_handle(project_root: Option<&Path>, text: &str) -> St
 struct TruncatedResponseHandle {
     record: Option<ResponseHandleRecord>,
     unavailable: Option<Value>,
+}
+
+fn truncation_handle_status(
+    project_root: Option<&Path>,
+    handle: &TruncatedResponseHandle,
+) -> &'static str {
+    if handle.record.is_some() {
+        "stored"
+    } else if project_root.is_none() {
+        "no_project_root"
+    } else {
+        "store_failed"
+    }
 }
 
 fn prepare_truncated_response_handle(
