@@ -244,7 +244,11 @@ impl Drop for TestTraceDecay {
                 runtime.block_on(async {
                     let _ = cg.checkpoint().await;
                 });
-                cg.close();
+                // Windows CI aborts inside libsql/SQLite teardown for these
+                // short-lived test graphs. Each nextest case runs in its own
+                // process, so leaking the fixture after a checkpoint is safer
+                // than exercising the native destructor path at process exit.
+                std::mem::forget(cg);
             });
             let _ = close_thread.join();
         }
