@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde_json::Value;
 
@@ -71,7 +70,7 @@ pub async fn resolved_project_session_db_path(project_root: &Path) -> Option<Pat
 async fn registry_profile_session_db_path(project_root: &Path) -> Option<PathBuf> {
     let profile_root = crate::storage::default_profile_root().ok()?;
     let global = GlobalDb::open().await?;
-    let git_common_dir = git_common_dir(project_root);
+    let git_common_dir = crate::worktree::git_common_dir(project_root);
     let resolution = global
         .resolve_project_store_by_identity(project_root, git_common_dir.as_deref())
         .await?;
@@ -83,29 +82,6 @@ async fn registry_profile_session_db_path(project_root: &Path) -> Option<PathBuf
             .join(resolution.store.store_relpath)
             .join(PROJECT_SESSION_DB_FILENAME),
     )
-}
-
-fn git_common_dir(project_root: &Path) -> Option<PathBuf> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--git-common-dir"])
-        .current_dir(project_root)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8(output.stdout).ok()?;
-    let text = text.trim();
-    if text.is_empty() {
-        return None;
-    }
-    let common_dir = PathBuf::from(text);
-    let resolved = if common_dir.is_absolute() {
-        common_dir
-    } else {
-        project_root.join(common_dir)
-    };
-    Some(resolved.canonicalize().unwrap_or(resolved))
 }
 
 fn is_hermes_profile_home(path: &Path) -> bool {

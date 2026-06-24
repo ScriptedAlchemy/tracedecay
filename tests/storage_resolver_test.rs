@@ -109,6 +109,14 @@ fn git(cwd: &Path, args: &[&str]) {
     );
 }
 
+fn init_repo_with_commit(project: &Path) {
+    git(project, &["init", "-b", "main"]);
+    git(project, &["config", "user.email", "test@example.com"]);
+    git(project, &["config", "user.name", "TraceDecay Test"]);
+    git(project, &["add", "."]);
+    git(project, &["commit", "-m", "initial"]);
+}
+
 #[test]
 fn enrollment_marker_is_discovered_without_graph_db() {
     let dir = TempDir::new().unwrap();
@@ -672,11 +680,7 @@ async fn linked_worktree_uses_initialized_git_common_dir_store_without_init() {
     fs::write(project.join("src/lib.rs"), "pub fn main_only() {}\n").unwrap();
     let _home_guard = HomeGuard::set(&home);
 
-    git(&project, &["init", "-b", "main"]);
-    git(&project, &["config", "user.email", "test@example.com"]);
-    git(&project, &["config", "user.name", "TraceDecay Test"]);
-    git(&project, &["add", "."]);
-    git(&project, &["commit", "-m", "initial"]);
+    init_repo_with_commit(&project);
 
     let main = TraceDecay::init(&project).await.unwrap();
     main.index_all().await.unwrap();
@@ -783,11 +787,7 @@ async fn nested_linked_worktree_does_not_discover_parent_checkout_marker() {
     fs::write(project.join("src/lib.rs"), "pub fn main_only() {}\n").unwrap();
     let _home_guard = HomeGuard::set(&home);
 
-    git(&project, &["init", "-b", "main"]);
-    git(&project, &["config", "user.email", "test@example.com"]);
-    git(&project, &["config", "user.name", "TraceDecay Test"]);
-    git(&project, &["add", "."]);
-    git(&project, &["commit", "-m", "initial"]);
+    init_repo_with_commit(&project);
     TraceDecay::init(&project).await.unwrap();
 
     git(

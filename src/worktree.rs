@@ -39,20 +39,23 @@ pub struct WorktreeIndexMismatch {
 /// checkout and each linked worktree report their own distinct directory,
 /// which is exactly the distinction this module relies on.
 pub fn git_worktree_root(dir: &Path) -> Option<PathBuf> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(dir)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let raw = String::from_utf8(output.stdout).ok()?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    realpath(Path::new(trimmed))
+    let trimmed = git_output(dir, &["rev-parse", "--show-toplevel"])?;
+    realpath(Path::new(&trimmed))
+}
+
+/// Absolute, symlink-resolved path to the repository's git common directory.
+///
+/// For a linked worktree this is the main checkout's `.git` directory, which is
+/// the stable local identity all linked worktrees share.
+pub fn git_common_dir(dir: &Path) -> Option<PathBuf> {
+    let raw = git_output(dir, &["rev-parse", "--git-common-dir"])?;
+    let common_dir = PathBuf::from(raw);
+    let resolved = if common_dir.is_absolute() {
+        common_dir
+    } else {
+        dir.join(common_dir)
+    };
+    Some(resolved.canonicalize().unwrap_or(resolved))
 }
 
 /// Detect when `start_path` lives in one git working tree but the resolved
@@ -121,6 +124,20 @@ pub fn worktree_mismatch_notice(m: &WorktreeIndexMismatch) -> String {
 /// fails (e.g. directory was deleted between rev-parse and the fs call).
 fn realpath(p: &Path) -> Option<PathBuf> {
     std::fs::canonicalize(p).ok()
+}
+
+fn git_output(dir: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8(output.stdout).ok()?;
+    let trimmed = raw.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 #[cfg(test)]

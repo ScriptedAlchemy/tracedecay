@@ -532,7 +532,7 @@ impl TraceDecay {
             return storage::resolve_layout(project_root, &profile_root);
         }
 
-        let git_common_dir = git_common_dir(project_root);
+        let git_common_dir = crate::worktree::git_common_dir(project_root);
         let git_remote_url = git_remote_url(project_root);
         if let Some(global_db) = open_options.open_global_db().await {
             let resolution = match global_db
@@ -1024,7 +1024,7 @@ impl TraceDecay {
 
         let meta = branch_meta::load_branch_meta(&self.store_layout.data_root);
         let default_branch = meta.as_ref().map(|meta| meta.default_branch.as_str());
-        let git_common_dir = git_common_dir(&self.project_root);
+        let git_common_dir = crate::worktree::git_common_dir(&self.project_root);
         let git_remote_url = git_remote_url(&self.project_root);
         let Some(project) = global_db
             .upsert_code_project(
@@ -1177,7 +1177,7 @@ impl TraceDecay {
             return storage::resolve_layout(project_root, &profile_root);
         }
 
-        let git_common_dir = git_common_dir(project_root);
+        let git_common_dir = crate::worktree::git_common_dir(project_root);
         if let Some(global_db) = open_options.open_global_db().await {
             if let Some(resolution) = global_db
                 .resolve_project_store_by_identity(project_root, git_common_dir.as_deref())
@@ -1243,18 +1243,6 @@ fn profile_root_for_layout(layout: &StoreLayout) -> Option<PathBuf> {
 
 fn profile_store_id(project_id: &str) -> String {
     format!("store:{project_id}:profile_sharded")
-}
-
-fn git_common_dir(project_root: &Path) -> Option<PathBuf> {
-    git_output(project_root, &["rev-parse", "--git-common-dir"]).map(|path| {
-        let common_dir = PathBuf::from(path);
-        let resolved = if common_dir.is_absolute() {
-            common_dir
-        } else {
-            project_root.join(common_dir)
-        };
-        resolved.canonicalize().unwrap_or(resolved)
-    })
 }
 
 fn git_remote_url(project_root: &Path) -> Option<String> {
