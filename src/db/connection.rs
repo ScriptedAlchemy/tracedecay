@@ -262,14 +262,14 @@ impl Database {
         let (cache_kb, mmap) = adaptive_cache_sizes(db_file_size);
         let mmap = platform_safe_mmap_size(mmap);
         conn.execute_batch(&format!(
-            "PRAGMA page_size = 8192;
+            "PRAGMA mmap_size = {mmap};
+             PRAGMA page_size = 8192;
              PRAGMA journal_mode = WAL;
              PRAGMA foreign_keys = ON;
              PRAGMA busy_timeout = 120000;
              PRAGMA synchronous = NORMAL;
              PRAGMA cache_size = -{cache_kb};
-             PRAGMA temp_store = MEMORY;
-             PRAGMA mmap_size = {mmap};",
+             PRAGMA temp_store = MEMORY;",
         ))
         .await
         .map_err(|e| TraceDecayError::Database {
@@ -283,11 +283,11 @@ impl Database {
         let (cache_kb, mmap) = adaptive_cache_sizes(db_file_size);
         let mmap = platform_safe_mmap_size(mmap);
         conn.execute_batch(&format!(
-            "PRAGMA foreign_keys = ON;
+            "PRAGMA mmap_size = {mmap};
+             PRAGMA foreign_keys = ON;
              PRAGMA busy_timeout = 120000;
              PRAGMA cache_size = -{cache_kb};
-             PRAGMA temp_store = MEMORY;
-             PRAGMA mmap_size = {mmap};",
+             PRAGMA temp_store = MEMORY;",
         ))
         .await
         .map_err(|e| TraceDecayError::Database {
