@@ -467,6 +467,49 @@ fn profile_scoped_tool_cli_invokes_daemon_without_project_handshake() {
 }
 
 #[test]
+fn profile_scoped_tool_cli_falls_back_without_daemon_socket() {
+    let home = TempDir::new().unwrap();
+    let hermes_home = TempDir::new().unwrap();
+    let outside_cwd = TempDir::new().unwrap();
+    let socket_dir = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let hermes_home_path = canonical_existing_path(hermes_home.path());
+    let outside_cwd_path = canonical_existing_path(outside_cwd.path());
+    let missing_socket = socket_dir.path().join("missing.sock");
+    let args = json!({
+        "provider": "cursor",
+        "storage_scope": "hermes_profile",
+        "hermes_home": hermes_home_path,
+    })
+    .to_string();
+
+    let output = tracedecay_command_with_home(&home_path)
+        .current_dir(&outside_cwd_path)
+        .env("TRACEDECAY_DAEMON_SOCKET", &missing_socket)
+        .args([
+            "tool",
+            "tracedecay_lcm_status",
+            "--json",
+            "--args",
+            args.as_str(),
+        ])
+        .output()
+        .expect("tracedecay tool should run");
+
+    assert!(
+        output.status.success(),
+        "profile-scoped tool CLI should fall back when the daemon socket is missing\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("hermes_profile"),
+        "fallback should use the Hermes profile storage scope, got:\n{stdout}"
+    );
+}
+
+#[test]
 fn first_touch_store_tool_cli_invokes_daemon_with_init_permission() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
@@ -624,7 +667,7 @@ fn daemon_project_cache_is_scoped_by_client_identity() {
 }
 
 #[test]
-fn tool_cli_without_daemon_socket_reports_client_only_error() {
+fn tool_cli_without_daemon_socket_falls_back_to_in_process_handler() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let socket_dir = TempDir::new().unwrap();
@@ -642,12 +685,14 @@ fn tool_cli_without_daemon_socket_reports_client_only_error() {
         .expect("tracedecay tool should run");
 
     assert!(
-        !output.status.success(),
-        "tool CLI should fail instead of opening MCP handlers in-process"
+        output.status.success(),
+        "tool CLI should fall back to in-process handlers when the daemon socket is missing\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stderr.contains("TraceDecay daemon socket") && stderr.contains("is not available"),
-        "expected daemon availability guidance, got:\n{stderr}"
+        stdout.contains("\"content\""),
+        "expected MCP tool result JSON from in-process fallback, got:\n{stdout}"
     );
 }

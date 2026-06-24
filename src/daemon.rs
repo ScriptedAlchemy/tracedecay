@@ -936,8 +936,8 @@ mod tests {
     #[tokio::test]
     async fn socket_client_serves_initialize_after_handshake() {
         let dir = TempDir::new().expect("temp dir");
-        let project = dir.path();
-        let client_identity = test_client_identity_for(dir.path().join("profile"));
+        let project = dir.path().canonicalize().expect("canonical temp dir");
+        let client_identity = test_client_identity_for(project.join("profile"));
         std::fs::create_dir_all(project.join("src")).expect("src dir");
         std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
 
@@ -949,7 +949,7 @@ mod tests {
 
         let (reader, mut writer) = client.into_split();
         let handshake = DaemonHandshake {
-            project_path: Some(project.to_path_buf()),
+            project_path: Some(project.clone()),
             scope_prefix: None,
             timings: false,
             allow_init: true,
@@ -1070,12 +1070,12 @@ mod tests {
     #[tokio::test]
     async fn socket_client_timings_are_connection_local() {
         let dir = TempDir::new().expect("temp dir");
-        let project = dir.path();
-        let client_identity = test_client_identity_for(dir.path().join("profile"));
+        let project = dir.path().canonicalize().expect("canonical temp dir");
+        let client_identity = test_client_identity_for(project.join("profile"));
         std::fs::create_dir_all(project.join("src")).expect("src dir");
         std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
         crate::tracedecay::TraceDecay::init_with_options(
-            project,
+            &project,
             crate::tracedecay::TraceDecayOpenOptions {
                 profile_root: Some(client_identity.profile_root.clone()),
                 global_db_path: Some(client_identity.global_db_path.clone()),
@@ -1091,7 +1091,7 @@ mod tests {
         let mut lines_a = tokio::io::BufReader::new(reader_a).lines();
 
         let handshake_a = DaemonHandshake {
-            project_path: Some(project.to_path_buf()),
+            project_path: Some(project.clone()),
             scope_prefix: None,
             timings: false,
             allow_init: false,
@@ -1129,7 +1129,7 @@ mod tests {
         let (reader_b, mut writer_b) = client_b.into_split();
         let mut lines_b = tokio::io::BufReader::new(reader_b).lines();
         let handshake_b = DaemonHandshake {
-            project_path: Some(project.to_path_buf()),
+            project_path: Some(project),
             scope_prefix: None,
             timings: true,
             allow_init: false,

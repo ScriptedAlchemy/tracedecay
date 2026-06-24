@@ -4,7 +4,8 @@
 //! Hermes home with `--project <home>`. A fresh profile has no `.tracedecay`
 //! there yet, so those tools must create the store on first touch instead of
 //! failing with "run tracedecay init". Code-graph tools keep the strict
-//! behaviour, as does any store tool invoked without an explicit `--project`.
+//! no-first-touch behaviour, as does any store tool invoked without an
+//! explicit `--project`.
 
 mod common;
 
@@ -109,7 +110,7 @@ fn store_tools_without_explicit_project_still_require_init() {
 }
 
 #[test]
-fn code_graph_tools_require_daemon_before_opening_project_store() {
+fn code_graph_tools_do_not_first_touch_project_store() {
     let target = TempDir::new().unwrap();
     let cwd = TempDir::new().unwrap();
     let home = TempDir::new().unwrap();
@@ -124,12 +125,13 @@ fn code_graph_tools_require_daemon_before_opening_project_store() {
     );
     assert!(
         !output.status.success(),
-        "code-graph tools must not open stores in the CLI process"
+        "code-graph tools must not first-touch create project stores"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("TraceDecay daemon socket") && stderr.contains("is not available"),
-        "expected daemon availability guidance, got:\n{stderr}"
+        stderr.contains("run 'tracedecay init' first")
+            || stderr.contains("run `tracedecay init` first"),
+        "expected init guidance, got:\n{stderr}"
     );
     assert!(!target_path.join(".tracedecay").exists());
 }

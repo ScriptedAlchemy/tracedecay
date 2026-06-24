@@ -28,9 +28,13 @@ use std::path::PathBuf;
 
 use serde_json::{Map, Value};
 
-use tracedecay::daemon::{call_default_tool, DaemonHandshake};
+#[cfg(unix)]
+use tracedecay::daemon::call_default_tool;
+use tracedecay::daemon::DaemonHandshake;
 use tracedecay::errors::{Result, TraceDecayError};
-use tracedecay::mcp::tools::{get_tool_definitions, ToolDefinition};
+use tracedecay::mcp::tools::{
+    get_tool_definitions, handle_profile_scoped_lcm_tool_call, ToolDefinition,
+};
 
 /// Old CLI command names that don't match the MCP tool name. Keeps muscle
 /// memory working for the seven removed top-level commands. The right-hand
@@ -155,6 +159,7 @@ fn is_profile_scoped_lcm_dispatch(tool_name: &str, tool_args: &Value) -> bool {
 struct DaemonToolDispatch {
     project_path: Option<PathBuf>,
     allow_init: bool,
+    allow_profile_scoped_fallback: bool,
 }
 
 impl DaemonToolDispatch {
@@ -162,6 +167,7 @@ impl DaemonToolDispatch {
         Self {
             project_path: None,
             allow_init: false,
+            allow_profile_scoped_fallback: true,
         }
     }
 
@@ -176,14 +182,79 @@ impl DaemonToolDispatch {
         Self {
             project_path: Some(project_path),
             allow_init,
+            allow_profile_scoped_fallback: false,
         }
     }
 
-    async fn call(self, tool_name: &str, tool_args: Value) -> Result<Value> {
-        let handshake =
-            DaemonHandshake::for_current_client(self.project_path, None, false, self.allow_init)?;
-        call_default_tool(&handshake, tool_name, tool_args).await
+    fn handshake(&self) -> Result<DaemonHandshake> {
+        DaemonHandshake::for_current_client(self.project_path.clone(), None, false, self.allow_init)
     }
+
+    async fn call(&self, tool_name: &str, tool_args: Value) -> Result<Value> {
+        let handshake = self.handshake()?;
+        #[cfg(unix)]
+        {
+            call_default_tool(&handshake, tool_name, tool_args).await
+        }
+        #[cfg(not(unix))]
+        {
+            call_in_process_tool(&handshake, tool_name, tool_args).await
+        }
+    }
+
+    async fn fallback(&self, tool_name: &str, tool_args: Value) -> Result<Option<Value>> {
+        if !self.allow_profile_scoped_fallback {
+            let handshake = self.handshake()?;
+            if handshake.project_path.is_none() {
+                return Ok(None);
+            }
+            return Ok(Some(
+                call_in_process_tool(&handshake, tool_name, tool_args).await?,
+            ));
+        }
+        let result = handle_profile_scoped_lcm_tool_call(tool_name, tool_args).await?;
+        Ok(Some(result.value))
+    }
+}
+
+async fn call_in_process_tool(
+    handshake: &DaemonHandshake,
+    tool_name: &str,
+    tool_args: Value,
+) -> Result<Value> {
+    let project_path = handshake
+        .project_path
+        .as_ref()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "profile-scoped daemon tool dispatch requires daemon socket support"
+                .to_string(),
+        })?;
+    let open_options = tracedecay::tracedecay::TraceDecayOpenOptions {
+        profile_root: Some(handshake.client_identity.profile_root.clone()),
+        global_db_path: Some(handshake.client_identity.global_db_path.clone()),
+    };
+    let cg = if handshake.allow_init
+        && !tracedecay::tracedecay::TraceDecay::is_initialized_with_options(
+            project_path,
+            &open_options,
+        ) {
+        tracedecay::tracedecay::TraceDecay::init_with_options(project_path, open_options).await?
+    } else {
+        tracedecay::tracedecay::TraceDecay::open_with_options(project_path, open_options).await?
+    };
+    let global_db =
+        tracedecay::global_db::GlobalDb::open_at(&handshake.client_identity.global_db_path).await;
+    let result = tracedecay::mcp::tools::handle_tool_call_with_registry(
+        &cg,
+        tool_name,
+        tool_args,
+        None,
+        handshake.scope_prefix.as_deref(),
+        global_db.as_ref(),
+        false,
+    )
+    .await?;
+    Ok(result.value)
 }
 
 async fn dispatch_daemon_tool(
@@ -192,9 +263,27 @@ async fn dispatch_daemon_tool(
     tool_args: Value,
     raw_json: bool,
 ) -> Result<()> {
-    let result_value = dispatch.call(tool_name, tool_args).await?;
+    let result_value = match dispatch.call(tool_name, tool_args.clone()).await {
+        Ok(value) => value,
+        Err(error) if is_daemon_unavailable(&error) => {
+            match dispatch.fallback(tool_name, tool_args).await? {
+                Some(value) => value,
+                None => return Err(error),
+            }
+        }
+        Err(error) => return Err(error),
+    };
     print_tool_output(&result_value, raw_json);
     Ok(())
+}
+
+fn is_daemon_unavailable(error: &TraceDecayError) -> bool {
+    matches!(
+        error,
+        TraceDecayError::Config { message }
+            if message.contains("TraceDecay daemon socket")
+                && message.contains("is not available")
+    )
 }
 
 fn print_tool_output(result_value: &Value, raw_json: bool) {
