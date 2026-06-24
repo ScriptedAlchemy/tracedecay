@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use tempfile::TempDir;
-use tracedecay::branch::{self, BranchAddOutcome};
+use tracedecay::branch::BranchAddOutcome;
 use tracedecay::branch_meta::load_branch_meta;
 use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::TraceDecay;
@@ -253,7 +253,7 @@ async fn add_branch_tracking_copies_from_nearest_tracked_ancestor() {
     .unwrap();
     commit_all(project, "feature commit");
 
-    let feature_outcome = branch::add_branch_tracking(project, "feature/parent")
+    let feature_outcome = TraceDecay::add_branch_tracking(project, "feature/parent")
         .await
         .unwrap();
     assert_eq!(feature_outcome, BranchAddOutcome::Added);
@@ -273,7 +273,7 @@ async fn add_branch_tracking_copies_from_nearest_tracked_ancestor() {
     .unwrap();
     commit_all(project, "topic commit");
 
-    let topic_outcome = branch::add_branch_tracking(project, "topic/child")
+    let topic_outcome = TraceDecay::add_branch_tracking(project, "topic/child")
         .await
         .unwrap();
     assert_eq!(topic_outcome, BranchAddOutcome::Added);
@@ -333,7 +333,7 @@ async fn add_branch_tracking_refuses_corrupt_metadata_without_overwriting() {
     .unwrap();
     commit_all(project, "feature commit");
 
-    let err = branch::add_branch_tracking(project, "feature/corrupt-meta")
+    let err = TraceDecay::add_branch_tracking(project, "feature/corrupt-meta")
         .await
         .expect_err("corrupt metadata must stop branch tracking instead of being replaced");
 

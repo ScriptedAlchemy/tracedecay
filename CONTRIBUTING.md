@@ -121,6 +121,12 @@ refactor: simplify reference resolver lookup
 
 Keep the first line under 72 characters. Add a body explaining *why* if the change isn't obvious.
 
+CI validates commit subjects with:
+
+```bash
+scripts/check-conventional-commits.sh origin/master..HEAD
+```
+
 ## Pull Requests
 
 - Target `master` for bug fixes and stable features.

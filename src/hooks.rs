@@ -1408,7 +1408,7 @@ fn session_start_from_compaction(event_json: &str) -> bool {
 fn matches_compaction_source(value: &str) -> bool {
     let normalized = value
         .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
+        .filter(char::is_ascii_alphanumeric)
         .collect::<String>()
         .to_ascii_lowercase();
     matches!(
@@ -1485,7 +1485,7 @@ async fn targeted_sync_for_cursor_after_file_edit(event_json: &str) {
 /// Branch-aware, fail-open handler for git state-changing shell commands.
 ///
 /// Branch switches (`checkout`/`switch`/`worktree add`) bootstrap/maintain
-/// tracedecay branch tracking via [`crate::branch::add_branch_tracking`] —
+/// tracedecay branch tracking via [`crate::tracedecay::TraceDecay::add_branch_tracking`] —
 /// which is idempotent and supersedes a plain sync. Other state-changing
 /// commands (pull/merge/rebase/reset/cherry-pick/stash apply|pop) run a full
 /// incremental `sync()`, coalesced by a short marker-based guard so back-to-back
@@ -1518,14 +1518,14 @@ async fn sync_after_cursor_shell_event(event_json: &str) {
     match plan {
         CursorShellSyncPlan::BranchAdd(branch) => {
             // Idempotent + fail-open: already-tracked branches no-op.
-            let _ = crate::branch::add_branch_tracking(&root, &branch).await;
+            let _ = crate::tracedecay::TraceDecay::add_branch_tracking(&root, &branch).await;
         }
         CursorShellSyncPlan::IncrementalSync => {
             run_coalesced_incremental_sync(&root, ".cursor_shell_sync_at").await;
         }
         CursorShellSyncPlan::CurrentBranchSync(branch) => {
             if !matches!(
-                crate::branch::add_branch_tracking(&root, &branch).await,
+                crate::tracedecay::TraceDecay::add_branch_tracking(&root, &branch).await,
                 Ok(crate::branch::BranchAddOutcome::Added)
             ) {
                 run_coalesced_incremental_sync(&root, ".cursor_shell_sync_at").await;
@@ -1572,7 +1572,7 @@ async fn workspace_open_for_cursor_event(event_json: &str) {
     // `add_branch_tracking` already runs a sync, so we can skip the catch-up.
     if let Some(branch) = crate::branch::current_branch(&root) {
         if let Ok(crate::branch::BranchAddOutcome::Added) =
-            crate::branch::add_branch_tracking(&root, &branch).await
+            crate::tracedecay::TraceDecay::add_branch_tracking(&root, &branch).await
         {
             return;
         }
@@ -1827,9 +1827,7 @@ pub fn codex_subagent_start_log_line(
         .filter(|value| !value.is_empty())
         .unwrap_or("unknown");
     let session_id = event_session_id(&parsed).unwrap_or_else(|| "unknown".to_string());
-    let count = count
-        .map(|value| format!("#{value}"))
-        .unwrap_or_else(|| "#?".to_string());
+    let count = count.map_or_else(|| "#?".to_string(), |value| format!("#{value}"));
     format!(
         "tracedecay Codex SubagentStart {count}: session_id={session_id} agent_type={agent_type} additional_context={emitted_context}"
     )
@@ -1902,7 +1900,7 @@ fn empty_array_field(value: &Value, keys: &[&str]) -> bool {
 fn matches_no_history_marker(value: &str) -> bool {
     let normalized = value
         .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
+        .filter(char::is_ascii_alphanumeric)
         .collect::<String>()
         .to_ascii_lowercase();
     matches!(
@@ -2054,14 +2052,14 @@ async fn codex_post_tool_use(event_json: &str) {
         match cursor_shell_sync_plan_with_current_branch(command, current_branch.as_deref()) {
             CursorShellSyncPlan::BranchAdd(branch) => {
                 // Idempotent + fail-open: already-tracked branches no-op.
-                let _ = crate::branch::add_branch_tracking(&root, &branch).await;
+                let _ = crate::tracedecay::TraceDecay::add_branch_tracking(&root, &branch).await;
             }
             CursorShellSyncPlan::IncrementalSync => {
                 run_coalesced_incremental_sync(&root, ".codex_shell_sync_at").await;
             }
             CursorShellSyncPlan::CurrentBranchSync(branch) => {
                 if !matches!(
-                    crate::branch::add_branch_tracking(&root, &branch).await,
+                    crate::tracedecay::TraceDecay::add_branch_tracking(&root, &branch).await,
                     Ok(crate::branch::BranchAddOutcome::Added)
                 ) {
                     run_coalesced_incremental_sync(&root, ".codex_shell_sync_at").await;

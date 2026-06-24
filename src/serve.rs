@@ -1,14 +1,40 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
-use crate::tracedecay::TraceDecay;
+use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServeGlobalDbResolution {
-    Found(std::path::PathBuf),
+    Found(PathBuf),
     Ambiguous(Vec<String>),
     None,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CwdProjectMatch {
+    ProjectContainsCwd,
+    ProjectUnderCwd,
+}
+
+impl CwdProjectMatch {
+    fn matches(self, project_path: &Path, cwd: &Path) -> bool {
+        match self {
+            Self::ProjectContainsCwd => cwd.starts_with(project_path),
+            Self::ProjectUnderCwd => project_path.starts_with(cwd),
+        }
+    }
+
+    fn sort_matches(self, matches: &mut [(usize, String)]) {
+        match self {
+            Self::ProjectContainsCwd => {
+                matches.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            }
+            Self::ProjectUnderCwd => {
+                matches.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+            }
+        }
+    }
 }
 
 pub fn global_db_ambiguity_message(paths: &[String]) -> String {
@@ -23,16 +49,25 @@ pub fn global_db_ambiguity_message(paths: &[String]) -> String {
 
 /// Opens an existing project, or tells the user to run `tracedecay init` first.
 pub async fn ensure_initialized(project_path: &Path) -> Result<TraceDecay> {
-    if TraceDecay::is_initialized(project_path) {
-        return match TraceDecay::open(project_path).await {
+    ensure_initialized_with_options(project_path, TraceDecayOpenOptions::default()).await
+}
+
+pub async fn ensure_initialized_with_options(
+    project_path: &Path,
+    open_options: TraceDecayOpenOptions,
+) -> Result<TraceDecay> {
+    if TraceDecay::has_initialized_store_with_options(project_path, &open_options).await {
+        return match TraceDecay::open_with_options(project_path, open_options.clone()).await {
             Ok(cg) => Ok(cg),
-            Err(open_err) => match TraceDecay::open_read_only(project_path).await {
-                Ok(cg) => {
-                    cg.ensure_schema_current().await?;
-                    Ok(cg)
+            Err(open_err) => {
+                match TraceDecay::open_read_only_with_options(project_path, open_options).await {
+                    Ok(cg) => {
+                        cg.ensure_schema_current().await?;
+                        Ok(cg)
+                    }
+                    Err(_) => Err(open_err),
                 }
-                Err(_) => Err(open_err),
-            },
+            }
         };
     }
     Err(TraceDecayError::Config {
@@ -48,6 +83,33 @@ fn initialized_project_paths(mut paths: Vec<String>) -> Vec<String> {
     paths
 }
 
+fn cwd_match_resolution(
+    paths: &[String],
+    cwd: &Path,
+    match_kind: CwdProjectMatch,
+) -> Option<ServeGlobalDbResolution> {
+    let mut matches: Vec<_> = paths
+        .iter()
+        .filter_map(|p| {
+            let project_path = Path::new(p).canonicalize().ok()?;
+            match_kind
+                .matches(&project_path, cwd)
+                .then(|| (project_path.components().count(), p.clone()))
+        })
+        .collect();
+    match_kind.sort_matches(&mut matches);
+
+    let (depth, _) = matches.first()?;
+    if matches.get(1).is_some_and(|next| next.0 == *depth) {
+        return Some(ServeGlobalDbResolution::Ambiguous(
+            matches.into_iter().map(|(_, p)| p).collect(),
+        ));
+    }
+    Some(ServeGlobalDbResolution::Found(PathBuf::from(
+        matches.remove(0).1,
+    )))
+}
+
 /// Fallback for `serve`: when CWD-based discovery fails, check the global DB
 /// for registered projects. When multiple projects exist, pick the best match
 /// against cwd: prefer a project that is an ancestor of cwd (cwd is inside the
@@ -60,7 +122,7 @@ pub async fn resolve_serve_from_global_db() -> ServeGlobalDbResolution {
     let mut paths = initialized_project_paths(gdb.list_project_paths().await);
     paths.sort();
     if paths.len() == 1 {
-        return ServeGlobalDbResolution::Found(std::path::PathBuf::from(paths.remove(0)));
+        return ServeGlobalDbResolution::Found(PathBuf::from(paths.remove(0)));
     }
     if paths.is_empty() {
         return ServeGlobalDbResolution::None;
@@ -74,42 +136,16 @@ pub async fn resolve_serve_from_global_db() -> ServeGlobalDbResolution {
 
     // Priority 1: cwd is inside a project (project is ancestor of cwd).
     // Pick the deepest ancestor (most specific match).
-    let mut ancestors: Vec<_> = paths
-        .iter()
-        .filter_map(|p| {
-            let pp = std::path::Path::new(p).canonicalize().ok()?;
-            cwd.starts_with(&pp)
-                .then(|| (pp.components().count(), p.clone()))
-        })
-        .collect();
-    ancestors.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    if let Some((depth, _)) = ancestors.first() {
-        if ancestors.get(1).is_some_and(|next| next.0 == *depth) {
-            return ServeGlobalDbResolution::Ambiguous(
-                ancestors.into_iter().map(|(_, p)| p).collect(),
-            );
-        }
-        return ServeGlobalDbResolution::Found(std::path::PathBuf::from(ancestors.remove(0).1));
+    if let Some(resolution) =
+        cwd_match_resolution(&paths, &cwd, CwdProjectMatch::ProjectContainsCwd)
+    {
+        return resolution;
     }
 
     // Priority 2: a project is under cwd (cwd is ancestor of project).
     // Pick the shallowest descendant (closest child).
-    let mut descendants: Vec<_> = paths
-        .iter()
-        .filter_map(|p| {
-            let pp = std::path::Path::new(p).canonicalize().ok()?;
-            pp.starts_with(&cwd)
-                .then(|| (pp.components().count(), p.clone()))
-        })
-        .collect();
-    descendants.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-    if let Some((depth, _)) = descendants.first() {
-        if descendants.get(1).is_some_and(|next| next.0 == *depth) {
-            return ServeGlobalDbResolution::Ambiguous(
-                descendants.into_iter().map(|(_, p)| p).collect(),
-            );
-        }
-        return ServeGlobalDbResolution::Found(std::path::PathBuf::from(descendants.remove(0).1));
+    if let Some(resolution) = cwd_match_resolution(&paths, &cwd, CwdProjectMatch::ProjectUnderCwd) {
+        return resolution;
     }
 
     // No cwd-based match — the global DB alone cannot disambiguate.

@@ -192,7 +192,7 @@ Match what §2 showed to the right recovery. **Always diagnose (§2) and capture
 | Added a branch you're on, but server still serves ancestor | `fallback_*` with `live_branch_tracked:true` | restart MCP server | §6 |
 | `tracking_enabled:false` unexpectedly (meta corrupt/missing) | `single_db` + orphaned `branches/*.db` | restore meta or re-add branches | §5 |
 | Merged/deleted branches still tracked | (meta lists gone refs) | `tracedecay branch gc` | §4c |
-| Wrong branch wrote into a DB (collision/aliasing) | two branches share one `db_file` | split DBs + re-index | §7 + INVARIANTS Risk A |
+| Wrong branch wrote into a DB (legacy collision/aliasing) | two branches share one `db_file` | split DBs + re-index | §7 |
 
 ---
 
@@ -209,16 +209,9 @@ tracedecay branch add                # [mutating] tracks the current branch
 tracedecay branch add feature/parser # [mutating] track by name without checkout
 ```
 
-> ⚠️ **CLI `branch add` collision caveat (INVARIANTS Risk A).** The CLI path
-> (`commands.rs:192-202`) computes the DB stem with bare `sanitize_branch_name`,
-> **not** the collision-safe `unique_branch_db_stem` the library/hooks use
-> (`branch.rs:118`). If you add two branches whose sanitized names collide
-> (e.g. `feature/foo` then `feature_foo`), the second `fs::copy` **overwrites**
-> the first branch's DB and both meta entries alias the same file. Workarounds:
-> - Prefer the agent/hooks auto-track path (Cursor `workspaceOpen`, Codex) which
->   uses the safe library path.
-> - If you must use the CLI, check `tracedecay branch list` first and avoid names
->   that sanitize to an existing stem (slashes and most punctuation → `_`).
+The CLI, hooks, and install-time branch tracking now share the collision-safe
+branch-tracking path. If an older store already has two branch names pointing at
+one `db_file`, use the legacy collision repair steps in §7.
 
 ### 4b. A tracked branch lost its DB (`[missing-db]`)
 
@@ -264,8 +257,9 @@ branch DB. Both only touch branches listed in `branch-meta.json`.
 
 When the CLI re-seed (§4b) isn't usable (e.g. the ancestor DB itself is corrupt,
 or you need to seed from a specific branch), you can perform the same DB-copy
-operation the code does and include the SQLite sidecars for safety. The CLI's
-core copy/meta-write path is in `commands.rs:192-203`:
+operation the code does and include the SQLite sidecars for safety. The normal
+code path enters through `TraceDecay::add_branch_tracking` and performs
+copy/meta-write work in `branch::prepare_branch_tracking_in_layout`:
 
 1. **Stop the MCP server** so no instance holds the DB/WAL open (see §1).
 2. Pick a healthy source DB — usually the default-branch DB or the nearest
@@ -441,9 +435,6 @@ and fallback, so a refused write is the signal that recovery isn't complete).
 - **Don't** run `branch gc` on linked worktrees / bare repos without
   cross-checking `git for-each-ref refs/heads` — the ref heuristic can delete a
   live branch's DB (INVARIANTS Risk C).
-- **Don't** add two CLI branches whose sanitized names collide (`feature/foo`
-  vs `feature_foo`) via `tracedecay branch add` — the CLI stem is collision-unsafe
-  and will overwrite/alias (INVARIANTS Risk A).
 - **Don't** delete `branches/*.db` files by hand to "clean up" — that creates
   `[missing-db]` entries. Use `branch remove` / `branch gc` so metadata stays
   consistent.

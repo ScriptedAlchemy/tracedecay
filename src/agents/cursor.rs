@@ -143,7 +143,7 @@ async fn track_branch_after_install(project_path: Option<&Path>) {
     let Some(branch_name) = crate::branch::current_branch(project_path) else {
         return;
     };
-    match crate::branch::add_branch_tracking(project_path, &branch_name).await {
+    match crate::tracedecay::TraceDecay::add_branch_tracking(project_path, &branch_name).await {
         Ok(crate::branch::BranchAddOutcome::Added) => {
             eprintln!(
                 "\x1b[32m✔\x1b[0m Tracked Cursor branch '{branch_name}' for tracedecay indexing"

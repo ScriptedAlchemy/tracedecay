@@ -305,7 +305,7 @@ async fn open_repairs_missing_tracked_branch_db_before_diagnostics() {
     git(project, &["add", "."]);
     git(project, &["commit", "-m", "feature"]);
 
-    tracedecay::branch::add_branch_tracking(project, "feature/tracked")
+    TraceDecay::add_branch_tracking(project, "feature/tracked")
         .await
         .unwrap();
 
