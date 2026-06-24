@@ -161,8 +161,46 @@ fn canonicalize_test_db_path(path: &Path) -> PathBuf {
 // Shared setup
 // ---------------------------------------------------------------------------
 
-struct TestProject {
+struct TestTempDir {
     dir: Option<TempDir>,
+}
+
+impl TestTempDir {
+    fn new() -> Self {
+        Self {
+            dir: Some(TempDir::new().unwrap()),
+        }
+    }
+
+    #[cfg(windows)]
+    fn keep(mut self) -> PathBuf {
+        self.dir.take().expect("test temp dir already kept").keep()
+    }
+}
+
+impl std::ops::Deref for TestTempDir {
+    type Target = TempDir;
+
+    fn deref(&self) -> &Self::Target {
+        self.dir.as_ref().expect("test temp dir already kept")
+    }
+}
+
+impl Drop for TestTempDir {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        if let Some(dir) = self.dir.take() {
+            let _ = dir.keep();
+        }
+    }
+}
+
+fn test_temp_dir() -> TestTempDir {
+    TestTempDir::new()
+}
+
+struct TestProject {
+    dir: Option<TestTempDir>,
     _env_lock: MutexGuard<'static, ()>,
     _home_guard: HomeEnvGuard,
     _global_db_guard: GlobalDbEnvGuard,
@@ -178,10 +216,7 @@ impl std::ops::Deref for TestProject {
 
 impl Drop for TestProject {
     fn drop(&mut self) {
-        #[cfg(windows)]
-        if let Some(dir) = self.dir.take() {
-            let _ = dir.keep();
-        }
+        let _ = self.dir.take();
     }
 }
 
@@ -192,7 +227,7 @@ struct TestEnv {
 }
 
 struct CrossProjectMemoryEnv {
-    _dir: TempDir,
+    _dir: TestTempDir,
     _env_lock: MutexGuard<'static, ()>,
     _storage_guard: common::TraceDecayStorageEnvGuard,
 }
@@ -259,7 +294,7 @@ impl Drop for TestTraceDecay {
 /// test files, and doc comments, then initialises and indexes a `TraceDecay`.
 async fn setup_project() -> (TestTraceDecay, TestProject) {
     let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     let home = project.join("home");
     let home_guard = HomeEnvGuard::set(&home);
@@ -341,8 +376,8 @@ async fn init_test_project(project: &Path) -> (TestTraceDecay, TestEnv) {
     )
 }
 
-async fn setup_generated_dir_project(include_dist: bool) -> (TestTraceDecay, TestEnv, TempDir) {
-    let dir = TempDir::new().unwrap();
+async fn setup_generated_dir_project(include_dist: bool) -> (TestTraceDecay, TestEnv, TestTempDir) {
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::create_dir_all(project.join("dist")).unwrap();
@@ -364,7 +399,7 @@ async fn setup_generated_dir_project(include_dist: bool) -> (TestTraceDecay, Tes
 async fn setup_cross_project_memory_projects(
 ) -> (TestTraceDecay, TestTraceDecay, CrossProjectMemoryEnv) {
     let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let storage_guard = common::isolated_tracedecay_storage(&dir);
 
     let active_project = dir.path().join("active");
@@ -419,7 +454,7 @@ fn project_session_db_path(cg: &TraceDecay) -> PathBuf {
 /// public entry point, which then reaches an internal helper. This exercises
 /// the calibrated depth-3 attribution path in `tracedecay_test_risk`.
 async fn setup_integration_test_risk_project() -> (TestTraceDecay, TestProject) {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
     let home = project.join("home");
@@ -494,7 +529,7 @@ fn integration_public_entry() {
 /// Extends the calibrated integration-risk fixture with a build script so the
 /// test-risk denominator can prove non-`src/` functions are excluded.
 async fn setup_test_risk_non_src_fixture() -> (TestTraceDecay, TestProject) {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
     let home = project.join("home");
@@ -699,7 +734,7 @@ async fn seed_project_registry(db_path: &Path, project_root: &Path) {
 #[tokio::test]
 async fn project_registry_tools_are_bounded_read_only_and_contextual() {
     let (cg, _project_dir) = setup_project().await;
-    let registry_dir = TempDir::new().unwrap();
+    let registry_dir = test_temp_dir();
     let registry_path = registry_dir.path().join("global.db");
     seed_project_registry(&registry_path, cg.project_root()).await;
     let _env_guard = GlobalDbEnvGuard::set(&registry_path);
@@ -772,9 +807,9 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
 #[tokio::test]
 async fn project_registry_tools_prefer_injected_registry_over_process_default() {
     let (cg, _project_dir) = setup_project().await;
-    let process_registry_dir = TempDir::new().unwrap();
+    let process_registry_dir = test_temp_dir();
     let process_registry_path = process_registry_dir.path().join("global.db");
-    let client_registry_dir = TempDir::new().unwrap();
+    let client_registry_dir = test_temp_dir();
     let client_registry_path = client_registry_dir.path().join("global.db");
     let _env_guard = GlobalDbEnvGuard::set(&process_registry_path);
 
@@ -855,10 +890,10 @@ async fn project_registry_tools_prefer_injected_registry_over_process_default() 
 #[tokio::test]
 async fn selected_project_read_skips_cache_write_for_read_only_store() {
     let (cg, _project_dir) = setup_project().await;
-    let registry_dir = TempDir::new().unwrap();
+    let registry_dir = test_temp_dir();
     let registry_path = registry_dir.path().join("global.db");
     let _env_guard = GlobalDbEnvGuard::set(&registry_path);
-    let target_dir = TempDir::new().unwrap();
+    let target_dir = test_temp_dir();
     let target_project = target_dir.path();
 
     fs::create_dir_all(target_project.join("src")).unwrap();
@@ -1358,6 +1393,18 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         .iter()
         .find(|tool| tool.name == "tracedecay_lcm_grep")
         .expect("tracedecay_lcm_grep definition");
+    assert!(
+        !grep
+            .input_schema
+            .get("required")
+            .and_then(Value::as_array)
+            .is_some_and(|required| required.iter().any(|field| field == "provider")),
+        "tracedecay_lcm_grep provider must stay optional"
+    );
+    assert!(grep.input_schema["properties"]["provider"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("all providers"));
     assert_eq!(
         grep.input_schema["properties"]["limit"]["type"],
         json!("integer")
@@ -2110,7 +2157,7 @@ async fn test_branch_list_reports_live_vs_serving_drift_state() {
         );
     }
 
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     let _env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
     let home = project.join("home");
@@ -2788,7 +2835,7 @@ async fn test_port_status() {
 /// distinct owners stay unmatched.
 #[tokio::test]
 async fn port_status_does_not_match_methods_of_different_parents() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src_a")).unwrap();
     fs::create_dir_all(project.join("src_b")).unwrap();
@@ -2846,7 +2893,7 @@ async fn port_status_does_not_match_methods_of_different_parents() {
 /// match — confirming the parent-aware key isn't too strict.
 #[tokio::test]
 async fn port_status_matches_methods_with_same_parent_type() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src_a")).unwrap();
     fs::create_dir_all(project.join("src_b")).unwrap();
@@ -3178,7 +3225,7 @@ async fn test_port_order_missing_source_dir() {
 
 #[tokio::test]
 async fn commit_context_clean_worktree_returns_json() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fn git(cwd: &std::path::Path, args: &[&str]) {
         std::process::Command::new("git")
@@ -3223,7 +3270,7 @@ async fn commit_context_clean_worktree_returns_json() {
 
 #[tokio::test]
 async fn test_changelog_with_real_git() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
 
@@ -3606,7 +3653,7 @@ async fn test_status_no_scope_prefix() {
 
 #[tokio::test]
 async fn test_str_replace_success() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
 
@@ -3646,7 +3693,7 @@ async fn test_str_replace_success() {
 
 #[tokio::test]
 async fn path_containment_config_rejects_parent_traversal_before_serving_config() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path().join("repo");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
@@ -3677,7 +3724,7 @@ async fn path_containment_config_rejects_parent_traversal_before_serving_config(
 
 #[tokio::test]
 async fn path_containment_read_rejects_parent_traversal_before_serving_file() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path().join("repo");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
@@ -3704,7 +3751,7 @@ async fn path_containment_read_rejects_parent_traversal_before_serving_file() {
 #[cfg(unix)]
 #[tokio::test]
 async fn read_and_outline_preserve_symlink_indexed_file_key() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path().join("repo");
     let external = dir.path().join("external-src");
     fs::create_dir_all(&project).unwrap();
@@ -3801,7 +3848,7 @@ async fn outline_preserves_db_payload_and_adds_ast_grep_outline_when_available()
 #[cfg(unix)]
 #[tokio::test]
 async fn path_containment_config_rejects_symlink_escape_before_serving_config() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path().join("repo");
     let outside_dir = dir.path().join("outside");
     fs::create_dir_all(project.join("src")).unwrap();
@@ -3911,7 +3958,7 @@ async fn lcm_project_path_selector_is_rejected_before_dispatch() {
 
 #[tokio::test]
 async fn test_str_replace_not_found() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
 
@@ -3942,7 +3989,7 @@ async fn test_str_replace_not_found() {
 
 #[tokio::test]
 async fn test_str_replace_multiple_matches_fails() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
 
@@ -3976,7 +4023,7 @@ async fn test_str_replace_multiple_matches_fails() {
 
 #[tokio::test]
 async fn test_multi_str_replace_success() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
 
@@ -4018,7 +4065,7 @@ async fn test_multi_str_replace_success() {
 
 #[tokio::test]
 async fn test_multi_str_replace_atomic_failure() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
 
@@ -4059,7 +4106,7 @@ async fn test_multi_str_replace_atomic_failure() {
 
 #[tokio::test]
 async fn test_multi_str_replace_unicode_preview_does_not_panic() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
 
@@ -4100,7 +4147,7 @@ async fn test_multi_str_replace_unicode_preview_does_not_panic() {
 async fn test_str_replace_unsupported_file_type_succeeds() {
     // Regression: editing unsupported types (e.g. .css) previously wrote the
     // file then returned a reindex error, silently mutating the file.
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
 
     fs::write(project.join("style.css"), ".foo {\n\tfont-size: 14px;\n}\n").unwrap();
@@ -4136,7 +4183,7 @@ async fn ast_grep_rewrite_has_literal_fallback_when_binary_missing() {
     if tracedecay::mcp::tools::ast_grep_available() {
         return;
     }
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn old_name() {}\n").unwrap();
@@ -4168,7 +4215,7 @@ async fn ast_grep_rewrite_uses_current_cli_update_flag() {
     if !tracedecay::mcp::tools::ast_grep_available() {
         return;
     }
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
@@ -4249,7 +4296,7 @@ async fn ast_grep_rewrite_surfaces_useful_error_on_empty_stderr() {
     if !tracedecay::mcp::tools::ast_grep_available() {
         return;
     }
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn foo() {}\n").unwrap();
@@ -4286,7 +4333,7 @@ async fn ast_grep_rewrite_surfaces_useful_error_on_empty_stderr() {
 
 #[tokio::test]
 async fn test_multi_str_replace_unsupported_file_type_succeeds() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
 
     fs::write(
@@ -4330,7 +4377,7 @@ async fn test_multi_str_replace_unsupported_file_type_succeeds() {
 
 #[tokio::test]
 async fn test_insert_at_string_anchor_before() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
 
@@ -4376,7 +4423,7 @@ async fn test_insert_at_string_anchor_before() {
 
 #[tokio::test]
 async fn test_insert_at_line_number() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
 
@@ -4423,7 +4470,7 @@ async fn test_insert_at_line_number() {
 
 #[tokio::test]
 async fn test_insert_at_anchor_not_found() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
 
@@ -4455,7 +4502,7 @@ async fn test_insert_at_anchor_not_found() {
 
 #[tokio::test]
 async fn test_insert_at_unicode_anchor_prefix_does_not_panic() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
 
@@ -4492,7 +4539,7 @@ async fn test_insert_at_unicode_anchor_prefix_does_not_panic() {
 
 #[tokio::test]
 async fn test_insert_at_ambiguous_anchor() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
 
@@ -4532,7 +4579,7 @@ async fn test_insert_at_ambiguous_anchor() {
 // Regression: insert_at must not strip trailing newline (#57)
 #[tokio::test]
 async fn test_insert_at_preserves_trailing_newline() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
 
@@ -4699,7 +4746,7 @@ async fn test_health_detailed() {
 /// top hit with the `definite` severity bucket.
 #[tokio::test]
 async fn test_redundancy_finds_planted_duplicate() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
 
@@ -5243,7 +5290,7 @@ async fn test_body_missing_symbol_param() {
 
 #[tokio::test]
 async fn test_todos_finds_markers() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
@@ -5296,7 +5343,7 @@ fn helper() {
 
 #[tokio::test]
 async fn test_todos_filters_by_kind() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
@@ -6212,7 +6259,7 @@ async fn memory_fact_store_uses_project_store_when_serving_branch_db() {
     }
 
     let _guard = GLOBAL_DB_ENV_LOCK.lock().await;
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path().join("repo");
     let home = dir.path().join("home");
     let _home_guard = HomeEnvGuard::set(&home);
@@ -6356,6 +6403,22 @@ async fn message_search_reads_project_local_session_db() {
         parent_tool_use_id: None,
     };
     assert!(db.upsert_session(&child_session).await);
+    let codex_session = SessionRecord {
+        provider: "codex".to_string(),
+        session_id: "codex-session".to_string(),
+        project_key: cg.project_root().to_string_lossy().to_string(),
+        project_path: cg.project_root().to_string_lossy().to_string(),
+        title: Some("Codex transcript".to_string()),
+        started_at: Some(5),
+        ended_at: None,
+        transcript_path: Some("codex-session.jsonl".to_string()),
+        metadata_json: None,
+        parent_session_id: None,
+        is_subagent: false,
+        agent_id: None,
+        parent_tool_use_id: None,
+    };
+    assert!(db.upsert_session(&codex_session).await);
     assert!(
         db.upsert_session_message(&SessionMessageRecord {
             provider: "cursor".to_string(),
@@ -6369,6 +6432,24 @@ async fn message_search_reads_project_local_session_db() {
             model: Some("test-model".to_string()),
             tool_names: None,
             source_path: Some("cursor-session.jsonl".to_string()),
+            source_offset: Some(0),
+            metadata_json: None,
+        })
+        .await
+    );
+    assert!(
+        db.upsert_session_message(&SessionMessageRecord {
+            provider: "codex".to_string(),
+            message_id: "codex-message".to_string(),
+            session_id: "codex-session".to_string(),
+            role: "assistant".to_string(),
+            timestamp: Some(6),
+            ordinal: 1,
+            text: "Project-local transcript search is also working for Codex.".to_string(),
+            kind: Some("message".to_string()),
+            model: Some("test-model".to_string()),
+            tool_names: None,
+            source_path: Some("codex-session.jsonl".to_string()),
             source_offset: Some(0),
             metadata_json: None,
         })
@@ -6414,6 +6495,28 @@ async fn message_search_reads_project_local_session_db() {
         cg.project_root().to_string_lossy().to_string()
     );
 
+    let all_provider_result = handle_tool_call(
+        &cg,
+        "tracedecay_message_search",
+        json!({"query": "transcript search", "limit": 5}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let all_provider_parsed = extract_json(&all_provider_result.value);
+    assert_eq!(all_provider_parsed["status"], "ok");
+    assert_eq!(all_provider_parsed["provider"], "all");
+    assert_eq!(all_provider_parsed["count"], 2);
+    let providers = all_provider_parsed["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|result| result["message"]["provider"].as_str().unwrap())
+        .collect::<std::collections::HashSet<_>>();
+    assert!(providers.contains("cursor"));
+    assert!(providers.contains("codex"));
+
     let subagent_result = handle_tool_call(
         &cg,
         "tracedecay_message_search",
@@ -6446,7 +6549,7 @@ async fn message_search_reads_project_local_session_db() {
 #[tokio::test]
 async fn message_search_reads_profile_sharded_session_db() {
     let _guard = GLOBAL_DB_ENV_LOCK.lock().await;
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path().join("repo");
     let home = dir.path().join("home");
     let shard_root = home.join(".tracedecay/projects/proj_123");
@@ -6541,12 +6644,24 @@ async fn seed_lcm_session_message(
     text: impl Into<String>,
     ordinal: i64,
 ) {
+    seed_lcm_session_message_for_provider(cg, "cursor", session_id, message_id, text, ordinal)
+        .await;
+}
+
+async fn seed_lcm_session_message_for_provider(
+    cg: &TraceDecay,
+    provider: &str,
+    session_id: &str,
+    message_id: &str,
+    text: impl Into<String>,
+    ordinal: i64,
+) {
     let db = open_project_session_db(cg.project_root())
         .await
         .expect("project-local session db should open");
     assert!(
         db.upsert_session(&SessionRecord {
-            provider: "cursor".to_string(),
+            provider: provider.to_string(),
             session_id: session_id.to_string(),
             project_key: cg.project_root().to_string_lossy().to_string(),
             project_path: cg.project_root().to_string_lossy().to_string(),
@@ -6564,7 +6679,7 @@ async fn seed_lcm_session_message(
     );
     assert!(
         db.upsert_session_message(&SessionMessageRecord {
-            provider: "cursor".to_string(),
+            provider: provider.to_string(),
             message_id: message_id.to_string(),
             session_id: session_id.to_string(),
             role: "assistant".to_string(),
@@ -7816,7 +7931,7 @@ async fn lcm_doctor_uses_explicit_hermes_profile_session_db() {
     )
     .await;
 
-    let hermes_home = TempDir::new().unwrap();
+    let hermes_home = test_temp_dir();
     let profile_db = open_hermes_profile_session_db(hermes_home.path()).await;
     seed_lcm_session_message_in_db(
         &profile_db,
@@ -7922,6 +8037,74 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
             .count()
             <= 4096,
         "grep snippets must stay bounded"
+    );
+
+    let default_provider_grep = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_grep",
+        json!({"query": "orchard dispatch", "limit": 5}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let default_provider_grep_payload: Value =
+        serde_json::from_str(extract_text(&default_provider_grep.value)).unwrap();
+    assert_eq!(default_provider_grep_payload["status"], "ok");
+    assert_eq!(default_provider_grep_payload["provider"], "all");
+    assert_eq!(
+        default_provider_grep_payload["hits"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    seed_lcm_session_message_for_provider(
+        &cg,
+        "cursor",
+        "provider-local-session",
+        "cursor-provider-local-message",
+        "provider local collision belongs to cursor",
+        2,
+    )
+    .await;
+    seed_lcm_session_message_for_provider(
+        &cg,
+        "codex",
+        "provider-local-session",
+        "codex-provider-local-message",
+        "provider local collision belongs to codex",
+        3,
+    )
+    .await;
+
+    let scoped_default_provider_grep = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_grep",
+        json!({
+            "query": "provider local collision",
+            "scope": "session",
+            "session_id": "provider-local-session",
+            "limit": 5
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let scoped_default_provider_grep_payload: Value =
+        serde_json::from_str(extract_text(&scoped_default_provider_grep.value)).unwrap();
+    assert_eq!(scoped_default_provider_grep_payload["status"], "ok");
+    assert_eq!(scoped_default_provider_grep_payload["provider"], "cursor");
+    assert_eq!(scoped_default_provider_grep_payload["count"], 1);
+    assert_eq!(
+        scoped_default_provider_grep_payload["hits"][0]["provider"],
+        "cursor"
+    );
+    assert_eq!(
+        scoped_default_provider_grep_payload["hits"][0]["message_id"],
+        "cursor-provider-local-message"
     );
 
     let described = handle_tool_call(
@@ -8930,7 +9113,7 @@ async fn lcm_status_uses_explicit_hermes_profile_session_db() {
     )
     .await;
 
-    let hermes_home = TempDir::new().unwrap();
+    let hermes_home = test_temp_dir();
     let profile_db = open_hermes_profile_session_db(hermes_home.path()).await;
     seed_lcm_session_message_in_db(
         &profile_db,
@@ -8987,7 +9170,7 @@ async fn lcm_load_and_grep_use_explicit_hermes_profile_session_db() {
     )
     .await;
 
-    let hermes_home = TempDir::new().unwrap();
+    let hermes_home = test_temp_dir();
     let profile_db = open_hermes_profile_session_db(hermes_home.path()).await;
     seed_lcm_session_message_in_db(
         &profile_db,
@@ -9136,8 +9319,8 @@ async fn lcm_hermes_profile_requires_explicit_valid_home_without_fallback() {
 #[tokio::test]
 async fn lcm_hermes_profile_rejects_symlinked_tracedecay_dir_escape() {
     let (cg, _dir) = setup_project().await;
-    let hermes_home = TempDir::new().unwrap();
-    let outside = TempDir::new().unwrap();
+    let hermes_home = test_temp_dir();
+    let outside = test_temp_dir();
     unix_fs::symlink(outside.path(), hermes_home.path().join(".tracedecay")).unwrap();
 
     let result = handle_tool_call(
@@ -9170,7 +9353,7 @@ async fn lcm_hermes_profile_rejects_symlinked_tracedecay_dir_escape() {
 #[tokio::test]
 async fn lcm_hermes_profile_rejects_non_directory_home() {
     let (cg, _dir) = setup_project().await;
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let hermes_home = dir.path().join("hermes-home-file");
     fs::write(&hermes_home, "not a directory").unwrap();
 
@@ -9594,7 +9777,7 @@ async fn lcm_status_cli_bridge_accepts_json_args() {
     let (cg, _dir) = setup_project().await;
     let home = _dir.path().join("home");
     let _daemon = common::spawn_tracedecay_daemon(&home);
-    let outside_cwd = TempDir::new().unwrap();
+    let outside_cwd = test_temp_dir();
     let project_arg = cg.project_root().display().to_string();
     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay"));
     common::apply_tracedecay_home_env(&mut command, &home);
@@ -9636,11 +9819,11 @@ async fn lcm_status_cli_bridge_accepts_json_args() {
 #[tokio::test]
 async fn lcm_status_cli_profile_scope_dispatches_without_initialized_project() {
     let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
-    let home = TempDir::new().unwrap();
+    let home = test_temp_dir();
     let _home_guard = HomeEnvGuard::set(home.path());
     let _global_db_guard = GlobalDbEnvGuard::set(&home.path().join(".tracedecay/global.db"));
-    let outside_cwd = TempDir::new().unwrap();
-    let hermes_home = TempDir::new().unwrap();
+    let outside_cwd = test_temp_dir();
+    let hermes_home = test_temp_dir();
     let profile_db = open_hermes_profile_session_db(hermes_home.path()).await;
     seed_lcm_session_message_in_db(
         &profile_db,
@@ -9800,8 +9983,16 @@ fn message_search_provider_schema_matches_ingested_providers() {
     assert_eq!(
         message_search.input_schema["properties"]["provider"]["enum"],
         serde_json::json!([
-            "cursor", "claude", "codex", "vibe", "cline", "roo-code", "kilo", "hermes"
+            "all", "cursor", "claude", "codex", "vibe", "cline", "roo-code", "kilo", "hermes"
         ])
+    );
+    assert!(
+        !message_search
+            .input_schema
+            .get("required")
+            .and_then(Value::as_array)
+            .is_some_and(|required| required.iter().any(|field| field == "provider")),
+        "tracedecay_message_search provider must stay optional"
     );
     assert_eq!(
         message_search.input_schema["properties"]["scope"]["enum"],
@@ -9884,8 +10075,8 @@ async fn memory_status_repairs_dirty_banks_before_reporting() {
 /// searching for `gmres`: the codebase has both a `pub fn gmres(...)` and a
 /// struct field literally named `gmres`. The function — the body the user
 /// actually wants — must outrank the field.
-async fn setup_function_vs_field_collision() -> (TestTraceDecay, TempDir) {
-    let dir = TempDir::new().unwrap();
+async fn setup_function_vs_field_collision() -> (TestTraceDecay, TestTempDir) {
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
@@ -9940,7 +10131,7 @@ async fn body_prefers_function_over_field_with_same_name() {
 /// symbols all reached the same dependent.
 #[tokio::test]
 async fn diff_context_dedupes_impacted_symbols() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     // Two functions in `mod.rs` both call `shared` in `dep.rs`. Without dedup,
@@ -9985,7 +10176,7 @@ pub fn second() { dep::shared(); }
 /// genuine direct recursion while filtering length-1 self-edge artifacts.
 #[tokio::test]
 async fn recursion_keeps_direct_recursion() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
@@ -10025,7 +10216,7 @@ pub fn nonrecursive() -> u32 { 42 }
 
 #[tokio::test]
 async fn recursion_filters_self_edge_artifacts() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
@@ -10064,7 +10255,7 @@ impl Triplet {
 
 #[tokio::test]
 async fn recursion_reports_real_cycle_path() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
@@ -10108,7 +10299,7 @@ pub fn c() { a(); }
 /// directory.
 #[tokio::test]
 async fn changelog_filters_directory_paths() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     std::process::Command::new("git")
         .args(["init"])
@@ -10191,7 +10382,7 @@ async fn changelog_filters_directory_paths() {
 /// condition never fired and the tool returned 0 on every real codebase.
 #[tokio::test]
 async fn unused_imports_detects_truly_unused() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
@@ -10229,7 +10420,7 @@ pub fn used_one() -> HashMap<u32, u32> { HashMap::new() }
 /// is mostly `pub` the tool reported 0 dead symbols.
 #[tokio::test]
 async fn dead_code_with_include_public_finds_pub_unreferenced() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
@@ -10286,7 +10477,7 @@ pub fn caller() { called(); }
 async fn dependency_depth_excludes_implements_and_extends() {
     // Public helper exposed from the lib for unit-test inspection.
     use tracedecay::graph::queries::GraphQueryManager;
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     // file_a derives Debug — extractor emits derives_macro and the
@@ -10342,7 +10533,7 @@ pub trait T {}
 /// paths" and skip running anything.
 #[tokio::test]
 async fn run_affected_tests_dispatches_directly_changed_test_files() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::create_dir_all(project.join("tests")).unwrap();
@@ -10411,7 +10602,7 @@ fn edited_only_test() {
 /// to `node: null` even though the file is indexed.
 #[tokio::test]
 async fn diagnose_normalizes_absolute_and_backslash_paths() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn target() {}\n").unwrap();
@@ -10451,7 +10642,7 @@ async fn diagnose_normalizes_absolute_and_backslash_paths() {
 /// name.
 #[tokio::test]
 async fn resolver_blocklist_branch_respects_kind_filter() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     // Use a struct named after a blocklisted identifier ("new") plus a
@@ -10512,7 +10703,7 @@ pub fn helper() {}
 /// references must only resolve to trait-shaped targets.
 #[tokio::test]
 async fn implements_refs_dont_resolve_to_enum_variants() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
@@ -10560,7 +10751,7 @@ impl Default for B { fn default() -> Self { B } }
 /// one entry per genuine component.
 #[tokio::test]
 async fn circular_reports_one_entry_per_scc_not_per_walk() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     // Three-file cycle: a uses b, b uses c, c uses a. Multiple DFS walks
@@ -10609,7 +10800,7 @@ async fn circular_reports_one_entry_per_scc_not_per_walk() {
 /// agent had no way to know what to break first.
 #[tokio::test]
 async fn port_order_reports_separate_scc_groups() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     // Two disjoint mutually-recursive pairs: (a, b) and (c, d). Before
@@ -10674,7 +10865,7 @@ pub fn leaf() {}
 /// / `break_point_candidate` suggestions.
 #[tokio::test]
 async fn port_order_provides_intra_cycle_ordering() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     // a → b → c → a, plus a "hub" h that all three call into and that
@@ -10749,7 +10940,7 @@ pub fn h() { a(); }
 /// not make singleton symbols appear as cycles.
 #[tokio::test]
 async fn port_order_ignores_self_edges() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub mod m;\n").unwrap();
@@ -10792,7 +10983,7 @@ impl Triplet {
 /// supertrait chains (`trait T: U`) as `Extends` edges.
 #[tokio::test]
 async fn inheritance_depth_walks_rust_supertraits() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
@@ -10833,7 +11024,7 @@ pub trait Leaf: Middle {}
 /// them and asserts no file leaks into a second cycle entry.
 #[tokio::test]
 async fn circular_emits_disjoint_sccs_under_load() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     let mut lib_rs = String::new();
@@ -10896,7 +11087,7 @@ async fn circular_emits_disjoint_sccs_under_load() {
 /// same file path duplicated upstream.
 #[tokio::test]
 async fn diff_context_dedupes_modified_symbols_on_duplicate_input() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
@@ -10938,7 +11129,7 @@ async fn diff_context_dedupes_modified_symbols_on_duplicate_input() {
 /// before they're ever pushed into the change list.
 #[tokio::test]
 async fn changelog_filters_deleted_directory_entries() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fn git(cwd: &std::path::Path, args: &[&str]) {
         std::process::Command::new("git")
@@ -10995,7 +11186,7 @@ async fn changelog_filters_deleted_directory_entries() {
 /// a single summary symbol.
 #[tokio::test]
 async fn pr_context_collapses_cargo_toml_keys() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fn git(cwd: &std::path::Path, args: &[&str]) {
         std::process::Command::new("git")
@@ -11081,7 +11272,7 @@ async fn pr_context_collapses_cargo_toml_keys() {
 /// nodes.
 #[tokio::test]
 async fn unused_imports_handles_grouped_use() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
@@ -11142,7 +11333,7 @@ pub fn used() -> HashMap<u32, u32> { HashMap::new() }
 /// across 5,715.
 #[tokio::test]
 async fn dead_code_flags_unreferenced_fn_with_attribute() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
@@ -11188,7 +11379,7 @@ fn dead_helper_with_attr() {}
 /// real def always beats `use` rows.
 #[tokio::test]
 async fn search_ranks_trait_definition_above_use_reexports() {
-    let dir = TempDir::new().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src/a")).unwrap();
     fs::create_dir_all(project.join("src/b")).unwrap();
@@ -11246,7 +11437,7 @@ pub mod e;
 
 #[tokio::test]
 async fn refresh_file_token_map_picks_up_new_files() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_temp_dir();
     let project = tmp.path();
     std::fs::write(project.join("a.rs"), "fn a() {}").unwrap();
 
@@ -11282,7 +11473,7 @@ async fn refresh_file_token_map_picks_up_new_files() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_server_owns_watcher_and_refreshes_token_map_on_change() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_temp_dir();
     let project = tmp.path();
     std::fs::write(project.join("a.rs"), "fn a() {}").unwrap();
 
@@ -11797,7 +11988,7 @@ async fn message_search_rejects_invalid_scope() {
 ///   3. NOT create the sessions.db file on disk.
 #[tokio::test]
 async fn lcm_read_only_tools_return_not_ingested_without_creating_sessions_db() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     std::fs::write(project.join("lib.rs"), "fn f() {}").unwrap();
     let (cg, _env) = init_test_project(project).await;
@@ -11869,7 +12060,7 @@ async fn lcm_read_only_tools_return_not_ingested_without_creating_sessions_db() 
 /// payload reflects it.
 #[tokio::test]
 async fn lcm_expand_query_context_max_tokens_is_independent_of_max_tokens() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     std::fs::write(project.join("lib.rs"), "fn f() {}").unwrap();
     let (cg, _env) = init_test_project(project).await;
@@ -11915,7 +12106,7 @@ async fn lcm_expand_query_context_max_tokens_is_independent_of_max_tokens() {
 /// `transcript_ingest_done` flag is always true.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wait_for_startup_catch_up_waits_for_transcript_ingest_flag() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_temp_dir();
     let project = dir.path();
     std::fs::write(project.join("lib.rs"), "fn f() {}").unwrap();
 

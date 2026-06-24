@@ -815,6 +815,12 @@ fn provider_arg(args: &Value) -> &str {
     string_arg(args, "provider").unwrap_or("cursor")
 }
 
+fn optional_search_provider_arg(args: &Value) -> Option<&str> {
+    string_arg(args, "provider")
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty() && *provider != "all")
+}
+
 fn messages_arg(args: &Value) -> Result<Vec<Value>> {
     let Some(messages) = args.get("messages") else {
         return Ok(Vec::new());
@@ -1264,6 +1270,18 @@ fn parse_lcm_scope(args: &Value) -> Result<LcmScope> {
     }
 }
 
+fn lcm_grep_provider_arg(args: &Value, scope: LcmScope) -> &str {
+    if let Some(provider) = optional_search_provider_arg(args) {
+        return provider;
+    }
+    if matches!(scope, LcmScope::Current | LcmScope::Session)
+        && string_arg(args, "provider").is_none()
+    {
+        return provider_arg(args);
+    }
+    "all"
+}
+
 fn parse_lcm_grep_sort(args: &Value) -> Result<LcmGrepSort> {
     let Some(sort) = string_arg(args, "sort") else {
         return Ok(LcmGrepSort::Recency);
@@ -1366,12 +1384,7 @@ pub(super) async fn handle_message_search(
         .ok_or_else(|| TraceDecayError::Config {
             message: "missing required parameter: query".to_string(),
         })?;
-    let provider = args
-        .get("provider")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|provider| !provider.is_empty())
-        .unwrap_or("cursor");
+    let provider = optional_search_provider_arg(&args);
     let project_key = args
         .get("project_key")
         .and_then(Value::as_str)
@@ -1426,15 +1439,15 @@ pub(super) async fn handle_message_search(
             }),
         ));
     };
-    if provider == "hermes" {
+    if provider.is_none() || provider == Some("hermes") {
         // Hermes history lives in per-profile state.db stores normally swept
         // by the serve/dashboard startup catch-ups; an incremental
         // search-time catch-up makes the `tracedecay tool` / generated-plugin
         // path self-sufficient (cursor-based, so it is cheap when fresh).
         let _ = crate::sessions::hermes::ingest_for_project(&db, &target_root).await;
     }
-    let results = db
-        .search_session_messages_filtered(
+    let results = if let Some(provider) = provider {
+        db.search_session_messages_filtered(
             provider,
             project_key,
             query,
@@ -1442,13 +1455,23 @@ pub(super) async fn handle_message_search(
             scope,
             parent_session_id,
         )
-        .await;
+        .await
+    } else {
+        db.search_session_messages_all_providers_filtered(
+            project_key,
+            query,
+            limit,
+            scope,
+            parent_session_id,
+        )
+        .await
+    };
 
     Ok(tool_json(
         Some(&target_root),
         &json!({
             "status": "ok",
-            "provider": provider,
+            "provider": provider.unwrap_or("all"),
             "selected_project_root": target_root,
             "project_key": project_key,
             "parent_session_id": parent_session_id,
@@ -1640,11 +1663,11 @@ pub(super) async fn handle_lcm_grep(
     context: LcmHandlerContext<'_>,
     args: Value,
 ) -> Result<ToolResult> {
-    let provider = provider_arg(&args);
     let query = required_string_arg(&args, "query")?;
     // Validate scope before opening storage so argument errors are reported
     // even when the sessions DB does not exist yet.
     let scope = parse_lcm_scope(&args)?;
+    let provider = lcm_grep_provider_arg(&args, scope);
     let storage = lcm_open_storage_ro!(context, &args);
     let hits = storage
         .db

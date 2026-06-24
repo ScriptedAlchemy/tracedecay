@@ -1738,19 +1738,30 @@ async fn handle_sessions_action(action: SessionsAction) -> tracedecay::errors::R
                         project_path.display()
                     ),
                 })?;
-            for provider in session_search_providers(provider.as_deref())? {
-                for result in db
-                    .search_session_messages(provider, None, &query, limit)
-                    .await
-                {
-                    println!(
-                        "[{}] {} {}: {}",
-                        result.session.provider,
-                        result.session.project_key,
-                        result.message.role,
-                        result.message.text.replace('\n', " ")
-                    );
+            let results = match optional_session_search_provider(provider.as_deref()) {
+                Some(provider) => {
+                    db.search_session_messages(provider, None, &query, limit)
+                        .await
                 }
+                None => {
+                    db.search_session_messages_all_providers_filtered(
+                        None,
+                        &query,
+                        limit,
+                        tracedecay::sessions::SessionSearchScope::All,
+                        None,
+                    )
+                    .await
+                }
+            };
+            for result in results {
+                println!(
+                    "[{}] {} {}: {}",
+                    result.session.provider,
+                    result.session.project_key,
+                    result.message.role,
+                    result.message.text.replace('\n', " ")
+                );
             }
         }
     }
@@ -1790,14 +1801,10 @@ fn parse_session_provider(provider: Option<&str>) -> tracedecay::errors::Result<
     }
 }
 
-fn session_search_providers(
-    provider: Option<&str>,
-) -> tracedecay::errors::Result<Vec<&'static str>> {
-    match parse_session_provider(provider)? {
-        SessionProvider::Cursor => Ok(vec!["cursor"]),
-        SessionProvider::Codex => Ok(vec!["codex"]),
-        SessionProvider::All => Ok(vec!["cursor", "codex"]),
-    }
+fn optional_session_search_provider(provider: Option<&str>) -> Option<&str> {
+    provider
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty() && *provider != "all")
 }
 
 fn should_skip_startup_maintenance(command: &Commands) -> bool {

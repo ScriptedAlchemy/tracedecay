@@ -167,7 +167,7 @@ fn install_prompt_rules(agents_md: &Path) -> Result<()> {
         queries that go beyond what the built-in tools expose.\n\n\
         For durable project/user facts, prefer `tracedecay_fact_store`, \
         `tracedecay_fact_feedback`, and `tracedecay_memory_status` over ad-hoc notes. \
-        Use `tracedecay_message_search` for project-local Cursor transcript recall when \
+        Use `tracedecay_message_search` for active-project transcript recall when \
         prior conversation context matters. Do not store secrets, credentials, or \
         unnecessary PII in persistent facts.\n\n\
         If you discover a gap where an extractor, schema, or tracedecay tool could be \

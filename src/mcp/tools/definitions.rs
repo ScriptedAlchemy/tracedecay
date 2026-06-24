@@ -2176,7 +2176,7 @@ fn def_message_search() -> ToolDefinition {
     def(
         "tracedecay_message_search",
         "Message Search",
-        "Search ingested Cursor/Codex/agent transcript messages. Defaults to the active project's session-message FTS index; pass project_id or project_path only when intentionally searching another registered project.",
+        "Search ingested Cursor/Codex/agent transcript messages. Defaults to all transcript providers in the active project's session-message FTS index; pass provider to constrain one provider, or project_id/project_path only when intentionally searching another registered project.",
         json!({
             "type": "object",
             "properties": {
@@ -2186,8 +2186,8 @@ fn def_message_search() -> ToolDefinition {
                 },
                 "provider": {
                     "type": "string",
-                    "description": "Message provider to search (default: cursor). Use 'hermes' for Hermes agent conversation history ingested from per-profile state.db stores.",
-                    "enum": ["cursor", "claude", "codex", "vibe", "cline", "roo-code", "kilo", "hermes"]
+                    "description": "Optional message provider to search. Omit or use 'all' to search all ingested providers. Use 'hermes' for Hermes agent conversation history ingested from per-profile state.db stores.",
+                    "enum": ["all", "cursor", "claude", "codex", "vibe", "cline", "roo-code", "kilo", "hermes"]
                 },
                 "project_key": {
                     "type": "string",
@@ -2421,13 +2421,13 @@ fn def_lcm_grep() -> ToolDefinition {
     def(
         "tracedecay_lcm_grep",
         "LCM Grep",
-        "Search bounded LCM raw-message snippets and optional summary text in the active project or Hermes profile session store.",
+        "Search bounded LCM raw-message snippets and optional summary text across all providers in the active project or Hermes profile session store. Pass provider to constrain one provider.",
         json!({
             "type": "object",
             "properties": {
                 "provider": {
                     "type": "string",
-                    "description": "Provider id, default cursor."
+                    "description": "Optional provider id. Omit or use 'all' to search all providers."
                 },
                 "query": {
                     "type": "string",

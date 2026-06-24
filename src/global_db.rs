@@ -3006,6 +3006,46 @@ impl GlobalDb {
         scope: SessionSearchScope,
         parent_session_id: Option<&str>,
     ) -> Vec<SessionMessageSearchResult> {
+        self.search_session_messages_filtered_inner(
+            Some(provider),
+            project_key,
+            query,
+            limit,
+            scope,
+            parent_session_id,
+        )
+        .await
+    }
+
+    /// Searches message text across all providers with optional parent/subagent filters.
+    pub async fn search_session_messages_all_providers_filtered(
+        &self,
+        project_key: Option<&str>,
+        query: &str,
+        limit: usize,
+        scope: SessionSearchScope,
+        parent_session_id: Option<&str>,
+    ) -> Vec<SessionMessageSearchResult> {
+        self.search_session_messages_filtered_inner(
+            None,
+            project_key,
+            query,
+            limit,
+            scope,
+            parent_session_id,
+        )
+        .await
+    }
+
+    async fn search_session_messages_filtered_inner(
+        &self,
+        provider: Option<&str>,
+        project_key: Option<&str>,
+        query: &str,
+        limit: usize,
+        scope: SessionSearchScope,
+        parent_session_id: Option<&str>,
+    ) -> Vec<SessionMessageSearchResult> {
         let fts_query = session_fts_query(query);
         if fts_query.is_empty() || limit == 0 {
             return Vec::new();
@@ -3026,9 +3066,13 @@ impl GlobalDb {
              FROM session_messages_fts
              JOIN session_messages m ON session_messages_fts.rowid = m.rowid
              JOIN sessions s ON s.provider = m.provider AND s.session_id = m.session_id
-             WHERE session_messages_fts MATCH ?1 AND m.provider = ?2"
+             WHERE session_messages_fts MATCH ?1"
             .to_string();
-        let mut query_params = vec![Value::Text(fts_query), Value::Text(provider.to_string())];
+        let mut query_params = vec![Value::Text(fts_query)];
+        if let Some(provider) = provider {
+            query_params.push(Value::Text(provider.to_string()));
+            let _ = write!(sql, " AND m.provider = ?{}", query_params.len());
+        }
         if let Some(project_key) = project_key {
             query_params.push(Value::Text(project_key.to_string()));
             let _ = write!(sql, " AND s.project_key = ?{}", query_params.len());

@@ -1083,6 +1083,27 @@ fn expand_query_synthesis_prompt(
     LcmExpandQuerySynthesisPrompt { system, user }
 }
 
+fn grep_provider_filter(request: &LcmGrepRequest) -> Option<&str> {
+    let provider = request.provider.trim();
+    if provider.is_empty() || provider == "all" {
+        None
+    } else {
+        Some(provider)
+    }
+}
+
+fn push_grep_provider_filter(
+    request: &LcmGrepRequest,
+    column: &str,
+    filters: &mut Vec<String>,
+    values: &mut Vec<Value>,
+) {
+    if let Some(provider) = grep_provider_filter(request) {
+        filters.push(format!("{column} = ?"));
+        values.push(Value::Text(provider.to_string()));
+    }
+}
+
 async fn raw_grep_hits(
     conn: &Connection,
     request: &LcmGrepRequest,
@@ -1093,11 +1114,9 @@ async fn raw_grep_hits(
     if query_plan.requires_like_fallback {
         return raw_like_grep_hits(conn, request, session_id, query_plan, limit).await;
     }
-    let mut values = vec![
-        Value::Text(query_plan.fts_query.clone()),
-        Value::Text(request.provider.clone()),
-    ];
+    let mut values = vec![Value::Text(query_plan.fts_query.clone())];
     let mut filters = Vec::new();
+    push_grep_provider_filter(request, "r.provider", &mut filters, &mut values);
     push_raw_grep_filters(request, session_id, &mut filters, &mut values);
     values.push(Value::Integer(limit as i64));
     let filter_sql = if filters.is_empty() {
@@ -1115,7 +1134,6 @@ async fn raw_grep_hits(
          FROM lcm_raw_messages_fts
          JOIN lcm_raw_messages r ON r.store_id = lcm_raw_messages_fts.rowid
          WHERE lcm_raw_messages_fts MATCH ?
-           AND r.provider = ?
            {filter_sql}
          ORDER BY {order_by}
          LIMIT ?"
@@ -1139,11 +1157,9 @@ async fn summary_grep_hits(
     if query_plan.requires_like_fallback {
         return summary_like_grep_hits(conn, request, session_id, query_plan, limit).await;
     }
-    let mut values = vec![
-        Value::Text(query_plan.fts_query.clone()),
-        Value::Text(request.provider.clone()),
-    ];
+    let mut values = vec![Value::Text(query_plan.fts_query.clone())];
     let mut filters = Vec::new();
+    push_grep_provider_filter(request, "n.provider", &mut filters, &mut values);
     push_summary_grep_filters(request, session_id, &mut filters, &mut values);
     values.push(Value::Integer(limit as i64));
     let filter_sql = if filters.is_empty() {
@@ -1157,7 +1173,6 @@ async fn summary_grep_hits(
          FROM lcm_summary_nodes_fts
          JOIN lcm_summary_nodes n ON n.rowid = lcm_summary_nodes_fts.rowid
          WHERE lcm_summary_nodes_fts MATCH ?
-           AND n.provider = ?
            {filter_sql}
          ORDER BY {order_by}, n.node_id
          LIMIT ?"
@@ -1183,8 +1198,9 @@ async fn raw_like_grep_hits(
     }
     let fetch_limit = compute_like_fallback_fetch_limit(limit, query_plan);
 
-    let mut values = vec![Value::Text(request.provider.clone())];
+    let mut values = Vec::new();
     let mut filters = Vec::new();
+    push_grep_provider_filter(request, "r.provider", &mut filters, &mut values);
     push_raw_grep_filters(request, session_id, &mut filters, &mut values);
 
     let like_sql = like_predicate_sql(
@@ -1209,8 +1225,7 @@ async fn raw_like_grep_hits(
     let sql = format!(
         "SELECT r.provider, r.session_id, r.message_id, r.store_id, r.snippet_text, 0.0 AS rank
          FROM lcm_raw_messages r
-         WHERE r.provider = ?
-           AND {}
+         WHERE {}
          ORDER BY {order_by}
          LIMIT ?",
         filters.join(" AND "),
@@ -1238,8 +1253,9 @@ async fn summary_like_grep_hits(
     }
     let fetch_limit = compute_like_fallback_fetch_limit(limit, query_plan);
 
-    let mut values = vec![Value::Text(request.provider.clone())];
+    let mut values = Vec::new();
     let mut filters = Vec::new();
+    push_grep_provider_filter(request, "n.provider", &mut filters, &mut values);
     push_summary_grep_filters(request, session_id, &mut filters, &mut values);
 
     filters.push(like_predicate_sql(
@@ -1255,8 +1271,7 @@ async fn summary_like_grep_hits(
     let sql = format!(
         "SELECT n.provider, n.session_id, n.node_id, n.summary_text, 0.0 AS rank
          FROM lcm_summary_nodes n
-         WHERE n.provider = ?
-           AND {}
+         WHERE {}
          ORDER BY {order_by}, n.node_id
          LIMIT ?",
         filters.join(" AND "),

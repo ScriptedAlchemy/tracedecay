@@ -424,7 +424,7 @@ pub enum SessionsAction {
     Search {
         /// Full-text query to search for
         query: String,
-        /// Provider to search: cursor, codex, or all
+        /// Optional provider to search; omit or use all to search all ingested providers
         #[arg(long)]
         provider: Option<String>,
         /// Maximum number of matches per provider
@@ -1228,6 +1228,25 @@ mod cli_parse_tests {
                 assert_eq!(limit, 5);
                 assert!(project_id.is_none());
                 assert!(project_path.is_none());
+            }
+            _ => panic!("expected sessions search command"),
+        }
+
+        let all_provider_search =
+            Cli::try_parse_from(["tracedecay", "sessions", "search", "needle"]).unwrap();
+        match all_provider_search.command {
+            Some(Commands::Sessions {
+                action:
+                    SessionsAction::Search {
+                        query,
+                        provider,
+                        limit,
+                        ..
+                    },
+            }) => {
+                assert_eq!(query, "needle");
+                assert!(provider.is_none());
+                assert_eq!(limit, 10);
             }
             _ => panic!("expected sessions search command"),
         }
