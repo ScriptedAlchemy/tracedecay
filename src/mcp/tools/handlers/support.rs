@@ -179,22 +179,24 @@ pub(super) async fn project_registry_context(
     }
 
     let owned_db;
-    let db = if let Some(db) = global_db {
-        db
-    } else {
-        if !allow_default_registry_fallback {
+    let db = match global_db {
+        Some(db) => db,
+        None if allow_default_registry_fallback => {
+            owned_db = GlobalDb::open()
+                .await
+                .ok_or_else(|| TraceDecayError::Config {
+                    message:
+                        "could not open tracedecay project registry; run tracedecay init first"
+                            .to_string(),
+                })?;
+            &owned_db
+        }
+        None => {
             return Err(TraceDecayError::Config {
                 message: "client project registry is unavailable for selector resolution"
                     .to_string(),
             });
         }
-        owned_db = GlobalDb::open()
-            .await
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "could not open tracedecay project registry; run tracedecay init first"
-                    .to_string(),
-            })?;
-        &owned_db
     };
     let context = if let Some(project_id) = project_id {
         db.project_registry_context_by_id(project_id).await
