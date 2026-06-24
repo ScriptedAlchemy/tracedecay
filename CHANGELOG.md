@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.10](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.9...v0.0.10) - 2026-06-24
+
+### Fixed
+
+- satisfy clippy on profile branch
+- handle unresolved profile store lookups
+
+### Other
+
+- remove redundant clippy suppressions
+- Centralize profile-scoped branch tracking
+
 ## [0.0.9](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.8...v0.0.9) - 2026-06-23
 
 ### Other
