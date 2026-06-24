@@ -429,7 +429,7 @@ The default query set targets patterns present in most application codebases (CL
 
 Each repo is shallow-cloned (`git init` + `git fetch --progress --depth 1 origin <ref>` + `checkout FETCH_HEAD`) on first use and cached locally; subsequent runs reuse the checkout. Git output is streamed to the terminal so the multi-GB fetch shows real-time progress.
 
-**Tools covered (5 queries each).** Read tools — `search`, `context`, `callers`, `callees`, `node`, `by_qualified_name`, `signature`, `impact`, `body`, `files`, `complexity`, `doc_coverage`, `largest`, `hotspots`, `god_class`, `module_api`, `derives`, `dead_code`, `rank`, `coupling`, `circular`. Write tools — `str_replace`, `multi_str_replace`, `insert_at`, and (if `ast-grep` is on `PATH`) `ast_grep_rewrite`.
+**Tools covered (5 queries each).** Read tools — `search`, `context`, `callers`, `callees`, `node`, `by_qualified_name`, `signature`, `impact`, `body`, `files`, `complexity`, `doc_coverage`, `largest`, `hotspots`, `god_class`, `module_api`, `derives`, `dead_code`, `rank`, `coupling`, `circular`, and `outline` when `ast-grep` >= 0.44 is on `PATH`. Write tools — `str_replace`, `multi_str_replace`, `insert_at`, and (when the user-installed `ast-grep` CLI is available) `ast_grep_rewrite`.
 
 **Force-sync on every run.** Before any benchmark fires, the harness runs the equivalent of `tracedecay sync --force` on each repo (`index_all()` regardless of `.tracedecay/` freshness) so timings always reflect the pinned source.
 
@@ -492,7 +492,7 @@ Different from the criterion bench above: criterion measures per-iteration laten
 
 ## 70+ MCP Tools
 
-The server exposes more than 70 tools (one fewer when the optional `ast-grep` binary is not on `PATH`); the tables below group the most commonly used ones by category. Most are read-only, safe to call in parallel, and annotated with `readOnlyHint`. The edit primitives are scoped to single files and re-index in place; session baseline and memory tools also mutate the active local TraceDecay store and are annotated as non-read-only. The three core tools (`tracedecay_context`, `tracedecay_search`, `tracedecay_status`) are marked `anthropic/alwaysLoad` so they bypass the client's tool-search round-trip.
+The server exposes more than 70 tools; the tables below group the most commonly used ones by category. `ast-grep` is an optional external CLI capability used by structural refactor tools and `tracedecay_outline`; outline requires `ast-grep` >= 0.44 on `PATH` for the CLI's `outline` command. These tools have no backend-selection argument. Most tools are read-only, safe to call in parallel, and annotated with `readOnlyHint`. The edit primitives are scoped to single files and re-index in place; session baseline and memory tools also mutate the active local TraceDecay store and are annotated as non-read-only. The three core tools (`tracedecay_context`, `tracedecay_search`, `tracedecay_status`) are marked `anthropic/alwaysLoad` so they bypass the client's tool-search round-trip.
 
 ### Recovering Truncated Responses
 
@@ -513,6 +513,7 @@ produced the truncated response.
 | `tracedecay_context` | Get relevant code context for a task -- entry points, related symbols, code snippets |
 | `tracedecay_search` | Find symbols by name (functions, classes, types) |
 | `tracedecay_node` | Get details + source code for a specific symbol |
+| `tracedecay_outline` | Lightweight `ast-grep` CLI outline of top-level file symbols, with DB-backed TraceDecay symbols preserved for follow-up graph calls; requires `ast-grep` >= 0.44 |
 | `tracedecay_files` | List indexed project files with filtering |
 | `tracedecay_module_api` | Public API surface of a file or directory |
 | `tracedecay_similar` | Find symbols with similar names |
@@ -751,7 +752,7 @@ Run a comprehensive health check of your tracedecay installation:
 tracedecay doctor
 ```
 
-Checks: binary location, project index, global DB, user config, agent integration (MCP server or plugin, hooks, permissions, prompt rules where applicable), and network connectivity. If any tool permissions are missing after an upgrade, it tells you to run `tracedecay install`. Use `--agent` to check a specific agent only.
+Checks: binary location, project index, global DB, user config, optional external capabilities such as `ast-grep` for `tracedecay_outline` and structural refactor tools, agent integration (MCP server or plugin, hooks, permissions, prompt rules where applicable), and network connectivity. If `ast-grep` is missing or older than 0.44, install or update it, make sure it is on `PATH`, then rerun `tracedecay install` or `tracedecay update-plugin` as appropriate to refresh generated agent integrations. If any tool permissions are missing after an upgrade, doctor tells you to run `tracedecay install`. Use `--agent` to check a specific agent only.
 
 Doctor also validates that each installed hook uses the correct tracedecay subcommand and auto-repairs broken hooks.
 

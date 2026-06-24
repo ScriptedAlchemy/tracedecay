@@ -14,117 +14,24 @@ pub mod info;
 pub mod memory;
 pub mod redundancy;
 pub mod session;
+mod support;
 pub mod workflow;
 
-use std::collections::HashSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
 use serde_json::{json, Value};
 
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{global_db_path, GlobalDb, ProjectRegistryContext};
-use crate::mcp::response_handles::{
-    note_response_handle_store_skipped_no_project_root, observe_response_truncation,
-    retrieve_response_handle, store_response_handle, ResponseHandleLookup,
-    RESPONSE_HANDLE_TTL_SECS, RESPONSE_RETRIEVE_TOOL,
-};
+use crate::global_db::GlobalDb;
+use crate::mcp::response_handles::{retrieve_response_handle, ResponseHandleLookup};
 use crate::tracedecay::current_timestamp;
 use crate::tracedecay::TraceDecay;
 
-use super::{ToolResult, MAX_RESPONSE_CHARS};
-
-/// Extracts the `node_id` parameter from tool arguments, accepting `id` as a
-/// fallback alias. LLMs occasionally shorten `node_id` to `id`; this avoids a
-/// confusing error when that happens.
-pub(crate) fn require_node_id(args: &Value) -> Result<&str> {
-    args.get("node_id")
-        .or_else(|| args.get("id"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "missing required parameter: node_id".to_string(),
-        })
-}
-
-/// Returns the user-provided `path` argument, falling back to the scope
-/// prefix when the argument is absent. This makes listing tools
-/// automatically scoped to the subdirectory the server was launched from.
-pub(crate) fn effective_path<'a>(
-    args: &'a Value,
-    scope_prefix: Option<&'a str>,
-) -> Option<&'a str> {
-    args.get("path").and_then(|v| v.as_str()).or(scope_prefix)
-}
-
-/// Filters a Vec of items by file path prefix when a scope is active.
-/// Returns the vec unchanged when `scope_prefix` is `None`.
-pub(crate) fn filter_by_scope<T, F>(
-    items: Vec<T>,
-    scope_prefix: Option<&str>,
-    get_path: F,
-) -> Vec<T>
-where
-    F: Fn(&T) -> &str,
-{
-    match scope_prefix {
-        Some(prefix) => {
-            let with_slash = if prefix.ends_with('/') {
-                prefix.to_string()
-            } else {
-                format!("{prefix}/")
-            };
-            items
-                .into_iter()
-                .filter(|item| {
-                    let p = get_path(item);
-                    p.starts_with(&with_slash) || p == prefix
-                })
-                .collect()
-        }
-        None => items,
-    }
-}
-
-/// Deduplicates an iterator of file path strings into a `Vec<String>`.
-pub(crate) fn unique_file_paths<'a>(paths: impl Iterator<Item = &'a str>) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut result = Vec::new();
-    for p in paths {
-        if seen.insert(p) {
-            result.push(p.to_string());
-        }
-    }
-    result
-}
-
-pub(crate) fn safe_profile_relpath(value: &str) -> Result<PathBuf> {
-    let path = PathBuf::from(value);
-    if path.is_absolute()
-        || path
-            .components()
-            .any(|component| matches!(component, Component::ParentDir))
-    {
-        return Err(TraceDecayError::Config {
-            message: format!("registry artifact path is not a safe profile-relative path: {value}"),
-        });
-    }
-    Ok(path)
-}
-
-pub(crate) fn global_db_profile_root() -> Result<PathBuf> {
-    global_db_path()
-        .and_then(|path| path.parent().map(Path::to_path_buf))
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "could not resolve tracedecay profile root".to_string(),
-        })
-}
-
-pub(crate) fn project_selector_present(args: &Value, top_level_path_keys: &[&str]) -> bool {
-    args.get("project_selector").is_some()
-        || args.get("project_id").is_some()
-        || top_level_path_keys
-            .iter()
-            .any(|key| args.get(*key).is_some())
-}
+use super::dispatch_policy::{
+    tool_accepts_registered_project_selector, tool_dispatches_registered_project_reader,
+};
+use super::ToolResult;
+use support::{profile_root_for_global_db, project_registry_context, project_selector_present};
 
 fn rejected_tool_project_selector_present(tool_name: &str, args: &Value) -> bool {
     let top_level_path_keys = if tool_name.starts_with("tracedecay_lcm_") {
@@ -135,275 +42,60 @@ fn rejected_tool_project_selector_present(tool_name: &str, args: &Value) -> bool
     project_selector_present(args, top_level_path_keys)
 }
 
-pub(crate) async fn project_registry_context(
-    args: &Value,
-    top_level_path_keys: &[&str],
-) -> Result<Option<ProjectRegistryContext>> {
-    let selector_present = project_selector_present(args, top_level_path_keys);
-    let selector = args
-        .get("project_selector")
-        .map(|value| {
-            value.as_object().ok_or_else(|| TraceDecayError::Config {
-                message: "project_selector must be an object".to_string(),
-            })
-        })
-        .transpose()?;
-    let project_id = selector
-        .and_then(|selector| selector.get("project_id"))
-        .or_else(|| args.get("project_id"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let project_path = selector
-        .and_then(|selector| {
-            selector
-                .get("path")
-                .or_else(|| selector.get("project_path"))
-        })
-        .or_else(|| top_level_path_keys.iter().find_map(|key| args.get(*key)))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    if project_id.is_none() && project_path.is_none() {
-        if selector_present {
-            return Err(TraceDecayError::Config {
-                message: "project selector must include project_id or project_path".to_string(),
-            });
-        }
-        return Ok(None);
-    }
-
-    let db = GlobalDb::open()
-        .await
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "could not open tracedecay project registry; run tracedecay init first"
-                .to_string(),
-        })?;
-    let context = if let Some(project_id) = project_id {
-        db.project_registry_context_by_id(project_id).await
-    } else if let Some(project_path) = project_path {
-        db.project_registry_context_by_alias(Path::new(project_path))
-            .await
-    } else {
-        return Ok(None);
-    };
-
-    context
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "registered project not found for selector".to_string(),
-        })
-        .map(Some)
-}
-
-fn tool_accepts_registered_project_selector(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "tracedecay_search"
-            | "tracedecay_context"
-            | "tracedecay_retrieve"
-            | "tracedecay_callers"
-            | "tracedecay_callees"
-            | "tracedecay_impact"
-            | "tracedecay_node"
-            | "tracedecay_files"
-            | "tracedecay_body"
-            | "tracedecay_read"
-            | "tracedecay_outline"
-            | "tracedecay_signature_search"
-            | "tracedecay_implementations"
-            | "tracedecay_callers_for"
-            | "tracedecay_call_chain"
-            | "tracedecay_file_dependents"
-            | "tracedecay_find_exact_symbol"
-            | "tracedecay_by_qualified_name"
-            | "tracedecay_signature"
-            | "tracedecay_impls"
-            | "tracedecay_derives"
-            | "tracedecay_project_context"
-            | "tracedecay_fact_store"
-            | "tracedecay_memory_status"
-            | "tracedecay_message_search"
-    )
-}
-
-fn tool_dispatches_registered_project_reader(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "tracedecay_search"
-            | "tracedecay_context"
-            | "tracedecay_retrieve"
-            | "tracedecay_callers"
-            | "tracedecay_callees"
-            | "tracedecay_impact"
-            | "tracedecay_node"
-            | "tracedecay_files"
-            | "tracedecay_body"
-            | "tracedecay_read"
-            | "tracedecay_outline"
-            | "tracedecay_signature_search"
-            | "tracedecay_implementations"
-            | "tracedecay_callers_for"
-            | "tracedecay_call_chain"
-            | "tracedecay_file_dependents"
-            | "tracedecay_find_exact_symbol"
-            | "tracedecay_by_qualified_name"
-            | "tracedecay_signature"
-            | "tracedecay_impls"
-            | "tracedecay_derives"
-    )
-}
-
 async fn selected_registered_project_reader(
     tool_name: &str,
     args: &Value,
+    global_db: Option<&GlobalDb>,
+    allow_default_registry_fallback: bool,
 ) -> Result<Option<TraceDecay>> {
     if !tool_dispatches_registered_project_reader(tool_name) {
         return Ok(None);
     }
-    let Some(context) = project_registry_context(args, &["project_path", "project_root"]).await?
+    let Some(context) = project_registry_context(
+        args,
+        &["project_path", "project_root"],
+        global_db,
+        allow_default_registry_fallback,
+    )
+    .await?
     else {
         return Ok(None);
     };
 
-    TraceDecay::open_read_only(Path::new(&context.project.canonical_root))
+    let global_db_path = global_db
+        .map(|db| db.db_path().to_path_buf())
+        .or_else(crate::global_db::global_db_path);
+    let mut profile_roots = vec![profile_root_for_global_db(
+        global_db,
+        allow_default_registry_fallback,
+    )?];
+    if let Ok(default_profile_root) = crate::storage::default_profile_root() {
+        if !profile_roots
+            .iter()
+            .any(|root| root == &default_profile_root)
+        {
+            profile_roots.push(default_profile_root);
+        }
+    }
+
+    let mut last_error = None;
+    for profile_root in profile_roots {
+        match TraceDecay::open_read_only_with_options(
+            Path::new(&context.project.canonical_root),
+            crate::tracedecay::TraceDecayOpenOptions {
+                profile_root: Some(profile_root),
+                global_db_path: global_db_path.clone(),
+            },
+        )
         .await
-        .map(Some)
-}
-
-/// Truncates a string to the maximum response character limit, appending
-/// a truncation notice if necessary.
-pub(crate) fn truncate_response(s: &str) -> String {
-    debug_assert!(!s.is_empty(), "truncate_response called with empty string");
-    if s.len() <= MAX_RESPONSE_CHARS {
-        s.to_string()
-    } else {
-        let started = std::time::Instant::now();
-        let now = current_timestamp();
-        // Find a valid UTF-8 character boundary at or before MAX_RESPONSE_CHARS
-        let mut end = MAX_RESPONSE_CHARS;
-        while !s.is_char_boundary(end) && end > 0 {
-            end -= 1;
+        {
+            Ok(cg) => return Ok(Some(cg)),
+            Err(err) => last_error = Some(err),
         }
-        let truncated = format!("{}\n\n[... truncated at {} chars]", &s[..end], end);
-        observe_response_truncation(
-            s.len(),
-            truncated.len(),
-            false,
-            now,
-            "not_available",
-            started.elapsed(),
-        );
-        truncated
     }
-}
-
-/// Wraps a JSON string that exceeds `MAX_RESPONSE_CHARS` in a
-/// `{"truncated": true, "preview": "..."}` envelope so the result is
-/// always valid JSON, never a mid-structure cut.
-///
-/// Prefer this over [`truncate_response`] for handlers whose payload is
-/// always JSON (e.g. the dashboard handler) to avoid breaking consumers
-/// that parse the entire response text.
-/// Wraps oversized JSON text in a valid preview envelope. When a project root
-/// is available, stores the full original locally and includes a retrieval
-/// handle.
-///
-/// If local handle storage is unavailable or fails, the envelope still carries
-/// a preview but also includes explicit recovery metadata so clients can tell
-/// why no handle was emitted and what to retry.
-pub(crate) fn truncated_json_envelope_with_handle(
-    project_root: Option<&Path>,
-    formatted: &str,
-) -> String {
-    if formatted.len() <= MAX_RESPONSE_CHARS {
-        return formatted.to_string();
-    }
-    let started = std::time::Instant::now();
-    let now = current_timestamp();
-    let mut handle_unavailable = None;
-    let stored = if let Some(root) = project_root {
-        match store_response_handle(root, formatted, current_timestamp()) {
-            Ok(record) => Some(record),
-            Err(err) => {
-                handle_unavailable = Some(json!({
-                    "reason_code": "handle_store_failed",
-                    "message": format!(
-                        "The full response could not be cached locally, so no retrieval handle is available: {err}"
-                    ),
-                    "retryable": true,
-                    "retry_instruction": "Fix the local project cache path or filesystem error, then re-run the original MCP tool to regenerate the full response and a fresh handle."
-                }));
-                None
-            }
-        }
-    } else {
-        note_response_handle_store_skipped_no_project_root();
-        handle_unavailable = Some(json!({
-            "reason_code": "handle_storage_unavailable",
-            "message": "This response was truncated in a context without a project-local cache path, so no retrieval handle could be created.",
-            "retryable": true,
-            "retry_instruction": "Re-run the original MCP tool from a project-scoped tracedecay session if you need a retrievable full response."
-        }));
-        None
-    };
-    let mut end = formatted.len().min(MAX_RESPONSE_CHARS.saturating_sub(1024));
-    loop {
-        while end > 0 && !formatted.is_char_boundary(end) {
-            end -= 1;
-        }
-        let preview = &formatted[..end];
-        let mut envelope = json!({
-            "truncated": true,
-            "original_chars": formatted.len(),
-            "preview_chars": preview.len(),
-            "preview": preview,
-        });
-        if let Some(object) = envelope.as_object_mut() {
-            if let Some(record) = &stored {
-                object.insert("handle".to_string(), json!(record.handle));
-                object.insert("retrieve_tool".to_string(), json!(RESPONSE_RETRIEVE_TOOL));
-                object.insert(
-                    "retrieve_ttl_seconds".to_string(),
-                    json!(RESPONSE_HANDLE_TTL_SECS),
-                );
-                object.insert("retrieve_expires_at".to_string(), json!(record.expires_at));
-                object.insert(
-                    "retrieve_instruction".to_string(),
-                    json!(format!(
-                        "This response was truncated: `preview` contains only the first {} of {} characters. The full original response is stored locally in this project and expires at {} (TTL {} seconds). To recover it, call `{RESPONSE_RETRIEVE_TOOL}` with required argument `handle` set to `{}`. If the original tool call used a project selector (`project_id`, `project_path`, or `project_selector`), pass the same selector to `{RESPONSE_RETRIEVE_TOOL}` so the handle is looked up in the same project cache. Only call it if the missing details are needed to answer the user's request.",
-                        preview.len(),
-                        formatted.len(),
-                        record.expires_at,
-                        RESPONSE_HANDLE_TTL_SECS,
-                        record.handle
-                    )),
-                );
-            } else if let Some(status) = &handle_unavailable {
-                object.insert("handle_available".to_string(), json!(false));
-                object.insert("handle_status".to_string(), status.clone());
-            }
-        }
-        let text = serde_json::to_string_pretty(&envelope).unwrap_or_default();
-        if text.len() <= MAX_RESPONSE_CHARS || end == 0 {
-            let handle_status = if stored.is_some() {
-                "stored"
-            } else if project_root.is_none() {
-                "no_project_root"
-            } else {
-                "store_failed"
-            };
-            observe_response_truncation(
-                formatted.len(),
-                text.len(),
-                true,
-                now,
-                handle_status,
-                started.elapsed(),
-            );
-            return text;
-        }
-        end = end.saturating_sub(1024);
-    }
+    Err(last_error.unwrap_or_else(|| TraceDecayError::Config {
+        message: "registered project could not be opened".to_string(),
+    }))
 }
 
 fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
@@ -469,6 +161,19 @@ pub async fn handle_tool_call(
     server_stats: Option<Value>,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
+    handle_tool_call_with_registry(cg, tool_name, args, server_stats, scope_prefix, None, true)
+        .await
+}
+
+pub async fn handle_tool_call_with_registry(
+    cg: &TraceDecay,
+    tool_name: &str,
+    args: Value,
+    server_stats: Option<Value>,
+    scope_prefix: Option<&str>,
+    global_db: Option<&GlobalDb>,
+    allow_default_registry_fallback: bool,
+) -> Result<ToolResult> {
     debug_assert!(
         !tool_name.is_empty(),
         "handle_tool_call called with empty tool_name"
@@ -486,7 +191,13 @@ pub async fn handle_tool_call(
             ),
         });
     }
-    let selected_cg = selected_registered_project_reader(tool_name, &args).await?;
+    let selected_cg = selected_registered_project_reader(
+        tool_name,
+        &args,
+        global_db,
+        allow_default_registry_fallback,
+    )
+    .await?;
     let selected_scope_prefix = if selected_cg.is_some() {
         None
     } else {
@@ -506,9 +217,15 @@ pub async fn handle_tool_call(
             Ok(info::handle_active_project(cg, server_stats, scope_prefix))
         }
         "tracedecay_storage_status" => info::handle_storage_status(cg, args, scope_prefix).await,
-        "tracedecay_project_list" => info::handle_project_list(args).await,
-        "tracedecay_project_search" => info::handle_project_search(args).await,
-        "tracedecay_project_context" => info::handle_project_context(cg, args).await,
+        "tracedecay_project_list" => {
+            info::handle_project_list(args, global_db, allow_default_registry_fallback).await
+        }
+        "tracedecay_project_search" => {
+            info::handle_project_search(args, global_db, allow_default_registry_fallback).await
+        }
+        "tracedecay_project_context" => {
+            info::handle_project_context(cg, args, global_db, allow_default_registry_fallback).await
+        }
         "tracedecay_files" => info::handle_files(cg, args, selected_scope_prefix).await,
         "tracedecay_affected" => git::handle_affected(cg, args).await,
         "tracedecay_dead_code" => analysis::handle_dead_code(cg, args, scope_prefix).await,
@@ -589,32 +306,47 @@ pub async fn handle_tool_call(
         "tracedecay_diagnose" => workflow::handle_diagnose(cg, args).await,
         "tracedecay_run_affected_tests" => workflow::handle_run_affected_tests(cg, args).await,
         "tracedecay_derives" => graph::handle_derives(cg, args).await,
-        "tracedecay_fact_store" => memory::handle_fact_store(cg, args).await,
+        "tracedecay_fact_store" => {
+            memory::handle_fact_store(cg, args, global_db, allow_default_registry_fallback).await
+        }
         "tracedecay_fact_feedback" => memory::handle_fact_feedback(cg, args).await,
-        "tracedecay_memory_status" => memory::handle_memory_status(cg, args).await,
+        "tracedecay_memory_status" => {
+            memory::handle_memory_status(cg, args, global_db, allow_default_registry_fallback).await
+        }
         "tracedecay_dashboard" => dashboard::handle_dashboard(cg, args).await,
-        "tracedecay_message_search" => session::handle_message_search(cg, args).await,
-        "tracedecay_lcm_status" => session::handle_lcm_status(Some(cg.project_root()), args).await,
-        "tracedecay_lcm_doctor" => session::handle_lcm_doctor(Some(cg.project_root()), args).await,
+        "tracedecay_message_search" => {
+            session::handle_message_search(cg, args, global_db, allow_default_registry_fallback)
+                .await
+        }
+        "tracedecay_lcm_status" => {
+            session::handle_lcm_status(session::LcmHandlerContext::active(cg), args).await
+        }
+        "tracedecay_lcm_doctor" => {
+            session::handle_lcm_doctor(session::LcmHandlerContext::active(cg), args).await
+        }
         "tracedecay_lcm_load_session" => {
-            session::handle_lcm_load_session(Some(cg.project_root()), args).await
+            session::handle_lcm_load_session(session::LcmHandlerContext::active(cg), args).await
         }
-        "tracedecay_lcm_grep" => session::handle_lcm_grep(Some(cg.project_root()), args).await,
+        "tracedecay_lcm_grep" => {
+            session::handle_lcm_grep(session::LcmHandlerContext::active(cg), args).await
+        }
         "tracedecay_lcm_describe" => {
-            session::handle_lcm_describe(Some(cg.project_root()), args).await
+            session::handle_lcm_describe(session::LcmHandlerContext::active(cg), args).await
         }
-        "tracedecay_lcm_expand" => session::handle_lcm_expand(Some(cg.project_root()), args).await,
+        "tracedecay_lcm_expand" => {
+            session::handle_lcm_expand(session::LcmHandlerContext::active(cg), args).await
+        }
         "tracedecay_lcm_expand_query" => {
-            session::handle_lcm_expand_query(Some(cg.project_root()), args).await
+            session::handle_lcm_expand_query(session::LcmHandlerContext::active(cg), args).await
         }
         "tracedecay_lcm_preflight" => {
-            session::handle_lcm_preflight(Some(cg.project_root()), args).await
+            session::handle_lcm_preflight(session::LcmHandlerContext::active(cg), args).await
         }
         "tracedecay_lcm_compress" => {
-            session::handle_lcm_compress(Some(cg.project_root()), args).await
+            session::handle_lcm_compress(session::LcmHandlerContext::active(cg), args).await
         }
         "tracedecay_lcm_session_boundary" => {
-            session::handle_lcm_session_boundary(Some(cg.project_root()), args).await
+            session::handle_lcm_session_boundary(session::LcmHandlerContext::active(cg), args).await
         }
         _ => Err(TraceDecayError::Config {
             message: format!("unknown tool: {tool_name}"),
@@ -629,16 +361,37 @@ pub async fn handle_profile_scoped_lcm_tool_call(
     args: Value,
 ) -> Result<ToolResult> {
     match tool_name {
-        "tracedecay_lcm_status" => session::handle_lcm_status(None, args).await,
-        "tracedecay_lcm_doctor" => session::handle_lcm_doctor(None, args).await,
-        "tracedecay_lcm_load_session" => session::handle_lcm_load_session(None, args).await,
-        "tracedecay_lcm_grep" => session::handle_lcm_grep(None, args).await,
-        "tracedecay_lcm_describe" => session::handle_lcm_describe(None, args).await,
-        "tracedecay_lcm_expand" => session::handle_lcm_expand(None, args).await,
-        "tracedecay_lcm_expand_query" => session::handle_lcm_expand_query(None, args).await,
-        "tracedecay_lcm_preflight" => session::handle_lcm_preflight(None, args).await,
-        "tracedecay_lcm_compress" => session::handle_lcm_compress(None, args).await,
-        "tracedecay_lcm_session_boundary" => session::handle_lcm_session_boundary(None, args).await,
+        "tracedecay_lcm_status" => {
+            session::handle_lcm_status(session::LcmHandlerContext::projectless(), args).await
+        }
+        "tracedecay_lcm_doctor" => {
+            session::handle_lcm_doctor(session::LcmHandlerContext::projectless(), args).await
+        }
+        "tracedecay_lcm_load_session" => {
+            session::handle_lcm_load_session(session::LcmHandlerContext::projectless(), args).await
+        }
+        "tracedecay_lcm_grep" => {
+            session::handle_lcm_grep(session::LcmHandlerContext::projectless(), args).await
+        }
+        "tracedecay_lcm_describe" => {
+            session::handle_lcm_describe(session::LcmHandlerContext::projectless(), args).await
+        }
+        "tracedecay_lcm_expand" => {
+            session::handle_lcm_expand(session::LcmHandlerContext::projectless(), args).await
+        }
+        "tracedecay_lcm_expand_query" => {
+            session::handle_lcm_expand_query(session::LcmHandlerContext::projectless(), args).await
+        }
+        "tracedecay_lcm_preflight" => {
+            session::handle_lcm_preflight(session::LcmHandlerContext::projectless(), args).await
+        }
+        "tracedecay_lcm_compress" => {
+            session::handle_lcm_compress(session::LcmHandlerContext::projectless(), args).await
+        }
+        "tracedecay_lcm_session_boundary" => {
+            session::handle_lcm_session_boundary(session::LcmHandlerContext::projectless(), args)
+                .await
+        }
         _ => Err(TraceDecayError::Config {
             message: format!("tool `{tool_name}` does not support profile-scoped dispatch"),
         }),
@@ -655,6 +408,7 @@ pub async fn handle_profile_scoped_lcm_tool_call(
 mod tests {
     use std::collections::BTreeSet;
     use std::ffi::{OsStr, OsString};
+    use std::fmt::Write as _;
     use std::fs;
     use std::path::Path;
 
@@ -775,9 +529,10 @@ mod tests {
             .collect::<BTreeSet<_>>();
         let mut handler_names = dispatch_tool_names_from_source("handle_tool_call");
 
-        // This tool is intentionally hidden from the advertised surface when
-        // the host is missing ast-grep; mirror that runtime filter so the
-        // integrity check covers the actual MCP tools/list surface.
+        // These tools are intentionally hidden from the advertised surface when
+        // the host ast-grep CLI capability they need is unavailable; mirror the
+        // runtime filters so the integrity check covers the actual tools/list
+        // surface.
         if !super::super::definitions::ast_grep_available() {
             handler_names.remove("tracedecay_ast_grep_rewrite");
         }
@@ -829,52 +584,17 @@ mod tests {
 
     #[test]
     fn graph_reader_selector_dispatch_policy_is_allowlisted() {
-        let allowlisted_tool_names = [
-            "tracedecay_search",
-            "tracedecay_context",
-            "tracedecay_callers",
-            "tracedecay_callees",
-            "tracedecay_impact",
-            "tracedecay_node",
-            "tracedecay_files",
-            "tracedecay_retrieve",
-            "tracedecay_body",
-            "tracedecay_read",
-            "tracedecay_outline",
-            "tracedecay_signature_search",
-            "tracedecay_implementations",
-            "tracedecay_callers_for",
-            "tracedecay_call_chain",
-            "tracedecay_file_dependents",
-            "tracedecay_find_exact_symbol",
-            "tracedecay_by_qualified_name",
-            "tracedecay_signature",
-            "tracedecay_impls",
-            "tracedecay_derives",
-            "tracedecay_project_context",
-            "tracedecay_fact_store",
-            "tracedecay_memory_status",
-            "tracedecay_message_search",
-        ];
-
-        for tool_name in allowlisted_tool_names {
-            assert!(
-                tool_accepts_registered_project_selector(tool_name),
-                "{tool_name} should dispatch through a selected registered project"
-            );
-        }
-
-        let definitions = get_tool_definitions()
-            .into_iter()
-            .map(|tool| (tool.name, tool.input_schema))
-            .collect::<std::collections::BTreeMap<_, _>>();
-        for tool_name in allowlisted_tool_names {
-            let properties = &definitions[tool_name]["properties"];
-            assert!(
-                ["project_selector", "project_id", "project_path", "path"]
+        for tool in get_tool_definitions() {
+            let properties = &tool.input_schema["properties"];
+            let schema_has_registered_project_selector =
+                ["project_selector", "project_id", "project_path"]
                     .iter()
-                    .any(|selector_key| properties.get(*selector_key).is_some()),
-                "{tool_name} should advertise at least one registered project selector because its dispatcher accepts registered project selectors"
+                    .any(|selector_key| properties.get(*selector_key).is_some());
+            assert_eq!(
+                tool_accepts_registered_project_selector(&tool.name),
+                schema_has_registered_project_selector,
+                "{} registered-project selector schema and dispatch policy should stay in lockstep",
+                tool.name
             );
         }
 
@@ -1000,9 +720,10 @@ mod tests {
 
         let mut target_source = String::new();
         for i in 0..420 {
-            target_source.push_str(&format!(
-                "pub fn selected_project_handle_marker_{i:03}() -> &'static str {{ \"marker-{i:03}\" }}\n"
-            ));
+            let _ = writeln!(
+                target_source,
+                "pub fn selected_project_handle_marker_{i:03}() -> &'static str {{ \"marker-{i:03}\" }}"
+            );
         }
         fs::write(target_project.join("src/lib.rs"), target_source).unwrap();
 
@@ -1081,15 +802,11 @@ mod tests {
     #[test]
     fn test_tool_definitions_complete() {
         let tools = get_tool_definitions();
-        // ast_grep_rewrite is conditionally registered based on whether the
-        // external `ast-grep` binary is on PATH — agents should never see a
-        // tool that will instantly fail. The count and the per-tool checks
-        // below adapt to the host's capability set.
-        let expected_total = if super::super::definitions::ast_grep_available() {
-            94
-        } else {
-            93
-        };
+        // ast-grep-backed tools are conditionally registered based on the
+        // host CLI capabilities they need; agents should never see a tool that
+        // will instantly fail. The count and per-tool checks below adapt to
+        // the host's capability set.
+        let expected_total = 93 + usize::from(super::super::definitions::ast_grep_available());
         assert_eq!(tools.len(), expected_total);
 
         let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
@@ -1298,113 +1015,10 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate_short_response() {
-        let short = "hello world";
-        assert_eq!(truncate_response(short), short);
-    }
-
-    #[test]
-    fn test_truncate_long_response() {
-        let long = "x".repeat(20_000);
-        let result = truncate_response(&long);
-        assert!(result.len() < 20_000);
-        assert!(result.contains("[... truncated at 15000 chars]"));
-    }
-
-    #[test]
-    fn test_truncated_json_envelope_includes_handle() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let long = format!(
-            "{{\"items\":[{}]}}",
-            (0..3_000)
-                .map(|i| format!("{{\"id\":{i},\"name\":\"item-{i}\"}}"))
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-
-        let result = truncated_json_envelope_with_handle(Some(dir.path()), &long);
-        let parsed: Value = serde_json::from_str(&result).unwrap();
-
-        assert_eq!(parsed["truncated"], true);
-        assert_eq!(parsed["retrieve_tool"], "tracedecay_retrieve");
-        assert!(parsed.get("retrieve_handle").is_none());
-        let handle = parsed["handle"].as_str().unwrap();
-        assert!(handle.starts_with("rh_"));
-
-        let stored = crate::mcp::response_handles::retrieve_response_handle(
-            dir.path(),
-            handle,
-            crate::tracedecay::current_timestamp(),
-        )
-        .unwrap();
-        match stored {
-            ResponseHandleLookup::Found(record) => assert_eq!(record.content, long),
-            other => panic!("stored response should be retrievable, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_truncated_json_envelope_reports_store_failure() {
-        let dir = tempfile::TempDir::new().unwrap();
-        std::fs::create_dir_all(dir.path().join(".tracedecay")).unwrap();
-        std::fs::write(
-            dir.path().join(".tracedecay/enrollment.json"),
-            r#"{"project_id":"../invalid","storage_mode":"profile_sharded"}"#,
-        )
-        .unwrap();
-        let long = format!(
-            "{{\"items\":[{}]}}",
-            (0..3_000)
-                .map(|i| format!("{{\"id\":{i},\"name\":\"item-{i}\"}}"))
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-
-        let result = truncated_json_envelope_with_handle(Some(dir.path()), &long);
-        let parsed: Value = serde_json::from_str(&result).unwrap();
-
-        assert_eq!(parsed["truncated"], true);
-        assert_eq!(parsed["handle_available"], false);
-        assert!(parsed.get("handle").is_none());
-        assert_eq!(
-            parsed["handle_status"]["reason_code"],
-            "handle_store_failed"
-        );
-        assert!(parsed["handle_status"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("could not be cached locally"));
-    }
-
-    #[test]
     fn test_tool_definitions_serializable() {
         let tools = get_tool_definitions();
         let json = serde_json::to_string(&tools).unwrap();
         assert!(json.contains("tracedecay_search"));
         assert!(json.contains("tracedecay_status"));
-    }
-
-    #[test]
-    fn test_require_node_id_canonical() {
-        let args = json!({"node_id": "fn:abc123"});
-        assert_eq!(require_node_id(&args).unwrap(), "fn:abc123");
-    }
-
-    #[test]
-    fn test_require_node_id_alias() {
-        let args = json!({"id": "trait:def456"});
-        assert_eq!(require_node_id(&args).unwrap(), "trait:def456");
-    }
-
-    #[test]
-    fn test_require_node_id_prefers_canonical() {
-        let args = json!({"node_id": "fn:canonical", "id": "fn:alias"});
-        assert_eq!(require_node_id(&args).unwrap(), "fn:canonical");
-    }
-
-    #[test]
-    fn test_require_node_id_missing() {
-        let args = json!({"query": "something"});
-        assert!(require_node_id(&args).is_err());
     }
 }

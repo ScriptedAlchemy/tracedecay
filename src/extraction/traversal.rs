@@ -11,6 +11,18 @@ pub(crate) fn has_direct_child_kind(node: TsNode<'_>, kind: &str) -> bool {
     find_direct_child_by_kind(node, kind).is_some()
 }
 
+/// Visits each direct child in source order.
+///
+/// This keeps the raw tree-sitter cursor loop in one place so extractors that
+/// only need to recurse into direct children can share the traversal behavior.
+#[allow(dead_code)]
+pub(crate) fn visit_children<'tree>(node: TsNode<'tree>, mut visit: impl FnMut(TsNode<'tree>)) {
+    visit_children_while(node, |child| {
+        visit(child);
+        true
+    });
+}
+
 /// Returns the first direct child whose tree-sitter kind exactly matches
 /// `kind`.
 ///
@@ -22,20 +34,16 @@ pub(crate) fn find_direct_child_by_kind<'tree>(
     node: TsNode<'tree>,
     kind: &str,
 ) -> Option<TsNode<'tree>> {
-    let mut cursor = node.walk();
-    if cursor.goto_first_child() {
-        loop {
-            let child = cursor.node();
-            if child.kind() == kind {
-                return Some(child);
-            }
-            if !cursor.goto_next_sibling() {
-                break;
-            }
+    let mut found = None;
+    visit_children_while(node, |child| {
+        if child.kind() == kind {
+            found = Some(child);
+            return false;
         }
-    }
+        true
+    });
 
-    None
+    found
 }
 
 /// Returns the first descendant whose tree-sitter kind exactly matches `kind`.
@@ -48,29 +56,43 @@ pub(crate) fn find_descendant_by_kind<'tree>(
     node: TsNode<'tree>,
     kind: &str,
 ) -> Option<TsNode<'tree>> {
+    let mut found = None;
+    visit_children_while(node, |child| {
+        if child.kind() == kind {
+            found = Some(child);
+            return false;
+        }
+        if let Some(descendant) = find_descendant_by_kind(child, kind) {
+            found = Some(descendant);
+            return false;
+        }
+        true
+    });
+
+    found
+}
+
+fn visit_children_while<'tree>(node: TsNode<'tree>, mut visit: impl FnMut(TsNode<'tree>) -> bool) {
     let mut cursor = node.walk();
     if cursor.goto_first_child() {
         loop {
             let child = cursor.node();
-            if child.kind() == kind {
-                return Some(child);
-            }
-            if let Some(found) = find_descendant_by_kind(child, kind) {
-                return Some(found);
+            if !visit(child) {
+                break;
             }
             if !cursor.goto_next_sibling() {
                 break;
             }
         }
     }
-
-    None
 }
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
-    use super::{find_descendant_by_kind, find_direct_child_by_kind, has_direct_child_kind};
+    use super::{
+        find_descendant_by_kind, find_direct_child_by_kind, has_direct_child_kind, visit_children,
+    };
     use crate::extraction::ts_provider;
     use tree_sitter::{Node as TsNode, Parser};
 
@@ -111,5 +133,24 @@ mod tests {
 
         assert!(has_direct_child_kind(function, "function_declarator"));
         assert!(!has_direct_child_kind(function, "identifier"));
+    }
+
+    #[test]
+    fn visits_direct_children_in_source_order() {
+        let function = parse_c_function("int answer(void) { return 42; }");
+        let mut child_kinds = Vec::new();
+
+        visit_children(function, |child| {
+            child_kinds.push(child.kind().to_owned());
+        });
+
+        assert_eq!(
+            child_kinds,
+            [
+                "primitive_type",
+                "function_declarator",
+                "compound_statement"
+            ]
+        );
     }
 }

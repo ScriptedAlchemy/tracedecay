@@ -2,13 +2,13 @@
 //! `changelog`, `branch_list`, `branch_search`, `branch_diff`, `affected`, and
 //! git helper functions.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde_json::{json, Value};
 
-use super::super::render;
+use super::super::render::{self, truncated_json_envelope_with_handle};
 use super::super::ToolResult;
-use super::{truncated_json_envelope_with_handle, unique_file_paths};
+use super::support::unique_file_paths;
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
@@ -39,10 +39,8 @@ fn git_error_result(cg: &TraceDecay, operation: &str, message: &str) -> ToolResu
     }
 }
 
-/// Handles `tracedecay_affected` tool calls.
-pub(super) async fn handle_affected(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
-    let files: Vec<String> = args
-        .get("files")
+fn require_string_array_arg(args: &Value, name: &str) -> Result<Vec<String>> {
+    args.get(name)
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
@@ -50,33 +48,41 @@ pub(super) async fn handle_affected(cg: &TraceDecay, args: Value) -> Result<Tool
                 .collect()
         })
         .ok_or_else(|| TraceDecayError::Config {
-            message: "missing required parameter: files (array of strings)".to_string(),
-        })?;
+            message: format!("missing required parameter: {name} (array of strings)"),
+        })
+}
 
-    let max_depth = args
-        .get("depth")
+fn clamped_depth_arg(args: &Value, name: &str, default: usize, max: usize) -> usize {
+    args.get(name)
         .and_then(serde_json::Value::as_u64)
-        .map_or(5, |v| v.min(10) as usize);
+        .map_or(default, |v| v.min(max as u64) as usize)
+}
 
-    let custom_filter = args.get("filter").and_then(|v| v.as_str());
-    let custom_glob = custom_filter.and_then(|p| glob::Pattern::new(p).ok());
+fn matches_test_file(
+    path: &str,
+    custom_glob: Option<&glob::Pattern>,
+    files_with_inline_tests: &HashSet<String>,
+) -> bool {
+    if let Some(glob) = custom_glob {
+        glob.matches(path)
+    } else {
+        crate::tracedecay::is_test_file(path) || files_with_inline_tests.contains(path)
+    }
+}
 
-    // Pre-compute files with inline test modules for test detection.
-    let files_with_inline_tests = cg.get_files_with_test_annotations().await?;
-    let matches_test = |path: &str| -> bool {
-        if let Some(ref g) = custom_glob {
-            g.matches(path)
-        } else {
-            crate::tracedecay::is_test_file(path) || files_with_inline_tests.contains(path)
-        }
-    };
-
+async fn collect_affected_test_files(
+    cg: &TraceDecay,
+    files: &[String],
+    max_depth: usize,
+    custom_glob: Option<&glob::Pattern>,
+    files_with_inline_tests: &HashSet<String>,
+) -> Result<HashSet<String>> {
     let mut affected: HashSet<String> = HashSet::new();
     let mut visited: HashSet<String> = HashSet::new();
-    let mut queue: std::collections::VecDeque<(String, usize)> = std::collections::VecDeque::new();
+    let mut queue: VecDeque<(String, usize)> = VecDeque::new();
 
-    for file in &files {
-        if matches_test(file) {
+    for file in files {
+        if matches_test_file(file, custom_glob, files_with_inline_tests) {
             affected.insert(file.clone());
         }
         if visited.insert(file.clone()) {
@@ -93,7 +99,7 @@ pub(super) async fn handle_affected(cg: &TraceDecay, args: Value) -> Result<Tool
             if !visited.insert(dep.clone()) {
                 continue;
             }
-            if matches_test(&dep) {
+            if matches_test_file(&dep, custom_glob, files_with_inline_tests) {
                 affected.insert(dep.clone());
             } else {
                 queue.push_back((dep, depth + 1));
@@ -101,10 +107,31 @@ pub(super) async fn handle_affected(cg: &TraceDecay, args: Value) -> Result<Tool
         }
     }
 
+    Ok(affected)
+}
+
+/// Handles `tracedecay_affected` tool calls.
+pub(super) async fn handle_affected(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+    let files = require_string_array_arg(&args, "files")?;
+    let max_depth = clamped_depth_arg(&args, "depth", 5, 10);
+
+    let custom_filter = args.get("filter").and_then(|v| v.as_str());
+    let custom_glob = custom_filter.and_then(|p| glob::Pattern::new(p).ok());
+
+    let files_with_inline_tests = cg.get_files_with_test_annotations().await?;
+    let affected = collect_affected_test_files(
+        cg,
+        &files,
+        max_depth,
+        custom_glob.as_ref(),
+        &files_with_inline_tests,
+    )
+    .await?;
+
     let mut result: Vec<String> = affected.into_iter().collect();
     result.sort();
 
-    let touched_files = result.clone();
+    let touched_files = unique_file_paths(result.iter().map(std::string::String::as_str));
     let output = json!({
         "changed_files": files,
         "affected_tests": result,
@@ -128,22 +155,8 @@ pub(super) async fn handle_diff_context(cg: &TraceDecay, args: Value) -> Result<
         args.is_object(),
         "handle_diff_context expects an object argument"
     );
-    let files: Vec<String> = args
-        .get("files")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(std::string::ToString::to_string))
-                .collect()
-        })
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "missing required parameter: files (array of strings)".to_string(),
-        })?;
-
-    let depth = args
-        .get("depth")
-        .and_then(serde_json::Value::as_u64)
-        .map_or(2, |v| v.min(10) as usize);
+    let files = require_string_array_arg(&args, "files")?;
+    let depth = clamped_depth_arg(&args, "depth", 2, 10);
 
     let mut modified_symbols: Vec<Value> = Vec::new();
     let mut modified_seen: HashSet<String> = HashSet::new();
@@ -155,13 +168,7 @@ pub(super) async fn handle_diff_context(cg: &TraceDecay, args: Value) -> Result<
     // synthesising the list from a directory walk that double-counts symlinked
     // or canonicalised entries. Dedup early so downstream loops don't emit
     // the same node N times for the same path.
-    let files: Vec<String> = {
-        let mut seen: HashSet<String> = HashSet::new();
-        files
-            .into_iter()
-            .filter(|f| seen.insert(f.clone()))
-            .collect()
-    };
+    let files = unique_file_paths(files.iter().map(std::string::String::as_str));
 
     // Pre-compute files containing inline test modules.
     let files_with_inline_tests = cg.get_files_with_test_annotations().await?;
@@ -219,33 +226,9 @@ pub(super) async fn handle_diff_context(cg: &TraceDecay, args: Value) -> Result<
         }
     }
 
-    // Also run affected-tests BFS at file level
-    let mut visited: HashSet<String> = HashSet::new();
-    let mut queue: std::collections::VecDeque<(String, usize)> = std::collections::VecDeque::new();
-    for file in &files {
-        if has_tests(file) {
-            affected_tests.insert(file.clone());
-        }
-        if visited.insert(file.clone()) {
-            queue.push_back((file.clone(), 0));
-        }
-    }
-    while let Some((file, d)) = queue.pop_front() {
-        if d >= depth {
-            continue;
-        }
-        let dependents = cg.get_file_dependents(&file).await?;
-        for dep in dependents {
-            if !visited.insert(dep.clone()) {
-                continue;
-            }
-            if has_tests(&dep) {
-                affected_tests.insert(dep.clone());
-            } else {
-                queue.push_back((dep, d + 1));
-            }
-        }
-    }
+    affected_tests.extend(
+        collect_affected_test_files(cg, &files, depth, None, &files_with_inline_tests).await?,
+    );
 
     let mut tests_sorted: Vec<String> = affected_tests.into_iter().collect();
     tests_sorted.sort();

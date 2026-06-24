@@ -11,6 +11,7 @@
 # Prerequisites:
 #   - tracedecay binary on PATH (cargo install or brew install)
 #   - jq installed (brew install jq)
+#   - cargo installed if ast-grep needs to be installed or upgraded
 #   - Claude Code installed
 
 set -euo pipefail
@@ -36,6 +37,56 @@ if ! command -v jq &>/dev/null; then
 fi
 
 TRACEDECAY_BIN="$(command -v tracedecay)"
+
+AST_GREP_MIN_VERSION="0.44.0"
+
+version_at_least() {
+    local current="$1"
+    local required="$2"
+    awk -v current="$current" -v required="$required" '
+      BEGIN {
+        split(current, c, ".")
+        split(required, r, ".")
+        for (i = 1; i <= 3; i++) {
+          cv = c[i] + 0
+          rv = r[i] + 0
+          if (cv > rv) exit 0
+          if (cv < rv) exit 1
+        }
+        exit 0
+      }
+    '
+}
+
+ast_grep_version() {
+    ast-grep --version 2>/dev/null | awk '{print $2}'
+}
+
+ensure_ast_grep() {
+    local current=""
+    if command -v ast-grep &>/dev/null; then
+        current="$(ast_grep_version)"
+        if [ -n "$current" ] && version_at_least "$current" "$AST_GREP_MIN_VERSION"; then
+            echo "ast-grep $current already installed"
+            return
+        fi
+        echo "ast-grep ${current:-unknown} is older than required $AST_GREP_MIN_VERSION; upgrading"
+    else
+        echo "ast-grep not found; installing $AST_GREP_MIN_VERSION"
+    fi
+
+    if ! command -v cargo &>/dev/null; then
+        echo "Error: cargo is required to install ast-grep $AST_GREP_MIN_VERSION" >&2
+        echo "Install ast-grep manually with one of:" >&2
+        echo "  cargo install ast-grep --locked --version $AST_GREP_MIN_VERSION" >&2
+        echo "  npm install --global @ast-grep/cli@$AST_GREP_MIN_VERSION" >&2
+        exit 1
+    fi
+
+    cargo install ast-grep --locked --version "$AST_GREP_MIN_VERSION"
+}
+
+ensure_ast_grep
 
 # 1. Install hook script
 mkdir -p "$HOOKS_DIR"

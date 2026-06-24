@@ -28,7 +28,7 @@ use crate::types::{Node, NodeKind};
 
 use super::super::render;
 use super::super::ToolResult;
-use super::effective_path;
+use super::support::effective_path;
 
 /// `tracedecay_redundancy` handler.
 pub(super) async fn handle_redundancy(
@@ -36,27 +36,10 @@ pub(super) async fn handle_redundancy(
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
-    let path_prefix = effective_path(&args, scope_prefix);
-    let min_lines = args
-        .get("min_lines")
-        .and_then(Value::as_u64)
-        .map_or(8u32, |v| u32::try_from(v).unwrap_or(8));
-    let max_pairs = args
-        .get("max_pairs")
-        .and_then(Value::as_u64)
-        .map_or(20usize, |v| usize::try_from(v.min(500)).unwrap_or(20));
-    let threshold = args
-        .get("similarity_threshold")
-        .and_then(Value::as_f64)
-        .unwrap_or(0.6)
-        .clamp(0.0, 1.0);
-    let include_naming = args
-        .get("include_naming_only")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let options = redundancy_options(&args, scope_prefix);
 
     // 1. Collect candidate function nodes.
-    let nodes = collect_candidates(cg, path_prefix, min_lines).await?;
+    let nodes = collect_candidates(cg, options.path_prefix, options.min_lines).await?;
     let total_candidates = nodes.len();
 
     // 2. Ensure each has a fresh fingerprint (cache by source hash).
@@ -64,23 +47,15 @@ pub(super) async fn handle_redundancy(
     let scanned = fingerprints.len();
 
     // 3. Bucket by token count to keep pairwise comparison sub-quadratic.
-    let pairs = find_redundant_pairs(&nodes, &fingerprints, threshold, include_naming, max_pairs);
+    let pairs = find_redundant_pairs(
+        &nodes,
+        &fingerprints,
+        options.threshold,
+        options.include_naming,
+        options.max_pairs,
+    );
 
-    let pair_count = pairs.len();
-    let output = json!({
-        "candidates": total_candidates,
-        "scanned": scanned,
-        "skipped_for_size": total_candidates.saturating_sub(scanned),
-        "pair_count": pair_count,
-        "pairs": pairs,
-        "ranked_by": "similarity desc",
-        "scope": path_prefix.unwrap_or("(whole project)"),
-        "thresholds": {
-            "min_lines": min_lines,
-            "similarity_threshold": threshold,
-            "include_naming_only": include_naming,
-        },
-    });
+    let output = redundancy_output(&options, total_candidates, scanned, &pairs);
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render::generic_md(&output)
     });
@@ -89,6 +64,60 @@ pub(super) async fn handle_redundancy(
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
+    })
+}
+
+struct RedundancyOptions<'a> {
+    path_prefix: Option<&'a str>,
+    min_lines: u32,
+    max_pairs: usize,
+    threshold: f64,
+    include_naming: bool,
+}
+
+fn redundancy_options<'a>(args: &'a Value, scope_prefix: Option<&'a str>) -> RedundancyOptions<'a> {
+    RedundancyOptions {
+        path_prefix: effective_path(args, scope_prefix),
+        min_lines: args
+            .get("min_lines")
+            .and_then(Value::as_u64)
+            .map_or(8u32, |v| u32::try_from(v).unwrap_or(8)),
+        max_pairs: args
+            .get("max_pairs")
+            .and_then(Value::as_u64)
+            .map_or(20usize, |v| usize::try_from(v.min(500)).unwrap_or(20)),
+        threshold: args
+            .get("similarity_threshold")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.6)
+            .clamp(0.0, 1.0),
+        include_naming: args
+            .get("include_naming_only")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    }
+}
+
+fn redundancy_output(
+    options: &RedundancyOptions<'_>,
+    total_candidates: usize,
+    scanned: usize,
+    pairs: &[Value],
+) -> Value {
+    let pair_count = pairs.len();
+    json!({
+        "candidates": total_candidates,
+        "scanned": scanned,
+        "skipped_for_size": total_candidates.saturating_sub(scanned),
+        "pair_count": pair_count,
+        "pairs": pairs,
+        "ranked_by": "similarity desc",
+        "scope": options.path_prefix.unwrap_or("(whole project)"),
+        "thresholds": {
+            "min_lines": options.min_lines,
+            "similarity_threshold": options.threshold,
+            "include_naming_only": options.include_naming,
+        },
     })
 }
 
@@ -268,6 +297,10 @@ fn extractor_to_language_key(name: &str) -> Option<&'static str> {
 /// slice. Node `start_line` / `end_line` are stored as raw tree-sitter
 /// row indices (see `info::extract_lines`).
 fn body_slice(source: &str, start_line: u32, end_line: u32) -> &str {
+    line_byte_range(source, start_line, end_line).map_or("", |range| &source[range])
+}
+
+fn line_byte_range(source: &str, start_line: u32, end_line: u32) -> Option<std::ops::Range<usize>> {
     let start = start_line as usize;
     let end = (end_line as usize).saturating_add(1);
     let mut offset = 0usize;
@@ -283,11 +316,11 @@ fn body_slice(source: &str, start_line: u32, end_line: u32) -> &str {
         }
         offset += line.len();
     }
-    let Some(s) = start_byte else { return "" };
+    let s = start_byte?;
     if end_byte <= s || end_byte > source.len() {
-        return "";
+        return None;
     }
-    &source[s..end_byte]
+    Some(s..end_byte)
 }
 
 /// Cheap body hash used for cache invalidation. Matches the format used
@@ -309,6 +342,17 @@ fn quick_body_hash(body: &str) -> String {
 // 3. Pairwise comparison + ranking
 // ---------------------------------------------------------------------------
 
+type ScopedFingerprint<'a> = (&'a Node, &'a Fingerprint);
+
+struct RedundantPair<'a> {
+    score: f64,
+    kind: &'static str,
+    node_a: &'a Node,
+    node_b: &'a Node,
+    fp_a: &'a Fingerprint,
+    fp_b: &'a Fingerprint,
+}
+
 fn find_redundant_pairs(
     nodes: &[Node],
     fingerprints: &HashMap<String, Fingerprint>,
@@ -316,21 +360,13 @@ fn find_redundant_pairs(
     include_naming: bool,
     max_pairs: usize,
 ) -> Vec<Value> {
-    // Pair each node with its fingerprint (skip nodes that failed to
-    // produce one).
-    let scope: Vec<(&Node, &Fingerprint)> = nodes
-        .iter()
-        .filter_map(|n| fingerprints.get(&n.id).map(|fp| (n, fp)))
-        .collect();
-
     // Sort by body_tokens so the size-window check is a linear scan.
-    let mut sorted = scope;
+    let mut sorted = scoped_fingerprints(nodes, fingerprints);
     sorted.sort_by_key(|(_, fp)| fp.body_tokens);
 
-    let mut found: Vec<(f64, &str, &Node, &Node, &Fingerprint, &Fingerprint)> = Vec::new();
+    let mut found = Vec::new();
     for (i, (node_a, fp_a)) in sorted.iter().enumerate() {
-        let lo = (fp_a.body_tokens as f64 * 0.75).floor() as usize;
-        let hi = (fp_a.body_tokens as f64 * 1.25).ceil() as usize;
+        let (lo, hi) = body_token_window(fp_a.body_tokens);
         for (node_b, fp_b) in sorted.iter().skip(i + 1) {
             if fp_b.body_tokens > hi {
                 break; // sorted, no need to scan further
@@ -338,52 +374,94 @@ fn find_redundant_pairs(
             if fp_b.body_tokens < lo {
                 continue;
             }
-            let score = composite_similarity(fp_a, fp_b);
-            if score < threshold {
-                continue;
+            if let Some(pair) =
+                redundant_pair(node_a, fp_a, node_b, fp_b, threshold, include_naming)
+            {
+                found.push(pair);
             }
-            let kind = overlap_kind(fp_a, fp_b);
-            if !include_naming && kind == "naming" {
-                continue;
-            }
-            found.push((score, kind, node_a, node_b, fp_a, fp_b));
         }
     }
 
-    found.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    found.sort_by(|a: &RedundantPair<'_>, b: &RedundantPair<'_>| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     found.truncate(max_pairs);
 
-    found
-        .into_iter()
-        .map(|(score, kind, na, nb, fp_a, fp_b)| {
-            let shingle_jaccard = jaccard_similarity(&fp_a.shingles, &fp_b.shingles);
-            let severity = severity_bucket(score, kind);
-            json!({
-                "similarity": (score * 10000.0).round() / 10000.0,
-                "severity": severity,
-                "overlap_kind": kind,
-                "a": {
-                    "file": na.file_path,
-                    "line": na.start_line,
-                    "name": na.name,
-                    "id": na.id,
-                },
-                "b": {
-                    "file": nb.file_path,
-                    "line": nb.start_line,
-                    "name": nb.name,
-                    "id": nb.id,
-                },
-                "signals": {
-                    "ast_match": fp_a.ast_hash == fp_b.ast_hash,
-                    "cfg_match": fp_a.cfg_hash == fp_b.cfg_hash,
-                    "call_seq_match": fp_a.call_seq_hash == fp_b.call_seq_hash,
-                    "shingle_jaccard": (shingle_jaccard * 10000.0).round() / 10000.0,
-                    "body_tokens": [fp_a.body_tokens, fp_b.body_tokens],
-                },
-            })
-        })
+    found.iter().map(redundant_pair_json).collect()
+}
+
+fn scoped_fingerprints<'a>(
+    nodes: &'a [Node],
+    fingerprints: &'a HashMap<String, Fingerprint>,
+) -> Vec<ScopedFingerprint<'a>> {
+    nodes
+        .iter()
+        .filter_map(|n| fingerprints.get(&n.id).map(|fp| (n, fp)))
         .collect()
+}
+
+fn body_token_window(body_tokens: usize) -> (usize, usize) {
+    (
+        (body_tokens as f64 * 0.75).floor() as usize,
+        (body_tokens as f64 * 1.25).ceil() as usize,
+    )
+}
+
+fn redundant_pair<'a>(
+    node_a: &'a Node,
+    fp_a: &'a Fingerprint,
+    node_b: &'a Node,
+    fp_b: &'a Fingerprint,
+    threshold: f64,
+    include_naming: bool,
+) -> Option<RedundantPair<'a>> {
+    let score = composite_similarity(fp_a, fp_b);
+    if score < threshold {
+        return None;
+    }
+    let kind = overlap_kind(fp_a, fp_b);
+    if !include_naming && kind == "naming" {
+        return None;
+    }
+    Some(RedundantPair {
+        score,
+        kind,
+        node_a,
+        node_b,
+        fp_a,
+        fp_b,
+    })
+}
+
+fn redundant_pair_json(pair: &RedundantPair<'_>) -> Value {
+    let shingle_jaccard = jaccard_similarity(&pair.fp_a.shingles, &pair.fp_b.shingles);
+    let severity = severity_bucket(pair.score, pair.kind);
+    json!({
+        "similarity": (pair.score * 10000.0).round() / 10000.0,
+        "severity": severity,
+        "overlap_kind": pair.kind,
+        "a": {
+            "file": pair.node_a.file_path,
+            "line": pair.node_a.start_line,
+            "name": pair.node_a.name,
+            "id": pair.node_a.id,
+        },
+        "b": {
+            "file": pair.node_b.file_path,
+            "line": pair.node_b.start_line,
+            "name": pair.node_b.name,
+            "id": pair.node_b.id,
+        },
+        "signals": {
+            "ast_match": pair.fp_a.ast_hash == pair.fp_b.ast_hash,
+            "cfg_match": pair.fp_a.cfg_hash == pair.fp_b.cfg_hash,
+            "call_seq_match": pair.fp_a.call_seq_hash == pair.fp_b.call_seq_hash,
+            "shingle_jaccard": (shingle_jaccard * 10000.0).round() / 10000.0,
+            "body_tokens": [pair.fp_a.body_tokens, pair.fp_b.body_tokens],
+        },
+    })
 }
 
 #[cfg(test)]

@@ -206,12 +206,7 @@ fn assistant_output_is_high_repetition(content: &str) -> bool {
     let normalized = content.split_whitespace().collect::<Vec<_>>().join(" ");
     let tokens = word_tokens(&normalized);
     if tokens.len() < QUARANTINED_ASSISTANT_MIN_TOKENS {
-        return tokens.len() >= 20
-            && normalized
-                .chars()
-                .collect::<std::collections::BTreeSet<_>>()
-                .len()
-                <= 12;
+        return tokens.len() >= 20 && distinct_char_count(&normalized) <= 12;
     }
 
     let mut counts = HashMap::<&str, usize>::new();

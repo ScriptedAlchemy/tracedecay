@@ -114,9 +114,22 @@ grep category — confirming it as a recurring opening move on essentially any l
 { "file": "src/tracedecay.rs", "kinds": ["function", "struct", "impl"] }
 ```
 
+**Backend:** The outline uses the optional external `ast-grep` CLI capability,
+the same dependency family as structural refactor tools such as
+`tracedecay_ast_grep_rewrite`. It requires `ast-grep` >= 0.44 on `PATH` because
+outline support depends on the CLI's `outline` command. There is no
+backend-selection argument.
+
 **Returns:** A flat list of `{kind, name, line, visibility}` for every top-level symbol in the
-file, sorted by line. No code bodies — just the map. Response should be cheap (graph lookup,
-no snippet extraction).
+file, sorted by line. No code bodies — just the map. The response should also preserve the
+DB-backed TraceDecay symbols for the same file in the same payload, so callers get the fresh
+CLI outline without losing indexed graph symbols, ids, or qualified names needed for
+follow-up graph calls.
+
+**Install guidance:** `tracedecay doctor` should report when `ast-grep` is
+missing or older than 0.44. After installing or updating `ast-grep`, rerun
+`tracedecay install` or `tracedecay update-plugin` as appropriate so agent
+integrations refresh their generated tool surfaces and guidance.
 
 **Value:** Turns "where is X defined in this file?" from a Read + manual scan into a single
 call. Also useful as a pre-flight before `tracedecay_context` — orient first, then zoom.
@@ -418,7 +431,7 @@ scan, where measurable.
 | `tracedecay_body` | ✅ shipped | 1571 targeted Reads + 52 sed -n | Low | **High** |
 | `tracedecay_todos` | ✅ shipped | scattered across projects | Low | Medium |
 | `tracedecay_diagnostics` | proposed | 777 cargo invocations | High (compiler integration) | **Very high** |
-| `tracedecay_outline` | proposed | 618 symbol-skeleton greps | Very low (file → node list) | **High** |
+| `tracedecay_outline` | proposed | 618 symbol-skeleton greps | Low (optional ast-grep CLI outline + DB symbols) | **High** |
 | `tracedecay_unsafe_patterns` | proposed | recurring in review/audit | Low (AST predicates) | High |
 | `tracedecay_implementations` | proposed | tracedecay 22ff55cd, 67f09223 | Low (method edges) | High |
 | `tracedecay_signature_search` | proposed | smaller volume, high token cost | Medium (AST matcher) | High |
@@ -432,8 +445,9 @@ scan, where measurable.
 
 **Build order recommendation (revised after telemetry scan):**
 
-1. `tracedecay_outline` — trivial query, addresses the single largest grep category (618 hits).
-   One afternoon.
+1. `tracedecay_outline` — optional `ast-grep` CLI outline with DB-backed TraceDecay symbols
+   preserved in the same payload; requires `ast-grep` >= 0.44 and addresses the single
+   largest grep category (618 hits). One afternoon.
 2. `tracedecay_unsafe_patterns` — AST predicates on top of the existing matcher. Replaces a
    recurring review-time grep family. Half-day.
 3. `tracedecay_diagnostics` — biggest single Bash : tracedecay gap. Highest impact even though

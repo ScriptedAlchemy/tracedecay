@@ -5,22 +5,28 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use super::handlers::{truncate_response, truncated_json_envelope_with_handle};
+use crate::mcp::response_handles::{
+    note_response_handle_store_skipped_no_project_root, observe_response_truncation,
+    store_response_handle, ResponseHandleRecord, RESPONSE_HANDLE_TTL_SECS, RESPONSE_RETRIEVE_TOOL,
+};
+use crate::tracedecay::current_timestamp;
+
+use super::MAX_RESPONSE_CHARS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutputFormat {
+enum OutputFormat {
     Markdown,
     Json,
 }
 
-pub fn parse_format(args: &Value) -> OutputFormat {
+fn parse_format(args: &Value) -> OutputFormat {
     match args.get("format").and_then(Value::as_str) {
         Some(v) if v.eq_ignore_ascii_case("json") => OutputFormat::Json,
         _ => OutputFormat::Markdown,
     }
 }
 
-pub fn finalize<F>(project_root: Option<&Path>, args: &Value, value: &Value, md: F) -> String
+pub(super) fn finalize<F>(project_root: Option<&Path>, args: &Value, value: &Value, md: F) -> String
 where
     F: FnOnce() -> String,
 {
@@ -34,65 +40,285 @@ where
             if text.is_empty() {
                 return text;
             }
-            truncate_response(&text)
+            truncated_markdown_with_handle(project_root, &text)
         }
     }
 }
 
-pub fn esc_cell(s: &str) -> String {
+/// Truncates a string to the maximum response character limit, appending
+/// a truncation notice if necessary.
+pub(super) fn truncate_response(s: &str) -> String {
+    debug_assert!(!s.is_empty(), "truncate_response called with empty string");
+    if s.len() <= MAX_RESPONSE_CHARS {
+        s.to_string()
+    } else {
+        let started = std::time::Instant::now();
+        let now = current_timestamp();
+        // Find a valid UTF-8 character boundary at or before MAX_RESPONSE_CHARS.
+        let mut end = MAX_RESPONSE_CHARS;
+        while !s.is_char_boundary(end) && end > 0 {
+            end -= 1;
+        }
+        let truncated = format!("{}\n\n[... truncated at {} chars]", &s[..end], end);
+        observe_response_truncation(
+            s.len(),
+            truncated.len(),
+            false,
+            now,
+            "not_available",
+            started.elapsed(),
+        );
+        truncated
+    }
+}
+
+/// Wraps oversized JSON text in a valid preview envelope. When a project root
+/// is available, stores the full original locally and includes a retrieval
+/// handle.
+///
+/// If local handle storage is unavailable or fails, the envelope still carries
+/// a preview but also includes explicit recovery metadata so clients can tell
+/// why no handle was emitted and what to retry.
+pub(super) fn truncated_json_envelope_with_handle(
+    project_root: Option<&Path>,
+    formatted: &str,
+) -> String {
+    if formatted.len() <= MAX_RESPONSE_CHARS {
+        return formatted.to_string();
+    }
+    let started = std::time::Instant::now();
+    let now = current_timestamp();
+    let handle = prepare_truncated_response_handle(project_root, formatted);
+    let mut end = formatted.len().min(MAX_RESPONSE_CHARS.saturating_sub(1024));
+    loop {
+        while end > 0 && !formatted.is_char_boundary(end) {
+            end -= 1;
+        }
+        let preview = &formatted[..end];
+        let mut envelope = serde_json::json!({
+            "truncated": true,
+            "original_chars": formatted.len(),
+            "preview_chars": preview.len(),
+            "preview": preview,
+        });
+        if let Some(object) = envelope.as_object_mut() {
+            if let Some(record) = &handle.record {
+                object.insert("handle".to_string(), serde_json::json!(record.handle));
+                object.insert(
+                    "retrieve_tool".to_string(),
+                    serde_json::json!(RESPONSE_RETRIEVE_TOOL),
+                );
+                object.insert(
+                    "retrieve_ttl_seconds".to_string(),
+                    serde_json::json!(RESPONSE_HANDLE_TTL_SECS),
+                );
+                object.insert(
+                    "retrieve_expires_at".to_string(),
+                    serde_json::json!(record.expires_at),
+                );
+                object.insert(
+                    "retrieve_instruction".to_string(),
+                    serde_json::json!(format!(
+                        "This response was truncated: `preview` contains only the first {} of {} characters. The full original response is stored locally in this project and expires at {} (TTL {} seconds). To recover it, call `{RESPONSE_RETRIEVE_TOOL}` with required argument `handle` set to `{}`. If the original tool call used a project selector (`project_id`, `project_path`, or `project_selector`), pass the same selector to `{RESPONSE_RETRIEVE_TOOL}` so the handle is looked up in the same project cache. Only call it if the missing details are needed to answer the user's request.",
+                        preview.len(),
+                        formatted.len(),
+                        record.expires_at,
+                        RESPONSE_HANDLE_TTL_SECS,
+                        record.handle
+                    )),
+                );
+            } else if let Some(status) = &handle.unavailable {
+                object.insert("handle_available".to_string(), serde_json::json!(false));
+                object.insert("handle_status".to_string(), status.clone());
+            }
+        }
+        let text = serde_json::to_string_pretty(&envelope).unwrap_or_default();
+        if text.len() <= MAX_RESPONSE_CHARS || end == 0 {
+            observe_response_truncation(
+                formatted.len(),
+                text.len(),
+                true,
+                now,
+                truncation_handle_status(project_root, &handle),
+                started.elapsed(),
+            );
+            return text;
+        }
+        end = end.saturating_sub(1024);
+    }
+}
+
+fn truncated_markdown_with_handle(project_root: Option<&Path>, text: &str) -> String {
+    if text.len() <= MAX_RESPONSE_CHARS {
+        return text.to_string();
+    }
+    let started = std::time::Instant::now();
+    let now = current_timestamp();
+    let handle = prepare_truncated_response_handle(project_root, text);
+    let mut end = text.len().min(MAX_RESPONSE_CHARS.saturating_sub(2048));
+    loop {
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let preview = &text[..end];
+        let rendered = render_markdown_truncation(preview, text.len(), &handle);
+        if rendered.len() <= MAX_RESPONSE_CHARS || end == 0 {
+            observe_response_truncation(
+                text.len(),
+                rendered.len(),
+                handle.record.is_some(),
+                now,
+                truncation_handle_status(project_root, &handle),
+                started.elapsed(),
+            );
+            return rendered;
+        }
+        end = end.saturating_sub(1024);
+    }
+}
+
+struct TruncatedResponseHandle {
+    record: Option<ResponseHandleRecord>,
+    unavailable: Option<Value>,
+}
+
+fn truncation_handle_status(
+    project_root: Option<&Path>,
+    handle: &TruncatedResponseHandle,
+) -> &'static str {
+    if handle.record.is_some() {
+        "stored"
+    } else if project_root.is_none() {
+        "no_project_root"
+    } else {
+        "store_failed"
+    }
+}
+
+fn prepare_truncated_response_handle(
+    project_root: Option<&Path>,
+    text: &str,
+) -> TruncatedResponseHandle {
+    if let Some(root) = project_root {
+        match store_response_handle(root, text, current_timestamp()) {
+            Ok(record) => TruncatedResponseHandle {
+                record: Some(record),
+                unavailable: None,
+            },
+            Err(err) => TruncatedResponseHandle {
+                record: None,
+                unavailable: Some(serde_json::json!({
+                    "reason_code": "handle_store_failed",
+                    "message": format!(
+                        "The full response could not be cached locally, so no retrieval handle is available: {err}"
+                    ),
+                    "retryable": true,
+                    "retry_instruction": "Fix the local project cache path or filesystem error, then re-run the original MCP tool to regenerate the full response and a fresh handle."
+                })),
+            },
+        }
+    } else {
+        note_response_handle_store_skipped_no_project_root();
+        TruncatedResponseHandle {
+            record: None,
+            unavailable: Some(serde_json::json!({
+                "reason_code": "handle_storage_unavailable",
+                "message": "This response was truncated in a context without a project-local cache path, so no retrieval handle could be created.",
+                "retryable": true,
+                "retry_instruction": "Re-run the original MCP tool from a project-scoped tracedecay session if you need a retrievable full response."
+            })),
+        }
+    }
+}
+
+fn render_markdown_truncation(
+    preview: &str,
+    original_chars: usize,
+    handle: &TruncatedResponseHandle,
+) -> String {
+    let mut rendered = String::new();
+    rendered.push_str("# Truncated Response\n\n");
+    let _ = writeln!(
+        rendered,
+        "Showing the first {} of {original_chars} characters.",
+        preview.len()
+    );
+    if let Some(record) = &handle.record {
+        let _ = writeln!(
+            rendered,
+            "Full response stored locally. Retrieve it with `{RESPONSE_RETRIEVE_TOOL}` using handle `{}` before {}.",
+            record.handle,
+            record.expires_at
+        );
+    } else if let Some(status) = &handle.unavailable {
+        let message = status
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("No retrieval handle is available.");
+        let _ = writeln!(rendered, "{message}");
+    }
+    rendered.push_str("\n## Preview\n\n");
+    rendered.push_str(preview);
+    if !preview.ends_with('\n') {
+        rendered.push('\n');
+    }
+    rendered
+}
+
+fn esc_cell(s: &str) -> String {
     s.replace('|', "\\|").replace(['\n', '\r'], " ")
 }
 
-pub fn field_str<'a>(v: &'a Value, key: &str) -> &'a str {
+pub(super) fn field_str<'a>(v: &'a Value, key: &str) -> &'a str {
     v.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
-pub fn field_i64(v: &Value, key: &str) -> i64 {
+pub(super) fn field_i64(v: &Value, key: &str) -> i64 {
     v.get(key).and_then(Value::as_i64).unwrap_or(0)
 }
 
 #[derive(Default)]
-pub struct Md {
+pub(super) struct Md {
     buf: String,
 }
 
 impl Md {
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self::default()
     }
 
-    pub fn heading(&mut self, level: u8, text: &str) -> &mut Self {
+    pub(super) fn heading(&mut self, level: u8, text: &str) -> &mut Self {
         let hashes = "#".repeat(level.clamp(1, 6) as usize);
         let _ = writeln!(self.buf, "{hashes} {text}");
         self
     }
 
-    pub fn field(&mut self, key: &str, value: &str) -> &mut Self {
+    pub(super) fn field(&mut self, key: &str, value: &str) -> &mut Self {
         let _ = writeln!(self.buf, "**{key}:** {value}");
         self
     }
 
-    pub fn line(&mut self, text: &str) -> &mut Self {
+    pub(super) fn line(&mut self, text: &str) -> &mut Self {
         let _ = writeln!(self.buf, "{text}");
         self
     }
 
-    pub fn bullet(&mut self, text: &str) -> &mut Self {
+    pub(super) fn bullet(&mut self, text: &str) -> &mut Self {
         let _ = writeln!(self.buf, "- {text}");
         self
     }
 
-    pub fn empty_note(&mut self, text: &str) -> &mut Self {
+    pub(super) fn empty_note(&mut self, text: &str) -> &mut Self {
         let _ = writeln!(self.buf, "_{text}_");
         self
     }
 
-    pub fn blank(&mut self) -> &mut Self {
+    pub(super) fn blank(&mut self) -> &mut Self {
         self.buf.push('\n');
         self
     }
 
-    pub fn table(&mut self, headers: &[&str], rows: &[Vec<String>]) -> &mut Self {
+    pub(super) fn table(&mut self, headers: &[&str], rows: &[Vec<String>]) -> &mut Self {
         if headers.is_empty() {
             return self;
         }
@@ -106,7 +332,7 @@ impl Md {
         self
     }
 
-    pub fn code(&mut self, lang: &str, body: &str) -> &mut Self {
+    pub(super) fn code(&mut self, lang: &str, body: &str) -> &mut Self {
         let _ = writeln!(self.buf, "```{lang}");
         self.buf.push_str(body);
         if !body.ends_with('\n') {
@@ -116,14 +342,14 @@ impl Md {
         self
     }
 
-    pub fn render(self) -> String {
+    pub(super) fn render(self) -> String {
         self.buf
     }
 }
 
 const GENERIC_MAX_DEPTH: u8 = 4;
 
-pub fn generic_md(value: &Value) -> String {
+pub(super) fn generic_md(value: &Value) -> String {
     let mut md = Md::new();
     render_value(&mut md, value, 2);
     let out = md.render();
@@ -239,6 +465,8 @@ fn render_object(md: &mut Md, map: &serde_json::Map<String, Value>, depth: u8) {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::mcp::response_handles::{retrieve_response_handle, ResponseHandleLookup};
+    use crate::tracedecay::current_timestamp;
     use serde_json::json;
 
     #[test]
@@ -278,6 +506,111 @@ mod tests {
         let value = json!({"a": 1});
         let out = finalize(None, &json!({}), &value, || "## Hi\n".to_string());
         assert_eq!(out, "## Hi\n");
+    }
+
+    #[test]
+    fn truncate_short_response() {
+        let short = "hello world";
+        assert_eq!(truncate_response(short), short);
+    }
+
+    #[test]
+    fn truncate_long_response() {
+        let long = "x".repeat(20_000);
+        let result = truncate_response(&long);
+        assert!(result.len() < 20_000);
+        assert!(result.contains("[... truncated at 15000 chars]"));
+    }
+
+    #[test]
+    fn truncated_json_envelope_includes_handle() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let long = format!(
+            "{{\"items\":[{}]}}",
+            (0..3_000)
+                .map(|i| format!("{{\"id\":{i},\"name\":\"item-{i}\"}}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+
+        let result = truncated_json_envelope_with_handle(Some(dir.path()), &long);
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+
+        assert_eq!(parsed["truncated"], true);
+        assert_eq!(parsed["retrieve_tool"], "tracedecay_retrieve");
+        assert!(parsed.get("retrieve_handle").is_none());
+        let handle = parsed["handle"].as_str().unwrap();
+        assert!(handle.starts_with("rh_"));
+
+        let stored = retrieve_response_handle(dir.path(), handle, current_timestamp()).unwrap();
+        match stored {
+            ResponseHandleLookup::Found(record) => assert_eq!(record.content, long),
+            other => panic!("stored response should be retrievable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn truncated_markdown_includes_readable_handle_guidance() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let long = format!("# Scan\n\n{}", "- repeated finding\n".repeat(3_000));
+
+        let result = truncated_markdown_with_handle(Some(dir.path()), &long);
+
+        assert!(result.starts_with("# Truncated Response"));
+        assert!(result.contains("## Preview"));
+        assert!(result.contains("Full response stored locally"));
+        assert!(result.contains("tracedecay_retrieve"));
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&result).is_err(),
+            "markdown truncation should not render as a JSON envelope"
+        );
+        let Some(handle) = result
+            .split("handle `")
+            .nth(1)
+            .and_then(|tail| tail.split('`').next())
+        else {
+            panic!("markdown guidance should include handle");
+        };
+        assert!(handle.starts_with("rh_"));
+
+        let stored = retrieve_response_handle(dir.path(), handle, current_timestamp()).unwrap();
+        match stored {
+            ResponseHandleLookup::Found(record) => assert_eq!(record.content, long),
+            other => panic!("stored markdown response should be retrievable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn truncated_json_envelope_reports_store_failure() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join(".tracedecay")).unwrap();
+        std::fs::write(
+            dir.path().join(".tracedecay/enrollment.json"),
+            r#"{"project_id":"../invalid","storage_mode":"profile_sharded"}"#,
+        )
+        .unwrap();
+        let long = format!(
+            "{{\"items\":[{}]}}",
+            (0..3_000)
+                .map(|i| format!("{{\"id\":{i},\"name\":\"item-{i}\"}}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+
+        let result = truncated_json_envelope_with_handle(Some(dir.path()), &long);
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+
+        assert_eq!(parsed["truncated"], true);
+        assert_eq!(parsed["handle_available"], false);
+        assert!(parsed.get("handle").is_none());
+        assert_eq!(
+            parsed["handle_status"]["reason_code"],
+            "handle_store_failed"
+        );
+        assert!(parsed["handle_status"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("could not be cached locally"));
     }
 
     #[test]

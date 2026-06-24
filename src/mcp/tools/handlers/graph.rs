@@ -10,14 +10,39 @@ use serde_json::{json, Value};
 use crate::context::format_context_as_markdown;
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
-use crate::types::{BuildContextOptions, EdgeKind, NodeKind, Visibility};
+use crate::types::{BuildContextOptions, EdgeKind, Node, NodeKind, TaskContext, Visibility};
 
 use super::super::render::{self, Md};
 use super::super::ToolResult;
-use super::{effective_path, filter_by_scope, require_node_id, unique_file_paths};
+use super::support::{
+    effective_path, filter_by_scope, require_node_id, string_array_values, unique_file_paths,
+};
 
 fn user_line(line: u32) -> u32 {
     line.saturating_add(1)
+}
+
+fn rendered_tool_result<F>(
+    cg: &TraceDecay,
+    args: &Value,
+    value: &Value,
+    touched_files: Vec<String>,
+    md: F,
+) -> ToolResult
+where
+    F: FnOnce() -> String,
+{
+    let text = render::finalize(Some(cg.project_root()), args, value, md);
+    text_tool_result(&text, touched_files)
+}
+
+fn text_tool_result(text: &str, touched_files: Vec<String>) -> ToolResult {
+    ToolResult {
+        value: json!({
+            "content": [{ "type": "text", "text": text }]
+        }),
+        touched_files,
+    }
 }
 
 /// Handles `tracedecay_search` tool calls.
@@ -67,15 +92,13 @@ pub(super) async fn handle_search(
     } else {
         json!(items)
     };
-    let text = render::finalize(Some(cg.project_root()), &args, &output_value, || {
-        render_search_md(&output_value)
-    });
-    Ok(ToolResult {
-        value: json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        cg,
+        &args,
+        &output_value,
         touched_files,
-    })
+        || render_search_md(&output_value),
+    ))
 }
 
 fn render_search_md(value: &Value) -> String {
@@ -133,70 +156,11 @@ pub(super) async fn handle_context(
                 message: "missing required parameter: task".to_string(),
             })?;
 
-    let max_nodes = args
-        .get("max_nodes")
-        .and_then(serde_json::Value::as_u64)
-        .map_or(20, |v| v.min(100) as usize);
-
-    let include_code = args
-        .get("include_code")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-
-    let max_code_blocks = args
-        .get("max_code_blocks")
-        .and_then(serde_json::Value::as_u64)
-        .map_or(5, |v| v.min(20) as usize);
-
     let mode = args
         .get("mode")
         .and_then(|v| v.as_str())
         .unwrap_or("explore");
-
-    let extra_keywords: Vec<String> = args
-        .get("keywords")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let exclude_node_ids: std::collections::HashSet<String> = args
-        .get("exclude_node_ids")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let merge_adjacent = args
-        .get("merge_adjacent")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-
-    let max_per_file: Option<usize> = args
-        .get("max_per_file")
-        .and_then(serde_json::Value::as_u64)
-        .map(|v| v as usize)
-        .or(Some((max_nodes / 3).max(3)));
-
-    let path_prefix = effective_path(&args, scope_prefix).map(String::from);
-
-    let options = BuildContextOptions {
-        max_nodes,
-        max_code_blocks,
-        include_code,
-        extra_keywords,
-        exclude_node_ids,
-        merge_adjacent,
-        max_per_file,
-        path_prefix,
-        ..Default::default()
-    };
+    let options = build_context_options(&args, scope_prefix);
 
     let context = cg.build_context(task, &options).await?;
     let touched_files = unique_file_paths(
@@ -225,71 +189,7 @@ pub(super) async fn handle_context(
 
     // Plan mode: append extension points, test coverage, and dependency info
     if mode == "plan" {
-        output.push_str("\n### Extension Points\n");
-        let mut found_extension = false;
-        for node in &context.subgraph.nodes {
-            if matches!(node.kind, NodeKind::Trait | NodeKind::Interface)
-                && node.visibility == Visibility::Pub
-            {
-                let implementors = cg.get_callers(&node.id, 1).await?;
-                let impl_count = implementors
-                    .iter()
-                    .filter(|(_, e)| matches!(e.kind, crate::types::EdgeKind::Implements))
-                    .count();
-                let _ = writeln!(
-                    output,
-                    "- **{}** ({}) - {}:{} ({} implementors)",
-                    node.name,
-                    node.kind.as_str(),
-                    node.file_path,
-                    user_line(node.start_line),
-                    impl_count,
-                );
-                found_extension = true;
-            }
-        }
-        if !found_extension {
-            output.push_str("_No public traits/interfaces found in context._\n");
-        }
-
-        // Test coverage for related files
-        let file_paths: Vec<String> = context
-            .subgraph
-            .nodes
-            .iter()
-            .map(|n| n.file_path.clone())
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect();
-        if !file_paths.is_empty() {
-            output.push_str("\n### Test Coverage\n");
-            let mut test_files: HashSet<String> = HashSet::new();
-            for file in &file_paths {
-                let nodes = cg.get_nodes_by_file(file).await?;
-                for node in &nodes {
-                    let callers = cg.get_callers(&node.id, 2).await?;
-                    let caller_ids: Vec<String> =
-                        callers.iter().map(|(n, _)| n.id.clone()).collect();
-                    let test_annotated = cg.get_test_annotated_node_ids(&caller_ids).await?;
-                    for (caller, _) in &callers {
-                        if crate::tracedecay::is_test_file(&caller.file_path)
-                            || test_annotated.contains(&caller.id)
-                        {
-                            test_files.insert(caller.file_path.clone());
-                        }
-                    }
-                }
-            }
-            if test_files.is_empty() {
-                output.push_str("_No test files found covering these modules._\n");
-            } else {
-                let mut sorted: Vec<_> = test_files.into_iter().collect();
-                sorted.sort();
-                for tf in &sorted {
-                    let _ = writeln!(output, "- {tf}");
-                }
-            }
-        }
+        append_plan_context(cg, &context, &mut output).await?;
     }
 
     if !context.seen_node_ids.is_empty() {
@@ -301,13 +201,131 @@ pub(super) async fn handle_context(
     }
 
     let value = serde_json::to_value(&context).unwrap_or_else(|_| json!({}));
-    let text = render::finalize(Some(cg.project_root()), &args, &value, || output);
-    Ok(ToolResult {
-        value: json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        cg,
+        &args,
+        &value,
         touched_files,
-    })
+        || output,
+    ))
+}
+
+fn build_context_options(args: &Value, scope_prefix: Option<&str>) -> BuildContextOptions {
+    let max_nodes = args
+        .get("max_nodes")
+        .and_then(serde_json::Value::as_u64)
+        .map_or(20, |v| v.min(100) as usize);
+
+    let max_per_file = args
+        .get("max_per_file")
+        .and_then(serde_json::Value::as_u64)
+        .map(|v| v as usize)
+        .or(Some((max_nodes / 3).max(3)));
+
+    BuildContextOptions {
+        max_nodes,
+        max_code_blocks: args
+            .get("max_code_blocks")
+            .and_then(serde_json::Value::as_u64)
+            .map_or(5, |v| v.min(20) as usize),
+        include_code: args
+            .get("include_code")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        extra_keywords: string_array_values(args, "keywords"),
+        exclude_node_ids: string_array_values(args, "exclude_node_ids")
+            .into_iter()
+            .collect(),
+        merge_adjacent: args
+            .get("merge_adjacent")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        max_per_file,
+        path_prefix: effective_path(args, scope_prefix).map(String::from),
+        ..Default::default()
+    }
+}
+
+async fn append_plan_context(
+    cg: &TraceDecay,
+    context: &TaskContext,
+    output: &mut String,
+) -> Result<()> {
+    output.push_str("\n### Extension Points\n");
+    let mut found_extension = false;
+    for node in &context.subgraph.nodes {
+        if matches!(node.kind, NodeKind::Trait | NodeKind::Interface)
+            && node.visibility == Visibility::Pub
+        {
+            let implementors = cg.get_callers(&node.id, 1).await?;
+            let impl_count = implementors
+                .iter()
+                .filter(|(_, e)| matches!(e.kind, EdgeKind::Implements))
+                .count();
+            let _ = writeln!(
+                output,
+                "- **{}** ({}) - {}:{} ({} implementors)",
+                node.name,
+                node.kind.as_str(),
+                node.file_path,
+                user_line(node.start_line),
+                impl_count,
+            );
+            found_extension = true;
+        }
+    }
+    if !found_extension {
+        output.push_str("_No public traits/interfaces found in context._\n");
+    }
+
+    append_plan_test_coverage(cg, context, output).await
+}
+
+async fn append_plan_test_coverage(
+    cg: &TraceDecay,
+    context: &TaskContext,
+    output: &mut String,
+) -> Result<()> {
+    let file_paths: Vec<String> = context
+        .subgraph
+        .nodes
+        .iter()
+        .map(|n| n.file_path.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    if file_paths.is_empty() {
+        return Ok(());
+    }
+
+    output.push_str("\n### Test Coverage\n");
+    let mut test_files: HashSet<String> = HashSet::new();
+    for file in &file_paths {
+        let nodes = cg.get_nodes_by_file(file).await?;
+        for node in &nodes {
+            let callers = cg.get_callers(&node.id, 2).await?;
+            let caller_ids: Vec<String> = callers.iter().map(|(n, _)| n.id.clone()).collect();
+            let test_annotated = cg.get_test_annotated_node_ids(&caller_ids).await?;
+            for (caller, _) in &callers {
+                if crate::tracedecay::is_test_file(&caller.file_path)
+                    || test_annotated.contains(&caller.id)
+                {
+                    test_files.insert(caller.file_path.clone());
+                }
+            }
+        }
+    }
+    if test_files.is_empty() {
+        output.push_str("_No test files found covering these modules._\n");
+    } else {
+        let mut sorted: Vec<_> = test_files.into_iter().collect();
+        sorted.sort();
+        for tf in &sorted {
+            let _ = writeln!(output, "- {tf}");
+        }
+    }
+
+    Ok(())
 }
 
 /// Handles `tracedecay_callers` tool calls.
@@ -338,15 +356,13 @@ pub(super) async fn handle_callers(cg: &TraceDecay, args: Value) -> Result<ToolR
         .collect();
 
     let value = json!(items);
-    let text = render::finalize(Some(cg.project_root()), &args, &value, || {
-        render::generic_md(&value)
-    });
-    Ok(ToolResult {
-        value: json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        cg,
+        &args,
+        &value,
         touched_files,
-    })
+        || render::generic_md(&value),
+    ))
 }
 
 /// Handles `tracedecay_callees` tool calls.
@@ -418,15 +434,13 @@ pub(super) async fn handle_callees(cg: &TraceDecay, args: Value) -> Result<ToolR
     );
 
     let value = json!(items);
-    let text = render::finalize(Some(cg.project_root()), &args, &value, || {
-        render::generic_md(&value)
-    });
-    Ok(ToolResult {
-        value: json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        cg,
+        &args,
+        &value,
         touched_files,
-    })
+        || render::generic_md(&value),
+    ))
 }
 
 /// Handles `tracedecay_find_exact_symbol` tool calls. Bare-name lookup against
@@ -478,15 +492,13 @@ pub(super) async fn handle_find_exact_symbol(
         "count": items.len(),
         "matches": items,
     });
-    let text = render::finalize(Some(cg.project_root()), &args, &body, || {
-        render::generic_md(&body)
-    });
-    Ok(ToolResult {
-        value: json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        cg,
+        &args,
+        &body,
         touched_files,
-    })
+        || render::generic_md(&body),
+    ))
 }
 
 /// Handles `tracedecay_call_chain` tool calls. Finds the shortest directed
@@ -545,15 +557,13 @@ pub(super) async fn handle_call_chain(cg: &TraceDecay, args: Value) -> Result<To
         )
     };
 
-    let text = render::finalize(Some(cg.project_root()), &args, &body, || {
-        render::generic_md(&body)
-    });
-    Ok(ToolResult {
-        value: json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        cg,
+        &args,
+        &body,
         touched_files,
-    })
+        || render::generic_md(&body),
+    ))
 }
 
 /// Handles `tracedecay_file_dependents` tool calls.
@@ -572,15 +582,13 @@ pub(super) async fn handle_file_dependents(cg: &TraceDecay, args: Value) -> Resu
         "count": dependents.len(),
         "dependents": dependents,
     });
-    let text = render::finalize(Some(cg.project_root()), &args, &body, || {
-        render::generic_md(&body)
-    });
-    Ok(ToolResult {
-        value: json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        cg,
+        &args,
+        &body,
         touched_files,
-    })
+        || render::generic_md(&body),
+    ))
 }
 
 /// Handles `tracedecay_impact` tool calls.
@@ -616,15 +624,13 @@ pub(super) async fn handle_impact(cg: &TraceDecay, args: Value) -> Result<ToolRe
         "nodes": nodes,
     });
 
-    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-        render::generic_md(&output)
-    });
-    Ok(ToolResult {
-        value: json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        cg,
+        &args,
+        &output,
         touched_files,
-    })
+        || render::generic_md(&output),
+    ))
 }
 
 /// Handles `tracedecay_node` tool calls.
@@ -689,22 +695,18 @@ pub(super) async fn handle_node(cg: &TraceDecay, args: Value) -> Result<ToolResu
                 "cost_to_expand": cost_to_expand(&n, file_size_bytes),
                 "derives": derives,
             });
-            let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-                render::generic_md(&output)
-            });
-            Ok(ToolResult {
-                value: json!({
-                    "content": [{ "type": "text", "text": text }]
-                }),
+            Ok(rendered_tool_result(
+                cg,
+                &args,
+                &output,
                 touched_files,
-            })
+                || render::generic_md(&output),
+            ))
         }
-        None => Ok(ToolResult {
-            value: json!({
-                "content": [{ "type": "text", "text": format!("Node not found: {}", node_id) }]
-            }),
-            touched_files: vec![],
-        }),
+        None => Ok(text_tool_result(
+            &format!("Node not found: {node_id}"),
+            vec![],
+        )),
     }
 }
 
@@ -772,15 +774,13 @@ pub(super) async fn handle_similar(cg: &TraceDecay, args: Value) -> Result<ToolR
         .collect();
 
     let value = json!(items);
-    let text = render::finalize(Some(cg.project_root()), &args, &value, || {
-        render::generic_md(&value)
-    });
-    Ok(ToolResult {
-        value: json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        cg,
+        &args,
+        &value,
         touched_files,
-    })
+        || render::generic_md(&value),
+    ))
 }
 
 /// Handles `tracedecay_rename_preview` tool calls.
@@ -798,12 +798,10 @@ pub(super) async fn handle_rename_preview(cg: &TraceDecay, args: Value) -> Resul
             "line": user_line(n.start_line),
         }),
         None => {
-            return Ok(ToolResult {
-                value: json!({
-                    "content": [{ "type": "text", "text": format!("Node not found: {}", node_id) }]
-                }),
-                touched_files: vec![],
-            });
+            return Ok(text_tool_result(
+                &format!("Node not found: {node_id}"),
+                vec![],
+            ));
         }
     };
 
@@ -860,15 +858,13 @@ pub(super) async fn handle_rename_preview(cg: &TraceDecay, args: Value) -> Resul
         "references": references,
     });
 
-    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-        render::generic_md(&output)
-    });
-    Ok(ToolResult {
-        value: json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        cg,
+        &args,
+        &output,
         touched_files,
-    })
+        || render::generic_md(&output),
+    ))
 }
 
 /// Handles `tracedecay_callers_for` tool calls — bulk caller lookup over many IDs.
@@ -934,15 +930,9 @@ pub(super) async fn handle_callers_for(cg: &TraceDecay, args: Value) -> Result<T
         "truncated": truncated,
         "max_per_item": max_per_item,
     });
-    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+    Ok(rendered_tool_result(cg, &args, &output, vec![], || {
         render::generic_md(&output)
-    });
-    Ok(ToolResult {
-        value: json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
-        touched_files: vec![],
-    })
+    }))
 }
 
 /// Handles `tracedecay_by_qualified_name` — cross-run node lookup by name.
@@ -974,15 +964,13 @@ pub(super) async fn handle_by_qualified_name(cg: &TraceDecay, args: Value) -> Re
         .collect();
 
     let value = json!(items);
-    let text = render::finalize(Some(cg.project_root()), &args, &value, || {
-        render::generic_md(&value)
-    });
-    Ok(ToolResult {
-        value: json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        cg,
+        &args,
+        &value,
         touched_files,
-    })
+        || render::generic_md(&value),
+    ))
 }
 
 /// Handles `tracedecay_signature` — signature-only lookup (no body) by
@@ -1035,15 +1023,13 @@ pub(super) async fn handle_signature(cg: &TraceDecay, args: Value) -> Result<Too
     }
 
     let value = json!(items);
-    let text = render::finalize(Some(cg.project_root()), &args, &value, || {
-        render::generic_md(&value)
-    });
-    Ok(ToolResult {
-        value: json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        cg,
+        &args,
+        &value,
         touched_files,
-    })
+        || render::generic_md(&value),
+    ))
 }
 
 /// Handles `tracedecay_impls` — index of `impl Trait for Type` blocks.
@@ -1092,15 +1078,13 @@ pub(super) async fn handle_impls(cg: &TraceDecay, args: Value) -> Result<ToolRes
         "truncated": truncated,
         "impls": items,
     });
-    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-        render::generic_md(&output)
-    });
-    Ok(ToolResult {
-        value: json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        cg,
+        &args,
+        &output,
         touched_files,
-    })
+        || render::generic_md(&output),
+    ))
 }
 
 /// Handles `tracedecay_derives` — lists `#[derive(...)]` macros on a type
@@ -1159,15 +1143,13 @@ pub(super) async fn handle_derives(cg: &TraceDecay, args: Value) -> Result<ToolR
     }
 
     let value = json!(items);
-    let text = render::finalize(Some(cg.project_root()), &args, &value, || {
-        render::generic_md(&value)
-    });
-    Ok(ToolResult {
-        value: json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        cg,
+        &args,
+        &value,
         touched_files,
-    })
+        || render::generic_md(&value),
+    ))
 }
 
 /// Approximate token cost of expanding a node's body and its full file.
@@ -1178,7 +1160,7 @@ pub(super) async fn handle_derives(cg: &TraceDecay, args: Value) -> Result<ToolR
 /// resolve to the single-line floor of 20 tokens. Good enough to decide whether
 /// to set `include_code=true`; not a reliable absolute count.
 /// `full_file` uses `size_bytes / 4` from the indexed `files.size`.
-pub(super) fn cost_to_expand(node: &crate::types::Node, file_size_bytes: u64) -> Value {
+fn cost_to_expand(node: &Node, file_size_bytes: u64) -> Value {
     let line_count = node
         .end_line
         .saturating_sub(node.start_line)
@@ -1236,12 +1218,10 @@ pub(super) async fn handle_implementations(
             })
             .collect();
         if trait_nodes.is_empty() {
-            return Ok(ToolResult {
-                value: json!({
-                    "content": [{ "type": "text", "text": format!("No trait or interface named '{name}' found.") }]
-                }),
-                touched_files: vec![],
-            });
+            return Ok(text_tool_result(
+                &format!("No trait or interface named '{name}' found."),
+                vec![],
+            ));
         }
 
         for trait_node in trait_nodes {
@@ -1289,12 +1269,10 @@ pub(super) async fn handle_implementations(
             .take(limit)
             .collect();
         if method_nodes.is_empty() {
-            return Ok(ToolResult {
-                value: json!({
-                    "content": [{ "type": "text", "text": format!("No function or method named '{name}' found.") }]
-                }),
-                touched_files: vec![],
-            });
+            return Ok(text_tool_result(
+                &format!("No function or method named '{name}' found."),
+                vec![],
+            ));
         }
         for n in method_nodes {
             let abs_path = project_root.join(&n.file_path);
@@ -1322,15 +1300,9 @@ pub(super) async fn handle_implementations(
         "match_count": entries.len(),
         "implementations": entries,
     });
-    let text = render::finalize(Some(cg.project_root()), &args, &payload, || {
+    Ok(rendered_tool_result(cg, &args, &payload, touched, || {
         render::generic_md(&payload)
-    });
-    Ok(ToolResult {
-        value: json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
-        touched_files: touched,
-    })
+    }))
 }
 
 async fn collect_method_bodies(

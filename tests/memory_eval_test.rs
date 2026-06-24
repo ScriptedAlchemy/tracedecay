@@ -14,6 +14,8 @@
 //! The harness still understands `pending-sibling` for future branch-split work,
 //! but shipped hygiene contracts should be marked stable.
 
+mod common;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -212,6 +214,8 @@ struct Fixture {
     home_path: PathBuf,
     _project: TempDir,
     project_path: PathBuf,
+    #[cfg(unix)]
+    _daemon: Option<common::DaemonProcess>,
 }
 
 impl Fixture {
@@ -374,11 +378,13 @@ fn build_fixture(setup: &Setup) -> Fixture {
     let project = TempDir::new().expect("project tempdir");
     let home_path = canonical_test_dir(home.path());
     let project_path = canonical_test_dir(project.path());
-    let fixture = Fixture {
+    let mut fixture = Fixture {
         _home: home,
         home_path,
         _project: project,
         project_path,
+        #[cfg(unix)]
+        _daemon: None,
     };
     let src = fixture.project_path.join("src");
     std::fs::create_dir_all(&src).expect("create src dir");
@@ -388,6 +394,10 @@ fn build_fixture(setup: &Setup) -> Fixture {
             .unwrap_or_else(|e| panic!("write fixture file {name}: {e}"));
     }
     run_ok(&fixture, &["init"]);
+    #[cfg(unix)]
+    {
+        fixture._daemon = Some(common::spawn_tracedecay_daemon(&fixture.home_path));
+    }
     for fact in &setup.facts {
         let args = serde_json::json!({
             "action": "add",

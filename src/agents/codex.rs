@@ -1701,7 +1701,7 @@ mod tests {
 
         let created_at = parsed
             .get("created_at")
-            .and_then(|value| value.as_integer())
+            .and_then(toml::Value::as_integer)
             .expect("created_at");
         install_codex_native_automation(home.path(), project).expect("automation reinstall");
         let reparsed = std::fs::read_to_string(&path)
@@ -1709,9 +1709,7 @@ mod tests {
             .parse::<toml::Table>()
             .expect("valid toml");
         assert_eq!(
-            reparsed
-                .get("created_at")
-                .and_then(|value| value.as_integer()),
+            reparsed.get("created_at").and_then(toml::Value::as_integer),
             Some(created_at),
             "reinstall should preserve created_at for the existing Codex automation"
         );

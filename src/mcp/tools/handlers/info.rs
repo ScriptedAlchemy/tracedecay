@@ -13,12 +13,9 @@ use crate::storage::{ProjectPath, StorageMode, StoreKind};
 use crate::tracedecay::{BranchDiagnostics, TraceDecay};
 use crate::types::{NodeKind, Visibility};
 
-use super::super::render::{self, Md};
+use super::super::render::{self, truncate_response, truncated_json_envelope_with_handle, Md};
 use super::super::ToolResult;
-use super::{
-    effective_path, require_node_id, truncate_response, truncated_json_envelope_with_handle,
-    unique_file_paths,
-};
+use super::support::{effective_path, filter_by_scope, require_node_id, unique_file_paths};
 
 fn project_response_text(cg: &TraceDecay, text: &str) -> String {
     truncated_json_envelope_with_handle(Some(cg.project_root()), text)
@@ -85,9 +82,9 @@ pub(super) async fn handle_status(
 
     // Session-transcript ingest health (recall trust): last ingest time and
     // any un-ingested transcript backlog from the project sessions.db.
-    let session_db_path = crate::sessions::cursor::project_session_db_path(cg.project_root());
+    let session_db_path = cg.store_layout().sessions_db_path.clone();
     if session_db_path.exists() {
-        match crate::sessions::cursor::open_project_session_db(cg.project_root()).await {
+        match GlobalDb::open_at(&session_db_path).await {
             None => {
                 // The store exists but won't open — say so instead of
                 // silently dropping the section (which reads as "healthy").
@@ -344,7 +341,35 @@ fn bounded_limit(args: &Value, default: usize, max: usize) -> usize {
         .map_or(default, |value| value.clamp(1, max))
 }
 
-async fn open_project_registry_read_only() -> Result<Option<(PathBuf, GlobalDb)>> {
+enum ProjectRegistryDb<'a> {
+    Borrowed(&'a GlobalDb),
+    Owned(Box<GlobalDb>),
+}
+
+impl ProjectRegistryDb<'_> {
+    fn db(&self) -> &GlobalDb {
+        match self {
+            Self::Borrowed(db) => db,
+            Self::Owned(db) => db,
+        }
+    }
+}
+
+async fn open_project_registry_read_only(
+    global_db: Option<&GlobalDb>,
+    allow_default_registry_fallback: bool,
+) -> Result<Option<(PathBuf, ProjectRegistryDb<'_>)>> {
+    if let Some(db) = global_db {
+        return Ok(Some((
+            db.db_path().to_path_buf(),
+            ProjectRegistryDb::Borrowed(db),
+        )));
+    }
+    if !allow_default_registry_fallback {
+        return Err(TraceDecayError::Config {
+            message: "client project registry is unavailable for selector resolution".to_string(),
+        });
+    }
     let Some(path) = global_db_path() else {
         return Ok(None);
     };
@@ -359,23 +384,19 @@ async fn open_project_registry_read_only() -> Result<Option<(PathBuf, GlobalDb)>
                 path.display()
             ),
         })?;
-    Ok(Some((path, db)))
+    Ok(Some((path, ProjectRegistryDb::Owned(Box::new(db)))))
 }
 
 fn project_registry_result(cg: &TraceDecay, args: &Value, payload: &Value) -> ToolResult {
-    let text = render::finalize(Some(cg.project_root()), args, payload, || {
-        render::generic_md(payload)
-    });
-    ToolResult {
-        value: json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
-        touched_files: vec![],
-    }
+    render_registry_result(Some(cg.project_root()), args, payload)
 }
 
 fn registry_result(args: &Value, payload: &Value) -> ToolResult {
-    let text = render::finalize(None, args, payload, || render::generic_md(payload));
+    render_registry_result(None, args, payload)
+}
+
+fn render_registry_result(root: Option<&Path>, args: &Value, payload: &Value) -> ToolResult {
+    let text = render::finalize(root, args, payload, || render::generic_md(payload));
     ToolResult {
         value: json!({
             "content": [{ "type": "text", "text": text }]
@@ -401,15 +422,21 @@ fn registry_project_value(project: &crate::global_db::CodeProjectRecord) -> Valu
 }
 
 /// Handles `tracedecay_project_list` tool calls.
-pub(super) async fn handle_project_list(args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_project_list(
+    args: Value,
+    global_db: Option<&GlobalDb>,
+    allow_default_registry_fallback: bool,
+) -> Result<ToolResult> {
     let limit = bounded_limit(&args, 25, 100);
-    let Some((registry_path, db)) = open_project_registry_read_only().await? else {
+    let Some((registry_path, db)) =
+        open_project_registry_read_only(global_db, allow_default_registry_fallback).await?
+    else {
         let mut payload = registry_missing_payload();
         payload["limit"] = json!(limit);
         payload["truncated"] = json!(false);
         return Ok(registry_result(&args, &payload));
     };
-    let mut projects = db.list_code_projects(limit + 1).await;
+    let mut projects = db.db().list_code_projects(limit + 1).await;
     let truncated = projects.len() > limit;
     projects.truncate(limit);
     let projects: Vec<Value> = projects.iter().map(registry_project_value).collect();
@@ -426,7 +453,11 @@ pub(super) async fn handle_project_list(args: Value) -> Result<ToolResult> {
 }
 
 /// Handles `tracedecay_project_search` tool calls.
-pub(super) async fn handle_project_search(args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_project_search(
+    args: Value,
+    global_db: Option<&GlobalDb>,
+    allow_default_registry_fallback: bool,
+) -> Result<ToolResult> {
     let query =
         args.get("query")
             .and_then(Value::as_str)
@@ -434,14 +465,16 @@ pub(super) async fn handle_project_search(args: Value) -> Result<ToolResult> {
                 message: "missing required parameter: query".to_string(),
             })?;
     let limit = bounded_limit(&args, 10, 50);
-    let Some((registry_path, db)) = open_project_registry_read_only().await? else {
+    let Some((registry_path, db)) =
+        open_project_registry_read_only(global_db, allow_default_registry_fallback).await?
+    else {
         let mut payload = registry_missing_payload();
         payload["query"] = json!(query);
         payload["limit"] = json!(limit);
         payload["truncated"] = json!(false);
         return Ok(registry_result(&args, &payload));
     };
-    let mut projects = db.search_code_projects(query, limit + 1).await;
+    let mut projects = db.db().search_code_projects(query, limit + 1).await;
     let truncated = projects.len() > limit;
     projects.truncate(limit);
     let projects: Vec<Value> = projects.iter().map(registry_project_value).collect();
@@ -471,8 +504,15 @@ fn project_context_alias_path<'a>(cg: &'a TraceDecay, args: &'a Value) -> PathBu
 }
 
 /// Handles `tracedecay_project_context` tool calls.
-pub(super) async fn handle_project_context(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
-    let Some((registry_path, db)) = open_project_registry_read_only().await? else {
+pub(super) async fn handle_project_context(
+    cg: &TraceDecay,
+    args: Value,
+    global_db: Option<&GlobalDb>,
+    allow_default_registry_fallback: bool,
+) -> Result<ToolResult> {
+    let Some((registry_path, db)) =
+        open_project_registry_read_only(global_db, allow_default_registry_fallback).await?
+    else {
         return Ok(project_registry_result(
             cg,
             &args,
@@ -480,10 +520,10 @@ pub(super) async fn handle_project_context(cg: &TraceDecay, args: Value) -> Resu
         ));
     };
     let context = if let Some(project_id) = args.get("project_id").and_then(Value::as_str) {
-        db.project_registry_context_by_id(project_id).await
+        db.db().project_registry_context_by_id(project_id).await
     } else {
         let alias_path = project_context_alias_path(cg, &args);
-        db.project_registry_context_by_alias(&alias_path).await
+        db.db().project_registry_context_by_alias(&alias_path).await
     };
     let Some(context) = context else {
         return Ok(project_registry_result(
@@ -1310,12 +1350,150 @@ pub(super) async fn handle_simplify_scan(
     });
 
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-        render::generic_md(&output)
+        render_simplify_scan_markdown(&output)
     });
     Ok(ToolResult {
         value: json!({"content": [{"type": "text", "text": text}]}),
         touched_files: files,
     })
+}
+
+fn render_simplify_scan_markdown(output: &Value) -> String {
+    let mut md = Md::new();
+    md.heading(1, "Simplify Scan");
+
+    let duplications = output
+        .get("duplications")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let dead = output
+        .get("dead_introductions")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let complexity = output
+        .get("complexity_warnings")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let coupling = output
+        .get("coupling_warnings")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let total = duplications.len() + dead.len() + complexity.len() + coupling.len();
+
+    if total == 0 {
+        md.empty_note("No simplification findings for the scanned files.");
+        return md.render();
+    }
+
+    md.field("Findings", &total.to_string()).blank();
+    render_simplify_duplications(&mut md, duplications);
+    render_simplify_dead_code(&mut md, dead);
+    render_simplify_complexity(&mut md, complexity);
+    render_simplify_coupling(&mut md, coupling);
+    md.render()
+}
+
+fn render_simplify_duplications(md: &mut Md, items: &[Value]) {
+    if items.is_empty() {
+        return;
+    }
+    md.heading(2, "Possible Duplications");
+    let rows = items
+        .iter()
+        .map(|item| {
+            vec![
+                render::field_str(item, "symbol").to_string(),
+                finding_location(item),
+                summarize_similar_symbols(item),
+            ]
+        })
+        .collect::<Vec<_>>();
+    md.table(&["Symbol", "Location", "Similar Symbols"], &rows)
+        .blank();
+}
+
+fn render_simplify_dead_code(md: &mut Md, items: &[Value]) {
+    if items.is_empty() {
+        return;
+    }
+    md.heading(2, "Potential Dead Code");
+    let rows = items
+        .iter()
+        .map(|item| {
+            vec![
+                render::field_str(item, "symbol").to_string(),
+                finding_location(item),
+                render::field_str(item, "reason").to_string(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    md.table(&["Symbol", "Location", "Reason"], &rows).blank();
+}
+
+fn render_simplify_complexity(md: &mut Md, items: &[Value]) {
+    if items.is_empty() {
+        return;
+    }
+    md.heading(2, "Complexity Warnings");
+    let rows = items
+        .iter()
+        .map(|item| {
+            vec![
+                render::field_str(item, "symbol").to_string(),
+                finding_location(item),
+                render::field_i64(item, "lines").to_string(),
+                render::field_i64(item, "fan_out").to_string(),
+                render::field_i64(item, "score").to_string(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    md.table(&["Symbol", "Location", "Lines", "Fan-out", "Score"], &rows)
+        .blank();
+}
+
+fn render_simplify_coupling(md: &mut Md, items: &[Value]) {
+    if items.is_empty() {
+        return;
+    }
+    md.heading(2, "Coupling Warnings");
+    let rows = items
+        .iter()
+        .map(|item| {
+            vec![
+                render::field_str(item, "file").to_string(),
+                render::field_i64(item, "fan_in").to_string(),
+                render::field_str(item, "warning").to_string(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    md.table(&["File", "Fan-in", "Warning"], &rows).blank();
+}
+
+fn finding_location(item: &Value) -> String {
+    format!(
+        "{}:{}",
+        render::field_str(item, "file"),
+        render::field_i64(item, "line")
+    )
+}
+
+fn summarize_similar_symbols(item: &Value) -> String {
+    let Some(similar) = item.get("similar_to").and_then(Value::as_array) else {
+        return String::new();
+    };
+    let Some(first) = similar.first() else {
+        return String::new();
+    };
+    let mut summary = format!(
+        "{} at {}:{}",
+        render::field_str(first, "name"),
+        render::field_str(first, "file"),
+        render::field_i64(first, "line")
+    );
+    if similar.len() > 1 {
+        let _ = write!(summary, " (+{} more)", similar.len() - 1);
+    }
+    summary
 }
 
 /// Handles `tracedecay_type_hierarchy` tool calls.
@@ -1427,32 +1605,7 @@ pub(super) async fn handle_body(
         .and_then(serde_json::Value::as_u64)
         .map_or(3, |v| v.clamp(1, 20) as usize);
 
-    // First try an exact-name lookup against the DB — this avoids the BM25
-    // ranker's tendency to bury a definition under unrelated noise when the
-    // bare name is common (e.g. `gmres` exists as both a `pub fn` and a
-    // struct field). Falls back to suffix / name match inside
-    // `get_nodes_by_qualified_name`.
-    let exact_nodes = cg.get_nodes_by_qualified_name(symbol).await?;
-    let exact_nodes = super::filter_by_scope(exact_nodes, scope_prefix, |n| &n.file_path);
-
-    // Wrap as SearchResult so the existing scoring/rendering path works.
-    let mut candidates: Vec<crate::types::SearchResult> = exact_nodes
-        .into_iter()
-        .map(|node| crate::types::SearchResult { node, score: 0.0 })
-        .collect();
-
-    // If exact lookup returned nothing, fall back to BM25 search.
-    if candidates.is_empty() {
-        let raw = cg.search(symbol, (limit * 4).max(20)).await?;
-        candidates = super::filter_by_scope(raw, scope_prefix, |r| &r.node.file_path);
-    }
-
-    // Whether the matches came from the exact lookup or the search fallback,
-    // sort by `body_kind_preference` so callable / type definitions surface
-    // above fields, variants, uses, etc. This is the bug-#1 fix: when both a
-    // function and a same-named field exist, the function wins.
-    candidates.sort_by_key(|r| body_kind_preference(&r.node.kind));
-    let chosen: Vec<_> = candidates.iter().take(limit).collect();
+    let chosen = body_candidates(cg, symbol, limit, scope_prefix).await?;
 
     if chosen.is_empty() {
         return Ok(ToolResult {
@@ -1469,19 +1622,13 @@ pub(super) async fn handle_body(
 
     for result in &chosen {
         let n = &result.node;
-        let project_path = ProjectPath::resolve(project_root, Path::new(&n.file_path));
-        let body = match project_path {
-            Ok(ref path) => match crate::sync::read_source_file(&path.absolute_path()) {
-                Ok(source) => {
-                    if !touched.contains(&n.file_path) {
-                        touched.push(n.file_path.clone());
-                    }
-                    extract_lines(&source, n.start_line, n.end_line)
-                }
-                Err(_) => String::from("<file unreadable>"),
-            },
-            Err(_) => String::from("<file path outside project>"),
-        };
+        let body = source_body_for_node(
+            project_root,
+            &n.file_path,
+            n.start_line,
+            n.end_line,
+            &mut touched,
+        );
         matches.push(json!({
             "id": n.id,
             "name": n.name,
@@ -1508,6 +1655,63 @@ pub(super) async fn handle_body(
         }),
         touched_files: touched,
     })
+}
+
+async fn body_candidates(
+    cg: &TraceDecay,
+    symbol: &str,
+    limit: usize,
+    scope_prefix: Option<&str>,
+) -> Result<Vec<crate::types::SearchResult>> {
+    // First try an exact-name lookup against the DB — this avoids the BM25
+    // ranker's tendency to bury a definition under unrelated noise when the
+    // bare name is common (e.g. `gmres` exists as both a `pub fn` and a
+    // struct field). Falls back to suffix / name match inside
+    // `get_nodes_by_qualified_name`.
+    let exact_nodes = cg.get_nodes_by_qualified_name(symbol).await?;
+    let exact_nodes = filter_by_scope(exact_nodes, scope_prefix, |n| &n.file_path);
+
+    // Wrap as SearchResult so the existing scoring/rendering path works.
+    let mut candidates: Vec<crate::types::SearchResult> = exact_nodes
+        .into_iter()
+        .map(|node| crate::types::SearchResult { node, score: 0.0 })
+        .collect();
+
+    // If exact lookup returned nothing, fall back to BM25 search.
+    if candidates.is_empty() {
+        let raw = cg.search(symbol, (limit * 4).max(20)).await?;
+        candidates = filter_by_scope(raw, scope_prefix, |r| &r.node.file_path);
+    }
+
+    // Whether the matches came from the exact lookup or the search fallback,
+    // sort by `body_kind_preference` so callable / type definitions surface
+    // above fields, variants, uses, etc. This is the bug-#1 fix: when both a
+    // function and a same-named field exist, the function wins.
+    candidates.sort_by_key(|r| body_kind_preference(&r.node.kind));
+    candidates.truncate(limit);
+    Ok(candidates)
+}
+
+fn source_body_for_node(
+    project_root: &Path,
+    file_path: &str,
+    start_line: u32,
+    end_line: u32,
+    touched: &mut Vec<String>,
+) -> String {
+    let project_path = ProjectPath::resolve(project_root, Path::new(file_path));
+    match project_path {
+        Ok(ref path) => match crate::sync::read_source_file(&path.absolute_path()) {
+            Ok(source) => {
+                if !touched.iter().any(|path| path == file_path) {
+                    touched.push(file_path.to_string());
+                }
+                extract_lines(&source, start_line, end_line)
+            }
+            Err(_) => String::from("<file unreadable>"),
+        },
+        Err(_) => String::from("<file path outside project>"),
+    }
 }
 
 /// Ordering key used by `handle_body` to choose between same-named symbols.
@@ -1959,10 +2163,19 @@ pub(super) async fn handle_outline(cg: &TraceDecay, args: Value) -> Result<ToolR
             .collect()
     });
 
-    let (_abs_path, display_file) = resolve_indexed_source_file(cg, file).await?;
+    let (abs_path, display_file) = resolve_indexed_source_file(cg, file).await?;
 
     let kinds_slice: Option<&[String]> = kinds.as_deref();
-    let value = render_map(cg.db(), &display_file, kinds_slice).await?;
+    let mut value = render_map(cg.db(), &display_file, kinds_slice).await?;
+    match ast_grep_outline(&abs_path) {
+        Ok(outline) => {
+            value["ast_grep_outline"] = outline;
+        }
+        Err(err) => {
+            value["ast_grep_outline"] = Value::Null;
+            value["ast_grep_outline_error"] = json!(err.to_string());
+        }
+    }
     let text = render::finalize(Some(cg.project_root()), &args, &value, || {
         render_outline_md(&value)
     });
@@ -1973,6 +2186,58 @@ pub(super) async fn handle_outline(cg: &TraceDecay, args: Value) -> Result<ToolR
         }),
         touched_files: vec![display_file],
     })
+}
+
+fn ast_grep_outline(abs_path: &Path) -> Result<Value> {
+    ensure_ast_grep_outline_available()?;
+
+    let output = std::process::Command::new("ast-grep")
+        .args([
+            "outline",
+            "--json=compact",
+            "--items",
+            "structure",
+            "--view",
+            "expanded",
+        ])
+        .arg(abs_path)
+        .output()
+        .map_err(|err| TraceDecayError::Config {
+            message: format!("failed to run ast-grep outline: {err}"),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let detail = if !stderr.trim().is_empty() {
+            stderr.trim()
+        } else if !stdout.trim().is_empty() {
+            stdout.trim()
+        } else {
+            "no output"
+        };
+        return Err(TraceDecayError::Config {
+            message: format!("ast-grep outline failed: {detail}"),
+        });
+    }
+
+    serde_json::from_slice::<Value>(&output.stdout).map_err(|err| TraceDecayError::Config {
+        message: format!("failed to parse ast-grep outline JSON: {err}"),
+    })
+}
+
+fn ensure_ast_grep_outline_available() -> Result<()> {
+    let diagnostics = super::super::definitions::ast_grep_diagnostics();
+    if diagnostics.outline_available {
+        Ok(())
+    } else {
+        Err(TraceDecayError::Config {
+            message: format!(
+                "tracedecay_outline requires ast-grep outline >= 0.44: {}",
+                diagnostics.message
+            ),
+        })
+    }
 }
 
 fn render_outline_md(value: &Value) -> String {
@@ -2062,54 +2327,24 @@ pub(super) fn handle_config(cg: &TraceDecay, args: &Value) -> Result<ToolResult>
         let Ok(contents) = std::fs::read_to_string(&abs) else {
             continue;
         };
-        let parsed = match config_format(&rel) {
-            Some(ConfigFormat::Toml) => match toml::from_str::<toml::Value>(&contents) {
-                Ok(v) => toml_to_json(&v),
-                Err(e) => {
-                    matches.push(json!({
-                        "file": rel,
-                        "error": format!("toml parse error: {e}"),
-                    }));
-                    continue;
-                }
-            },
-            Some(ConfigFormat::Json) => match serde_json::from_str::<Value>(&contents) {
-                Ok(v) => v,
-                Err(e) => {
-                    matches.push(json!({
-                        "file": rel,
-                        "error": format!("json parse error: {e}"),
-                    }));
-                    continue;
-                }
-            },
-            None => continue,
+        let Some(parsed) = parse_config_value(&rel, &contents) else {
+            continue;
         };
-
-        let value = lookup_dotted(&parsed, key);
-        let line = match &value {
-            Some(_) => find_key_line(&contents, key),
-            None => None,
+        let parsed = match parsed {
+            Ok(value) => value,
+            Err(error) => {
+                matches.push(json!({
+                    "file": rel,
+                    "error": error,
+                }));
+                continue;
+            }
         };
 
         if !touched.contains(&rel) {
             touched.push(rel.clone());
         }
-
-        matches.push(match value {
-            Some(v) => json!({
-                "file": rel,
-                "key": key,
-                "value": v,
-                "line": line,
-            }),
-            None => json!({
-                "file": rel,
-                "key": key,
-                "value": Value::Null,
-                "found": false,
-            }),
-        });
+        matches.push(config_match_value(&rel, key, &contents, &parsed));
     }
 
     let payload = json!({
@@ -2134,19 +2369,25 @@ enum ConfigFormat {
 }
 
 fn config_format(path: &str) -> Option<ConfigFormat> {
-    if std::path::Path::new(path)
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"))
-    {
+    let extension = Path::new(path).extension()?;
+    if extension.eq_ignore_ascii_case("toml") {
         Some(ConfigFormat::Toml)
-    } else if std::path::Path::new(path)
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
-    {
+    } else if extension.eq_ignore_ascii_case("json") {
         Some(ConfigFormat::Json)
     } else {
         None
     }
+}
+
+fn parse_config_value(path: &str, contents: &str) -> Option<std::result::Result<Value, String>> {
+    let parsed = match config_format(path)? {
+        ConfigFormat::Toml => toml::from_str::<toml::Value>(contents)
+            .map(|value| toml_to_json(&value))
+            .map_err(|err| format!("toml parse error: {err}")),
+        ConfigFormat::Json => serde_json::from_str::<Value>(contents)
+            .map_err(|err| format!("json parse error: {err}")),
+    };
+    Some(parsed)
 }
 
 fn lookup_dotted(value: &Value, key: &str) -> Option<Value> {
@@ -2184,21 +2425,41 @@ fn toml_to_json(v: &toml::Value) -> Value {
     }
 }
 
+fn config_match_value(file: &str, key: &str, contents: &str, parsed: &Value) -> Value {
+    match lookup_dotted(parsed, key) {
+        Some(value) => json!({
+            "file": file,
+            "key": key,
+            "value": value,
+            "line": find_key_line(contents, key),
+        }),
+        None => json!({
+            "file": file,
+            "key": key,
+            "value": Value::Null,
+            "found": false,
+        }),
+    }
+}
+
 fn find_key_line(contents: &str, key: &str) -> Option<u32> {
     let last = key.rsplit('.').next()?;
-    let toml_form_eq = format!("{last} =");
-    let toml_form_quoted = format!("\"{last}\" =");
-    let json_form = format!("\"{last}\":");
+    let prefixes = config_key_line_prefixes(last);
     for (idx, line) in contents.lines().enumerate() {
         let trimmed = line.trim_start();
-        if trimmed.starts_with(&toml_form_eq)
-            || trimmed.starts_with(&toml_form_quoted)
-            || trimmed.starts_with(&json_form)
-        {
+        if prefixes.iter().any(|prefix| trimmed.starts_with(prefix)) {
             return Some((idx as u32) + 1);
         }
     }
     None
+}
+
+fn config_key_line_prefixes(key: &str) -> [String; 3] {
+    [
+        format!("{key} ="),
+        format!("\"{key}\" ="),
+        format!("\"{key}\":"),
+    ]
 }
 
 /// Handles `tracedecay_signature_search` — substring search across the

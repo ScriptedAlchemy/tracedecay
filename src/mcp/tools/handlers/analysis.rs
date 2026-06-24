@@ -12,7 +12,7 @@ use crate::types::{NodeKind, Visibility};
 
 use super::super::render;
 use super::super::ToolResult;
-use super::{effective_path, filter_by_scope, unique_file_paths};
+use super::support::{effective_path, filter_by_scope, unique_file_paths};
 
 /// True if `line` contains `identifier` as a whole token (boundaries are
 /// any non-`[A-Za-z0-9_]` char or string ends). Avoids false positives
@@ -148,6 +148,21 @@ fn identifier_from_segment(seg: &str) -> String {
         .unwrap_or(seg)
         .trim()
         .to_string()
+}
+
+fn path_matches_prefix(path: &str, prefix: &str) -> bool {
+    if path == prefix {
+        true
+    } else if prefix.ends_with('/') {
+        path.starts_with(prefix)
+    } else {
+        path.strip_prefix(prefix)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+    }
+}
+
+fn path_matches_optional_scope(path: &str, scope_prefix: Option<&str>) -> bool {
+    scope_prefix.is_none_or(|prefix| path_matches_prefix(path, prefix))
 }
 
 /// Handles `tracedecay_dead_code` tool calls.
@@ -341,17 +356,12 @@ pub(super) async fn handle_hotspots(
     }
 
     if let Some(prefix) = scope_prefix {
-        let with_slash = if prefix.ends_with('/') {
-            prefix.to_string()
-        } else {
-            format!("{prefix}/")
-        };
         items.retain(|item| {
             item["file"]
                 .as_str()
-                .is_some_and(|f| f.starts_with(&with_slash) || f == prefix)
+                .is_some_and(|f| path_matches_prefix(f, prefix))
         });
-        touched.retain(|f| f.starts_with(&with_slash) || f == prefix);
+        touched.retain(|f| path_matches_prefix(f, prefix));
     }
 
     let touched_files = unique_file_paths(touched.iter().map(std::string::String::as_str));
@@ -385,16 +395,7 @@ pub(super) async fn handle_unused_imports(
     let use_nodes: Vec<&crate::types::Node> = all_nodes
         .iter()
         .filter(|n| n.kind == NodeKind::Use)
-        .filter(|n| {
-            scope_prefix.is_none_or(|prefix| {
-                let with_slash = if prefix.ends_with('/') {
-                    prefix.to_string()
-                } else {
-                    format!("{prefix}/")
-                };
-                n.file_path.starts_with(&with_slash) || n.file_path == prefix
-            })
-        })
+        .filter(|n| path_matches_optional_scope(&n.file_path, scope_prefix))
         .collect();
 
     let mut unused: Vec<Value> = Vec::new();
@@ -1431,15 +1432,8 @@ pub(super) async fn handle_unsafe_patterns(
     let mut touched: Vec<String> = Vec::new();
 
     'outer: for file in &files {
-        if let Some(prefix) = path {
-            let with_slash = if prefix.ends_with('/') {
-                prefix.to_string()
-            } else {
-                format!("{prefix}/")
-            };
-            if !file.path.starts_with(&with_slash) && file.path != prefix {
-                continue;
-            }
+        if !path_matches_optional_scope(&file.path, path) {
+            continue;
         }
         let in_test = path_looks_like_test(&file.path);
         if exclude_tests && in_test {
@@ -1501,8 +1495,8 @@ pub(super) async fn handle_unsafe_patterns(
 // tracedecay_diagnostics
 // ---------------------------------------------------------------------------
 
-pub(super) async fn handle_diagnostics(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
-    use crate::diagnostics::{run_all, Scope};
+fn diagnostics_scope_arg(args: &Value) -> Result<(&str, crate::diagnostics::Scope)> {
+    use crate::diagnostics::Scope;
 
     let scope_str = args
         .get("scope")
@@ -1511,26 +1505,12 @@ pub(super) async fn handle_diagnostics(cg: &TraceDecay, args: Value) -> Result<T
 
     let scope = match scope_str {
         "workspace" => Scope::Workspace,
-        "package" => {
-            let name = args
-                .get("name")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| TraceDecayError::Config {
-                    message: "scope='package' requires a 'name' argument".to_string(),
-                })?
-                .to_string();
-            Scope::Package { name }
-        }
-        "file" => {
-            let path = args
-                .get("path")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| TraceDecayError::Config {
-                    message: "scope='file' requires a 'path' argument".to_string(),
-                })?
-                .to_string();
-            Scope::File { path }
-        }
+        "package" => Scope::Package {
+            name: required_diagnostics_scope_value(args, "package", "name")?,
+        },
+        "file" => Scope::File {
+            path: required_diagnostics_scope_value(args, "file", "path")?,
+        },
         other => {
             return Err(TraceDecayError::Config {
                 message: format!("unknown scope '{other}'; expected workspace, package, or file"),
@@ -1538,15 +1518,51 @@ pub(super) async fn handle_diagnostics(cg: &TraceDecay, args: Value) -> Result<T
         }
     };
 
+    Ok((scope_str, scope))
+}
+
+fn required_diagnostics_scope_value(args: &Value, scope: &str, name: &str) -> Result<String> {
+    args.get(name)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!("scope='{scope}' requires a '{name}' argument"),
+        })
+        .map(str::to_string)
+}
+
+async fn enclosing_diagnostic_node(
+    cg: &TraceDecay,
+    nodes_by_file: &mut HashMap<String, Vec<crate::types::Node>>,
+    file: &str,
+    line_start: u32,
+) -> Result<Option<String>> {
+    if !nodes_by_file.contains_key(file) {
+        let fetched = cg.get_nodes_by_file(file).await?;
+        nodes_by_file.insert(file.to_string(), fetched);
+    }
+
+    let node_line = line_start.saturating_sub(1);
+    Ok(nodes_by_file.get(file).and_then(|nodes| {
+        nodes
+            .iter()
+            .filter(|n| n.start_line <= node_line && node_line <= n.end_line)
+            .min_by_key(|n| n.end_line.saturating_sub(n.start_line))
+            .map(|n| n.qualified_name.clone())
+    }))
+}
+
+pub(super) async fn handle_diagnostics(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+    use crate::diagnostics::run_all;
+
+    let (scope_str, scope) = diagnostics_scope_arg(&args)?;
     let project_root = cg.project_root().to_path_buf();
     let mut diagnostics = run_all(&project_root, &scope).await?;
 
-    if let Scope::File { path } = &scope {
+    if let crate::diagnostics::Scope::File { path } = &scope {
         diagnostics.retain(|d| d.file == *path);
     }
 
     let mut entries: Vec<Value> = Vec::with_capacity(diagnostics.len());
-    let mut touched: Vec<String> = Vec::new();
     let mut error_count = 0u64;
     let mut warning_count = 0u64;
     let mut nodes_by_file: HashMap<String, Vec<crate::types::Node>> = HashMap::new();
@@ -1557,21 +1573,10 @@ pub(super) async fn handle_diagnostics(cg: &TraceDecay, args: Value) -> Result<T
             "warning" => warning_count += 1,
             _ => {}
         }
-        let nodes = if let Some(n) = nodes_by_file.get(&diag.file) {
-            n
-        } else {
-            let fetched = cg.get_nodes_by_file(&diag.file).await?;
-            nodes_by_file.entry(diag.file.clone()).or_insert(fetched)
-        };
-        let node_line = diag.line_start.saturating_sub(1);
-        let enclosing = nodes
-            .iter()
-            .filter(|n| n.start_line <= node_line && node_line <= n.end_line)
-            .min_by_key(|n| n.end_line.saturating_sub(n.start_line))
-            .map(|n| n.qualified_name.clone());
-        if !touched.contains(&diag.file) {
-            touched.push(diag.file.clone());
-        }
+
+        let enclosing =
+            enclosing_diagnostic_node(cg, &mut nodes_by_file, &diag.file, diag.line_start).await?;
+
         entries.push(json!({
             "file": diag.file,
             "line_start": diag.line_start,
@@ -1598,7 +1603,7 @@ pub(super) async fn handle_diagnostics(cg: &TraceDecay, args: Value) -> Result<T
         value: json!({
             "content": [{ "type": "text", "text": text }]
         }),
-        touched_files: touched,
+        touched_files: unique_file_paths(diagnostics.iter().map(|d| d.file.as_str())),
     })
 }
 
@@ -1664,15 +1669,8 @@ pub(super) async fn handle_constructors(
     let mut touched: Vec<String> = Vec::new();
 
     'outer: for file in &files {
-        if let Some(prefix) = scope_prefix {
-            let with_slash = if prefix.ends_with('/') {
-                prefix.to_string()
-            } else {
-                format!("{prefix}/")
-            };
-            if !file.path.starts_with(&with_slash) && file.path != prefix {
-                continue;
-            }
+        if !path_matches_optional_scope(&file.path, scope_prefix) {
+            continue;
         }
         let abs = project_root.join(&file.path);
         let Ok(source) = crate::sync::read_source_file(&abs) else {
@@ -2025,15 +2023,8 @@ pub(super) async fn handle_field_sites(
     let mut touched: Vec<String> = Vec::new();
 
     'outer: for file in &files {
-        if let Some(prefix) = scope_prefix {
-            let with_slash = if prefix.ends_with('/') {
-                prefix.to_string()
-            } else {
-                format!("{prefix}/")
-            };
-            if !file.path.starts_with(&with_slash) && file.path != prefix {
-                continue;
-            }
+        if !path_matches_optional_scope(&file.path, scope_prefix) {
+            continue;
         }
         let abs = project_root.join(&file.path);
         let Ok(source) = crate::sync::read_source_file(&abs) else {

@@ -723,6 +723,10 @@ async fn add_session_parent_column_after_missing_check(
 }
 
 impl GlobalDb {
+    pub fn db_path(&self) -> &Path {
+        &self.db_path
+    }
+
     async fn open_local(db_path: &Path, read_only: bool) -> Option<Self> {
         let storage_root = db_path
             .parent()

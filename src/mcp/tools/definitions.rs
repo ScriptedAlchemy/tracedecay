@@ -6,6 +6,7 @@
 
 use serde_json::{json, Value};
 
+use super::dispatch_policy::REGISTERED_PROJECT_READER_TOOL_NAMES;
 use super::ToolDefinition;
 
 /// Read-only annotations shared by every tool.
@@ -63,6 +64,126 @@ fn def_always_load(
     }
 }
 
+fn object_schema(properties: Value) -> Value {
+    let mut schema = json!({ "type": "object" });
+    schema["properties"] = properties;
+    schema
+}
+
+fn required_object_schema(properties: Value, required: &[&str]) -> Value {
+    let mut schema = object_schema(properties);
+    schema["required"] = json!(required);
+    schema
+}
+
+fn def_object(name: &str, title: &str, description: &str, properties: Value) -> ToolDefinition {
+    def(name, title, description, object_schema(properties))
+}
+
+fn def_required_object(
+    name: &str,
+    title: &str,
+    description: &str,
+    properties: Value,
+    required: &[&str],
+) -> ToolDefinition {
+    def(
+        name,
+        title,
+        description,
+        required_object_schema(properties, required),
+    )
+}
+
+fn string_property(description: &str) -> Value {
+    json!({
+        "type": "string",
+        "description": description
+    })
+}
+
+fn number_property(description: &str) -> Value {
+    json!({
+        "type": "number",
+        "description": description
+    })
+}
+
+fn boolean_property(description: &str) -> Value {
+    json!({
+        "type": "boolean",
+        "description": description
+    })
+}
+
+fn def_path_limit_tool(
+    name: &str,
+    title: &str,
+    description: &str,
+    path_description: &str,
+    limit_description: &str,
+) -> ToolDefinition {
+    def_object(
+        name,
+        title,
+        description,
+        json!({
+            "path": string_property(path_description),
+            "limit": number_property(limit_description)
+        }),
+    )
+}
+
+fn def_limit_path_tool(
+    name: &str,
+    title: &str,
+    description: &str,
+    limit_description: &str,
+    path_description: &str,
+) -> ToolDefinition {
+    def_object(
+        name,
+        title,
+        description,
+        json!({
+            "limit": number_property(limit_description),
+            "path": string_property(path_description)
+        }),
+    )
+}
+
+fn def_path_flag_tool(
+    name: &str,
+    title: &str,
+    description: &str,
+    path_description: &str,
+    flag_name: &str,
+    flag_description: &str,
+) -> ToolDefinition {
+    let mut properties = serde_json::Map::new();
+    properties.insert("path".to_string(), string_property(path_description));
+    properties.insert(flag_name.to_string(), boolean_property(flag_description));
+    def_object(name, title, description, Value::Object(properties))
+}
+
+fn def_node_depth_tool(
+    name: &str,
+    title: &str,
+    description: &str,
+    node_id_description: &str,
+) -> ToolDefinition {
+    def_required_object(
+        name,
+        title,
+        description,
+        json!({
+            "node_id": string_property(node_id_description),
+            "max_depth": number_property("Maximum traversal depth (default: 3)")
+        }),
+        &["node_id"],
+    )
+}
+
 /// Computes the call budget based on project size.
 pub fn explore_call_budget(total_nodes: u64) -> u8 {
     match total_nodes {
@@ -101,8 +222,10 @@ pub fn get_tool_definitions_with_budget(node_count: u64, budget: u8) -> Vec<Tool
 ///
 /// Tools whose backing dependency is missing on the current host are
 /// filtered out so the model never sees a tool that will immediately
-/// fail when called. Currently this only affects `tracedecay_ast_grep_rewrite`,
-/// which shells out to the `ast-grep` binary.
+/// fail when called. The host `ast-grep` CLI gates rewrite support.
+/// `tracedecay_outline` remains advertised and reports its runtime
+/// `ast-grep outline` requirement from the handler, because the Cursor
+/// plugin docs/rules intentionally teach agents to start there.
 pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     let mut definitions = vec![
         def_search(),
@@ -218,37 +341,19 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     definitions
 }
 
-fn registered_project_selector_tool_names() -> &'static [&'static str] {
-    &[
-        "tracedecay_search",
-        "tracedecay_context",
-        "tracedecay_retrieve",
-        "tracedecay_callers",
-        "tracedecay_callees",
-        "tracedecay_impact",
-        "tracedecay_node",
-        "tracedecay_files",
-        "tracedecay_body",
-        "tracedecay_read",
-        "tracedecay_outline",
-        "tracedecay_signature_search",
-        "tracedecay_implementations",
-        "tracedecay_callers_for",
-        "tracedecay_call_chain",
-        "tracedecay_file_dependents",
-        "tracedecay_find_exact_symbol",
-        "tracedecay_by_qualified_name",
-        "tracedecay_signature",
-        "tracedecay_impls",
-        "tracedecay_derives",
-    ]
+fn matching_tool_definitions_mut<'a>(
+    definitions: &'a mut [ToolDefinition],
+    tool_names: &'a [&'static str],
+) -> impl Iterator<Item = &'a mut ToolDefinition> + 'a {
+    definitions
+        .iter_mut()
+        .filter(move |definition| tool_names.contains(&definition.name.as_str()))
 }
 
 fn add_registered_project_selector_properties(definitions: &mut [ToolDefinition]) {
-    for definition in definitions {
-        if !registered_project_selector_tool_names().contains(&definition.name.as_str()) {
-            continue;
-        }
+    for definition in
+        matching_tool_definitions_mut(definitions, REGISTERED_PROJECT_READER_TOOL_NAMES)
+    {
         let Some(properties) = definition.input_schema.get_mut("properties") else {
             continue;
         };
@@ -256,91 +361,90 @@ fn add_registered_project_selector_properties(definitions: &mut [ToolDefinition]
     }
 }
 
+const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
+    // graph
+    "tracedecay_search",
+    "tracedecay_context",
+    "tracedecay_callers",
+    "tracedecay_callees",
+    "tracedecay_impact",
+    "tracedecay_node",
+    "tracedecay_similar",
+    "tracedecay_rename_preview",
+    "tracedecay_implementations",
+    "tracedecay_callers_for",
+    "tracedecay_call_chain",
+    "tracedecay_file_dependents",
+    "tracedecay_find_exact_symbol",
+    "tracedecay_by_qualified_name",
+    "tracedecay_signature",
+    "tracedecay_impls",
+    "tracedecay_derives",
+    // info
+    "tracedecay_status",
+    "tracedecay_project_list",
+    "tracedecay_project_search",
+    "tracedecay_project_context",
+    "tracedecay_body",
+    "tracedecay_todos",
+    "tracedecay_read",
+    "tracedecay_outline",
+    "tracedecay_config",
+    "tracedecay_signature_search",
+    "tracedecay_port_status",
+    "tracedecay_port_order",
+    "tracedecay_simplify_scan",
+    // git
+    "tracedecay_affected",
+    "tracedecay_diff_context",
+    "tracedecay_changelog",
+    "tracedecay_commit_context",
+    "tracedecay_pr_context",
+    "tracedecay_branch_search",
+    "tracedecay_branch_diff",
+    // analysis
+    "tracedecay_dead_code",
+    "tracedecay_module_api",
+    "tracedecay_circular",
+    "tracedecay_hotspots",
+    "tracedecay_unused_imports",
+    "tracedecay_rank",
+    "tracedecay_largest",
+    "tracedecay_coupling",
+    "tracedecay_inheritance_depth",
+    "tracedecay_distribution",
+    "tracedecay_recursion",
+    "tracedecay_complexity",
+    "tracedecay_doc_coverage",
+    "tracedecay_god_class",
+    "tracedecay_unsafe_patterns",
+    "tracedecay_diagnostics",
+    "tracedecay_constructors",
+    "tracedecay_field_sites",
+    // health
+    "tracedecay_test_map",
+    "tracedecay_gini",
+    "tracedecay_dependency_depth",
+    "tracedecay_health",
+    "tracedecay_runtime",
+    "tracedecay_test_risk",
+    "tracedecay_session_start",
+    "tracedecay_session_end",
+    // redundancy
+    "tracedecay_redundancy",
+    // memory
+    "tracedecay_memory_status",
+    // workflow
+    "tracedecay_diagnose",
+    "tracedecay_run_affected_tests",
+];
+
 pub fn format_capable_tool_names() -> &'static [&'static str] {
-    &[
-        // graph
-        "tracedecay_search",
-        "tracedecay_context",
-        "tracedecay_callers",
-        "tracedecay_callees",
-        "tracedecay_impact",
-        "tracedecay_node",
-        "tracedecay_similar",
-        "tracedecay_rename_preview",
-        "tracedecay_implementations",
-        "tracedecay_callers_for",
-        "tracedecay_call_chain",
-        "tracedecay_file_dependents",
-        "tracedecay_find_exact_symbol",
-        "tracedecay_by_qualified_name",
-        "tracedecay_signature",
-        "tracedecay_impls",
-        "tracedecay_derives",
-        // info
-        "tracedecay_status",
-        "tracedecay_project_list",
-        "tracedecay_project_search",
-        "tracedecay_project_context",
-        "tracedecay_body",
-        "tracedecay_todos",
-        "tracedecay_read",
-        "tracedecay_outline",
-        "tracedecay_config",
-        "tracedecay_signature_search",
-        "tracedecay_port_status",
-        "tracedecay_port_order",
-        "tracedecay_simplify_scan",
-        // git
-        "tracedecay_affected",
-        "tracedecay_diff_context",
-        "tracedecay_changelog",
-        "tracedecay_commit_context",
-        "tracedecay_pr_context",
-        "tracedecay_branch_search",
-        "tracedecay_branch_diff",
-        // analysis
-        "tracedecay_dead_code",
-        "tracedecay_module_api",
-        "tracedecay_circular",
-        "tracedecay_hotspots",
-        "tracedecay_unused_imports",
-        "tracedecay_rank",
-        "tracedecay_largest",
-        "tracedecay_coupling",
-        "tracedecay_inheritance_depth",
-        "tracedecay_distribution",
-        "tracedecay_recursion",
-        "tracedecay_complexity",
-        "tracedecay_doc_coverage",
-        "tracedecay_god_class",
-        "tracedecay_unsafe_patterns",
-        "tracedecay_diagnostics",
-        "tracedecay_constructors",
-        "tracedecay_field_sites",
-        // health
-        "tracedecay_test_map",
-        "tracedecay_gini",
-        "tracedecay_dependency_depth",
-        "tracedecay_health",
-        "tracedecay_runtime",
-        "tracedecay_test_risk",
-        "tracedecay_session_start",
-        "tracedecay_session_end",
-        // redundancy
-        "tracedecay_redundancy",
-        // memory
-        "tracedecay_memory_status",
-        // workflow
-        "tracedecay_diagnose",
-        "tracedecay_run_affected_tests",
-    ]
+    FORMAT_CAPABLE_TOOL_NAMES
 }
 
 fn add_format_property(definitions: &mut [ToolDefinition]) {
-    for definition in definitions {
-        if !format_capable_tool_names().contains(&definition.name.as_str()) {
-            continue;
-        }
+    for definition in matching_tool_definitions_mut(definitions, FORMAT_CAPABLE_TOOL_NAMES) {
         let properties = definition
             .input_schema
             .get_mut("properties")
@@ -357,18 +461,166 @@ fn add_format_property(definitions: &mut [ToolDefinition]) {
     }
 }
 
-/// Returns true when the external `ast-grep` binary is on PATH. Result is
-/// cached after the first check so we don't fork a subprocess on every
-/// `tools/list` request.
-pub fn ast_grep_available() -> bool {
+const MIN_AST_GREP_OUTLINE_VERSION: (u64, u64, u64) = (0, 44, 0);
+
+#[derive(Debug, Clone)]
+pub struct AstGrepDiagnostics {
+    pub installed: bool,
+    pub version: Option<String>,
+    pub rewrite_available: bool,
+    pub outline_available: bool,
+    pub outline_version_ok: bool,
+    pub outline_flags_ok: bool,
+    pub message: String,
+}
+
+fn ast_grep_output_text(output: &std::process::Output) -> String {
+    let mut text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim();
+    if !stderr.is_empty() {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(stderr);
+    }
+    text
+}
+
+fn parse_version_component(component: &str) -> Option<u64> {
+    let digits = component
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>();
+    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
+}
+
+fn parse_ast_grep_version(text: &str) -> Option<(String, (u64, u64, u64))> {
+    for token in text.split_whitespace() {
+        let token = token
+            .trim_start_matches('v')
+            .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '.');
+        let mut parts = token.split('.');
+        let Some(major) = parts.next().and_then(parse_version_component) else {
+            continue;
+        };
+        let Some(minor) = parts.next().and_then(parse_version_component) else {
+            continue;
+        };
+        let patch = parts.next().and_then(parse_version_component).unwrap_or(0);
+        return Some((format!("{major}.{minor}.{patch}"), (major, minor, patch)));
+    }
+    None
+}
+
+fn ast_grep_diagnostics_uncached() -> AstGrepDiagnostics {
+    let version_output = match std::process::Command::new("ast-grep")
+        .arg("--version")
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) => {
+            return AstGrepDiagnostics {
+                installed: false,
+                version: None,
+                rewrite_available: false,
+                outline_available: false,
+                outline_version_ok: false,
+                outline_flags_ok: false,
+                message: format!(
+                    "ast-grep is not installed or is not on PATH: {err}. Install ast-grep >= 0.44 for tracedecay_outline and rewrite support."
+                ),
+            };
+        }
+    };
+
+    let version_text = ast_grep_output_text(&version_output);
+    if !version_output.status.success() {
+        return AstGrepDiagnostics {
+            installed: true,
+            version: parse_ast_grep_version(&version_text).map(|(version, _)| version),
+            rewrite_available: false,
+            outline_available: false,
+            outline_version_ok: false,
+            outline_flags_ok: false,
+            message: format!(
+                "ast-grep --version failed. Install or repair ast-grep >= 0.44. Output: {version_text}"
+            ),
+        };
+    }
+
+    let (version, version_tuple) =
+        parse_ast_grep_version(&version_text).unwrap_or_else(|| (version_text.clone(), (0, 0, 0)));
+    let outline_version_ok = version_tuple >= MIN_AST_GREP_OUTLINE_VERSION;
+    let help_output = std::process::Command::new("ast-grep")
+        .args(["outline", "--help"])
+        .output();
+    let (outline_flags_ok, help_detail) = match help_output {
+        Ok(output) => {
+            let help_text = ast_grep_output_text(&output);
+            (
+                output.status.success()
+                    && help_text.contains("--json")
+                    && help_text.contains("--items")
+                    && help_text.contains("--view"),
+                help_text,
+            )
+        }
+        Err(err) => (false, err.to_string()),
+    };
+    let outline_available = outline_version_ok && outline_flags_ok;
+    let message = if outline_available {
+        format!("ast-grep {version} is available with outline JSON support")
+    } else if !outline_version_ok {
+        format!("ast-grep {version} is installed, but tracedecay_outline requires ast-grep >= 0.44")
+    } else {
+        format!(
+            "ast-grep {version} is installed, but `ast-grep outline --help` does not advertise the required --json, --items, and --view flags. Output: {help_detail}"
+        )
+    };
+
+    AstGrepDiagnostics {
+        installed: true,
+        version: Some(version),
+        rewrite_available: true,
+        outline_available,
+        outline_version_ok,
+        outline_flags_ok,
+        message,
+    }
+}
+
+pub fn ast_grep_diagnostics() -> &'static AstGrepDiagnostics {
     use std::sync::OnceLock;
-    static AVAILABLE: OnceLock<bool> = OnceLock::new();
-    *AVAILABLE.get_or_init(|| {
-        std::process::Command::new("ast-grep")
-            .arg("--version")
-            .output()
-            .is_ok_and(|out| out.status.success())
+    static DIAGNOSTICS: OnceLock<AstGrepDiagnostics> = OnceLock::new();
+    DIAGNOSTICS.get_or_init(ast_grep_diagnostics_uncached)
+}
+
+pub fn ast_grep_diagnostics_json() -> Value {
+    let diagnostics = ast_grep_diagnostics();
+    json!({
+        "installed": diagnostics.installed,
+        "version": diagnostics.version.clone(),
+        "rewrite_available": diagnostics.rewrite_available,
+        "outline_available": diagnostics.outline_available,
+        "outline_min_version": "0.44.0",
+        "outline_version_ok": diagnostics.outline_version_ok,
+        "outline_flags_ok": diagnostics.outline_flags_ok,
+        "message": diagnostics.message.clone(),
     })
+}
+
+/// Returns true when the external `ast-grep` binary is on PATH and responds to
+/// `--version`. Result is cached after the first check so we don't fork a
+/// subprocess on every `tools/list` request.
+pub fn ast_grep_available() -> bool {
+    ast_grep_diagnostics().rewrite_available
+}
+
+/// Returns true when the external `ast-grep` CLI supports `outline` JSON output
+/// with the flags introduced in ast-grep 0.44.
+pub fn ast_grep_outline_available() -> bool {
+    ast_grep_diagnostics().outline_available
 }
 
 // ── alwaysLoad tools (loaded into the model prompt immediately) ─────────
@@ -643,27 +895,21 @@ fn def_callers_for() -> ToolDefinition {
 }
 
 fn def_by_qualified_name() -> ToolDefinition {
-    def(
+    def_required_object(
         "tracedecay_by_qualified_name",
         "Lookup by qualified name",
         "Look up nodes by their qualified name. Multiple rows can share a \
          qualified name (overloads, generics, separate impl blocks). Useful \
          for cross-run lookups where the content-hash node ID has changed.",
         json!({
-            "type": "object",
-            "properties": {
-                "qualified_name": {
-                    "type": "string",
-                    "description": "The exact qualified name to look up."
-                }
-            },
-            "required": ["qualified_name"]
+            "qualified_name": string_property("The exact qualified name to look up.")
         }),
+        &["qualified_name"],
     )
 }
 
 fn def_impls() -> ToolDefinition {
-    def(
+    def_object(
         "tracedecay_impls",
         "Trait Implementations",
         "List `impl` blocks matching a trait, a type, or both. With no filter \
@@ -673,27 +919,15 @@ fn def_impls() -> ToolDefinition {
          targets, which types satisfy a given trait, and which traits a type \
          implements.",
         json!({
-            "type": "object",
-            "properties": {
-                "trait": {
-                    "type": "string",
-                    "description": "Trait name to filter by (short or qualified). Omit to include all traits."
-                },
-                "type": {
-                    "type": "string",
-                    "description": "Implementing type to filter by (short or qualified). Omit to include all types."
-                },
-                "limit": {
-                    "type": "number",
-                    "description": "Maximum number of results to return (default: 100)."
-                }
-            }
+            "trait": string_property("Trait name to filter by (short or qualified). Omit to include all traits."),
+            "type": string_property("Implementing type to filter by (short or qualified). Omit to include all types."),
+            "limit": number_property("Maximum number of results to return (default: 100).")
         }),
     )
 }
 
 fn def_signature() -> ToolDefinition {
-    def(
+    def_object(
         "tracedecay_signature",
         "Signature",
         "Return the signature-level metadata for symbols matching a qualified \
@@ -703,17 +937,8 @@ fn def_signature() -> ToolDefinition {
          surface of a function, method, or type. Multiple rows can be \
          returned (overloads, separate impls).",
         json!({
-            "type": "object",
-            "properties": {
-                "qualified_name": {
-                    "type": "string",
-                    "description": "The exact qualified name to look up."
-                },
-                "node_id": {
-                    "type": "string",
-                    "description": "Optional: look up a single node by its ID instead of qualified_name."
-                }
-            }
+            "qualified_name": string_property("The exact qualified name to look up."),
+            "node_id": string_property("Optional: look up a single node by its ID instead of qualified_name.")
         }),
     )
 }
@@ -721,29 +946,16 @@ fn def_signature() -> ToolDefinition {
 // ── Deferred tools (discovered via ToolSearch on demand) ────────────────
 
 fn def_callers() -> ToolDefinition {
-    def(
+    def_node_depth_tool(
         "tracedecay_callers",
         "Callers",
         "Find all callers of a given node (function, method, etc.) up to a specified depth.",
-        json!({
-            "type": "object",
-            "properties": {
-                "node_id": {
-                    "type": "string",
-                    "description": "The unique node ID to find callers for"
-                },
-                "max_depth": {
-                    "type": "number",
-                    "description": "Maximum traversal depth (default: 3)"
-                }
-            },
-            "required": ["node_id"]
-        }),
+        "The unique node ID to find callers for",
     )
 }
 
 fn def_callees() -> ToolDefinition {
-    def(
+    def_required_object(
         "tracedecay_callees",
         "Callees",
         "Find all callees of a given node (function, method, etc.) up to a \
@@ -753,63 +965,32 @@ fn def_callees() -> ToolDefinition {
          pointing at the trait method. Pass `resolve_dispatch: false` to \
          disable this behaviour and get only direct call edges.",
         json!({
-            "type": "object",
-            "properties": {
-                "node_id": {
-                    "type": "string",
-                    "description": "The unique node ID to find callees for"
-                },
-                "max_depth": {
-                    "type": "number",
-                    "description": "Maximum traversal depth (default: 3)"
-                },
-                "resolve_dispatch": {
-                    "type": "boolean",
-                    "description": "If true (default), append concrete impl methods for any trait-method callee."
-                }
-            },
-            "required": ["node_id"]
+            "node_id": string_property("The unique node ID to find callees for"),
+            "max_depth": number_property("Maximum traversal depth (default: 3)"),
+            "resolve_dispatch": boolean_property("If true (default), append concrete impl methods for any trait-method callee.")
         }),
+        &["node_id"],
     )
 }
 
 fn def_impact() -> ToolDefinition {
-    def(
+    def_node_depth_tool(
         "tracedecay_impact",
         "Impact Radius",
         "Compute the impact radius of a node: all symbols that directly or indirectly depend on it.",
-        json!({
-            "type": "object",
-            "properties": {
-                "node_id": {
-                    "type": "string",
-                    "description": "The unique node ID to compute impact for"
-                },
-                "max_depth": {
-                    "type": "number",
-                    "description": "Maximum traversal depth (default: 3)"
-                }
-            },
-            "required": ["node_id"]
-        }),
+        "The unique node ID to compute impact for",
     )
 }
 
 fn def_node() -> ToolDefinition {
-    def(
+    def_required_object(
         "tracedecay_node",
         "Node Details",
         "Retrieve detailed information about a single node by its ID.",
         json!({
-            "type": "object",
-            "properties": {
-                "node_id": {
-                    "type": "string",
-                    "description": "The unique node ID to retrieve"
-                }
-            },
-            "required": ["node_id"]
+            "node_id": string_property("The unique node ID to retrieve")
         }),
+        &["node_id"],
     )
 }
 
@@ -1056,26 +1237,14 @@ fn def_rank() -> ToolDefinition {
 }
 
 fn def_largest() -> ToolDefinition {
-    def(
+    def_object(
         "tracedecay_largest",
         "Largest Symbols",
         "Rank nodes by size (line count). Find the largest classes, longest methods, biggest enums, etc.",
         json!({
-            "type": "object",
-            "properties": {
-                "node_kind": {
-                    "type": "string",
-                    "description": "Filter by node kind (e.g. 'class', 'method', 'function', 'interface', 'enum', 'struct')"
-                },
-                "path": {
-                    "type": "string",
-                    "description": "Filter to files under this directory path (e.g. 'src/main/java')"
-                },
-                "limit": {
-                    "type": "number",
-                    "description": "Maximum number of results to return (default: 10)"
-                }
-            }
+            "node_kind": string_property("Filter by node kind (e.g. 'class', 'method', 'function', 'interface', 'enum', 'struct')"),
+            "path": string_property("Filter to files under this directory path (e.g. 'src/main/java')"),
+            "limit": number_property("Maximum number of results to return (default: 10)")
         }),
     )
 }
@@ -1107,132 +1276,66 @@ fn def_coupling() -> ToolDefinition {
 }
 
 fn def_inheritance_depth() -> ToolDefinition {
-    def(
+    def_path_limit_tool(
         "tracedecay_inheritance_depth",
         "Inheritance Depth",
         "Find the deepest class/interface inheritance hierarchies by walking extends chains.",
-        json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Filter to files under this directory path (e.g. 'src/main/java')"
-                },
-                "limit": {
-                    "type": "number",
-                    "description": "Maximum number of results to return (default: 10)"
-                }
-            }
-        }),
+        "Filter to files under this directory path (e.g. 'src/main/java')",
+        "Maximum number of results to return (default: 10)",
     )
 }
 
 fn def_distribution() -> ToolDefinition {
-    def(
+    def_path_flag_tool(
         "tracedecay_distribution",
         "Distribution",
         "Show node kind distribution (classes, methods, fields, etc.) per file or directory.",
-        json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Directory or file path prefix to filter (e.g. 'src/main/java/com/example'). Omit for entire codebase."
-                },
-                "summary": {
-                    "type": "boolean",
-                    "description": "If true, aggregate counts across all matching files instead of per-file breakdown (default: false)"
-                }
-            }
-        }),
+        "Directory or file path prefix to filter (e.g. 'src/main/java/com/example'). Omit for entire codebase.",
+        "summary",
+        "If true, aggregate counts across all matching files instead of per-file breakdown (default: false)",
     )
 }
 
 fn def_recursion() -> ToolDefinition {
-    def(
+    def_path_limit_tool(
         "tracedecay_recursion",
         "Recursion",
         "Detect recursive and mutually-recursive call cycles in the call graph.",
-        json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Filter to files under this directory path (e.g. 'src/main/java')"
-                },
-                "limit": {
-                    "type": "number",
-                    "description": "Maximum number of cycles to return (default: 10)"
-                }
-            }
-        }),
+        "Filter to files under this directory path (e.g. 'src/main/java')",
+        "Maximum number of cycles to return (default: 10)",
     )
 }
 
 fn def_complexity() -> ToolDefinition {
-    def(
+    def_object(
         "tracedecay_complexity",
         "Complexity",
         "Rank functions/methods by composite complexity score (lines + fan-out + fan-in).",
         json!({
-            "type": "object",
-            "properties": {
-                "node_kind": {
-                    "type": "string",
-                    "description": "Filter by node kind (default: function and method)"
-                },
-                "path": {
-                    "type": "string",
-                    "description": "Filter to files under this directory path (e.g. 'src/main/java')"
-                },
-                "limit": {
-                    "type": "number",
-                    "description": "Maximum number of results to return (default: 10)"
-                }
-            }
+            "node_kind": string_property("Filter by node kind (default: function and method)"),
+            "path": string_property("Filter to files under this directory path (e.g. 'src/main/java')"),
+            "limit": number_property("Maximum number of results to return (default: 10)")
         }),
     )
 }
 
 fn def_doc_coverage() -> ToolDefinition {
-    def(
+    def_path_limit_tool(
         "tracedecay_doc_coverage",
         "Doc Coverage",
         "Find public symbols missing documentation (docstrings).",
-        json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Directory or file path prefix to filter (e.g. 'src/main'). Omit for entire codebase."
-                },
-                "limit": {
-                    "type": "number",
-                    "description": "Maximum number of results to return (default: 50)"
-                }
-            }
-        }),
+        "Directory or file path prefix to filter (e.g. 'src/main'). Omit for entire codebase.",
+        "Maximum number of results to return (default: 50)",
     )
 }
 
 fn def_god_class() -> ToolDefinition {
-    def(
+    def_path_limit_tool(
         "tracedecay_god_class",
         "God Classes",
         "Find classes with the most members (methods + fields).",
-        json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Filter to files under this directory path (e.g. 'src/main/java')"
-                },
-                "limit": {
-                    "type": "number",
-                    "description": "Maximum number of results to return (default: 10)"
-                }
-            }
-        }),
+        "Filter to files under this directory path (e.g. 'src/main/java')",
+        "Maximum number of results to return (default: 10)",
     )
 }
 
@@ -1576,75 +1679,45 @@ fn def_insert_at() -> ToolDefinition {
 }
 
 fn def_gini() -> ToolDefinition {
-    def(
+    def_object(
         "tracedecay_gini",
         "Gini Inequality",
         "Compute inequality (Gini coefficient) for any metric across files or symbols. Detects god files and uneven complexity distribution.",
         json!({
-            "type": "object",
-            "properties": {
-                "metric": {
-                    "type": "string",
-                    "enum": ["complexity", "lines", "fan_in", "fan_out", "members"],
-                    "description": "Metric to measure inequality for (default: complexity)"
-                },
-                "scope": {
-                    "type": "string",
-                    "enum": ["file", "symbol"],
-                    "description": "Aggregate per file or per symbol (default: file)"
-                },
-                "path": {
-                    "type": "string",
-                    "description": "Filter to files under this directory path"
-                },
-                "limit": {
-                    "type": "number",
-                    "description": "Number of top outliers to return (default: 10)"
-                }
-            }
+            "metric": {
+                "type": "string",
+                "enum": ["complexity", "lines", "fan_in", "fan_out", "members"],
+                "description": "Metric to measure inequality for (default: complexity)"
+            },
+            "scope": {
+                "type": "string",
+                "enum": ["file", "symbol"],
+                "description": "Aggregate per file or per symbol (default: file)"
+            },
+            "path": string_property("Filter to files under this directory path"),
+            "limit": number_property("Number of top outliers to return (default: 10)")
         }),
     )
 }
 
 fn def_dependency_depth() -> ToolDefinition {
-    def(
+    def_limit_path_tool(
         "tracedecay_dependency_depth",
         "Dependency Depth",
         "Show the longest file-level dependency chains. Files at the end of long chains are fragile to upstream changes.",
-        json!({
-            "type": "object",
-            "properties": {
-                "limit": {
-                    "type": "number",
-                    "description": "Maximum number of chains to return (default: 10)"
-                },
-                "path": {
-                    "type": "string",
-                    "description": "Filter to files under this directory path"
-                }
-            }
-        }),
+        "Maximum number of chains to return (default: 10)",
+        "Filter to files under this directory path",
     )
 }
 
 fn def_health() -> ToolDefinition {
-    def(
+    def_path_flag_tool(
         "tracedecay_health",
         "Health Score",
         "Get quality signal (0-10000) with root cause breakdown (acyclicity, depth, equality, redundancy, modularity). Quality signal = geometric mean of 5 dimensions — maximize this ONE number.",
-        json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Filter to files under this directory path"
-                },
-                "details": {
-                    "type": "boolean",
-                    "description": "If true, include full dimension breakdown (default: false)"
-                }
-            }
-        }),
+        "Filter to files under this directory path",
+        "details",
+        "If true, include full dimension breakdown (default: false)",
     )
 }
 
@@ -2833,7 +2906,7 @@ fn def_lcm_session_boundary() -> ToolDefinition {
 fn def_ast_grep_rewrite() -> ToolDefinition {
     ToolDefinition {
         name: "tracedecay_ast_grep_rewrite".to_string(),
-        description: "Perform structural code rewrite using ast-grep. The pattern and rewrite use ast-grep's SGPattern syntax. Fails if ast-grep is not installed.".to_string(),
+        description: "Perform structural code rewrite using the host ast-grep CLI. The pattern and rewrite use ast-grep's SGPattern syntax. This tool is advertised only when that CLI is available.".to_string(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -3186,8 +3259,10 @@ fn def_outline() -> ToolDefinition {
         "File Outline",
         "Flat list of every top-level symbol defined in a file (functions, structs, \
          enums, traits, classes, impls, etc.) — like a table of contents. Sorted by \
-         line number; no code bodies. Optional 'kinds' filter narrows to specific \
-         node kinds. Use this as the cheapest way to orient before zooming into a \
+         line number; no code bodies. Includes ast-grep outline JSON when the host \
+         ast-grep CLI supports outline flags from ast-grep 0.44 or newer. Optional \
+         'kinds' filter narrows to specific node kinds. Use this as the cheapest way \
+         to orient before zooming into a \
          large file with tracedecay_node, tracedecay_body, or tracedecay_read.",
         json!({
             "type": "object",
