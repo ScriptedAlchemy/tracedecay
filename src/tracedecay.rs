@@ -998,8 +998,9 @@ impl TraceDecay {
         Some(meta.branches.keys().cloned().collect())
     }
 
-    #[allow(clippy::items_after_statements)]
     async fn register_project_store_in_global_registry(&self) {
+        static REGISTRY_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
         if self.store_layout.storage_mode != storage::StorageMode::ProfileSharded {
             return;
         }
@@ -1015,7 +1016,6 @@ impl TraceDecay {
             return;
         };
 
-        static REGISTRY_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
         let _registry_write = REGISTRY_WRITE_LOCK.lock().await;
 
         let Some(global_db) = self.open_options.open_global_db().await else {
@@ -2561,12 +2561,7 @@ impl TraceDecay {
         dirs
     }
 
-    #[allow(clippy::items_after_statements)]
     fn is_skipped_dir_hint(rel_str: &str, name: &str, config: &TraceDecayConfig) -> bool {
-        if is_included_dir(rel_str, config) || is_included(rel_str, config) {
-            return false;
-        }
-
         const HINTABLE_DIRS: &[&str] = &[
             "node_modules",
             "vendor",
@@ -2582,6 +2577,10 @@ impl TraceDecay {
             "venv",
             "__pycache__",
         ];
+
+        if is_included_dir(rel_str, config) || is_included(rel_str, config) {
+            return false;
+        }
 
         HINTABLE_DIRS.contains(&name) && is_excluded_dir(rel_str, config)
     }
