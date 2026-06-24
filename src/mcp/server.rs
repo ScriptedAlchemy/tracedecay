@@ -17,7 +17,7 @@ use crate::global_db::{AnalyticsEventInsert, GlobalDb};
 use crate::mcp::response_handles::{
     cleanup_expired_response_handles, response_handle_stats_json, RESPONSE_RETRIEVE_TOOL,
 };
-use crate::path_tree::format_annotated_path_tree;
+use crate::path_tree::format_compact_annotated_path_list;
 use crate::tracedecay::TraceDecay;
 
 use super::tools::{
@@ -212,20 +212,9 @@ fn format_per_file_staleness_banner(
             (path.as_str(), format!(" (edited {})", humanize_age(age)))
         })
         .collect::<Vec<_>>();
-    let bullet_list = annotated_paths
-        .iter()
-        .map(|(path, suffix)| format!("  - {path}{suffix}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let tree = format_annotated_path_tree(annotated_paths)
-        .lines()
-        .map(|line| format!("  {line}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    if !tree.is_empty() && tree.len() < bullet_list.len() {
-        lines.push(tree);
-    } else if !bullet_list.is_empty() {
-        lines.push(bullet_list);
+    let path_list = format_compact_annotated_path_list(annotated_paths, "  - ", "  ");
+    if !path_list.is_empty() {
+        lines.push(path_list);
     }
     lines.push("Run `tracedecay sync` to refresh the index.".to_string());
     lines.join("\n")
