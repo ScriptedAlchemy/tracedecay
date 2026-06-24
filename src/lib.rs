@@ -44,6 +44,7 @@ pub mod mcp;
 pub mod memory;
 pub mod migrate;
 pub mod monitor;
+mod path_tree;
 pub mod redundancy;
 pub mod resolution;
 pub mod runtime_telemetry;
