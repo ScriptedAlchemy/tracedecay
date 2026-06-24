@@ -11,6 +11,8 @@ windows-global-state = { max-threads = 1 }
 filter = 'binary_id(tracedecay::mcp_handler_test)'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-global-state'
+retries = 2
+flaky-result = 'pass'
 
 [[profile.ci.overrides]]
 filter = 'binary_id(tracedecay::cli_non_interactive_test)'

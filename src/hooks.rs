@@ -2329,8 +2329,10 @@ const CURSOR_STOP_INGEST_BUDGET: Duration = Duration::from_secs(25);
 const CURSOR_PRE_COMPACT_INGEST_BUDGET: Duration = Duration::from_secs(30);
 /// Budget for the auxiliary `cursor-agent` summary call inside the hook. Kept
 /// below the registered Cursor hook timeout so the child can be killed/reaped
-/// by `TraceDecay` rather than by Cursor killing the hook process.
-const CURSOR_PRE_COMPACT_SUMMARY_BUDGET: Duration = Duration::from_secs(85);
+/// by `TraceDecay` rather than by Cursor killing the hook process. Sized so
+/// the ingest budget plus this cap stay below the overall preCompact budget,
+/// leaving slack for LCM prepare/persist and process overhead.
+const CURSOR_PRE_COMPACT_SUMMARY_BUDGET: Duration = Duration::from_secs(75);
 /// Overall budget for the `preCompact` hook (registered with a 120s timeout).
 const CURSOR_PRE_COMPACT_BUDGET: Duration = Duration::from_secs(115);
 const COMPACTION_CONTEXT_RECOVERY_HINT: &str = "Context was just compacted. If important prior-session context seems missing, query TraceDecay session context before assuming the compacted summary is complete. Start with `tracedecay_message_search` or `tracedecay_lcm_expand_query`; use `tracedecay_lcm_describe` and `tracedecay_lcm_expand` when you need the summary DAG sources.";

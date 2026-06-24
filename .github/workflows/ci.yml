@@ -183,12 +183,16 @@ jobs:
           $ErrorActionPreference = "Stop"
           $partition = [int]"${{ matrix.partition }}"
           $partitions = 16
-          $testThreads = 2
+          $testThreads = 1
           $partitionArg = "hash:$partition/$partitions"
           $workspace = (Get-Location).Path
           $archive = Join-Path $workspace "windows-nextest-archive.tar.zst"
+          $targetDir = Join-Path $workspace "target"
+          $cargoMetadata = Join-Path $targetDir "nextest/cargo-metadata.json"
+          $binariesMetadata = Join-Path $targetDir "nextest/binaries-metadata.json"
+          cargo nextest run --archive-file $archive --extract-to $workspace --extract-overwrite --profile ci --no-run
           Write-Host "Windows shard $partition/$partitions running archive partition $partitionArg with $testThreads test threads"
-          $nextestArgs = @("nextest", "run", "--archive-file", $archive, "--workspace-remap", $workspace, "--profile", "ci", "--partition", $partitionArg, "--test-threads", $testThreads)
+          $nextestArgs = @("nextest", "run", "--cargo-metadata", $cargoMetadata, "--binaries-metadata", $binariesMetadata, "--workspace-remap", $workspace, "--target-dir-remap", $targetDir, "--profile", "ci", "--partition", $partitionArg, "--test-threads", $testThreads)
           cargo @nextestArgs
 
   windows-test:
