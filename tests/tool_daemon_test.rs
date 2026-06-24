@@ -151,6 +151,9 @@ fn spawn_sentinel_daemon_with_notification(
             }
         };
         stream
+            .set_nonblocking(false)
+            .expect("set accepted stream blocking");
+        stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .expect("read timeout");
         stream
