@@ -697,6 +697,9 @@ mod tests {
         .await
         .expect_err("unsupported selector tools must reject explicit selectors");
 
+        cg.checkpoint().await.unwrap();
+        cg.close();
+
         assert!(
             format!("{err}").contains("does not accept project selectors"),
             "unexpected selector rejection error: {err}"

@@ -756,13 +756,18 @@ impl GlobalDb {
         let pragmas = if read_only {
             "PRAGMA busy_timeout = 5000;
              PRAGMA foreign_keys = ON;"
+                .to_string()
         } else {
-            "PRAGMA journal_mode = WAL;
-             PRAGMA busy_timeout = 5000;
-             PRAGMA synchronous = NORMAL;
-             PRAGMA foreign_keys = ON;"
+            let journal_mode = crate::db::platform_safe_journal_mode();
+            let synchronous = crate::db::platform_safe_synchronous_mode();
+            format!(
+                "PRAGMA journal_mode = {journal_mode};
+                 PRAGMA busy_timeout = 5000;
+                 PRAGMA synchronous = {synchronous};
+                 PRAGMA foreign_keys = ON;"
+            )
         };
-        conn.execute_batch(pragmas).await.ok()?;
+        conn.execute_batch(&pragmas).await.ok()?;
 
         Some(Self {
             conn,
@@ -2102,6 +2107,38 @@ impl GlobalDb {
             .ok_or_else(|| "append analytics event returned no id".to_string())?;
         row.get::<i64>(0)
             .map_err(|e| format!("failed to decode appended analytics event id: {e}"))
+    }
+
+    pub async fn append_analytics_events(
+        &self,
+        events: &[AnalyticsEventInsert],
+    ) -> Result<Vec<i64>, String> {
+        if events.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        self.conn
+            .execute("BEGIN IMMEDIATE", ())
+            .await
+            .map_err(|e| format!("failed to begin analytics event batch: {e}"))?;
+
+        let mut ids = Vec::with_capacity(events.len());
+        for event in events {
+            match self.append_analytics_event(event).await {
+                Ok(id) => ids.push(id),
+                Err(err) => {
+                    let _ = self.conn.execute("ROLLBACK", ()).await;
+                    return Err(err);
+                }
+            }
+        }
+
+        if let Err(err) = self.conn.execute("COMMIT", ()).await {
+            let _ = self.conn.execute("ROLLBACK", ()).await;
+            return Err(format!("failed to commit analytics event batch: {err}"));
+        }
+
+        Ok(ids)
     }
 
     pub async fn query_analytics_events(
