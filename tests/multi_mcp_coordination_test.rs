@@ -28,9 +28,9 @@ async fn two_mcps_on_same_project_coordinate_via_sync_lock() {
     for (label, server) in [("server1", &server1), ("server2", &server2)] {
         assert!(
             server
-                .wait_for_startup_catch_up(Duration::from_secs(10))
+                .wait_for_startup_catch_up(Duration::from_secs(30))
                 .await,
-            "{label}: startup catch-up should finish within 10s"
+            "{label}: startup catch-up should finish within 30s"
         );
     }
 

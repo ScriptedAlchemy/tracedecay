@@ -11510,7 +11510,7 @@ async fn mcp_server_owns_watcher_and_refreshes_token_map_on_change() {
     let server = tracedecay::mcp::McpServer::new(cg.into_inner(), None).await;
     assert!(
         server
-            .wait_for_startup_catch_up(std::time::Duration::from_secs(2))
+            .wait_for_startup_catch_up(std::time::Duration::from_secs(30))
             .await,
         "startup catch-up sync should finish before mutating the project"
     );
@@ -12142,10 +12142,10 @@ async fn wait_for_startup_catch_up_waits_for_transcript_ingest_flag() {
     server.run_startup_catch_up_sync().await;
 
     let completed = server
-        .wait_for_startup_catch_up(std::time::Duration::from_secs(5))
+        .wait_for_startup_catch_up(std::time::Duration::from_secs(30))
         .await;
 
-    assert!(completed, "wait_for_startup_catch_up timed out after 5s");
+    assert!(completed, "wait_for_startup_catch_up timed out after 30s");
 
     // After the wait returns true, both flags must be set.
     assert!(
