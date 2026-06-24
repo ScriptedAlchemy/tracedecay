@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 
 use crate::context::format_context_as_markdown;
 use crate::errors::{Result, TraceDecayError};
-use crate::path_tree::format_path_tree;
+use crate::path_tree::format_compact_path_list;
 use crate::tracedecay::TraceDecay;
 use crate::types::{BuildContextOptions, EdgeKind, Node, NodeKind, TaskContext, Visibility};
 
@@ -329,17 +329,7 @@ async fn append_plan_test_coverage(
 }
 
 fn compact_path_list_markdown(paths: &[String]) -> String {
-    let bullets = paths
-        .iter()
-        .map(|path| format!("- {path}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let tree = format_path_tree(paths.iter().map(String::as_str));
-    if !tree.is_empty() && tree.len() < bullets.len() {
-        tree
-    } else {
-        bullets
-    }
+    format_compact_path_list(paths.iter().map(String::as_str), "- ", "")
 }
 
 /// Handles `tracedecay_callers` tool calls.

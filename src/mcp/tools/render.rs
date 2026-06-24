@@ -9,7 +9,7 @@ use crate::mcp::response_handles::{
     note_response_handle_store_skipped_no_project_root, observe_response_truncation,
     store_response_handle, ResponseHandleRecord, RESPONSE_HANDLE_TTL_SECS, RESPONSE_RETRIEVE_TOOL,
 };
-use crate::path_tree::format_path_tree;
+use crate::path_tree::format_compact_path_list;
 use crate::tracedecay::current_timestamp;
 
 use super::MAX_RESPONSE_CHARS;
@@ -457,11 +457,11 @@ fn compact_path_array(arr: &[Value]) -> Option<String> {
         .map(|path| format!("- {path}"))
         .collect::<Vec<_>>()
         .join("\n");
-    let tree = format_path_tree(paths);
-    if !tree.is_empty() && tree.len() < bullets.len() {
-        Some(tree)
-    } else {
+    let compact = format_compact_path_list(paths.iter().copied(), "- ", "");
+    if compact == bullets {
         None
+    } else {
+        Some(compact)
     }
 }
 
