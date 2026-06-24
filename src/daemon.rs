@@ -183,6 +183,37 @@ pub fn service_spec(
 }
 
 pub fn install_service(spec: &DaemonServiceSpec, start: bool) -> Result<PathBuf> {
+    let service_path = write_service_unit(spec)?;
+
+    if start {
+        run_systemctl(&["daemon-reload"])?;
+        run_systemctl(&["enable", "--now", SERVICE_NAME])?;
+    }
+
+    Ok(service_path)
+}
+
+pub fn refresh_service(spec: &DaemonServiceSpec) -> Result<PathBuf> {
+    let service_path = write_service_unit(spec)?;
+    run_systemctl(&["daemon-reload"])?;
+    run_systemctl(&["enable", SERVICE_NAME])?;
+    run_systemctl(&["restart", SERVICE_NAME])?;
+    Ok(service_path)
+}
+
+pub fn refresh_installed_service(spec: &DaemonServiceSpec) -> Result<Option<PathBuf>> {
+    let service_path = systemd_user_service_path()?;
+    if !service_path.exists() {
+        return Ok(None);
+    }
+    let mut refreshed_spec = spec.clone();
+    if let Some(socket_path) = service_socket_path_from_unit_file(&service_path)? {
+        refreshed_spec.socket_path = socket_path;
+    }
+    refresh_service(&refreshed_spec).map(Some)
+}
+
+fn write_service_unit(spec: &DaemonServiceSpec) -> Result<PathBuf> {
     let service_path = systemd_user_service_path()?;
     let parent = service_path
         .parent()
@@ -201,12 +232,39 @@ pub fn install_service(spec: &DaemonServiceSpec, start: bool) -> Result<PathBuf>
         }
     })?;
 
-    if start {
-        run_systemctl(&["daemon-reload"])?;
-        run_systemctl(&["enable", "--now", SERVICE_NAME])?;
-    }
-
     Ok(service_path)
+}
+
+pub fn installed_service_socket_path() -> Result<Option<PathBuf>> {
+    let service_path = systemd_user_service_path()?;
+    if !service_path.exists() {
+        return Ok(None);
+    }
+    service_socket_path_from_unit_file(&service_path)
+}
+
+fn service_socket_path_from_unit_file(service_path: &Path) -> Result<Option<PathBuf>> {
+    let unit = std::fs::read_to_string(service_path).map_err(|e| TraceDecayError::Config {
+        message: format!("failed to read service '{}': {e}", service_path.display()),
+    })?;
+    Ok(socket_path_from_service_unit(&unit))
+}
+
+fn socket_path_from_service_unit(unit: &str) -> Option<PathBuf> {
+    unit.lines()
+        .filter_map(|line| line.trim().strip_prefix("ExecStart="))
+        .find_map(|exec_start| {
+            let mut args = exec_start.split_whitespace();
+            while let Some(arg) = args.next() {
+                if arg == "--socket" {
+                    return args.next().map(PathBuf::from);
+                }
+                if let Some(path) = arg.strip_prefix("--socket=") {
+                    return Some(PathBuf::from(path));
+                }
+            }
+            None
+        })
 }
 
 pub fn uninstall_service(stop: bool) -> Result<PathBuf> {
@@ -937,6 +995,8 @@ mod tests {
     use serde_json::json;
     #[cfg(unix)]
     use serde_json::Value;
+    #[cfg(target_os = "linux")]
+    use std::os::unix::fs::PermissionsExt;
     #[cfg(unix)]
     use tempfile::TempDir;
     #[cfg(unix)]
@@ -1018,6 +1078,136 @@ mod tests {
         ));
         assert!(unit.contains("Environment=\"PATH="));
         assert!(unit.contains("Restart=on-failure"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn refresh_service_rewrites_unit_and_restarts_daemon() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let dir = TempDir::new().expect("temp dir");
+        let config_home = dir.path().join("config");
+        let fake_bin = dir.path().join("bin");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
+        std::fs::create_dir_all(&home).expect("home dir");
+
+        let systemctl = fake_bin.join("systemctl");
+        let log = dir.path().join("systemctl.log");
+        std::fs::write(
+            &systemctl,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n",
+        )
+        .expect("fake systemctl");
+        std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
+            .expect("systemctl permissions");
+
+        let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
+        let _home_guard = EnvVarGuard::set("HOME", &home);
+        let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
+        let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
+        let spec = DaemonServiceSpec {
+            tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
+            socket_path: PathBuf::from("/run/user/1000/tracedecay.sock"),
+        };
+
+        let service_path = super::refresh_service(&spec).expect("refresh service");
+
+        assert_eq!(
+            service_path,
+            config_home.join("systemd/user").join(super::SERVICE_NAME)
+        );
+        let unit = std::fs::read_to_string(&service_path).expect("service unit");
+        assert!(unit.contains(
+            "ExecStart=/opt/tracedecay/bin/tracedecay daemon run --socket /run/user/1000/tracedecay.sock"
+        ));
+        assert_eq!(
+            std::fs::read_to_string(log).expect("systemctl log"),
+            "--user daemon-reload\n--user enable tracedecay.service\n--user restart tracedecay.service\n"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn refresh_installed_service_skips_missing_unit() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let dir = TempDir::new().expect("temp dir");
+        let config_home = dir.path().join("config");
+        let fake_bin = dir.path().join("bin");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
+        std::fs::create_dir_all(&home).expect("home dir");
+
+        let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
+        let _home_guard = EnvVarGuard::set("HOME", &home);
+        let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
+        let spec = DaemonServiceSpec {
+            tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
+            socket_path: PathBuf::from("/run/user/1000/tracedecay.sock"),
+        };
+
+        let service_path = config_home.join("systemd/user").join(super::SERVICE_NAME);
+        let outcome = super::refresh_installed_service(&spec).expect("refresh service");
+
+        assert_eq!(outcome, None);
+        assert!(!service_path.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn refresh_installed_service_preserves_existing_socket_path() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let dir = TempDir::new().expect("temp dir");
+        let config_home = dir.path().join("config");
+        let fake_bin = dir.path().join("bin");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
+        std::fs::create_dir_all(&home).expect("home dir");
+
+        let systemctl = fake_bin.join("systemctl");
+        let log = dir.path().join("systemctl.log");
+        std::fs::write(
+            &systemctl,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n",
+        )
+        .expect("fake systemctl");
+        std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
+            .expect("systemctl permissions");
+
+        let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
+        let _home_guard = EnvVarGuard::set("HOME", &home);
+        let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
+        let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
+
+        let service_path = config_home.join("systemd/user").join(super::SERVICE_NAME);
+        std::fs::create_dir_all(service_path.parent().expect("service parent"))
+            .expect("service dir");
+        std::fs::write(
+            &service_path,
+            "[Unit]\n\
+             Description=TraceDecay daemon\n\
+             \n\
+             [Service]\n\
+             ExecStart=/old/tracedecay daemon run --socket /custom/tracedecay.sock\n",
+        )
+        .expect("existing service unit");
+
+        let spec = DaemonServiceSpec {
+            tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
+            socket_path: PathBuf::from("/run/user/1000/tracedecay.sock"),
+        };
+
+        let outcome = super::refresh_installed_service(&spec).expect("refresh service");
+
+        assert_eq!(outcome, Some(service_path.clone()));
+        let unit = std::fs::read_to_string(service_path).expect("service unit");
+        assert!(unit.contains(
+            "ExecStart=/opt/tracedecay/bin/tracedecay daemon run --socket /custom/tracedecay.sock"
+        ));
+        assert!(!unit.contains("/run/user/1000/tracedecay.sock"));
+        assert_eq!(
+            std::fs::read_to_string(log).expect("systemctl log"),
+            "--user daemon-reload\n--user enable tracedecay.service\n--user restart tracedecay.service\n"
+        );
     }
 
     #[test]
