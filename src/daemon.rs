@@ -1,14 +1,24 @@
 #[cfg(unix)]
 use std::collections::HashMap;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(unix)]
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
+use serde_json::json;
+#[cfg(unix)]
+use tokio::io::{copy, AsyncBufReadExt, AsyncWriteExt};
+#[cfg(unix)]
+use tokio::net::{UnixListener, UnixStream};
 
 use crate::client_identity::DaemonClientIdentity;
 use crate::errors::{Result, TraceDecayError};
+#[cfg(unix)]
+use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 
 pub const SERVICE_NAME: &str = "tracedecay.service";
 pub const SOCKET_ENV: &str = "TRACEDECAY_DAEMON_SOCKET";
@@ -208,9 +218,6 @@ pub async fn proxy_stdio_to_daemon(
     handshake: &DaemonHandshake,
     replay_line: Option<String>,
 ) -> Result<()> {
-    use tokio::io::{copy, AsyncWriteExt};
-    use tokio::net::UnixStream;
-
     let stream = UnixStream::connect(socket_path).await?;
     let (mut socket_reader, mut socket_writer) = stream.into_split();
 
@@ -264,11 +271,6 @@ pub async fn call_tool(
     tool_name: &str,
     arguments: serde_json::Value,
 ) -> Result<serde_json::Value> {
-    use crate::mcp::{JsonRpcRequest, JsonRpcResponse};
-    use serde_json::json;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-    use tokio::net::UnixStream;
-
     let stream = UnixStream::connect(socket_path).await?;
     let (reader, mut writer) = stream.into_split();
     let id = json!(1);
@@ -334,8 +336,6 @@ pub async fn call_default_tool(
 
 #[cfg(unix)]
 async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
-    use tokio::net::UnixListener;
-
     if let Some(parent) = socket_path.parent() {
         let parent_existed = parent.exists();
         std::fs::create_dir_all(parent).map_err(|e| TraceDecayError::Config {
@@ -366,7 +366,7 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         };
         let engine = engine.clone();
         tokio::spawn(async move {
-            if let Err(e) = Box::pin(serve_socket_client(stream, engine)).await {
+            if let Err(e) = serve_socket_client(stream, engine).await {
                 eprintln!("[tracedecay] daemon client error: {e}");
             }
         });
@@ -378,8 +378,6 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
 
 #[cfg(unix)]
 fn set_owner_only_permissions(path: &Path, mode: u32) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
     let permissions = std::fs::Permissions::from_mode(mode);
     std::fs::set_permissions(path, permissions).map_err(|e| TraceDecayError::Config {
         message: format!(
@@ -391,8 +389,6 @@ fn set_owner_only_permissions(path: &Path, mode: u32) -> Result<()> {
 
 #[cfg(unix)]
 async fn prepare_socket_path(socket_path: &Path) -> Result<()> {
-    use tokio::net::UnixStream;
-
     match UnixStream::connect(socket_path).await {
         Ok(_) => Err(TraceDecayError::Config {
             message: format!(
@@ -485,15 +481,13 @@ impl DaemonEngine {
 
 #[cfg(unix)]
 async fn serve_socket_client(stream: tokio::net::UnixStream, engine: DaemonEngine) -> Result<()> {
-    use crate::mcp::McpTransport;
-
     let mut transport = UnixStreamTransport::new(stream);
     let Some(line) = transport.read_line().await? else {
         return Ok(());
     };
     let handshake = DaemonHandshake::from_line(&line)?;
     if handshake.project_path.is_some() {
-        let server = match Box::pin(engine.project_server(&handshake)).await {
+        let server = match engine.project_server(&handshake).await {
             Ok(server) => server,
             Err(e) => {
                 write_project_open_error(&mut transport, &e).await?;
@@ -585,8 +579,6 @@ async fn write_project_open_error(
     transport: &mut UnixStreamTransport,
     error: &TraceDecayError,
 ) -> Result<()> {
-    use crate::mcp::{ErrorCode, JsonRpcResponse};
-
     let id = read_json_rpc_request_id(transport).await?;
     let response = JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
     write_json_rpc_response(transport, &response).await
@@ -596,8 +588,6 @@ async fn write_project_open_error(
 async fn read_json_rpc_request_id(
     transport: &mut UnixStreamTransport,
 ) -> Result<serde_json::Value> {
-    use crate::mcp::{JsonRpcRequest, McpTransport};
-
     let Some(line) = transport.read_line().await? else {
         return Ok(serde_json::Value::Null);
     };
@@ -613,8 +603,6 @@ async fn write_json_rpc_response(
     transport: &mut UnixStreamTransport,
     response: &crate::mcp::JsonRpcResponse,
 ) -> Result<()> {
-    use crate::mcp::McpTransport;
-
     transport
         .write_line(&serde_json::to_string(response)?)
         .await?;
@@ -628,9 +616,6 @@ async fn serve_projectless_client(
     transport: &mut UnixStreamTransport,
     client_identity: &DaemonClientIdentity,
 ) -> Result<()> {
-    use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
-    use serde_json::json;
-
     while let Some(line) = transport.read_line().await? {
         let response = match serde_json::from_str::<JsonRpcRequest>(&line) {
             Ok(request) => projectless_response(&request, client_identity).await,
@@ -652,9 +637,6 @@ async fn projectless_response(
     request: &crate::mcp::JsonRpcRequest,
     client_identity: &DaemonClientIdentity,
 ) -> Option<crate::mcp::JsonRpcResponse> {
-    use crate::mcp::{ErrorCode, JsonRpcResponse};
-    use serde_json::json;
-
     let id = request.id.clone()?;
     match request.method.as_str() {
         "initialize" => Some(JsonRpcResponse::success(
@@ -688,8 +670,6 @@ async fn projectless_tools_call_response(
     params: Option<&serde_json::Value>,
     _client_identity: &DaemonClientIdentity,
 ) -> crate::mcp::JsonRpcResponse {
-    use crate::mcp::{ErrorCode, JsonRpcResponse};
-
     let (tool_name, arguments) = match projectless_tool_call(params) {
         Ok(tool_call) => tool_call,
         Err(message) => {
@@ -729,8 +709,6 @@ struct UnixStreamTransport {
 #[cfg(unix)]
 impl UnixStreamTransport {
     fn new(stream: tokio::net::UnixStream) -> Self {
-        use tokio::io::AsyncBufReadExt;
-
         let (reader, writer) = stream.into_split();
         Self {
             reader: tokio::io::BufReader::new(reader).lines(),
@@ -746,14 +724,10 @@ impl crate::mcp::McpTransport for UnixStreamTransport {
     }
 
     async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
-        use tokio::io::AsyncWriteExt;
-
         self.writer.write_all(line.as_bytes()).await
     }
 
     async fn flush(&mut self) -> std::io::Result<()> {
-        use tokio::io::AsyncWriteExt;
-
         self.writer.flush().await
     }
 }
@@ -808,6 +782,14 @@ mod tests {
     use std::ffi::{OsStr, OsString};
     use std::path::PathBuf;
     use std::sync::Mutex;
+
+    use serde_json::json;
+    #[cfg(unix)]
+    use serde_json::Value;
+    #[cfg(unix)]
+    use tempfile::TempDir;
+    #[cfg(unix)]
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
     use super::{DaemonClientIdentity, DaemonHandshake, DaemonServiceSpec, SOCKET_ENV};
 
@@ -953,10 +935,6 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn socket_client_serves_initialize_after_handshake() {
-        use serde_json::{json, Value};
-        use tempfile::TempDir;
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-
         let dir = TempDir::new().expect("temp dir");
         let project = dir.path();
         let client_identity = test_client_identity_for(dir.path().join("profile"));
@@ -1017,10 +995,6 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn socket_client_serves_profile_scoped_lcm_without_project() {
-        use serde_json::{json, Value};
-        use tempfile::TempDir;
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-
         let hermes_home = TempDir::new().expect("hermes home");
         let hermes_home = hermes_home
             .path()
@@ -1095,10 +1069,6 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn socket_client_timings_are_connection_local() {
-        use serde_json::{json, Value};
-        use tempfile::TempDir;
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-
         let dir = TempDir::new().expect("temp dir");
         let project = dir.path();
         let client_identity = test_client_identity_for(dir.path().join("profile"));
