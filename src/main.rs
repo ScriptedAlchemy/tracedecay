@@ -519,13 +519,15 @@ fn refresh_generated_plugins() -> tracedecay::errors::Result<()> {
 fn refresh_daemon_service() -> tracedecay::errors::Result<()> {
     let tracedecay_bin = tracedecay_bin_on_path()?;
     let spec = tracedecay::daemon::service_spec(tracedecay_bin, None)?;
+    let socket_path = tracedecay::daemon::installed_service_socket_path()?
+        .unwrap_or_else(|| spec.socket_path.clone());
     match tracedecay::daemon::refresh_installed_service(&spec)? {
         Some(service_path) => {
             eprintln!(
                 "\x1b[32m✔\x1b[0m Daemon service refreshed at {}",
                 service_path.display()
             );
-            eprintln!("Daemon socket: {}", spec.socket_path.display());
+            eprintln!("Daemon socket: {}", socket_path.display());
         }
         None => {
             eprintln!("TraceDecay daemon service is not installed; skipping daemon restart.");
