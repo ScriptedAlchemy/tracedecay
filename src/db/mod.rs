@@ -15,5 +15,6 @@ mod stats;
 mod tx;
 mod unresolved;
 
+pub(crate) use connection::platform_safe_mmap_size;
 pub use connection::Database;
 pub use fingerprints::StoredFingerprint;

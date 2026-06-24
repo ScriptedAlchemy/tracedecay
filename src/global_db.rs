@@ -283,6 +283,13 @@ fn global_db_path_override() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+fn global_db_mmap_size_guard() -> Option<u64> {
+    const PROBE_MMAP_SIZE: u64 = 1;
+
+    let safe_mmap = crate::db::platform_safe_mmap_size(PROBE_MMAP_SIZE);
+    (safe_mmap != PROBE_MMAP_SIZE).then_some(safe_mmap)
+}
+
 /// Returns the path to the global database: `global.db` inside the user-level
 /// data dir (`~/.tracedecay/` by default).
 pub fn global_db_path() -> Option<PathBuf> {
@@ -739,6 +746,12 @@ impl GlobalDb {
         };
         let db = builder.build().await.ok()?;
         let conn = db.connect().ok()?;
+
+        if let Some(mmap_size) = global_db_mmap_size_guard() {
+            conn.execute_batch(&format!("PRAGMA mmap_size = {mmap_size};"))
+                .await
+                .ok()?;
+        }
 
         let pragmas = if read_only {
             "PRAGMA busy_timeout = 5000;
@@ -3261,6 +3274,15 @@ impl GlobalDb {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn global_db_mmap_guard_matches_connection_platform_guard() {
+        if cfg!(windows) {
+            assert_eq!(global_db_mmap_size_guard(), Some(0));
+        } else {
+            assert_eq!(global_db_mmap_size_guard(), None);
+        }
+    }
 
     #[tokio::test]
     async fn session_column_migration_tolerates_duplicate_column_race() {
