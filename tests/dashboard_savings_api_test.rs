@@ -19,7 +19,7 @@ use common::{
 use serde_json::Value;
 use tempfile::TempDir;
 use tracedecay::dashboard;
-use tracedecay::global_db::GlobalDb;
+use tracedecay::global_db::{GlobalDb, ParseOffset};
 use tracedecay::sessions::cursor::project_session_db_path;
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::tracedecay::TraceDecay;
@@ -331,44 +331,46 @@ async fn seed_daily_limit_regression(
     let gdb = GlobalDb::open_at(session_db_path)
         .await
         .expect("open session db");
-    assert!(
-        gdb.upsert_session(&session(
-            "sess-daily-limit",
-            project,
-            latest_day + 30,
-            "Daily limit regression"
-        ))
-        .await
-    );
 
+    let daily_session = session(
+        "sess-daily-limit",
+        project,
+        latest_day + 30,
+        "Daily limit regression",
+    );
+    let mut messages = Vec::new();
     for offset in 0..=366 {
         let timestamp = latest_day - (offset * 86_400) + 60;
-        assert!(
-            gdb.upsert_session_message(&message(
-                &format!("m-daily-limit-{offset}"),
-                "sess-daily-limit",
-                "assistant",
-                offset,
-                timestamp,
-                "Daily limit accounting row.",
-                Some("daily-limit-a"),
-                None,
-            ))
-            .await
-        );
-    }
-
-    assert!(
-        gdb.upsert_session_message(&message(
-            "m-daily-limit-latest-b",
+        messages.push(message(
+            &format!("m-daily-limit-{offset}"),
             "sess-daily-limit",
             "assistant",
-            500,
-            latest_day + 90,
-            "Second latest-day model bucket.",
-            Some("daily-limit-b"),
-            None,
-        ))
+            offset,
+            timestamp,
+            "Daily limit accounting row.",
+            Some("daily-limit-a"),
+            Some(r#"{"usage":{"input_tokens":1,"output_tokens":1}}"#),
+        ));
+    }
+
+    messages.push(message(
+        "m-daily-limit-latest-b",
+        "sess-daily-limit",
+        "assistant",
+        500,
+        latest_day + 90,
+        "Second latest-day model bucket.",
+        Some("daily-limit-b"),
+        Some(r#"{"usage":{"input_tokens":1,"output_tokens":1}}"#),
+    ));
+
+    assert!(
+        gdb.upsert_transcript_batch(
+            &daily_session,
+            &messages,
+            "daily-limit-regression.jsonl",
+            ParseOffset::default(),
+        )
         .await
     );
 

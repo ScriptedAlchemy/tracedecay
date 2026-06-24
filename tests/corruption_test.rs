@@ -189,24 +189,25 @@ async fn search_nodes_falls_back_to_like_when_fts_empty() {
     close_db(db).await;
 }
 
-// ─── begin_bulk_load no longer disables synchronous ──────────────────────
+// ─── begin_bulk_load no longer downgrades synchronous ────────────────────
 
 #[tokio::test]
-async fn bulk_load_preserves_synchronous_normal() {
+async fn bulk_load_preserves_platform_synchronous_mode() {
     let (db, _dir, _path) = setup_db().await;
 
     db.begin_bulk_load().await.unwrap();
 
-    // Check that synchronous is still NORMAL (1) not OFF (0)
+    // NORMAL = 1, FULL = 2. Windows uses DELETE journaling with FULL sync;
+    // other platforms use WAL with NORMAL sync.
     let sync_value: i64 = {
         let mut rows = db.conn().query("PRAGMA synchronous", ()).await.unwrap();
         let row = rows.next().await.unwrap().unwrap();
         row.get(0).unwrap()
     };
-    // NORMAL = 1, OFF = 0, FULL = 2
+    let expected_sync = if cfg!(windows) { 2 } else { 1 };
     assert_eq!(
-        sync_value, 1,
-        "synchronous should be NORMAL (1) during bulk load, not OFF (0)"
+        sync_value, expected_sync,
+        "bulk load should preserve the platform synchronous mode"
     );
 
     db.end_bulk_load().await.unwrap();

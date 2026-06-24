@@ -7,6 +7,7 @@ mod common;
 
 use std::ffi::OsString;
 use std::fs;
+use std::ops::{Deref, DerefMut};
 #[cfg(unix)]
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
@@ -196,9 +197,63 @@ struct CrossProjectMemoryEnv {
     _storage_guard: common::TraceDecayStorageEnvGuard,
 }
 
+struct TestTraceDecay {
+    inner: Option<TraceDecay>,
+}
+
+impl TestTraceDecay {
+    fn new(cg: TraceDecay) -> Self {
+        Self { inner: Some(cg) }
+    }
+
+    async fn close(mut self) {
+        if let Some(cg) = self.inner.take() {
+            cg.checkpoint().await.unwrap();
+            cg.close();
+        }
+    }
+
+    fn into_inner(mut self) -> TraceDecay {
+        self.inner.take().expect("test graph already closed")
+    }
+}
+
+impl Deref for TestTraceDecay {
+    type Target = TraceDecay;
+
+    fn deref(&self) -> &Self::Target {
+        self.inner.as_ref().expect("test graph already closed")
+    }
+}
+
+impl DerefMut for TestTraceDecay {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.inner.as_mut().expect("test graph already closed")
+    }
+}
+
+#[cfg(windows)]
+impl Drop for TestTraceDecay {
+    fn drop(&mut self) {
+        if let Some(cg) = self.inner.take() {
+            let close_thread = std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("test teardown runtime");
+                runtime.block_on(async {
+                    let _ = cg.checkpoint().await;
+                });
+                cg.close();
+            });
+            let _ = close_thread.join();
+        }
+    }
+}
+
 /// Creates a temporary Rust project with cross-file calls, structs, impls,
 /// test files, and doc comments, then initialises and indexes a `TraceDecay`.
-async fn setup_project() -> (TraceDecay, TestProject) {
+async fn setup_project() -> (TestTraceDecay, TestProject) {
     let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let project = dir.path();
@@ -252,7 +307,7 @@ fn test_helper() { assert!(!helper().is_empty()); }
     let cg = TraceDecay::init(project).await.unwrap();
     index_all_retrying_sync_lock(&cg).await;
     (
-        cg,
+        TestTraceDecay::new(cg),
         TestProject {
             dir: Some(dir),
             _env_lock: env_lock,
@@ -262,19 +317,18 @@ fn test_helper() { assert!(!helper().is_empty()); }
     )
 }
 
-async fn close_test_graph(cg: TraceDecay) {
-    cg.checkpoint().await.unwrap();
-    cg.close();
+async fn close_test_graph(cg: TestTraceDecay) {
+    cg.close().await;
 }
 
-async fn init_test_project(project: &Path) -> (TraceDecay, TestEnv) {
+async fn init_test_project(project: &Path) -> (TestTraceDecay, TestEnv) {
     let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
     let home = project.join("home");
     let home_guard = HomeEnvGuard::set(&home);
     let global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
     let cg = TraceDecay::init(project).await.unwrap();
     (
-        cg,
+        TestTraceDecay::new(cg),
         TestEnv {
             _env_lock: env_lock,
             _home_guard: home_guard,
@@ -283,7 +337,7 @@ async fn init_test_project(project: &Path) -> (TraceDecay, TestEnv) {
     )
 }
 
-async fn setup_generated_dir_project(include_dist: bool) -> (TraceDecay, TestEnv, TempDir) {
+async fn setup_generated_dir_project(include_dist: bool) -> (TestTraceDecay, TestEnv, TempDir) {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
@@ -303,7 +357,8 @@ async fn setup_generated_dir_project(include_dist: bool) -> (TraceDecay, TestEnv
     (cg, env, dir)
 }
 
-async fn setup_cross_project_memory_projects() -> (TraceDecay, TraceDecay, CrossProjectMemoryEnv) {
+async fn setup_cross_project_memory_projects(
+) -> (TestTraceDecay, TestTraceDecay, CrossProjectMemoryEnv) {
     let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let storage_guard = common::isolated_tracedecay_storage(&dir);
@@ -319,8 +374,8 @@ async fn setup_cross_project_memory_projects() -> (TraceDecay, TraceDecay, Cross
     let target = TraceDecay::init(&target_project).await.unwrap();
 
     (
-        active,
-        target,
+        TestTraceDecay::new(active),
+        TestTraceDecay::new(target),
         CrossProjectMemoryEnv {
             _dir: dir,
             _env_lock: env_lock,
@@ -359,7 +414,7 @@ fn project_session_db_path(cg: &TraceDecay) -> PathBuf {
 /// Creates a small Rust library with an integration-style test that calls a
 /// public entry point, which then reaches an internal helper. This exercises
 /// the calibrated depth-3 attribution path in `tracedecay_test_risk`.
-async fn setup_integration_test_risk_project() -> (TraceDecay, TestProject) {
+async fn setup_integration_test_risk_project() -> (TestTraceDecay, TestProject) {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
@@ -422,7 +477,7 @@ fn integration_public_entry() {
     let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
     (
-        cg,
+        TestTraceDecay::new(cg),
         TestProject {
             dir: Some(dir),
             _env_lock: env_lock,
@@ -434,7 +489,7 @@ fn integration_public_entry() {
 
 /// Extends the calibrated integration-risk fixture with a build script so the
 /// test-risk denominator can prove non-`src/` functions are excluded.
-async fn setup_test_risk_non_src_fixture() -> (TraceDecay, TestProject) {
+async fn setup_test_risk_non_src_fixture() -> (TestTraceDecay, TestProject) {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
@@ -511,7 +566,7 @@ fn main() {
     let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
     (
-        cg,
+        TestTraceDecay::new(cg),
         TestProject {
             dir: Some(dir),
             _env_lock: env_lock,
@@ -814,7 +869,7 @@ async fn selected_project_read_skips_cache_write_for_read_only_store() {
         .upsert_code_project("proj_read", target_project, None, None, Some("main"))
         .await
         .unwrap();
-    let target_cg = TraceDecay::init(target_project).await.unwrap();
+    let target_cg = TestTraceDecay::new(TraceDecay::init(target_project).await.unwrap());
     index_all_retrying_sync_lock(&target_cg).await;
 
     let read_args = json!({
@@ -2066,7 +2121,7 @@ async fn test_branch_list_reports_live_vs_serving_drift_state() {
     git(project, &["commit", "-m", "initial"]);
     git(project, &["branch", "-M", "main"]);
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let cg = TestTraceDecay::new(TraceDecay::init(project).await.unwrap());
     cg.index_all().await.unwrap();
     let tracedecay_dir = resolve_layout_for_current_profile(project)
         .unwrap()
@@ -2077,7 +2132,7 @@ async fn test_branch_list_reports_live_vs_serving_drift_state() {
     )
     .unwrap();
 
-    let cg = TraceDecay::open(project).await.unwrap();
+    let cg = TestTraceDecay::new(TraceDecay::open(project).await.unwrap());
     git(project, &["checkout", "-b", "feature"]);
 
     let result = handle_tool_call(&cg, "tracedecay_branch_list", json!({}), None, None)
@@ -2127,6 +2182,8 @@ async fn test_files_path_filter() {
         !text.contains("tests/test_utils"),
         "path filter should exclude files outside 'src'"
     );
+
+    close_test_graph(cg).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -4264,8 +4321,7 @@ async fn test_multi_str_replace_unsupported_file_type_succeeds() {
     assert!(!content.contains("14px"));
     assert!(!content.contains("16px"));
 
-    cg.checkpoint().await.unwrap();
-    cg.close();
+    close_test_graph(cg).await;
 }
 
 #[tokio::test]
@@ -5777,6 +5833,9 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
         "Target selector fact",
         "top-level path should not act as an undocumented project selector",
     );
+
+    close_test_graph(target).await;
+    close_test_graph(active).await;
 }
 
 #[tokio::test]
@@ -6164,10 +6223,10 @@ async fn memory_fact_store_uses_project_store_when_serving_branch_db() {
     git(&project, &["commit", "-m", "initial"]);
     git(&project, &["branch", "-M", "main"]);
 
-    let cg = TraceDecay::init(&project).await.unwrap();
+    let cg = TestTraceDecay::new(TraceDecay::init(&project).await.unwrap());
     index_all_retrying_sync_lock(&cg).await;
     git(&project, &["checkout", "-b", "feature"]);
-    let cg = TraceDecay::open(&project).await.unwrap();
+    let cg = TestTraceDecay::new(TraceDecay::open(&project).await.unwrap());
     assert_ne!(
         cg.db_path(),
         cg.store_layout().graph_db_path,
@@ -6409,7 +6468,7 @@ async fn message_search_reads_profile_sharded_session_db() {
         .unwrap();
     let meta = tracedecay::branch_meta::BranchMeta::new_for_dir(&shard_root, "main");
     tracedecay::branch_meta::save_branch_meta(&shard_root, &meta).unwrap();
-    let cg = TraceDecay::open(&project).await.unwrap();
+    let cg = TestTraceDecay::new(TraceDecay::open(&project).await.unwrap());
     let db = open_project_session_db(cg.project_root())
         .await
         .expect("profile-sharded session db should open");
@@ -9821,7 +9880,7 @@ async fn memory_status_repairs_dirty_banks_before_reporting() {
 /// searching for `gmres`: the codebase has both a `pub fn gmres(...)` and a
 /// struct field literally named `gmres`. The function — the body the user
 /// actually wants — must outrank the field.
-async fn setup_function_vs_field_collision() -> (TraceDecay, TempDir) {
+async fn setup_function_vs_field_collision() -> (TestTraceDecay, TempDir) {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
@@ -11190,15 +11249,17 @@ async fn refresh_file_token_map_picks_up_new_files() {
     let (cg, _env) = init_test_project(project).await;
     cg.sync().await.unwrap();
 
-    let server = tracedecay::mcp::McpServer::new(cg, None).await;
+    let server = tracedecay::mcp::McpServer::new(cg.into_inner(), None).await;
     let initial_map = server.file_token_map_snapshot();
     let initial_keys: std::collections::HashSet<_> = initial_map.keys().cloned().collect();
 
     // Add a new file, sync it, then refresh.
     std::fs::write(project.join("b.rs"), "fn b() { let y = 2; }").unwrap();
-    let cg2 = tracedecay::tracedecay::TraceDecay::open(project)
-        .await
-        .unwrap();
+    let cg2 = TestTraceDecay::new(
+        tracedecay::tracedecay::TraceDecay::open(project)
+            .await
+            .unwrap(),
+    );
     cg2.sync().await.unwrap();
 
     server.refresh_file_token_map().await;
@@ -11224,7 +11285,7 @@ async fn mcp_server_owns_watcher_and_refreshes_token_map_on_change() {
     let (cg, _env) = init_test_project(project).await;
     cg.sync().await.unwrap();
 
-    let server = tracedecay::mcp::McpServer::new(cg, None).await;
+    let server = tracedecay::mcp::McpServer::new(cg.into_inner(), None).await;
     assert!(
         server
             .wait_for_startup_catch_up(std::time::Duration::from_secs(2))
@@ -11857,7 +11918,7 @@ async fn wait_for_startup_catch_up_waits_for_transcript_ingest_flag() {
     let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
-    let server = tracedecay::mcp::McpServer::new(cg, None).await;
+    let server = tracedecay::mcp::McpServer::new(cg.into_inner(), None).await;
     server.run_startup_catch_up_sync().await;
 
     let completed = server

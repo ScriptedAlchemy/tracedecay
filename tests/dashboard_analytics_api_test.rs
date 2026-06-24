@@ -186,22 +186,17 @@ async fn seed_durable_analytics(db_path: &Path, project_root: &Path) {
 async fn seed_durable_recent_window(db_path: &Path, project_root: &Path) {
     let gdb = GlobalDb::open_at(db_path).await.expect("open global db");
     let project_id = GlobalDb::canonical_project_key(project_root);
-    for offset in 0..10_000 {
-        gdb.append_analytics_event(&analytics_event(
-            &project_id,
-            1_760_000_000 + offset,
-            "older_noise",
-        ))
-        .await
-        .expect("append older durable analytics event");
-    }
-    gdb.append_analytics_event(&AnalyticsEventInsert {
+    let mut events: Vec<_> = (0..10_000)
+        .map(|offset| analytics_event(&project_id, 1_760_000_000 + offset, "older_noise"))
+        .collect();
+    events.push(AnalyticsEventInsert {
         skill_name: Some("superpowers:test-driven-development".to_string()),
         outcome: Some("used".to_string()),
         ..analytics_event(&project_id, 1_760_020_000, "skill")
-    })
-    .await
-    .expect("append recent durable analytics event");
+    });
+    gdb.append_analytics_events(&events)
+        .await
+        .expect("append durable analytics events");
 }
 
 async fn seed_fallback_analytics(db_path: &Path, project_root: &Path) {

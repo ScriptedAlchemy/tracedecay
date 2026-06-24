@@ -49,6 +49,35 @@ pub(crate) fn platform_safe_mmap_size(mmap: u64) -> u64 {
     }
 }
 
+/// Returns the `journal_mode` safe for the current platform.
+///
+/// Windows libsql/SQLite local databases can intermittently fault while closing
+/// WAL-mode databases under nextest's per-test process isolation. Disabling
+/// mmap removed one unsafe teardown path, but master CI still aborts in
+/// unrelated tests as different short-lived databases close. Use rollback
+/// journaling on Windows and keep WAL everywhere else.
+pub(crate) fn platform_safe_journal_mode() -> &'static str {
+    if cfg!(windows) {
+        "DELETE"
+    } else {
+        "WAL"
+    }
+}
+
+/// Returns the `synchronous` level paired with the current platform journal.
+///
+/// `NORMAL` is consistency-safe for WAL because WAL can recover from a missing
+/// final fsync, but rollback journals need `FULL` to avoid corruption after an
+/// OS crash or power loss. Keep the faster WAL+NORMAL pairing on non-Windows
+/// and use DELETE+FULL on Windows.
+pub(crate) fn platform_safe_synchronous_mode() -> &'static str {
+    if cfg!(windows) {
+        "FULL"
+    } else {
+        "NORMAL"
+    }
+}
+
 /// `SQLite` database backing the code graph, powered by libsql.
 pub struct Database {
     conn: Connection,
@@ -261,13 +290,15 @@ impl Database {
     async fn apply_pragmas(conn: &Connection, db_file_size: u64) -> Result<()> {
         let (cache_kb, mmap) = adaptive_cache_sizes(db_file_size);
         let mmap = platform_safe_mmap_size(mmap);
+        let journal_mode = platform_safe_journal_mode();
+        let synchronous = platform_safe_synchronous_mode();
         conn.execute_batch(&format!(
             "PRAGMA mmap_size = {mmap};
              PRAGMA page_size = 8192;
-             PRAGMA journal_mode = WAL;
+             PRAGMA journal_mode = {journal_mode};
              PRAGMA foreign_keys = ON;
              PRAGMA busy_timeout = 120000;
-             PRAGMA synchronous = NORMAL;
+             PRAGMA synchronous = {synchronous};
              PRAGMA cache_size = -{cache_kb};
              PRAGMA temp_store = MEMORY;",
         ))
@@ -422,8 +453,9 @@ mod tests {
 
     #[test]
     fn mmap_disabled_on_windows_only() {
-        // Windows forces mmap_size to 0 to avoid the close-time WAL checkpoint
-        // access violation; every other platform keeps the adaptive value.
+        // Windows forces mmap_size to 0 to avoid the close-time database
+        // teardown access violation; every other platform keeps the adaptive
+        // value.
         let raw = 200 * MB;
         let effective = platform_safe_mmap_size(raw);
         if cfg!(windows) {
@@ -433,5 +465,23 @@ mod tests {
         }
         // A zero input stays zero on every platform.
         assert_eq!(platform_safe_mmap_size(0), 0);
+    }
+
+    #[test]
+    fn journal_mode_uses_wal_except_on_windows() {
+        if cfg!(windows) {
+            assert_eq!(platform_safe_journal_mode(), "DELETE");
+        } else {
+            assert_eq!(platform_safe_journal_mode(), "WAL");
+        }
+    }
+
+    #[test]
+    fn synchronous_mode_matches_platform_journal_mode() {
+        if cfg!(windows) {
+            assert_eq!(platform_safe_synchronous_mode(), "FULL");
+        } else {
+            assert_eq!(platform_safe_synchronous_mode(), "NORMAL");
+        }
     }
 }
