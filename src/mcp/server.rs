@@ -19,7 +19,9 @@ use crate::mcp::response_handles::{
 };
 use crate::tracedecay::TraceDecay;
 
-use super::tools::{explore_call_budget, get_tool_definitions_with_budget, handle_tool_call};
+use super::tools::{
+    explore_call_budget, get_tool_definitions_with_budget, handle_tool_call_with_registry,
+};
 use super::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
 
 /// Runtime statistics for the MCP server.
@@ -419,6 +421,11 @@ pub struct McpServer {
     /// `Arc` so spawned savings-recording tasks can hold a cheap clone of
     /// the handle instead of opening a new connection per call.
     global_db: Option<Arc<GlobalDb>>,
+    /// Registry used for project-selector reads. This remains available even
+    /// when global accounting is disabled so daemon clients do not fall back
+    /// to the daemon process profile for selector resolution.
+    registry_db: Option<Arc<GlobalDb>>,
+    allow_default_registry_fallback: bool,
     /// Cached latest-version check result.
     version_cache: std::sync::Mutex<VersionCheckState>,
     /// Pending JSON-RPC notifications to send before the next response.
@@ -479,14 +486,33 @@ impl McpServer {
     /// `packages/*/target`) drove unbounded event traffic and `FileId`
     /// cache growth.
     pub async fn new(cg: TraceDecay, scope_prefix: Option<String>) -> Arc<Self> {
-        let file_token_map = cg.get_file_token_map().await.unwrap_or_default();
-        let persisted = cg.get_tokens_saved().await.unwrap_or(0);
-        let response_handle_project_root = cg.project_root().to_path_buf();
+        let registry_db = GlobalDb::open().await.map(Arc::new);
         let global_db: Option<Arc<GlobalDb>> = if crate::global_db::global_accounting_enabled() {
-            GlobalDb::open().await.map(Arc::new)
+            registry_db.clone()
         } else {
             None
         };
+        Self::new_with_dbs(cg, scope_prefix, global_db, registry_db, true).await
+    }
+
+    pub async fn new_with_global_db(
+        cg: TraceDecay,
+        scope_prefix: Option<String>,
+        global_db: Option<Arc<GlobalDb>>,
+    ) -> Arc<Self> {
+        Self::new_with_dbs(cg, scope_prefix, global_db.clone(), global_db, true).await
+    }
+
+    pub async fn new_with_dbs(
+        cg: TraceDecay,
+        scope_prefix: Option<String>,
+        global_db: Option<Arc<GlobalDb>>,
+        registry_db: Option<Arc<GlobalDb>>,
+        allow_default_registry_fallback: bool,
+    ) -> Arc<Self> {
+        let file_token_map = cg.get_file_token_map().await.unwrap_or_default();
+        let persisted = cg.get_tokens_saved().await.unwrap_or(0);
+        let response_handle_project_root = cg.project_root().to_path_buf();
         // Register this project in the global DB with its current tokens
         if let Some(ref gdb) = global_db {
             gdb.upsert(cg.project_root(), persisted).await;
@@ -516,6 +542,8 @@ impl McpServer {
             last_flushed_tokens: AtomicU64::new(persisted),
             last_flush_at: AtomicI64::new(0),
             global_db,
+            registry_db,
+            allow_default_registry_fallback,
             version_cache: std::sync::Mutex::new(VersionCheckState {
                 latest: None,
                 checked_at: None,
@@ -754,12 +782,11 @@ impl McpServer {
         // flags via `wait_for_startup_catch_up`.
         {
             let project_root = cg.project_root().to_path_buf();
+            let session_db_path = cg.store_layout().sessions_db_path.clone();
             let ingest_done_flag = Arc::clone(&self.transcript_ingest_done);
             tokio::spawn(async move {
                 let _ = tokio::time::timeout(std::time::Duration::from_secs(20), async move {
-                    if let Some(db) =
-                        crate::sessions::cursor::open_project_session_db(&project_root).await
-                    {
+                    if let Some(db) = GlobalDb::open_at(&session_db_path).await {
                         let _ = crate::sessions::ingest_global_sources(&db, &project_root).await;
                     }
                 })
@@ -998,48 +1025,105 @@ impl McpServer {
     /// responses to stdout. Runs until stdin is closed or a shutdown signal
     /// (SIGINT/SIGTERM) is received, then performs graceful cleanup.
     pub async fn run(&self, transport: &mut impl super::transport::McpTransport) -> Result<()> {
+        self.run_with_shutdown_policy(transport, true, true, None)
+            .await
+    }
+
+    /// Runs one client connection without shutting down the server when that
+    /// connection closes. Daemon-owned servers use this so the engine remains
+    /// shared across independent clients.
+    pub async fn run_connection(
+        &self,
+        transport: &mut impl super::transport::McpTransport,
+    ) -> Result<()> {
+        self.run_with_shutdown_policy(transport, false, false, None)
+            .await
+    }
+
+    /// Runs one daemon client connection using connection-local timing
+    /// settings. The shared server's default timing flag remains unchanged.
+    pub async fn run_connection_with_timings(
+        &self,
+        transport: &mut impl super::transport::McpTransport,
+        timings_enabled: bool,
+    ) -> Result<()> {
+        self.run_with_shutdown_policy(transport, false, false, Some(timings_enabled))
+            .await
+    }
+
+    async fn run_with_shutdown_policy(
+        &self,
+        transport: &mut impl super::transport::McpTransport,
+        shutdown_on_exit: bool,
+        listen_for_process_signals: bool,
+        timings_override: Option<bool>,
+    ) -> Result<()> {
         // Register the SIGTERM listener once before entering the loop so
         // there is no window between iterations where a SIGTERM is delivered
         // but no handler is installed (which would cause silent loss of the
         // signal and skip the shutdown() flush).
         #[cfg(unix)]
         #[allow(clippy::expect_used)]
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to register SIGTERM handler");
+        let mut sigterm = listen_for_process_signals.then(|| {
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to register SIGTERM handler")
+        });
 
         loop {
             let line: String = {
                 #[cfg(unix)]
                 {
-                    tokio::select! {
-                        result = transport.read_line() => {
-                            match result {
-                                Ok(Some(line)) => line,
-                                Ok(None) => break,
-                                Err(e) => {
-                                    self.shutdown().await;
-                                    return Err(e.into());
+                    if let Some(sigterm) = sigterm.as_mut() {
+                        tokio::select! {
+                            result = transport.read_line() => {
+                                match result {
+                                    Ok(Some(line)) => line,
+                                    Ok(None) => break,
+                                    Err(e) => {
+                                        self.shutdown_if(shutdown_on_exit).await;
+                                        return Err(e.into());
+                                    }
                                 }
                             }
+                            _ = tokio::signal::ctrl_c() => break,
+                            _ = sigterm.recv() => break,
                         }
-                        _ = tokio::signal::ctrl_c() => break,
-                        _ = sigterm.recv() => break,
+                    } else {
+                        match transport.read_line().await {
+                            Ok(Some(line)) => line,
+                            Ok(None) => break,
+                            Err(e) => {
+                                self.shutdown_if(shutdown_on_exit).await;
+                                return Err(e.into());
+                            }
+                        }
                     }
                 }
                 #[cfg(not(unix))]
                 {
-                    tokio::select! {
-                        result = transport.read_line() => {
-                            match result {
-                                Ok(Some(line)) => line,
-                                Ok(None) => break,
-                                Err(e) => {
-                                    self.shutdown().await;
-                                    return Err(e.into());
+                    if listen_for_process_signals {
+                        tokio::select! {
+                            result = transport.read_line() => {
+                                match result {
+                                    Ok(Some(line)) => line,
+                                    Ok(None) => break,
+                                    Err(e) => {
+                                        self.shutdown_if(shutdown_on_exit).await;
+                                        return Err(e.into());
+                                    }
                                 }
                             }
+                            _ = tokio::signal::ctrl_c() => break,
                         }
-                        _ = tokio::signal::ctrl_c() => break,
+                    } else {
+                        match transport.read_line().await {
+                            Ok(Some(line)) => line,
+                            Ok(None) => break,
+                            Err(e) => {
+                                self.shutdown_if(shutdown_on_exit).await;
+                                return Err(e.into());
+                            }
+                        }
                     }
                 }
             };
@@ -1053,7 +1137,13 @@ impl McpServer {
             let parsed: std::result::Result<JsonRpcRequest, _> = serde_json::from_str(&line);
 
             let response = match parsed {
-                Ok(request) => self.handle_request(&request).await,
+                Ok(request) => {
+                    self.handle_request_with_timings(
+                        &request,
+                        timings_override.unwrap_or_else(|| self.timings_enabled()),
+                    )
+                    .await
+                }
                 Err(e) => Some(JsonRpcResponse::error(
                     Value::Null,
                     ErrorCode::ParseError,
@@ -1071,11 +1161,11 @@ impl McpServer {
                 for notification in notifications {
                     if let Ok(s) = serde_json::to_string(&notification) {
                         if let Err(e) = transport.write_line(&format!("{s}\n")).await {
-                            self.shutdown().await;
+                            self.shutdown_if(shutdown_on_exit).await;
                             return Err(e.into());
                         }
                         if let Err(e) = transport.flush().await {
-                            self.shutdown().await;
+                            self.shutdown_if(shutdown_on_exit).await;
                             return Err(e.into());
                         }
                     }
@@ -1088,19 +1178,25 @@ impl McpServer {
                 let output = format!("{json_line}\n");
                 if let Err(e) = transport.write_line(&output).await {
                     eprintln!("failed to write response: {e}");
-                    self.shutdown().await;
+                    self.shutdown_if(shutdown_on_exit).await;
                     return Err(e.into());
                 }
                 if let Err(e) = transport.flush().await {
                     eprintln!("failed to flush stdout: {e}");
-                    self.shutdown().await;
+                    self.shutdown_if(shutdown_on_exit).await;
                     return Err(e.into());
                 }
             }
         }
 
-        self.shutdown().await;
+        self.shutdown_if(shutdown_on_exit).await;
         Ok(())
+    }
+
+    async fn shutdown_if(&self, enabled: bool) {
+        if enabled {
+            self.shutdown().await;
+        }
     }
 
     /// Persists the tokens-saved counter, flushes pending tokens to the
@@ -1167,6 +1263,15 @@ impl McpServer {
     ///
     /// Returns `None` for notifications (requests without an `id`).
     pub(crate) async fn handle_request(&self, request: &JsonRpcRequest) -> Option<JsonRpcResponse> {
+        self.handle_request_with_timings(request, self.timings_enabled())
+            .await
+    }
+
+    async fn handle_request_with_timings(
+        &self,
+        request: &JsonRpcRequest,
+        timings_enabled: bool,
+    ) -> Option<JsonRpcResponse> {
         debug_assert!(
             !request.method.is_empty(),
             "handle_request called with empty method"
@@ -1185,7 +1290,10 @@ impl McpServer {
                 None
             }
             "tools/list" => Some(self.handle_tools_list(id).await),
-            "tools/call" => Some(self.handle_tools_call(id, request.params.as_ref()).await),
+            "tools/call" => Some(
+                self.handle_tools_call(id, request.params.as_ref(), timings_enabled)
+                    .await,
+            ),
             "resources/list" => Some(Self::handle_resources_list(id)),
             "resources/read" => Some(
                 self.handle_resources_read(id, request.params.as_ref())
@@ -1507,7 +1615,12 @@ impl McpServer {
     }
 
     /// Handles the `tools/call` method, dispatching to the appropriate tool handler.
-    async fn handle_tools_call(&self, id: Value, params: Option<&Value>) -> JsonRpcResponse {
+    async fn handle_tools_call(
+        &self,
+        id: Value,
+        params: Option<&Value>,
+        timings_enabled: bool,
+    ) -> JsonRpcResponse {
         let Some(params) = params else {
             return JsonRpcResponse::error(
                 id,
@@ -1549,14 +1662,21 @@ impl McpServer {
             None
         };
 
-        let timings_enabled = self.timings_enabled();
         let handler_start = if timings_enabled {
             Some(std::time::Instant::now())
         } else {
             None
         };
-        let dispatch_outcome =
-            handle_tool_call(&cg, tool_name, arguments, server_stats, self.scope_prefix()).await;
+        let dispatch_outcome = handle_tool_call_with_registry(
+            &cg,
+            tool_name,
+            arguments,
+            server_stats,
+            self.scope_prefix(),
+            self.registry_db.as_deref(),
+            self.allow_default_registry_fallback,
+        )
+        .await;
         let handler_elapsed_us = handler_start.map(|t| t.elapsed().as_micros() as u64);
         let request_id = id.clone();
         match dispatch_outcome {

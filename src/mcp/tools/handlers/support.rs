@@ -9,7 +9,7 @@ use std::path::{Component, Path, PathBuf};
 use serde_json::Value;
 
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{global_db_path, GlobalDb, ProjectRegistryContext};
+use crate::global_db::{GlobalDb, ProjectRegistryContext};
 
 /// Extracts the `node_id` parameter from tool arguments, accepting `id` as a
 /// fallback alias. LLMs occasionally shorten `node_id` to `id`; this avoids a
@@ -102,11 +102,7 @@ pub(super) fn safe_profile_relpath(value: &str) -> Result<PathBuf> {
 }
 
 fn global_db_profile_root() -> Result<PathBuf> {
-    global_db_path()
-        .and_then(|path| path.parent().map(Path::to_path_buf))
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "could not resolve tracedecay profile root".to_string(),
-        })
+    crate::storage::default_profile_root()
 }
 
 pub(super) fn profile_root_for_global_db(

@@ -494,6 +494,13 @@ pub(crate) async fn status(
     deep: bool,
     gc_config: &LcmGcConfig,
 ) -> Result<LcmStatus, LcmError> {
+    let schema_version = schema::schema_version(conn)
+        .await
+        .unwrap_or(LCM_SCHEMA_VERSION);
+    if !lcm_table_exists(conn, "lcm_raw_messages").await? {
+        return Ok(empty_status(schema_version, gc_config));
+    }
+
     let payload_health = payload_health_detail(
         conn,
         storage_root,
@@ -520,9 +527,7 @@ pub(crate) async fn status(
     let dag = dag_status(conn, provider, session_id).await?;
 
     Ok(LcmStatus {
-        schema_version: schema::schema_version(conn)
-            .await
-            .unwrap_or(LCM_SCHEMA_VERSION),
+        schema_version,
         storage_scope: Some("project_local".to_string()),
         raw_message_count: count_raw_messages(conn, provider, session_id).await?,
         summary_node_count: count_summary_nodes(conn, provider, session_id).await?,
@@ -554,6 +559,96 @@ pub(crate) async fn status(
             legacy_truncated_count,
         },
     })
+}
+
+async fn lcm_table_exists(conn: &Connection, table_name: &str) -> Result<bool, LcmError> {
+    Ok(util::fetch_i64(
+        conn,
+        "SELECT COUNT(*)
+         FROM sqlite_master
+         WHERE type = 'table' AND name = ?1",
+        params![table_name],
+        "LCM table existence query returned no rows",
+    )
+    .await?
+        > 0)
+}
+
+fn empty_status(schema_version: i64, gc_config: &LcmGcConfig) -> LcmStatus {
+    let gc_config = gc_config.clone().normalized();
+    let grace_seconds = i64::try_from(gc_config.grace_seconds).unwrap_or(i64::MAX);
+    let reap_missing_after_seconds =
+        i64::try_from(gc_config.reap_missing_after).unwrap_or(i64::MAX);
+    LcmStatus {
+        schema_version,
+        storage_scope: Some("project_local".to_string()),
+        raw_message_count: 0,
+        summary_node_count: 0,
+        external_payload_count: 0,
+        missing_payload_count: 0,
+        unreferenced_payload_count: 0,
+        maintenance_debt_count: 0,
+        store: LcmStoreStatus {
+            messages: 0,
+            estimated_tokens: 0,
+        },
+        dag: LcmDagStatus {
+            total_nodes: 0,
+            total_tokens: 0,
+            total_source_tokens: 0,
+            compression_ratio: "0:1".to_string(),
+            depths: BTreeMap::new(),
+        },
+        config: LcmConfigStatus {
+            fresh_tail_count: LCM_DEFAULT_FRESH_TAIL_COUNT,
+            summary_fan_in: LCM_DEFAULT_SUMMARY_FAN_IN,
+            compression_boundary_cooldown_seconds: LCM_COMPRESSION_BOUNDARY_COOLDOWN_SECONDS,
+        },
+        payload: LcmPayloadStatus {
+            externalized_count: 0,
+            missing_count: 0,
+            unreferenced_count: 0,
+            placeholder_ref_count: 0,
+            missing_placeholder_metadata_count: 0,
+            missing_placeholder_file_count: 0,
+            gc_candidate_count: 0,
+            root_contained: true,
+            orphan_file_count: 0,
+            tombstoned_count: 0,
+            referenced_count: 0,
+            total_bytes: 0,
+            referenced_bytes: 0,
+            orphan_file_bytes: 0,
+            reclaimable_bytes: 0,
+            reclaimable_bytes_after_grace: 0,
+            integrity_mismatch_count: None,
+        },
+        payload_gc: LcmPayloadGcStatus {
+            last_gc_at: None,
+            last_gc_duration_ms: None,
+            last_gc_status: None,
+            last_gc_error: None,
+            last_reaped_refs: None,
+            last_reaped_bytes: None,
+            grace_seconds,
+            reap_missing_metadata_after_seconds: reap_missing_after_seconds,
+            next_run_eligible_at: None,
+        },
+        lifecycle: LcmLifecycleStatus {
+            lifecycle_state_count: 0,
+            frontier_count: 0,
+            maintenance_debt_count: 0,
+            current_session_id: None,
+            current_frontier_store_id: None,
+            last_finalized_session_id: None,
+            last_finalized_frontier_store_id: None,
+        },
+        redaction: LcmRedactionStatus {
+            enabled: false,
+            lossy_records: 0,
+            legacy_truncated_count: 0,
+        },
+    }
 }
 
 fn load_message_from_raw(

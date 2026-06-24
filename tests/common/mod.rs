@@ -5,7 +5,11 @@ use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(unix)]
+use std::process::{Child, Stdio};
 use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 use serde_json::Value;
 use tempfile::TempDir;
@@ -216,7 +220,17 @@ pub fn http_agent() -> ureq::Agent {
 }
 
 #[cfg(unix)]
-pub struct DaemonProcess;
+pub struct DaemonProcess {
+    child: Child,
+}
+
+#[cfg(unix)]
+impl Drop for DaemonProcess {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
 
 pub fn apply_tracedecay_home_env(command: &mut Command, home: &Path) {
     let home = canonical_existing_path(home);
@@ -228,9 +242,46 @@ pub fn apply_tracedecay_home_env(command: &mut Command, home: &Path) {
         .env(GLOBAL_DB_ENV, home.join(".tracedecay/global.db"));
 }
 
+pub fn tracedecay_command_with_home(home: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+    apply_tracedecay_home_env(&mut command, home);
+    command
+}
+
 #[cfg(unix)]
-pub fn spawn_tracedecay_daemon(_home: &Path) -> DaemonProcess {
-    DaemonProcess
+pub fn daemon_socket_path(home: &Path) -> PathBuf {
+    canonical_existing_path(home).join(".tracedecay/daemon.sock")
+}
+
+#[cfg(unix)]
+pub fn spawn_tracedecay_daemon(home: &Path) -> DaemonProcess {
+    let socket_path = daemon_socket_path(home);
+    let _ = std::fs::remove_file(&socket_path);
+
+    let mut child = tracedecay_command_with_home(home)
+        .arg("daemon")
+        .arg("run")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("tracedecay daemon should start");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
+            return DaemonProcess { child };
+        }
+        if let Some(status) = child.try_wait().expect("daemon status should be readable") {
+            panic!("tracedecay daemon exited before opening socket: {status}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for daemon socket at {}",
+            socket_path.display()
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 pub fn response_to_json(mut response: ureq::http::Response<ureq::Body>) -> (u16, Value) {
