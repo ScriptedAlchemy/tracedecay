@@ -27,6 +27,28 @@ pub(crate) fn adaptive_cache_sizes(db_file_size: u64) -> (u64, u64) {
     (cache_kb, mmap)
 }
 
+/// Returns the `mmap_size` that is actually safe to apply on the current
+/// platform.
+///
+/// `SQLite` memory-mapped I/O is disabled on Windows. When the final connection
+/// to a WAL-mode database closes, `SQLite` runs an implicit checkpoint; on
+/// Windows the interaction between that close-time checkpoint and tearing down
+/// the file's memory map intermittently faults with `STATUS_ACCESS_VIOLATION`
+/// (`0xc0000005`). Because libsql's local connection executes synchronously
+/// (no background runtime), the fault surfaces as a native process abort
+/// during teardown — nextest reports it as an ABORT/"test aborted" on a
+/// rotating set of tests rather than an assertion failure. Forcing
+/// `mmap_size = 0` on Windows routes the close path through ordinary file I/O
+/// and removes the crash at its source. Other platforms keep the adaptive
+/// mmap size for its read-throughput benefit.
+pub(crate) fn platform_safe_mmap_size(mmap: u64) -> u64 {
+    if cfg!(windows) {
+        0
+    } else {
+        mmap
+    }
+}
+
 /// `SQLite` database backing the code graph, powered by libsql.
 pub struct Database {
     conn: Connection,
@@ -238,6 +260,7 @@ impl Database {
     /// small projects don't pay the 320 MB baseline of a large project.
     async fn apply_pragmas(conn: &Connection, db_file_size: u64) -> Result<()> {
         let (cache_kb, mmap) = adaptive_cache_sizes(db_file_size);
+        let mmap = platform_safe_mmap_size(mmap);
         conn.execute_batch(&format!(
             "PRAGMA page_size = 8192;
              PRAGMA journal_mode = WAL;
@@ -258,6 +281,7 @@ impl Database {
 
     async fn apply_read_only_pragmas(conn: &Connection, db_file_size: u64) -> Result<()> {
         let (cache_kb, mmap) = adaptive_cache_sizes(db_file_size);
+        let mmap = platform_safe_mmap_size(mmap);
         conn.execute_batch(&format!(
             "PRAGMA foreign_keys = ON;
              PRAGMA busy_timeout = 120000;
@@ -394,5 +418,20 @@ mod tests {
         let (cache_kb, mmap) = adaptive_cache_sizes(2 * 1024 * MB);
         assert_eq!(cache_kb, 64 * MB / KB);
         assert_eq!(mmap, 256 * MB);
+    }
+
+    #[test]
+    fn mmap_disabled_on_windows_only() {
+        // Windows forces mmap_size to 0 to avoid the close-time WAL checkpoint
+        // access violation; every other platform keeps the adaptive value.
+        let raw = 200 * MB;
+        let effective = platform_safe_mmap_size(raw);
+        if cfg!(windows) {
+            assert_eq!(effective, 0, "Windows must disable mmap");
+        } else {
+            assert_eq!(effective, raw, "non-Windows keeps adaptive mmap");
+        }
+        // A zero input stays zero on every platform.
+        assert_eq!(platform_safe_mmap_size(0), 0);
     }
 }
