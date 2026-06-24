@@ -326,6 +326,80 @@ async fn serve_without_daemon_socket_falls_back_to_in_process_mcp() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn serve_daemon_proxy_reports_daemon_disconnect_as_json_rpc_error() {
+    use std::io::Read;
+    use std::os::unix::net::UnixListener;
+    use std::sync::mpsc;
+
+    let home = TempDir::new().unwrap();
+    let project = init_project_with_file(home.path(), "pub fn disconnect_marker() {}\n").await;
+    let socket_dir = TempDir::new().unwrap();
+    let socket_path = socket_dir.path().join("tracedecay.sock");
+    let (ready_tx, ready_rx) = mpsc::channel();
+
+    let listener_path = socket_path.clone();
+    let fake_daemon = std::thread::spawn(move || {
+        let listener = UnixListener::bind(&listener_path).expect("bind fake daemon socket");
+        ready_tx.send(()).expect("notify fake daemon readiness");
+        if let Ok((mut stream, _addr)) = listener.accept() {
+            let mut scratch = [0_u8; 512];
+            let _ = stream.read(&mut scratch);
+        }
+    });
+    ready_rx.recv().expect("fake daemon should be ready");
+
+    let mut child = tracedecay_command_with_home(home.path())
+        .arg("serve")
+        .arg("--path")
+        .arg(project.path())
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("tracedecay serve should run");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin should be piped");
+        writeln!(
+            stdin,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {}
+            })
+        )
+        .unwrap();
+    }
+    drop(child.stdin.take());
+
+    let output = child
+        .wait_with_output()
+        .expect("tracedecay serve should exit after stdin closes");
+    fake_daemon.join().expect("fake daemon thread should exit");
+
+    assert!(
+        output.status.success(),
+        "serve should keep stdio healthy after daemon disconnect\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let response: Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|err| {
+        panic!("stdout should contain one JSON-RPC response: {err}\n{stdout}")
+    });
+    assert_eq!(response["id"], json!(1));
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("TraceDecay daemon connection failed")),
+        "disconnect should be reported as a JSON-RPC error response, got:\n{response}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn ensure_initialized_rejects_read_only_db_with_pending_migrations() {
     let _env_guard = READ_ONLY_SERVE_ENV_LOCK.lock().await;
     let home = TempDir::new().unwrap();

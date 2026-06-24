@@ -11,14 +11,14 @@ use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use serde_json::json;
 #[cfg(unix)]
-use tokio::io::{copy, AsyncBufReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::client_identity::DaemonClientIdentity;
 use crate::errors::{Result, TraceDecayError};
 #[cfg(unix)]
-use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
+use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, StdioTransport};
 
 pub const SERVICE_NAME: &str = "tracedecay.service";
 pub const SOCKET_ENV: &str = "TRACEDECAY_DAEMON_SOCKET";
@@ -77,6 +77,7 @@ impl DaemonHandshake {
 
 impl DaemonServiceSpec {
     pub fn render_systemd_user_unit(&self) -> String {
+        let service_path = daemon_service_path_env(&self.tracedecay_bin);
         format!(
             "[Unit]\n\
              Description=TraceDecay daemon\n\
@@ -84,16 +85,77 @@ impl DaemonServiceSpec {
              \n\
              [Service]\n\
              Type=simple\n\
+             Environment=\"PATH={}\"\n\
              ExecStart={} daemon run --socket {}\n\
              Restart=on-failure\n\
              RestartSec=2\n\
              \n\
              [Install]\n\
              WantedBy=default.target\n",
+            systemd_escape_env_value(&service_path),
             self.tracedecay_bin.display(),
             self.socket_path.display()
         )
     }
+}
+
+fn daemon_service_path_env(tracedecay_bin: &Path) -> String {
+    let mut dirs = Vec::new();
+
+    if let Some(parent) = tracedecay_bin
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        push_unique_path(&mut dirs, parent.to_path_buf());
+    }
+
+    if let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) {
+        let home = PathBuf::from(home);
+        push_unique_path(&mut dirs, home.join(".cargo/bin"));
+        push_unique_path(&mut dirs, home.join(".local/bin"));
+    }
+
+    if let Some(path) = std::env::var_os("PATH").filter(|path| !path.is_empty()) {
+        for dir in std::env::split_paths(&path) {
+            push_unique_path(&mut dirs, dir);
+        }
+    }
+
+    for dir in [
+        "/usr/local/sbin",
+        "/usr/local/bin",
+        "/usr/sbin",
+        "/usr/bin",
+        "/sbin",
+        "/bin",
+        "/opt/homebrew/bin",
+    ] {
+        push_unique_path(&mut dirs, PathBuf::from(dir));
+    }
+
+    std::env::join_paths(&dirs).map_or_else(
+        |_| {
+            dirs.iter()
+                .map(|path| path.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(":")
+        },
+        |path| path.to_string_lossy().into_owned(),
+    )
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if path.as_os_str().is_empty() || paths.iter().any(|existing| existing == &path) {
+        return;
+    }
+    paths.push(path);
+}
+
+fn systemd_escape_env_value(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('%', "%%")
 }
 
 pub fn default_socket_path() -> Result<PathBuf> {
@@ -218,33 +280,122 @@ pub async fn proxy_stdio_to_daemon(
     handshake: &DaemonHandshake,
     replay_line: Option<String>,
 ) -> Result<()> {
-    let stream = UnixStream::connect(socket_path).await?;
-    let (mut socket_reader, mut socket_writer) = stream.into_split();
+    let mut transport = StdioTransport::new();
+    proxy_transport_to_daemon(socket_path, handshake, replay_line, &mut transport).await
+}
 
-    socket_writer
-        .write_all(handshake.to_line()?.as_bytes())
-        .await?;
-    socket_writer.write_all(b"\n").await?;
+#[cfg(unix)]
+pub async fn proxy_transport_to_daemon(
+    socket_path: &Path,
+    handshake: &DaemonHandshake,
+    replay_line: Option<String>,
+    transport: &mut impl McpTransport,
+) -> Result<()> {
     if let Some(line) = replay_line {
-        socket_writer.write_all(line.as_bytes()).await?;
-        if !line.ends_with('\n') {
-            socket_writer.write_all(b"\n").await?;
+        proxy_request_line_to_daemon(socket_path, handshake, &line, transport).await?;
+    }
+
+    while let Some(line) = transport.read_line().await? {
+        proxy_request_line_to_daemon(socket_path, handshake, &line, transport).await?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn proxy_request_line_to_daemon(
+    socket_path: &Path,
+    handshake: &DaemonHandshake,
+    line: &str,
+    transport: &mut impl McpTransport,
+) -> Result<()> {
+    if line.trim().is_empty() {
+        return Ok(());
+    }
+
+    match send_daemon_request_line(socket_path, handshake, line).await {
+        Ok(responses) => {
+            for response in responses {
+                transport.write_line(&response).await?;
+                if !response.ends_with('\n') {
+                    transport.write_line("\n").await?;
+                }
+            }
+            transport.flush().await?;
+        }
+        Err(err) => {
+            if let Some(response) = daemon_proxy_error_response(line, &err) {
+                let json_line = serde_json::to_string(&response)?;
+                transport.write_line(&json_line).await?;
+                transport.write_line("\n").await?;
+                transport.flush().await?;
+            } else {
+                eprintln!("[tracedecay] daemon proxy dropped notification after error: {err}");
+            }
         }
     }
-    socket_writer.flush().await?;
-
-    let mut stdin = tokio::io::stdin();
-    let mut stdout = tokio::io::stdout();
-    let stdin_to_daemon = async {
-        copy(&mut stdin, &mut socket_writer).await?;
-        socket_writer.shutdown().await
-    };
-    let daemon_to_stdout = async {
-        copy(&mut socket_reader, &mut stdout).await?;
-        stdout.flush().await
-    };
-    tokio::try_join!(stdin_to_daemon, daemon_to_stdout)?;
     Ok(())
+}
+
+#[cfg(unix)]
+async fn send_daemon_request_line(
+    socket_path: &Path,
+    handshake: &DaemonHandshake,
+    line: &str,
+) -> Result<Vec<String>> {
+    let stream = UnixStream::connect(socket_path).await?;
+    let (reader, mut writer) = stream.into_split();
+
+    writer.write_all(handshake.to_line()?.as_bytes()).await?;
+    writer.write_all(b"\n").await?;
+    writer.write_all(line.as_bytes()).await?;
+    if !line.ends_with('\n') {
+        writer.write_all(b"\n").await?;
+    }
+    writer.flush().await?;
+    writer.shutdown().await?;
+
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+    let request_id = serde_json::from_str::<JsonRpcRequest>(line)
+        .ok()
+        .and_then(|request| request.id);
+    let mut responses = Vec::new();
+    let mut matched_response = request_id.is_none();
+    while let Some(response_line) = lines.next_line().await? {
+        if response_line.trim().is_empty() {
+            continue;
+        }
+        let is_matching_response = request_id.as_ref().is_some_and(|id| {
+            serde_json::from_str::<serde_json::Value>(&response_line)
+                .ok()
+                .and_then(|value| value.get("id").cloned())
+                .as_ref()
+                == Some(id)
+        });
+        responses.push(format!("{response_line}\n"));
+        if is_matching_response {
+            matched_response = true;
+            break;
+        }
+    }
+    if !matched_response {
+        return Err(TraceDecayError::Config {
+            message: "daemon closed the connection before returning a matching response"
+                .to_string(),
+        });
+    }
+    Ok(responses)
+}
+
+#[cfg(unix)]
+fn daemon_proxy_error_response(line: &str, err: &TraceDecayError) -> Option<JsonRpcResponse> {
+    let request = serde_json::from_str::<JsonRpcRequest>(line).ok()?;
+    request.id.map(|id| {
+        JsonRpcResponse::error(
+            id,
+            ErrorCode::InternalError,
+            format!("TraceDecay daemon connection failed: {err}"),
+        )
+    })
 }
 
 #[cfg(not(unix))]
@@ -865,6 +1016,7 @@ mod tests {
         assert!(unit.contains(
             "ExecStart=/usr/local/bin/tracedecay daemon run --socket /tmp/tracedecay.sock"
         ));
+        assert!(unit.contains("Environment=\"PATH="));
         assert!(unit.contains("Restart=on-failure"));
     }
 
