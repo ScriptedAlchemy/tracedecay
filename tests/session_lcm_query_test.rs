@@ -1928,6 +1928,47 @@ fn grep_request(query: &str) -> LcmGrepRequest {
     }
 }
 
+#[tokio::test]
+async fn grep_all_provider_searches_raw_messages_across_providers() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_session(&db, "cursor", "cursor-session").await;
+    insert_session(&db, "codex", "codex-session").await;
+    assert!(
+        db.upsert_session_message(&raw_message(
+            "cursor",
+            "cursor-cross-provider",
+            "cursor-session",
+            1,
+            "Cross provider grep search should find cursor."
+        ))
+        .await
+    );
+    assert!(
+        db.upsert_session_message(&raw_message(
+            "codex",
+            "codex-cross-provider",
+            "codex-session",
+            1,
+            "Cross provider grep search should find codex."
+        ))
+        .await
+    );
+
+    let mut request = grep_request("cross provider grep search");
+    request.provider = "all".into();
+    let hits = db
+        .lcm_grep(request)
+        .await
+        .expect("all-provider grep should succeed");
+    let providers = hits
+        .iter()
+        .map(|hit| hit.provider.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    assert!(providers.contains("cursor"));
+    assert!(providers.contains("codex"));
+}
+
 // Hermes scopes message FTS matches to the content column only
 // (store.py:173-204 `build_message_fts_spec` indexes nothing but `content`).
 // Role and metadata text must therefore never satisfy an unqualified grep.

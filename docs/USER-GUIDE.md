@@ -793,7 +793,7 @@ tracedecay status /path/to/project --json
 tracedecay memory status --path /path/to/project --json
 ```
 
-`tracedecay sessions search` searches previously ingested sessions for the current context and does not accept a project selector in this branch.
+`tracedecay sessions search` searches previously ingested sessions for the active project. By default it searches all ingested transcript providers; pass `--provider <id>` only when intentionally constraining the search. Use `--project-id` or `--project-path` to search a registered project other than the current directory.
 
 ### Per-user: `~/.tracedecay/`
 

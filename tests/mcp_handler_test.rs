@@ -1358,6 +1358,18 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         .iter()
         .find(|tool| tool.name == "tracedecay_lcm_grep")
         .expect("tracedecay_lcm_grep definition");
+    assert!(
+        !grep
+            .input_schema
+            .get("required")
+            .and_then(Value::as_array)
+            .is_some_and(|required| required.iter().any(|field| field == "provider")),
+        "tracedecay_lcm_grep provider must stay optional"
+    );
+    assert!(grep.input_schema["properties"]["provider"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("all providers"));
     assert_eq!(
         grep.input_schema["properties"]["limit"]["type"],
         json!("integer")
@@ -6356,6 +6368,22 @@ async fn message_search_reads_project_local_session_db() {
         parent_tool_use_id: None,
     };
     assert!(db.upsert_session(&child_session).await);
+    let codex_session = SessionRecord {
+        provider: "codex".to_string(),
+        session_id: "codex-session".to_string(),
+        project_key: cg.project_root().to_string_lossy().to_string(),
+        project_path: cg.project_root().to_string_lossy().to_string(),
+        title: Some("Codex transcript".to_string()),
+        started_at: Some(5),
+        ended_at: None,
+        transcript_path: Some("codex-session.jsonl".to_string()),
+        metadata_json: None,
+        parent_session_id: None,
+        is_subagent: false,
+        agent_id: None,
+        parent_tool_use_id: None,
+    };
+    assert!(db.upsert_session(&codex_session).await);
     assert!(
         db.upsert_session_message(&SessionMessageRecord {
             provider: "cursor".to_string(),
@@ -6369,6 +6397,24 @@ async fn message_search_reads_project_local_session_db() {
             model: Some("test-model".to_string()),
             tool_names: None,
             source_path: Some("cursor-session.jsonl".to_string()),
+            source_offset: Some(0),
+            metadata_json: None,
+        })
+        .await
+    );
+    assert!(
+        db.upsert_session_message(&SessionMessageRecord {
+            provider: "codex".to_string(),
+            message_id: "codex-message".to_string(),
+            session_id: "codex-session".to_string(),
+            role: "assistant".to_string(),
+            timestamp: Some(6),
+            ordinal: 1,
+            text: "Project-local transcript search is also working for Codex.".to_string(),
+            kind: Some("message".to_string()),
+            model: Some("test-model".to_string()),
+            tool_names: None,
+            source_path: Some("codex-session.jsonl".to_string()),
             source_offset: Some(0),
             metadata_json: None,
         })
@@ -6413,6 +6459,28 @@ async fn message_search_reads_project_local_session_db() {
         parsed["results"][0]["session"]["project_key"],
         cg.project_root().to_string_lossy().to_string()
     );
+
+    let all_provider_result = handle_tool_call(
+        &cg,
+        "tracedecay_message_search",
+        json!({"query": "transcript search", "limit": 5}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let all_provider_parsed = extract_json(&all_provider_result.value);
+    assert_eq!(all_provider_parsed["status"], "ok");
+    assert_eq!(all_provider_parsed["provider"], "all");
+    assert_eq!(all_provider_parsed["count"], 2);
+    let providers = all_provider_parsed["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|result| result["message"]["provider"].as_str().unwrap())
+        .collect::<std::collections::HashSet<_>>();
+    assert!(providers.contains("cursor"));
+    assert!(providers.contains("codex"));
 
     let subagent_result = handle_tool_call(
         &cg,
@@ -7922,6 +7990,27 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
             .count()
             <= 4096,
         "grep snippets must stay bounded"
+    );
+
+    let default_provider_grep = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_grep",
+        json!({"query": "orchard dispatch", "limit": 5}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let default_provider_grep_payload: Value =
+        serde_json::from_str(extract_text(&default_provider_grep.value)).unwrap();
+    assert_eq!(default_provider_grep_payload["status"], "ok");
+    assert_eq!(default_provider_grep_payload["provider"], "all");
+    assert_eq!(
+        default_provider_grep_payload["hits"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
     );
 
     let described = handle_tool_call(
@@ -9800,8 +9889,16 @@ fn message_search_provider_schema_matches_ingested_providers() {
     assert_eq!(
         message_search.input_schema["properties"]["provider"]["enum"],
         serde_json::json!([
-            "cursor", "claude", "codex", "vibe", "cline", "roo-code", "kilo", "hermes"
+            "all", "cursor", "claude", "codex", "vibe", "cline", "roo-code", "kilo", "hermes"
         ])
+    );
+    assert!(
+        !message_search
+            .input_schema
+            .get("required")
+            .and_then(Value::as_array)
+            .is_some_and(|required| required.iter().any(|field| field == "provider")),
+        "tracedecay_message_search provider must stay optional"
     );
     assert_eq!(
         message_search.input_schema["properties"]["scope"]["enum"],
