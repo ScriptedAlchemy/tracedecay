@@ -3005,8 +3005,6 @@ impl TraceDecay {
         pattern: &str,
         rewrite: &str,
     ) -> Result<AstGrepResult> {
-        use std::process::Command;
-
         let rel_path = self
             .resolve_path(path)
             .ok_or_else(|| TraceDecayError::Config {
@@ -3015,7 +3013,9 @@ impl TraceDecay {
 
         let abs_path = self.absolute_path(&rel_path);
 
-        let check_output = Command::new("ast-grep").args(["--version"]).output();
+        let check_output = crate::external_tools::ast_grep_command()
+            .args(["--version"])
+            .output();
 
         if check_output.is_err() {
             if can_use_literal_rewrite_fallback(pattern) {
@@ -3049,7 +3049,7 @@ impl TraceDecay {
             });
         }
 
-        let output = Command::new("ast-grep")
+        let output = crate::external_tools::ast_grep_command()
             .args([
                 "run",
                 "-p",

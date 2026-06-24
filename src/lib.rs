@@ -34,6 +34,7 @@ pub mod diagnostics;
 pub mod display;
 pub mod doctor;
 pub mod errors;
+pub mod external_tools;
 pub mod extraction;
 pub mod extraction_worker;
 pub mod global_db;

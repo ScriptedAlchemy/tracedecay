@@ -2191,7 +2191,7 @@ pub(super) async fn handle_outline(cg: &TraceDecay, args: Value) -> Result<ToolR
 fn ast_grep_outline(abs_path: &Path) -> Result<Value> {
     ensure_ast_grep_outline_available()?;
 
-    let output = std::process::Command::new("ast-grep")
+    let output = crate::external_tools::ast_grep_command()
         .args([
             "outline",
             "--json=compact",

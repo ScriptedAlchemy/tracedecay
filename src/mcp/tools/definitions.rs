@@ -514,7 +514,7 @@ fn parse_ast_grep_version(text: &str) -> Option<(String, (u64, u64, u64))> {
 }
 
 fn ast_grep_diagnostics_uncached() -> AstGrepDiagnostics {
-    let version_output = match std::process::Command::new("ast-grep")
+    let version_output = match crate::external_tools::ast_grep_command()
         .arg("--version")
         .output()
     {
@@ -552,7 +552,7 @@ fn ast_grep_diagnostics_uncached() -> AstGrepDiagnostics {
     let (version, version_tuple) =
         parse_ast_grep_version(&version_text).unwrap_or_else(|| (version_text.clone(), (0, 0, 0)));
     let outline_version_ok = version_tuple >= MIN_AST_GREP_OUTLINE_VERSION;
-    let help_output = std::process::Command::new("ast-grep")
+    let help_output = crate::external_tools::ast_grep_command()
         .args(["outline", "--help"])
         .output();
     let (outline_flags_ok, help_detail) = match help_output {
