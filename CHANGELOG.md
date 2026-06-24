@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.12](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.11...v0.0.12) - 2026-06-24
+
+### Fixed
+
+- avoid WAL teardown on Windows ([#118](https://github.com/ScriptedAlchemy/tracedecay/pull/118))
+- disable graph DB mmap before WAL ([#117](https://github.com/ScriptedAlchemy/tracedecay/pull/117))
+- disable GlobalDb mmap on Windows ([#115](https://github.com/ScriptedAlchemy/tracedecay/pull/115))
+
 ## [0.0.11](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.10...v0.0.11) - 2026-06-24
 
 ### Added
