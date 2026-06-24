@@ -405,7 +405,7 @@ struct VersionCheckState {
 }
 
 /// The MCP server wrapping a `TraceDecay` instance.
-// Lock ordering: file_token_map -> tool_call_counts (never nested)
+// Lock ordering: file_token_map -> method/resource/tool call counts (never nested)
 pub struct McpServer {
     /// The served code graph. Guarded so a mid-session `git checkout` can
     /// hot-swap the instance onto the new branch's DB
@@ -416,6 +416,8 @@ pub struct McpServer {
     /// each call is internally consistent.
     cg: tokio::sync::RwLock<Arc<TraceDecay>>,
     stats: ServerStats,
+    method_call_counts: std::sync::Mutex<HashMap<String, u64>>,
+    resource_read_counts: std::sync::Mutex<HashMap<String, u64>>,
     tool_call_counts: std::sync::Mutex<HashMap<String, u64>>,
     /// Approximate token count per indexed file (`file_path` -> tokens).
     file_token_map: std::sync::Mutex<HashMap<String, u64>>,
@@ -544,6 +546,8 @@ impl McpServer {
         let server = Arc::new(Self {
             cg: tokio::sync::RwLock::new(Arc::new(cg)),
             stats: ServerStats::new(),
+            method_call_counts: std::sync::Mutex::new(HashMap::new()),
+            resource_read_counts: std::sync::Mutex::new(HashMap::new()),
             tool_call_counts: std::sync::Mutex::new(HashMap::new()),
             file_token_map: std::sync::Mutex::new(file_token_map),
             tokens_saved: AtomicU64::new(persisted),
@@ -1285,6 +1289,9 @@ impl McpServer {
             "handle_request called with empty method"
         );
         self.stats.total_requests.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut counts) = self.method_call_counts.lock() {
+            *counts.entry(request.method.clone()).or_insert(0) += 1;
+        }
         let id = request.id.clone()?;
 
         let result = match request.method.as_str() {
@@ -1419,6 +1426,9 @@ impl McpServer {
                 "missing 'uri' in resources/read params".to_string(),
             );
         };
+        if let Ok(mut counts) = self.resource_read_counts.lock() {
+            *counts.entry(uri.to_string()).or_insert(0) += 1;
+        }
 
         match uri {
             "tracedecay://status" => self.read_resource_status(id).await,
@@ -1968,18 +1978,45 @@ impl McpServer {
     /// Returns the current server runtime statistics as a JSON value.
     pub async fn server_stats_json(&self) -> Value {
         let uptime = self.stats.started_at.elapsed();
+        let total_requests = self.stats.total_requests.load(Ordering::Relaxed);
+        let tool_calls = self.stats.tool_calls.load(Ordering::Relaxed);
+        let errors = self.stats.errors.load(Ordering::Relaxed);
+        let method_counts: Value = self
+            .method_call_counts
+            .lock()
+            .map(|counts| json!(*counts))
+            .unwrap_or(json!({}));
+        let resource_counts: Value = self
+            .resource_read_counts
+            .lock()
+            .map(|counts| json!(*counts))
+            .unwrap_or(json!({}));
         let tool_counts: Value = self
             .tool_call_counts
             .lock()
             .map(|counts| json!(*counts))
             .unwrap_or(json!({}));
+        let ratio = |n: u64| {
+            if total_requests == 0 {
+                0.0
+            } else {
+                n as f64 / total_requests as f64
+            }
+        };
 
         let mut stats = json!({
             "uptime_secs": uptime.as_secs(),
-            "total_requests": self.stats.total_requests.load(Ordering::Relaxed),
-            "tool_calls": self.stats.tool_calls.load(Ordering::Relaxed),
-            "errors": self.stats.errors.load(Ordering::Relaxed),
+            "total_requests": total_requests,
+            "jsonrpc_messages": total_requests,
+            "tool_calls": tool_calls,
+            "errors": errors,
+            "method_call_counts": method_counts,
+            "resource_read_counts": resource_counts,
             "tool_call_counts": tool_counts,
+            "ratios": {
+                "tool_calls_per_jsonrpc_message": ratio(tool_calls),
+                "errors_per_jsonrpc_message": ratio(errors),
+            },
             "approx_tokens_saved": self.tokens_saved.load(Ordering::Relaxed),
         });
 

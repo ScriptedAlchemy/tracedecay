@@ -403,6 +403,14 @@ fn post_json_body(agent: &ureq::Agent, url: &str, body: &Value) -> (u16, Value) 
     response_to_json(response)
 }
 
+fn patch_json_body(agent: &ureq::Agent, url: &str, body: &Value) -> (u16, Value) {
+    let response = match agent.patch(url).send_json(body) {
+        Ok(response) => response,
+        Err(err) => panic!("PATCH {url} (with body) failed: {err}"),
+    };
+    response_to_json(response)
+}
+
 async fn start_dashboard_fixture(seed_lcm: bool) -> DashboardFixture {
     let tmp = tempdir_or_panic();
     let tmp_root = tmp
@@ -2597,5 +2605,117 @@ fn curation_preview_persists_across_dashboard_restarts() {
             "no preview may reappear after curation was applied"
         );
         stop_server(server);
+    });
+}
+
+#[test]
+fn automation_config_is_dashboard_controllable_and_persistent() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let tmp = tempdir_or_panic();
+        let tmp_root = tmp
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
+        let project_root = tmp_root.join("project");
+        let global_db_path = tmp_root.join("global").join("global.db");
+        let profile_root = tmp_root.join("profile").join(".tracedecay");
+        let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
+        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
+
+        let mut global_config = tracedecay::user_config::UserConfig::default();
+        global_config.automation.enabled = true;
+        global_config.automation.backend =
+            tracedecay::automation::config::AutomationBackend::CodexAppServer;
+        global_config.automation.model = Some("global-model".to_string());
+        assert!(global_config.save(), "global user config should save");
+
+        let cg = setup_project(&project_root).await;
+        let sidecar = cg
+            .store_layout()
+            .dashboard_root
+            .join("automation_config.json");
+        let agent = http_agent();
+        let port = pick_free_port();
+        let base_url = format!("http://127.0.0.1:{port}");
+        let mut server = spawn_dashboard_server(cg, port);
+        wait_for_dashboard(&agent, &base_url).await;
+
+        let config_url = format!("{base_url}/api/plugins/holographic/curation/config");
+        let (status, config) = get_json(&agent, &config_url);
+        assert_eq!(status, 200);
+        assert_eq!(config["global"]["enabled"], true);
+        assert_eq!(config["global"]["backend"], "codex_app_server");
+        assert_eq!(config["global"]["model"], "global-model");
+        assert!(config["project"].is_null());
+        assert_eq!(config["effective"]["model"], "global-model");
+        assert_eq!(
+            config["effective"]["tasks"]["memory_curator"]["enabled"],
+            false
+        );
+
+        let patch = serde_json::json!({
+            "model": "project-model",
+            "timeout_secs": 90,
+            "memory_curator": { "enabled": true, "schedule": "manual" }
+        });
+        let (status, saved) = patch_json_body(&agent, &config_url, &patch);
+        assert_eq!(status, 200);
+        assert_eq!(saved["project"]["model"], "project-model");
+        assert_eq!(saved["effective"]["model"], "project-model");
+        assert_eq!(saved["effective"]["timeout_secs"], 90);
+        assert_eq!(
+            saved["effective"]["tasks"]["memory_curator"]["schedule"],
+            "manual"
+        );
+        assert!(sidecar.exists(), "PATCH must persist a project sidecar");
+
+        let (status, capabilities) = get_json(&agent, &format!("{base_url}/api/capabilities"));
+        assert_eq!(status, 200);
+        assert_eq!(capabilities["features"]["automation"], true);
+        assert_eq!(capabilities["features"]["llm_curation"], true);
+        assert_eq!(capabilities["automation"]["mode"], "standalone_backend");
+        assert_eq!(capabilities["automation"]["backend"], "codex_app_server");
+        assert_eq!(capabilities["automation"]["host_mode"], "standalone");
+
+        let (status, rejected) = patch_json_body(
+            &agent,
+            &config_url,
+            &serde_json::json!({
+                "require_dashboard_approval": false,
+                "auto_apply_memory_ops": true
+            }),
+        );
+        assert_eq!(status, 400);
+        assert!(
+            rejected["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("auto_apply_memory_ops")),
+            "unsafe config should explain why it was rejected: {rejected}"
+        );
+        server.stop();
+
+        let cg = TraceDecay::open(&project_root)
+            .await
+            .unwrap_or_else(|err| panic!("failed to reopen fixture project: {err}"));
+        let port = pick_free_port();
+        let base_url = format!("http://127.0.0.1:{port}");
+        let mut server = spawn_dashboard_server(cg, port);
+        wait_for_dashboard(&agent, &base_url).await;
+        let (status, restored) = get_json(
+            &agent,
+            &format!("{base_url}/api/plugins/holographic/curation/config"),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(restored["project"]["model"], "project-model");
+        assert_eq!(restored["effective"]["model"], "project-model");
+        assert_eq!(
+            restored["effective"]["tasks"]["memory_curator"]["enabled"],
+            true
+        );
+        server.stop();
     });
 }

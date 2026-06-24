@@ -311,6 +311,57 @@ fn init_skips_gitignore_prompt_when_stdin_not_a_terminal() {
 }
 
 #[test]
+fn automation_config_enable_writes_project_sidecar_noninteractively() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    std::fs::create_dir_all(project.path().join("src")).unwrap();
+    std::fs::write(project.path().join("src/lib.rs"), "pub fn marker() {}\n").unwrap();
+
+    let mut init = tracedecay_command(home.path(), project.path());
+    init.arg("init");
+    let init_output = run_with_timeout(init, Duration::from_secs(30));
+    assert!(
+        init_output.status.success(),
+        "init should succeed before automation config\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&init_output.stdout),
+        String::from_utf8_lossy(&init_output.stderr)
+    );
+
+    let mut enable = tracedecay_command(home.path(), project.path());
+    enable.args(["automation", "config", "enable"]);
+    let enable_output = run_with_timeout(enable, Duration::from_secs(30));
+    assert!(
+        enable_output.status.success(),
+        "automation config enable should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&enable_output.stdout),
+        String::from_utf8_lossy(&enable_output.stderr)
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&enable_output.stdout)
+        .expect("automation config enable should print JSON");
+    assert_eq!(payload["project"]["enabled"], true);
+    assert_eq!(payload["project"]["backend"], "codex_app_server");
+    assert_eq!(payload["effective"]["enabled"], true);
+    assert_eq!(payload["effective"]["backend"], "codex_app_server");
+
+    let projects_dir = profile_root(home.path()).join("projects");
+    let sidecars = std::fs::read_dir(&projects_dir)
+        .unwrap()
+        .map(|entry| {
+            entry
+                .unwrap()
+                .path()
+                .join("dashboard/automation_config.json")
+        })
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        sidecars.len(),
+        1,
+        "automation config should write one project sidecar under {projects_dir:?}, got {sidecars:?}"
+    );
+}
+
+#[test]
 fn bare_invocation_skips_create_prompt_when_stdin_not_a_terminal() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();

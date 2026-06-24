@@ -1,4 +1,5 @@
 import {
+  type ChangeEvent,
   type Key,
   type ReactNode,
   type RefObject,
@@ -13,10 +14,11 @@ import {
   ChevronRight,
   History,
   ListChecks,
+  Save,
   ScrollText,
   Wand2,
 } from "lucide-react";
-import { Badge, Button, Card, CardContent, CardHeader, CardTitle } from "./sdk";
+import { Badge, Button, Card, CardContent, CardHeader, CardTitle, Input } from "./sdk";
 import { Spinner } from "./Spinner";
 import {
   describe,
@@ -619,6 +621,11 @@ export default function CurationPanel({
     activity,
     activityLoading,
     activityError,
+    configDraft,
+    configLoading,
+    configSaving,
+    configError,
+    configDirty,
     activityRef,
     panelRef,
     setConfirmOpen,
@@ -627,6 +634,10 @@ export default function CurationPanel({
     apply,
     loadActivity,
     loadStatus,
+    updateConfigDraft,
+    updateConfigTaskDraft,
+    resetConfigDraft,
+    saveConfigDraft,
   } = useCurationData({ onApplied });
 
   const actions = report?.actions ?? [];
@@ -905,56 +916,184 @@ export default function CurationPanel({
                   />
                   <MetadataRow label="Last preview summary" value={status.state.last_preview_summary || "none"} />
                 </div>
-                <div className="border border-border bg-background/30 px-3">
-                  <div className="pt-2 text-[11px] uppercase tracking-[0.08em] text-text-tertiary">
-                    Curator configuration
+                <div className="border border-border bg-background/30 px-3 py-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-[11px] uppercase tracking-[0.08em] text-text-tertiary">
+                      Automation config
+                    </div>
+                    {configLoading ? <Spinner /> : null}
                   </div>
-                  <div className="pt-1 text-[11px] text-text-tertiary">
-                    Settings, not run results — "auto" means the provider
-                    default is used.
-                  </div>
-                  <MetadataRow label="Enabled" value={status.config.enabled ? "yes" : "no"} />
+                  {configError ? (
+                    <div className="mt-2 border border-destructive/30 bg-destructive/10 px-2 py-1 text-xs text-destructive">
+                      {configError}
+                    </div>
+                  ) : null}
+                  {configDraft ? (
+                    <div className="mt-2 grid gap-2">
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        <label className="flex items-center gap-2 text-xs text-text-secondary">
+                          <input
+                            aria-label="Enable automation"
+                            type="checkbox"
+                            checked={configDraft.enabled}
+                            onChange={(event) =>
+                              updateConfigDraft({ enabled: event.currentTarget.checked })
+                            }
+                          />
+                          Enable automation
+                        </label>
+                        <label className="flex items-center gap-2 text-xs text-text-secondary">
+                          <input
+                            aria-label="Require dashboard approval"
+                            type="checkbox"
+                            checked={configDraft.require_dashboard_approval}
+                            onChange={(event) =>
+                              updateConfigDraft({
+                                require_dashboard_approval: event.currentTarget.checked,
+                              })
+                            }
+                          />
+                          Require approval
+                        </label>
+                      </div>
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        <label className="grid gap-1 text-xs text-text-secondary">
+                          Backend
+                          <select
+                            aria-label="Backend"
+                            className="h-8 border border-border bg-background px-2 text-xs"
+                            value={configDraft.backend}
+                            onChange={(event) =>
+                              updateConfigDraft({
+                                backend: event.currentTarget.value as typeof configDraft.backend,
+                              })
+                            }
+                          >
+                            <option value="disabled">Disabled</option>
+                            <option value="codex_app_server">Codex app server</option>
+                            <option value="external_command">External command</option>
+                          </select>
+                        </label>
+                        <label className="grid gap-1 text-xs text-text-secondary">
+                          Host mode
+                          <select
+                            aria-label="Host mode"
+                            className="h-8 border border-border bg-background px-2 text-xs"
+                            value={configDraft.host_mode}
+                            onChange={(event) =>
+                              updateConfigDraft({
+                                host_mode: event.currentTarget.value as typeof configDraft.host_mode,
+                              })
+                            }
+                          >
+                            <option value="standalone">Standalone</option>
+                            <option value="hermes_hosted">Hermes hosted</option>
+                          </select>
+                        </label>
+                      </div>
+                      <div className="grid gap-2 sm:grid-cols-[1fr_8rem]">
+                        <label className="grid gap-1 text-xs text-text-secondary">
+                          Model
+                          <Input
+                            aria-label="Model"
+                            value={configDraft.model ?? ""}
+                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                              updateConfigDraft({ model: event.currentTarget.value || null })
+                            }
+                          />
+                        </label>
+                        <label className="grid gap-1 text-xs text-text-secondary">
+                          Timeout
+                          <Input
+                            aria-label="Timeout seconds"
+                            type="number"
+                            min={1}
+                            value={configDraft.timeout_secs}
+                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                              updateConfigDraft({
+                                timeout_secs: Math.max(1, Number(event.currentTarget.value) || 1),
+                              })
+                            }
+                          />
+                        </label>
+                      </div>
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        <label className="flex items-center gap-2 text-xs text-text-secondary">
+                          <input
+                            aria-label="Run memory curator"
+                            type="checkbox"
+                            checked={configDraft.tasks.memory_curator.enabled}
+                            onChange={(event) =>
+                              updateConfigTaskDraft("memory_curator", {
+                                enabled: event.currentTarget.checked,
+                              })
+                            }
+                          />
+                          Run memory curator
+                        </label>
+                        <label className="grid gap-1 text-xs text-text-secondary">
+                          Memory curator schedule
+                          <Input
+                            aria-label="Memory curator schedule"
+                            value={configDraft.tasks.memory_curator.schedule ?? ""}
+                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                              updateConfigTaskDraft("memory_curator", {
+                                schedule: event.currentTarget.value || null,
+                              })
+                            }
+                          />
+                        </label>
+                      </div>
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        <label className="flex items-center gap-2 text-xs text-text-secondary">
+                          <input
+                            aria-label="Auto-apply memory ops"
+                            type="checkbox"
+                            checked={configDraft.auto_apply_memory_ops}
+                            onChange={(event) =>
+                              updateConfigDraft({
+                                auto_apply_memory_ops: event.currentTarget.checked,
+                              })
+                            }
+                          />
+                          Auto-apply memory ops
+                        </label>
+                        <label className="flex items-center gap-2 text-xs text-text-secondary">
+                          <input
+                            aria-label="Auto-enable skills"
+                            type="checkbox"
+                            checked={configDraft.auto_enable_skills}
+                            onChange={(event) =>
+                              updateConfigDraft({
+                                auto_enable_skills: event.currentTarget.checked,
+                              })
+                            }
+                          />
+                          Auto-enable skills
+                        </label>
+                      </div>
+                      <div className="flex items-center justify-end gap-2 pt-1">
+                        <Button
+                          size="xs"
+                          outlined
+                          disabled={!configDirty || configSaving}
+                          onClick={resetConfigDraft}
+                        >
+                          Reset
+                        </Button>
+                        <Button
+                          size="xs"
+                          disabled={!configDirty || configSaving}
+                          onClick={saveConfigDraft}
+                          className="gap-1.5"
+                        >
+                          {configSaving ? <Spinner /> : <Save className="h-3.5 w-3.5" />}
+                          Save config
+                        </Button>
+                      </div>
+                    </div>
+                  ) : null}
                   <MetadataRow label="Paused" value={status.state.paused ? "yes" : "no"} />
-                  <MetadataRow label="Interval hours" value={metadataValue(status.config.interval_hours)} />
-                  <MetadataRow label="Idle gate hours" value={metadataValue(status.config.min_idle_hours)} />
-                  <MetadataRow label="Resolved mode" value={metadataValue(status.config.mode, "fast")} />
-                  <MetadataRow label="Dry-run first" value={metadataValue(status.config.dry_run_first, "no")} />
-                  <MetadataRow label="Scan cap" value={metadataValue(status.config.scan_cap)} />
-                  <MetadataRow label="Scan cap grace" value={metadataValue(status.config.scan_cap_grace, "0")} />
-                  <MetadataRow label="Max candidates" value={metadataValue(status.config.max_candidates)} />
-                  <MetadataRow
-                    label="Related threshold"
-                    value={metadataValue(status.config.related_cluster_threshold)}
-                  />
-                  <MetadataRow
-                    label="Batch size"
-                    value={metadataValue(status.config.batch_size)}
-                  />
-                  <MetadataRow
-                    label="Tool calls / batch"
-                    value={metadataValue(status.config.max_tool_calls_per_batch)}
-                  />
-                  <MetadataRow
-                    label="LLM calls / run"
-                    value={metadataValue(status.config.max_llm_calls_per_run)}
-                  />
-                  <MetadataRow label="Facts / run" value={metadataValue(status.config.per_run_facts)} />
-                  <MetadataRow
-                    label="Candidates / fact"
-                    value={metadataValue(status.config.candidates_per_fact)}
-                  />
-                  <MetadataRow
-                    label="Source cap"
-                    value={metadataValue(status.config.candidate_source_cap)}
-                  />
-                  <MetadataRow
-                    label="Expansion scan cap"
-                    value={metadataValue(status.config.candidate_expansion_scan_cap)}
-                  />
-                  <MetadataRow
-                    label="Parallel LLM"
-                    value={metadataValue(status.config.max_parallel_llm)}
-                  />
                 </div>
                 <div className="border border-border bg-background/30 px-3 py-2">
                   <div className="mb-1 text-[11px] uppercase tracking-[0.08em] text-text-tertiary">

@@ -936,6 +936,9 @@ async fn test_server_stats_initial() {
     );
     assert_eq!(stats["tool_calls"], 0, "initial tool_calls should be 0");
     assert_eq!(stats["errors"], 0, "initial errors should be 0");
+    assert!(stats["method_call_counts"].is_object());
+    assert!(stats["resource_read_counts"].is_object());
+    assert_eq!(stats["ratios"]["tool_calls_per_jsonrpc_message"], 0.0);
 }
 
 #[tokio::test]
@@ -1129,12 +1132,20 @@ async fn test_server_stats_include_response_handle_metrics() {
 #[tokio::test]
 async fn test_server_stats_after_run() {
     let (server, _dir) = setup_server().await;
+    let server_handle = server.clone();
     // Send several requests then a tracedecay_status to check stats are embedded.
     let responses = run_server_with_messages(
         server,
         vec![
             jsonrpc_request(json!(200), "initialize", json!({})),
             jsonrpc_request(json!(201), "ping", json!({})),
+            jsonrpc_request(
+                json!(203),
+                "resources/read",
+                json!({
+                    "uri": "tracedecay://status"
+                }),
+            ),
             jsonrpc_request(
                 json!(202),
                 "tools/call",
@@ -1169,6 +1180,16 @@ async fn test_server_stats_after_run() {
         "status response should contain server stats, got: {}",
         text
     );
+
+    let stats = server_handle.server_stats_json().await;
+    assert_eq!(stats["jsonrpc_messages"], 4);
+    assert_eq!(stats["method_call_counts"]["initialize"], 1);
+    assert_eq!(stats["method_call_counts"]["ping"], 1);
+    assert_eq!(stats["method_call_counts"]["resources/read"], 1);
+    assert_eq!(stats["method_call_counts"]["tools/call"], 1);
+    assert_eq!(stats["resource_read_counts"]["tracedecay://status"], 1);
+    assert_eq!(stats["tool_call_counts"]["tracedecay_status"], 1);
+    assert_eq!(stats["ratios"]["tool_calls_per_jsonrpc_message"], 0.25);
 }
 
 // ---------------------------------------------------------------------------

@@ -49,6 +49,7 @@ pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value>
     let durable_events = durable_analytics_rows_for_state(&state).await;
     let hints = hint_summary(state.lcm_conn.as_ref(), durable_events.as_deref()).await;
     let usage = usage_summary(state.lcm_conn.as_ref(), durable_events.as_deref()).await;
+    let diagnostics = diagnostics_summary(&state, durable_events.as_deref()).await;
     let underused = underused_tool_families(state.lcm_conn.as_ref()).await;
 
     Json(json!({
@@ -57,6 +58,7 @@ pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value>
         "scope": state.lcm_scope,
         "hints": hints,
         "usage": usage,
+        "diagnostics": diagnostics,
         "underused_tool_families": underused,
     }))
 }
@@ -71,6 +73,12 @@ pub(crate) async fn hints(State(state): State<DashboardState>) -> Json<Value> {
 pub(crate) async fn usage(State(state): State<DashboardState>) -> Json<Value> {
     let durable_events = durable_analytics_rows_for_state(&state).await;
     Json(usage_summary(state.lcm_conn.as_ref(), durable_events.as_deref()).await)
+}
+
+/// `GET /api/plugins/analytics/diagnostics`
+pub(crate) async fn diagnostics(State(state): State<DashboardState>) -> Json<Value> {
+    let durable_events = durable_analytics_rows_for_state(&state).await;
+    Json(diagnostics_summary(&state, durable_events.as_deref()).await)
 }
 
 /// `GET /api/plugins/analytics/underused`
@@ -130,11 +138,11 @@ async fn durable_analytics_rows(
 
     let rows = query_rows(
         lcm_conn?,
-        "SELECT event_kind, tool_name, tool_category, skill_name,
-                hint_category, outcome, metadata_json
+        "SELECT provider, timestamp, event_kind, hook_name, tool_name,
+                tool_category, skill_name, hint_category, outcome, metadata_json
          FROM (
-             SELECT event_kind, tool_name, tool_category, skill_name,
-                    hint_category, outcome, metadata_json, timestamp, id
+             SELECT provider, timestamp, event_kind, hook_name, tool_name,
+                    tool_category, skill_name, hint_category, outcome, metadata_json, id
              FROM analytics_events
              WHERE project_id = ?1
              ORDER BY timestamp DESC, id DESC
@@ -154,7 +162,10 @@ async fn durable_analytics_rows(
 
 fn durable_analytics_event_row(event: &AnalyticsEventRecord) -> Value {
     json!({
+        "provider": &event.provider,
+        "timestamp": event.timestamp,
         "event_kind": &event.event_kind,
+        "hook_name": &event.hook_name,
         "tool_name": &event.tool_name,
         "tool_category": &event.tool_category,
         "skill_name": &event.skill_name,
@@ -424,6 +435,217 @@ fn usage_count_rows(counts: BTreeMap<(String, String), i64>) -> Vec<Value> {
                 "kind": kind,
                 "category": category,
                 "events": events,
+            })
+        })
+        .collect()
+}
+
+async fn diagnostics_summary(state: &DashboardState, durable_events: Option<&[Value]>) -> Value {
+    let message_count = session_message_rows(state.lcm_conn.as_ref())
+        .await
+        .map_or(0, |rows| rows.len() as i64);
+    let hook_rows = read_hook_analytics_rows(state);
+    let hook_call_count = hook_invocation_count(&hook_rows);
+
+    let Some(events) = durable_events else {
+        return json!({
+            "available": !hook_rows.is_empty() || message_count > 0,
+            "source": "session_messages_and_hook_analytics",
+            "message_count": message_count,
+            "event_count": 0,
+            "tool_call_count": 0,
+            "mcp_tool_call_count": 0,
+            "tracedecay_call_count": 0,
+            "hook_call_count": hook_call_count,
+            "ratios": diagnostics_ratios(message_count, 0, 0, 0, hook_call_count),
+            "by_event_kind": [],
+            "by_tool": [],
+            "by_mcp_tool": [],
+            "by_tool_category": [],
+            "by_outcome": [],
+            "by_hook": hook_count_rows(&hook_rows),
+            "by_prompt_category": hook_prompt_category_rows(&hook_rows),
+            "recent_events": [],
+            "recent_hooks": recent_hook_rows(&hook_rows, 20),
+        });
+    };
+
+    let mut by_event_kind = BTreeMap::new();
+    let mut by_tool = BTreeMap::new();
+    let mut by_mcp_tool = BTreeMap::new();
+    let mut by_tool_category = BTreeMap::new();
+    let mut by_outcome = BTreeMap::new();
+    let mut tool_call_count = 0;
+    let mut mcp_tool_call_count = 0;
+    let mut tracedecay_call_count = 0;
+    let mut first_ts: Option<i64> = None;
+    let mut last_ts: Option<i64> = None;
+
+    for event in events {
+        let event_kind = str_field(event, "event_kind");
+        let tool_name = str_field(event, "tool_name");
+        increment_string_count(&mut by_event_kind, event_kind);
+        increment_string_count(&mut by_tool_category, str_field(event, "tool_category"));
+        increment_string_count(&mut by_outcome, str_field(event, "outcome"));
+
+        if let Some(ts) = event.get("timestamp").and_then(Value::as_i64) {
+            first_ts = Some(first_ts.map_or(ts, |current| current.min(ts)));
+            last_ts = Some(last_ts.map_or(ts, |current| current.max(ts)));
+        }
+
+        if !tool_name.is_empty() {
+            tool_call_count += 1;
+            increment_string_count(&mut by_tool, tool_name);
+            if event_kind == "mcp_tool_call" || tool_name.starts_with("mcp__") {
+                mcp_tool_call_count += 1;
+                increment_string_count(&mut by_mcp_tool, tool_name);
+            }
+            if crate::analytics::normalize_tool_name(tool_name).starts_with("tracedecay_") {
+                tracedecay_call_count += 1;
+            }
+        }
+    }
+
+    let span_secs = match (first_ts, last_ts) {
+        (Some(first), Some(last)) => last.saturating_sub(first).max(1),
+        _ => 0,
+    };
+    let events_per_hour = if span_secs > 0 {
+        (events.len() as f64) * 3600.0 / span_secs as f64
+    } else {
+        0.0
+    };
+
+    json!({
+        "available": true,
+        "source": "analytics_events",
+        "message_count": message_count,
+        "event_count": events.len() as i64,
+        "tool_call_count": tool_call_count,
+        "mcp_tool_call_count": mcp_tool_call_count,
+        "tracedecay_call_count": tracedecay_call_count,
+        "hook_call_count": hook_call_count,
+        "events_per_hour": events_per_hour,
+        "ratios": diagnostics_ratios(
+            message_count,
+            events.len() as i64,
+            tool_call_count,
+            mcp_tool_call_count,
+            hook_call_count,
+        ),
+        "by_event_kind": count_rows("event_kind", by_event_kind),
+        "by_tool": count_rows("tool_name", by_tool),
+        "by_mcp_tool": count_rows("tool_name", by_mcp_tool),
+        "by_tool_category": count_rows("tool_category", by_tool_category),
+        "by_outcome": count_rows("outcome", by_outcome),
+        "by_hook": hook_count_rows(&hook_rows),
+        "by_prompt_category": hook_prompt_category_rows(&hook_rows),
+        "recent_events": recent_event_rows(events, 20),
+        "recent_hooks": recent_hook_rows(&hook_rows, 20),
+    })
+}
+
+fn diagnostics_ratios(
+    message_count: i64,
+    event_count: i64,
+    tool_call_count: i64,
+    mcp_tool_call_count: i64,
+    hook_call_count: i64,
+) -> Value {
+    json!({
+        "events_per_message": per_message(event_count, message_count),
+        "tool_calls_per_message": per_message(tool_call_count, message_count),
+        "mcp_tool_calls_per_message": per_message(mcp_tool_call_count, message_count),
+        "hook_calls_per_message": per_message(hook_call_count, message_count),
+    })
+}
+
+fn per_message(count: i64, message_count: i64) -> f64 {
+    if message_count <= 0 {
+        0.0
+    } else {
+        count as f64 / message_count as f64
+    }
+}
+
+fn increment_string_count(counts: &mut BTreeMap<String, i64>, key: &str) {
+    if !key.is_empty() {
+        *counts.entry(key.to_string()).or_default() += 1;
+    }
+}
+
+fn count_rows(label: &str, counts: BTreeMap<String, i64>) -> Vec<Value> {
+    counts
+        .into_iter()
+        .map(|(key, count)| json!({ label: key, "count": count }))
+        .collect()
+}
+
+fn read_hook_analytics_rows(state: &DashboardState) -> Vec<Value> {
+    let Ok(text) = std::fs::read_to_string(state.store_root.join("hook_analytics.jsonl")) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect()
+}
+
+fn hook_invocation_count(rows: &[Value]) -> i64 {
+    rows.iter()
+        .filter(|row| str_field(row, "event") == "hook_invoked")
+        .count() as i64
+}
+
+fn hook_count_rows(rows: &[Value]) -> Vec<Value> {
+    let mut counts = BTreeMap::new();
+    for row in rows {
+        if str_field(row, "event") == "hook_invoked" {
+            increment_string_count(&mut counts, str_field(row, "hook_name"));
+        }
+    }
+    count_rows("hook_name", counts)
+}
+
+fn hook_prompt_category_rows(rows: &[Value]) -> Vec<Value> {
+    let mut counts = BTreeMap::new();
+    for row in rows {
+        if str_field(row, "event") == "hook_invoked" {
+            increment_string_count(&mut counts, str_field(row, "prompt_category"));
+        }
+    }
+    count_rows("prompt_category", counts)
+}
+
+fn recent_event_rows(events: &[Value], limit: usize) -> Vec<Value> {
+    events
+        .iter()
+        .rev()
+        .take(limit)
+        .map(|event| {
+            json!({
+                "timestamp": event.get("timestamp").cloned().unwrap_or(Value::Null),
+                "event_kind": str_field(event, "event_kind"),
+                "hook_name": str_field(event, "hook_name"),
+                "tool_name": str_field(event, "tool_name"),
+                "outcome": str_field(event, "outcome"),
+            })
+        })
+        .collect()
+}
+
+fn recent_hook_rows(rows: &[Value], limit: usize) -> Vec<Value> {
+    rows.iter()
+        .rev()
+        .filter(|row| str_field(row, "event") == "hook_invoked")
+        .take(limit)
+        .map(|row| {
+            json!({
+                "ts_unix_ms": row.get("ts_unix_ms").cloned().unwrap_or(Value::Null),
+                "agent": str_field(row, "agent"),
+                "hook_name": str_field(row, "hook_name"),
+                "session_id": str_field(row, "session_id"),
+                "tool_name": str_field(row, "tool_name"),
+                "prompt_category": str_field(row, "prompt_category"),
             })
         })
         .collect()

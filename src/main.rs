@@ -1679,6 +1679,9 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                 commands::handle_memory_action(other).await?;
             }
         },
+        Commands::Automation { action } => {
+            handle_automation_command(action).await?;
+        }
         Commands::Migrate { action } => {
             commands::handle_migrate_action(action).await?;
         }
@@ -1690,6 +1693,152 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
         }
     }
     Ok(())
+}
+
+async fn handle_automation_command(action: AutomationAction) -> tracedecay::errors::Result<()> {
+    match action {
+        AutomationAction::Config { action } => handle_automation_config_command(action).await,
+    }
+}
+
+async fn handle_automation_config_command(
+    action: AutomationConfigAction,
+) -> tracedecay::errors::Result<()> {
+    use tracedecay::automation::config::{
+        effective_config, load_project_config, merge_project_config, save_project_config,
+        AutomationBackend, AutomationConfigPatch, AutomationTaskPatch,
+    };
+
+    let path = match &action {
+        AutomationConfigAction::Get { path, .. }
+        | AutomationConfigAction::Enable { path }
+        | AutomationConfigAction::Disable { path }
+        | AutomationConfigAction::Set { path, .. } => path.clone(),
+    };
+    let project_path = resolve_cli_project_root(path, None, None).await?;
+    let cg = crate::serve::ensure_initialized(&project_path).await?;
+    let dashboard_root = cg.store_layout().dashboard_root.clone();
+    let global = tracedecay::user_config::UserConfig::load().automation;
+    let current = load_project_config(&dashboard_root).await?;
+
+    let updated = match action {
+        AutomationConfigAction::Get { json, .. } => {
+            let effective = effective_config(&global, current.as_ref())?;
+            print_automation_config(&global, current.as_ref(), &effective, json)?;
+            return Ok(());
+        }
+        AutomationConfigAction::Enable { .. } => merge_project_config(
+            current,
+            AutomationConfigPatch {
+                enabled: Some(true),
+                backend: Some(AutomationBackend::CodexAppServer),
+                ..AutomationConfigPatch::default()
+            },
+        ),
+        AutomationConfigAction::Disable { .. } => merge_project_config(
+            current,
+            AutomationConfigPatch {
+                enabled: Some(false),
+                ..AutomationConfigPatch::default()
+            },
+        ),
+        AutomationConfigAction::Set {
+            backend,
+            host_mode,
+            model,
+            timeout_secs,
+            memory_curator,
+            memory_curator_schedule,
+            ..
+        } => merge_project_config(
+            current,
+            AutomationConfigPatch {
+                backend: backend
+                    .as_deref()
+                    .map(parse_automation_backend)
+                    .transpose()?,
+                host_mode: host_mode
+                    .as_deref()
+                    .map(parse_automation_host_mode)
+                    .transpose()?,
+                model: model.map(|value| if value.is_empty() { None } else { Some(value) }),
+                timeout_secs,
+                memory_curator: AutomationTaskPatch {
+                    enabled: memory_curator,
+                    schedule: memory_curator_schedule.map(|value| {
+                        if value.is_empty() {
+                            None
+                        } else {
+                            Some(value)
+                        }
+                    }),
+                },
+                ..AutomationConfigPatch::default()
+            },
+        ),
+    };
+
+    let effective = effective_config(&global, Some(&updated))?;
+    save_project_config(&dashboard_root, &updated).await?;
+    print_automation_config(&global, Some(&updated), &effective, true)
+}
+
+fn print_automation_config(
+    global: &tracedecay::automation::config::AutomationConfig,
+    project: Option<&tracedecay::automation::config::AutomationConfigPatch>,
+    effective: &tracedecay::automation::config::AutomationConfig,
+    json: bool,
+) -> tracedecay::errors::Result<()> {
+    let payload = serde_json::json!({
+        "global": global,
+        "project": project,
+        "effective": effective,
+    });
+    if json {
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!("enabled: {}", effective.enabled);
+        println!("backend: {:?}", effective.backend);
+        println!("host_mode: {:?}", effective.host_mode);
+        println!(
+            "model: {}",
+            effective.model.as_deref().unwrap_or("<provider default>")
+        );
+        println!("timeout_secs: {}", effective.timeout_secs);
+        println!("memory_curator: {}", effective.tasks.memory_curator.enabled);
+    }
+    Ok(())
+}
+
+fn parse_automation_backend(
+    value: &str,
+) -> tracedecay::errors::Result<tracedecay::automation::config::AutomationBackend> {
+    use tracedecay::automation::config::AutomationBackend;
+    match value {
+        "disabled" => Ok(AutomationBackend::Disabled),
+        "codex-app-server" | "codex_app_server" => Ok(AutomationBackend::CodexAppServer),
+        "external-command" | "external_command" => Ok(AutomationBackend::ExternalCommand),
+        _ => Err(tracedecay::errors::TraceDecayError::Config {
+            message: format!(
+                "unknown automation backend '{value}' (expected disabled, codex-app-server, external-command)"
+            ),
+        }),
+    }
+}
+
+fn parse_automation_host_mode(
+    value: &str,
+) -> tracedecay::errors::Result<tracedecay::automation::config::AutomationHostMode> {
+    use tracedecay::automation::config::AutomationHostMode;
+    match value {
+        "standalone" => Ok(AutomationHostMode::Standalone),
+        "hermes-hosted" | "hermes_hosted" => Ok(AutomationHostMode::HermesHosted),
+        _ => Err(tracedecay::errors::TraceDecayError::Config {
+            message: format!(
+                "unknown automation host mode '{value}' (expected standalone, hermes-hosted)"
+            ),
+        }),
+    }
 }
 
 #[derive(Clone, Copy)]

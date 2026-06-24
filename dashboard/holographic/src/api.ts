@@ -9,6 +9,8 @@
 
 import { fetchJSON } from "./sdk";
 import type {
+  MemoryAutomationConfigPatch,
+  MemoryAutomationConfigResponse,
   MemoryCurateApplyResponse,
   MemoryCurateOp,
   MemoryCurateResponse,
@@ -104,6 +106,18 @@ export const api = {
   /** Read-only memory curator state/history metadata (GET /curation/status). */
   getMemoryCuratorStatus: () =>
     fetchJSON<MemoryCuratorStatusResponse>(`${BASE}/curation/status`),
+
+  /** Effective automation config plus project override sidecar (GET /curation/config). */
+  getMemoryAutomationConfig: () =>
+    fetchJSON<MemoryAutomationConfigResponse>(`${BASE}/curation/config`),
+
+  /** Persist project automation config overrides (PATCH /curation/config). */
+  patchMemoryAutomationConfig: (body: MemoryAutomationConfigPatch) =>
+    fetchJSON<MemoryAutomationConfigResponse>(`${BASE}/curation/config`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
 
   /** Recent structured curator activity (GET /curation/activity). */
   getMemoryCuratorActivity: (params: { limit?: number } = {}) => {

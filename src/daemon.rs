@@ -563,9 +563,7 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
     set_owner_only_permissions(&socket_path, 0o600)?;
     eprintln!("[tracedecay] daemon listening on {}", socket_path.display());
     let engine = DaemonEngine::default();
-    #[allow(clippy::expect_used)]
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .expect("failed to register SIGTERM handler");
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
     loop {
         let stream = tokio::select! {
@@ -575,7 +573,7 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         };
         let engine = engine.clone();
         tokio::spawn(async move {
-            if let Err(e) = serve_socket_client(stream, engine).await {
+            if let Err(e) = Box::pin(serve_socket_client(stream, engine)).await {
                 eprintln!("[tracedecay] daemon client error: {e}");
             }
         });
@@ -696,7 +694,7 @@ async fn serve_socket_client(stream: tokio::net::UnixStream, engine: DaemonEngin
     };
     let handshake = DaemonHandshake::from_line(&line)?;
     if handshake.project_path.is_some() {
-        let server = match engine.project_server(&handshake).await {
+        let server = match Box::pin(engine.project_server(&handshake)).await {
             Ok(server) => server,
             Err(e) => {
                 write_project_open_error(&mut transport, &e).await?;

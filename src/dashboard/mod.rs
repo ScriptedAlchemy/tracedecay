@@ -23,6 +23,7 @@
 
 mod analytics_api;
 pub(crate) mod assets;
+mod automation_config_api;
 mod curate_preview_store;
 mod graph_api;
 mod graph_queries;
@@ -380,6 +381,10 @@ pub(crate) fn router(state: DashboardState) -> Router {
             "/api/plugins/holographic/curation/preview",
             get(memory_api::curation_preview),
         )
+        .route(
+            "/api/plugins/holographic/curation/config",
+            get(automation_config_api::get_config).patch(automation_config_api::patch_config),
+        )
         .route("/api/plugins/holographic/curate", post(memory_api::curate))
         .route(
             "/api/plugins/holographic/curate/apply",
@@ -425,6 +430,10 @@ pub(crate) fn router(state: DashboardState) -> Router {
         .route("/api/plugins/analytics/hints", get(analytics_api::hints))
         .route("/api/plugins/analytics/usage", get(analytics_api::usage))
         .route(
+            "/api/plugins/analytics/diagnostics",
+            get(analytics_api::diagnostics),
+        )
+        .route(
             "/api/plugins/analytics/underused",
             get(analytics_api::underused),
         )
@@ -441,6 +450,11 @@ pub(crate) fn router(state: DashboardState) -> Router {
 /// (or a wrapper) can probe this to decide which panels/actions to enable.
 async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
     let has_lcm = state.lcm_conn.is_some();
+    let automation = crate::user_config::UserConfig::load().automation;
+    let automation_backend = automation.backend;
+    let automation_host_mode = automation.host_mode;
+    let automation_available = automation.enabled
+        && automation_backend != crate::automation::config::AutomationBackend::Disabled;
     Json(json!({
         "name": "tracedecay-dashboard",
         "version": env!("CARGO_PKG_VERSION"),
@@ -461,14 +475,20 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
             "graph": true,
             "analytics": true,
             // Similarity-based dedup curation (delete/merge ops via /curate
-            // and /curate/apply). LLM-proposed curation is a host-side
-            // extension (the Hermes wrapper flips llm_curation when it adds
-            // an LLM planner that calls /curate/apply).
+            // and /curate/apply). LLM-proposed curation is served by the
+            // configured standalone automation backend when enabled.
             "curation": true,
-            "llm_curation": false,
+            "automation": automation_available,
+            "llm_curation": automation_available,
             // Savings & Cost tab: savings-ledger analytics + per-session
             // cost accounting with OpenRouter-backed pricing.
             "savings": true,
+        },
+        "automation": {
+            "enabled": automation.enabled,
+            "mode": if automation_available { "standalone_backend" } else { "disabled" },
+            "backend": automation_backend,
+            "host_mode": automation_host_mode,
         },
         "dashboards": ["holographic", "hermes-lcm", "graph", "savings"],
     }))

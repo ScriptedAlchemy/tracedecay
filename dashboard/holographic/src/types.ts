@@ -372,6 +372,63 @@ export interface MemoryCuratorPreviewResponse {
   error?: string;
 }
 
+export type AutomationBackend = "disabled" | "codex_app_server" | "external_command";
+
+export type AutomationHostMode = "standalone" | "hermes_hosted";
+
+export interface AutomationTaskConfig {
+  enabled: boolean;
+  schedule?: string | null;
+}
+
+export interface AutomationTaskSet {
+  memory_curator: AutomationTaskConfig;
+  session_reflector: AutomationTaskConfig;
+  skill_writer: AutomationTaskConfig;
+}
+
+export interface MemoryAutomationConfig {
+  enabled: boolean;
+  backend: AutomationBackend;
+  host_mode: AutomationHostMode;
+  model?: string | null;
+  timeout_secs: number;
+  max_tokens?: number | null;
+  temperature?: number | null;
+  require_dashboard_approval: boolean;
+  auto_apply_memory_ops: boolean;
+  auto_enable_skills: boolean;
+  tasks: AutomationTaskSet;
+}
+
+export interface AutomationTaskPatch {
+  enabled?: boolean;
+  schedule?: string | null;
+}
+
+export interface MemoryAutomationConfigPatch {
+  enabled?: boolean;
+  backend?: AutomationBackend;
+  host_mode?: AutomationHostMode;
+  model?: string | null;
+  timeout_secs?: number;
+  max_tokens?: number | null;
+  temperature?: number | null;
+  require_dashboard_approval?: boolean;
+  auto_apply_memory_ops?: boolean;
+  auto_enable_skills?: boolean;
+  memory_curator?: AutomationTaskPatch;
+  session_reflector?: AutomationTaskPatch;
+  skill_writer?: AutomationTaskPatch;
+}
+
+export interface MemoryAutomationConfigResponse {
+  global: MemoryAutomationConfig;
+  project: MemoryAutomationConfigPatch | null;
+  effective: MemoryAutomationConfig;
+  project_config_path?: string;
+}
+
 /**
  * Wire contract for `GET /api/plugins/holographic/curation/status`: scheduler
  * state, resolved curator configuration, and recent snapshot files.

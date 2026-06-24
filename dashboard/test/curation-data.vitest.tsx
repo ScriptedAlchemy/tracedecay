@@ -1,4 +1,4 @@
-import { act, renderHook } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { useCurationData } from "../holographic/src/curation/useCurationData";
@@ -19,6 +19,50 @@ function makeApi(overrides = {}): any {
     getMemoryCuratorActivity: vi.fn().mockResolvedValue({ events: [] }),
     postMemoryCurate: vi.fn().mockResolvedValue({ dry_run: true, actions: [], counts: {} }),
     getMemoryCuratorStatus: vi.fn().mockResolvedValue({ runs: [] }),
+    getMemoryAutomationConfig: vi.fn().mockResolvedValue({
+      global: null,
+      project: null,
+      effective: {
+        enabled: false,
+        backend: "disabled",
+        host_mode: "standalone",
+        model: null,
+        timeout_secs: 60,
+        max_tokens: null,
+        temperature: null,
+        require_dashboard_approval: true,
+        auto_apply_memory_ops: false,
+        auto_enable_skills: false,
+        tasks: {
+          memory_curator: { enabled: false, schedule: null },
+          session_reflector: { enabled: false, schedule: null },
+          skill_writer: { enabled: false, schedule: null },
+        },
+      },
+    }),
+    patchMemoryAutomationConfig: vi.fn().mockImplementation((patch) =>
+      Promise.resolve({
+        global: null,
+        project: patch,
+        effective: {
+          enabled: patch.enabled ?? false,
+          backend: patch.backend ?? "disabled",
+          host_mode: patch.host_mode ?? "standalone",
+          model: patch.model ?? null,
+          timeout_secs: patch.timeout_secs ?? 60,
+          max_tokens: patch.max_tokens ?? null,
+          temperature: patch.temperature ?? null,
+          require_dashboard_approval: patch.require_dashboard_approval ?? true,
+          auto_apply_memory_ops: patch.auto_apply_memory_ops ?? false,
+          auto_enable_skills: patch.auto_enable_skills ?? false,
+          tasks: {
+            memory_curator: patch.memory_curator ?? { enabled: false, schedule: null },
+            session_reflector: patch.session_reflector ?? { enabled: false, schedule: null },
+            skill_writer: patch.skill_writer ?? { enabled: false, schedule: null },
+          },
+        },
+      }),
+    ),
     getMemoryOplog: vi.fn().mockResolvedValue({ events: [] }),
     ...overrides,
   };
@@ -144,5 +188,47 @@ describe("useCurationData", () => {
     });
     expect(api.getMemoryCuratorActivity).toHaveBeenCalledTimes(1);
     vi.useRealTimers();
+  });
+
+  it("loads, edits, saves, and resets the automation config draft", async () => {
+    const api = makeApi();
+    const { result } = renderHook(() => useCurationData({ api }));
+
+    await waitFor(() => {
+      expect(result.current.configDraft?.enabled).toBe(false);
+    });
+
+    expect(result.current.configDraft?.enabled).toBe(false);
+
+    act(() => {
+      result.current.updateConfigDraft({ enabled: true, model: "project-model" });
+      result.current.updateConfigTaskDraft("memory_curator", {
+        enabled: true,
+        schedule: "manual",
+      });
+    });
+
+    expect(result.current.configDirty).toBe(true);
+    expect(result.current.configDraft.enabled).toBe(true);
+    expect(result.current.configDraft.tasks.memory_curator.schedule).toBe("manual");
+
+    await act(async () => {
+      await result.current.saveConfigDraft();
+    });
+
+    expect(api.patchMemoryAutomationConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        enabled: true,
+        model: "project-model",
+        memory_curator: { enabled: true, schedule: "manual" },
+      }),
+    );
+    expect(result.current.configDirty).toBe(false);
+
+    act(() => result.current.updateConfigDraft({ model: "changed" }));
+    expect(result.current.configDirty).toBe(true);
+    act(() => result.current.resetConfigDraft());
+    expect(result.current.configDraft.model).toBe("project-model");
+    expect(result.current.configDirty).toBe(false);
   });
 });

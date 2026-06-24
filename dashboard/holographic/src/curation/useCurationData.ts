@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api as defaultApi } from "../api";
 import type {
+  AutomationTaskConfig,
+  AutomationTaskSet,
+  MemoryAutomationConfig,
+  MemoryAutomationConfigPatch,
+  MemoryAutomationConfigResponse,
   MemoryCurateResponse,
   MemoryCuratorActivityEvent,
   MemoryCuratorStatusResponse,
@@ -8,6 +13,41 @@ import type {
 } from "../types";
 
 export type CurationTab = "plan" | "history" | "activity";
+
+type AutomationTaskKey = keyof AutomationTaskSet;
+
+function cloneConfig(config: MemoryAutomationConfig): MemoryAutomationConfig {
+  return {
+    ...config,
+    tasks: {
+      memory_curator: { ...config.tasks.memory_curator },
+      session_reflector: { ...config.tasks.session_reflector },
+      skill_writer: { ...config.tasks.skill_writer },
+    },
+  };
+}
+
+function configToPatch(config: MemoryAutomationConfig): MemoryAutomationConfigPatch {
+  return {
+    enabled: config.enabled,
+    backend: config.backend,
+    host_mode: config.host_mode,
+    model: config.model || null,
+    timeout_secs: config.timeout_secs,
+    max_tokens: config.max_tokens ?? null,
+    temperature: config.temperature ?? null,
+    require_dashboard_approval: config.require_dashboard_approval,
+    auto_apply_memory_ops: config.auto_apply_memory_ops,
+    auto_enable_skills: config.auto_enable_skills,
+    memory_curator: { ...config.tasks.memory_curator },
+    session_reflector: { ...config.tasks.session_reflector },
+    skill_writer: { ...config.tasks.skill_writer },
+  };
+}
+
+function sameConfig(a: MemoryAutomationConfig | null, b: MemoryAutomationConfig | null) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
 
 export function useCurationData({
   api = defaultApi,
@@ -39,10 +79,17 @@ export function useCurationData({
   const [activity, setActivity] = useState<MemoryCuratorActivityEvent[]>([]);
   const [activityLoading, setActivityLoading] = useState(false);
   const [activityError, setActivityError] = useState("");
+  const [configResponse, setConfigResponse] = useState<MemoryAutomationConfigResponse | null>(null);
+  const [configDraft, setConfigDraft] = useState<MemoryAutomationConfig | null>(null);
+  const [savedConfig, setSavedConfig] = useState<MemoryAutomationConfig | null>(null);
+  const [configLoading, setConfigLoading] = useState(false);
+  const [configSaving, setConfigSaving] = useState(false);
+  const [configError, setConfigError] = useState("");
   const activityRef = useRef<HTMLDivElement>(null);
   const previewSavedAtRef = useRef<string | null>(null);
   const previewLoadSeq = useRef(0);
   const panelRef = useRef<HTMLDivElement>(null);
+  const configDirty = !sameConfig(configDraft, savedConfig);
 
   const applySavedPreview = useCallback((
     savedReport: MemoryCurateResponse,
@@ -113,6 +160,73 @@ export function useCurationData({
       .finally(() => setStatusLoading(false));
   }, [api]);
 
+  const applyConfigResponse = useCallback((response: MemoryAutomationConfigResponse) => {
+    const effective = cloneConfig(response.effective);
+    setConfigResponse(response);
+    setConfigDraft(effective);
+    setSavedConfig(cloneConfig(response.effective));
+  }, []);
+
+  const loadConfig = useCallback(() => {
+    setConfigLoading(true);
+    setConfigError("");
+    return api
+      .getMemoryAutomationConfig()
+      .then((response) => {
+        applyConfigResponse(response);
+        return response;
+      })
+      .catch((err) => {
+        setConfigError(err instanceof Error ? err.message : String(err));
+        throw err;
+      })
+      .finally(() => setConfigLoading(false));
+  }, [api, applyConfigResponse]);
+
+  const updateConfigDraft = useCallback((patch: Partial<MemoryAutomationConfig>) => {
+    setConfigDraft((current) => (current ? { ...current, ...patch } : current));
+  }, []);
+
+  const updateConfigTaskDraft = useCallback((
+    task: AutomationTaskKey,
+    patch: Partial<AutomationTaskConfig>,
+  ) => {
+    setConfigDraft((current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        tasks: {
+          ...current.tasks,
+          [task]: {
+            ...current.tasks[task],
+            ...patch,
+          },
+        },
+      };
+    });
+  }, []);
+
+  const resetConfigDraft = useCallback(() => {
+    setConfigDraft(savedConfig ? cloneConfig(savedConfig) : null);
+    setConfigError("");
+  }, [savedConfig]);
+
+  const saveConfigDraft = useCallback(async () => {
+    if (!configDraft) return null;
+    setConfigSaving(true);
+    setConfigError("");
+    try {
+      const response = await api.patchMemoryAutomationConfig(configToPatch(configDraft));
+      applyConfigResponse(response);
+      return response;
+    } catch (err) {
+      setConfigError(err instanceof Error ? err.message : String(err));
+      throw err;
+    } finally {
+      setConfigSaving(false);
+    }
+  }, [api, applyConfigResponse, configDraft]);
+
   const loadOplog = useCallback(() => {
     setOplogError("");
     api
@@ -127,6 +241,10 @@ export function useCurationData({
   useEffect(() => {
     loadSavedPreview(true);
   }, [loadSavedPreview]);
+
+  useEffect(() => {
+    loadConfig().catch(() => {});
+  }, [loadConfig]);
 
   const preview = useCallback(async () => {
     setLoading(true);
@@ -237,6 +355,12 @@ export function useCurationData({
     activity,
     activityLoading,
     activityError,
+    configResponse,
+    configDraft,
+    configLoading,
+    configSaving,
+    configError,
+    configDirty,
     activityRef,
     panelRef,
     setConfirmOpen,
@@ -246,5 +370,10 @@ export function useCurationData({
     loadActivity,
     loadStatus,
     loadOplog,
+    loadConfig,
+    updateConfigDraft,
+    updateConfigTaskDraft,
+    resetConfigDraft,
+    saveConfigDraft,
   };
 }

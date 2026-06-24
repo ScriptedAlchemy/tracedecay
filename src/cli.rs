@@ -358,6 +358,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: MemoryAction,
     },
+    /// Self-improvement automation config and manual runs
+    Automation {
+        #[command(subcommand)]
+        action: AutomationAction,
+    },
     /// Inspect stores before profile-storage migration
     Migrate {
         #[command(subcommand)]
@@ -481,6 +486,64 @@ pub enum MemoryAction {
         #[arg(long, default_value_t = tracedecay::dashboard::memory_curate::CURATION_DEFAULT_MIN_CONFIDENCE)]
         min_confidence: f64,
         /// Project path (default: current directory, with discovery)
+        #[arg(short, long)]
+        path: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AutomationAction {
+    /// Read or mutate the project automation sidecar config.
+    Config {
+        #[command(subcommand)]
+        action: AutomationConfigAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AutomationConfigAction {
+    /// Print effective automation config.
+    Get {
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Project path (default: current directory, with discovery).
+        #[arg(short, long)]
+        path: Option<String>,
+    },
+    /// Enable project automation.
+    Enable {
+        /// Project path (default: current directory, with discovery).
+        #[arg(short, long)]
+        path: Option<String>,
+    },
+    /// Disable project automation.
+    Disable {
+        /// Project path (default: current directory, with discovery).
+        #[arg(short, long)]
+        path: Option<String>,
+    },
+    /// Patch project automation config fields.
+    Set {
+        /// Backend: disabled, codex-app-server, external-command.
+        #[arg(long)]
+        backend: Option<String>,
+        /// Host mode: standalone, hermes-hosted.
+        #[arg(long)]
+        host_mode: Option<String>,
+        /// Model id. Empty string clears the project override.
+        #[arg(long)]
+        model: Option<String>,
+        /// Timeout in seconds.
+        #[arg(long)]
+        timeout_secs: Option<u64>,
+        /// Enable or disable the memory curator task.
+        #[arg(long)]
+        memory_curator: Option<bool>,
+        /// Schedule label for the memory curator task. Empty string clears it.
+        #[arg(long)]
+        memory_curator_schedule: Option<String>,
+        /// Project path (default: current directory, with discovery).
         #[arg(short, long)]
         path: Option<String>,
     },
@@ -634,7 +697,8 @@ pub enum BranchAction {
 #[cfg(test)]
 mod cli_parse_tests {
     use super::{
-        BranchAction, Cli, Commands, DaemonAction, MemoryAction, MigrateAction, SessionsAction,
+        AutomationAction, AutomationConfigAction, BranchAction, Cli, Commands, DaemonAction,
+        MemoryAction, MigrateAction, SessionsAction,
     };
     use clap::{error::ErrorKind, CommandFactory, Parser};
 
@@ -941,6 +1005,97 @@ mod cli_parse_tests {
                 && path.as_deref() == Some("/tmp/project")
                 && project_id.is_none()
                 && project_path.is_none()
+        ));
+    }
+
+    #[test]
+    fn automation_config_commands_parse_project_sidecar_flags() {
+        let get = Cli::try_parse_from([
+            "tracedecay",
+            "automation",
+            "config",
+            "get",
+            "--json",
+            "--path",
+            "/tmp/project",
+        ])
+        .expect("automation config get should parse");
+        assert!(matches!(
+            get.command,
+            Some(Commands::Automation {
+                action:
+                    AutomationAction::Config {
+                        action: AutomationConfigAction::Get { json, path }
+                    }
+            }) if json && path.as_deref() == Some("/tmp/project")
+        ));
+
+        let enable = Cli::try_parse_from(["tracedecay", "automation", "config", "enable"])
+            .expect("automation config enable should parse");
+        assert!(matches!(
+            enable.command,
+            Some(Commands::Automation {
+                action:
+                    AutomationAction::Config {
+                        action: AutomationConfigAction::Enable { path }
+                    }
+            }) if path.is_none()
+        ));
+
+        let disable = Cli::try_parse_from(["tracedecay", "automation", "config", "disable"])
+            .expect("automation config disable should parse");
+        assert!(matches!(
+            disable.command,
+            Some(Commands::Automation {
+                action:
+                    AutomationAction::Config {
+                        action: AutomationConfigAction::Disable { path }
+                    }
+            }) if path.is_none()
+        ));
+
+        let set = Cli::try_parse_from([
+            "tracedecay",
+            "automation",
+            "config",
+            "set",
+            "--backend",
+            "codex-app-server",
+            "--host-mode",
+            "hermes-hosted",
+            "--model",
+            "gpt-test",
+            "--timeout-secs",
+            "120",
+            "--memory-curator",
+            "true",
+            "--memory-curator-schedule",
+            "manual",
+        ])
+        .expect("automation config set should parse");
+        assert!(matches!(
+            set.command,
+            Some(Commands::Automation {
+                action:
+                    AutomationAction::Config {
+                        action:
+                            AutomationConfigAction::Set {
+                                backend,
+                                host_mode,
+                                model,
+                                timeout_secs,
+                                memory_curator,
+                                memory_curator_schedule,
+                                path,
+                            }
+                    }
+            }) if backend.as_deref() == Some("codex-app-server")
+                && host_mode.as_deref() == Some("hermes-hosted")
+                && model.as_deref() == Some("gpt-test")
+                && timeout_secs == Some(120)
+                && memory_curator == Some(true)
+                && memory_curator_schedule.as_deref() == Some("manual")
+                && path.is_none()
         ));
     }
 
