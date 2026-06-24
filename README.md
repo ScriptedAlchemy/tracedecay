@@ -216,6 +216,8 @@ tracedecay init
 
 This creates the active project's TraceDecay store. Graph/session artifacts live in a user-level profile shard scoped to this project; `.tracedecay/` in the repo is only a lightweight marker/config directory. `init` is the explicit opt-in; `sync` only updates already-initialized projects, so the global post-commit hook does not create stores in repos you never intended to index. After `init`, use `tracedecay sync` for incremental updates.
 
+Linked git worktrees do not need their own `tracedecay init`. Once the repository has been initialized from any checkout, TraceDecay resolves sibling or nested worktrees through the repository's shared git common directory and keeps the current worktree as the active file root. Do not copy `.tracedecay/` into worktrees; branch database tracking isolates the checked-out branch inside the shared project store.
+
 <details>
 <summary><strong>What install writes for Claude Code</strong></summary>
 
@@ -673,7 +675,7 @@ tracedecay keeps the graph up to date without a background daemon or an OS-level
 
 **Catch-up sync on connect.** When the MCP server starts, it immediately runs a non-blocking catch-up sync that picks up any changes made while no agent was attached — a `git pull`, an IDE edit, a build step — so the very first tool call of a session sees a fresh index.
 
-**Multi-agent work and git worktrees.** When multiple agents work on a project concurrently, each is expected to operate in its own git worktree — an independent filesystem checkout of the same repository, so agents never overwrite each other's in-flight edits. tracedecay detects when a query comes from a worktree nested inside the main checkout and serves results from the correct branch graph. Changes accumulate independently and are reconciled via git merge or rebase, avoiding the complexity and failure modes of cross-agent locking over a shared mutable directory.
+**Multi-agent work and git worktrees.** When multiple agents work on a project concurrently, each is expected to operate in its own git worktree — an independent filesystem checkout of the same repository, so agents never overwrite each other's in-flight edits. After one checkout has been initialized, tracedecay automatically resolves linked worktrees by `git rev-parse --git-common-dir`, uses the shared project store, and keeps the invoking worktree as the active file root for scans and syncs. This works for sibling worktrees, nested `repo/.worktrees/*` layouts, and agent-managed worktrees such as Codex or Conductor. Changes accumulate independently and are reconciled via git merge or rebase, avoiding the complexity and failure modes of cross-agent locking over a shared mutable directory.
 
 **CLI-only workflows.** If you run `tracedecay` commands without an attached agent (no MCP server), the staleness check is not running between commands. Install a git post-commit hook to keep the index fresh automatically after every commit:
 
@@ -963,6 +965,8 @@ TraceDecay could not find an initialized project store. Run `tracedecay init` fr
 ```bash
 tracedecay init
 ```
+
+If you are inside a linked git worktree, initialize the repository once from any checkout instead of running `init` in every worktree. A separate clone with the same remote URL is not considered initialized; only the original checkout and its linked worktrees share the store.
 
 ### MCP server not connecting
 
