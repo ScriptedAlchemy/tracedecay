@@ -9,6 +9,7 @@ use crate::mcp::response_handles::{
     note_response_handle_store_skipped_no_project_root, observe_response_truncation,
     store_response_handle, ResponseHandleRecord, RESPONSE_HANDLE_TTL_SECS, RESPONSE_RETRIEVE_TOOL,
 };
+use crate::path_tree::format_path_tree;
 use crate::tracedecay::current_timestamp;
 
 use super::MAX_RESPONSE_CHARS;
@@ -406,6 +407,10 @@ fn render_array(md: &mut Md, arr: &[Value], depth: u8) {
         md.empty_note("None.");
         return;
     }
+    if let Some(paths) = compact_path_array(arr) {
+        md.line(&paths);
+        return;
+    }
     if arr.iter().all(Value::is_object) {
         let mut cols: Vec<String> = Vec::new();
         for e in arr {
@@ -437,6 +442,35 @@ fn render_array(md: &mut Md, arr: &[Value], depth: u8) {
             }
         }
     }
+}
+
+fn compact_path_array(arr: &[Value]) -> Option<String> {
+    if arr.len() < 2 || !arr.iter().all(Value::is_string) {
+        return None;
+    }
+    let paths = arr.iter().filter_map(Value::as_str).collect::<Vec<_>>();
+    if !paths.iter().all(|path| looks_like_path(path)) {
+        return None;
+    }
+    let bullets = paths
+        .iter()
+        .map(|path| format!("- {path}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let tree = format_path_tree(paths);
+    if !tree.is_empty() && tree.len() < bullets.len() {
+        Some(tree)
+    } else {
+        None
+    }
+}
+
+fn looks_like_path(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty()
+        && !trimmed.contains('\n')
+        && !trimmed.contains("://")
+        && (trimmed.contains('/') || trimmed.contains('\\'))
 }
 
 fn render_object(md: &mut Md, map: &serde_json::Map<String, Value>, depth: u8) {
@@ -643,6 +677,32 @@ mod tests {
     fn generic_md_empty_is_noted() {
         assert!(generic_md(&json!([])).contains("None."));
         assert!(generic_md(&json!({})).contains("No results."));
+    }
+
+    #[test]
+    fn generic_md_compacts_scalar_path_arrays() {
+        let out = generic_md(&json!({
+            "changed_files": [
+                "tests/gateway/test_gateway_shutdown.py",
+                "tests/gateway/test_goal_verdict_send.py",
+                "tests/gateway/test_homeassistant.py"
+            ]
+        }));
+
+        assert!(out.contains("## changed_files"));
+        assert!(out.contains("tests/gateway/"));
+        assert!(out.contains("  test_gateway_shutdown.py"));
+        assert!(!out.contains("- tests/gateway/test_gateway_shutdown.py"));
+    }
+
+    #[test]
+    fn generic_md_keeps_non_path_scalar_arrays_as_bullets() {
+        let out = generic_md(&json!({
+            "warnings": ["first warning", "second warning"]
+        }));
+
+        assert!(out.contains("- first warning"));
+        assert!(out.contains("- second warning"));
     }
 
     #[test]

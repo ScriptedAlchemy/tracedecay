@@ -17,6 +17,7 @@ use crate::global_db::{AnalyticsEventInsert, GlobalDb};
 use crate::mcp::response_handles::{
     cleanup_expired_response_handles, response_handle_stats_json, RESPONSE_RETRIEVE_TOOL,
 };
+use crate::path_tree::format_annotated_path_tree;
 use crate::tracedecay::TraceDecay;
 
 use super::tools::{
@@ -204,9 +205,27 @@ fn format_per_file_staleness_banner(
          Read these directly; the rest of this response reflects the current index:",
         stale_files.len()
     ));
-    for path in stale_files {
-        let age = file_mtime_secs(project_root, path).map_or(0, |m| now_secs.saturating_sub(m));
-        lines.push(format!("  - {path} (edited {})", humanize_age(age)));
+    let annotated_paths = stale_files
+        .iter()
+        .map(|path| {
+            let age = file_mtime_secs(project_root, path).map_or(0, |m| now_secs.saturating_sub(m));
+            (path.as_str(), format!(" (edited {})", humanize_age(age)))
+        })
+        .collect::<Vec<_>>();
+    let bullet_list = annotated_paths
+        .iter()
+        .map(|(path, suffix)| format!("  - {path}{suffix}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let tree = format_annotated_path_tree(annotated_paths)
+        .lines()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !tree.is_empty() && tree.len() < bullet_list.len() {
+        lines.push(tree);
+    } else if !bullet_list.is_empty() {
+        lines.push(bullet_list);
     }
     lines.push("Run `tracedecay sync` to refresh the index.".to_string());
     lines.join("\n")
@@ -2084,8 +2103,9 @@ mod staleness_banner_tests {
         let stale = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
         let banner = format_per_file_staleness_banner(root, &stale);
         assert!(banner.contains("2 file(s) referenced below were edited"));
-        assert!(banner.contains("src/a.rs ("));
-        assert!(banner.contains("src/b.rs ("));
+        assert!(banner.contains("src/"));
+        assert!(banner.contains("a.rs ("));
+        assert!(banner.contains("b.rs ("));
         assert!(banner.contains("ago)"));
         assert!(banner.contains("tracedecay sync"));
         // Critical UX shift: should NOT say "STALE INDEX" — the whole
