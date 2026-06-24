@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.11](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.10...v0.0.11) - 2026-06-24
+
+### Added
+
+- make update refresh plugins and daemon
+
+### Fixed
+
+- simplify compact path list rendering
+- keep daemon MCP proxy alive across restarts
+- *(db)* disable SQLite mmap on Windows to stop teardown crash
+
 ## [0.0.10](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.9...v0.0.10) - 2026-06-24
 
 ### Fixed
