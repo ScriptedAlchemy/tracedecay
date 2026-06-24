@@ -9,7 +9,7 @@
 
 mod common;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Mutex;
 
 use common::{
@@ -33,11 +33,14 @@ struct Fixture {
     _env_guards: Vec<EnvVarGuard>,
     base_url: String,
     server: tokio::task::JoinHandle<()>,
-    global_db_path: PathBuf,
-    session_db_path: PathBuf,
-    project_root: PathBuf,
     /// Start of the current UTC day; seeded timestamps hang off this.
     day_start: i64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FixtureSeed {
+    Base,
+    DailyLimitRegression,
 }
 
 impl Drop for Fixture {
@@ -399,7 +402,7 @@ async fn seed_daily_limit_regression(
     }
 }
 
-async fn start_fixture() -> Fixture {
+async fn start_fixture(seed: FixtureSeed) -> Fixture {
     let tmp = TempDir::new().expect("temp dir");
     let project_root = tmp.path().join("project");
     std::fs::create_dir_all(&project_root).expect("project dir");
@@ -433,6 +436,10 @@ async fn start_fixture() -> Fixture {
         .expect("tracedecay init");
     let session_db_path = project_session_db_path(&project_root);
     seed_global_db(&session_db_path, &project_root, day_start).await;
+    if seed == FixtureSeed::DailyLimitRegression {
+        seed_daily_limit_regression(&session_db_path, &global_db_path, &project_root, day_start)
+            .await;
+    }
     let port = pick_free_port();
     let base_url = format!("http://127.0.0.1:{port}");
     let server = tokio::spawn(async move {
@@ -446,9 +453,6 @@ async fn start_fixture() -> Fixture {
         _env_guards: env_guards,
         base_url,
         server,
-        global_db_path,
-        session_db_path,
-        project_root,
         day_start,
     }
 }
@@ -477,7 +481,7 @@ fn savings_ledger_endpoints_reflect_seeded_ledger() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_fixture().await;
+        let fixture = start_fixture(FixtureSeed::Base).await;
         let agent = http_agent();
 
         // Capability flag + tab registration.
@@ -570,14 +574,7 @@ fn daily_model_series_limits_days_not_model_rows() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_fixture().await;
-        seed_daily_limit_regression(
-            &fixture.session_db_path,
-            &fixture.global_db_path,
-            &fixture.project_root,
-            fixture.day_start,
-        )
-        .await;
+        let fixture = start_fixture(FixtureSeed::DailyLimitRegression).await;
 
         let (_, models) = get_json(
             &http_agent(),
@@ -633,7 +630,7 @@ fn session_costs_label_actual_vs_tokenized_vs_estimated() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_fixture().await;
+        let fixture = start_fixture(FixtureSeed::Base).await;
         let agent = http_agent();
 
         // Whether this build carries the BPE tokenizer (the `token-counting`
@@ -824,7 +821,7 @@ fn pricing_serves_bundled_fallback_when_offline() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_fixture().await;
+        let fixture = start_fixture(FixtureSeed::Base).await;
         let agent = http_agent();
 
         let (status, pricing) = get_json(

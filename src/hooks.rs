@@ -2326,7 +2326,7 @@ const CURSOR_SESSION_INGEST_BUDGET: Duration = Duration::from_secs(4);
 /// Budget for the end-of-turn `stop` catch-up ingest (registered with a 30s timeout).
 const CURSOR_STOP_INGEST_BUDGET: Duration = Duration::from_secs(25);
 /// Budget for the transcript catch-up portion of the `preCompact` hook.
-const CURSOR_PRE_COMPACT_INGEST_BUDGET: Duration = Duration::from_secs(20);
+const CURSOR_PRE_COMPACT_INGEST_BUDGET: Duration = Duration::from_secs(30);
 /// Budget for the auxiliary `cursor-agent` summary call inside the hook. Kept
 /// below the registered Cursor hook timeout so the child can be killed/reaped
 /// by `TraceDecay` rather than by Cursor killing the hook process.
