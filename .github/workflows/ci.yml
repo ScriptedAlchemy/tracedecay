@@ -110,8 +110,15 @@ jobs:
       - name: Install ast-grep
         shell: pwsh
         run: |
-          npm install --global "@ast-grep/cli@$env:AST_GREP_VERSION"
-          ast-grep --version
+          $ErrorActionPreference = "Stop"
+          $toolsDir = Join-Path (Get-Location).Path "windows-test-tools"
+          New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
+          npm install --prefix $toolsDir "@ast-grep/cli@$env:AST_GREP_VERSION"
+          $astGrepExe = Join-Path $toolsDir "node_modules/@ast-grep/cli/ast-grep.exe"
+          if (!(Test-Path $astGrepExe)) {
+            throw "Missing archived ast-grep executable at $astGrepExe"
+          }
+          & $astGrepExe --version
 
       - name: Install sccache
         uses: mozilla-actions/sccache-action@v0.0.10
@@ -139,7 +146,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-nextest-archive
-          path: windows-nextest-archive.tar.zst
+          path: |
+            windows-nextest-archive.tar.zst
+            windows-test-tools
           if-no-files-found: error
           retention-days: 1
 
@@ -162,12 +171,6 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install ast-grep
-        shell: pwsh
-        run: |
-          npm install --global "@ast-grep/cli@$env:AST_GREP_VERSION"
-          ast-grep --version
-
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
@@ -177,6 +180,19 @@ jobs:
           name: windows-nextest-archive
           path: .
 
+      - name: Add archived ast-grep to PATH
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $toolsDir = Join-Path (Get-Location).Path "windows-test-tools"
+          $binDir = Join-Path $toolsDir "node_modules/@ast-grep/cli"
+          $astGrepExe = Join-Path $binDir "ast-grep.exe"
+          if (!(Test-Path $astGrepExe)) {
+            throw "Missing archived ast-grep executable at $astGrepExe"
+          }
+          $binDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & $astGrepExe --version
+
       - name: Run Windows test shard
         shell: pwsh
         run: |
@@ -184,7 +200,7 @@ jobs:
           $partition = [int]"${{ matrix.partition }}"
           $partitions = 16
           $testThreads = 1
-          $partitionArg = "hash:$partition/$partitions"
+          $partitionArg = "slice:$partition/$partitions"
           $workspace = (Get-Location).Path
           $archive = Join-Path $workspace "windows-nextest-archive.tar.zst"
           $targetDir = Join-Path $workspace "target"

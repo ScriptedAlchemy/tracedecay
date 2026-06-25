@@ -2,7 +2,8 @@
 fail-fast = false
 retries = 0
 flaky-result = "fail"
-slow-timeout = { period = "90s", terminate-after = 4 }
+slow-timeout = { period = "10s", terminate-after = 36 }
+final-status-level = "slow"
 
 [test-groups]
 windows-global-state = { max-threads = 1 }
