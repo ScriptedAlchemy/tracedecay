@@ -1,4 +1,3 @@
-use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -17,6 +16,10 @@ use tracedecay::automation::config::{AutomationBackend, AutomationConfig};
 use tracedecay::sessions::codex_app_server::{
     run_prompt_with_codex_app_server, CodexAppServerSummaryConfig,
 };
+
+mod common;
+
+use common::{fake_codex_bin, install_fake_codex_launcher, windows_python_launcher, EnvVarGuard};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -505,29 +508,6 @@ struct FakeCodexAppServer {
     pid: PathBuf,
 }
 
-struct EnvVarGuard {
-    key: &'static str,
-    previous: Option<OsString>,
-}
-
-impl EnvVarGuard {
-    fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
-        let previous = std::env::var_os(key);
-        std::env::set_var(key, value);
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        if let Some(previous) = self.previous.take() {
-            std::env::set_var(self.key, previous);
-        } else {
-            std::env::remove_var(self.key);
-        }
-    }
-}
-
 fn backend_error_for_behavior(behavior: &str, timeout: Duration) -> (String, u32) {
     let fake = FakeCodexAppServer::new_with_behavior(behavior);
     let backend = CodexAppServerBackend::from_config(CodexAppServerSummaryConfig {
@@ -670,21 +650,6 @@ with open(log_path, "a", encoding="utf-8") as log:
     )
 }
 
-fn fake_codex_bin(temp: &Path) -> PathBuf {
-    temp.join(if cfg!(windows) { "codex.cmd" } else { "codex" })
-}
-
-#[cfg(windows)]
-fn install_fake_codex_launcher(_script: &Path, bin: &Path) {
-    fs::write(bin, windows_python_launcher("codex.py")).unwrap();
-}
-
-#[cfg(not(windows))]
-fn install_fake_codex_launcher(script: &Path, bin: &Path) {
-    fs::copy(script, bin).unwrap();
-    make_executable(bin);
-}
-
 #[cfg(target_os = "linux")]
 fn assert_process_gone(pid: u32) {
     let proc_path = PathBuf::from(format!("/proc/{pid}"));
@@ -699,45 +664,6 @@ fn assert_process_gone(pid: u32) {
 
 #[cfg(not(target_os = "linux"))]
 fn assert_process_gone(_pid: u32) {}
-
-#[cfg(unix)]
-fn make_executable(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-
-    let mut permissions = fs::metadata(path).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions).unwrap();
-}
-
-#[cfg(not(unix))]
-fn make_executable(_path: &Path) {}
-
-fn windows_python_launcher(script_name: &str) -> String {
-    format!(
-        "@echo off\r\n\
-setlocal\r\n\
-if defined Python_ROOT_DIR if exist \"%Python_ROOT_DIR%\\python.exe\" (\r\n\
-  \"%Python_ROOT_DIR%\\python.exe\" \"%~dp0{script_name}\" %*\r\n\
-  exit /b %ERRORLEVEL%\r\n\
-)\r\n\
-if defined pythonLocation if exist \"%pythonLocation%\\python.exe\" (\r\n\
-  \"%pythonLocation%\\python.exe\" \"%~dp0{script_name}\" %*\r\n\
-  exit /b %ERRORLEVEL%\r\n\
-)\r\n\
-where python >nul 2>nul\r\n\
-if not errorlevel 1 (\r\n\
-  python \"%~dp0{script_name}\" %*\r\n\
-  exit /b %ERRORLEVEL%\r\n\
-)\r\n\
-where python3 >nul 2>nul\r\n\
-if not errorlevel 1 (\r\n\
-  python3 \"%~dp0{script_name}\" %*\r\n\
-  exit /b %ERRORLEVEL%\r\n\
-)\r\n\
-py -3 \"%~dp0{script_name}\" %*\r\n\
-exit /b %ERRORLEVEL%\r\n"
-    )
-}
 
 #[test]
 fn windows_python_launcher_prefers_setup_python_and_preserves_exit_status() {
