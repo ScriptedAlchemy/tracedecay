@@ -54,7 +54,7 @@ that reuses it, never a fork.
                 └──────────────┬─────────────────────────────┘
             register via window.__HERMES_PLUGINS__ / SDK
            ┌───────────────────┴────────────────────────┐
-           │ standalone                                 │ hermes-hosted
+           │ standalone                                 │ delegated-host
 ┌──────────▼─────────────┐                 ┌────────────▼─────────────────┐
 │ shell/dist/shell.js    │                 │ hermes-wrapper dist/index.js │
 │ (bundles React 19,     │                 │ (uses host SDK; evaluates    │
@@ -138,7 +138,7 @@ Hermes `~/.hermes/memory_store.db` (`facts`/`entities`/`memory_banks`).
 | `GET /similarity` | pure-python `mean(cos(p_i−p_j))` + lexical overlap + classification | same math in Rust (`SIMILARITY_FACT_CAP` 500, identical thresholds) | working |
 | `GET /archive` / `POST /archive/{id}/restore` | `facts.state='archived'` / provider restore | **removed by design** — tracedecay curation hard-DELETEs losing facts; there is no archive state and no restore. The UI's Archive tab was removed accordingly. | n/a |
 | `GET /curation/status` | hermes curator state files | Returns `enabled:true`, `mode: similarity_dedup`, last preview timestamp | **working** |
-| `GET /curation/activity` | curator activity events | Always empty (no LLM/agent event stream) | working |
+| `GET /curation/activity` | curator activity events | Structured TraceDecay curation activity events from preview/apply, agent-plan, and automation paths (`queued`, `evidence`, `backend`, `validation`, `apply`, `report`, `finish`, `failure`, or `rejection` as applicable) | working |
 | `GET /curation/preview` | saved dry-run file | Last `dry_run=true` result, persisted to a `.tracedecay/dashboard/curation_preview.json` sidecar (survives restarts); stale when fact count changes | **working** |
 | `POST /curate` | `agent.memory_curator.run_memory_curation` | Similarity-based dedup: proposes/applies `delete` actions for `likely_duplicate` pairs; `dry_run=true` returns plan, `dry_run=false` hard-deletes losers via `MemoryStore::remove_fact` | **working** |
 | `POST /curate/apply` | (new, no Hermes equivalent) | Generic curation-ops apply API: `{"ops": [{"op":"delete",...} \| {"op":"merge",...}]}` with per-op results; the contract for external (LLM) planners | **working** |
@@ -307,12 +307,15 @@ planner builds against.
 
 ### Capabilities
 
-`GET /api/capabilities` returns `"curation": true, "llm_curation": false`
-(standalone). The Hermes wrapper flips `llm_curation` when it adds an
-LLM-backed planner that proposes merge/retag-style ops and applies them via
-`/curate/apply`. The UI's CurationPanel consumes the same ops shape either
-way (its Archive tab was removed; `delete` ops render as high-risk actions
-with a permanent-deletion warning).
+`GET /api/capabilities` returns `"curation": true` plus automation metadata.
+TraceDecay reports `automation.mode` as `"disabled"`, `"standalone_backend"`,
+or `"delegated_host"`. In standalone mode, a configured backend can set
+`features.llm_curation` true. In delegated-host mode, planning remains
+host-owned and the host submits proposed ops via `/curate/apply`; Hermes is one
+compatibility bridge for this provider-neutral contract. The UI's
+CurationPanel consumes the same ops shape either way (its Archive tab was
+removed; `delete` ops render as high-risk actions with a permanent-deletion
+warning).
 
 ### Hermes live render + holographic_plus retirement (2026-06-10)
 
@@ -514,9 +517,11 @@ conservatism backstop, and callers can pass a higher `threshold` /
 
 ## What's stubbed / known gaps
 
-1. **Curation activity stream**: `GET /curation/activity` always returns an empty
-   event list. The holographic_plus backend streams structured phases from a live
-   LLM agent run; the similarity-dedup implementation has no equivalent events.
+1. **Curation activity stream**: RESOLVED — `GET /curation/activity` returns the
+   in-memory structured activity log for preview/apply, standalone agent-plan,
+   and queued automation paths. Events use phases such as `queued`, `evidence`,
+   `backend`, `validation`, `apply`, `report`, `finish`, `failure`, and
+   `rejection` as applicable.
 2. **Rich curation ops**: the built-in planner only proposes `delete`. The apply
    API additionally executes `merge` (content rewrite + loser deletion), but
    `supersede`, `retag`, and `entity_*` ops from holographic_plus are not
@@ -640,7 +645,7 @@ cd /home/zack/projects/tracedecay
 cargo build --bin tracedecay
 ./target/debug/tracedecay dashboard            # http://127.0.0.1:7341/
 
-# 3. Hermes-hosted (wrapper spawns the server automatically)
+# 3. Delegated host (wrapper spawns the server automatically)
 TRACEDECAY_BIN=/home/zack/projects/tracedecay/target/debug/tracedecay \
 TRACEDECAY_DASHBOARD_PROJECT=/home/zack/projects/tracedecay \
 hermes dashboard   # → "TraceDecay" tab (named "Hermes Intelligence" at port time)
