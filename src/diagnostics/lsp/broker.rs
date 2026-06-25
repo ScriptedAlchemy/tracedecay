@@ -510,11 +510,45 @@ fn workspace_root_for_document(
 }
 
 pub fn command_available(command: &str) -> bool {
-    if command.contains(std::path::MAIN_SEPARATOR) {
+    if Path::new(command).components().count() > 1 {
         return Path::new(command).is_file();
     }
     let Some(paths) = std::env::var_os("PATH") else {
         return false;
     };
-    std::env::split_paths(&paths).any(|path| path.join(command).is_file())
+    let candidates = command_candidates(command);
+    std::env::split_paths(&paths).any(|path| {
+        candidates
+            .iter()
+            .any(|candidate| path.join(candidate).is_file())
+    })
+}
+
+#[cfg(windows)]
+fn command_candidates(command: &str) -> Vec<String> {
+    if Path::new(command).extension().is_some() {
+        return vec![command.to_string()];
+    }
+
+    let pathext = std::env::var_os("PATHEXT")
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".to_string());
+
+    let mut candidates = vec![command.to_string()];
+    candidates.extend(pathext.split(';').filter_map(|extension| {
+        let extension = extension.trim();
+        if extension.is_empty() {
+            None
+        } else if extension.starts_with('.') {
+            Some(format!("{command}{extension}"))
+        } else {
+            Some(format!("{command}.{extension}"))
+        }
+    }));
+    candidates
+}
+
+#[cfg(not(windows))]
+fn command_candidates(command: &str) -> Vec<String> {
+    vec![command.to_string()]
 }
