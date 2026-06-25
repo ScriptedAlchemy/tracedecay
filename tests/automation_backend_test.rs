@@ -1,6 +1,6 @@
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
@@ -538,9 +538,7 @@ impl FakeCodexAppServer {
 
     fn new_with_behavior(behavior: &str) -> Self {
         let temp = tempfile::tempdir().unwrap();
-        let bin = temp
-            .path()
-            .join(if cfg!(windows) { "codex.cmd" } else { "codex" });
+        let bin = fake_codex_bin(temp.path());
         let script_path = temp.path().join("codex.py");
         let log = temp.path().join("stdin.jsonl");
         let pid = temp.path().join("child.pid");
@@ -615,11 +613,7 @@ with open(log_path, "a", encoding="utf-8") as log:
             behavior,
         );
         fs::write(&script_path, script).unwrap();
-        #[cfg(windows)]
-        fs::write(&bin, "@echo off\r\npython \"%~dp0codex.py\" %*\r\n").unwrap();
-        #[cfg(not(windows))]
-        fs::copy(&script_path, &bin).unwrap();
-        make_executable(&bin);
+        install_fake_codex_launcher(&script_path, &bin);
         thread::sleep(Duration::from_millis(10));
         Self {
             _temp: temp,
@@ -646,6 +640,21 @@ with open(log_path, "a", encoding="utf-8") as log:
     }
 }
 
+fn fake_codex_bin(temp: &Path) -> PathBuf {
+    temp.join(if cfg!(windows) { "codex.cmd" } else { "codex" })
+}
+
+#[cfg(windows)]
+fn install_fake_codex_launcher(_script: &Path, bin: &Path) {
+    fs::write(bin, "@echo off\r\npython \"%~dp0codex.py\" %*\r\n").unwrap();
+}
+
+#[cfg(not(windows))]
+fn install_fake_codex_launcher(script: &Path, bin: &Path) {
+    fs::copy(script, bin).unwrap();
+    make_executable(bin);
+}
+
 #[cfg(target_os = "linux")]
 fn assert_process_gone(pid: u32) {
     let proc_path = PathBuf::from(format!("/proc/{pid}"));
@@ -662,7 +671,7 @@ fn assert_process_gone(pid: u32) {
 fn assert_process_gone(_pid: u32) {}
 
 #[cfg(unix)]
-fn make_executable(path: &PathBuf) {
+fn make_executable(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
 
     let mut permissions = fs::metadata(path).unwrap().permissions();
@@ -671,4 +680,4 @@ fn make_executable(path: &PathBuf) {
 }
 
 #[cfg(not(unix))]
-fn make_executable(_path: &PathBuf) {}
+fn make_executable(_path: &Path) {}
