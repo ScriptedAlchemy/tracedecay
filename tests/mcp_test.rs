@@ -100,7 +100,7 @@ fn test_tool_definitions_count() {
     // is available. Outline stays registered and reports the ast-grep outline
     // requirement at runtime so plugin docs/rules can consistently reference it.
     // LCM comparison and profile-storage registry support add extra tools.
-    let expected = 93 + usize::from(tracedecay::mcp::tools::ast_grep_available());
+    let expected = 97 + usize::from(tracedecay::mcp::tools::ast_grep_available());
     assert_eq!(tools.len(), expected);
 }
 

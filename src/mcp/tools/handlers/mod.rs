@@ -14,6 +14,7 @@ pub mod info;
 pub mod memory;
 pub mod redundancy;
 pub mod session;
+pub mod skills;
 mod support;
 pub mod workflow;
 
@@ -313,6 +314,12 @@ pub async fn handle_tool_call_with_registry(
         "tracedecay_memory_status" => {
             memory::handle_memory_status(cg, args, global_db, allow_default_registry_fallback).await
         }
+        "tracedecay_automation_run_artifact_view" => {
+            skills::handle_automation_run_artifact_view(cg, args).await
+        }
+        "tracedecay_skill_list" => skills::handle_skill_list(cg, args).await,
+        "tracedecay_skill_view" => skills::handle_skill_view(cg, args).await,
+        "tracedecay_hermes_skill_bridge" => skills::handle_hermes_skill_bridge(cg, &args),
         "tracedecay_dashboard" => dashboard::handle_dashboard(cg, args).await,
         "tracedecay_message_search" => {
             session::handle_message_search(cg, args, global_db, allow_default_registry_fallback)
@@ -807,7 +814,7 @@ mod tests {
         // host CLI capabilities they need; agents should never see a tool that
         // will instantly fail. The count and per-tool checks below adapt to
         // the host's capability set.
-        let expected_total = 93 + usize::from(super::super::definitions::ast_grep_available());
+        let expected_total = 97 + usize::from(super::super::definitions::ast_grep_available());
         assert_eq!(tools.len(), expected_total);
 
         let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
