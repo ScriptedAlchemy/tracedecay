@@ -542,8 +542,38 @@ impl FakeCodexAppServer {
         let script_path = temp.path().join("codex.py");
         let log = temp.path().join("stdin.jsonl");
         let pid = temp.path().join("child.pid");
-        let script = format!(
-            r#"#!/usr/bin/env python3
+        let script = fake_codex_script(&log, &pid, behavior);
+        fs::write(&script_path, script).unwrap();
+        install_fake_codex_launcher(&script_path, &bin);
+        thread::sleep(Duration::from_millis(10));
+        Self {
+            _temp: temp,
+            bin,
+            log,
+            pid,
+        }
+    }
+
+    fn logged_messages(&self) -> Vec<serde_json::Value> {
+        fs::read_to_string(&self.log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    fn child_pid(&self) -> u32 {
+        fs::read_to_string(&self.pid)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    }
+}
+
+fn fake_codex_script(log: &Path, pid: &Path, behavior: &str) -> String {
+    format!(
+        r#"#!/usr/bin/env python3
 import json
 import os
 import sys
@@ -608,36 +638,10 @@ with open(log_path, "a", encoding="utf-8") as log:
                 print(json.dumps(dict(method="turn/completed", params=dict(model="actual-model"))), flush=True)
             break
 "#,
-            log.display(),
-            pid.display(),
-            behavior,
-        );
-        fs::write(&script_path, script).unwrap();
-        install_fake_codex_launcher(&script_path, &bin);
-        thread::sleep(Duration::from_millis(10));
-        Self {
-            _temp: temp,
-            bin,
-            log,
-            pid,
-        }
-    }
-
-    fn logged_messages(&self) -> Vec<serde_json::Value> {
-        fs::read_to_string(&self.log)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect()
-    }
-
-    fn child_pid(&self) -> u32 {
-        fs::read_to_string(&self.pid)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap()
-    }
+        log.display(),
+        pid.display(),
+        behavior,
+    )
 }
 
 fn fake_codex_bin(temp: &Path) -> PathBuf {
