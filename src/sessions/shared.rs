@@ -120,9 +120,26 @@ pub async fn read_new_rows<T>(
 /// longer exists).
 pub(crate) fn paths_equal(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => a == b,
+        (Ok(a), Ok(b)) => normalized_paths_equal(&a, &b),
+        _ => normalized_paths_equal(a, b),
     }
+}
+
+#[cfg(windows)]
+fn normalized_paths_equal(a: &Path, b: &Path) -> bool {
+    fn normalize(path: &Path) -> String {
+        let path = path.to_string_lossy().replace('/', "\\");
+        path.strip_prefix(r"\\?\")
+            .unwrap_or(&path)
+            .to_ascii_lowercase()
+    }
+
+    normalize(a) == normalize(b)
+}
+
+#[cfg(not(windows))]
+fn normalized_paths_equal(a: &Path, b: &Path) -> bool {
+    a == b
 }
 
 /// Collapse whitespace and clip to a short preview suitable for a session title.

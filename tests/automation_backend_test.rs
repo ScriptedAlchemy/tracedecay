@@ -538,7 +538,10 @@ impl FakeCodexAppServer {
 
     fn new_with_behavior(behavior: &str) -> Self {
         let temp = tempfile::tempdir().unwrap();
-        let bin = temp.path().join("codex");
+        let bin = temp
+            .path()
+            .join(if cfg!(windows) { "codex.cmd" } else { "codex" });
+        let script_path = temp.path().join("codex.py");
         let log = temp.path().join("stdin.jsonl");
         let pid = temp.path().join("child.pid");
         let script = format!(
@@ -611,7 +614,11 @@ with open(log_path, "a", encoding="utf-8") as log:
             pid.display(),
             behavior,
         );
-        fs::write(&bin, script).unwrap();
+        fs::write(&script_path, script).unwrap();
+        #[cfg(windows)]
+        fs::write(&bin, "@echo off\r\npython \"%~dp0codex.py\" %*\r\n").unwrap();
+        #[cfg(not(windows))]
+        fs::copy(&script_path, &bin).unwrap();
         make_executable(&bin);
         thread::sleep(Duration::from_millis(10));
         Self {

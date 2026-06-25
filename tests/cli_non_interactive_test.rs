@@ -35,6 +35,21 @@ fn canonical_temp_path(path: &Path) -> PathBuf {
     }
 }
 
+fn comparable_existing_path(path: &Path) -> String {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    #[cfg(windows)]
+    {
+        let path = path.to_string_lossy().into_owned();
+        path.strip_prefix(r"\\?\")
+            .unwrap_or(&path)
+            .to_ascii_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_string_lossy().into_owned()
+    }
+}
+
 fn profile_root(home: &Path) -> PathBuf {
     canonical_temp_path(home).join(".tracedecay")
 }
@@ -366,13 +381,15 @@ fn install_codex_automation_writes_global_project_record_noninteractively() {
     let parsed = automation
         .parse::<toml::Table>()
         .expect("automation.toml should be valid TOML");
+    let configured_cwd = parsed
+        .get("cwds")
+        .and_then(|value| value.as_array())
+        .and_then(|values| values.first())
+        .and_then(|value| value.as_str())
+        .expect("automation cwd should be written");
     assert_eq!(
-        parsed
-            .get("cwds")
-            .and_then(|value| value.as_array())
-            .and_then(|values| values.first())
-            .and_then(|value| value.as_str()),
-        Some(project_root.to_string_lossy().as_ref())
+        comparable_existing_path(Path::new(configured_cwd)),
+        comparable_existing_path(&project_root)
     );
     assert!(
         !project_root.join(".codex/automations").exists(),
