@@ -641,8 +641,14 @@ mod tests {
 
         let active = TraceDecay::init(&active_project).await.unwrap();
         let target = TraceDecay::init(&target_project).await.unwrap();
-        active.index_all().await.unwrap();
-        target.index_all().await.unwrap();
+        let target_still_stale = target
+            .sync_if_stale(&["src/lib.rs".to_string()])
+            .await
+            .unwrap();
+        assert!(
+            !target_still_stale,
+            "target fixture source should be indexed for selected-project search"
+        );
         let target_project_id = target
             .store_layout()
             .identity
