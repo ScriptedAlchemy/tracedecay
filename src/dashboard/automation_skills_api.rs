@@ -286,28 +286,26 @@ fn bad_request(err: &impl ToString) -> JsonError {
 }
 
 fn bad_request_or_internal(err: &impl ToString) -> JsonError {
-    let message = err.to_string();
-    if is_bad_request(&message) {
-        bad_request(&message)
-    } else {
-        internal_error(&message)
-    }
+    client_error_or_internal(err, false, true)
 }
 
 fn not_found_or_internal(err: &impl ToString) -> JsonError {
-    let message = err.to_string();
-    if is_not_found(&message) {
-        not_found(&message)
-    } else {
-        internal_error(&message)
-    }
+    client_error_or_internal(err, true, false)
 }
 
 fn not_found_bad_request_or_internal(err: &impl ToString) -> JsonError {
+    client_error_or_internal(err, true, true)
+}
+
+fn client_error_or_internal(
+    err: &impl ToString,
+    allow_not_found: bool,
+    allow_bad_request: bool,
+) -> JsonError {
     let message = err.to_string();
-    if is_not_found(&message) {
+    if allow_not_found && is_not_found(&message) {
         not_found(&message)
-    } else if is_bad_request(&message) {
+    } else if allow_bad_request && is_bad_request(&message) {
         bad_request(&message)
     } else {
         internal_error(&message)
