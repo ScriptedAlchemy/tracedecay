@@ -17,6 +17,7 @@ use tracedecay::dashboard;
 use tracedecay::global_db::{AnalyticsEventInsert, GlobalDb};
 use tracedecay::sessions::cursor::project_session_db_path;
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
+use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::TraceDecay;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -181,6 +182,41 @@ async fn seed_durable_analytics(db_path: &Path, project_root: &Path) {
             .await
             .expect("append durable analytics event");
     }
+}
+
+fn seed_hook_analytics(project_root: &Path) {
+    let layout = resolve_layout_for_current_profile(project_root).expect("resolve store layout");
+    std::fs::create_dir_all(&layout.data_root).expect("create store root");
+    let rows = [
+        serde_json::json!({
+            "event": "hook_invoked",
+            "ts_unix_ms": 1_760_000_300_000u64,
+            "agent": "codex",
+            "hook_name": "UserPromptSubmit",
+            "session_id": "analytics-session",
+            "tool_name": null,
+            "prompt_category": "dashboard_or_ui",
+        }),
+        serde_json::json!({
+            "event": "hook_invoked",
+            "ts_unix_ms": 1_760_000_301_000u64,
+            "agent": "cursor",
+            "hook_name": "postToolUse",
+            "session_id": "analytics-session",
+            "tool_name": "Grep",
+            "prompt_category": "code_research",
+        }),
+    ];
+    let content = rows
+        .iter()
+        .map(serde_json::Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(
+        layout.data_root.join("hook_analytics.jsonl"),
+        format!("{content}\n"),
+    )
+    .expect("write hook analytics");
 }
 
 async fn seed_durable_recent_window(db_path: &Path, project_root: &Path) {
@@ -359,6 +395,54 @@ fn analytics_api_prefers_durable_events_when_available() {
         let usage = &overview["usage"]["by_category"];
         assert_usage_row(usage, "tracedecay_mcp", 1, "tool");
         assert_usage_row(usage, "workflow_skill", 1, "skill");
+    });
+}
+
+#[test]
+fn analytics_diagnostics_reports_tool_hook_and_prompt_rollups() {
+    let _lock = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_fixture(true).await;
+        seed_hook_analytics(&fixture.project_root);
+        let agent = http_agent();
+
+        let (status, diagnostics) = get_json(
+            &agent,
+            &format!("{}/api/plugins/analytics/diagnostics", fixture.base_url),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(diagnostics["source"], "analytics_events");
+        assert_eq!(diagnostics["message_count"], 4);
+        assert_eq!(diagnostics["event_count"], 3);
+        assert_eq!(diagnostics["mcp_tool_call_count"], 1);
+        assert_eq!(diagnostics["tracedecay_call_count"], 1);
+        assert_eq!(diagnostics["hook_call_count"], 2);
+        assert_eq!(diagnostics["ratios"]["mcp_tool_calls_per_message"], 0.25);
+        assert_eq!(diagnostics["ratios"]["hook_calls_per_message"], 0.5);
+
+        assert_eq!(
+            find_row(&diagnostics["by_tool_category"], "tool_category", "mcp")["count"],
+            1
+        );
+        assert_eq!(
+            find_row(&diagnostics["by_hook"], "hook_name", "UserPromptSubmit")["count"],
+            1
+        );
+        assert_eq!(
+            find_row(
+                &diagnostics["by_prompt_category"],
+                "prompt_category",
+                "dashboard_or_ui"
+            )["count"],
+            1
+        );
+        assert_eq!(
+            diagnostics["recent_hooks"][0]["hook_name"], "postToolUse",
+            "recent hook rows should be newest-first"
+        );
     });
 }
 

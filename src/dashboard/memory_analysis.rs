@@ -359,6 +359,13 @@ pub(crate) const ACCESS_RELUCTANCE_EXTREME_SIMILARITY: f64 = 0.98;
 /// negation/state-change cue only signals supersession when the two facts are
 /// substantially similar (mirrors the write-time conflict threshold).
 pub(crate) const SUPERSESSION_SIMILARITY_THRESHOLD: f64 = 0.7;
+const SEMANTIC_FRESHNESS_FIELDS: [&str; 5] = [
+    "asserted_at",
+    "effective_at",
+    "observed_at",
+    "occurred_at",
+    "created_at",
+];
 
 fn pair_has_supersession_cue(facts: &[Value], a: usize, b: usize) -> bool {
     let a_content = facts[a]
@@ -471,6 +478,39 @@ fn fact_i64(fact: &Value, key: &str) -> i64 {
     fact.get(key).and_then(Value::as_i64).unwrap_or(0)
 }
 
+fn metadata_value(fact: &Value) -> Option<Value> {
+    let metadata = fact.get("metadata")?;
+    if metadata.is_object() {
+        return Some(metadata.clone());
+    }
+    metadata
+        .as_str()
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+}
+
+fn timestamp_i64(value: Option<&Value>) -> Option<i64> {
+    value.and_then(|value| {
+        value
+            .as_i64()
+            .or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok()))
+            .or_else(|| value.as_str().and_then(|raw| raw.parse::<i64>().ok()))
+    })
+}
+
+fn semantic_freshness(fact: &Value) -> (i64, &'static str) {
+    let metadata = metadata_value(fact);
+    for field in SEMANTIC_FRESHNESS_FIELDS {
+        if let Some(value) = metadata
+            .as_ref()
+            .and_then(|metadata| timestamp_i64(metadata.get(field)))
+            .or_else(|| timestamp_i64(fact.get(field)))
+        {
+            return (value, field);
+        }
+    }
+    (0, "created_at")
+}
+
 fn candidate_confidence(base: f64, fact: &Value) -> f64 {
     let trust = fact
         .get("trust_score")
@@ -555,18 +595,21 @@ pub(crate) fn propose_hygiene_candidates(
         {
             continue;
         }
-        // Older = smaller created_at; on a tie, the smaller fact_id.
-        let (older, newer) = match fact_i64(a, "created_at").cmp(&fact_i64(b, "created_at")) {
-            std::cmp::Ordering::Less => (a, b),
-            std::cmp::Ordering::Greater => (b, a),
-            std::cmp::Ordering::Equal => {
-                if fact_i64(a, "fact_id") <= fact_i64(b, "fact_id") {
-                    (a, b)
-                } else {
-                    (b, a)
+        // Older = smaller semantic freshness timestamp; on a tie, the smaller fact_id.
+        let (a_freshness, a_freshness_field) = semantic_freshness(a);
+        let (b_freshness, b_freshness_field) = semantic_freshness(b);
+        let (older, newer, freshness_field, newer_freshness_field) =
+            match a_freshness.cmp(&b_freshness) {
+                std::cmp::Ordering::Less => (a, b, a_freshness_field, b_freshness_field),
+                std::cmp::Ordering::Greater => (b, a, b_freshness_field, a_freshness_field),
+                std::cmp::Ordering::Equal => {
+                    if fact_i64(a, "fact_id") <= fact_i64(b, "fact_id") {
+                        (a, b, a_freshness_field, b_freshness_field)
+                    } else {
+                        (b, a, b_freshness_field, a_freshness_field)
+                    }
                 }
-            }
-        };
+            };
         let older_id = fact_i64(older, "fact_id");
         let newer_id = fact_i64(newer, "fact_id");
         if flagged.contains(&older_id) || !proposed.insert(older_id) {
@@ -586,6 +629,8 @@ pub(crate) fn propose_hygiene_candidates(
             "review_required": true,
             "status": "candidate",
             "access_count": fact_i64(older, "access_count"),
+            "freshness_field": freshness_field,
+            "superseded_by_freshness_field": newer_freshness_field,
             "tier": "supersession",
         }));
     }
@@ -777,6 +822,40 @@ mod tests {
         assert_eq!(supersession[0]["superseded_by"], 4);
         assert_eq!(supersession[0]["access_count"], 4);
         assert_eq!(supersession[0]["tier"], "supersession");
+    }
+
+    #[test]
+    fn supersession_prefers_semantic_timestamps_over_created_at_and_updated_at() {
+        let facts = vec![
+            json!({
+                "fact_id": 1,
+                "content": "The ingestion pipeline uses Redis for queueing",
+                "trust_score": 0.8,
+                "created_at": 100,
+                "updated_at": 500,
+                "metadata": {"asserted_at": 10}
+            }),
+            json!({
+                "fact_id": 2,
+                "content": "The ingestion pipeline no longer uses Redis for queueing",
+                "trust_score": 0.8,
+                "created_at": 50,
+                "updated_at": 100,
+                "metadata": {"asserted_at": 200}
+            }),
+        ];
+        let pairs = vec![ScoredPair::analyze(&facts, 0.91, 0, 1)];
+
+        let hygiene_candidates =
+            propose_hygiene_candidates(&facts, &facts, &pairs, &std::collections::HashSet::new());
+        let supersession = hygiene_candidates["supersession"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected supersession array"));
+
+        assert_eq!(supersession.len(), 1);
+        assert_eq!(supersession[0]["fact_id"], 1);
+        assert_eq!(supersession[0]["superseded_by"], 2);
+        assert_eq!(supersession[0]["freshness_field"], "asserted_at");
     }
 
     #[test]

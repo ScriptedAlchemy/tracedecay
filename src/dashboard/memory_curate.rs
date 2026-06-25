@@ -19,6 +19,7 @@ use std::sync::Arc;
 use serde_json::{json, Map, Value};
 use tokio::sync::RwLock;
 
+use super::memory_queries::normalize_fact_metadata;
 use super::memory_service::{
     apply_delete_op, apply_merge_op, build_delete_plan, delete_fact, similarity_computation,
 };
@@ -47,8 +48,10 @@ and facts that merely share an entity should remain separate (use \
 \"keep\").\n\n\
 Conflict policy: when two facts about the SAME subject conflict, keep \
 the higher-trust one and delete the stale one. Only use age/recency \
-after the same-subject / same-claim conflict is established (created_at \
-is the freshness signal; updated_at is maintenance metadata). If the \
+after the same-subject / same-claim conflict is established. Freshness \
+signals, in order, are asserted_at, effective_at, observed_at, occurred_at, \
+then created_at; these may appear in metadata. updated_at is maintenance \
+metadata, never truth freshness. If the \
 facts describe an EVOLUTION over time (a preference pivot, not a true \
 contradiction, e.g. 'used React' then 'switched to Vue'), emit a merge \
 whose merged_content is ONE time-aware fact built strictly from the \
@@ -410,7 +413,7 @@ async fn fact_details(
     }
     let ids: Vec<i64> = fact_ids.iter().copied().collect();
     let sql = format!(
-        "SELECT fact_id, content, category, tags, trust_score, created_at, updated_at,
+        "SELECT fact_id, content, category, tags, trust_score, metadata, created_at, updated_at,
                 access_count, last_recalled_at
          FROM memory_facts WHERE fact_id IN ({})",
         qmarks(ids.len())
@@ -422,6 +425,7 @@ async fn fact_details(
             message: format!("fact detail query failed: {message}"),
         })?;
     for row in rows {
+        let row = normalize_fact_metadata(row);
         if let Some(fact_id) = row.get("fact_id").and_then(Value::as_i64) {
             details.insert(fact_id, row);
         }
