@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use serde_json::{json, Value};
 
@@ -17,6 +20,8 @@ use super::scheduler::{
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::current_timestamp;
+
+static RUN_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) enum SchedulerGate {
     Proceed(Option<AutomationTaskLock>),
@@ -47,7 +52,7 @@ impl<'a> AgentTaskRunContext<'a> {
         task: AgentTaskKind,
     ) -> Self {
         Self {
-            run_id: run_id.unwrap_or_else(|| format!("{run_id_prefix}_{}", current_timestamp())),
+            run_id: run_id.unwrap_or_else(|| generated_run_id(run_id_prefix)),
             trigger,
             dashboard_root,
             config,
@@ -520,6 +525,16 @@ fn scheduler_skip_reason(
     }
 }
 
+fn generated_run_id(prefix: &str) -> String {
+    let mut random = [0u8; 8];
+    let entropy = match getrandom::getrandom(&mut random) {
+        Ok(()) => hex::encode(random),
+        Err(_) => std::process::id().to_string(),
+    };
+    let counter = RUN_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}_{}_{counter}_{entropy}", current_timestamp())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn ledger_record(
     run_id: &str,
@@ -586,5 +601,18 @@ fn noop_output_for_task(task: AgentTaskKind) -> Value {
         AgentTaskKind::MemoryCurator => json!({ "ops": [] }),
         AgentTaskKind::SessionReflector => json!({ "facts": [] }),
         AgentTaskKind::SkillWriter => json!({ "skills": [] }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_run_ids_are_unique_for_same_prefix() {
+        let first = generated_run_id("memory_curator");
+        let second = generated_run_id("memory_curator");
+
+        assert_ne!(first, second);
     }
 }

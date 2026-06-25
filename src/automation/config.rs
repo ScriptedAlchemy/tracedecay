@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::errors::{Result, TraceDecayError};
 
@@ -128,15 +128,35 @@ impl AutomationConfig {
 pub struct AutomationTaskPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_clearable_field",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub schedule: Option<Option<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_clearable_field",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub interval_secs: Option<Option<u64>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_clearable_field",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub cooldown_secs: Option<Option<u64>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_clearable_field",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub min_idle_secs: Option<Option<u64>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_clearable_field",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub stale_lock_secs: Option<Option<u64>>,
 }
 
@@ -149,15 +169,27 @@ pub struct AutomationConfigPatch {
     pub backend: Option<AutomationBackend>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_mode: Option<AutomationHostMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_clearable_field",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub model: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduler_tick_secs: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_clearable_field",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub max_tokens: Option<Option<u32>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_clearable_field",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub temperature: Option<Option<f32>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub require_dashboard_approval: Option<bool>,
@@ -183,6 +215,16 @@ fn default_timeout_secs() -> u64 {
 
 fn default_scheduler_tick_secs() -> u64 {
     DEFAULT_SCHEDULER_TICK_SECS
+}
+
+fn deserialize_clearable_field<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 pub fn project_config_path(dashboard_root: &Path) -> PathBuf {
