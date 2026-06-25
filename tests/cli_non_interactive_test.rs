@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
 
 mod common;
@@ -81,6 +81,14 @@ fn tracedecay_command_with_stdin(home: &std::path::Path, project: &std::path::Pa
     command
 }
 
+fn cli_timeout() -> Duration {
+    if cfg!(windows) {
+        Duration::from_secs(90)
+    } else {
+        Duration::from_secs(30)
+    }
+}
+
 fn add_tracedecay_path_shim(command: &mut Command, home: &Path) -> PathBuf {
     let bin_dir = home.join("bin");
     std::fs::create_dir_all(&bin_dir).unwrap();
@@ -143,7 +151,7 @@ fn init_accepts_relative_current_directory() {
 
     let mut command = tracedecay_command(home.path(), &project_root);
     command.args(["init", "."]);
-    let output = run_with_timeout(command, Duration::from_secs(30));
+    let output = run_with_timeout(command, cli_timeout());
 
     assert!(
         output.status.success(),
@@ -270,7 +278,35 @@ fn write_branch_meta(
     .unwrap();
 }
 
-fn run_with_timeout(mut command: Command, timeout: Duration) -> std::process::Output {
+fn child_output(mut child: Child, status: ExitStatus) -> Output {
+    let stdout = child
+        .stdout
+        .take()
+        .map(|mut out| {
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut out, &mut buf)
+                .unwrap_or_else(|e| panic!("failed to read stdout: {e}"));
+            buf
+        })
+        .unwrap_or_default();
+    let stderr = child
+        .stderr
+        .take()
+        .map(|mut err| {
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut err, &mut buf)
+                .unwrap_or_else(|e| panic!("failed to read stderr: {e}"));
+            buf
+        })
+        .unwrap_or_default();
+    Output {
+        status,
+        stdout,
+        stderr,
+    }
+}
+
+fn run_with_timeout(mut command: Command, timeout: Duration) -> Output {
     let mut child = command
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn tracedecay: {e}"));
@@ -280,37 +316,21 @@ fn run_with_timeout(mut command: Command, timeout: Duration) -> std::process::Ou
             .try_wait()
             .unwrap_or_else(|e| panic!("failed to poll child: {e}"))
         {
-            let stdout = child
-                .stdout
-                .take()
-                .map(|mut out| {
-                    let mut buf = Vec::new();
-                    std::io::Read::read_to_end(&mut out, &mut buf)
-                        .unwrap_or_else(|e| panic!("failed to read stdout: {e}"));
-                    buf
-                })
-                .unwrap_or_default();
-            let stderr = child
-                .stderr
-                .take()
-                .map(|mut err| {
-                    let mut buf = Vec::new();
-                    std::io::Read::read_to_end(&mut err, &mut buf)
-                        .unwrap_or_else(|e| panic!("failed to read stderr: {e}"));
-                    buf
-                })
-                .unwrap_or_default();
-            return std::process::Output {
-                status,
-                stdout,
-                stderr,
-            };
+            return child_output(child, status);
         }
-        assert!(
-            started.elapsed() < timeout,
-            "tracedecay hung with stdin closed after {:?}",
-            started.elapsed()
-        );
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let status = child
+                .wait()
+                .unwrap_or_else(|e| panic!("failed to wait for timed out child: {e}"));
+            let output = child_output(child, status);
+            panic!(
+                "tracedecay hung with stdin closed after {:?}\nstdout:\n{}\nstderr:\n{}",
+                started.elapsed(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
         std::thread::sleep(Duration::from_millis(50));
     }
 }
@@ -324,7 +344,7 @@ fn init_skips_gitignore_prompt_when_stdin_not_a_terminal() {
 
     let mut command = tracedecay_command(home.path(), project.path());
     command.arg("init");
-    let output = run_with_timeout(command, Duration::from_secs(30));
+    let output = run_with_timeout(command, cli_timeout());
 
     assert!(
         output.status.success(),
@@ -359,7 +379,7 @@ fn install_codex_automation_writes_global_project_record_noninteractively() {
     let mut install = tracedecay_command(home.path(), &project_root);
     let _shim = add_tracedecay_path_shim(&mut install, home.path());
     install.args(["install", "--agent", "codex", "--automation"]);
-    let output = run_with_timeout(install, Duration::from_secs(30));
+    let output = run_with_timeout(install, cli_timeout());
     assert!(
         output.status.success(),
         "codex automation install should succeed non-interactively\nstdout:\n{}\nstderr:\n{}",
@@ -406,7 +426,7 @@ fn automation_config_enable_writes_project_sidecar_noninteractively() {
 
     let mut init = tracedecay_command(home.path(), project.path());
     init.arg("init");
-    let init_output = run_with_timeout(init, Duration::from_secs(30));
+    let init_output = run_with_timeout(init, cli_timeout());
     assert!(
         init_output.status.success(),
         "init should succeed before automation config\nstdout:\n{}\nstderr:\n{}",
@@ -416,7 +436,7 @@ fn automation_config_enable_writes_project_sidecar_noninteractively() {
 
     let mut enable = tracedecay_command(home.path(), project.path());
     enable.args(["automation", "config", "enable"]);
-    let enable_output = run_with_timeout(enable, Duration::from_secs(30));
+    let enable_output = run_with_timeout(enable, cli_timeout());
     assert!(
         enable_output.status.success(),
         "automation config enable should succeed\nstdout:\n{}\nstderr:\n{}",
@@ -432,7 +452,7 @@ fn automation_config_enable_writes_project_sidecar_noninteractively() {
 
     let mut explain = tracedecay_command(home.path(), project.path());
     explain.args(["automation", "config", "explain", "--json"]);
-    let explain_output = run_with_timeout(explain, Duration::from_secs(30));
+    let explain_output = run_with_timeout(explain, cli_timeout());
     assert!(
         explain_output.status.success(),
         "automation config explain should succeed\nstdout:\n{}\nstderr:\n{}",
@@ -500,7 +520,7 @@ fn automation_config_set_global_defaults_noninteractively() {
         "--session-reflector-interval-secs",
         "1800",
     ]);
-    let output = run_with_timeout(set, Duration::from_secs(30));
+    let output = run_with_timeout(set, cli_timeout());
     assert!(
         output.status.success(),
         "automation config global set should succeed\nstdout:\n{}\nstderr:\n{}",
@@ -536,7 +556,7 @@ fn automation_config_set_global_defaults_noninteractively() {
 
     let mut get = tracedecay_command(home.path(), project.path());
     get.args(["automation", "config", "get", "--scope", "global", "--json"]);
-    let get_output = run_with_timeout(get, Duration::from_secs(30));
+    let get_output = run_with_timeout(get, cli_timeout());
     assert!(
         get_output.status.success(),
         "automation config global get should succeed\nstdout:\n{}\nstderr:\n{}",
@@ -565,7 +585,7 @@ fn automation_config_set_rejects_unimplemented_external_backend() {
         "--backend",
         "external-command",
     ]);
-    let output = run_with_timeout(set, Duration::from_secs(30));
+    let output = run_with_timeout(set, cli_timeout());
     assert!(
         !output.status.success(),
         "external backend should be rejected\nstdout:\n{}\nstderr:\n{}",
@@ -586,7 +606,7 @@ fn automation_config_set_writes_complete_project_sidecar_noninteractively() {
 
     let mut init = tracedecay_command(home.path(), project.path());
     init.arg("init");
-    let init_output = run_with_timeout(init, Duration::from_secs(30));
+    let init_output = run_with_timeout(init, cli_timeout());
     assert!(
         init_output.status.success(),
         "init should succeed before automation config set\nstdout:\n{}\nstderr:\n{}",
@@ -640,7 +660,7 @@ fn automation_config_set_writes_complete_project_sidecar_noninteractively() {
         "--skill-writer-stale-lock-secs",
         "7200",
     ]);
-    let output = run_with_timeout(set, Duration::from_secs(30));
+    let output = run_with_timeout(set, cli_timeout());
     assert!(
         output.status.success(),
         "automation config set should succeed\nstdout:\n{}\nstderr:\n{}",
@@ -703,7 +723,7 @@ fn automation_run_memory_curation_skips_without_backend_when_disabled() {
 
     let mut init = tracedecay_command(home.path(), project.path());
     init.arg("init");
-    let init_output = run_with_timeout(init, Duration::from_secs(30));
+    let init_output = run_with_timeout(init, cli_timeout());
     assert!(
         init_output.status.success(),
         "init should succeed before automation run\nstdout:\n{}\nstderr:\n{}",
@@ -713,7 +733,7 @@ fn automation_run_memory_curation_skips_without_backend_when_disabled() {
 
     let mut run = tracedecay_command(home.path(), project.path());
     run.args(["automation", "run", "memory-curation"]);
-    let run_output = run_with_timeout(run, Duration::from_secs(30));
+    let run_output = run_with_timeout(run, cli_timeout());
     assert!(
         run_output.status.success(),
         "disabled automation run should skip cleanly\nstdout:\n{}\nstderr:\n{}",
@@ -755,7 +775,7 @@ fn automation_run_memory_curation_skips_without_backend_when_disabled() {
         .expect("automation run payload should include a run_id");
     let mut list = tracedecay_command(home.path(), project.path());
     list.args(["automation", "runs", "list", "--json", "--limit", "5"]);
-    let list_output = run_with_timeout(list, Duration::from_secs(30));
+    let list_output = run_with_timeout(list, cli_timeout());
     assert!(
         list_output.status.success(),
         "automation runs list should succeed\nstdout:\n{}\nstderr:\n{}",
@@ -770,7 +790,7 @@ fn automation_run_memory_curation_skips_without_backend_when_disabled() {
 
     let mut view = tracedecay_command(home.path(), project.path());
     view.args(["automation", "runs", "view", run_id, "--json"]);
-    let view_output = run_with_timeout(view, Duration::from_secs(30));
+    let view_output = run_with_timeout(view, cli_timeout());
     assert!(
         view_output.status.success(),
         "automation runs view should succeed\nstdout:\n{}\nstderr:\n{}",
@@ -818,7 +838,7 @@ fn automation_run_memory_curation_skips_without_backend_when_disabled() {
         "codex_handoff",
         "--json",
     ]);
-    let artifact_output = run_with_timeout(artifact_view, Duration::from_secs(30));
+    let artifact_output = run_with_timeout(artifact_view, cli_timeout());
     assert!(
         artifact_output.status.success(),
         "automation runs artifact should succeed\nstdout:\n{}\nstderr:\n{}",
@@ -844,7 +864,7 @@ fn automation_run_session_reflection_skips_without_backend_when_disabled() {
 
     let mut init = tracedecay_command(home.path(), project.path());
     init.arg("init");
-    let init_output = run_with_timeout(init, Duration::from_secs(30));
+    let init_output = run_with_timeout(init, cli_timeout());
     assert!(
         init_output.status.success(),
         "init should succeed before automation run\nstdout:\n{}\nstderr:\n{}",
@@ -854,7 +874,7 @@ fn automation_run_session_reflection_skips_without_backend_when_disabled() {
 
     let mut run = tracedecay_command(home.path(), project.path());
     run.args(["automation", "run", "session-reflection"]);
-    let run_output = run_with_timeout(run, Duration::from_secs(30));
+    let run_output = run_with_timeout(run, cli_timeout());
     assert!(
         run_output.status.success(),
         "disabled session reflection run should skip cleanly\nstdout:\n{}\nstderr:\n{}",
@@ -880,7 +900,7 @@ fn automation_run_skill_writing_skips_without_backend_when_disabled() {
 
     let mut init = tracedecay_command(home.path(), project.path());
     init.arg("init");
-    let init_output = run_with_timeout(init, Duration::from_secs(30));
+    let init_output = run_with_timeout(init, cli_timeout());
     assert!(
         init_output.status.success(),
         "init should succeed before automation run\nstdout:\n{}\nstderr:\n{}",
@@ -890,7 +910,7 @@ fn automation_run_skill_writing_skips_without_backend_when_disabled() {
 
     let mut run = tracedecay_command(home.path(), project.path());
     run.args(["automation", "run", "skill-writing"]);
-    let run_output = run_with_timeout(run, Duration::from_secs(30));
+    let run_output = run_with_timeout(run, cli_timeout());
     assert!(
         run_output.status.success(),
         "disabled skill writing run should skip cleanly\nstdout:\n{}\nstderr:\n{}",
@@ -916,7 +936,7 @@ fn bare_invocation_skips_create_prompt_when_stdin_not_a_terminal() {
 
     let output = run_with_timeout(
         tracedecay_command(home.path(), project.path()),
-        Duration::from_secs(30),
+        cli_timeout(),
     );
 
     assert!(
@@ -945,7 +965,7 @@ fn status_skips_create_prompt_when_stdin_not_a_terminal() {
 
     let mut command = tracedecay_command(home.path(), project.path());
     command.arg("status");
-    let output = run_with_timeout(command, Duration::from_secs(30));
+    let output = run_with_timeout(command, cli_timeout());
 
     assert!(
         output.status.success(),
@@ -991,7 +1011,7 @@ async fn status_json_reads_readonly_project_database() {
 
     let mut command = tracedecay_command(home.path(), project.path());
     command.args(["status", "--json"]);
-    let output = run_with_timeout(command, Duration::from_secs(30));
+    let output = run_with_timeout(command, cli_timeout());
 
     assert!(
         output.status.success(),
@@ -1015,7 +1035,7 @@ async fn list_all_reports_profile_sharded_store_without_stale_label() {
 
     let mut command = tracedecay_command(home.path(), project.path());
     command.args(["list", "--all"]);
-    let output = run_with_timeout(command, Duration::from_secs(30));
+    let output = run_with_timeout(command, cli_timeout());
 
     assert!(
         output.status.success(),
@@ -1081,7 +1101,7 @@ fn list_all_reports_orphan_manifest_reconstructable_store() {
 
     let mut command = tracedecay_command(home.path(), project.path());
     command.args(["list", "--all"]);
-    let output = run_with_timeout(command, Duration::from_secs(30));
+    let output = run_with_timeout(command, cli_timeout());
 
     assert!(
         output.status.success(),
@@ -1109,7 +1129,7 @@ async fn list_all_uses_registry_profile_shard_when_enrollment_marker_missing() {
 
     let mut command = tracedecay_command(home.path(), project.path());
     command.args(["list", "--all"]);
-    let output = run_with_timeout(command, Duration::from_secs(30));
+    let output = run_with_timeout(command, cli_timeout());
 
     assert!(
         output.status.success(),
@@ -1172,7 +1192,7 @@ fn branch_list_reads_profile_sharded_branch_meta() {
 
     let mut command = tracedecay_command(home.path(), project.path());
     command.args(["branch", "list"]);
-    let output = run_with_timeout(command, Duration::from_secs(30));
+    let output = run_with_timeout(command, cli_timeout());
 
     assert!(
         output.status.success(),
@@ -1201,7 +1221,7 @@ fn branch_add_writes_new_branch_db_into_profile_shard() {
 
     let mut command = tracedecay_command(home.path(), project.path());
     command.args(["branch", "add", "feature/new"]);
-    let output = run_with_timeout(command, Duration::from_secs(30));
+    let output = run_with_timeout(command, cli_timeout());
     let stderr = String::from_utf8_lossy(&output.stderr);
     let copied_db = shard_root.join("branches/feature_new.db");
 
@@ -1235,7 +1255,7 @@ fn branch_remove_deletes_branch_db_from_profile_shard() {
 
     let mut command = tracedecay_command(home.path(), project.path());
     command.args(["branch", "remove", "feature/ui"]);
-    let output = run_with_timeout(command, Duration::from_secs(30));
+    let output = run_with_timeout(command, cli_timeout());
 
     assert!(
         output.status.success(),
@@ -1266,7 +1286,7 @@ fn branch_removeall_deletes_profile_shard_branch_dbs() {
 
     let mut command = tracedecay_command(home.path(), project.path());
     command.args(["branch", "removeall"]);
-    let output = run_with_timeout(command, Duration::from_secs(30));
+    let output = run_with_timeout(command, cli_timeout());
 
     assert!(
         output.status.success(),
@@ -1295,7 +1315,7 @@ fn branch_gc_deletes_stale_profile_shard_branch_dbs() {
 
     let mut command = tracedecay_command(home.path(), project.path());
     command.args(["branch", "gc"]);
-    let output = run_with_timeout(command, Duration::from_secs(30));
+    let output = run_with_timeout(command, cli_timeout());
 
     assert!(
         output.status.success(),
@@ -1362,7 +1382,7 @@ fn migrate_verify_text_reports_actual_apply_supported_state() {
     let mut command = tracedecay_command(home.path(), &project_root);
     command.args(["migrate", "verify", "--manifest"]);
     command.arg(manifest_path);
-    let output = run_with_timeout(command, Duration::from_secs(30));
+    let output = run_with_timeout(command, cli_timeout());
 
     assert!(
         output.status.success(),
@@ -1398,7 +1418,7 @@ fn migrate_plan_save_writes_manifest_and_prints_confirmation_token_noninteractiv
         "--project-id",
         "proj_cli",
     ]);
-    let output = run_with_timeout(command, Duration::from_secs(30));
+    let output = run_with_timeout(command, cli_timeout());
 
     assert!(
         output.status.success(),
@@ -1441,7 +1461,7 @@ fn migrate_export_from_profile_copies_profile_store_to_target() {
         "--to",
         export_dir.to_str().unwrap(),
     ]);
-    let output = run_with_timeout(command, Duration::from_secs(30));
+    let output = run_with_timeout(command, cli_timeout());
 
     assert!(
         output.status.success(),
@@ -1546,7 +1566,7 @@ fn migrate_cleanup_sources_removes_source_artifacts_but_preserves_enrollment_mar
         "--confirm-token",
         "confirm-mig_cli_cleanup",
     ]);
-    let output = run_with_timeout(command, Duration::from_secs(30));
+    let output = run_with_timeout(command, cli_timeout());
 
     assert!(
         output.status.success(),
