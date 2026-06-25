@@ -103,6 +103,7 @@ pub(crate) async fn draft(
     Json(request): Json<ManagedSkillDraftRequest>,
 ) -> ApiResult {
     let profile_root = profile_root_or_error()?;
+    reject_existing_managed_skill(&profile_root, &request.id).await?;
     let pinned = request.pinned;
     let mut skill = create_managed_skill_draft(&profile_root, request.into_draft())
         .await
@@ -114,6 +115,25 @@ pub(crate) async fn draft(
             .map_err(|err| internal_error(&err))?;
     }
     skill_payload(&profile_root, skill).await
+}
+
+async fn reject_existing_managed_skill(
+    profile_root: &std::path::Path,
+    id: &str,
+) -> std::result::Result<(), JsonError> {
+    match load_managed_skill(profile_root, id).await {
+        Ok(_) => Err(conflict(&format!(
+            "managed skill '{id}' already exists; use PATCH to update it"
+        ))),
+        Err(err) => {
+            let message = err.to_string();
+            if is_not_found(&message) {
+                Ok(())
+            } else {
+                Err(not_found_bad_request_or_internal(&message))
+            }
+        }
+    }
 }
 
 pub(crate) async fn update(
@@ -300,6 +320,10 @@ fn is_not_found(message: &str) -> bool {
 
 fn not_found(message: &str) -> JsonError {
     (StatusCode::NOT_FOUND, Json(http_detail(message)))
+}
+
+fn conflict(message: &str) -> JsonError {
+    (StatusCode::CONFLICT, Json(http_detail(message)))
 }
 
 fn is_bad_request(message: &str) -> bool {

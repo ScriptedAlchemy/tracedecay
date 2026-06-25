@@ -158,6 +158,42 @@ fn managed_skills_are_dashboard_controllable_and_persistent() {
                     .unwrap_or_default()
         );
 
+        let duplicate = serde_json::json!({
+            "id": "repo-hygiene",
+            "title": "Overwrite attempt",
+            "summary": "This should not replace the approved skill.",
+            "category": "workflow",
+            "body_markdown": "Duplicate drafts must not bypass PATCH staging.",
+            "support_files": [
+                {
+                    "path": "templates/overwrite.md",
+                    "bytes": [111, 118, 101, 114, 119, 114, 105, 116, 101]
+                }
+            ]
+        });
+        let (status, conflict) = post_json_body(&agent, &skills_url, &duplicate);
+        assert_eq!(status, 409);
+        assert!(conflict["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("already exists")));
+        let persisted_after_duplicate =
+            tracedecay::automation::managed_skills::load_managed_skill(
+                &profile_root,
+                "repo-hygiene",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            persisted_after_duplicate.body_markdown,
+            "Use this when cleaning generated changes."
+        );
+        assert!(profile_root
+            .join("agent_managed/skills/repo-hygiene/references/checklist.md")
+            .is_file());
+        assert!(!profile_root
+            .join("agent_managed/skills/repo-hygiene/templates/overwrite.md")
+            .exists());
+
         let (status, missing_checksum) = patch_json_body(
             &agent,
             &skill_url,
