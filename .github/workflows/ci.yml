@@ -248,7 +248,12 @@ jobs:
       - name: Show sccache stats
         if: always()
         shell: pwsh
-        run: '& $env:SCCACHE_PATH --show-stats'
+        run: |
+          if ($env:SCCACHE_PATH -and (Test-Path $env:SCCACHE_PATH)) {
+            & $env:SCCACHE_PATH --show-stats
+          } else {
+            Write-Host "sccache was not installed; skipping stats"
+          }
 
   windows-test-shards:
     name: Test Windows ${{ matrix.partition }}/16
