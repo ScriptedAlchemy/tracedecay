@@ -74,7 +74,7 @@ impl CodexSource {
     /// Source rooted at the real `~/.codex`. Returns `None` when the
     /// home directory cannot be resolved.
     pub fn new() -> Option<Self> {
-        let home = dirs::home_dir()?;
+        let home = crate::sessions::home_dir()?;
         Some(Self::with_home(&home))
     }
 

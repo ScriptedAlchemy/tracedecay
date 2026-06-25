@@ -2,6 +2,8 @@
 
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write as IoWrite};
+#[cfg(windows)]
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -102,8 +104,8 @@ pub fn run_prompt_with_codex_app_server(
     thread_source: &str,
 ) -> Result<CodexAppServerSummary> {
     let model = configured_model(config);
-    let child = Command::new(&config.codex_bin)
-        .arg("app-server")
+    let mut command = codex_app_server_command(&config.codex_bin);
+    let child = command
         .env(CODEX_SUMMARY_CHILD_ENV, "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -209,6 +211,31 @@ pub fn run_prompt_with_codex_app_server(
     Ok(summary)
 }
 
+fn codex_app_server_command(codex_bin: &str) -> Command {
+    let mut command = command_for_codex_bin(codex_bin);
+    command.arg("app-server");
+    command
+}
+
+#[cfg(windows)]
+fn command_for_codex_bin(codex_bin: &str) -> Command {
+    let extension = Path::new(codex_bin)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase);
+    if matches!(extension.as_deref(), Some("bat" | "cmd")) {
+        let mut command = Command::new("cmd");
+        command.arg("/D").arg("/C").arg(codex_bin);
+        return command;
+    }
+    Command::new(codex_bin)
+}
+
+#[cfg(not(windows))]
+fn command_for_codex_bin(codex_bin: &str) -> Command {
+    Command::new(codex_bin)
+}
+
 fn build_ephemeral_thread_start_params(model: Option<&str>, thread_source: &str) -> Value {
     let mut params = json!({
         "ephemeral": true,
@@ -226,10 +253,26 @@ struct ChildGuard {
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
+        kill_child_process_tree(&mut self.child);
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
 }
+
+#[cfg(windows)]
+fn kill_child_process_tree(child: &mut Child) {
+    let _ = Command::new("taskkill")
+        .arg("/PID")
+        .arg(child.id().to_string())
+        .arg("/T")
+        .arg("/F")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(not(windows))]
+fn kill_child_process_tree(_child: &mut Child) {}
 
 fn send_json(stdin: &mut impl IoWrite, value: &Value) -> Result<()> {
     writeln!(stdin, "{value}")?;

@@ -1,6 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
@@ -16,6 +17,8 @@ use tracedecay::automation::config::{AutomationBackend, AutomationConfig};
 use tracedecay::sessions::codex_app_server::{
     run_prompt_with_codex_app_server, CodexAppServerSummaryConfig,
 };
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 struct EchoBackend;
 
@@ -251,6 +254,7 @@ fn codex_app_server_backend_falls_back_to_configured_model_when_server_omits_mod
 
 #[test]
 fn codex_app_server_backend_from_automation_config_forwards_runtime_limits() {
+    let _env_lock = ENV_LOCK.lock().unwrap();
     let fake = FakeCodexAppServer::new_with_behavior("json");
     let _codex_bin = EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &fake.bin);
     let backend = CodexAppServerBackend::from_automation_config(&AutomationConfig {
@@ -287,6 +291,7 @@ fn codex_app_server_backend_from_automation_config_forwards_runtime_limits() {
 
 #[test]
 fn codex_app_server_backend_uses_env_runtime_limits_when_config_omits_them() {
+    let _env_lock = ENV_LOCK.lock().unwrap();
     let fake = FakeCodexAppServer::new_with_behavior("json");
     let _codex_bin = EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &fake.bin);
     let _max_tokens = EnvVarGuard::set("TRACEDECAY_CODEX_SUMMARY_MAX_TOKENS", "2048");
@@ -323,7 +328,7 @@ fn codex_app_server_backend_uses_env_runtime_limits_when_config_omits_them() {
 
 #[test]
 fn codex_app_server_backend_propagates_timeout_errors_and_reaps_child() {
-    let (err, pid) = backend_error_for_behavior("timeout", Duration::from_millis(50));
+    let (err, pid) = backend_error_for_behavior("timeout", Duration::from_millis(500));
 
     assert!(
         err.contains("timed out waiting for codex app-server"),
@@ -368,6 +373,7 @@ fn codex_app_server_backend_propagates_empty_output_errors_and_reaps_child() {
 
 #[test]
 fn backend_availability_reports_configured_codex_executable_status() {
+    let _env_lock = ENV_LOCK.lock().unwrap();
     let fake = FakeCodexAppServer::new();
     let _codex_bin = EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &fake.bin);
     let available = backend_availability(&AutomationConfig {
@@ -442,7 +448,7 @@ fn fake_codex_app_server_times_out_and_reaps_child() {
     let config = CodexAppServerSummaryConfig {
         codex_bin: fake.bin.display().to_string(),
         model: None,
-        timeout: Duration::from_millis(50),
+        timeout: Duration::from_millis(500),
         max_tokens: None,
         temperature: None,
     };
@@ -563,11 +569,13 @@ impl FakeCodexAppServer {
     }
 
     fn child_pid(&self) -> u32 {
-        fs::read_to_string(&self.pid)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap()
+        for _ in 0..100 {
+            if let Ok(raw) = fs::read_to_string(&self.pid) {
+                return raw.trim().parse().unwrap();
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        panic!("fake codex app-server did not write pid file");
     }
 }
 
@@ -650,7 +658,7 @@ fn fake_codex_bin(temp: &Path) -> PathBuf {
 
 #[cfg(windows)]
 fn install_fake_codex_launcher(_script: &Path, bin: &Path) {
-    fs::write(bin, "@echo off\r\npython \"%~dp0codex.py\" %*\r\n").unwrap();
+    fs::write(bin, windows_python_launcher("codex.py")).unwrap();
 }
 
 #[cfg(not(windows))]
@@ -685,3 +693,21 @@ fn make_executable(path: &Path) {
 
 #[cfg(not(unix))]
 fn make_executable(_path: &Path) {}
+
+#[cfg(windows)]
+fn windows_python_launcher(script_name: &str) -> String {
+    format!(
+        "@echo off\r\n\
+where py >nul 2>nul\r\n\
+if %ERRORLEVEL% EQU 0 (\r\n\
+  py -3 \"%~dp0{script_name}\" %*\r\n\
+  exit /b %ERRORLEVEL%\r\n\
+)\r\n\
+where python3 >nul 2>nul\r\n\
+if %ERRORLEVEL% EQU 0 (\r\n\
+  python3 \"%~dp0{script_name}\" %*\r\n\
+  exit /b %ERRORLEVEL%\r\n\
+)\r\n\
+python \"%~dp0{script_name}\" %*\r\n"
+    )
+}

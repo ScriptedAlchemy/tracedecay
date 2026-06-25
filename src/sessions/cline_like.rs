@@ -44,21 +44,21 @@ impl ClineLikeSource {
     /// Cline VS Code extension storage:
     /// `Code/User/globalStorage/saoudrizwan.claude-dev/tasks`.
     pub fn cline() -> Option<Self> {
-        let home = dirs::home_dir()?;
+        let home = crate::sessions::home_dir()?;
         Some(Self::cline_with_home(&home))
     }
 
     /// Roo Code VS Code extension storage:
     /// `Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks`.
     pub fn roo_code() -> Option<Self> {
-        let home = dirs::home_dir()?;
+        let home = crate::sessions::home_dir()?;
         Some(Self::roo_code_with_home(&home))
     }
 
     /// Kilo Code storage. Current docs mention both the VS Code extension root
     /// and the CLI root (`~/.kilocode/cli/global/tasks`), so scan both.
     pub fn kilo() -> Option<Self> {
-        let home = dirs::home_dir()?;
+        let home = crate::sessions::home_dir()?;
         Some(Self::kilo_with_home(&home))
     }
 

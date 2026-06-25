@@ -427,7 +427,8 @@ pub(crate) struct FakeCodexAppServer {
 impl FakeCodexAppServer {
     pub(crate) fn new_memory_curator() -> Self {
         let temp = tempdir_or_panic();
-        let bin = temp.path().join("codex");
+        let script_path = temp.path().join("codex.py");
+        let bin = fake_codex_bin(temp.path());
         let script = r#"#!/usr/bin/env python3
 import json
 import os
@@ -465,10 +466,31 @@ for line in sys.stdin:
         print(json.dumps({"method": "turn/completed"}), flush=True)
         break
 "#;
-        write_file(&bin, script);
-        make_executable(&bin);
+        write_file(&script_path, script);
+        install_fake_codex_launcher(&script_path, &bin);
         Self { _temp: temp, bin }
     }
+}
+
+fn fake_codex_bin(temp: &Path) -> PathBuf {
+    temp.join(if cfg!(windows) { "codex.cmd" } else { "codex" })
+}
+
+#[cfg(windows)]
+fn install_fake_codex_launcher(_script: &Path, bin: &Path) {
+    write_file(bin, &windows_python_launcher("codex.py"));
+}
+
+#[cfg(not(windows))]
+fn install_fake_codex_launcher(script: &Path, bin: &Path) {
+    if let Err(err) = fs::copy(script, bin) {
+        panic!(
+            "failed to install fake codex launcher {} from {}: {err}",
+            bin.display(),
+            script.display()
+        );
+    }
+    make_executable(bin);
 }
 
 #[cfg(unix)]
@@ -485,6 +507,24 @@ pub(crate) fn make_executable(path: &Path) {
 
 #[cfg(not(unix))]
 pub(crate) fn make_executable(_path: &Path) {}
+
+#[cfg(windows)]
+fn windows_python_launcher(script_name: &str) -> String {
+    format!(
+        "@echo off\r\n\
+where py >nul 2>nul\r\n\
+if %ERRORLEVEL% EQU 0 (\r\n\
+  py -3 \"%~dp0{script_name}\" %*\r\n\
+  exit /b %ERRORLEVEL%\r\n\
+)\r\n\
+where python3 >nul 2>nul\r\n\
+if %ERRORLEVEL% EQU 0 (\r\n\
+  python3 \"%~dp0{script_name}\" %*\r\n\
+  exit /b %ERRORLEVEL%\r\n\
+)\r\n\
+python \"%~dp0{script_name}\" %*\r\n"
+    )
+}
 
 pub(crate) async fn start_dashboard_fixture(seed_lcm: bool) -> DashboardFixture {
     let tmp = tempdir_or_panic();
