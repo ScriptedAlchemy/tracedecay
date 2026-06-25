@@ -302,11 +302,10 @@ fn hermes_selected_profile_targets(
 const ASYNC_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 fn main() {
-    let cli = Cli::parse();
     let spawned = std::thread::Builder::new()
         .name("tracedecay-main".to_string())
         .stack_size(ASYNC_STACK_BYTES)
-        .spawn(move || async_main(cli));
+        .spawn(async_main);
     let result = match spawned {
         Ok(handle) => match handle.join() {
             Ok(result) => result,
@@ -323,7 +322,8 @@ fn main() {
     }
 }
 
-fn async_main(cli: Cli) -> tracedecay::errors::Result<()> {
+fn async_main() -> tracedecay::errors::Result<()> {
+    let cli = Cli::parse();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_stack_size(ASYNC_STACK_BYTES)
