@@ -140,6 +140,20 @@ pub struct SkillWriterAutomationRun {
     pub backend_response: Option<AgentTaskResponse>,
 }
 
+struct SkillWriterEvidenceBundle {
+    profile_root: PathBuf,
+    evidence: Value,
+    evidence_hash: Option<String>,
+}
+
+enum SkillWriterEvidenceOutcome {
+    Ready(SkillWriterEvidenceBundle),
+    Skipped {
+        reason: &'static str,
+        evidence_hash: Option<String>,
+    },
+}
+
 enum SessionReflectorLcmStore {
     Available(PathBuf),
     NotIngested,
@@ -344,14 +358,6 @@ pub async fn run_skill_writer_with_backend(
         config,
         AgentTaskKind::SkillWriter,
     );
-    let profile_root = match options.profile_root {
-        Some(path) => path,
-        None => crate::storage::default_profile_root()?,
-    };
-    let provider = normalized_non_empty(&options.provider).unwrap_or_else(default_session_provider);
-    let query = normalized_non_empty(&options.query).unwrap_or_else(default_skill_writer_query);
-    let evidence_limit = options.evidence_limit.clamp(1, 50);
-
     let _run_lock = match run.gate().await? {
         SchedulerGate::Proceed(lock) => lock,
         SchedulerGate::Skip(reason) => {
@@ -359,98 +365,18 @@ pub async fn run_skill_writer_with_backend(
         }
     };
 
-    let sessions_db_path = cg.store_layout().sessions_db_path.clone();
-    if !sessions_db_path.is_file() {
-        return skipped_skill_writer_run(&run, "lcm_not_ingested", None).await;
-    }
-    let Some(lcm_db) = GlobalDb::open_read_only_at(&sessions_db_path).await else {
-        return skipped_skill_writer_run(&run, "lcm_unavailable", None).await;
+    let evidence_bundle = match build_skill_writer_evidence(cg, options).await? {
+        SkillWriterEvidenceOutcome::Ready(bundle) => bundle,
+        SkillWriterEvidenceOutcome::Skipped {
+            reason,
+            evidence_hash,
+        } => return skipped_skill_writer_run(&run, reason, evidence_hash).await,
     };
-    let hits = lcm_db
-        .lcm_grep(LcmGrepRequest {
-            provider: provider.clone(),
-            query: query.clone(),
-            scope: LcmScope::All,
-            session_id: None,
-            include_summaries: true,
-            limit: evidence_limit,
-            sort: LcmGrepSort::Recency,
-            source: None,
-            role: None,
-            start_time: None,
-            end_time: None,
-        })
-        .await
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to build skill writer evidence: {e}"),
-        })?;
-    let existing_skills = list_managed_skills(&profile_root).await?;
-    let global_db = GlobalDb::open().await;
-    ingest_project_analytics_events(
-        &profile_root,
-        cg.project_root(),
-        global_db.as_ref(),
-        SKILL_ANALYTICS_IMPORT_LIMIT,
-    )
-    .await?;
-    let skill_usage_summaries = summarize_skill_usage(&profile_root, &existing_skills).await?;
-    let stale_recommendations = stale_skill_recommendations(
-        &skill_usage_summaries,
-        current_timestamp(),
-        60 * 60 * 24 * 90,
-    );
-    let underused_tool_families = lcm_db
-        .session_tool_usage_rows(10_000)
-        .await
-        .map(|rows| {
-            underused_tool_family_signals(rows.iter().map(|row| ToolUsageObservation {
-                tool_names: Some(row.tool_names.as_str()),
-                metadata_json: Some(row.metadata_json.as_str()),
-                text: Some(row.text.as_str()),
-            }))
-        })
-        .unwrap_or_default();
-    let skill_improvement_recommendations = skill_improvement_recommendations(
-        &hits,
-        &skill_usage_summaries,
-        &stale_recommendations,
-        &underused_tool_families,
-    );
-    let evidence = json!({
-        "provider": provider,
-        "query": query,
-        "hits": hits,
-        "skill_usage_summaries": skill_usage_summaries,
-        "stale_recommendations": stale_recommendations,
-        "underused_tool_families": underused_tool_families,
-        "skill_improvement_recommendations": skill_improvement_recommendations,
-        "existing_managed_skills": existing_skills
-            .iter()
-            .map(|skill| json!({
-                "id": skill.metadata.id,
-                "title": skill.metadata.title,
-                "summary": skill.metadata.summary,
-                "category": skill.metadata.category,
-                "state": skill.metadata.state,
-                "pinned": skill.metadata.pinned,
-                "checksum": skill.metadata.checksum,
-                "updated_at": skill.metadata.updated_at,
-                "body_markdown": truncate_chars_for_prompt(&skill.body_markdown, 4000),
-                "support_files": skill.support_files
-                    .iter()
-                    .map(skill_writer_support_file_evidence)
-                    .collect::<Vec<_>>(),
-            }))
-            .collect::<Vec<_>>(),
-    });
-    let evidence_hash = Some(sha256_json(&evidence));
-    if evidence
-        .get("hits")
-        .and_then(Value::as_array)
-        .is_none_or(Vec::is_empty)
-    {
-        return skipped_skill_writer_run(&run, "no_skill_writer_evidence", evidence_hash).await;
-    }
+    let SkillWriterEvidenceBundle {
+        profile_root,
+        evidence,
+        evidence_hash,
+    } = evidence_bundle;
 
     let activation_policy = skill_writer_activation_policy(config);
     let request = AgentTaskRequest::new(
@@ -564,6 +490,129 @@ pub async fn run_skill_writer_with_backend(
         ledger_record: record,
         backend_response: Some(response),
     })
+}
+
+async fn build_skill_writer_evidence(
+    cg: &TraceDecay,
+    options: SkillWriterAutomationOptions,
+) -> Result<SkillWriterEvidenceOutcome> {
+    let profile_root = match options.profile_root {
+        Some(path) => path,
+        None => crate::storage::default_profile_root()?,
+    };
+    let provider = normalized_non_empty(&options.provider).unwrap_or_else(default_session_provider);
+    let query = normalized_non_empty(&options.query).unwrap_or_else(default_skill_writer_query);
+    let evidence_limit = options.evidence_limit.clamp(1, 50);
+
+    let sessions_db_path = cg.store_layout().sessions_db_path.clone();
+    if !sessions_db_path.is_file() {
+        return Ok(SkillWriterEvidenceOutcome::Skipped {
+            reason: "lcm_not_ingested",
+            evidence_hash: None,
+        });
+    }
+    let Some(lcm_db) = GlobalDb::open_read_only_at(&sessions_db_path).await else {
+        return Ok(SkillWriterEvidenceOutcome::Skipped {
+            reason: "lcm_unavailable",
+            evidence_hash: None,
+        });
+    };
+    let hits = lcm_db
+        .lcm_grep(LcmGrepRequest {
+            provider: provider.clone(),
+            query: query.clone(),
+            scope: LcmScope::All,
+            session_id: None,
+            include_summaries: true,
+            limit: evidence_limit,
+            sort: LcmGrepSort::Recency,
+            source: None,
+            role: None,
+            start_time: None,
+            end_time: None,
+        })
+        .await
+        .map_err(|e| TraceDecayError::Config {
+            message: format!("failed to build skill writer evidence: {e}"),
+        })?;
+    let existing_skills = list_managed_skills(&profile_root).await?;
+    let global_db = GlobalDb::open().await;
+    ingest_project_analytics_events(
+        &profile_root,
+        cg.project_root(),
+        global_db.as_ref(),
+        SKILL_ANALYTICS_IMPORT_LIMIT,
+    )
+    .await?;
+    let skill_usage_summaries = summarize_skill_usage(&profile_root, &existing_skills).await?;
+    let stale_recommendations = stale_skill_recommendations(
+        &skill_usage_summaries,
+        current_timestamp(),
+        60 * 60 * 24 * 90,
+    );
+    let underused_tool_families = lcm_db
+        .session_tool_usage_rows(10_000)
+        .await
+        .map(|rows| {
+            underused_tool_family_signals(rows.iter().map(|row| ToolUsageObservation {
+                tool_names: Some(row.tool_names.as_str()),
+                metadata_json: Some(row.metadata_json.as_str()),
+                text: Some(row.text.as_str()),
+            }))
+        })
+        .unwrap_or_default();
+    let skill_improvement_recommendations = skill_improvement_recommendations(
+        &hits,
+        &skill_usage_summaries,
+        &stale_recommendations,
+        &underused_tool_families,
+    );
+    let evidence = json!({
+        "provider": provider,
+        "query": query,
+        "hits": hits,
+        "skill_usage_summaries": skill_usage_summaries,
+        "stale_recommendations": stale_recommendations,
+        "underused_tool_families": underused_tool_families,
+        "skill_improvement_recommendations": skill_improvement_recommendations,
+        "existing_managed_skills": existing_skills
+            .iter()
+            .map(|skill| json!({
+                "id": skill.metadata.id,
+                "title": skill.metadata.title,
+                "summary": skill.metadata.summary,
+                "category": skill.metadata.category,
+                "state": skill.metadata.state,
+                "pinned": skill.metadata.pinned,
+                "checksum": skill.metadata.checksum,
+                "updated_at": skill.metadata.updated_at,
+                "body_markdown": truncate_chars_for_prompt(&skill.body_markdown, 4000),
+                "support_files": skill.support_files
+                    .iter()
+                    .map(skill_writer_support_file_evidence)
+                    .collect::<Vec<_>>(),
+            }))
+            .collect::<Vec<_>>(),
+    });
+    let evidence_hash = Some(sha256_json(&evidence));
+    if evidence
+        .get("hits")
+        .and_then(Value::as_array)
+        .is_none_or(Vec::is_empty)
+    {
+        return Ok(SkillWriterEvidenceOutcome::Skipped {
+            reason: "no_skill_writer_evidence",
+            evidence_hash,
+        });
+    }
+
+    Ok(SkillWriterEvidenceOutcome::Ready(
+        SkillWriterEvidenceBundle {
+            profile_root,
+            evidence,
+            evidence_hash,
+        },
+    ))
 }
 
 async fn skipped_session_reflector_run(
