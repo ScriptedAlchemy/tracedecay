@@ -1,5 +1,9 @@
 //! Handlers for read-only managed-skill MCP tools.
 
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::automation::hermes_bridge::{load_hermes_skill_bridge, HermesSkillBridgeOptions};
@@ -17,6 +21,7 @@ use crate::mcp::tools::ToolResult;
 use crate::tracedecay::TraceDecay;
 
 const SKILL_ANALYTICS_IMPORT_LIMIT: usize = 10_000;
+const STALE_SKILL_AFTER_SECS: i64 = 60 * 60 * 24 * 90;
 
 fn config_error(message: impl Into<String>) -> TraceDecayError {
     TraceDecayError::Config {
@@ -74,6 +79,16 @@ fn skill_summary(skill: &ManagedSkill, include_body: bool, usage_summary: &Value
     summary
 }
 
+fn json_by_skill<T: Serialize>(
+    items: &[T],
+    skill_id: impl Fn(&T) -> &str,
+) -> BTreeMap<String, Value> {
+    items
+        .iter()
+        .map(|item| (skill_id(item).to_string(), json!(item)))
+        .collect()
+}
+
 pub(super) async fn handle_skill_list(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let profile_root = crate::storage::default_profile_root()?;
     sync_project_skill_analytics(cg, &profile_root).await?;
@@ -87,21 +102,15 @@ pub(super) async fn handle_skill_list(cg: &TraceDecay, args: Value) -> Result<To
     let recommendations = stale_skill_recommendations(
         &usage_summaries,
         crate::tracedecay::current_timestamp(),
-        60 * 60 * 24 * 90,
+        STALE_SKILL_AFTER_SECS,
     );
     let improvement_recommendations = skill_improvement_recommendations(&usage_summaries);
-    let usage_by_skill = usage_summaries
-        .iter()
-        .map(|summary| (summary.skill_id.as_str(), json!(summary)))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let recommendation_by_skill = recommendations
-        .iter()
-        .map(|recommendation| (recommendation.skill_id.as_str(), json!(recommendation)))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let improvement_by_skill = improvement_recommendations
-        .iter()
-        .map(|recommendation| (recommendation.skill_id.as_str(), json!(recommendation)))
-        .collect::<std::collections::BTreeMap<_, _>>();
+    let usage_by_skill = json_by_skill(&usage_summaries, |summary| &summary.skill_id);
+    let recommendation_by_skill =
+        json_by_skill(&recommendations, |recommendation| &recommendation.skill_id);
+    let improvement_by_skill = json_by_skill(&improvement_recommendations, |recommendation| {
+        &recommendation.skill_id
+    });
     let payload = json!({
         "status": "ok",
         "profile_root": profile_root,
@@ -109,16 +118,17 @@ pub(super) async fn handle_skill_list(cg: &TraceDecay, args: Value) -> Result<To
         "skills": skills
             .iter()
             .map(|skill| {
+                let skill_id = &skill.metadata.id;
                 let usage_summary = usage_by_skill
-                    .get(skill.metadata.id.as_str())
+                    .get(skill_id)
                     .cloned()
                     .unwrap_or(Value::Null);
                 let stale_recommendation = recommendation_by_skill
-                    .get(skill.metadata.id.as_str())
+                    .get(skill_id)
                     .cloned()
                     .unwrap_or(Value::Null);
                 let improvement_recommendation = improvement_by_skill
-                    .get(skill.metadata.id.as_str())
+                    .get(skill_id)
                     .cloned()
                     .unwrap_or(Value::Null);
                 let mut summary = skill_summary(skill, include_body, &usage_summary);
@@ -169,7 +179,7 @@ pub(super) async fn handle_skill_view(cg: &TraceDecay, args: Value) -> Result<To
     let stale_recommendation = stale_skill_recommendations(
         std::slice::from_ref(&usage_summary),
         crate::tracedecay::current_timestamp(),
-        60 * 60 * 24 * 90,
+        STALE_SKILL_AFTER_SECS,
     )
     .into_iter()
     .next();
@@ -221,10 +231,7 @@ pub(super) async fn handle_automation_run_artifact_view(
     Ok(tool_json(&payload))
 }
 
-async fn sync_project_skill_analytics(
-    cg: &TraceDecay,
-    profile_root: &std::path::Path,
-) -> Result<()> {
+async fn sync_project_skill_analytics(cg: &TraceDecay, profile_root: &Path) -> Result<()> {
     let global_db = crate::global_db::GlobalDb::open().await;
     ingest_project_analytics_events(
         profile_root,
@@ -239,7 +246,7 @@ async fn sync_project_skill_analytics(
 pub(super) fn handle_hermes_skill_bridge(_cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
     let hermes_home = required_str(args, "hermes_home")?;
     let snapshot = load_hermes_skill_bridge(
-        std::path::Path::new(hermes_home),
+        Path::new(hermes_home),
         HermesSkillBridgeOptions {
             include_skill_bodies: optional_bool(args, "include_skill_bodies", false),
             include_pending_payloads: optional_bool(args, "include_pending_payloads", false),
