@@ -20,15 +20,19 @@
 //!   replacement history and an encrypted compaction body, so `TraceDecay` records
 //!   the boundary/provenance as a summary record without claiming plaintext
 //!   access to Codex's private summary.
+//! * `response_item` goal context — Codex replays active thread goals as
+//!   synthetic user context. `TraceDecay` indexes those as compact goal-context
+//!   records so LCM can catalog the objective and budget without treating the
+//!   instruction boilerplate as normal conversation.
 //! * subagent rollouts — separate `rollout-*.jsonl` files whose leading
 //!   `session_meta` has `thread_source == "subagent"` and parent ids in
 //!   `forked_from_id` / `source.subagent.thread_spawn.parent_thread_id`.
 //!
-//! `response_item` entries are intentionally skipped: they carry auto-injected
-//! synthetic context and duplicate the `agent_message`/`user_message` turns, so
-//! ingesting them would double-count the conversation. This append-only JSONL is
-//! read with the shared byte-offset machinery and scoped to the current project
-//! by `session_meta.cwd`.
+//! Other `response_item` entries are intentionally skipped: they carry
+//! auto-injected synthetic context and duplicate the `agent_message`/`user_message`
+//! turns, so ingesting them would double-count the conversation. This append-only
+//! JSONL is read with the shared byte-offset machinery and scoped to the current
+//! project by `session_meta.cwd`.
 
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -148,6 +152,16 @@ impl TranscriptSource for CodexSource {
             ) {
                 flush_turn_usage(&mut messages, &mut turn_usage);
                 compaction_depth += 1;
+                messages.push(message);
+                continue;
+            }
+            if let Some(message) = goal_context_from_line(
+                &line.value,
+                &meta,
+                current_model.as_deref(),
+                path,
+                line.offset,
+            ) {
                 messages.push(message);
                 continue;
             }
@@ -496,6 +510,95 @@ fn compacted_summary_from_line(
         source_offset: Some(offset),
         metadata_json: serde_json::to_string(&Value::Object(metadata)).ok(),
     })
+}
+
+fn goal_context_from_line(
+    record: &Value,
+    meta: &CodexMeta,
+    model: Option<&str>,
+    path: &Path,
+    offset: i64,
+) -> Option<SessionMessageRecord> {
+    if record.get("type").and_then(Value::as_str) != Some("response_item") {
+        return None;
+    }
+    let payload = record.get("payload")?;
+    if payload.get("type").and_then(Value::as_str) != Some("message")
+        || payload.get("role").and_then(Value::as_str) != Some("user")
+    {
+        return None;
+    }
+    let text = response_item_text(payload.get("content")?)?;
+    if !is_goal_context_text(&text) {
+        return None;
+    }
+
+    let timestamp = record
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(parse_timestamp)
+        .map(|secs| secs as i64);
+
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        "source".to_string(),
+        Value::String("codex_goal_context".to_string()),
+    );
+    metadata.insert(
+        "source_event".to_string(),
+        Value::String("response_item".to_string()),
+    );
+    metadata.insert("source_offset".to_string(), Value::from(offset));
+
+    Some(SessionMessageRecord {
+        provider: PROVIDER.to_string(),
+        message_id: format!("{}:{offset}", meta.session_id),
+        session_id: meta.session_id.clone(),
+        role: "system".to_string(),
+        timestamp,
+        ordinal: offset,
+        text,
+        kind: Some("context".to_string()),
+        model: model.map(str::to_string),
+        tool_names: None,
+        source_path: Some(path.to_string_lossy().to_string()),
+        source_offset: Some(offset),
+        metadata_json: serde_json::to_string(&Value::Object(metadata)).ok(),
+    })
+}
+
+fn response_item_text(content: &Value) -> Option<String> {
+    let Value::Array(items) = content else {
+        return None;
+    };
+    let parts = items
+        .iter()
+        .filter_map(|item| item.get("text").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>();
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
+}
+
+fn is_goal_context_text(text: &str) -> bool {
+    let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+    let Some(header) = lines.next() else {
+        return false;
+    };
+    let header = header.trim_end_matches(':').to_ascii_lowercase();
+    if header != "current goal for this thread" && header != "active goal for this thread" {
+        return false;
+    }
+
+    let mut has_objective = false;
+    let mut has_budget = false;
+    for line in lines {
+        let lower = line.to_ascii_lowercase();
+        has_objective |= lower.starts_with("objective:");
+        has_budget |=
+            lower.starts_with("remaining token budget:") || lower.starts_with("token budget:");
+    }
+    has_objective && has_budget
 }
 
 fn message_metadata(payload: &Value) -> Value {
