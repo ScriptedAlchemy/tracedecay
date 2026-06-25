@@ -6,6 +6,10 @@ use std::process::Command;
 use common::{pyyaml_shim_pythonpath, EnvVarGuard};
 use tempfile::TempDir;
 use tracedecay::agents::*;
+use tracedecay::automation::managed_skills::{
+    approve_managed_skill, create_managed_skill_draft, ManagedSkillDraft, ManagedSkillProvenance,
+    ManagedSkillSource,
+};
 use tracedecay::branch_meta;
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::storage::resolve_layout_for_current_profile;
@@ -135,6 +139,23 @@ fn make_install_ctx(home: &Path) -> InstallContext {
         profile: None,
         project_root: None,
         dashboard: true,
+    }
+}
+
+fn managed_skill_draft(id: &str, title: &str) -> ManagedSkillDraft {
+    ManagedSkillDraft {
+        id: id.to_string(),
+        title: title.to_string(),
+        summary: format!("{title} summary"),
+        category: "workflow".to_string(),
+        targets: tracedecay::automation::managed_skills::default_managed_skill_targets(),
+        body_markdown: format!("Use {title} for repeated workflows."),
+        support_files: Vec::new(),
+        provenance: ManagedSkillProvenance {
+            source: ManagedSkillSource::UserDraft,
+            actor: "test".to_string(),
+            run_id: None,
+        },
     }
 }
 
@@ -2951,6 +2972,73 @@ fn test_codex_install_creates_plugin_bundle_and_marketplace() {
     );
 }
 
+#[tokio::test]
+async fn test_codex_install_exports_active_managed_skills() {
+    let _env_lock = AGENT_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let profile_root = home.join(".tracedecay");
+    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
+    create_managed_skill_draft(
+        &profile_root,
+        managed_skill_draft("repo-hygiene", "Repo Hygiene"),
+    )
+    .await
+    .unwrap();
+    approve_managed_skill(&profile_root, "repo-hygiene")
+        .await
+        .unwrap();
+
+    let ctx = make_install_ctx(home);
+    CodexIntegration.install(&ctx).unwrap();
+
+    let skill_path =
+        codex_plugin_install_dir(home).join("skills/agent-managed/repo-hygiene/SKILL.md");
+    let skill = std::fs::read_to_string(skill_path).unwrap();
+    assert!(skill.contains("id: repo-hygiene"));
+    assert!(skill.contains("Use Repo Hygiene for repeated workflows."));
+}
+
+#[tokio::test]
+async fn test_codex_shareable_plugin_artifact_exports_bundle_and_managed_skills() {
+    let _env_lock = AGENT_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let profile_root = home.join(".tracedecay");
+    create_managed_skill_draft(
+        &profile_root,
+        managed_skill_draft("repo-hygiene", "Repo Hygiene"),
+    )
+    .await
+    .unwrap();
+    approve_managed_skill(&profile_root, "repo-hygiene")
+        .await
+        .unwrap();
+
+    let output = home.join("shareable-codex-plugin");
+    let summary = tracedecay::agents::codex::export_codex_plugin_artifact(
+        &profile_root,
+        &output,
+        "/usr/local/bin/tracedecay",
+    )
+    .unwrap();
+
+    assert_eq!(summary.exported_count, 1);
+    assert_eq!(summary.output, output);
+    assert_codex_plugin_bundle(
+        &summary.output,
+        "/usr/local/bin/tracedecay",
+        serde_json::json!(["serve"]),
+        true,
+    );
+    let skill_path = summary
+        .output
+        .join("skills/agent-managed/repo-hygiene/SKILL.md");
+    let skill = std::fs::read_to_string(skill_path).unwrap();
+    assert!(skill.contains("id: repo-hygiene"));
+    assert!(skill.contains("Use Repo Hygiene for repeated workflows."));
+}
+
 #[test]
 fn test_codex_install_refreshes_existing_cache_and_keeps_bootstrap_source_listable() {
     let dir = TempDir::new().unwrap();
@@ -3429,6 +3517,103 @@ fn test_cursor_install_creates_plugin() {
         !home.join(".cursor/mcp.json").exists(),
         "Cursor plugin install should not write legacy ~/.cursor/mcp.json"
     );
+}
+
+#[tokio::test]
+async fn test_cursor_install_exports_active_managed_skills() {
+    let _env_lock = AGENT_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let profile_root = home.join(".tracedecay");
+    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
+    create_managed_skill_draft(
+        &profile_root,
+        managed_skill_draft("repo-hygiene", "Repo Hygiene"),
+    )
+    .await
+    .unwrap();
+    approve_managed_skill(&profile_root, "repo-hygiene")
+        .await
+        .unwrap();
+
+    let ctx = make_install_ctx(home);
+    CursorIntegration.install(&ctx).unwrap();
+
+    let skill_path =
+        cursor_plugin_install_dir(home).join("skills/agent-managed/repo-hygiene/SKILL.md");
+    let skill = std::fs::read_to_string(skill_path).unwrap();
+    assert!(skill.contains("id: repo-hygiene"));
+    assert!(skill.contains("Use Repo Hygiene for repeated workflows."));
+}
+
+#[tokio::test]
+async fn test_prompt_integrations_export_active_managed_skill_indexes() {
+    let _env_lock = AGENT_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let profile_root = home.join(".tracedecay");
+    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
+    create_managed_skill_draft(
+        &profile_root,
+        managed_skill_draft("repo-hygiene", "Repo Hygiene"),
+    )
+    .await
+    .unwrap();
+    approve_managed_skill(&profile_root, "repo-hygiene")
+        .await
+        .unwrap();
+
+    let ctx = make_install_ctx(home);
+    ClaudeIntegration.install(&ctx).unwrap();
+    KimiIntegration.install(&ctx).unwrap();
+    OpenCodeIntegration.install(&ctx).unwrap();
+    CopilotIntegration.install(&ctx).unwrap();
+    VibeIntegration.install(&ctx).unwrap();
+
+    for prompt_path in [
+        home.join(".claude/CLAUDE.md"),
+        home.join(".kimi/AGENTS.md"),
+        home.join(".config/opencode/AGENTS.md"),
+        vscode_data_dir(home).join("User/prompts/copilot-instructions.md"),
+        copilot_cli_dir(home).join("copilot-instructions.md"),
+        home.join(".vibe/prompts/cli.md"),
+    ] {
+        let prompt = std::fs::read_to_string(&prompt_path).unwrap();
+        assert!(
+            prompt.contains("TRACEDECAY MANAGED SKILLS START"),
+            "missing managed skill block in {}",
+            prompt_path.display()
+        );
+        assert!(prompt.contains("`repo-hygiene`"));
+        assert!(prompt.contains("tracedecay_skill_view"));
+    }
+
+    ClaudeIntegration.uninstall(&ctx).unwrap();
+    KimiIntegration.uninstall(&ctx).unwrap();
+    OpenCodeIntegration.uninstall(&ctx).unwrap();
+    CopilotIntegration.uninstall(&ctx).unwrap();
+    VibeIntegration.uninstall(&ctx).unwrap();
+
+    for prompt_path in [
+        home.join(".claude/CLAUDE.md"),
+        home.join(".kimi/AGENTS.md"),
+        home.join(".config/opencode/AGENTS.md"),
+        vscode_data_dir(home).join("User/prompts/copilot-instructions.md"),
+        copilot_cli_dir(home).join("copilot-instructions.md"),
+        home.join(".vibe/prompts/cli.md"),
+    ] {
+        if !prompt_path.exists() {
+            continue;
+        }
+        let prompt = std::fs::read_to_string(&prompt_path).unwrap();
+        assert!(
+            !prompt.contains("TRACEDECAY MANAGED SKILLS START")
+                && !prompt.contains("TRACEDECAY MANAGED SKILLS END")
+                && !prompt.contains("`repo-hygiene`"),
+            "managed skill block should be removed from {}",
+            prompt_path.display()
+        );
+    }
 }
 
 #[test]

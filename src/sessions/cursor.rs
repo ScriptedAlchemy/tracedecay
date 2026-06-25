@@ -179,7 +179,13 @@ fn resolve_hermes_profile_tracedecay_dir(
             brand_dir.display()
         )
     })?;
-    if !canonical_parent.starts_with(hermes_home) {
+    let canonical_home = hermes_home.canonicalize().map_err(|err| {
+        format!(
+            "could not resolve hermes_profile home {}: {err}",
+            hermes_home.display()
+        )
+    })?;
+    if !canonical_parent.starts_with(&canonical_home) {
         return Err(format!(
             "hermes_profile LCM storage path must stay inside hermes_home: {}",
             canonical_parent.display()
@@ -391,7 +397,7 @@ impl CursorSweepSource {
     /// Source rooted at the real `~/.cursor/projects`. Returns `None` when the
     /// home directory cannot be resolved.
     pub fn new() -> Option<Self> {
-        let home = dirs::home_dir()?;
+        let home = crate::sessions::home_dir()?;
         Some(Self::with_home(&home))
     }
 

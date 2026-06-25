@@ -46,6 +46,20 @@ pub use roo_code::RooCodeIntegration;
 pub use vibe::VibeIntegration;
 pub use zed::ZedIntegration;
 
+pub(crate) fn install_managed_skill_prompt_index(
+    profile_home: &Path,
+    prompt_path: &Path,
+    target: crate::automation::skill_targets::SkillInstallTarget,
+) -> Result<()> {
+    let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(profile_home);
+    crate::automation::skill_targets::install_managed_skills(&profile_root, target, prompt_path)?;
+    Ok(())
+}
+
+pub(crate) fn remove_managed_skill_prompt_index(prompt_path: &Path) -> Result<()> {
+    crate::automation::skill_targets::remove_prompt_skill_index(prompt_path)
+}
+
 // ---------------------------------------------------------------------------
 // AgentIntegration trait
 // ---------------------------------------------------------------------------

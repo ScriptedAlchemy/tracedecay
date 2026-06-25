@@ -1,10 +1,20 @@
 use std::io::Write;
 use std::path::Path;
 
+use common::EnvVarGuard;
 use tempfile::TempDir;
 use tracedecay::agents::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, KiroIntegration,
 };
+use tracedecay::automation::managed_skills::{
+    approve_managed_skill, create_managed_skill_draft, ManagedSkillDraft, ManagedSkillProvenance,
+    ManagedSkillSource,
+};
+use tracedecay::config::USER_DATA_DIR_ENV;
+
+mod common;
+
+static KIRO_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn make_ctx(home: &Path) -> InstallContext {
     InstallContext {
@@ -19,6 +29,23 @@ fn make_ctx(home: &Path) -> InstallContext {
 
 fn read_json(path: &Path) -> serde_json::Value {
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+fn managed_skill_draft(id: &str, title: &str) -> ManagedSkillDraft {
+    ManagedSkillDraft {
+        id: id.to_string(),
+        title: title.to_string(),
+        summary: format!("{title} summary"),
+        category: "workflow".to_string(),
+        targets: tracedecay::automation::managed_skills::default_managed_skill_targets(),
+        body_markdown: format!("Use {title} for repeated workflows."),
+        support_files: Vec::new(),
+        provenance: ManagedSkillProvenance {
+            source: ManagedSkillSource::UserDraft,
+            actor: "test".to_string(),
+            run_id: None,
+        },
+    }
 }
 
 fn file_resource_uri(path: &Path) -> String {
@@ -171,6 +198,97 @@ fn test_install_creates_global_mcp_steering_agent_and_default() {
     assert!(cli_path.exists(), "Kiro CLI settings should exist");
     let cli = read_json(&cli_path);
     assert_eq!(cli["chat"]["defaultAgent"].as_str(), Some("tracedecay"));
+}
+
+#[tokio::test]
+async fn test_install_exports_active_managed_skill_index_to_steering() {
+    let _env_lock = KIRO_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let profile_root = home.join(".tracedecay");
+    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
+    create_managed_skill_draft(
+        &profile_root,
+        managed_skill_draft("repo-hygiene", "Repo Hygiene"),
+    )
+    .await
+    .unwrap();
+    approve_managed_skill(&profile_root, "repo-hygiene")
+        .await
+        .unwrap();
+
+    let ctx = make_ctx(home);
+    KiroIntegration.install(&ctx).unwrap();
+
+    let steering_path = home.join(".kiro/steering/tracedecay.md");
+    let index_path = home.join(".kiro/steering/tracedecay-managed-skills.md");
+    let index = std::fs::read_to_string(&index_path).unwrap();
+    assert!(index.contains("TRACEDECAY MANAGED SKILLS START"));
+    assert!(index.contains("This Kiro index lists approved profile-managed skills"));
+    assert!(index.contains("`repo-hygiene`"));
+    assert!(index.contains("tracedecay_skill_view"));
+
+    let agent = read_json(&home.join(".kiro/agents/tracedecay.json"));
+    let steering_resource = file_resource_uri(&steering_path);
+    assert!(
+        agent["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v.as_str() == Some(steering_resource.as_str())),
+        "Kiro managed agent should load core steering"
+    );
+    let index_resource = file_resource_uri(&index_path);
+    assert!(
+        agent["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v.as_str() == Some(index_resource.as_str())),
+        "Kiro managed agent should load generated managed skill index"
+    );
+}
+
+#[tokio::test]
+async fn test_install_preserves_user_managed_agent_while_updating_skill_index() {
+    let _env_lock = KIRO_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let profile_root = home.join(".tracedecay");
+    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
+    create_managed_skill_draft(
+        &profile_root,
+        managed_skill_draft("repo-hygiene", "Repo Hygiene"),
+    )
+    .await
+    .unwrap();
+    approve_managed_skill(&profile_root, "repo-hygiene")
+        .await
+        .unwrap();
+
+    let agent_path = home.join(".kiro/agents/tracedecay.json");
+    std::fs::create_dir_all(agent_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &agent_path,
+        r#"{"name":"tracedecay","description":"user-owned","prompt":"do not rewrite"}"#,
+    )
+    .unwrap();
+
+    let ctx = make_ctx(home);
+    KiroIntegration.install(&ctx).unwrap();
+
+    let agent = std::fs::read_to_string(&agent_path).unwrap();
+    assert!(agent.contains("do not rewrite"));
+    assert!(
+        !home
+            .join(".kiro/steering/tracedecay-managed-skills.md")
+            .exists(),
+        "user-managed agent should not receive an unused managed-skill index resource"
+    );
+    assert!(
+        !home.join(".kiro/settings/cli.json").exists(),
+        "default agent should not point at a user-managed tracedecay agent file"
+    );
 }
 
 #[test]

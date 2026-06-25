@@ -5,22 +5,8 @@ flaky-result = "fail"
 slow-timeout = { period = "10s", terminate-after = 36 }
 final-status-level = "slow"
 
-[test-groups]
-windows-global-state = { max-threads = 1 }
-
 [[profile.ci.overrides]]
 filter = 'binary_id(tracedecay::mcp_handler_test)'
 platform = { host = 'cfg(windows)' }
-test-group = 'windows-global-state'
 retries = 2
 flaky-result = 'pass'
-
-[[profile.ci.overrides]]
-filter = 'binary_id(tracedecay::cli_non_interactive_test)'
-platform = { host = 'cfg(windows)' }
-test-group = 'windows-global-state'
-
-[[profile.ci.overrides]]
-filter = 'test(/^doctor::tests::/)'
-platform = { host = 'cfg(windows)' }
-test-group = 'windows-global-state'

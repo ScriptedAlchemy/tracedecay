@@ -6,8 +6,78 @@ readonly CONVENTIONAL_SUBJECT_RE='^(build|chore|ci|docs|feat|fix|perf|refactor|r
 
 usage() {
     echo "usage: $0 <commit-range-or-sha>" >&2
+    echo "       $0 --message-file <path>" >&2
     echo "example: $0 origin/master..HEAD" >&2
 }
+
+validate_subject() {
+    local label="$1"
+    local subject="$2"
+    local failed=0
+
+    if ! [[ "$subject" =~ $CONVENTIONAL_SUBJECT_RE ]]; then
+        echo "::error::Commit $label does not use conventional commit style: $subject" >&2
+        failed=1
+    fi
+
+    if [ "${#subject}" -gt 72 ]; then
+        echo "::error::Commit $label subject exceeds 72 characters (${#subject}): $subject" >&2
+        failed=1
+    fi
+
+    if [ "$failed" -ne 0 ]; then
+        return 1
+    fi
+
+    return 0
+}
+
+message_subject() {
+    local message_file="$1"
+    local line
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"
+        if [[ "$line" =~ ^[[:space:]]*$ || "$line" =~ ^[[:space:]]*# ]]; then
+            continue
+        fi
+        echo "$line"
+        return 0
+    done < "$message_file"
+
+    return 1
+}
+
+is_merge_subject() {
+    local subject="$1"
+
+    [[ "$subject" =~ ^Merge[[:space:]] ]]
+}
+
+if [ "$#" -eq 2 ] && [ "$1" = "--message-file" ]; then
+    if [ ! -r "$2" ]; then
+        echo "Commit message file is not readable: $2" >&2
+        exit 2
+    fi
+
+    if ! subject="$(message_subject "$2")"; then
+        echo "::error::Commit message subject is empty" >&2
+        exit 1
+    fi
+
+    if is_merge_subject "$subject"; then
+        echo "Skipping merge commit message: $subject"
+        exit 0
+    fi
+
+    if ! validate_subject "message" "$subject"; then
+        echo "Commit subjects must look like 'fix: handle UTF-16 files' and stay under 72 characters." >&2
+        exit 1
+    fi
+
+    echo "OK commit message: $subject"
+    exit 0
+fi
 
 if [ "$#" -ne 1 ]; then
     usage
@@ -64,24 +134,13 @@ failed=0
 for commit in "${commits[@]}"; do
     short_sha=$(git rev-parse --short=7 "$commit")
     subject=$(git log -1 --format=%s "$commit")
-    commit_failed=0
 
     if is_baselined_commit "$commit"; then
         echo "Skipping grandfathered commit $short_sha: $subject"
         continue
     fi
 
-    if ! [[ "$subject" =~ $CONVENTIONAL_SUBJECT_RE ]]; then
-        echo "::error::Commit $short_sha does not use conventional commit style: $subject" >&2
-        commit_failed=1
-    fi
-
-    if [ "${#subject}" -gt 72 ]; then
-        echo "::error::Commit $short_sha subject exceeds 72 characters (${#subject}): $subject" >&2
-        commit_failed=1
-    fi
-
-    if [ "$commit_failed" -ne 0 ]; then
+    if ! validate_subject "$short_sha" "$subject"; then
         failed=1
     else
         echo "OK $short_sha: $subject"

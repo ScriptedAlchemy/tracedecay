@@ -76,6 +76,10 @@ jobs:
         with:
           node-version: 22
 
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
       - name: Install ast-grep
         run: |
           npm install --global "@ast-grep/cli@${AST_GREP_VERSION}"
@@ -118,6 +122,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
 
       - name: Install ast-grep
         shell: pwsh

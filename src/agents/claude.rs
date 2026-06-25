@@ -46,6 +46,11 @@ impl AgentIntegration for ClaudeIntegration {
         write_json_file(&settings_path, &settings)?;
 
         install_claude_md_rules(&claude_md_path)?;
+        super::install_managed_skill_prompt_index(
+            &ctx.home,
+            &claude_md_path,
+            crate::automation::skill_targets::SkillInstallTarget::Claude,
+        )?;
         install_clean_local_config();
 
         eprintln!();
@@ -72,7 +77,12 @@ impl AgentIntegration for ClaudeIntegration {
         install_permissions(&mut settings, &ctx.tool_permissions);
         write_json_file(&settings_path, &settings)?;
 
-        install_claude_md_rules(&claude_md_path)
+        install_claude_md_rules(&claude_md_path)?;
+        super::install_managed_skill_prompt_index(
+            &ctx.home,
+            &claude_md_path,
+            crate::automation::skill_targets::SkillInstallTarget::Claude,
+        )
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
@@ -83,6 +93,7 @@ impl AgentIntegration for ClaudeIntegration {
 
         uninstall_mcp_server(&claude_json_path);
         uninstall_settings(&settings_path);
+        super::remove_managed_skill_prompt_index(&claude_md_path)?;
         uninstall_claude_md_rules(&claude_md_path);
 
         eprintln!();

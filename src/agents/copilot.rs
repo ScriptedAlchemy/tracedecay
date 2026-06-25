@@ -49,6 +49,11 @@ impl AgentIntegration for CopilotIntegration {
         let vscode_instructions =
             super::vscode_data_dir(&ctx.home).join("User/prompts/copilot-instructions.md");
         install_prompt_rules(&vscode_instructions)?;
+        super::install_managed_skill_prompt_index(
+            &ctx.home,
+            &vscode_instructions,
+            crate::automation::skill_targets::SkillInstallTarget::Agents,
+        )?;
         let insiders_instructions =
             super::vscode_insiders_data_dir(&ctx.home).join("User/prompts/copilot-instructions.md");
         if super::vscode_insiders_data_dir(&ctx.home)
@@ -56,9 +61,19 @@ impl AgentIntegration for CopilotIntegration {
             .exists()
         {
             install_prompt_rules(&insiders_instructions)?;
+            super::install_managed_skill_prompt_index(
+                &ctx.home,
+                &insiders_instructions,
+                crate::automation::skill_targets::SkillInstallTarget::Agents,
+            )?;
         }
         let cli_instructions = super::copilot_cli_dir(&ctx.home).join("copilot-instructions.md");
         install_prompt_rules(&cli_instructions)?;
+        super::install_managed_skill_prompt_index(
+            &ctx.home,
+            &cli_instructions,
+            crate::automation::skill_targets::SkillInstallTarget::Agents,
+        )?;
 
         eprintln!();
         eprintln!("Setup complete. Next steps:");
@@ -74,7 +89,13 @@ impl AgentIntegration for CopilotIntegration {
 
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
         install_workspace_mcp_server(&project_path.join(".vscode/mcp.json"), &ctx.tracedecay_bin)?;
-        install_prompt_rules(&project_path.join(".github/copilot-instructions.md"))
+        let instructions = project_path.join(".github/copilot-instructions.md");
+        install_prompt_rules(&instructions)?;
+        super::install_managed_skill_prompt_index(
+            &ctx.home,
+            &instructions,
+            crate::automation::skill_targets::SkillInstallTarget::Agents,
+        )
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
@@ -88,11 +109,14 @@ impl AgentIntegration for CopilotIntegration {
 
         let vscode_instructions =
             super::vscode_data_dir(&ctx.home).join("User/prompts/copilot-instructions.md");
+        super::remove_managed_skill_prompt_index(&vscode_instructions)?;
         uninstall_prompt_rules(&vscode_instructions);
         let insiders_instructions =
             super::vscode_insiders_data_dir(&ctx.home).join("User/prompts/copilot-instructions.md");
+        super::remove_managed_skill_prompt_index(&insiders_instructions)?;
         uninstall_prompt_rules(&insiders_instructions);
         let cli_instructions = super::copilot_cli_dir(&ctx.home).join("copilot-instructions.md");
+        super::remove_managed_skill_prompt_index(&cli_instructions)?;
         uninstall_prompt_rules(&cli_instructions);
 
         eprintln!();

@@ -59,6 +59,11 @@ impl AgentIntegration for VibeIntegration {
         std::fs::create_dir_all(&prompt_dir).ok();
         let prompt_path = vibe_prompt_path(&ctx.home);
         install_prompt_rules(&prompt_path)?;
+        super::install_managed_skill_prompt_index(
+            &ctx.home,
+            &prompt_path,
+            crate::automation::skill_targets::SkillInstallTarget::Agents,
+        )?;
 
         eprintln!();
         eprintln!("Setup complete. Next steps:");
@@ -77,13 +82,21 @@ impl AgentIntegration for VibeIntegration {
         std::fs::create_dir_all(vibe_dir.join("prompts")).ok();
 
         install_mcp_server(&vibe_dir.join("config.toml"), &ctx.tracedecay_bin)?;
-        install_prompt_rules(&vibe_dir.join("prompts/cli.md"))
+        let prompt_path = vibe_dir.join("prompts/cli.md");
+        install_prompt_rules(&prompt_path)?;
+        super::install_managed_skill_prompt_index(
+            &ctx.home,
+            &prompt_path,
+            crate::automation::skill_targets::SkillInstallTarget::Agents,
+        )
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
         let config_path = vibe_config_path(&ctx.home);
         uninstall_mcp_server(&config_path);
-        uninstall_prompt_rules(&vibe_prompt_path(&ctx.home));
+        let prompt_path = vibe_prompt_path(&ctx.home);
+        super::remove_managed_skill_prompt_index(&prompt_path)?;
+        uninstall_prompt_rules(&prompt_path);
 
         eprintln!();
         eprintln!("Uninstall complete. Tracedecay has been removed from Mistral Vibe.");

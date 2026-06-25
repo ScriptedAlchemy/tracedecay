@@ -16,6 +16,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
+use crate::automation::skill_targets::{
+    install_managed_skills, profile_root_for_agent_home, SkillInstallTarget,
+};
 use crate::errors::{Result, TraceDecayError};
 
 use super::{
@@ -68,6 +71,10 @@ fn steering_path(home: &Path) -> PathBuf {
     kiro_home(home).join("steering/tracedecay.md")
 }
 
+fn managed_skill_index_path(home: &Path) -> PathBuf {
+    kiro_home(home).join("steering/tracedecay-managed-skills.md")
+}
+
 fn workspace_mcp_config_path(project_path: &Path) -> PathBuf {
     project_path.join(".kiro/settings/mcp.json")
 }
@@ -91,7 +98,14 @@ impl AgentIntegration for KiroIntegration {
         install_steering_rules(&steering)?;
 
         let agent_path = managed_agent_path(&ctx.home);
-        let owns_agent = install_managed_agent(&agent_path, &ctx.tracedecay_bin, &steering)?;
+        let skill_index_path = managed_skill_index_path(&ctx.home);
+        let owns_agent = install_managed_agent(
+            &agent_path,
+            &ctx.tracedecay_bin,
+            &steering,
+            &ctx.home,
+            Some(&skill_index_path),
+        )?;
 
         let cli_path = cli_config_path(&ctx.home);
         install_default_agent(&cli_path, owns_agent)?;
@@ -119,7 +133,14 @@ impl AgentIntegration for KiroIntegration {
         install_steering_rules(&steering)?;
 
         let agent_path = project_path.join(".kiro/agents/tracedecay.json");
-        install_managed_agent(&agent_path, &ctx.tracedecay_bin, &steering)?;
+        let skill_index_path = project_path.join(".kiro/steering/tracedecay-managed-skills.md");
+        install_managed_agent(
+            &agent_path,
+            &ctx.tracedecay_bin,
+            &steering,
+            &ctx.home,
+            Some(&skill_index_path),
+        )?;
 
         Ok(())
     }
@@ -133,13 +154,21 @@ impl AgentIntegration for KiroIntegration {
         if !is_owned_agent_file(&agent_path) {
             return Ok(UpdatePluginOutcome::NotInstalled);
         }
-        install_managed_agent(&agent_path, &ctx.tracedecay_bin, &steering_path(&ctx.home))?;
+        let skill_index_path = managed_skill_index_path(&ctx.home);
+        install_managed_agent(
+            &agent_path,
+            &ctx.tracedecay_bin,
+            &steering_path(&ctx.home),
+            &ctx.home,
+            Some(&skill_index_path),
+        )?;
         Ok(UpdatePluginOutcome::Refreshed(vec![agent_path]))
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
         uninstall_mcp_server(&mcp_config_path(&ctx.home));
         remove_steering_rules(&steering_path(&ctx.home));
+        remove_kiro_managed_skill_index(&managed_skill_index_path(&ctx.home));
         let agent_path = managed_agent_path(&ctx.home);
         let owned_agent = is_owned_agent_file(&agent_path);
         uninstall_managed_agent(&agent_path);
@@ -225,12 +254,20 @@ fn percent_encode_file_uri_path(path: &str) -> String {
     encoded
 }
 
-fn managed_agent_config(tracedecay_bin: &str, steering_path: &Path) -> serde_json::Value {
+fn managed_agent_config(
+    tracedecay_bin: &str,
+    steering_path: &Path,
+    managed_skill_index_path: Option<&Path>,
+) -> serde_json::Value {
+    let mut resources = vec![file_resource_uri(steering_path)];
+    if let Some(path) = managed_skill_index_path {
+        resources.push(file_resource_uri(path));
+    }
     json!({
         "name": KIRO_AGENT_NAME,
         "description": OWNED_AGENT_DESCRIPTION,
         "includeMcpJson": true,
-        "resources": [file_resource_uri(steering_path)],
+        "resources": resources,
         "tools": [KIRO_AGENT_ALL_TOOLS],
         "allowedTools": [KIRO_ALLOWED_BUILTIN_TOOLS, KIRO_ALLOWED_TRACEDECAY_TOOLS],
         "hooks": {
@@ -293,7 +330,13 @@ fn install_mcp_server(path: &Path, tracedecay_bin: &str) -> Result<()> {
 /// Returns true when tracedecay owns the resulting agent file. A pre-existing
 /// user-managed `tracedecay.json` is preserved and returns false so the default
 /// agent selector is not pointed at a file whose policy tracedecay does not own.
-fn install_managed_agent(path: &Path, tracedecay_bin: &str, steering_path: &Path) -> Result<bool> {
+fn install_managed_agent(
+    path: &Path,
+    tracedecay_bin: &str,
+    steering_path: &Path,
+    profile_home: &Path,
+    managed_skill_index_path: Option<&Path>,
+) -> Result<bool> {
     if path.exists() && !is_owned_agent_file(path) {
         eprintln!(
             "  {} already exists and is user-managed, leaving unchanged",
@@ -302,14 +345,31 @@ fn install_managed_agent(path: &Path, tracedecay_bin: &str, steering_path: &Path
         return Ok(false);
     }
 
+    let managed_skill_index_path = match managed_skill_index_path {
+        Some(index_path) => install_kiro_managed_skill_index(profile_home, index_path)?,
+        None => None,
+    };
     let backup = backup_config_file(path)?;
-    let config = managed_agent_config(tracedecay_bin, steering_path);
+    let config = managed_agent_config(tracedecay_bin, steering_path, managed_skill_index_path);
     safe_write_json_file(path, &config, backup.as_deref())?;
     eprintln!(
         "\x1b[32m✔\x1b[0m Wrote tracedecay Kiro agent to {}",
         path.display()
     );
     Ok(true)
+}
+
+fn install_kiro_managed_skill_index<'a>(
+    home: &Path,
+    index_path: &'a Path,
+) -> Result<Option<&'a Path>> {
+    let profile_root = profile_root_for_agent_home(home);
+    let summary = install_managed_skills(&profile_root, SkillInstallTarget::Kiro, index_path)?;
+    Ok((summary.exported_count > 0).then_some(index_path))
+}
+
+fn remove_kiro_managed_skill_index(index_path: &Path) {
+    super::remove_managed_skill_prompt_index(index_path).ok();
 }
 
 fn install_default_agent(path: &Path, owns_agent: bool) -> Result<()> {

@@ -28,11 +28,13 @@
 //!   `session_meta` has `thread_source == "subagent"` and parent ids in
 //!   `forked_from_id` / `source.subagent.thread_spawn.parent_thread_id`.
 //!
-//! Other `response_item` entries are intentionally skipped: they carry
-//! auto-injected synthetic context and duplicate the `agent_message`/`user_message`
-//! turns, so ingesting them would double-count the conversation. This append-only
-//! JSONL is read with the shared byte-offset machinery and scoped to the current
-//! project by `session_meta.cwd`.
+//! `response_item` entries are intentionally skipped except for Codex goal
+//! context blocks: they usually carry auto-injected synthetic context and
+//! duplicate the `agent_message`/`user_message` turns, so ingesting them would
+//! double-count the conversation. Goal context blocks are cataloged as compact
+//! `goal_context` rows because real rollouts often record them only in
+//! `response_item` form. This append-only JSONL is read with the shared
+//! byte-offset machinery and scoped to the current project by `session_meta.cwd`.
 
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -76,7 +78,7 @@ impl CodexSource {
     /// Source rooted at the real `~/.codex`. Returns `None` when the
     /// home directory cannot be resolved.
     pub fn new() -> Option<Self> {
-        let home = dirs::home_dir()?;
+        let home = crate::sessions::home_dir()?;
         Some(Self::with_home(&home))
     }
 
@@ -140,6 +142,16 @@ impl TranscriptSource for CodexSource {
             }
             if let Some(model) = turn_context_model(&line.value) {
                 current_model = Some(model);
+                continue;
+            }
+            if let Some(message) = response_item_goal_context_from_line(
+                &line.value,
+                &meta,
+                current_model.as_deref(),
+                path,
+                line.offset,
+            ) {
+                messages.push(message);
                 continue;
             }
             if let Some(message) = compacted_summary_from_line(
@@ -388,11 +400,18 @@ fn message_from_line(
         return None;
     }
 
-    let timestamp = record
-        .get("timestamp")
-        .and_then(Value::as_str)
-        .and_then(parse_timestamp)
-        .map(|secs| secs as i64);
+    let timestamp = timestamp_from_record(record);
+    if let Some(goal_context) = codex_goal_context_from_text(&text) {
+        return Some(goal_context_message(
+            meta,
+            model,
+            path,
+            offset,
+            timestamp,
+            &goal_context,
+            &message_metadata(payload, Some(&goal_context)),
+        ));
+    }
 
     Some(SessionMessageRecord {
         provider: PROVIDER.to_string(),
@@ -407,8 +426,104 @@ fn message_from_line(
         tool_names: (!tool_names.is_empty()).then(|| tool_names.join(",")),
         source_path: Some(path.to_string_lossy().to_string()),
         source_offset: Some(offset),
-        metadata_json: serde_json::to_string(&message_metadata(payload)).ok(),
+        metadata_json: serde_json::to_string(&message_metadata(payload, None)).ok(),
     })
+}
+
+fn response_item_goal_context_from_line(
+    record: &Value,
+    meta: &CodexMeta,
+    model: Option<&str>,
+    path: &Path,
+    offset: i64,
+) -> Option<SessionMessageRecord> {
+    if record.get("type").and_then(Value::as_str) != Some("response_item") {
+        return None;
+    }
+    let payload = record.get("payload")?;
+    if payload.get("type").and_then(Value::as_str) != Some("message") {
+        return None;
+    }
+    let text = collect_response_item_text(payload.get("content").unwrap_or(payload));
+    let goal_context = codex_goal_context_from_text(&text)?;
+    let mut metadata = message_metadata(payload, Some(&goal_context));
+    if let Value::Object(map) = &mut metadata {
+        map.insert(
+            "source_event".to_string(),
+            Value::String("response_item".to_string()),
+        );
+        if let Some(role) = payload.get("role").and_then(Value::as_str) {
+            map.insert("source_role".to_string(), Value::String(role.to_string()));
+        }
+    }
+
+    Some(goal_context_message(
+        meta,
+        model,
+        path,
+        offset,
+        timestamp_from_record(record),
+        &goal_context,
+        &metadata,
+    ))
+}
+
+fn goal_context_message(
+    meta: &CodexMeta,
+    model: Option<&str>,
+    path: &Path,
+    offset: i64,
+    timestamp: Option<i64>,
+    goal_context: &CodexGoalContext,
+    metadata: &Value,
+) -> SessionMessageRecord {
+    SessionMessageRecord {
+        provider: PROVIDER.to_string(),
+        message_id: format!("{}:{offset}", meta.session_id),
+        session_id: meta.session_id.clone(),
+        role: "system".to_string(),
+        timestamp,
+        ordinal: offset,
+        text: goal_context.storage_text(),
+        kind: Some("goal_context".to_string()),
+        model: model.map(str::to_string),
+        tool_names: None,
+        source_path: Some(path.to_string_lossy().to_string()),
+        source_offset: Some(offset),
+        metadata_json: serde_json::to_string(&metadata).ok(),
+    }
+}
+
+fn collect_response_item_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Array(items) => items
+            .iter()
+            .map(collect_response_item_text)
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Value::Object(map) => {
+            if let Some(text) = map.get("text").and_then(Value::as_str) {
+                return text.to_string();
+            }
+            ["content", "message", "item"]
+                .iter()
+                .filter_map(|key| map.get(*key))
+                .map(collect_response_item_text)
+                .find(|text| !text.is_empty())
+                .unwrap_or_default()
+        }
+        _ => String::new(),
+    }
+}
+
+fn timestamp_from_record(record: &Value) -> Option<i64> {
+    record
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(parse_timestamp)
+        .map(|secs| secs as i64)
 }
 
 fn compacted_summary_from_line(
@@ -465,12 +580,6 @@ fn compacted_summary_from_line(
         str::to_string,
     );
 
-    let timestamp = record
-        .get("timestamp")
-        .and_then(Value::as_str)
-        .and_then(parse_timestamp)
-        .map(|secs| secs as i64);
-
     let mut metadata = serde_json::Map::new();
     metadata.insert(
         "source".to_string(),
@@ -500,7 +609,7 @@ fn compacted_summary_from_line(
         message_id: format!("{}:{offset}", meta.session_id),
         session_id: meta.session_id.clone(),
         role: "assistant".to_string(),
-        timestamp,
+        timestamp: timestamp_from_record(record),
         ordinal: offset,
         text,
         kind: Some("summary".to_string()),
@@ -510,6 +619,117 @@ fn compacted_summary_from_line(
         source_offset: Some(offset),
         metadata_json: serde_json::to_string(&Value::Object(metadata)).ok(),
     })
+}
+
+struct CodexGoalContext {
+    objective: String,
+    tokens_used: Option<i64>,
+    token_budget: Option<i64>,
+    token_budget_unbounded: bool,
+    tokens_remaining: Option<i64>,
+    tokens_remaining_unbounded: bool,
+}
+
+impl CodexGoalContext {
+    fn storage_text(&self) -> String {
+        format!("Codex active goal: {}", self.objective)
+    }
+
+    fn metadata(&self) -> Value {
+        let mut goal = serde_json::Map::new();
+        goal.insert("source".to_string(), Value::String("goal".to_string()));
+        goal.insert(
+            "objective".to_string(),
+            Value::String(self.objective.clone()),
+        );
+        if let Some(tokens_used) = self.tokens_used {
+            goal.insert("tokens_used".to_string(), Value::from(tokens_used));
+        }
+        if let Some(token_budget) = self.token_budget {
+            goal.insert("token_budget".to_string(), Value::from(token_budget));
+        }
+        if self.token_budget_unbounded {
+            goal.insert("token_budget_unbounded".to_string(), Value::from(true));
+        }
+        if let Some(tokens_remaining) = self.tokens_remaining {
+            goal.insert(
+                "tokens_remaining".to_string(),
+                Value::from(tokens_remaining),
+            );
+        }
+        if self.tokens_remaining_unbounded {
+            goal.insert("tokens_remaining_unbounded".to_string(), Value::from(true));
+        }
+        Value::Object(goal)
+    }
+}
+
+fn codex_goal_context_from_text(text: &str) -> Option<CodexGoalContext> {
+    const START: &str = "<codex_internal_context source=\"goal\">";
+    const END: &str = "</codex_internal_context>";
+    let start = text.find(START)?;
+    if !text[..start].trim().is_empty() {
+        return None;
+    }
+    let after_start = &text[start + START.len()..];
+    let end = after_start.find(END)?;
+    if !after_start[end + END.len()..].trim().is_empty() {
+        return None;
+    }
+    let body = &after_start[..end];
+    let objective = tag_body(body, "objective")?.trim();
+    if objective.is_empty() {
+        return None;
+    }
+    let token_budget_line = budget_line_value(body, "Token budget:");
+    let tokens_remaining_line = budget_line_value(body, "Tokens remaining:");
+    Some(CodexGoalContext {
+        objective: objective.to_string(),
+        tokens_used: budget_line_value(body, "Tokens used:").and_then(parse_budget_count),
+        token_budget: token_budget_line.and_then(parse_budget_count),
+        token_budget_unbounded: token_budget_line.is_some_and(is_unbounded_budget_value),
+        tokens_remaining: tokens_remaining_line.and_then(parse_budget_count),
+        tokens_remaining_unbounded: tokens_remaining_line.is_some_and(is_unbounded_budget_value),
+    })
+}
+
+fn tag_body<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    let start_tag = format!("<{tag}>");
+    let end_tag = format!("</{tag}>");
+    let after_start = text.split_once(&start_tag)?.1;
+    let body = after_start.split_once(&end_tag)?.0;
+    Some(body)
+}
+
+fn budget_line_value<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    text.lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("- ")?.trim().strip_prefix(prefix))
+        .or_else(|| {
+            text.lines()
+                .map(str::trim)
+                .find_map(|line| line.strip_prefix(prefix))
+        })
+        .map(str::trim)
+}
+
+fn parse_budget_count(value: &str) -> Option<i64> {
+    let digits = value
+        .chars()
+        .filter(char::is_ascii_digit)
+        .collect::<String>();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse::<i64>().ok()
+    }
+}
+
+fn is_unbounded_budget_value(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "none" | "unbounded"
+    )
 }
 
 fn goal_context_from_line(
@@ -528,16 +748,10 @@ fn goal_context_from_line(
     {
         return None;
     }
-    let text = response_item_text(payload.get("content")?)?;
+    let text = collect_response_item_text(payload.get("content").unwrap_or(payload));
     if !is_goal_context_text(&text) {
         return None;
     }
-
-    let timestamp = record
-        .get("timestamp")
-        .and_then(Value::as_str)
-        .and_then(parse_timestamp)
-        .map(|secs| secs as i64);
 
     let mut metadata = serde_json::Map::new();
     metadata.insert(
@@ -555,7 +769,7 @@ fn goal_context_from_line(
         message_id: format!("{}:{offset}", meta.session_id),
         session_id: meta.session_id.clone(),
         role: "system".to_string(),
-        timestamp,
+        timestamp: timestamp_from_record(record),
         ordinal: offset,
         text,
         kind: Some("context".to_string()),
@@ -565,19 +779,6 @@ fn goal_context_from_line(
         source_offset: Some(offset),
         metadata_json: serde_json::to_string(&Value::Object(metadata)).ok(),
     })
-}
-
-fn response_item_text(content: &Value) -> Option<String> {
-    let Value::Array(items) = content else {
-        return None;
-    };
-    let parts = items
-        .iter()
-        .filter_map(|item| item.get("text").and_then(Value::as_str))
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .collect::<Vec<_>>();
-    (!parts.is_empty()).then(|| parts.join("\n\n"))
 }
 
 fn is_goal_context_text(text: &str) -> bool {
@@ -601,12 +802,19 @@ fn is_goal_context_text(text: &str) -> bool {
     has_objective && has_budget
 }
 
-fn message_metadata(payload: &Value) -> Value {
+fn message_metadata(payload: &Value, goal_context: Option<&CodexGoalContext>) -> Value {
     let mut metadata = serde_json::Map::new();
     metadata.insert(
         "source".to_string(),
         Value::String("codex_rollout".to_string()),
     );
+    if let Some(goal_context) = goal_context {
+        metadata.insert(
+            "codex_internal_context".to_string(),
+            Value::String("goal".to_string()),
+        );
+        metadata.insert("codex_goal".to_string(), goal_context.metadata());
+    }
     append_tool_calls_metadata(&mut metadata, payload);
     Value::Object(metadata)
 }

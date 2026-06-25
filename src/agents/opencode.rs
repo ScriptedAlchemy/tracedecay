@@ -38,6 +38,11 @@ impl AgentIntegration for OpenCodeIntegration {
 
         let global_prompt = opencode_prompt_path(&ctx.home);
         install_prompt_rules(&global_prompt)?;
+        super::install_managed_skill_prompt_index(
+            &ctx.home,
+            &global_prompt,
+            crate::automation::skill_targets::SkillInstallTarget::OpenCode,
+        )?;
 
         eprintln!();
         eprintln!("Setup complete. Next steps:");
@@ -53,7 +58,13 @@ impl AgentIntegration for OpenCodeIntegration {
 
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
         install_mcp_server(&project_path.join("opencode.json"), &ctx.tracedecay_bin)?;
-        install_prompt_rules(&project_path.join("AGENTS.md"))
+        let agents_md = project_path.join("AGENTS.md");
+        install_prompt_rules(&agents_md)?;
+        super::install_managed_skill_prompt_index(
+            &ctx.home,
+            &agents_md,
+            crate::automation::skill_targets::SkillInstallTarget::OpenCode,
+        )
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
@@ -61,6 +72,7 @@ impl AgentIntegration for OpenCodeIntegration {
         uninstall_mcp_server(&config_path);
 
         let global_prompt = opencode_prompt_path(&ctx.home);
+        super::remove_managed_skill_prompt_index(&global_prompt)?;
         uninstall_prompt_rules(&global_prompt);
 
         eprintln!();
