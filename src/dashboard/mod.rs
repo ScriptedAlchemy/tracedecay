@@ -29,6 +29,7 @@ mod automation_run_api;
 mod automation_run_service;
 mod automation_scheduler_api;
 mod automation_skills_api;
+mod code_diagnostics_api;
 mod curate_preview_store;
 mod graph_api;
 mod graph_queries;
@@ -47,6 +48,7 @@ mod token_count;
 mod util;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -59,6 +61,7 @@ use tokio::sync::RwLock;
 use crate::automation::backend;
 use crate::automation::config::{self, AutomationBackend, AutomationHostMode};
 use crate::db::Database;
+use crate::diagnostics::lsp;
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
 use crate::storage::StorageMode;
@@ -118,6 +121,12 @@ pub(crate) struct DashboardState {
     /// In-process BPE token-count cache for the Savings & Cost tab (backed
     /// by the `dashboard_token_counts` sidecar in the global accounting DB).
     pub(crate) token_counts: Arc<token_count::TokenCountCache>,
+    /// Dashboard-owned LSP diagnostics broker. This is deliberately not
+    /// exposed to hooks or model-context paths in Phase 1.
+    pub(crate) code_diagnostics: Arc<RwLock<lsp::broker::DiagnosticBroker>>,
+    /// Ensures the dashboard-opened idle backfill pass is scheduled once per
+    /// dashboard server lifetime.
+    pub(crate) code_diagnostics_backfill_started: Arc<AtomicBool>,
 }
 
 /// The LCM session store the dashboard will serve.
@@ -164,6 +173,15 @@ pub(crate) fn storage_mode_label(mode: &StorageMode) -> &'static str {
         StorageMode::ProjectLocal => "project_local",
         StorageMode::ProfileSharded => "profile_sharded",
     }
+}
+
+pub(crate) fn code_diagnostics_broker(
+    project_root: PathBuf,
+    settings: lsp::settings::CodeDiagnosticsSettings,
+) -> lsp::broker::DiagnosticBroker {
+    let mut adapters = lsp::adapters::builtin_adapters();
+    adapters.extend(settings.custom_adapters.clone());
+    lsp::broker::DiagnosticBroker::new(project_root, adapters, settings)
 }
 
 async fn open_dashboard_connection(path: &Path) -> Option<libsql::Connection> {
@@ -224,6 +242,11 @@ pub(crate) async fn build_state(cg: &TraceDecay) -> DashboardState {
     let store_root = cg.store_layout().data_root.clone();
     let storage_mode = storage_mode_label(&cg.store_layout().storage_mode).to_string();
     let persisted_preview = curate_preview_store::load(&dashboard_root).await;
+    let code_diagnostics_settings = lsp::settings::load_settings(&dashboard_root)
+        .await
+        .unwrap_or_default();
+    let code_diagnostics =
+        code_diagnostics_broker(cg.project_root().to_path_buf(), code_diagnostics_settings);
     let savings_db = GlobalDb::open().await.map(Arc::new);
     let savings_db_path = crate::global_db::global_db_path()
         .map(|p| p.display().to_string())
@@ -245,6 +268,8 @@ pub(crate) async fn build_state(cg: &TraceDecay) -> DashboardState {
         curate_preview: Arc::new(RwLock::new(persisted_preview)),
         curation_activity: Arc::new(RwLock::new(Vec::new())),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
+        code_diagnostics: Arc::new(RwLock::new(code_diagnostics)),
+        code_diagnostics_backfill_started: Arc::new(AtomicBool::new(false)),
     };
     if let Err(err) = memory_api::repair_derived_memory(&state).await {
         eprintln!("Dashboard memory repair skipped: {err}");
@@ -546,6 +571,19 @@ pub(crate) fn router(state: DashboardState) -> Router {
             "/api/plugins/analytics/underused",
             get(analytics_api::underused),
         )
+        // Code Diagnostics API (dashboard-only LSP diagnostics broker)
+        .route(
+            "/api/plugins/code-diagnostics",
+            get(code_diagnostics_api::overview).patch(code_diagnostics_api::patch_settings),
+        )
+        .route(
+            "/api/plugins/code-diagnostics/refresh",
+            post(code_diagnostics_api::refresh_all),
+        )
+        .route(
+            "/api/plugins/code-diagnostics/refresh/{language}",
+            post(code_diagnostics_api::refresh_language),
+        )
         // Savings & Cost API (savings ledger + session cost accounting)
         .route("/api/plugins/savings/overview", get(savings_api::overview))
         .route("/api/plugins/savings/ledger", get(savings_api::ledger))
@@ -599,6 +637,7 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
             "lcm_payload_health": has_lcm,
             "graph": true,
             "analytics": true,
+            "code_diagnostics": true,
             // Similarity-based dedup curation (delete/merge ops via /curate
             // and /curate/apply). LLM-proposed curation is served by the
             // configured standalone automation backend when enabled.
@@ -617,53 +656,29 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
             "host_mode": automation_host_mode,
             "availability": backend_availability,
         },
-        "dashboards": ["holographic", "hermes-lcm", "graph", "savings"],
+        "dashboards": assets::DASHBOARD_PLUGINS
+            .iter()
+            .map(|plugin| plugin.name)
+            .collect::<Vec<_>>(),
     }))
 }
 
 /// Plugin manifest list, mirroring the Hermes `/api/dashboard/plugins`
 /// endpoint shape closely enough for the standalone shell.
 async fn plugins_list() -> Json<Value> {
-    Json(json!([
-        {
-            "name": "holographic",
-            "label": "Holographic Memory",
-            "description": "Holographic memory explorer + curation",
-            "icon": "BrainCircuit",
-            "entry": "dist/index.js",
-            "css": "dist/style.css",
-            "has_api": true,
-            "source": "tracedecay",
-        },
-        {
-            "name": "hermes-lcm",
-            "label": "LCM",
-            "description": "Lossless Context Management dashboard tab.",
-            "icon": "Database",
-            "entry": "dist/index.js",
-            "css": "dist/style.css",
-            "has_api": true,
-            "source": "tracedecay",
-        },
-        {
-            "name": "graph",
-            "label": "Code Graph",
-            "description": "Search and explore the indexed code graph.",
-            "icon": "Network",
-            "entry": "dist/index.js",
-            "css": "dist/style.css",
-            "has_api": true,
-            "source": "tracedecay",
-        },
-        {
-            "name": "savings",
-            "label": "Savings & Cost",
-            "description": "Token savings ledger and session cost accounting.",
-            "icon": "PiggyBank",
-            "entry": "dist/index.js",
-            "css": "dist/style.css",
-            "has_api": true,
-            "source": "tracedecay",
-        }
-    ]))
+    Json(json!(assets::DASHBOARD_PLUGINS
+        .iter()
+        .map(|plugin| {
+            json!({
+                "name": plugin.name,
+                "label": plugin.label,
+                "description": plugin.description,
+                "icon": plugin.icon,
+                "entry": "dist/index.js",
+                "css": "dist/style.css",
+                "has_api": true,
+                "source": "tracedecay",
+            })
+        })
+        .collect::<Vec<_>>()))
 }

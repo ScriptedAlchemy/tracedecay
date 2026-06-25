@@ -601,15 +601,21 @@ pub fn backup_and_write_json(path: &Path, value: &serde_json::Value) -> bool {
 pub fn which_tracedecay() -> Option<String> {
     let current_exe = std::env::current_exe().ok();
     let path_var = std::env::var_os("PATH");
-    which_tracedecay_from(current_exe.as_deref(), path_var.as_deref())
+    let cargo_target_dir = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from);
+    which_tracedecay_from(
+        current_exe.as_deref(),
+        path_var.as_deref(),
+        cargo_target_dir.as_deref(),
+    )
 }
 
 fn which_tracedecay_from(
     current_exe: Option<&Path>,
     path_var: Option<&std::ffi::OsStr>,
+    cargo_target_dir: Option<&Path>,
 ) -> Option<String> {
-    if let Some(exe) =
-        current_exe.filter(|exe| is_tracedecay_exe(exe) && !is_cargo_target_binary(exe))
+    if let Some(exe) = current_exe
+        .filter(|exe| is_tracedecay_exe(exe) && !is_cargo_target_binary(exe, cargo_target_dir))
     {
         return Some(normalize_path_separators(&exe.to_string_lossy()));
     }
@@ -617,7 +623,7 @@ fn which_tracedecay_from(
     let path_match = path_var.and_then(|path_var| {
         std::env::split_paths(path_var).find_map(|dir| {
             let candidate = dir.join(tracedecay_bin_name());
-            (candidate.exists() && !is_cargo_target_binary(&candidate))
+            (candidate.exists() && !is_cargo_target_binary(&candidate, cargo_target_dir))
                 .then(|| normalize_path_separators(&candidate.to_string_lossy()))
         })
     });
@@ -638,7 +644,11 @@ fn is_tracedecay_exe(path: &Path) -> bool {
         .is_some_and(|name| name == "tracedecay")
 }
 
-fn is_cargo_target_binary(path: &Path) -> bool {
+fn is_cargo_target_binary(path: &Path, cargo_target_dir: Option<&Path>) -> bool {
+    if cargo_target_dir.is_some_and(|target_dir| path.starts_with(target_dir)) {
+        return true;
+    }
+
     let mut saw_target = false;
     for component in path.components() {
         let value = component.as_os_str();
@@ -2184,8 +2194,31 @@ mod path_normalize_tests {
             .join(tracedecay_bin_name());
         let path_var = std::env::join_paths([dir.path().join("bin")]).unwrap();
 
-        let found = which_tracedecay_from(Some(&current_exe), Some(path_var.as_os_str()))
+        let found = which_tracedecay_from(Some(&current_exe), Some(path_var.as_os_str()), None)
             .expect("PATH binary should be preferred over cargo target binary");
+
+        assert_eq!(
+            found,
+            normalize_path_separators(&path_bin.to_string_lossy())
+        );
+    }
+
+    #[test]
+    fn which_tracedecay_prefers_path_when_current_exe_is_custom_cargo_target_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path_bin = dir.path().join("bin").join(tracedecay_bin_name());
+        std::fs::create_dir_all(path_bin.parent().unwrap()).unwrap();
+        std::fs::write(&path_bin, "").unwrap();
+        let cargo_target_dir = dir.path().join("custom-target");
+        let current_exe = cargo_target_dir.join("debug").join(tracedecay_bin_name());
+        let path_var = std::env::join_paths([dir.path().join("bin")]).unwrap();
+
+        let found = which_tracedecay_from(
+            Some(&current_exe),
+            Some(path_var.as_os_str()),
+            Some(&cargo_target_dir),
+        )
+        .expect("PATH binary should be preferred over a custom cargo target binary");
 
         assert_eq!(
             found,
@@ -2209,7 +2242,7 @@ mod path_normalize_tests {
             std::env::join_paths([target_bin.parent().unwrap(), stable_bin.parent().unwrap()])
                 .unwrap();
 
-        let found = which_tracedecay_from(None, Some(path_var.as_os_str()))
+        let found = which_tracedecay_from(None, Some(path_var.as_os_str()), None)
             .expect("stable PATH binary should be found after skipping cargo target binary");
 
         assert_eq!(
@@ -2227,7 +2260,7 @@ mod path_normalize_tests {
         let current_exe = dir.path().join(".cargo/bin").join(tracedecay_bin_name());
         let path_var = std::env::join_paths([dir.path().join("bin")]).unwrap();
 
-        let found = which_tracedecay_from(Some(&current_exe), Some(path_var.as_os_str()))
+        let found = which_tracedecay_from(Some(&current_exe), Some(path_var.as_os_str()), None)
             .expect("non-target current exe should be accepted");
 
         assert_eq!(

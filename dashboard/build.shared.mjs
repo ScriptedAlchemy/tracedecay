@@ -23,6 +23,8 @@ export const EMBEDDED_DIST_FILES = [
   "lcm/dist/style.css",
   "graph/dist/index.js",
   "graph/dist/style.css",
+  "code-diagnostics/dist/index.js",
+  "code-diagnostics/dist/style.css",
   "savings/dist/index.js",
   "savings/dist/style.css",
 ];
@@ -47,6 +49,7 @@ export const DASHBOARD_SOURCE_DIRS = [
   "graph/src",
   "holographic/src",
   "lcm/src",
+  "code-diagnostics/src",
   "lib",
   "savings/src",
   "shell/src",

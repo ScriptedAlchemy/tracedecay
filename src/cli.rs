@@ -103,6 +103,11 @@ pub enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Inspect language-server support for dashboard code diagnostics
+    Lsp {
+        #[command(subcommand)]
+        action: LspAction,
+    },
     /// Configure agent integration (MCP server, permissions, hooks, prompt rules)
     #[command(name = "install", visible_alias = "claude-install")]
     Install {
@@ -387,6 +392,16 @@ pub enum Commands {
         /// List ALL tracked projects from the global DB
         #[arg(short, long)]
         all: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum LspAction {
+    /// List supported language servers, availability, and install hints
+    Servers {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 

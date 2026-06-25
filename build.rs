@@ -16,6 +16,8 @@ const DASHBOARD_ASSET_FILES: &[&str] = &[
     "dashboard/lcm/dist/style.css",
     "dashboard/graph/dist/index.js",
     "dashboard/graph/dist/style.css",
+    "dashboard/code-diagnostics/dist/index.js",
+    "dashboard/code-diagnostics/dist/style.css",
     "dashboard/savings/dist/index.js",
     "dashboard/savings/dist/style.css",
 ];
@@ -31,6 +33,7 @@ const DASHBOARD_SOURCE_DIRS: &[&str] = &[
     "dashboard/graph/src",
     "dashboard/holographic/src",
     "dashboard/lcm/src",
+    "dashboard/code-diagnostics/src",
     "dashboard/lib",
     "dashboard/savings/src",
     "dashboard/shell/src",

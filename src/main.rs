@@ -12,6 +12,7 @@ mod commands;
 mod cost_cmd;
 mod global;
 mod hook_cmd;
+mod lsp_cmd;
 mod sessions_cmd;
 mod status_cmd;
 mod tool_command;
@@ -562,6 +563,9 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
         } => {
             tool_command::run(project, name, args).await?;
         }
+        Commands::Lsp { action } => {
+            lsp_cmd::handle_lsp_action(action)?;
+        }
         Commands::Install {
             agent,
             local,
@@ -875,6 +879,7 @@ fn should_skip_startup_maintenance(command: &Commands) -> bool {
             | Commands::Update
             | Commands::PostUpdate
             | Commands::Uninstall { .. }
+            | Commands::Lsp { .. }
             | Commands::Doctor { .. }
             | Commands::Migrate { .. }
             | Commands::HookPreToolUse
@@ -938,6 +943,7 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
             | Commands::Update
             | Commands::PostUpdate
             | Commands::Uninstall { .. }
+            | Commands::Lsp { .. }
             | Commands::Doctor { .. }
             | Commands::Migrate { .. }
             | Commands::Tool { .. }

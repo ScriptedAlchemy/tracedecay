@@ -11,6 +11,7 @@
 //! enclosing graph node, so callers get structured errors mapped to the
 //! same node IDs the rest of tracedecay's tools speak.
 
+pub mod lsp;
 pub mod python;
 pub mod rust;
 pub mod typescript;
