@@ -1,6 +1,6 @@
 # Self-Improving Loop Contracts
 
-This document is the durable contract for TraceDecay-owned self-improvement loops. Hermes is a reference implementation and compatibility bridge; it is not required to run TraceDecay curation, managed skills, scheduler jobs, or artifact generation. The first standalone backend is the Codex app-server adapter, and the same contracts are intended to support other delegated or CLI hosts later.
+This is the durable contract for TraceDecay-owned self-improvement loops. Hermes is a reference implementation and compatibility bridge, not a requirement for curation, managed skills, scheduler jobs, or artifact generation. The first standalone backend is the Codex app-server adapter, and the same contracts are intended to support other delegated or CLI hosts later.
 
 ## Host Matrix
 

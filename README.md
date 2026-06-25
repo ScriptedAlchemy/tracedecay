@@ -164,9 +164,8 @@ host surface that each provider can load safely:
 | Hermes | Read-only bridge only. Hermes owns its native skill store; TraceDecay does not export or mutate Hermes skills. |
 
 The curation backend is provider-agnostic. Hermes remains a compatibility bridge
-and reference source, while TraceDecay's automation config can delegate
-intelligence to hosts such as the Codex app server without requiring Hermes to
-run.
+and reference source; TraceDecay automation can delegate intelligence to hosts
+such as the Codex app server without requiring Hermes to run.
 
 For project-scoped setup, run from the repository root:
 

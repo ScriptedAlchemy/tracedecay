@@ -2,11 +2,11 @@
 
 ## Summary
 
-Phase 1 adds a dedicated **Code Diagnostics** dashboard surface powered by a TraceDecay-owned, LSP-first diagnostics broker. The broker starts supported language servers when available, keeps them warm while the dashboard process is alive, caches diagnostics, and exposes status/results only through dashboard APIs. Hooks, prompt hints, MCP auto-context, and model-visible summaries are explicitly out of Phase 1 and are documented as Phase 2 extension points.
+Phase 1 adds a dedicated **Code Diagnostics** dashboard surface powered by a TraceDecay-owned, LSP-first diagnostics broker. The broker starts supported language servers when available, keeps them warm while the dashboard process is alive, caches diagnostics, and exposes status/results only through dashboard APIs. Hooks, prompt hints, MCP auto-context, and model-visible summaries stay out of Phase 1 and remain Phase 2 extension points.
 
-Phase 1 is a general LSP diagnostics platform, not a Rust-only feature. It ships a broker and adapter registry that can host every language server TraceDecay knows how to start. Rust is an important validation path because `rust-analyzer` highlights the cold `cargo check` problem, but the architecture and dashboard controls are language-generic.
+The platform is language-generic, not Rust-only. Rust is an important validation path because `rust-analyzer` highlights the cold `cargo check` problem, but the broker, adapter registry, and dashboard controls must work for every supported language server.
 
-Built-in Phase 1 adapters should cover the practical, low-friction language servers first:
+Built-in adapters should cover the practical, low-friction language servers first:
 
 - Rust via `rust-analyzer`
 - TypeScript and JavaScript via `typescript-language-server`
@@ -43,7 +43,7 @@ Each language can be enabled or disabled from the dashboard. Disabled languages 
 
 ## Product Surface
 
-The dashboard gains a new dedicated **Code Diagnostics** tab or plugin area, separate from the existing Savings & Cost `Diagnostics` view. The existing diagnostics panel reports TraceDecay hook/tool/prompt telemetry, so compiler and type diagnostics should not be mixed into it.
+The dashboard gains a dedicated **Code Diagnostics** tab or plugin area. It stays separate from the existing Savings & Cost `Diagnostics` view, which reports TraceDecay hook/tool/prompt telemetry rather than compiler or type diagnostics.
 
 The Code Diagnostics UI includes:
 
@@ -86,7 +86,7 @@ src/diagnostics/lsp/
     settings.rs     project-persisted language enablement
 ```
 
-The broker is owned by dashboard state, not by hidden autostart infrastructure. When `tracedecay dashboard` starts, it builds one `DiagnosticBroker` for the active project. The broker lazily starts language servers when the Code Diagnostics UI asks for status, diagnostics, or refresh. This avoids surprising background work for users who never open the tab.
+Dashboard state owns the broker; hidden autostart infrastructure does not. When `tracedecay dashboard` starts, it builds one `DiagnosticBroker` for the active project. The broker starts language servers lazily when the Code Diagnostics UI asks for status, diagnostics, or refresh, so users who never open the tab do not get surprise background work.
 
 The broker stores:
 
@@ -102,7 +102,7 @@ The broker stores:
 
 ## Adapter Registry and Language Coverage
 
-The LSP broker uses an adapter registry. Each adapter is a declarative unit that answers:
+The LSP broker uses an adapter registry. Each adapter declares:
 
 - which TraceDecay languages it handles
 - LSP language id for each file type
@@ -139,11 +139,11 @@ root_markers = ["Gemfile", ".ruby-version"]
 diagnostics = "push"
 ```
 
-The dashboard should list built-in and custom adapters together. For unsupported languages, it should show an “Add custom LSP adapter” affordance rather than pretending TraceDecay has no path forward.
+The dashboard should list built-in and custom adapters together. Unsupported languages should show an “Add custom LSP adapter” affordance rather than imply TraceDecay has no path forward.
 
 ## External Implementation Notes
 
-The design should copy proven LSP-client shapes from existing projects rather than invent protocol machinery from scratch.
+The design should reuse proven LSP-client shapes from existing projects rather than invent protocol machinery from scratch.
 
 Relevant findings:
 
@@ -176,7 +176,7 @@ For each supported language, an adapter provides:
 - file extensions to open
 - diagnostic capability support
 
-Phase 1 starts with stdio LSP servers launched by TraceDecay. It does not attempt to attach to Cursor, VS Code, or other editor-owned LSP sessions because the LSP lifecycle is client-owned and not exposed through a standard cross-editor discovery API.
+TraceDecay starts stdio LSP servers itself in Phase 1. It does not attach to Cursor, VS Code, or other editor-owned LSP sessions because the LSP lifecycle is client-owned and not exposed through a standard cross-editor discovery API.
 
 The active lifecycle is:
 
@@ -220,7 +220,7 @@ The broker should avoid a full project file walk on every refresh when possible.
 
 ## Idle Whole-Project Backfill
 
-Phase 1 should passively collect diagnostics for files the user has not touched, but only through dashboard-owned idle work. This gives the dashboard a project-wide type-error view without making hooks or prompt submission slower.
+Phase 1 passively collects diagnostics for files the user has not touched, but only through dashboard-owned idle work. This gives the dashboard a project-wide type-error view without slowing hooks or prompt submission.
 
 Idle backfill behavior:
 
@@ -238,7 +238,7 @@ Backfill modes:
 - `off`: no passive project sweep.
 - `idle`: default. Backfill only when the dashboard process is idle and no explicit refresh is active.
 
-The Phase 1 default should be `idle`. This gives users broad coverage without surprising CPU use. A repeating `continuous` sweep can be considered later, but it is not part of Phase 1. The dashboard should expose the Phase 1 setting and show current backfill progress.
+The Phase 1 default is `idle`, which gives broad coverage without surprising CPU use. A repeating `continuous` sweep can be considered later, but it is not part of Phase 1. The dashboard should expose the setting and show current backfill progress.
 
 Whole-project coverage is best-effort. Some LSP servers publish diagnostics for the entire workspace after initialization; others only publish for opened files. The broker should support both:
 
@@ -290,7 +290,7 @@ pub struct DiagnosticEngineStatus {
 }
 ```
 
-The first implementation can keep the cache in memory while the dashboard runs. Persisting the latest snapshot to a dashboard sidecar table is allowed in Phase 1 if it is useful for reload behavior, but the UI must clearly distinguish cached/stale data from fresh data.
+The first implementation can keep the cache in memory while the dashboard runs. Persisting the latest snapshot to a dashboard sidecar table is allowed in Phase 1 for reload behavior, but the UI must clearly distinguish cached/stale data from fresh data.
 
 ## Dashboard API
 
@@ -330,7 +330,7 @@ Add a dedicated frontend package or panel matching existing dashboard plugin pat
 - Refresh/restart controls using existing button and table primitives.
 - Idle backfill control with progress for project-wide coverage.
 
-The UI should treat disabled and unavailable languages differently:
+The UI should distinguish disabled and unavailable languages:
 
 - Disabled: user intentionally turned it off.
 - Unavailable: enabled, but binary or project manifest is missing.
@@ -487,7 +487,7 @@ All LSP diagnostics work is fail-open:
 - Malformed LSP diagnostics: malformed entries are dropped and counted in engine status.
 - Graph enrichment failure: diagnostics are still returned with `enclosing: null`.
 
-The dashboard should never panic or fail to load because one language server is broken.
+One broken language server must never panic the dashboard or prevent it from loading.
 
 ## Testing Strategy
 

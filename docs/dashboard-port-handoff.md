@@ -302,8 +302,8 @@ each op is one of:
 Response: `{"results": [per-op result], "counts": {"deleted", "merged",
 "errors"}}`. Ids are validated per-op; partial failures are reported per-op
 (status stays 200), never as a whole-request 500. A 400 is returned only for a
-malformed body. This is the contract the Hermes wrapper's future LLM curation
-planner builds against.
+malformed body. Standalone automation backends and delegated host planners use
+this contract.
 
 ### Capabilities
 
