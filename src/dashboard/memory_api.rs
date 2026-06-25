@@ -22,6 +22,7 @@ use axum::response::Json;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
+use super::automation_run_service;
 use super::memory_analysis::{SIMILARITY_DEFAULT_THRESHOLD, SIMILARITY_PAIR_CAP};
 use super::memory_service;
 use super::util::{coerce_limit, http_detail, query_i64, JsonPath, JsonQuery};
@@ -558,7 +559,7 @@ pub(crate) async fn curation_agent_plan(
             )),
         );
     }
-    match Box::pin(memory_service::curation_agent_plan_payload(
+    match Box::pin(automation_run_service::curation_agent_plan_payload(
         &state,
         body.max_clusters,
         body.min_confidence,

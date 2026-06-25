@@ -1,12 +1,15 @@
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::response::Json;
+use std::future::Future;
 use std::path::PathBuf;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::automation_run_service::{self, SessionReflectionRunRequest};
+use super::automation_run_service::{
+    self, MemoryCuratorRunRequest, SessionReflectionRunRequest, SkillWritingRunRequest,
+};
 use super::memory_api::{
     default_agent_plan_max_clusters, default_agent_plan_min_confidence, default_dry_run,
 };
@@ -42,6 +45,15 @@ impl Default for MemoryCuratorRunBody {
             dry_run: default_dry_run(),
             max_clusters: default_agent_plan_max_clusters(),
             min_confidence: default_agent_plan_min_confidence(),
+        }
+    }
+}
+
+impl From<MemoryCuratorRunBody> for MemoryCuratorRunRequest {
+    fn from(body: MemoryCuratorRunBody) -> Self {
+        Self {
+            max_clusters: body.max_clusters,
+            min_confidence: body.min_confidence,
         }
     }
 }
@@ -96,27 +108,12 @@ pub(crate) struct SkillWritingRunBody {
     evidence_limit: Option<usize>,
 }
 
-#[derive(Debug)]
-enum AutomationRunBody {
-    MemoryCurator(MemoryCuratorRunBody),
-    SessionReflection(SessionReflectionRunBody),
-    SkillWriting(SkillWritingRunBody),
-}
-
-impl AutomationRunBody {
-    fn task(&self) -> AgentTaskKind {
-        match self {
-            Self::MemoryCurator(_) => AgentTaskKind::MemoryCurator,
-            Self::SessionReflection(_) => AgentTaskKind::SessionReflector,
-            Self::SkillWriting(_) => AgentTaskKind::SkillWriter,
-        }
-    }
-
-    fn dry_run(&self) -> bool {
-        match self {
-            Self::MemoryCurator(body) => body.dry_run,
-            Self::SessionReflection(body) => body.dry_run,
-            Self::SkillWriting(body) => body.dry_run,
+impl From<SkillWritingRunBody> for SkillWritingRunRequest {
+    fn from(body: SkillWritingRunBody) -> Self {
+        Self {
+            provider: body.provider,
+            query: body.query,
+            evidence_limit: body.evidence_limit,
         }
     }
 }
@@ -125,10 +122,22 @@ pub(crate) async fn memory_curator(
     State(state): State<DashboardState>,
     body: Option<axum::extract::Json<MemoryCuratorRunBody>>,
 ) -> (StatusCode, Json<Value>) {
+    let body = body.map(|body| body.0).unwrap_or_default();
+    let dry_run = body.dry_run;
+    let request = MemoryCuratorRunRequest::from(body);
     run_dashboard_task_endpoint(
         state,
-        AutomationRunBody::MemoryCurator(body.map(|body| body.0).unwrap_or_default()),
+        dry_run,
         "memory-curator",
+        AgentTaskKind::MemoryCurator,
+        move |state, run_id| async move {
+            automation_run_service::curation_agent_plan_payload_with_run_id(
+                &state,
+                request,
+                Some(run_id),
+            )
+            .await
+        },
     )
     .await
 }
@@ -137,10 +146,22 @@ pub(crate) async fn session_reflection(
     State(state): State<DashboardState>,
     body: Option<axum::extract::Json<SessionReflectionRunBody>>,
 ) -> (StatusCode, Json<Value>) {
+    let body = body.map(|body| body.0).unwrap_or_default();
+    let dry_run = body.dry_run;
+    let request = SessionReflectionRunRequest::from(body);
     run_dashboard_task_endpoint(
         state,
-        AutomationRunBody::SessionReflection(body.map(|body| body.0).unwrap_or_default()),
+        dry_run,
         "session-reflection",
+        AgentTaskKind::SessionReflector,
+        move |state, run_id| async move {
+            automation_run_service::session_reflection_run_payload_with_run_id(
+                &state,
+                request,
+                Some(run_id),
+            )
+            .await
+        },
     )
     .await
 }
@@ -149,23 +170,41 @@ pub(crate) async fn skill_writing(
     State(state): State<DashboardState>,
     body: Option<axum::extract::Json<SkillWritingRunBody>>,
 ) -> (StatusCode, Json<Value>) {
+    let body = body.map(|body| body.0).unwrap_or_default();
+    let dry_run = body.dry_run;
+    let request = SkillWritingRunRequest::from(body);
     run_dashboard_task_endpoint(
         state,
-        AutomationRunBody::SkillWriting(body.map(|body| body.0).unwrap_or_default()),
+        dry_run,
         "skill-writing",
+        AgentTaskKind::SkillWriter,
+        move |state, run_id| async move {
+            automation_run_service::skill_writing_run_payload_with_run_id(
+                &state,
+                request,
+                Some(run_id),
+            )
+            .await
+        },
     )
     .await
 }
 
-async fn run_dashboard_task_endpoint(
+async fn run_dashboard_task_endpoint<F, Fut>(
     state: DashboardState,
-    body: AutomationRunBody,
+    dry_run: bool,
     task_label: &'static str,
-) -> (StatusCode, Json<Value>) {
-    if !body.dry_run() {
+    task: AgentTaskKind,
+    run_job: F,
+) -> (StatusCode, Json<Value>)
+where
+    F: FnOnce(DashboardState, String) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<Value, String>> + Send + 'static,
+{
+    if !dry_run {
         return dry_run_only_response(task_label);
     }
-    enqueue_dashboard_run(state, body).await
+    enqueue_dashboard_run(state, task, run_job).await
 }
 
 pub(crate) async fn artifact_list(
@@ -277,11 +316,15 @@ fn expected_artifact_chain_kinds() -> Vec<&'static str> {
     ]
 }
 
-async fn enqueue_dashboard_run(
+async fn enqueue_dashboard_run<F, Fut>(
     state: DashboardState,
-    body: AutomationRunBody,
-) -> (StatusCode, Json<Value>) {
-    let task = body.task();
+    task: AgentTaskKind,
+    run_job: F,
+) -> (StatusCode, Json<Value>)
+where
+    F: FnOnce(DashboardState, String) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<Value, String>> + Send + 'static,
+{
     let run_id = dashboard_run_id(task);
     let queued =
         match append_dashboard_job_record(&state, &run_id, task, AutomationRunStatus::Queued, None)
@@ -308,17 +351,20 @@ async fn enqueue_dashboard_run(
 
     let payload = automation_job_payload(&run_id, &queued);
     tokio::spawn(async move {
-        Box::pin(run_dashboard_job(state, run_id, task, body)).await;
+        Box::pin(run_dashboard_job(state, run_id, task, run_job)).await;
     });
     (StatusCode::ACCEPTED, Json(payload))
 }
 
-async fn run_dashboard_job(
+async fn run_dashboard_job<F, Fut>(
     state: DashboardState,
     run_id: String,
     task: AgentTaskKind,
-    body: AutomationRunBody,
-) {
+    run_job: F,
+) where
+    F: FnOnce(DashboardState, String) -> Fut,
+    Fut: Future<Output = Result<Value, String>>,
+{
     if let Err(err) = append_running_record(&state, &run_id, task).await {
         eprintln!("[tracedecay] failed to mark automation run running: {err}");
     }
@@ -338,43 +384,7 @@ async fn run_dashboard_job(
         }
     }
 
-    let result = match body {
-        AutomationRunBody::MemoryCurator(body) => {
-            Box::pin(
-                automation_run_service::curation_agent_plan_payload_with_run_id(
-                    &state,
-                    body.max_clusters,
-                    body.min_confidence,
-                    Some(run_id.clone()),
-                ),
-            )
-            .await
-        }
-        AutomationRunBody::SessionReflection(body) => {
-            Box::pin(
-                automation_run_service::session_reflection_run_payload_with_run_id(
-                    &state,
-                    body.into(),
-                    Some(run_id.clone()),
-                ),
-            )
-            .await
-        }
-        AutomationRunBody::SkillWriting(body) => {
-            Box::pin(
-                automation_run_service::skill_writing_run_payload_with_run_id(
-                    &state,
-                    body.provider,
-                    body.query,
-                    body.evidence_limit,
-                    Some(run_id.clone()),
-                ),
-            )
-            .await
-        }
-    };
-
-    if let Err(err) = result {
+    if let Err(err) = run_job(state.clone(), run_id.clone()).await {
         append_failed_if_missing(&state, &run_id, task, err).await;
     }
 }

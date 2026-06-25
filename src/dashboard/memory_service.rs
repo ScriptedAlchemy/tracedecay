@@ -718,15 +718,6 @@ pub(crate) async fn curation_preview_payload(state: &DashboardState) -> Value {
     }
 }
 
-pub(crate) async fn curation_agent_plan_payload(
-    state: &DashboardState,
-    max_clusters: usize,
-    min_confidence: f64,
-) -> Result<Value, String> {
-    super::automation_run_service::curation_agent_plan_payload(state, max_clusters, min_confidence)
-        .await
-}
-
 pub(crate) async fn build_delete_plan(
     state: &DashboardState,
 ) -> Result<(Vec<Value>, Value, Map<String, Value>, i64), String> {

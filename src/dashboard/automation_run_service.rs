@@ -6,6 +6,11 @@ use super::memory_service::{push_curation_activity, push_curation_activity_with_
 use super::DashboardState;
 use crate::sessions::lcm::{LcmGrepSort, LcmScope};
 
+pub(crate) struct MemoryCuratorRunRequest {
+    pub max_clusters: usize,
+    pub min_confidence: f64,
+}
+
 pub(crate) async fn curation_agent_plan_payload(
     state: &DashboardState,
     max_clusters: usize,
@@ -13,8 +18,10 @@ pub(crate) async fn curation_agent_plan_payload(
 ) -> Result<Value, String> {
     Box::pin(curation_agent_plan_payload_with_run_id(
         state,
-        max_clusters,
-        min_confidence,
+        MemoryCuratorRunRequest {
+            max_clusters,
+            min_confidence,
+        },
         None,
     ))
     .await
@@ -22,8 +29,7 @@ pub(crate) async fn curation_agent_plan_payload(
 
 pub(crate) async fn curation_agent_plan_payload_with_run_id(
     state: &DashboardState,
-    max_clusters: usize,
-    min_confidence: f64,
+    request: MemoryCuratorRunRequest,
     run_id: Option<String>,
 ) -> Result<Value, String> {
     use crate::automation::run_ledger::AutomationTrigger;
@@ -64,7 +70,8 @@ pub(crate) async fn curation_agent_plan_payload_with_run_id(
         state,
         "evidence",
         format!(
-            "Collecting memory-curator evidence with up to {max_clusters} cluster(s) at confidence floor {min_confidence:.2}"
+            "Collecting memory-curator evidence with up to {} cluster(s) at confidence floor {:.2}",
+            request.max_clusters, request.min_confidence
         ),
         true,
     )
@@ -83,8 +90,8 @@ pub(crate) async fn curation_agent_plan_payload_with_run_id(
         MemoryCuratorAutomationOptions {
             trigger: AutomationTrigger::Dashboard,
             run_id,
-            max_clusters,
-            min_confidence,
+            max_clusters: request.max_clusters,
+            min_confidence: request.min_confidence,
         },
     )
     .await
@@ -239,6 +246,12 @@ pub(crate) struct SessionReflectionRunRequest {
     pub end_time: Option<i64>,
 }
 
+pub(crate) struct SkillWritingRunRequest {
+    pub provider: Option<String>,
+    pub query: Option<String>,
+    pub evidence_limit: Option<usize>,
+}
+
 pub(crate) async fn session_reflection_run_payload_with_run_id(
     state: &DashboardState,
     request: SessionReflectionRunRequest,
@@ -341,9 +354,7 @@ pub(crate) async fn session_reflection_run_payload_with_run_id(
 
 pub(crate) async fn skill_writing_run_payload_with_run_id(
     state: &DashboardState,
-    provider: Option<String>,
-    query: Option<String>,
-    evidence_limit: Option<usize>,
+    request: SkillWritingRunRequest,
     run_id: Option<String>,
 ) -> Result<Value, String> {
     use crate::automation::run_ledger::AutomationTrigger;
@@ -375,13 +386,13 @@ pub(crate) async fn skill_writing_run_payload_with_run_id(
         profile_root: None,
         ..SkillWriterAutomationOptions::default()
     };
-    if let Some(provider) = provider {
+    if let Some(provider) = request.provider {
         options.provider = provider;
     }
-    if let Some(query) = query {
+    if let Some(query) = request.query {
         options.query = query;
     }
-    if let Some(evidence_limit) = evidence_limit {
+    if let Some(evidence_limit) = request.evidence_limit {
         options.evidence_limit = evidence_limit;
     }
     let run = match run_skill_writer_with_backend(
