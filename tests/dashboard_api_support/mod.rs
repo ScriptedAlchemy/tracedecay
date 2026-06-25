@@ -508,22 +508,30 @@ pub(crate) fn make_executable(path: &Path) {
 #[cfg(not(unix))]
 pub(crate) fn make_executable(_path: &Path) {}
 
-#[cfg(windows)]
 fn windows_python_launcher(script_name: &str) -> String {
     format!(
         "@echo off\r\n\
 setlocal\r\n\
+if defined Python_ROOT_DIR if exist \"%Python_ROOT_DIR%\\python.exe\" (\r\n\
+  \"%Python_ROOT_DIR%\\python.exe\" \"%~dp0{script_name}\" %*\r\n\
+  exit /b %ERRORLEVEL%\r\n\
+)\r\n\
+if defined pythonLocation if exist \"%pythonLocation%\\python.exe\" (\r\n\
+  \"%pythonLocation%\\python.exe\" \"%~dp0{script_name}\" %*\r\n\
+  exit /b %ERRORLEVEL%\r\n\
+)\r\n\
 where python >nul 2>nul\r\n\
 if not errorlevel 1 (\r\n\
   python \"%~dp0{script_name}\" %*\r\n\
-  if not errorlevel 1 exit /b 0\r\n\
+  exit /b %ERRORLEVEL%\r\n\
 )\r\n\
 where python3 >nul 2>nul\r\n\
 if not errorlevel 1 (\r\n\
   python3 \"%~dp0{script_name}\" %*\r\n\
-  if not errorlevel 1 exit /b 0\r\n\
+  exit /b %ERRORLEVEL%\r\n\
 )\r\n\
-py -3 \"%~dp0{script_name}\" %*\r\n"
+py -3 \"%~dp0{script_name}\" %*\r\n\
+exit /b %ERRORLEVEL%\r\n"
     )
 }
 
