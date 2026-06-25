@@ -20,6 +20,14 @@ use tracedecay::sessions::codex_app_server::{
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+fn fake_codex_response_timeout() -> Duration {
+    if cfg!(windows) {
+        Duration::from_secs(30)
+    } else {
+        Duration::from_secs(5)
+    }
+}
+
 struct EchoBackend;
 
 impl AgentTaskBackend for EchoBackend {
@@ -144,7 +152,7 @@ fn fake_codex_app_server_returns_summary_and_logs_protocol() {
     let config = CodexAppServerSummaryConfig {
         codex_bin: fake.bin.display().to_string(),
         model: Some("configured-model".to_string()),
-        timeout: Duration::from_secs(5),
+        timeout: fake_codex_response_timeout(),
         max_tokens: Some(2048),
         temperature: Some(0.2),
     };
@@ -186,7 +194,7 @@ fn codex_app_server_backend_run_task_uses_injected_config() {
     let backend = CodexAppServerBackend::from_config(CodexAppServerSummaryConfig {
         codex_bin: fake.bin.display().to_string(),
         model: Some("configured-model".to_string()),
-        timeout: Duration::from_secs(5),
+        timeout: fake_codex_response_timeout(),
         max_tokens: None,
         temperature: None,
     });
@@ -232,7 +240,7 @@ fn codex_app_server_backend_falls_back_to_configured_model_when_server_omits_mod
     let backend = CodexAppServerBackend::from_config(CodexAppServerSummaryConfig {
         codex_bin: fake.bin.display().to_string(),
         model: Some("configured-model".to_string()),
-        timeout: Duration::from_secs(5),
+        timeout: fake_codex_response_timeout(),
         max_tokens: None,
         temperature: None,
     });
@@ -407,7 +415,7 @@ fn fake_codex_app_server_uses_thread_model_when_turn_omits_model() {
     let config = CodexAppServerSummaryConfig {
         codex_bin: fake.bin.display().to_string(),
         model: Some("configured-model".to_string()),
-        timeout: Duration::from_secs(5),
+        timeout: fake_codex_response_timeout(),
         max_tokens: None,
         temperature: None,
     };
@@ -426,7 +434,7 @@ fn fake_codex_app_server_rejects_empty_turn_output() {
     let config = CodexAppServerSummaryConfig {
         codex_bin: fake.bin.display().to_string(),
         model: None,
-        timeout: Duration::from_secs(5),
+        timeout: fake_codex_response_timeout(),
         max_tokens: None,
         temperature: None,
     };
@@ -470,7 +478,7 @@ fn fake_codex_app_server_rejects_malformed_json_and_reaps_child() {
     let config = CodexAppServerSummaryConfig {
         codex_bin: fake.bin.display().to_string(),
         model: None,
-        timeout: Duration::from_secs(5),
+        timeout: fake_codex_response_timeout(),
         max_tokens: None,
         temperature: None,
     };
