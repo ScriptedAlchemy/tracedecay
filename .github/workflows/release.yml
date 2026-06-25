@@ -39,7 +39,7 @@ jobs:
             target: aarch64-unknown-linux-gnu
             archive: tar.gz
           - name: x86_64-windows
-            runner: [self-hosted, Windows, X64, lennox-windows]
+            runner: [self-hosted, Windows, X64, windows-runner]
             target: x86_64-pc-windows-msvc
             archive: zip
 
