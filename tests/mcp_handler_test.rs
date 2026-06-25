@@ -17,19 +17,29 @@ use std::time::{Duration, SystemTime};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tokio::sync::{Mutex, MutexGuard};
+use tracedecay::automation::managed_skills::{
+    approve_managed_skill, create_managed_skill_draft, ManagedSkillDraft, ManagedSkillProvenance,
+    ManagedSkillSource, ManagedSupportFile,
+};
+use tracedecay::automation::run_ledger::{
+    append_run_record, write_run_artifact, AutomationRunArtifactKind, AutomationRunLedgerRecord,
+    AutomationRunStatus, AutomationTrigger,
+};
+use tracedecay::automation::skill_usage::{
+    load_skill_usage_record, record_skill_usage, SkillUsageAction,
+};
 use tracedecay::db::Database;
 use tracedecay::errors::TraceDecayError;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::mcp::{get_tool_definitions, ToolResult};
 use tracedecay::memory::store::MemoryStore;
-use tracedecay::sessions::cursor::open_project_session_db;
+use tracedecay::sessions::cursor::{cursor_project_slug, open_project_session_db};
 use tracedecay::sessions::lcm::{
     LcmLifecycleUpdate, LcmMaintenanceDebt, LcmSourceRef, LcmSummaryNodeDraft,
 };
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::storage::{
-    resolve_layout_for_current_profile, resolve_lcm_payload_root, resolve_project_session_db_path,
-    resolve_response_handle_root,
+    resolve_layout_for_current_profile, resolve_lcm_payload_root, resolve_response_handle_root,
 };
 use tracedecay::tracedecay::TraceDecay;
 
@@ -478,8 +488,13 @@ fn lcm_payload_dir(cg: &TraceDecay) -> PathBuf {
 }
 
 fn project_session_db_path(cg: &TraceDecay) -> PathBuf {
-    resolve_project_session_db_path(cg.project_root())
-        .unwrap_or_else(|err| panic!("failed to resolve test project session DB path: {err}"))
+    cg.store_layout().sessions_db_path.clone()
+}
+
+async fn open_active_project_session_db(cg: &TraceDecay) -> GlobalDb {
+    GlobalDb::open_at(&project_session_db_path(cg))
+        .await
+        .expect("active project-local session db should open")
 }
 
 /// Creates a small Rust library with an integration-style test that calls a
@@ -6400,9 +6415,7 @@ async fn memory_tools_validate_malformed_inputs() {
 #[tokio::test]
 async fn message_search_reads_project_local_session_db() {
     let (cg, _dir) = setup_project().await;
-    let db = open_project_session_db(cg.project_root())
-        .await
-        .expect("project-local session db should open");
+    let db = open_active_project_session_db(&cg).await;
     let session = SessionRecord {
         provider: "cursor".to_string(),
         session_id: "cursor-session".to_string(),
@@ -6517,6 +6530,8 @@ async fn message_search_reads_project_local_session_db() {
     .unwrap();
     let parsed = extract_json(&result.value);
     assert_eq!(parsed["status"], "ok");
+    assert_eq!(parsed["provider"], "cursor");
+    assert_eq!(parsed["requested_provider"], "cursor");
     assert_eq!(parsed["count"], 1);
     assert_eq!(
         parsed["results"][0]["message"]["message_id"],
@@ -6576,6 +6591,142 @@ async fn message_search_reads_project_local_session_db() {
         subagent_parsed["results"][0]["session"]["is_subagent"],
         true
     );
+}
+
+#[tokio::test]
+async fn message_search_catches_up_provider_transcripts_before_querying() {
+    let (cg, _dir) = setup_project().await;
+    let home = cg.project_root().join("home");
+    let project = cg.project_root().to_path_buf();
+    let project_text = project.to_string_lossy();
+
+    let codex_dir = home.join(".codex/sessions/2026/01/01");
+    fs::create_dir_all(&codex_dir).unwrap();
+    fs::write(
+        codex_dir.join("rollout-2026-01-01T00-00-00-codex-catchup.jsonl"),
+        format!(
+            "{}\n{}\n",
+            json!({
+                "timestamp": "2026-01-01T00:00:00.000Z",
+                "type": "session_meta",
+                "payload": {"id": "codex-catchup", "cwd": project_text}
+            }),
+            json!({
+                "timestamp": "2026-01-01T00:00:01.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": "Codex provider catchup sees rsbuild recall evidence."
+                }
+            })
+        ),
+    )
+    .unwrap();
+
+    let cursor_slug = cursor_project_slug(&project).expect("test project should have cursor slug");
+    let cursor_dir = home
+        .join(".cursor/projects")
+        .join(cursor_slug)
+        .join("agent-transcripts");
+    fs::create_dir_all(&cursor_dir).unwrap();
+    fs::write(
+        cursor_dir.join("cursor-catchup.jsonl"),
+        r#"{"role":"assistant","message":{"content":[{"type":"text","text":"Cursor provider catchup sees rsbuild recall evidence."}]}}
+"#,
+    )
+    .unwrap();
+
+    let codex_result = handle_tool_call(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "query": "codex provider catchup",
+            "provider": "codex",
+            "limit": 5
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let codex = extract_json(&codex_result.value);
+    assert_eq!(codex["status"], "ok");
+    assert_eq!(codex["count"], 1);
+    assert_eq!(codex["results"][0]["message"]["provider"], "codex");
+
+    let requested_codex_unified_result = handle_tool_call(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "query": "rsbuild recall evidence",
+            "provider": "codex",
+            "limit": 5
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let requested_codex_unified = extract_json(&requested_codex_unified_result.value);
+    assert_eq!(requested_codex_unified["status"], "ok");
+    assert_eq!(requested_codex_unified["provider"], "codex");
+    assert_eq!(requested_codex_unified["requested_provider"], "codex");
+    let requested_codex_providers = requested_codex_unified["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|result| result["message"]["provider"].as_str().unwrap())
+        .collect::<std::collections::HashSet<_>>();
+    assert!(requested_codex_providers.contains("codex"));
+    assert!(!requested_codex_providers.contains("cursor"));
+    let db = open_active_project_session_db(&cg).await;
+    let ingested_cursor = db
+        .search_session_messages("cursor", None, "cursor provider catchup", 10)
+        .await;
+    assert_eq!(
+        ingested_cursor.len(),
+        1,
+        "provider-scoped search should still ingest every supported provider"
+    );
+
+    let cursor_result = handle_tool_call(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "query": "cursor provider catchup",
+            "provider": "cursor",
+            "limit": 5
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let cursor = extract_json(&cursor_result.value);
+    assert_eq!(cursor["status"], "ok");
+    assert_eq!(cursor["count"], 1);
+    assert_eq!(cursor["results"][0]["message"]["provider"], "cursor");
+
+    let all_result = handle_tool_call(
+        &cg,
+        "tracedecay_message_search",
+        json!({"query": "rsbuild recall evidence", "limit": 5}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let all = extract_json(&all_result.value);
+    assert_eq!(all["status"], "ok");
+    assert_eq!(all["provider"], "all");
+    let providers = all["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|result| result["message"]["provider"].as_str().unwrap())
+        .collect::<std::collections::HashSet<_>>();
+    assert!(providers.contains("codex"));
+    assert!(providers.contains("cursor"));
 }
 
 #[tokio::test]
@@ -6688,9 +6839,7 @@ async fn seed_lcm_session_message_for_provider(
     text: impl Into<String>,
     ordinal: i64,
 ) {
-    let db = open_project_session_db(cg.project_root())
-        .await
-        .expect("project-local session db should open");
+    let db = open_active_project_session_db(cg).await;
     assert!(
         db.upsert_session(&SessionRecord {
             provider: provider.to_string(),
@@ -6736,9 +6885,7 @@ async fn seed_lcm_tool_result_message(
     text: impl Into<String>,
     ordinal: i64,
 ) {
-    let db = open_project_session_db(cg.project_root())
-        .await
-        .expect("project-local session db should open");
+    let db = open_active_project_session_db(cg).await;
     assert!(
         db.upsert_session(&SessionRecord {
             provider: "cursor".to_string(),
@@ -6788,9 +6935,7 @@ async fn seed_lcm_session_message_with_role_source_timestamp(
     source: &str,
     timestamp: i64,
 ) {
-    let db = open_project_session_db(cg.project_root())
-        .await
-        .expect("project-local session db should open");
+    let db = open_active_project_session_db(cg).await;
     assert!(
         db.upsert_session(&SessionRecord {
             provider: "cursor".to_string(),
@@ -9792,6 +9937,7 @@ async fn message_search_preserves_provider_project_parent_scope_shape_after_lcm(
     assert_eq!(payload["status"], "ok");
     assert_eq!(payload["scope"], "subagents_only");
     assert_eq!(payload["provider"], "cursor");
+    assert_eq!(payload["requested_provider"], "cursor");
     assert_eq!(payload["parent_session_id"], "parent");
     assert_eq!(payload["results"].as_array().unwrap().len(), 1);
     assert!(payload["results"][0]["message"].get("text").is_some());
@@ -9999,6 +10145,507 @@ fn memory_tool_definitions_include_hermes_payload_fields() {
     );
 }
 
+fn managed_skill_test_draft(id: &str, title: &str) -> ManagedSkillDraft {
+    ManagedSkillDraft {
+        id: id.to_string(),
+        title: title.to_string(),
+        summary: format!("{title} summary."),
+        category: "maintenance".to_string(),
+        targets: tracedecay::automation::managed_skills::default_managed_skill_targets(),
+        body_markdown: format!("Use {title} before applying repository changes."),
+        support_files: vec![ManagedSupportFile::new(
+            "references/checklist.md",
+            b"- inspect context\n- run focused tests\n".to_vec(),
+        )
+        .unwrap()],
+        provenance: ManagedSkillProvenance {
+            source: ManagedSkillSource::AutomationRun,
+            actor: "tracedecay-test".to_string(),
+            run_id: Some("run_mcp_skill".to_string()),
+        },
+    }
+}
+
+#[test]
+fn managed_skill_tool_definitions_are_read_only() {
+    let tools = get_tool_definitions();
+    let artifact = tools
+        .iter()
+        .find(|tool| tool.name == "tracedecay_automation_run_artifact_view")
+        .expect("tracedecay_automation_run_artifact_view definition");
+    let list = tools
+        .iter()
+        .find(|tool| tool.name == "tracedecay_skill_list")
+        .expect("tracedecay_skill_list definition");
+    let view = tools
+        .iter()
+        .find(|tool| tool.name == "tracedecay_skill_view")
+        .expect("tracedecay_skill_view definition");
+    let hermes_bridge = tools
+        .iter()
+        .find(|tool| tool.name == "tracedecay_hermes_skill_bridge")
+        .expect("tracedecay_hermes_skill_bridge definition");
+
+    assert_eq!(artifact.annotations.as_ref().unwrap()["readOnlyHint"], true);
+    assert_eq!(artifact.input_schema["required"], json!(["run_id", "kind"]));
+    assert_eq!(list.annotations.as_ref().unwrap()["readOnlyHint"], true);
+    assert_eq!(view.annotations.as_ref().unwrap()["readOnlyHint"], true);
+    assert_eq!(
+        hermes_bridge.annotations.as_ref().unwrap()["readOnlyHint"],
+        true
+    );
+    assert_eq!(
+        list.input_schema["properties"]["state"]["enum"],
+        json!(["pending_approval", "active", "disabled", "archived"])
+    );
+    assert_eq!(view.input_schema["required"], json!(["id"]));
+    assert_eq!(
+        hermes_bridge.input_schema["required"],
+        json!(["hermes_home"])
+    );
+}
+
+#[tokio::test]
+async fn automation_run_artifact_mcp_tool_reads_verified_payload() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
+    let (cg, _env) = init_test_project(&project).await;
+    let dashboard_root = cg.store_layout().dashboard_root.clone();
+    let run_id = "run-mcp-artifact";
+    let artifact = write_run_artifact(
+        &dashboard_root,
+        run_id,
+        AutomationRunArtifactKind::CodexHandoff,
+        &json!({
+            "status": "ready_for_review",
+            "next_actions": ["inspect artifact through MCP"],
+        }),
+        Some("handoff ready".to_string()),
+        "1782283200",
+    )
+    .await
+    .unwrap();
+    append_run_record(
+        &dashboard_root,
+        &AutomationRunLedgerRecord {
+            schema_version: 2,
+            run_id: run_id.to_string(),
+            trigger: AutomationTrigger::Dashboard,
+            task: tracedecay::automation::backend::AgentTaskKind::MemoryCurator,
+            task_key: Some("memory_curator".to_string()),
+            backend: "codex_app_server".to_string(),
+            host_mode: Some("standalone".to_string()),
+            prompt_version: Some("memory_curator:v1".to_string()),
+            response_schema: None,
+            strict_json: Some(true),
+            model: Some("test-model".to_string()),
+            status: AutomationRunStatus::Succeeded,
+            evidence_hash: Some("sha256:evidence".to_string()),
+            input_hash: Some("sha256:input".to_string()),
+            output_hash: Some("sha256:output".to_string()),
+            proposed_ops: Some(json!({"ops": []})),
+            applied_ops: None,
+            rejected_ops: None,
+            validation_report: None,
+            reviewed_count: 0,
+            accepted_count: 0,
+            rejected_count: 0,
+            skipped_count: 0,
+            error: None,
+            error_classification: None,
+            error_retryable: None,
+            fallback_status: None,
+            report_ref: None,
+            artifacts: vec![artifact],
+            started_at: "1782283199".to_string(),
+            completed_at: "1782283200".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_automation_run_artifact_view",
+        json!({"run_id": run_id, "kind": "codex_handoff"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&result.value);
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["run_id"], run_id);
+    assert_eq!(payload["artifact"]["kind"], "codex_handoff");
+    assert_eq!(payload["payload"]["status"], "ready_for_review");
+    assert_eq!(
+        payload["payload"]["next_actions"][0],
+        "inspect artifact through MCP"
+    );
+
+    let missing = handle_tool_call(
+        &cg,
+        "tracedecay_automation_run_artifact_view",
+        json!({"run_id": run_id, "kind": "generated_evals"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(missing
+        .to_string()
+        .contains("automation run artifact not found"));
+
+    close_test_graph(cg).await;
+}
+
+#[tokio::test]
+async fn managed_skill_mcp_tools_list_and_view_profile_store() {
+    let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
+    let home = dir.path().join("home");
+    let _home_guard = HomeEnvGuard::set(&home);
+    let _global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
+    let cg = TestTraceDecay::new(TraceDecay::init(&project).await.unwrap());
+    let profile_root = tracedecay::storage::default_profile_root().unwrap();
+
+    create_managed_skill_draft(
+        &profile_root,
+        managed_skill_test_draft("pending-skill", "Pending skill"),
+    )
+    .await
+    .unwrap();
+    create_managed_skill_draft(
+        &profile_root,
+        managed_skill_test_draft("active-skill", "Active skill"),
+    )
+    .await
+    .unwrap();
+    let active_skill = approve_managed_skill(&profile_root, "active-skill")
+        .await
+        .unwrap();
+    record_skill_usage(
+        &profile_root,
+        &active_skill,
+        SkillUsageAction::Use,
+        "mcp-test",
+        vec!["codex".to_string(), "cursor".to_string()],
+        Some("codex".to_string()),
+        None,
+    )
+    .await
+    .unwrap();
+    let global_db = GlobalDb::open().await.unwrap();
+    global_db
+        .append_analytics_event(&tracedecay::global_db::AnalyticsEventInsert {
+            provider: "mcp".to_string(),
+            project_id: GlobalDb::canonical_project_key(cg.project_root()),
+            session_id: Some("mcp-skill-session".to_string()),
+            timestamp: tracedecay::tracedecay::current_timestamp(),
+            event_kind: "mcp_tool_call".to_string(),
+            hook_name: None,
+            tool_name: Some("tracedecay_skill_view".to_string()),
+            tool_category: None,
+            skill_name: None,
+            hint_category: None,
+            hint_id: None,
+            outcome: Some("success".to_string()),
+            metadata_json: Some(
+                json!({
+                    "function": {
+                        "name": "tracedecay_skill_view",
+                        "arguments": { "id": "active-skill" }
+                    }
+                })
+                .to_string(),
+            ),
+        })
+        .await
+        .unwrap();
+
+    let list = handle_tool_call(
+        &cg,
+        "tracedecay_skill_list",
+        json!({"state": "active"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&list.value);
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["count"], 1);
+    assert_eq!(payload["skills"][0]["metadata"]["id"], "active-skill");
+    assert_eq!(payload["skills"][0]["metadata"]["state"], "active");
+    assert_eq!(payload["skills"][0]["support_file_count"], 1);
+    assert_eq!(payload["skills"][0]["usage_summary"]["view_count"], 1);
+    assert_eq!(payload["skills"][0]["usage_summary"]["use_count"], 1);
+    assert_eq!(
+        payload["skills"][0]["usage_summary"]["targets"],
+        json!(["codex", "cursor", "lifecycle", "mcp"])
+    );
+    assert_eq!(
+        payload["skills"][0]["stale_recommendation"]["skill_id"],
+        "active-skill"
+    );
+    assert_eq!(
+        payload["skills"][0]["improvement_recommendation"]["skill_id"],
+        "active-skill"
+    );
+    assert_eq!(
+        payload["skills"][0]["improvement_recommendation"]["recommendation"],
+        "none"
+    );
+    assert!(payload["skills"][0].get("body_markdown").is_none());
+
+    let view = handle_tool_call(
+        &cg,
+        "tracedecay_skill_view",
+        json!({"id": "active-skill", "include_support_files": false}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&view.value);
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["skill"]["metadata"]["id"], "active-skill");
+    assert_eq!(payload["usage_summary"]["view_count"], 2);
+    assert_eq!(payload["usage_summary"]["use_count"], 1);
+    assert!(
+        payload["usage_summary"]["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|target| target == "mcp"),
+        "direct MCP view should mark mcp as a usage target: {payload:#}"
+    );
+    assert_eq!(payload["stale_recommendation"]["skill_id"], "active-skill");
+    assert_eq!(
+        payload["improvement_recommendation"]["skill_id"],
+        "active-skill"
+    );
+    assert!(payload["skill"]["body_markdown"]
+        .as_str()
+        .unwrap()
+        .contains("Active skill"));
+    assert_eq!(
+        payload["skill"]["support_files"].as_array().unwrap().len(),
+        0
+    );
+    assert_eq!(payload["support_files_included"], false);
+    let usage_record = load_skill_usage_record(&profile_root, "active-skill")
+        .await
+        .unwrap()
+        .expect("skill view should write direct usage telemetry");
+    assert_eq!(usage_record.view_count, 2);
+    assert_eq!(usage_record.use_count, 1);
+    assert!(usage_record.targets.iter().any(|target| target == "mcp"));
+
+    close_test_graph(cg).await;
+    drop(env_lock);
+}
+
+#[tokio::test]
+async fn hermes_skill_bridge_mcp_tool_reads_host_owned_profile_state() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
+    let cg = TestTraceDecay::new(TraceDecay::init(&project).await.unwrap());
+
+    let hermes_home = dir.path().join("hermes");
+    let skills_dir = hermes_home.join("skills");
+    let skill_dir = skills_dir.join("repo-hygiene");
+    fs::create_dir_all(&skill_dir).unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: repo-hygiene\ndescription: Keep repositories tidy\n---\n\nRun focused checks.\n",
+    )
+    .unwrap();
+    fs::write(
+        skills_dir.join(".usage.json"),
+        r#"{"repo-hygiene":{"created_by":"agent","use_count":3}}"#,
+    )
+    .unwrap();
+    let pending_dir = hermes_home.join("pending").join("skills");
+    fs::create_dir_all(&pending_dir).unwrap();
+    fs::write(
+        pending_dir.join("pending1.json"),
+        r#"{"id":"pending1","action":"patch","summary":"improve repo hygiene","origin":"background_review","payload":{"action":"patch","name":"repo-hygiene"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        hermes_home.join("config.json"),
+        r#"{"projectRoot":"/workspace/repo","memory":{"write_approval":true},"skills":{"write_approval":"json-pending"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        hermes_home.join("config.yaml"),
+        r#"
+plugins:
+  tracedecay:
+    project_root: /workspace/repo-from-yaml
+curator:
+  enabled: true
+  auxiliary:
+    provider: openai
+    model: gpt-test
+    api_key: secret-value
+memory:
+  nudge_interval: 14
+  write_approval: manual
+skills:
+  creation_nudge_interval: 16
+  write_approval: pending
+"#,
+    )
+    .unwrap();
+    fs::write(
+        skills_dir.join(".curator_state"),
+        r#"{"paused":false,"run_count":7,"last_run_summary":"reviewed skills"}"#,
+    )
+    .unwrap();
+    fs::write(hermes_home.join("state.db"), b"").unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_hermes_skill_bridge",
+        json!({
+            "hermes_home": hermes_home,
+            "include_skill_bodies": true
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&result.value);
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["bridge"]["contracts"]["lifecycle_owner"], "hermes");
+    assert_eq!(payload["bridge"]["config"]["exists"], true);
+    assert_eq!(payload["bridge"]["config"]["config_yaml_exists"], true);
+    assert_eq!(payload["bridge"]["config"]["config_format"], "yaml");
+    assert_eq!(
+        payload["bridge"]["config"]["project_root_pin"],
+        json!("/workspace/repo-from-yaml")
+    );
+    assert_eq!(
+        payload["bridge"]["config"]["curator"]["enabled"],
+        json!(true)
+    );
+    assert_eq!(
+        payload["bridge"]["config"]["self_improvement"]["memory_nudge_interval"],
+        json!(14)
+    );
+    assert_eq!(
+        payload["bridge"]["config"]["self_improvement"]["skill_creation_nudge_interval"],
+        json!(16)
+    );
+    assert_eq!(
+        payload["bridge"]["config"]["write_approval"]["memory"],
+        json!("manual")
+    );
+    assert_eq!(
+        payload["bridge"]["config"]["write_approval"]["memory_enabled"],
+        json!(false)
+    );
+    assert_eq!(
+        payload["bridge"]["config"]["write_approval"]["skills"],
+        json!("pending")
+    );
+    assert_eq!(
+        payload["bridge"]["config"]["write_approval"]["skills_enabled"],
+        json!(false)
+    );
+    assert_eq!(
+        payload["bridge"]["config"]["auxiliary_curator"]["api_key_configured"],
+        json!(true)
+    );
+    assert!(
+        !serde_json::to_string(&payload)
+            .unwrap()
+            .contains("secret-value"),
+        "Hermes bridge must not expose auxiliary secrets"
+    );
+    assert_eq!(payload["bridge"]["state"]["exists"], true);
+    assert_eq!(
+        payload["bridge"]["state"]["raw_lcm_owner"],
+        "hermes_runtime"
+    );
+    assert_eq!(
+        payload["bridge"]["state"]["hermes_state_owner"],
+        "hermes_runtime"
+    );
+    assert_eq!(
+        payload["bridge"]["state"]["trace_decay_lcm_store_owner"],
+        "tracedecay_hermes_plugin"
+    );
+    assert_eq!(
+        payload["bridge"]["state"]["trace_decay_lcm_role"],
+        "hermes_profile_session_store"
+    );
+    assert_eq!(
+        payload["bridge"]["state"]["trace_decay_ingest_role"],
+        "read_only_session_message_projector"
+    );
+    assert_eq!(payload["bridge"]["curator"]["owner"], "hermes");
+    assert_eq!(
+        payload["bridge"]["curator"]["trace_decay_role"],
+        "read_only_projector"
+    );
+    assert_eq!(
+        payload["bridge"]["curator"]["standalone_automation_blocked"],
+        true
+    );
+    assert_eq!(payload["bridge"]["curator"]["state"]["run_count"], json!(7));
+    assert_eq!(
+        payload["bridge"]["curator"]["policy"]["max_destructive_action"],
+        "archive"
+    );
+    assert_eq!(
+        payload["bridge"]["curator"]["policy"]["eligible_provenance"],
+        json!(["agent", "agent_created"])
+    );
+    assert_eq!(
+        payload["bridge"]["background_review"]["owner"],
+        "hermes_runtime"
+    );
+    assert_eq!(
+        payload["bridge"]["background_review"]["skill_nudge_interval"],
+        json!(16)
+    );
+    assert_eq!(payload["bridge"]["skill_count"], 1);
+    assert_eq!(payload["bridge"]["pending_skill_count"], 1);
+    assert_eq!(payload["bridge"]["skills"][0]["name"], "repo-hygiene");
+    assert_eq!(
+        payload["bridge"]["skills"][0]["ownership"]["owner"],
+        "hermes_local"
+    );
+    assert_eq!(
+        payload["bridge"]["skills"][0]["ownership"]["curator_managed_record"],
+        json!(true)
+    );
+    assert_eq!(
+        payload["bridge"]["skills"][0]["pending_write_ids"],
+        json!(["pending1"])
+    );
+    assert_eq!(
+        payload["bridge"]["usage_records"]["repo-hygiene"]["created_by"],
+        "agent"
+    );
+    assert!(payload["bridge"]["pending_skills"][0]
+        .get("payload")
+        .is_none());
+
+    close_test_graph(cg).await;
+}
+
 #[test]
 fn message_search_provider_schema_matches_ingested_providers() {
     let tools = get_tool_definitions();
@@ -10010,7 +10657,8 @@ fn message_search_provider_schema_matches_ingested_providers() {
     assert_eq!(
         message_search.input_schema["properties"]["provider"]["enum"],
         serde_json::json!([
-            "all", "cursor", "claude", "codex", "vibe", "cline", "roo-code", "kilo", "hermes"
+            "all", "cursor", "claude", "codex", "vibe", "cline", "roo-code", "kilo", "kiro",
+            "hermes"
         ])
     );
     assert!(
@@ -11834,10 +12482,13 @@ async fn lcm_status_reports_dag_store_and_config_diagnostics_over_mcp() {
         1,
     )
     .await;
-    let store_id = lcm_raw_store_id(&cg, "diag-message").await;
-    let db = open_project_session_db(cg.project_root())
+    let db = open_active_project_session_db(&cg).await;
+    let raw = db
+        .lcm_load_raw_message("cursor", "diag-message")
         .await
-        .expect("project-local session db should open");
+        .expect("raw message should load from the active project-local store");
+    assert_eq!(raw.session_id, "lcm-diag-session");
+    let store_id = raw.store_id;
     db.lcm_insert_summary_node(LcmSummaryNodeDraft {
         provider: "cursor".to_string(),
         conversation_id: "lcm-diag-session".to_string(),

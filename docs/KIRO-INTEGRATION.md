@@ -16,6 +16,7 @@ so does not overwrite a user's existing custom default-agent choice.
 |---|---|
 | `~/.kiro/settings/mcp.json` | Registers the global `tracedecay` MCP server with `command`, `args: ["serve"]`, and `disabled: false`. Approval policy is left to the managed Kiro agent. |
 | `~/.kiro/steering/tracedecay.md` | Adds global Kiro steering that tells normal Kiro sessions to prefer tracedecay MCP tools for codebase research. |
+| `~/.kiro/steering/tracedecay-managed-skills.md` | Adds a tracedecay-managed skill index for approved managed skills. The index points Kiro at `tracedecay_skill_list` and `tracedecay_skill_view`; full skill bodies remain in TraceDecay's managed skill store. |
 | `~/.kiro/agents/tracedecay.json` | Adds the tracedecay-managed Kiro agent with `tools: ["*"]`, `allowedTools: ["@builtin", "@tracedecay"]`, hooks for delegation guardrails, post-write sync, and an absolute `resources` entry for `~/.kiro/steering/tracedecay.md`. The agent leaves `prompt` unset so Kiro's default prompt is used. |
 | `~/.kiro/settings/cli.json` | Sets `chat.defaultAgent` to `tracedecay` when the setting is absent or still points at Kiro's built-in default. |
 
@@ -25,9 +26,10 @@ tracedecay also does not point `chat.defaultAgent` at that user-managed file.
 If `chat.defaultAgent` already names another custom agent, install leaves that
 choice unchanged and prints a warning.
 
-Uninstall removes only the `tracedecay.md` steering block, the global MCP server entry,
-the tracedecay-owned agent file, and `chat.defaultAgent` when it points at that
-owned agent. User-authored steering after the installed block remains in place.
+Uninstall removes only the `tracedecay.md` steering block, the managed-skill
+index, the global MCP server entry, the tracedecay-owned agent file, and
+`chat.defaultAgent` when it points at that owned agent. User-authored steering
+after the installed block remains in place.
 
 ## Tool approval defaults
 

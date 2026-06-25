@@ -296,6 +296,10 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_fact_store(),
         def_fact_feedback(),
         def_memory_status(),
+        def_automation_run_artifact_view(),
+        def_skill_list(),
+        def_skill_view(),
+        def_hermes_skill_bridge(),
         def_dashboard(),
         def_message_search(),
         def_lcm_status(),
@@ -2172,11 +2176,107 @@ fn def_memory_status() -> ToolDefinition {
     )
 }
 
+fn def_automation_run_artifact_view() -> ToolDefinition {
+    def(
+        "tracedecay_automation_run_artifact_view",
+        "Automation Run Artifact View",
+        "Read and hash-verify one durable automation run artifact payload from the active project's dashboard sidecar. Returns the run id, artifact metadata, and JSON payload without mutating automation state. Human/operator equivalents: `tracedecay automation runs artifact <run_id> <kind> --json` and `GET /api/automation/runs/{run_id}/artifacts/{kind}`.",
+        json!({
+            "type": "object",
+            "properties": {
+                "run_id": {
+                    "type": "string",
+                    "description": "Automation run id to inspect."
+                },
+                "kind": {
+                    "type": "string",
+                    "description": "Artifact kind to read, such as traces, feedback, generated_evals, validation_gate, optimizer_diagnosis, or codex_handoff."
+                }
+            },
+            "required": ["run_id", "kind"]
+        }),
+    )
+}
+
+fn skill_state_property() -> Value {
+    json!({
+        "type": "string",
+        "enum": ["pending_approval", "active", "disabled", "archived"],
+        "description": "Optional managed-skill lifecycle state filter."
+    })
+}
+
+fn def_skill_list() -> ToolDefinition {
+    def(
+        "tracedecay_skill_list",
+        "Skill List",
+        "List agent-managed skills from the active TraceDecay profile. Returns metadata, lifecycle state, support-file paths, usage summary, stale/archive and improvement recommendation evidence, and optional body text without mutating the skill store.",
+        json!({
+            "type": "object",
+            "properties": {
+                "state": skill_state_property(),
+                "include_body": {
+                    "type": "boolean",
+                    "description": "If true, include each skill's body_markdown in the list response (default: false)."
+                }
+            }
+        }),
+    )
+}
+
+fn def_skill_view() -> ToolDefinition {
+    def(
+        "tracedecay_skill_view",
+        "Skill View",
+        "Read one agent-managed skill package from the active TraceDecay profile. Returns full metadata, body text, usage summary, stale/archive and improvement recommendation evidence, and support files by default.",
+        json!({
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "Managed skill id to read."
+                },
+                "include_support_files": {
+                    "type": "boolean",
+                    "description": "If false, omit support file byte payloads from the response (default: true)."
+                }
+            },
+            "required": ["id"]
+        }),
+    )
+}
+
+fn def_hermes_skill_bridge() -> ToolDefinition {
+    def(
+        "tracedecay_hermes_skill_bridge",
+        "Hermes Skill Bridge",
+        "Read Hermes-owned profile skill state without mutating Hermes. Returns skill summaries, pending skill approval records, usage telemetry, archive count, and the explicit host-owned lifecycle contract. Requires an absolute hermes_home path.",
+        json!({
+            "type": "object",
+            "properties": {
+                "hermes_home": {
+                    "type": "string",
+                    "description": "Absolute path to the Hermes profile home whose skills/ and pending/skills/ stores should be inspected."
+                },
+                "include_skill_bodies": {
+                    "type": "boolean",
+                    "description": "If true, include SKILL.md contents capped at the Hermes bridge body limit (default: false)."
+                },
+                "include_pending_payloads": {
+                    "type": "boolean",
+                    "description": "If true, include staged skill write replay payloads from pending/skills (default: false)."
+                }
+            },
+            "required": ["hermes_home"]
+        }),
+    )
+}
+
 fn def_message_search() -> ToolDefinition {
     def(
         "tracedecay_message_search",
         "Message Search",
-        "Search ingested Cursor/Codex/agent transcript messages. Defaults to all transcript providers in the active project's session-message FTS index; pass provider to constrain one provider, or project_id/project_path only when intentionally searching another registered project.",
+        "Search ingested transcript messages across all supported providers by default. Every search first catches up all supported provider adapters for the selected project; pass provider only when explicitly scoping results to one provider.",
         json!({
             "type": "object",
             "properties": {
@@ -2186,8 +2286,8 @@ fn def_message_search() -> ToolDefinition {
                 },
                 "provider": {
                     "type": "string",
-                    "description": "Optional message provider to search. Omit or use 'all' to search all ingested providers. Use 'hermes' for Hermes agent conversation history ingested from per-profile state.db stores.",
-                    "enum": ["all", "cursor", "claude", "codex", "vibe", "cline", "roo-code", "kilo", "hermes"]
+                    "description": "Optional explicit result scope. Omit or use 'all' for unified cross-provider recall; even scoped searches still ingest all supported providers first. Use 'hermes' for Hermes agent conversation history ingested from per-profile state.db stores.",
+                    "enum": ["all", "cursor", "claude", "codex", "vibe", "cline", "roo-code", "kilo", "kiro", "hermes"]
                 },
                 "project_key": {
                     "type": "string",

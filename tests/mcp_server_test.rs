@@ -936,6 +936,9 @@ async fn test_server_stats_initial() {
     );
     assert_eq!(stats["tool_calls"], 0, "initial tool_calls should be 0");
     assert_eq!(stats["errors"], 0, "initial errors should be 0");
+    assert!(stats["method_call_counts"].is_object());
+    assert!(stats["resource_read_counts"].is_object());
+    assert_eq!(stats["ratios"]["tool_calls_per_jsonrpc_message"], 0.0);
 }
 
 #[tokio::test]
@@ -1129,12 +1132,20 @@ async fn test_server_stats_include_response_handle_metrics() {
 #[tokio::test]
 async fn test_server_stats_after_run() {
     let (server, _dir) = setup_server().await;
+    let server_handle = server.clone();
     // Send several requests then a tracedecay_status to check stats are embedded.
     let responses = run_server_with_messages(
         server,
         vec![
             jsonrpc_request(json!(200), "initialize", json!({})),
             jsonrpc_request(json!(201), "ping", json!({})),
+            jsonrpc_request(
+                json!(203),
+                "resources/read",
+                json!({
+                    "uri": "tracedecay://status"
+                }),
+            ),
             jsonrpc_request(
                 json!(202),
                 "tools/call",
@@ -1169,6 +1180,16 @@ async fn test_server_stats_after_run() {
         "status response should contain server stats, got: {}",
         text
     );
+
+    let stats = server_handle.server_stats_json().await;
+    assert_eq!(stats["jsonrpc_messages"], 4);
+    assert_eq!(stats["method_call_counts"]["initialize"], 1);
+    assert_eq!(stats["method_call_counts"]["ping"], 1);
+    assert_eq!(stats["method_call_counts"]["resources/read"], 1);
+    assert_eq!(stats["method_call_counts"]["tools/call"], 1);
+    assert_eq!(stats["resource_read_counts"]["tracedecay://status"], 1);
+    assert_eq!(stats["tool_call_counts"]["tracedecay_status"], 1);
+    assert_eq!(stats["ratios"]["tool_calls_per_jsonrpc_message"], 0.25);
 }
 
 // ---------------------------------------------------------------------------
@@ -2145,6 +2166,53 @@ async fn failed_tool_call_writes_mcp_runtime_analytics_event() {
     assert_eq!(metadata["before_tokens"], 0);
     assert_eq!(metadata["after_tokens"], 0);
     assert_eq!(metadata["tokens_saved"], 0);
+}
+
+#[tokio::test]
+// Intentional: serializes env-mutating savings tests; #[tokio::test]
+// defaults to a current-thread runtime, so no executor thread blocks.
+#[allow(clippy::await_holding_lock)]
+async fn skill_view_call_writes_skill_arguments_to_mcp_runtime_analytics() {
+    let _env_guard = SAVINGS_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tmp_global = persistent_temp_dir();
+    let _env = isolated_savings_env(&tmp_global.join("global.db"));
+
+    let (server, _proj_tmp) = setup_server().await;
+    let server_handle = server.clone();
+    let db_path = locked_global_db_path();
+
+    let resp = call_tool(
+        server,
+        9004,
+        "tracedecay_skill_view",
+        json!({
+            "id": "repo-hygiene",
+            "session_id": "mcp-session-9004"
+        }),
+    )
+    .await;
+
+    assert!(
+        resp["error"].is_object(),
+        "missing fixture skill should make the tool call fail"
+    );
+
+    server_handle.ledger_writes_settled().await;
+    let event = expect_mcp_runtime_event(
+        &db_path,
+        "tracedecay_skill_view",
+        "mcp-session-9004",
+        "durable skill-view MCP runtime analytics event",
+    )
+    .await;
+    let metadata = analytics_metadata(&event);
+
+    assert_eq!(event.outcome.as_deref(), Some("error"));
+    assert_eq!(metadata["arguments"]["id"], "repo-hygiene");
+    assert_eq!(metadata["function"]["name"], "tracedecay_skill_view");
+    assert_eq!(metadata["function"]["arguments"]["id"], "repo-hygiene");
 }
 
 #[tokio::test]

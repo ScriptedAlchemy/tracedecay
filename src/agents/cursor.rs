@@ -380,10 +380,21 @@ fn install_cursor_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
     remove_cursor_plugin_install(&install_dir)?;
 
     write_embedded_plugin(&install_dir, tracedecay_bin)?;
+    install_cursor_managed_skill_overlay(home, &install_dir)?;
     eprintln!(
         "\x1b[32m✔\x1b[0m Installed Cursor plugin at {}",
         install_dir.display()
     );
+    Ok(())
+}
+
+fn install_cursor_managed_skill_overlay(home: &Path, install_dir: &Path) -> Result<()> {
+    let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(home);
+    crate::automation::skill_targets::install_managed_skills(
+        &profile_root,
+        crate::automation::skill_targets::SkillInstallTarget::Cursor,
+        install_dir,
+    )?;
     Ok(())
 }
 
@@ -494,6 +505,7 @@ fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
             std::fs::remove_dir_all(&path).ok();
         }
     }
+    remove_cursor_managed_skill_overlay(install_dir);
     if cursor_plugin_dir_has_only_managed_files(install_dir) {
         std::fs::remove_dir_all(install_dir).map_err(|e| TraceDecayError::Config {
             message: format!("failed to remove {}: {e}", install_dir.display()),
@@ -504,6 +516,10 @@ fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn remove_cursor_managed_skill_overlay(install_dir: &Path) {
+    std::fs::remove_dir_all(install_dir.join("skills/agent-managed")).ok();
 }
 
 fn cursor_plugin_dir_is_tracedecay(install_dir: &Path) -> bool {

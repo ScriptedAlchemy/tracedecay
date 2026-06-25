@@ -45,8 +45,8 @@ export interface HolographicFact {
   trust_score: number;
   retrieval_count: number;
   helpful_count: number;
-  created_at: string;
-  updated_at: string;
+  created_at: number;
+  updated_at: number;
   has_hrr?: boolean | number;
   snippet?: string;
 }
@@ -282,11 +282,14 @@ export interface MemoryCurateAction {
   op: string;
   tier?: string;
   reason?: string;
+  confidence?: number;
   fact_id?: number;
   duplicate_of?: number;
   entity_id?: number;
   loser?: number;
   winner?: number;
+  loser_ids?: number[];
+  winner_id?: number;
   loser_entity?: number;
   winner_entity?: number;
   name?: string;
@@ -322,11 +325,6 @@ export interface MemoryCurateHygieneCandidate {
   content?: string;
 }
 
-/**
- * Wire contract for `POST /api/plugins/holographic/curate`: the curation
- * plan/report. With `dry_run` the actions are proposals; otherwise
- * `applied_counts`/`apply_errors` describe what was actually executed.
- */
 /** Deterministic rule-based hygiene candidates (never auto-applied). */
 export interface MemoryCurateHygieneCandidates {
   secret_like: MemoryCurateHygieneCandidate[];
@@ -334,11 +332,22 @@ export interface MemoryCurateHygieneCandidates {
   supersession: MemoryCurateHygieneCandidate[];
 }
 
+/**
+ * Wire contract for `POST /api/plugins/holographic/curate`: the curation
+ * plan/report. With `dry_run` the actions are proposals; otherwise
+ * `applied_counts`/`apply_errors` describe what was actually executed.
+ */
 export interface MemoryCurateResponse {
   provider?: string;
   ran: boolean;
   dry_run: boolean;
   actions: MemoryCurateAction[];
+  llm_apply?: {
+    ops?: MemoryCurateAction[];
+    rejected_ops?: unknown[];
+    note?: string;
+    [key: string]: unknown;
+  };
   hygiene_candidates?: MemoryCurateHygieneCandidates;
   counts: Record<string, number>;
   applied_counts?: Record<string, number>;
@@ -369,6 +378,367 @@ export interface MemoryCuratorPreviewResponse {
   saved_at?: string | null;
   stale?: boolean;
   stale_reason?: string;
+  error?: string;
+}
+
+export type AutomationBackend = "disabled" | "codex_app_server" | "external_command";
+export type SelectableAutomationBackend = Exclude<AutomationBackend, "external_command">;
+
+export type AutomationHostMode = "standalone" | "delegated_host";
+
+export interface AutomationBackendAvailability {
+  backend: AutomationBackend;
+  available: boolean;
+  executable?: string | null;
+  reason?: string | null;
+}
+
+export interface AutomationTaskConfig {
+  enabled: boolean;
+  schedule?: string | null;
+  interval_secs?: number | null;
+  cooldown_secs?: number | null;
+  min_idle_secs?: number | null;
+  stale_lock_secs?: number | null;
+}
+
+export interface AutomationTaskSet {
+  memory_curator: AutomationTaskConfig;
+  session_reflector: AutomationTaskConfig;
+  skill_writer: AutomationTaskConfig;
+}
+
+export interface MemoryAutomationConfig {
+  enabled: boolean;
+  backend: AutomationBackend;
+  host_mode: AutomationHostMode;
+  model?: string | null;
+  timeout_secs: number;
+  scheduler_tick_secs: number;
+  max_tokens?: number | null;
+  temperature?: number | null;
+  require_dashboard_approval: boolean;
+  auto_apply_memory_ops: boolean;
+  auto_enable_skills: boolean;
+  tasks: AutomationTaskSet;
+}
+
+export interface AutomationTaskPatch {
+  enabled?: boolean;
+  schedule?: string | null;
+  interval_secs?: number | null;
+  cooldown_secs?: number | null;
+  min_idle_secs?: number | null;
+  stale_lock_secs?: number | null;
+}
+
+export interface MemoryAutomationConfigPatch {
+  enabled?: boolean;
+  backend?: SelectableAutomationBackend;
+  host_mode?: AutomationHostMode;
+  model?: string | null;
+  timeout_secs?: number;
+  scheduler_tick_secs?: number;
+  max_tokens?: number | null;
+  temperature?: number | null;
+  require_dashboard_approval?: boolean;
+  auto_apply_memory_ops?: boolean;
+  auto_enable_skills?: boolean;
+  memory_curator?: AutomationTaskPatch;
+  session_reflector?: AutomationTaskPatch;
+  skill_writer?: AutomationTaskPatch;
+}
+
+export interface MemoryAutomationConfigResponse {
+  global: MemoryAutomationConfig;
+  project: MemoryAutomationConfigPatch | null;
+  effective: MemoryAutomationConfig;
+  backend_availability?: AutomationBackendAvailability;
+  project_config_path?: string;
+}
+
+export interface AutomationSchedulerTaskStatus {
+  task: "memory_curator" | "session_reflector" | "skill_writer" | string;
+  due: boolean;
+  skip_reason?: string | null;
+  last_scheduler_run?: MemoryAutomationRunRecord | null;
+}
+
+export interface AutomationSchedulerStatusResponse {
+  status: string;
+  paused: boolean;
+  enabled: boolean;
+  scheduler_tick_secs: number;
+  now: number;
+  project_config_path?: string;
+  control_path?: string;
+  tasks: AutomationSchedulerTaskStatus[];
+}
+
+export interface MemoryAgentPlanResponse<TReport = Record<string, unknown>> {
+  run_id: string;
+  dry_run: true;
+  status: string;
+  report?: TReport;
+  ledger_record: MemoryAutomationRunRecord;
+  backend_response?: unknown;
+  error?: string;
+}
+
+export interface AutomationRunRequest {
+  dry_run?: true;
+  provider?: string;
+  query?: string;
+  evidence_limit?: number;
+  storage_scope?: "project_local" | "hermes_profile" | string;
+  hermes_home?: string;
+  scope?: "all" | "session" | "current" | string;
+  session_id?: string;
+  include_summaries?: boolean;
+  sort?: "recency" | "relevance" | "hybrid" | string;
+  source?: string;
+  role?: string;
+  start_time?: number;
+  end_time?: number;
+}
+
+export type MemoryAutomationRunResponse<TReport = Record<string, unknown>> =
+  MemoryAgentPlanResponse<TReport>;
+
+export interface MemoryAutomationRunRecord {
+  schema_version: number;
+  run_id: string;
+  trigger: "manual_cli" | "dashboard" | "scheduler" | string;
+  task: "memory_curator" | "session_reflector" | "skill_writer" | string;
+  task_key?: string | null;
+  backend: string;
+  host_mode?: "standalone" | "delegated_host" | string | null;
+  prompt_version?: string | null;
+  response_schema?: unknown;
+  strict_json?: boolean | null;
+  model?: string | null;
+  status: "queued" | "running" | "succeeded" | "failed" | "skipped" | string;
+  evidence_hash?: string | null;
+  input_hash?: string | null;
+  output_hash?: string | null;
+  proposed_ops?: unknown;
+  applied_ops?: unknown;
+  rejected_ops?: unknown;
+  validation_report?: unknown;
+  reviewed_count?: number;
+  accepted_count: number;
+  rejected_count: number;
+  skipped_count?: number;
+  error?: string | null;
+  error_classification?:
+    | "retryable"
+    | "permanent"
+    | "timeout"
+    | "unavailable"
+    | "malformed_output"
+    | string
+    | null;
+  error_retryable?: boolean | null;
+  fallback_status?: string | null;
+  report_ref?: unknown;
+  artifacts?: MemoryAutomationRunArtifact[];
+  started_at: string;
+  completed_at: string;
+}
+
+export interface MemoryAutomationRunArtifact {
+  schema_version: number;
+  kind: string;
+  path: string;
+  sha256: string;
+  summary?: string | null;
+  created_at: string;
+}
+
+export interface MemoryAutomationRunArtifactsResponse {
+  run_id: string;
+  artifacts: MemoryAutomationRunArtifact[];
+  artifact_chain?: {
+    expected_kinds?: string[];
+    present_kinds?: string[];
+    complete?: boolean;
+  };
+  count: number;
+  error?: string;
+}
+
+export interface MemoryAutomationRunArtifactPayloadResponse {
+  run_id: string;
+  artifact: MemoryAutomationRunArtifact;
+  payload: unknown;
+  error?: string;
+}
+
+export interface MemoryAutomationRunsResponse {
+  records: MemoryAutomationRunRecord[];
+  count: number;
+  limit: number;
+  error?: string;
+}
+
+export type ManagedSkillSource = "automation_run" | "user_draft" | "import" | string;
+
+export type ManagedSkillState =
+  | "pending_approval"
+  | "active"
+  | "disabled"
+  | "archived"
+  | string;
+
+export type SkillInstallTarget =
+  | "cursor"
+  | "codex"
+  | "claude"
+  | "agents"
+  | "opencode"
+  | "kimi"
+  | "kiro"
+  | "hermes"
+  | string;
+
+export interface ManagedSkillProvenance {
+  source: ManagedSkillSource;
+  actor: string;
+  run_id?: string | null;
+}
+
+export interface ManagedSkillMetadata {
+  id: string;
+  title: string;
+  summary: string;
+  category: string;
+  targets: SkillInstallTarget[];
+  state: ManagedSkillState;
+  checksum: string;
+  provenance: ManagedSkillProvenance;
+  pinned: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface ManagedSupportFile {
+  path: string;
+  bytes: number[];
+}
+
+export interface ManagedSkill {
+  metadata: ManagedSkillMetadata;
+  body_markdown: string;
+  support_files: ManagedSupportFile[];
+  pending_update?: ManagedSkillPendingUpdate | null;
+}
+
+export interface ManagedSkillPendingUpdate {
+  base_checksum: string;
+  staged_at: number;
+  metadata: ManagedSkillMetadata;
+  body_markdown: string;
+  support_files: ManagedSupportFile[];
+}
+
+export interface SkillUsageSummary {
+  schema_version: number;
+  skill_id: string;
+  title?: string | null;
+  category?: string | null;
+  state?: ManagedSkillState | null;
+  pinned: boolean;
+  created_by?: string | null;
+  provenance_source?: ManagedSkillSource | null;
+  targets: string[];
+  view_count: number;
+  use_count: number;
+  patch_count: number;
+  first_seen_at: number;
+  last_activity_at: number;
+  last_viewed_at?: number | null;
+  last_used_at?: number | null;
+  last_patched_at?: number | null;
+}
+
+export interface SkillStaleRecommendation {
+  skill_id: string;
+  stale: boolean;
+  recommendation: string;
+  reason: string;
+  evidence: string[];
+}
+
+export interface SkillImprovementRecommendation {
+  skill_id: string;
+  improvement: boolean;
+  recommendation: string;
+  reason: string;
+  priority: string;
+  evidence: string[];
+}
+
+export interface ManagedSkillListResponse {
+  profile_root: string;
+  skills_root: string;
+  count: number;
+  skills: ManagedSkill[];
+  skill_metadata: ManagedSkillMetadata[];
+  usage_summaries?: SkillUsageSummary[];
+  stale_recommendations?: SkillStaleRecommendation[];
+  improvement_recommendations?: SkillImprovementRecommendation[];
+  error?: string;
+}
+
+export interface ManagedSkillResponse {
+  profile_root: string;
+  skills_root: string;
+  skill_dir: string;
+  skill: ManagedSkill;
+  usage_summary?: SkillUsageSummary;
+  stale_recommendation?: SkillStaleRecommendation | null;
+  improvement_recommendation?: SkillImprovementRecommendation | null;
+  error?: string;
+}
+
+export type FactProposalState =
+  | "pending_approval"
+  | "applied"
+  | "rejected"
+  | string;
+
+export interface FactProposalRecord {
+  schema_version: number;
+  proposal_id: string;
+  run_id: string;
+  evidence_hash?: string | null;
+  state: FactProposalState;
+  add_fact_request?: {
+    content?: string;
+    type?: string;
+    category?: string;
+    tags?: string[];
+    [key: string]: unknown;
+  } | null;
+  proposal?: unknown;
+  validation_reason?: string | null;
+  validation?: unknown;
+  reviewer?: string | null;
+  applied_fact_id?: number | null;
+  apply_outcome?: unknown;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface FactProposalListResponse {
+  proposals: FactProposalRecord[];
+  count: number;
+  limit: number;
+  error?: string;
+}
+
+export interface FactProposalResponse {
+  proposal: FactProposalRecord;
   error?: string;
 }
 

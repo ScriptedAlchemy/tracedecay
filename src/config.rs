@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -268,6 +269,10 @@ pub fn is_in_gitignore(project_path: &Path) -> bool {
 }
 
 fn is_ignored_by_git(project_path: &Path, git_config_global: Option<&Path>) -> Option<bool> {
+    let fallback_global_excludes = || {
+        git_config_global
+            .and_then(|path| is_ignored_by_explicit_global_excludes(project_path, path))
+    };
     let dir_name = active_data_dir_name(project_path);
     let mut command = Command::new("git");
     command
@@ -280,16 +285,61 @@ fn is_ignored_by_git(project_path: &Path, git_config_global: Option<&Path>) -> O
         .stderr(Stdio::null());
 
     if let Some(path) = git_config_global {
+        command.env_clear();
+        command.env("PATH", git_subprocess_path());
         command.env("GIT_CONFIG_GLOBAL", path);
+        command.env("GIT_CONFIG_NOSYSTEM", "1");
     }
 
-    let status = command.status().ok()?;
+    let Ok(status) = command.status() else {
+        return fallback_global_excludes();
+    };
 
     match status.code() {
         Some(0) => Some(true),
         Some(1) => Some(false),
-        _ => None,
+        _ => fallback_global_excludes(),
     }
+}
+
+fn is_ignored_by_explicit_global_excludes(
+    project_path: &Path,
+    git_config_global: &Path,
+) -> Option<bool> {
+    let config = fs::read_to_string(git_config_global).ok()?;
+    let excludes_file = config.lines().find_map(|line| {
+        let trimmed = line.trim();
+        let (key, value) = trimmed.split_once('=')?;
+        (key.trim() == "excludesFile").then(|| PathBuf::from(value.trim()))
+    })?;
+    let excludes = fs::read_to_string(excludes_file).ok()?;
+    let dir_name = active_data_dir_name(project_path);
+    let dir_pattern = format!("{dir_name}/");
+    Some(excludes.lines().any(|line| {
+        let trimmed = line.trim();
+        !trimmed.is_empty()
+            && !trimmed.starts_with('#')
+            && (trimmed == dir_name || trimmed == dir_pattern)
+    }))
+}
+
+#[cfg(test)]
+fn git_subprocess_path() -> OsString {
+    std::env::var_os("PATH").unwrap_or_else(|| {
+        #[cfg(windows)]
+        {
+            OsString::new()
+        }
+        #[cfg(not(windows))]
+        {
+            OsString::from("/usr/bin:/bin")
+        }
+    })
+}
+
+#[cfg(not(test))]
+fn git_subprocess_path() -> OsString {
+    std::env::var_os("PATH").unwrap_or_default()
 }
 
 fn is_in_local_gitignore(project_path: &Path) -> bool {
@@ -517,7 +567,7 @@ pub fn is_excluded(file_path: &str, config: &TraceDecayConfig) -> bool {
 mod tests {
     use super::{
         db_filename, get_project_db_path, get_tracedecay_dir, is_excluded, is_excluded_dir,
-        is_ignored_by_git, is_included, TraceDecayConfig,
+        is_ignored_by_explicit_global_excludes, is_ignored_by_git, is_included, TraceDecayConfig,
     };
     use std::fs;
     use std::process::Command;
@@ -638,13 +688,17 @@ mod tests {
         let repo = sandbox.path().join("repo");
         fs::create_dir(&repo).unwrap();
 
-        Command::new("git")
+        let mut init = Command::new("git");
+        init.env_clear().env("PATH", super::git_subprocess_path());
+        let init_status = init
             .arg("-C")
             .arg(&repo)
             .arg("init")
             .arg("-q")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
             .status()
             .unwrap();
+        assert!(init_status.success(), "git init should succeed");
 
         let excludes = sandbox.path().join("global_ignore");
         fs::write(&excludes, ".tracedecay\n").unwrap();
@@ -658,6 +712,28 @@ mod tests {
         .unwrap();
 
         let ignored = is_ignored_by_git(&repo, Some(&git_config));
+
+        assert_eq!(ignored, Some(true));
+    }
+
+    #[test]
+    fn test_explicit_global_excludes_ignores_comments_and_blank_lines() {
+        let sandbox = TempDir::new().unwrap();
+        let repo = sandbox.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+
+        let excludes = sandbox.path().join("global_ignore");
+        fs::write(&excludes, "\n# comment\n.tracedecay/\n").unwrap();
+
+        let git_config = sandbox.path().join("gitconfig");
+        let excludes_value = excludes.to_string_lossy().replace('\\', "/");
+        fs::write(
+            &git_config,
+            format!("[core]\n\texcludesFile = {excludes_value}\n"),
+        )
+        .unwrap();
+
+        let ignored = is_ignored_by_explicit_global_excludes(&repo, &git_config);
 
         assert_eq!(ignored, Some(true));
     }

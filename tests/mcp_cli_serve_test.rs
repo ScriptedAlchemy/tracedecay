@@ -13,11 +13,21 @@ use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 #[cfg(unix)]
 use tokio::sync::Mutex;
+use tracedecay::automation::managed_skills::{
+    approve_managed_skill, create_managed_skill_draft, ManagedSkillDraft, ManagedSkillProvenance,
+    ManagedSkillSource, ManagedSupportFile,
+};
+use tracedecay::automation::run_ledger::{
+    append_run_record, write_run_artifact, AutomationRunArtifactKind, AutomationRunLedgerRecord,
+    AutomationRunStatus, AutomationTrigger,
+};
 use tracedecay::db::Database;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::mcp::handle_tool_call;
 use tracedecay::serve;
-use tracedecay::storage::{write_enrollment_marker, EnrollmentMarker, StorageMode};
+use tracedecay::storage::{
+    default_profile_sharded_layout, write_enrollment_marker, EnrollmentMarker, StorageMode,
+};
 use tracedecay::tracedecay::TraceDecay;
 
 #[cfg(unix)]
@@ -80,6 +90,55 @@ fn runtime_project_root(stdout: &[u8], id: i64) -> String {
         .as_str()
         .expect("runtime should include database.project_root")
         .to_string()
+}
+
+fn json_rpc_tool_payload(stdout: &[u8], id: i64) -> Value {
+    let stdout_text = String::from_utf8(stdout.to_vec()).unwrap();
+    let response: Value = stdout_text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|response| response.get("id") == Some(&json!(id)))
+        .unwrap_or_else(|| panic!("missing JSON-RPC response {id} in stdout:\n{stdout_text}"));
+    assert!(
+        response.get("error").is_none(),
+        "JSON-RPC response {id} should not be an error: {response}"
+    );
+    let content = response["result"]["content"]
+        .as_array()
+        .expect("tool result should include content items");
+    for item in content {
+        let Some(text) = item["text"].as_str() else {
+            continue;
+        };
+        let Some(json_start) = text.find('{').or_else(|| text.find('[')) else {
+            continue;
+        };
+        if let Ok(payload) = serde_json::from_str(&text[json_start..]) {
+            return payload;
+        }
+    }
+    panic!("tool response {id} should include a JSON payload:\n{response}")
+}
+
+fn managed_skill_stdio_draft(id: &str, title: &str) -> ManagedSkillDraft {
+    ManagedSkillDraft {
+        id: id.to_string(),
+        title: title.to_string(),
+        summary: format!("{title} summary."),
+        category: "maintenance".to_string(),
+        targets: tracedecay::automation::managed_skills::default_managed_skill_targets(),
+        body_markdown: format!("Use {title} before applying repository changes."),
+        support_files: vec![ManagedSupportFile::new(
+            "references/checklist.md",
+            b"- inspect context\n- run focused tests\n".to_vec(),
+        )
+        .unwrap()],
+        provenance: ManagedSkillProvenance {
+            source: ManagedSkillSource::AutomationRun,
+            actor: "tracedecay-stdio-test".to_string(),
+            run_id: Some("run_mcp_stdio_skill".to_string()),
+        },
+    }
 }
 
 #[cfg(unix)]
@@ -321,6 +380,236 @@ async fn serve_without_daemon_socket_falls_back_to_in_process_mcp() {
     assert!(
         stdout.contains("\"protocolVersion\":\"2024-11-05\""),
         "serve fallback should answer initialize over stdio\nstdout:\n{stdout}"
+    );
+}
+
+#[tokio::test]
+async fn serve_stdio_smokes_managed_skill_list_and_view() {
+    let home = TempDir::new().unwrap();
+    let project = init_project_with_file(home.path(), "pub fn skill_stdio_marker() {}\n").await;
+    let profile_root = profile_root(home.path());
+
+    create_managed_skill_draft(
+        &profile_root,
+        managed_skill_stdio_draft("pending-stdio-skill", "Pending stdio skill"),
+    )
+    .await
+    .unwrap();
+    create_managed_skill_draft(
+        &profile_root,
+        managed_skill_stdio_draft("active-stdio-skill", "Active stdio skill"),
+    )
+    .await
+    .unwrap();
+    approve_managed_skill(&profile_root, "active-stdio-skill")
+        .await
+        .unwrap();
+
+    let mut child = tracedecay_command_with_home(home.path())
+        .arg("serve")
+        .arg("--path")
+        .arg(project.path())
+        .env_remove("TRACEDECAY_DAEMON_SOCKET")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("tracedecay serve should run");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin should be piped");
+        writeln!(
+            stdin,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {}
+            })
+        )
+        .unwrap();
+        writeln!(
+            stdin,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "tracedecay_skill_list",
+                    "arguments": { "state": "active" }
+                }
+            })
+        )
+        .unwrap();
+        writeln!(
+            stdin,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "tracedecay_skill_view",
+                    "arguments": {
+                        "id": "active-stdio-skill",
+                        "include_support_files": false
+                    }
+                }
+            })
+        )
+        .unwrap();
+    }
+
+    let output = child
+        .wait_with_output()
+        .expect("tracedecay serve should exit after stdin closes");
+    assert!(
+        output.status.success(),
+        "serve skill stdio smoke failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let list = json_rpc_tool_payload(&output.stdout, 2);
+    assert_eq!(list["status"], "ok");
+    assert_eq!(list["count"], 1);
+    assert_eq!(list["skills"][0]["metadata"]["id"], "active-stdio-skill");
+    assert_eq!(list["skills"][0]["metadata"]["state"], "active");
+    assert_eq!(list["skills"][0]["support_file_count"], 1);
+    assert!(list["skills"][0].get("body_markdown").is_none());
+
+    let view = json_rpc_tool_payload(&output.stdout, 3);
+    assert_eq!(view["status"], "ok");
+    assert_eq!(view["skill"]["metadata"]["id"], "active-stdio-skill");
+    assert!(view["skill"]["body_markdown"]
+        .as_str()
+        .unwrap()
+        .contains("Active stdio skill"));
+    assert_eq!(view["skill"]["support_files"].as_array().unwrap().len(), 0);
+    assert_eq!(view["support_files_included"], false);
+}
+
+#[tokio::test]
+async fn serve_stdio_smokes_automation_run_artifact_view() {
+    let home = TempDir::new().unwrap();
+    let project = init_project_with_file(home.path(), "pub fn artifact_stdio_marker() {}\n").await;
+    let dashboard_root = default_profile_sharded_layout(project.path(), &profile_root(home.path()))
+        .unwrap()
+        .dashboard_root;
+    let run_id = "run-stdio-artifact";
+    let artifact = write_run_artifact(
+        &dashboard_root,
+        run_id,
+        AutomationRunArtifactKind::CodexHandoff,
+        &json!({
+            "status": "ready_for_review",
+            "next_actions": ["inspect stdio artifact payload"],
+        }),
+        Some("stdio handoff ready".to_string()),
+        "1782283200",
+    )
+    .await
+    .unwrap();
+    append_run_record(
+        &dashboard_root,
+        &AutomationRunLedgerRecord {
+            schema_version: 2,
+            run_id: run_id.to_string(),
+            trigger: AutomationTrigger::Dashboard,
+            task: tracedecay::automation::backend::AgentTaskKind::MemoryCurator,
+            task_key: Some("memory_curator".to_string()),
+            backend: "codex_app_server".to_string(),
+            host_mode: Some("standalone".to_string()),
+            prompt_version: Some("memory_curator:v1".to_string()),
+            response_schema: None,
+            strict_json: Some(true),
+            model: Some("test-model".to_string()),
+            status: AutomationRunStatus::Succeeded,
+            evidence_hash: Some("sha256:evidence".to_string()),
+            input_hash: Some("sha256:input".to_string()),
+            output_hash: Some("sha256:output".to_string()),
+            proposed_ops: Some(json!({"ops": []})),
+            applied_ops: None,
+            rejected_ops: None,
+            validation_report: None,
+            reviewed_count: 0,
+            accepted_count: 0,
+            rejected_count: 0,
+            skipped_count: 0,
+            error: None,
+            error_classification: None,
+            error_retryable: None,
+            fallback_status: None,
+            report_ref: None,
+            artifacts: vec![artifact],
+            started_at: "1782283199".to_string(),
+            completed_at: "1782283200".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut child = tracedecay_command_with_home(home.path())
+        .arg("serve")
+        .arg("--path")
+        .arg(project.path())
+        .env_remove("TRACEDECAY_DAEMON_SOCKET")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("tracedecay serve should run");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin should be piped");
+        writeln!(
+            stdin,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {}
+            })
+        )
+        .unwrap();
+        writeln!(
+            stdin,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "tracedecay_automation_run_artifact_view",
+                    "arguments": {
+                        "run_id": run_id,
+                        "kind": "codex_handoff"
+                    }
+                }
+            })
+        )
+        .unwrap();
+    }
+
+    let output = child
+        .wait_with_output()
+        .expect("tracedecay serve should exit after stdin closes");
+    assert!(
+        output.status.success(),
+        "serve artifact stdio smoke failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let payload = json_rpc_tool_payload(&output.stdout, 2);
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["run_id"], run_id);
+    assert_eq!(payload["artifact"]["kind"], "codex_handoff");
+    assert_eq!(payload["payload"]["status"], "ready_for_review");
+    assert_eq!(
+        payload["payload"]["next_actions"][0],
+        "inspect stdio artifact payload"
     );
 }
 

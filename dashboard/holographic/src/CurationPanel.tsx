@@ -1,44 +1,26 @@
 import {
-  type Key,
-  type ReactNode,
-  type RefObject,
-  useEffect,
-  useId,
-  useRef,
-  useState,
-} from "react";
-import { createPortal } from "react-dom";
-import {
-  ChevronDown,
-  ChevronRight,
   History,
   ListChecks,
   ScrollText,
   Wand2,
 } from "lucide-react";
-import { Badge, Button, Card, CardContent, CardHeader, CardTitle } from "./sdk";
+import { Button, Card, CardContent, CardHeader, CardTitle } from "./sdk";
 import { Spinner } from "./Spinner";
 import {
-  describe,
-  diffTags,
+  countLabel,
   formatHistoryTime,
-  formatOplogTime,
-  isBookkeepingTag,
-  splitTags,
 } from "./curation/format";
+import { groupActions } from "./curation/risk";
+import { ActivityScroller } from "./curation/ActivityScroller";
+import { ActionReviewGroup } from "./curation/ActionReviewGroup";
 import {
-  actionRisk,
-  groupActions,
-  riskClass,
-  type ActionGroupDef,
-  type ActionRisk,
-} from "./curation/risk";
-import { useCurationData, type CurationTab } from "./curation/useCurationData";
-import type {
-  MemoryCurateAction,
-  MemoryCuratorActivityEvent,
-  MemoryOplogEvent,
-} from "./types";
+  useCurationData,
+  type CurationTab,
+} from "./curation/useCurationData";
+import { CurationHistoryPanel } from "./curation/CurationHistoryPanel";
+import { InlineConfirm } from "./curation/InlineConfirm";
+import { isActiveAutomationStatus, type AutomationRunTask } from "./curation/automationTasks";
+import type { SecondsField, TaskField } from "./curation/configTypes";
 
 const DIAGNOSTIC_COUNT_KEYS = new Set([
   "contradictions_detected",
@@ -49,552 +31,6 @@ const DIAGNOSTIC_COUNT_KEYS = new Set([
   "orphan_entities_pruned",
   "related_clusters",
 ]);
-
-const COUNT_LABELS: Record<string, string> = {
-  delete: "delete",
-  entity_merge: "entity merges",
-  entity_classify: "entity classifications",
-  entity_prune: "junk entities pruned",
-  junk_entities_pruned: "junk entities pruned",
-  merge: "fact merges",
-  orphan_entities: "orphan entities",
-  orphan_entities_pruned: "orphan entities pruned",
-  recategorize: "recategorize",
-  reflect: "reflections",
-  retag: "retag",
-};
-
-function countLabel(key: string): string {
-  return COUNT_LABELS[key] ?? key;
-}
-
-function formatCounts(counts: Array<[string, number]>): string {
-  if (!counts.length) return "no changes";
-  return counts.map(([key, value]) => `${countLabel(key)}=${value}`).join(", ");
-}
-
-function MetadataRow({
-  label,
-  value,
-}: {
-  label: string;
-  value: ReactNode;
-}) {
-  return (
-    <div className="flex min-w-0 items-center justify-between gap-3 border-b border-border/50 py-2 last:border-b-0">
-      <span className="text-[11px] uppercase tracking-[0.08em] text-text-tertiary">
-        {label}
-      </span>
-      <span className="min-w-0 text-right font-mono-ui text-xs text-text-secondary break-all">
-        {value}
-      </span>
-    </div>
-  );
-}
-
-function metadataValue(value: unknown, fallback = "auto"): ReactNode {
-  if (value === null || value === undefined || value === "") return fallback;
-  if (typeof value === "boolean") return value ? "yes" : "no";
-  return String(value);
-}
-
-function activityTone(level?: string) {
-  switch ((level || "info").toLowerCase()) {
-    case "success":
-      return "text-success";
-    case "warning":
-      return "text-warning";
-    case "error":
-      return "text-destructive";
-    default:
-      return "text-text-secondary";
-  }
-}
-
-function formatActivityTime(ts: string): string {
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return "--:--:--";
-  try {
-    return d.toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    });
-  } catch {
-    return "--:--:--";
-  }
-}
-
-function activityStatus(events: MemoryCuratorActivityEvent[], loading: boolean): string {
-  const latest = events[events.length - 1];
-  if (!latest) return "idle";
-  if (latest.phase === "stale") return "stale";
-  if (loading) return "live";
-  if (latest.phase === "finish") return "complete";
-  if (latest.phase === "lock") return "skipped";
-  return "recent";
-}
-
-function activityStatusClass(status: string): string {
-  switch (status) {
-    case "live":
-      return "border-success/30 bg-success/10 text-success";
-    case "stale":
-      return "border-warning/30 bg-warning/10 text-warning";
-    case "complete":
-      return "border-primary/30 bg-primary/10 text-primary";
-    default:
-      return "border-border bg-muted/30 text-text-tertiary";
-  }
-}
-
-/**
- * One consistent localized timestamp for every curation history surface
- * (plan "saved" chip, history rows, preview metadata). Falls back to the raw
- * value when it is not a parseable date.
- */
-/** Compact one-line summary of an oplog row's detail payload. */
-function oplogDetailSummary(event: MemoryOplogEvent): string {
-  const detail = event.detail ?? {};
-  const parts = Object.entries(detail)
-    .filter(([, value]) => value !== null && value !== undefined && value !== "")
-    .slice(0, 4)
-    .map(([key, value]) => `${key}=${String(value)}`);
-  return parts.join(" · ");
-}
-
-function ActivityScroller({
-  events,
-  loading,
-  error,
-  scrollRef,
-}: {
-  events: MemoryCuratorActivityEvent[];
-  loading: boolean;
-  error: string;
-  scrollRef: RefObject<HTMLDivElement>;
-}) {
-  const status = activityStatus(events, loading);
-  const stale = status === "stale";
-  return (
-    <div className="flex min-h-0 flex-1 flex-col border border-border bg-background/40">
-      <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2">
-        <div className="flex min-w-0 items-center gap-2">
-          <ScrollText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-          <span className="text-xs font-medium text-foreground">Live Activity</span>
-        </div>
-        <div className="flex shrink-0 items-center gap-2 text-[11px] text-text-tertiary">
-          {loading && !stale ? <Spinner /> : null}
-          <span
-            className={`rounded border px-1.5 py-0.5 uppercase tracking-[0.08em] ${activityStatusClass(status)}`}
-          >
-            {status}
-          </span>
-          <span>{events.length} events</span>
-        </div>
-      </div>
-      {error ? (
-        <div className="border-b border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-          {error}
-        </div>
-      ) : null}
-      {stale ? (
-        <div className="border-b border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
-          The last curator run stopped reporting activity. Refresh or start a new preview to resume from a fresh run.
-        </div>
-      ) : null}
-      <div
-        ref={scrollRef}
-        className="min-h-[12rem] flex-1 overflow-y-auto overflow-x-hidden p-3 font-mono-ui text-xs"
-      >
-        {events.length === 0 ? (
-          <div className="text-text-tertiary">
-            Start a preview or apply run to watch curator activity here.
-          </div>
-        ) : (
-          <div className="flex flex-col gap-1.5">
-            {events.map((event, index) => (
-              <div
-                key={`${event.ts}-${index}`}
-                className="grid grid-cols-[4.5rem_5.5rem_minmax(0,1fr)] gap-2"
-              >
-                <span className="text-text-tertiary">{formatActivityTime(event.ts)}</span>
-                <span className="truncate uppercase tracking-[0.08em] text-text-tertiary">
-                  {event.phase}
-                </span>
-                <span className={`min-w-0 break-words ${activityTone(event.level)}`}>
-                  {event.message}
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function TagBucket({
-  label,
-  tags,
-  tone,
-}: {
-  label: string;
-  tags: string[];
-  tone: "neutral" | "removed" | "added";
-}) {
-  if (!tags.length) return null;
-  const chipClass =
-    tone === "removed"
-      ? "border-destructive/30 bg-destructive/10 text-destructive/90 line-through"
-      : tone === "added"
-        ? "border-success/30 bg-success/10 text-success"
-        : "border-border bg-secondary/60 text-text-secondary";
-  return (
-    <div className="flex flex-col gap-1 min-w-0">
-      <div className="text-[10px] uppercase tracking-[0.08em] text-text-tertiary">
-        {label}
-      </div>
-      <div className="flex flex-wrap gap-1.5">
-        {tags.map((tag) => (
-          <span
-            key={`${label}-${tag}`}
-            className={`rounded-sm border px-1.5 py-0.5 font-mono-ui text-[10px] leading-4 break-all ${chipClass}`}
-          >
-            {tag}
-          </span>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function ActionRow({ action }: { action: MemoryCurateAction; key?: Key }) {
-  const content = action.content ?? "";
-  const [expanded, setExpanded] = useState(false);
-  const risk = actionRisk(action.op);
-  const isRetag = action.op === "retag";
-  const isDelete = action.op === "delete";
-  const isEntityMerge = action.op === "entity_merge";
-  const isEntityPrune = action.op === "entity_prune";
-  const isEntityClassify = action.op === "entity_classify";
-  const isReflect = action.op === "reflect";
-  const { oldTags, newTags, kept, removed, added } = isRetag
-    ? diffTags(action.old_tags, action.tags)
-    : { oldTags: [], newTags: [], kept: [], removed: [], added: [] };
-  const tagsOnlyReordered = isRetag && removed.length === 0 && added.length === 0;
-  const normalizationOnly =
-    isRetag &&
-    removed.length > 0 &&
-    added.length === 0 &&
-    removed.every(isBookkeepingTag);
-
-  return (
-    <div className="flex flex-col gap-2 border border-border bg-background/40 px-3 py-2.5">
-      {/* Header row: badge + operation + tier */}
-      <div className="flex items-start gap-2">
-        <Badge className="shrink-0 text-[10px] uppercase mt-0.5">{action.op}</Badge>
-        <span
-          className={`shrink-0 rounded-sm border px-1.5 py-0.5 text-[10px] uppercase tracking-[0.08em] mt-0.5 ${riskClass(risk)}`}
-          title={risk === "review" ? "Unknown operation; review carefully before applying." : `${risk} risk`}
-        >
-          {risk}
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="text-xs font-medium text-foreground break-words">{describe(action)}</div>
-        </div>
-        {action.tier && (
-          <span className="shrink-0 text-[10px] tracking-[0.08em] text-text-tertiary mt-0.5">
-            {action.tier}
-          </span>
-        )}
-      </div>
-
-      {/* Memory content — tap to expand the full fact (clamped by default) */}
-      {content && (
-        <div className="flex flex-col gap-1 border-l-2 border-border pl-2.5">
-          <div className="text-[10px] uppercase tracking-[0.08em] text-text-tertiary">
-            Memory
-          </div>
-          <button
-            type="button"
-            onClick={() => setExpanded((v) => !v)}
-            className="text-left"
-            title={expanded ? "Show less" : "Show full fact"}
-          >
-            <p
-              className={`text-xs text-text-secondary leading-relaxed break-words ${
-                expanded ? "" : "line-clamp-3"
-              }`}
-            >
-              {content}
-            </p>
-            <span className="text-[10px] uppercase tracking-[0.08em] text-text-tertiary">
-              {expanded ? "show less" : "tap to expand"}
-            </span>
-          </button>
-        </div>
-      )}
-
-      {/* Retag: show kept tags and the delta so normalization does not look destructive. */}
-      {isRetag && (
-        <div className="flex flex-col gap-2 border border-border/60 bg-secondary/30 p-2 text-[11px] min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="font-medium text-text-secondary">Tag change</span>
-            {normalizationOnly && (
-              <span className="rounded-sm border border-border bg-background/60 px-1.5 py-0.5 text-[10px] uppercase tracking-[0.08em] text-text-tertiary">
-                normalization only
-              </span>
-            )}
-          </div>
-          <TagBucket label="Kept" tags={kept} tone="neutral" />
-          <TagBucket label="Removed" tags={removed} tone="removed" />
-          <TagBucket label="Added" tags={added} tone="added" />
-          {tagsOnlyReordered && (
-            <span className="text-text-tertiary italic">
-              Tags reordered/normalized — no tags added or removed.
-            </span>
-          )}
-          {oldTags.length > 0 && newTags.length === 0 && (
-            <span className="text-warning">
-              This would leave the memory with no tags.
-            </span>
-          )}
-        </div>
-      )}
-
-      {isDelete && (
-        <div className="text-[11px] text-warning italic">
-          Will be permanently deleted. This cannot be undone.
-        </div>
-      )}
-
-      {isEntityMerge && (
-        <div className="flex flex-col gap-1 text-[11px] text-text-tertiary">
-          <span>
-            Consolidates duplicate entity records and preserves their linked memories
-            under the surviving entity.
-          </span>
-          {action.normalized_identity || action.fact_links_moved != null ? (
-            <span className="font-mono-ui">
-              {action.normalized_identity ? `identity=${action.normalized_identity}` : ""}
-              {action.normalized_identity && action.fact_links_moved != null ? " · " : ""}
-              {action.fact_links_moved != null ? `links moved=${action.fact_links_moved}` : ""}
-            </span>
-          ) : null}
-        </div>
-      )}
-
-      {isEntityPrune && (
-        <div className="flex flex-col gap-1 text-[11px] text-text-tertiary">
-          <span>
-            Removes a low-value, junk, or orphan entity reference without changing
-            the underlying fact text.
-          </span>
-          {action.fact_links_removed != null ? (
-            <span className="font-mono-ui">links removed={action.fact_links_removed}</span>
-          ) : null}
-        </div>
-      )}
-
-      {isEntityClassify && (
-        <div className="flex flex-col gap-1 text-[11px] text-text-tertiary">
-          <span>
-            Adds a coarse type label used by the entity list, graph, and
-            curator filters. The entity links and facts are unchanged.
-          </span>
-          <span className="font-mono-ui">
-            {action.old_entity_type ?? "unknown"} → {action.entity_type}
-            {action.fact_count != null ? ` · linked facts=${action.fact_count}` : ""}
-          </span>
-        </div>
-      )}
-
-      {isReflect && (
-        <div className="text-[11px] text-text-tertiary">
-          Creates a new {action.category ?? "general"} fact
-          {action.supersedes?.length
-            ? `, supersedes ${action.supersedes.map((s) => `#${s}`).join(", ")}`
-            : ""}
-          .
-        </div>
-      )}
-
-      {/* Reason from AI */}
-      {action.reason && (
-        <div className="text-[11px] text-text-tertiary leading-relaxed border-t border-border/50 pt-1.5 mt-0.5">
-          {action.reason}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ActionGroup({
-  group,
-  defaultOpen,
-}: {
-  group: ActionGroupDef & { actions: MemoryCurateAction[] };
-  defaultOpen: boolean;
-  key?: Key;
-}) {
-  const [open, setOpen] = useState(defaultOpen);
-  if (group.actions.length === 0) return null;
-  const riskCounts = group.actions.reduce<Record<ActionRisk, number>>(
-    (acc, action) => {
-      acc[actionRisk(action.op)] += 1;
-      return acc;
-    },
-    { low: 0, medium: 0, high: 0, review: 0 },
-  );
-
-  return (
-    <section className="border border-border bg-background/30">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full min-w-0 items-start gap-2 px-3 py-2 text-left"
-      >
-        {open ? (
-          <ChevronDown className="mt-0.5 h-3.5 w-3.5 shrink-0 text-text-tertiary" />
-        ) : (
-          <ChevronRight className="mt-0.5 h-3.5 w-3.5 shrink-0 text-text-tertiary" />
-        )}
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs font-medium text-foreground">{group.label}</span>
-            <Badge tone="outline" className="text-[10px]">
-              {group.actions.length}
-            </Badge>
-            {(["high", "medium", "low", "review"] as ActionRisk[]).map((risk) =>
-              riskCounts[risk] ? (
-                <span
-                  key={risk}
-                  className={`rounded-sm border px-1.5 py-0.5 text-[10px] uppercase tracking-[0.08em] ${riskClass(risk)}`}
-                >
-                  {risk} {riskCounts[risk]}
-                </span>
-              ) : null,
-            )}
-          </div>
-          <div className="mt-0.5 text-[11px] text-text-tertiary">
-            {group.description}
-          </div>
-        </div>
-      </button>
-      {open ? (
-        <div className="flex flex-col gap-2 border-t border-border/70 p-2">
-          {group.actions.map((action, i) => (
-            <ActionRow key={`${group.key}-${action.op}-${i}`} action={action} />
-          ))}
-        </div>
-      ) : null}
-    </section>
-  );
-}
-
-/**
- * Minimal confirm modal — local replacement for the core SPA's `ConfirmDialog`
- * (not exposed on the plugin SDK). Rendered through a React portal to
- * `document.body` so the `fixed inset-0` overlay escapes `.ts-card`'s
- * containing block (`backdrop-filter`) and `overflow-hidden`/`max-h` clipping,
- * and reliably covers the full viewport.
- */
-function InlineConfirm({
-  open,
-  title,
-  description,
-  children,
-  confirmLabel,
-  loading,
-  onCancel,
-  onConfirm,
-}: {
-  open: boolean;
-  title: string;
-  description?: string;
-  children?: ReactNode;
-  confirmLabel: string;
-  loading?: boolean;
-  onCancel: () => void;
-  onConfirm: () => void;
-}) {
-  const titleId = useId();
-  const dialogRef = useRef<HTMLDivElement>(null);
-  const previouslyFocused = useRef<HTMLElement | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    previouslyFocused.current =
-      document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const dialog = dialogRef.current;
-    const focusTarget =
-      dialog?.querySelector<HTMLElement>(
-        "button:not([disabled]), [href], input, select, textarea, [tabindex]:not([tabindex='-1'])",
-      ) ?? dialog;
-    focusTarget?.focus();
-    return () => {
-      previouslyFocused.current?.focus?.();
-    };
-  }, [open]);
-
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onCancel();
-      }
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [open, onCancel]);
-
-  if (!open) return null;
-  if (typeof document === "undefined") return null;
-
-  return createPortal(
-    <div
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onCancel();
-      }}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
-    >
-      <div
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        tabIndex={-1}
-        className="relative mx-4 w-full max-w-md border border-border bg-card shadow-lg"
-      >
-        <div className="flex flex-col gap-1 border-b border-border p-4">
-          <h2
-            id={titleId}
-            className="font-mondwest text-display text-sm font-bold tracking-[0.12em]"
-          >
-            {title}
-          </h2>
-          {description && (
-            <p className="font-sans text-xs leading-relaxed text-muted-foreground">
-              {description}
-            </p>
-          )}
-        </div>
-        {children ? <div className="border-b border-border p-4">{children}</div> : null}
-        <div className="flex items-center justify-end gap-2 p-3">
-          <Button type="button" outlined onClick={onCancel} disabled={loading}>
-            Cancel
-          </Button>
-          <Button type="button" onClick={onConfirm} disabled={loading}>
-            {loading ? "…" : confirmLabel}
-          </Button>
-        </div>
-      </div>
-    </div>,
-    document.body,
-  );
-}
 
 export default function CurationPanel({
   onApplied,
@@ -616,9 +52,42 @@ export default function CurationPanel({
     statusError,
     oplog,
     oplogError,
+    automationRuns,
+    automationRunsError,
+    automationRunActioning,
+    automationRunError,
+    automationRunArtifacts,
+    automationRunArtifact,
+    automationRunArtifactLoading,
+    automationRunArtifactError,
+    factProposals,
+    factProposalsLoading,
+    factProposalsError,
+    factProposalActioning,
+    managedSkills,
+    selectedManagedSkillId,
+    selectedManagedSkill,
+    managedSkillUsage,
+    managedSkillRecommendations,
+    managedSkillImprovementRecommendations,
+    managedSkillsLoading,
+    managedSkillsError,
+    managedSkillActioning,
     activity,
     activityLoading,
     activityError,
+    configResponse,
+    configDraft,
+    configLoading,
+    configSaving,
+    configResetting,
+    configError,
+    configFieldErrors,
+    schedulerStatus,
+    schedulerStatusLoading,
+    schedulerStatusError,
+    schedulerActioning,
+    configDirty,
     activityRef,
     panelRef,
     setConfirmOpen,
@@ -627,6 +96,22 @@ export default function CurationPanel({
     apply,
     loadActivity,
     loadStatus,
+    loadOplog,
+    loadAutomationRuns,
+    loadSchedulerStatus,
+    loadAutomationRunArtifact,
+    loadFactProposals,
+    loadManagedSkills,
+    loadManagedSkill,
+    runAutomationTask,
+    runFactProposalAction,
+    runManagedSkillAction,
+    setSchedulerPaused,
+    updateConfigDraft,
+    updateConfigTaskDraft,
+    resetConfigDraft,
+    resetConfigToDefaults,
+    saveConfigDraft,
   } = useCurationData({ onApplied });
 
   const actions = report?.actions ?? [];
@@ -641,11 +126,78 @@ export default function CurationPanel({
   );
   const actionGroups = groupActions(actions);
   const nonEmptyActionGroups = actionGroups.filter((group) => group.actions.length > 0);
+  const backendAvailability = configResponse?.backend_availability;
+  const backendUnavailable =
+    !configDirty &&
+    configDraft?.backend === "codex_app_server" &&
+    configDraft?.host_mode === "standalone" &&
+    backendAvailability?.available === false;
+  const backendUnavailableReason =
+    backendAvailability?.reason ?? "Codex app-server backend is unavailable";
+  const automationCanRun =
+    Boolean(configDraft?.enabled) &&
+    configDraft?.backend === "codex_app_server" &&
+    configDraft?.host_mode === "standalone" &&
+    !backendUnavailable &&
+    !configDirty &&
+    !configSaving &&
+    !automationRunActioning;
+  const activeAutomationStatus = (task: AutomationRunTask) =>
+    automationRuns.find(
+      (record) => record.task === task && isActiveAutomationStatus(record.status),
+    )?.status;
+  const automationRunTitle = configDirty
+    ? "Save automation config before running"
+    : configDraft?.host_mode === "delegated_host"
+      ? "Delegated host mode owns intelligence runs"
+      : configDraft?.backend !== "codex_app_server"
+        ? "Select the Codex app-server backend before running"
+        : backendUnavailable
+          ? backendUnavailableReason
+          : !configDraft?.enabled
+            ? "Enable automation before running"
+            : "Run now";
+  const automationTaskTitle = (task: AutomationRunTask) => {
+    const status = activeAutomationStatus(task);
+    if (status === "queued") return "Automation run is queued";
+    if (status === "running") return "Automation run is running";
+    return automationRunTitle;
+  };
+  const automationTaskLabel = (task: AutomationRunTask) => {
+    const status = activeAutomationStatus(task);
+    if (status === "queued") return "Queued";
+    if (status === "running") return "Running";
+    return "Run";
+  };
+  const automationTaskCanRun = (task: AutomationRunTask) =>
+    automationCanRun && !activeAutomationStatus(task);
+  const updateTaskSeconds = (
+    task: AutomationRunTask,
+    key: SecondsField,
+    value: string,
+  ) => {
+    updateConfigTaskDraft(task, {
+      [key]: value ? Math.max(1, Number(value) || 1) : null,
+    });
+  };
+  const taskFieldError = (
+    task: AutomationRunTask,
+    field: TaskField,
+  ) => configFieldErrors[`${task}.${field}`];
   const planLabel = actions.length ? `Plan ${actions.length}` : "Plan";
   const confirmGroupCounts = nonEmptyActionGroups.map((group) => [
     group.label,
     group.actions.length,
   ] as const);
+  const selectedUsage = selectedManagedSkill
+    ? managedSkillUsage[selectedManagedSkill.metadata.id]
+    : null;
+  const selectedRecommendation = selectedManagedSkill
+    ? managedSkillRecommendations[selectedManagedSkill.metadata.id]
+    : null;
+  const selectedImprovementRecommendation = selectedManagedSkill
+    ? managedSkillImprovementRecommendations[selectedManagedSkill.metadata.id]
+    : null;
   const tabs: Array<{ id: CurationTab; label: string; Icon: typeof Wand2 }> = [
     { id: "plan", label: planLabel, Icon: ListChecks },
     { id: "history", label: "History", Icon: History },
@@ -802,7 +354,7 @@ export default function CurationPanel({
             {actions.length > 0 ? (
               <div className="flex flex-1 min-h-0 flex-col gap-2 overflow-y-auto overflow-x-hidden pr-1">
                 {nonEmptyActionGroups.map((group, i) => (
-                  <ActionGroup
+                  <ActionReviewGroup
                     key={group.key}
                     group={group}
                     defaultOpen={i === 0}
@@ -855,217 +407,78 @@ export default function CurationPanel({
         ) : null}
 
         {activeTab === "history" ? (
-          <div
-            role="tabpanel"
-            id="curation-panel-history"
-            aria-labelledby="curation-tab-history"
-            className="flex flex-1 min-h-0 flex-col gap-3 overflow-y-auto overflow-x-hidden pr-1"
-          >
-            <div className="flex min-w-0 items-center justify-between gap-2 shrink-0">
-              <div className="min-w-0">
-                <div className="text-xs font-medium text-foreground">
-                  Curator Status
-                </div>
-                <div className="text-[11px] text-text-tertiary">
-                  Scheduler state, last run summary, and recent snapshots.
-                </div>
-              </div>
-              <Button
-                size="xs"
-                ghost
-                disabled={statusLoading}
-                onClick={loadStatus}
-                className="shrink-0 gap-2"
-              >
-                {statusLoading ? <Spinner /> : null}
-                Refresh
-              </Button>
-            </div>
-            {statusError ? (
-              <div className="border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive shrink-0">
-                {statusError}
-              </div>
-            ) : null}
-            {status ? (
-              <>
-                <div className="border border-border bg-background/30 px-3">
-                  <div className="pt-2 text-[11px] uppercase tracking-[0.08em] text-text-tertiary">
-                    Run history
-                  </div>
-                  <MetadataRow label="Provider" value={status.provider || "none"} />
-                  <MetadataRow label="Run count" value={status.state.run_count} />
-                  <MetadataRow
-                    label="Last apply"
-                    value={formatHistoryTime(status.state.last_run_at) || "never"}
-                  />
-                  <MetadataRow label="Last applied summary" value={status.state.last_run_summary || "none"} />
-                  <MetadataRow
-                    label="Last preview"
-                    value={formatHistoryTime(status.state.last_preview_at) || "never"}
-                  />
-                  <MetadataRow label="Last preview summary" value={status.state.last_preview_summary || "none"} />
-                </div>
-                <div className="border border-border bg-background/30 px-3">
-                  <div className="pt-2 text-[11px] uppercase tracking-[0.08em] text-text-tertiary">
-                    Curator configuration
-                  </div>
-                  <div className="pt-1 text-[11px] text-text-tertiary">
-                    Settings, not run results — "auto" means the provider
-                    default is used.
-                  </div>
-                  <MetadataRow label="Enabled" value={status.config.enabled ? "yes" : "no"} />
-                  <MetadataRow label="Paused" value={status.state.paused ? "yes" : "no"} />
-                  <MetadataRow label="Interval hours" value={metadataValue(status.config.interval_hours)} />
-                  <MetadataRow label="Idle gate hours" value={metadataValue(status.config.min_idle_hours)} />
-                  <MetadataRow label="Resolved mode" value={metadataValue(status.config.mode, "fast")} />
-                  <MetadataRow label="Dry-run first" value={metadataValue(status.config.dry_run_first, "no")} />
-                  <MetadataRow label="Scan cap" value={metadataValue(status.config.scan_cap)} />
-                  <MetadataRow label="Scan cap grace" value={metadataValue(status.config.scan_cap_grace, "0")} />
-                  <MetadataRow label="Max candidates" value={metadataValue(status.config.max_candidates)} />
-                  <MetadataRow
-                    label="Related threshold"
-                    value={metadataValue(status.config.related_cluster_threshold)}
-                  />
-                  <MetadataRow
-                    label="Batch size"
-                    value={metadataValue(status.config.batch_size)}
-                  />
-                  <MetadataRow
-                    label="Tool calls / batch"
-                    value={metadataValue(status.config.max_tool_calls_per_batch)}
-                  />
-                  <MetadataRow
-                    label="LLM calls / run"
-                    value={metadataValue(status.config.max_llm_calls_per_run)}
-                  />
-                  <MetadataRow label="Facts / run" value={metadataValue(status.config.per_run_facts)} />
-                  <MetadataRow
-                    label="Candidates / fact"
-                    value={metadataValue(status.config.candidates_per_fact)}
-                  />
-                  <MetadataRow
-                    label="Source cap"
-                    value={metadataValue(status.config.candidate_source_cap)}
-                  />
-                  <MetadataRow
-                    label="Expansion scan cap"
-                    value={metadataValue(status.config.candidate_expansion_scan_cap)}
-                  />
-                  <MetadataRow
-                    label="Parallel LLM"
-                    value={metadataValue(status.config.max_parallel_llm)}
-                  />
-                </div>
-                <div className="border border-border bg-background/30 px-3 py-2">
-                  <div className="mb-1 text-[11px] uppercase tracking-[0.08em] text-text-tertiary">
-                    Recent snapshots
-                  </div>
-                  {status.snapshots.length ? (
-                    <div className="flex flex-col gap-1">
-                      {status.snapshots.map((snapshot) => (
-                        <div
-                          key={snapshot.path}
-                          className="min-w-0 font-mono-ui text-xs text-text-secondary break-all"
-                        >
-                          {snapshot.name}
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="text-xs text-text-tertiary">No snapshots found.</div>
-                  )}
-                </div>
-              </>
-            ) : null}
-            <div className="border border-border bg-background/30 px-3 py-2">
-              <div className="mb-1 text-[11px] uppercase tracking-[0.08em] text-text-tertiary">
-                Recent memory operations
-              </div>
-              {oplogError ? (
-                <div className="text-xs text-destructive">{oplogError}</div>
-              ) : null}
-              {oplog.length ? (
-                <div className="flex flex-col gap-1">
-                  {oplog.map((event) => (
-                    <div
-                      key={event.id}
-                      className="grid grid-cols-[7.5rem_5.5rem_minmax(0,1fr)] gap-2 font-mono-ui text-xs"
-                    >
-                      <span className="text-text-tertiary">{formatOplogTime(event.ts)}</span>
-                      <span className="truncate uppercase tracking-[0.08em] text-text-secondary">
-                        {event.op}
-                      </span>
-                      <span className="min-w-0 break-all text-text-tertiary">
-                        {event.fact_id != null ? `#${event.fact_id} ` : ""}
-                        {oplogDetailSummary(event)}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="text-xs text-text-tertiary">
-                  No memory operations recorded yet.
-                </div>
-              )}
-            </div>
-            {report ? (
-              <>
-                <div className="text-xs font-medium text-foreground">
-                  Current Preview
-                </div>
-                <div className="border border-border bg-background/30 px-3">
-                  <MetadataRow label="Run mode" value={isPlan ? "preview" : "applied"} />
-                  {previewSavedAt ? (
-                    <MetadataRow label="Saved" value={formatHistoryTime(previewSavedAt)} />
-                  ) : null}
-                  {previewStale ? (
-                    <MetadataRow
-                      label="Preview state"
-                      value={previewStaleReason || "stale"}
-                    />
-                  ) : null}
-                  <MetadataRow label="Actions" value={actions.length} />
-                  <MetadataRow label="Counts" value={formatCounts(actionCounts)} />
-                  <MetadataRow label="Signals" value={formatCounts(diagnosticCounts)} />
-                  <MetadataRow label="LLM calls" value={report.llm_calls} />
-                  {report.skipped_actions != null ? (
-                    <MetadataRow label="Skipped" value={report.skipped_actions} />
-                  ) : null}
-                  {report.snapshot ? (
-                    <MetadataRow label="Snapshot" value={report.snapshot} />
-                  ) : null}
-                </div>
-                {report.coverage ? (
-                  <div className="border border-border bg-background/30 px-3">
-                    <MetadataRow
-                      label="Facts scanned"
-                      value={`${report.coverage.scanned}/${report.coverage.active_total}`}
-                    />
-                    <MetadataRow
-                      label="Facts due"
-                      value={report.coverage.due_remaining}
-                    />
-                    {report.coverage.entity_total != null ? (
-                      <MetadataRow
-                        label="Entities scanned"
-                        value={`${report.coverage.entities_scanned ?? 0}/${report.coverage.entity_total}`}
-                      />
-                    ) : null}
-                    {report.coverage.entity_scan_remaining != null ? (
-                      <MetadataRow
-                        label="Entities due"
-                        value={report.coverage.entity_scan_remaining}
-                      />
-                    ) : null}
-                  </div>
-                ) : null}
-              </>
-            ) : (
-              <div className="border border-border bg-background/30 px-3 py-4 text-xs text-text-tertiary">
-                Preview a plan to see current run metadata, signals, and coverage.
-              </div>
-            )}
-          </div>
+          <CurationHistoryPanel
+            report={report}
+            previewSavedAt={previewSavedAt}
+            previewStale={previewStale}
+            previewStaleReason={previewStaleReason}
+            actionsLength={actions.length}
+            actionCounts={actionCounts}
+            diagnosticCounts={diagnosticCounts}
+            isPlan={isPlan}
+            status={status}
+            statusLoading={statusLoading}
+            statusError={statusError}
+            oplog={oplog}
+            oplogError={oplogError}
+            automationRuns={automationRuns}
+            automationRunsError={automationRunsError}
+            automationRunActioning={automationRunActioning}
+            automationRunError={automationRunError}
+            automationRunArtifacts={automationRunArtifacts}
+            automationRunArtifact={automationRunArtifact}
+            automationRunArtifactLoading={automationRunArtifactLoading}
+            automationRunArtifactError={automationRunArtifactError}
+            factProposals={factProposals}
+            factProposalsLoading={factProposalsLoading}
+            factProposalsError={factProposalsError}
+            factProposalActioning={factProposalActioning}
+            managedSkills={managedSkills}
+            selectedManagedSkillId={selectedManagedSkillId}
+            selectedManagedSkill={selectedManagedSkill}
+            selectedUsage={selectedUsage}
+            selectedRecommendation={selectedRecommendation}
+            selectedImprovementRecommendation={selectedImprovementRecommendation}
+            managedSkillsLoading={managedSkillsLoading}
+            managedSkillsError={managedSkillsError}
+            managedSkillActioning={managedSkillActioning}
+            configDraft={configDraft}
+            configLoading={configLoading}
+            configSaving={configSaving}
+            configResetting={configResetting}
+            configError={configError}
+            configFieldErrors={configFieldErrors}
+            schedulerStatus={schedulerStatus}
+            schedulerStatusLoading={schedulerStatusLoading}
+            schedulerStatusError={schedulerStatusError}
+            schedulerActioning={schedulerActioning}
+            configDirty={configDirty}
+            backendUnavailable={backendUnavailable}
+            backendUnavailableReason={backendUnavailableReason}
+            activeAutomationStatus={activeAutomationStatus}
+            automationTaskCanRun={automationTaskCanRun}
+            automationTaskTitle={automationTaskTitle}
+            automationTaskLabel={automationTaskLabel}
+            taskFieldError={taskFieldError}
+            loadStatus={loadStatus}
+            loadOplog={loadOplog}
+            loadAutomationRuns={loadAutomationRuns}
+            loadSchedulerStatus={loadSchedulerStatus}
+            loadAutomationRunArtifact={loadAutomationRunArtifact}
+            loadFactProposals={loadFactProposals}
+            loadManagedSkills={loadManagedSkills}
+            loadManagedSkill={loadManagedSkill}
+            runAutomationTask={runAutomationTask}
+            runFactProposalAction={runFactProposalAction}
+            runManagedSkillAction={runManagedSkillAction}
+            setSchedulerPaused={setSchedulerPaused}
+            updateConfigDraft={updateConfigDraft}
+            updateConfigTaskDraft={updateConfigTaskDraft}
+            updateTaskSeconds={updateTaskSeconds}
+            resetConfigDraft={resetConfigDraft}
+            resetConfigToDefaults={resetConfigToDefaults}
+            saveConfigDraft={saveConfigDraft}
+          />
         ) : null}
       </CardContent>
 

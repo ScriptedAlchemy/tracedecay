@@ -1,7 +1,8 @@
 //! Provider-neutral assistant usage taxonomy.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -30,6 +31,28 @@ pub struct UsageEvent {
     pub category: UsageCategory,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolFamilySignal {
+    pub family: String,
+    pub relevant_events: i64,
+    pub usage_events: i64,
+    pub missed_events: i64,
+    pub underused: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ToolUsageObservation<'a> {
+    pub tool_names: Option<&'a str>,
+    pub metadata_json: Option<&'a str>,
+    pub text: Option<&'a str>,
+}
+
+#[derive(Default)]
+struct FamilyCounts {
+    relevant_events: i64,
+    usage_events: i64,
+}
+
 impl UsageCategory {
     pub fn dashboard_label(self) -> &'static str {
         match self {
@@ -53,6 +76,13 @@ pub fn normalize_tool_name(raw: &str) -> String {
         .or_else(|| trimmed.strip_prefix("mcp_tracedecay_"))
         .unwrap_or(trimmed);
     without_mcp.to_ascii_lowercase().replace('-', "_")
+}
+
+pub fn is_skill_view_tool(raw: &str) -> bool {
+    matches!(
+        normalize_tool_name(raw).as_str(),
+        "skill_view" | "tracedecay_skill_view"
+    )
 }
 
 fn categorize_normalized_tool(normalized: &str, command_hint: Option<&str>) -> UsageCategory {
@@ -119,10 +149,7 @@ pub fn infer_usage_events(
 
     if let Some(value) = metadata.as_ref() {
         let mut skills = explicit_skills_from_metadata(value);
-        if tools
-            .iter()
-            .any(|tool| normalize_tool_name(tool) == "skill_view")
-        {
+        if tools.iter().any(|tool| is_skill_view_tool(tool)) {
             collect_skill_view_metadata(value, &mut skills);
         }
         for skill in skills {
@@ -135,6 +162,46 @@ pub fn infer_usage_events(
     }
 
     events.into_iter().collect()
+}
+
+pub fn underused_tool_family_signals<'a>(
+    observations: impl IntoIterator<Item = ToolUsageObservation<'a>>,
+) -> Vec<ToolFamilySignal> {
+    let mut families: BTreeMap<String, FamilyCounts> = [
+        ("code_context".to_string(), FamilyCounts::default()),
+        ("code_search".to_string(), FamilyCounts::default()),
+        ("call_graph".to_string(), FamilyCounts::default()),
+        ("impact_analysis".to_string(), FamilyCounts::default()),
+    ]
+    .into_iter()
+    .collect();
+
+    for observation in observations {
+        let text = observation.text.unwrap_or_default();
+        for event in infer_usage_events(
+            observation.tool_names,
+            observation.metadata_json,
+            Some(text),
+        ) {
+            if event.kind == UsageKind::Tool {
+                record_tool_family(&mut families, &event.name, text);
+            }
+        }
+    }
+
+    families
+        .into_iter()
+        .map(|(family, counts)| {
+            let missed_events = counts.relevant_events.saturating_sub(counts.usage_events);
+            ToolFamilySignal {
+                family,
+                relevant_events: counts.relevant_events,
+                usage_events: counts.usage_events,
+                missed_events,
+                underused: missed_events > 0,
+            }
+        })
+        .collect()
 }
 
 fn insert_tool_event(events: &mut BTreeSet<UsageEvent>, raw: &str, command_hint: Option<&str>) {
@@ -159,6 +226,47 @@ fn insert_skill_event(events: &mut BTreeSet<UsageEvent>, raw: &str) {
         category: categorize_skill(name),
         name: name.to_string(),
     });
+}
+
+fn record_tool_family(families: &mut BTreeMap<String, FamilyCounts>, tool: &str, text: &str) {
+    let normalized = normalize_tool_name(tool);
+    let text = text.to_ascii_lowercase();
+    if normalized.contains("tracedecay_context")
+        || normalized.contains("tracedecay_node")
+        || normalized.contains("tracedecay_files")
+    {
+        increment_family_usage(families, "code_context");
+    }
+    if normalized.contains("tracedecay_search") || normalized.contains("find_exact_symbol") {
+        increment_family_usage(families, "code_search");
+    }
+    if normalized.contains("tracedecay_call") || normalized.contains("tracedecay_graph") {
+        increment_family_usage(families, "call_graph");
+    }
+    if normalized.contains("tracedecay_impact") || normalized.contains("tracedecay_affected") {
+        increment_family_usage(families, "impact_analysis");
+    }
+
+    if normalized == "read" || normalized == "cat" || normalized == "sed" {
+        increment_family_relevance(families, "code_context");
+    }
+    if matches!(normalized.as_str(), "grep" | "rg" | "glob" | "search")
+        || (matches!(normalized.as_str(), "bash" | "shell" | "exec_command")
+            && (text.contains(" rg ") || text.contains("grep") || text.contains("find ")))
+    {
+        increment_family_relevance(families, "code_search");
+    }
+}
+
+fn increment_family_usage(families: &mut BTreeMap<String, FamilyCounts>, family: &str) {
+    families.entry(family.to_string()).or_default().usage_events += 1;
+}
+
+fn increment_family_relevance(families: &mut BTreeMap<String, FamilyCounts>, family: &str) {
+    families
+        .entry(family.to_string())
+        .or_default()
+        .relevant_events += 1;
 }
 
 pub fn split_tool_names(raw: &str) -> impl Iterator<Item = String> + '_ {
@@ -263,7 +371,11 @@ fn collect_skill_view_metadata(value: &Value, out: &mut Vec<String>) {
         }
         Value::Object(map) => {
             if let Some(function) = map.get("function").and_then(Value::as_object) {
-                if function.get("name").and_then(Value::as_str) == Some("skill_view") {
+                if function
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(is_skill_view_tool)
+                {
                     if let Some(arguments) = function.get("arguments") {
                         collect_skill_view_arguments(arguments, out);
                     }
@@ -280,7 +392,11 @@ fn collect_skill_view_metadata(value: &Value, out: &mut Vec<String>) {
 fn collect_skill_view_arguments(value: &Value, out: &mut Vec<String>) {
     match value {
         Value::Object(map) => {
-            if let Some(name) = map.get("name").and_then(Value::as_str) {
+            if let Some(name) = map
+                .get("id")
+                .or_else(|| map.get("name"))
+                .and_then(Value::as_str)
+            {
                 if let Some(skill) = normalize_skill_name(name) {
                     out.push(skill);
                 }
@@ -664,6 +780,29 @@ mod tests {
                 .count(),
             1,
             "skill_view should count one canonical skill event, got {events:#?}",
+        );
+    }
+
+    #[test]
+    fn infers_managed_skill_view_from_tracedecay_mcp_tool_id() {
+        let events = infer_usage_events(
+            Some("tracedecay_skill_view"),
+            Some(
+                r#"{"function":{"name":"tracedecay_skill_view","arguments":{"id":"repo-hygiene"}}}"#,
+            ),
+            None,
+        );
+        assert_usage_event(
+            &events,
+            UsageKind::Tool,
+            "tracedecay_skill_view",
+            UsageCategory::TraceDecayGraph,
+        );
+        assert_usage_event(
+            &events,
+            UsageKind::Skill,
+            "repo-hygiene",
+            UsageCategory::WorkflowSkill,
         );
     }
 

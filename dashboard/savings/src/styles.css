@@ -343,28 +343,6 @@
   background: color-mix(in srgb, var(--ts-red, #ff7a7a) 8%, transparent);
 }
 
-.tss-empty {
-  border: 1px dashed var(--ts-line-strong);
-  border-radius: var(--ts-radius);
-  color: var(--ts-text-2);
-  display: grid;
-  gap: 0.4rem;
-  justify-items: start;
-  padding: 1.4rem 1.2rem;
-}
-
-.tss-empty h3 {
-  color: var(--ts-text);
-  font-size: 0.95rem;
-  margin: 0;
-}
-
-.tss-empty p {
-  font-size: 0.8rem;
-  line-height: 1.5;
-  margin: 0;
-}
-
 .tss-empty-mini {
   color: var(--ts-text-3);
   font-size: 0.78rem;

@@ -1,4 +1,13 @@
-/* Shared dashboard primitives (`tdp-*`), prepended to opted-in plugin CSS. */
+/* Shared dashboard primitives (`tdp-*`), prepended to opted-in plugin CSS.
+ *
+ * Wrapped in `@layer hermes-plugin` so that, inside a plugin bundle, these
+ * defaults are merged into the same layer as the plugin's own rules and LOSE
+ * ties to plugin overrides by source order (primitives are prepended first).
+ * Plugins whose sheets compile unlayered (tailwind:false — lcm/savings/graph)
+ * still beat this layer, so their `.hermes-* .tdp-*` overrides continue to win.
+ * Without this layer, an unlayered `.tdp-stat` would defeat a layered `.hm-stat`
+ * in the holographic (tailwind:true) bundle, regressing the Stat visuals. */
+@layer hermes-plugin {
 
 /* ----------------------------------------------------------- EmptyState */
 .tdp-empty {
@@ -92,6 +101,11 @@
   border: 1px solid var(--color-border);
   border-radius: var(--ts-radius, 18px);
   background: color-mix(in srgb, var(--color-background) 26%, transparent);
+}
+
+/* When a native tooltip (title) is attached, signal it's hoverable help. */
+.tdp-stat[title] {
+  cursor: help;
 }
 
 .tdp-stat-value {
@@ -231,3 +245,5 @@
   border-radius: inherit;
   background: color-mix(in srgb, var(--color-primary, #5a7fff) 90%, white 10%);
 }
+
+} /* end @layer hermes-plugin */

@@ -19,6 +19,7 @@ use std::sync::Arc;
 use serde_json::{json, Map, Value};
 use tokio::sync::RwLock;
 
+use super::memory_queries::normalize_fact_metadata;
 use super::memory_service::{
     apply_delete_op, apply_merge_op, build_delete_plan, delete_fact, similarity_computation,
 };
@@ -47,8 +48,10 @@ and facts that merely share an entity should remain separate (use \
 \"keep\").\n\n\
 Conflict policy: when two facts about the SAME subject conflict, keep \
 the higher-trust one and delete the stale one. Only use age/recency \
-after the same-subject / same-claim conflict is established (created_at \
-is the freshness signal; updated_at is maintenance metadata). If the \
+after the same-subject / same-claim conflict is established. Freshness \
+signals, in order, are asserted_at, effective_at, observed_at, occurred_at, \
+then created_at; these may appear in metadata. updated_at is maintenance \
+metadata, never truth freshness. If the \
 facts describe an EVOLUTION over time (a preference pivot, not a true \
 contradiction, e.g. 'used React' then 'switched to Vue'), emit a merge \
 whose merged_content is ONE time-aware fact built strictly from the \
@@ -410,7 +413,7 @@ async fn fact_details(
     }
     let ids: Vec<i64> = fact_ids.iter().copied().collect();
     let sql = format!(
-        "SELECT fact_id, content, category, tags, trust_score, created_at, updated_at,
+        "SELECT fact_id, content, category, tags, trust_score, metadata, created_at, updated_at,
                 access_count, last_recalled_at
          FROM memory_facts WHERE fact_id IN ({})",
         qmarks(ids.len())
@@ -422,6 +425,7 @@ async fn fact_details(
             message: format!("fact detail query failed: {message}"),
         })?;
     for row in rows {
+        let row = normalize_fact_metadata(row);
         if let Some(fact_id) = row.get("fact_id").and_then(Value::as_i64) {
             details.insert(fact_id, row);
         }
@@ -458,6 +462,13 @@ fn validate_llm_ops(
             rejected.push(reject(raw, &format!("unknown op '{op}'")));
             continue;
         }
+        if uses_updated_at_as_truth_freshness(raw) {
+            rejected.push(reject(
+                raw,
+                "updated_at is maintenance metadata; cite asserted_at, effective_at, observed_at, occurred_at, or created_at for truth freshness",
+            ));
+            continue;
+        }
         if confidence < min_confidence {
             rejected.push(reject(raw, &format!("confidence {confidence} below floor")));
             continue;
@@ -468,7 +479,10 @@ fn validate_llm_ops(
                 continue;
             };
             if !allowed_ids.contains(&fact_id) {
-                rejected.push(reject(raw, "fact_id not in reviewed clusters"));
+                rejected.push(reject(
+                    raw,
+                    &format!("fact_id {fact_id} was not in reviewed evidence"),
+                ));
                 continue;
             }
             valid.push(raw.clone());
@@ -489,7 +503,7 @@ fn validate_llm_ops(
         }
         if !allowed_ids.contains(&winner_id) || loser_ids.iter().any(|id| !allowed_ids.contains(id))
         {
-            rejected.push(reject(raw, "fact ids not in reviewed clusters"));
+            rejected.push(reject(raw, "fact ids were not all in reviewed evidence"));
             continue;
         }
         valid.push(raw.clone());
@@ -501,6 +515,19 @@ fn reject(raw: &Value, reason: &str) -> Value {
     let mut out = raw.as_object().cloned().unwrap_or_default();
     out.insert("rejected_reason".to_string(), json!(reason));
     Value::Object(out)
+}
+
+fn uses_updated_at_as_truth_freshness(raw: &Value) -> bool {
+    raw.get("reason")
+        .and_then(Value::as_str)
+        .is_some_and(|reason| {
+            let normalized = reason.to_ascii_lowercase();
+            normalized.contains("updated_at") || normalized.contains("updated at")
+        })
+        || raw
+            .get("freshness_field")
+            .and_then(Value::as_str)
+            .is_some_and(|field| field == "updated_at")
 }
 
 #[cfg(test)]
@@ -538,7 +565,7 @@ mod tests {
         assert!(rejected[1]["rejected_reason"]
             .as_str()
             .unwrap()
-            .contains("not in reviewed clusters"));
+            .contains("not in reviewed evidence"));
     }
 
     #[test]
@@ -579,5 +606,33 @@ mod tests {
         assert_eq!(valid.len(), 2);
         assert_eq!(valid[0]["op"], "delete");
         assert_eq!(valid[1]["op"], "merge");
+    }
+
+    #[test]
+    fn validate_rejects_updated_at_as_truth_freshness() {
+        let ops = vec![
+            json!({
+                "op": "delete",
+                "fact_id": 1,
+                "confidence": 0.9,
+                "reason": "fact 1 is stale because updated_at is older than fact 2"
+            }),
+            json!({
+                "op": "delete",
+                "fact_id": 2,
+                "confidence": 0.9,
+                "reason": "same subject and atomic claim; created_at shows fact 2 is stale"
+            }),
+        ];
+
+        let (valid, rejected) = validate_llm_ops(&ops, &allowed(&[1, 2]), 0.5);
+
+        assert_eq!(valid.len(), 1);
+        assert_eq!(valid[0]["fact_id"], json!(2));
+        assert_eq!(rejected.len(), 1);
+        assert!(rejected[0]["rejected_reason"]
+            .as_str()
+            .unwrap()
+            .contains("updated_at is maintenance metadata"));
     }
 }

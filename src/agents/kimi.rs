@@ -42,6 +42,11 @@ impl AgentIntegration for KimiIntegration {
 
         let agents_md = kimi_dir.join("AGENTS.md");
         install_prompt_rules(&agents_md)?;
+        super::install_managed_skill_prompt_index(
+            &ctx.home,
+            &agents_md,
+            crate::automation::skill_targets::SkillInstallTarget::Kimi,
+        )?;
 
         eprintln!();
         eprintln!("Setup complete. Next steps:");
@@ -58,7 +63,13 @@ impl AgentIntegration for KimiIntegration {
         let kimi_dir = project_path.join(".kimi-code");
         std::fs::create_dir_all(&kimi_dir).ok();
         install_mcp_server(&kimi_dir.join("mcp.json"), &ctx.tracedecay_bin)?;
-        install_prompt_rules(&project_path.join("AGENTS.md"))
+        let agents_md = project_path.join("AGENTS.md");
+        install_prompt_rules(&agents_md)?;
+        super::install_managed_skill_prompt_index(
+            &ctx.home,
+            &agents_md,
+            crate::automation::skill_targets::SkillInstallTarget::Kimi,
+        )
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
@@ -67,6 +78,7 @@ impl AgentIntegration for KimiIntegration {
         uninstall_mcp_server(&mcp_path);
 
         let agents_md = kimi_dir.join("AGENTS.md");
+        super::remove_managed_skill_prompt_index(&agents_md)?;
         uninstall_prompt_rules(&agents_md);
 
         eprintln!();

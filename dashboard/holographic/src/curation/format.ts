@@ -1,5 +1,28 @@
 import type { MemoryCurateAction } from "../types";
 
+const COUNT_LABELS: Record<string, string> = {
+  delete: "delete",
+  entity_merge: "entity merges",
+  entity_classify: "entity classifications",
+  entity_prune: "junk entities pruned",
+  junk_entities_pruned: "junk entities pruned",
+  merge: "fact merges",
+  orphan_entities: "orphan entities",
+  orphan_entities_pruned: "orphan entities pruned",
+  recategorize: "recategorize",
+  reflect: "reflections",
+  retag: "retag",
+};
+
+export function countLabel(key: string): string {
+  return COUNT_LABELS[key] ?? key;
+}
+
+export function formatCounts(counts: Array<[string, number]>): string {
+  if (!counts.length) return "no changes";
+  return counts.map(([key, value]) => `${countLabel(key)}=${value}`).join(", ");
+}
+
 export function describe(a: MemoryCurateAction): string {
   switch (a.op) {
     case "merge":

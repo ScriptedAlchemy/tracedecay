@@ -1,4 +1,4 @@
-use clap::{builder::PossibleValuesParser, Parser, Subcommand};
+use clap::{builder::PossibleValuesParser, Parser, Subcommand, ValueEnum};
 
 fn agent_value_parser() -> PossibleValuesParser {
     PossibleValuesParser::new(tracedecay::agents::available_integrations())
@@ -16,6 +16,7 @@ pub struct Cli {
     pub command: Option<Commands>,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum Commands {
     /// Initialize a new TraceDecay project (full index)
@@ -358,6 +359,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: MemoryAction,
     },
+    /// Self-improvement automation config and manual runs
+    Automation {
+        #[command(subcommand)]
+        action: AutomationAction,
+    },
     /// Inspect stores before profile-storage migration
     Migrate {
         #[command(subcommand)]
@@ -408,9 +414,9 @@ pub enum DaemonAction {
 
 #[derive(Subcommand)]
 pub enum SessionsAction {
-    /// Ingest Cursor and/or Codex transcript JSONL files into the global DB
+    /// Ingest all supported transcript providers into the project session DB
     Ingest {
-        /// Provider to ingest: cursor, codex, or all
+        /// Deprecated compatibility option; ingest always sweeps all supported providers
         #[arg(long)]
         provider: Option<String>,
         /// Registered project id whose session store should receive ingested messages
@@ -424,10 +430,10 @@ pub enum SessionsAction {
     Search {
         /// Full-text query to search for
         query: String,
-        /// Optional provider to search; omit or use all to search all ingested providers
+        /// Optional explicit result scope; omit or use all for unified cross-provider search
         #[arg(long)]
         provider: Option<String>,
-        /// Maximum number of matches per provider
+        /// Maximum number of matches
         #[arg(long, default_value_t = 10)]
         limit: usize,
         /// Registered project id whose session store should be searched
@@ -481,6 +487,452 @@ pub enum MemoryAction {
         #[arg(long, default_value_t = tracedecay::dashboard::memory_curate::CURATION_DEFAULT_MIN_CONFIDENCE)]
         min_confidence: f64,
         /// Project path (default: current directory, with discovery)
+        #[arg(short, long)]
+        path: Option<String>,
+    },
+}
+
+#[allow(clippy::large_enum_variant)]
+#[derive(Subcommand)]
+pub enum AutomationAction {
+    /// Read or mutate the project automation sidecar config.
+    Config {
+        #[command(subcommand)]
+        action: AutomationConfigAction,
+    },
+    /// Run an explicit self-improvement automation job.
+    Run {
+        #[command(subcommand)]
+        action: AutomationRunAction,
+    },
+    /// Inspect automation run history.
+    Runs {
+        #[command(subcommand)]
+        action: AutomationRunsAction,
+    },
+    /// Manage profile-owned automation skills and approvals.
+    Skills {
+        #[command(subcommand)]
+        action: AutomationSkillsAction,
+    },
+    /// Review and apply session-reflection fact proposals.
+    Facts {
+        #[command(subcommand)]
+        action: AutomationFactsAction,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum AutomationConfigScope {
+    Project,
+    Global,
+}
+
+#[allow(clippy::large_enum_variant)]
+#[derive(Subcommand)]
+pub enum AutomationConfigAction {
+    /// Print effective automation config.
+    Get {
+        /// Config scope to inspect.
+        #[arg(long, value_enum, default_value_t = AutomationConfigScope::Project)]
+        scope: AutomationConfigScope,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Project path (default: current directory, with discovery).
+        #[arg(short, long)]
+        path: Option<String>,
+    },
+    /// Explain effective automation config, merge source, and backend availability.
+    Explain {
+        /// Config scope to inspect.
+        #[arg(long, value_enum, default_value_t = AutomationConfigScope::Project)]
+        scope: AutomationConfigScope,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Project path (default: current directory, with discovery).
+        #[arg(short, long)]
+        path: Option<String>,
+    },
+    /// Enable project automation.
+    Enable {
+        /// Config scope to mutate.
+        #[arg(long, value_enum, default_value_t = AutomationConfigScope::Project)]
+        scope: AutomationConfigScope,
+        /// Project path (default: current directory, with discovery).
+        #[arg(short, long)]
+        path: Option<String>,
+    },
+    /// Disable project automation.
+    Disable {
+        /// Config scope to mutate.
+        #[arg(long, value_enum, default_value_t = AutomationConfigScope::Project)]
+        scope: AutomationConfigScope,
+        /// Project path (default: current directory, with discovery).
+        #[arg(short, long)]
+        path: Option<String>,
+    },
+    /// Patch project automation config fields.
+    Set {
+        /// Config scope to mutate.
+        #[arg(long, value_enum, default_value_t = AutomationConfigScope::Project)]
+        scope: AutomationConfigScope,
+        /// Backend: disabled, codex-app-server.
+        #[arg(long)]
+        backend: Option<String>,
+        /// Host mode: standalone, delegated-host.
+        #[arg(long)]
+        host_mode: Option<String>,
+        /// Model id. Empty string clears the project override.
+        #[arg(long)]
+        model: Option<String>,
+        /// Timeout in seconds.
+        #[arg(long)]
+        timeout_secs: Option<u64>,
+        /// Scheduler polling cadence in seconds.
+        #[arg(long)]
+        scheduler_tick_secs: Option<u64>,
+        /// Maximum backend output tokens. Empty string clears the override.
+        #[arg(long)]
+        max_tokens: Option<String>,
+        /// Backend sampling temperature. Empty string clears the override.
+        #[arg(long)]
+        temperature: Option<String>,
+        /// Require dashboard approval before applying generated changes.
+        #[arg(long)]
+        require_dashboard_approval: Option<bool>,
+        /// Allow accepted memory operations to apply automatically when policy permits.
+        #[arg(long)]
+        auto_apply_memory_ops: Option<bool>,
+        /// Allow generated skills to become active automatically when policy permits.
+        #[arg(long)]
+        auto_enable_skills: Option<bool>,
+        /// Enable or disable the memory curator task.
+        #[arg(long)]
+        memory_curator: Option<bool>,
+        /// Schedule label for the memory curator task. Empty string clears it.
+        #[arg(long)]
+        memory_curator_schedule: Option<String>,
+        /// Memory curator interval seconds. Empty string clears it.
+        #[arg(long)]
+        memory_curator_interval_secs: Option<String>,
+        /// Memory curator cooldown seconds. Empty string clears it.
+        #[arg(long)]
+        memory_curator_cooldown_secs: Option<String>,
+        /// Memory curator idle seconds. Empty string clears it.
+        #[arg(long)]
+        memory_curator_min_idle_secs: Option<String>,
+        /// Memory curator stale-lock seconds. Empty string clears it.
+        #[arg(long)]
+        memory_curator_stale_lock_secs: Option<String>,
+        /// Enable or disable the session reflector task.
+        #[arg(long)]
+        session_reflector: Option<bool>,
+        /// Schedule label for the session reflector task. Empty string clears it.
+        #[arg(long)]
+        session_reflector_schedule: Option<String>,
+        /// Session reflector interval seconds. Empty string clears it.
+        #[arg(long)]
+        session_reflector_interval_secs: Option<String>,
+        /// Session reflector cooldown seconds. Empty string clears it.
+        #[arg(long)]
+        session_reflector_cooldown_secs: Option<String>,
+        /// Session reflector idle seconds. Empty string clears it.
+        #[arg(long)]
+        session_reflector_min_idle_secs: Option<String>,
+        /// Session reflector stale-lock seconds. Empty string clears it.
+        #[arg(long)]
+        session_reflector_stale_lock_secs: Option<String>,
+        /// Enable or disable the skill writer task.
+        #[arg(long)]
+        skill_writer: Option<bool>,
+        /// Schedule label for the skill writer task. Empty string clears it.
+        #[arg(long)]
+        skill_writer_schedule: Option<String>,
+        /// Skill writer interval seconds. Empty string clears it.
+        #[arg(long)]
+        skill_writer_interval_secs: Option<String>,
+        /// Skill writer cooldown seconds. Empty string clears it.
+        #[arg(long)]
+        skill_writer_cooldown_secs: Option<String>,
+        /// Skill writer idle seconds. Empty string clears it.
+        #[arg(long)]
+        skill_writer_min_idle_secs: Option<String>,
+        /// Skill writer stale-lock seconds. Empty string clears it.
+        #[arg(long)]
+        skill_writer_stale_lock_secs: Option<String>,
+        /// Project path (default: current directory, with discovery).
+        #[arg(short, long)]
+        path: Option<String>,
+    },
+}
+
+#[allow(clippy::large_enum_variant)]
+#[derive(Subcommand)]
+pub enum AutomationRunAction {
+    /// Build a memory-curation review, call the configured backend, and validate proposed ops.
+    #[command(name = "memory-curation")]
+    MemoryCuration {
+        /// Keep the run non-mutating. This is currently the only supported mode.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        dry_run: bool,
+        /// Maximum candidate clusters included in the backend review request.
+        #[arg(long, default_value_t = tracedecay::dashboard::memory_curate::CURATION_DEFAULT_MAX_CLUSTERS)]
+        max_clusters: usize,
+        /// Confidence floor below which backend ops are rejected.
+        #[arg(long, default_value_t = tracedecay::dashboard::memory_curate::CURATION_DEFAULT_MIN_CONFIDENCE)]
+        min_confidence: f64,
+        /// Project path (default: current directory, with discovery).
+        #[arg(short, long)]
+        path: Option<String>,
+    },
+    /// Build a session-reflection fact proposal review from LCM evidence.
+    #[command(name = "session-reflection")]
+    SessionReflection {
+        /// Keep the run non-mutating. This is currently the only supported mode.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        dry_run: bool,
+        /// LCM provider to inspect.
+        #[arg(long, default_value = "cursor")]
+        provider: String,
+        /// LCM grep query used to collect bounded evidence.
+        #[arg(long, default_value = "remember prefer decision requirement workflow")]
+        query: String,
+        /// Maximum LCM evidence snippets included in the backend review request.
+        #[arg(long, default_value_t = 20)]
+        evidence_limit: usize,
+        /// LCM storage scope: project_local or hermes_profile.
+        #[arg(long, default_value = "project_local")]
+        storage_scope: String,
+        /// Absolute Hermes profile home directory when --storage-scope hermes_profile.
+        #[arg(long)]
+        hermes_home: Option<String>,
+        /// LCM grep scope: all, session, or current.
+        #[arg(long, default_value = "all")]
+        scope: String,
+        /// Provider-local session id when --scope session/current or to filter all-scope evidence.
+        #[arg(long)]
+        session_id: Option<String>,
+        /// Include LCM summary nodes when no raw-message-only filters are active.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        include_summaries: bool,
+        /// LCM grep sort: recency, relevance, or hybrid.
+        #[arg(long, default_value = "recency")]
+        sort: String,
+        /// Optional LCM raw-message source filter.
+        #[arg(long)]
+        source: Option<String>,
+        /// Optional LCM raw-message role filter.
+        #[arg(long)]
+        role: Option<String>,
+        /// Optional inclusive minimum raw-message timestamp.
+        #[arg(long)]
+        start_time: Option<i64>,
+        /// Optional inclusive maximum raw-message timestamp.
+        #[arg(long)]
+        end_time: Option<i64>,
+        /// Project path (default: current directory, with discovery).
+        #[arg(short, long)]
+        path: Option<String>,
+    },
+    /// Draft managed skills from repeated workflow evidence without activating them.
+    #[command(name = "skill-writing")]
+    SkillWriting {
+        /// Keep the run non-mutating. This is currently the only supported mode.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        dry_run: bool,
+        /// LCM provider to inspect.
+        #[arg(long, default_value = "cursor")]
+        provider: String,
+        /// LCM grep query used to collect bounded evidence.
+        #[arg(
+            long,
+            default_value = "workflow correction repeated skill tool pattern"
+        )]
+        query: String,
+        /// Maximum LCM evidence snippets included in the backend review request.
+        #[arg(long, default_value_t = 20)]
+        evidence_limit: usize,
+        /// Project path (default: current directory, with discovery).
+        #[arg(short, long)]
+        path: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AutomationRunsAction {
+    /// List recent automation runs.
+    List {
+        /// Maximum number of newest runs to return.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// Print machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+        /// Project path (default: current directory, with discovery).
+        #[arg(short, long)]
+        path: Option<String>,
+    },
+    /// Show one automation run by run id.
+    View {
+        run_id: String,
+        /// Print machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+        /// Project path (default: current directory, with discovery).
+        #[arg(short, long)]
+        path: Option<String>,
+    },
+    /// Read a verified automation run artifact payload.
+    Artifact {
+        run_id: String,
+        /// Artifact kind, such as codex_handoff or validation_gate.
+        kind: String,
+        /// Print machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+        /// Project path (default: current directory, with discovery).
+        #[arg(short, long)]
+        path: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AutomationSkillsAction {
+    /// List managed skills.
+    List {
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one managed skill.
+    View {
+        id: String,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a pending managed skill draft.
+    Draft {
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        summary: String,
+        #[arg(long)]
+        category: String,
+        #[arg(long)]
+        body: String,
+        /// Pin the skill against future stale/archive recommendations.
+        #[arg(long, default_value_t = false)]
+        pinned: bool,
+    },
+    /// Update an existing skill and restage content changes for approval.
+    Update {
+        id: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        summary: Option<String>,
+        #[arg(long)]
+        category: Option<String>,
+        #[arg(long)]
+        body: Option<String>,
+        #[arg(long)]
+        pinned: Option<bool>,
+    },
+    /// Approve a pending skill.
+    Approve { id: String },
+    /// Disable an active or pending skill.
+    Disable { id: String },
+    /// Archive a managed skill.
+    Archive { id: String },
+    /// Restore an archived skill back to pending approval.
+    Restore { id: String },
+    /// Export approved managed skills into a host plugin overlay or prompt index.
+    Install {
+        /// Host target to install for.
+        #[arg(long, value_enum)]
+        target: AutomationSkillsInstallTarget,
+        /// Plugin root for cursor/codex, or prompt/index file for prompt targets.
+        #[arg(long, value_name = "PATH")]
+        output: String,
+        /// For Codex, write a complete shareable plugin bundle instead of only a managed-skill overlay.
+        #[arg(long)]
+        plugin_artifact: bool,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AutomationSkillsInstallTarget {
+    Cursor,
+    Codex,
+    Claude,
+    Agents,
+    #[value(alias = "opencode")]
+    OpenCode,
+    Kimi,
+    Kiro,
+    Hermes,
+}
+
+impl From<AutomationSkillsInstallTarget>
+    for tracedecay::automation::skill_targets::SkillInstallTarget
+{
+    fn from(value: AutomationSkillsInstallTarget) -> Self {
+        match value {
+            AutomationSkillsInstallTarget::Cursor => Self::Cursor,
+            AutomationSkillsInstallTarget::Codex => Self::Codex,
+            AutomationSkillsInstallTarget::Claude => Self::Claude,
+            AutomationSkillsInstallTarget::Agents => Self::Agents,
+            AutomationSkillsInstallTarget::OpenCode => Self::OpenCode,
+            AutomationSkillsInstallTarget::Kimi => Self::Kimi,
+            AutomationSkillsInstallTarget::Kiro => Self::Kiro,
+            AutomationSkillsInstallTarget::Hermes => Self::Hermes,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+pub enum AutomationFactsAction {
+    /// List session-reflection fact proposals.
+    List {
+        /// Proposal state filter: pending_approval, applied, rejected, rejected_validation.
+        #[arg(long)]
+        state: Option<String>,
+        /// Maximum proposals to show.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// Project path (default: current directory, with discovery).
+        #[arg(short, long)]
+        path: Option<String>,
+    },
+    /// Show one fact proposal.
+    View {
+        id: String,
+        /// Project path (default: current directory, with discovery).
+        #[arg(short, long)]
+        path: Option<String>,
+    },
+    /// Approve and apply a pending fact proposal to memory.
+    Apply {
+        id: String,
+        /// Project path (default: current directory, with discovery).
+        #[arg(short, long)]
+        path: Option<String>,
+    },
+    /// Reject a pending fact proposal.
+    Reject {
+        id: String,
+        /// Optional decision reason.
+        #[arg(long)]
+        reason: Option<String>,
+        /// Project path (default: current directory, with discovery).
         #[arg(short, long)]
         path: Option<String>,
     },
@@ -634,7 +1086,9 @@ pub enum BranchAction {
 #[cfg(test)]
 mod cli_parse_tests {
     use super::{
-        BranchAction, Cli, Commands, DaemonAction, MemoryAction, MigrateAction, SessionsAction,
+        AutomationAction, AutomationConfigAction, AutomationConfigScope, AutomationRunAction,
+        AutomationRunsAction, AutomationSkillsAction, AutomationSkillsInstallTarget, BranchAction,
+        Cli, Commands, DaemonAction, MemoryAction, MigrateAction, SessionsAction,
     };
     use clap::{error::ErrorKind, CommandFactory, Parser};
 
@@ -941,6 +1395,661 @@ mod cli_parse_tests {
                 && path.as_deref() == Some("/tmp/project")
                 && project_id.is_none()
                 && project_path.is_none()
+        ));
+    }
+
+    #[test]
+    fn automation_config_commands_parse_project_sidecar_flags() {
+        let get = Cli::try_parse_from([
+            "tracedecay",
+            "automation",
+            "config",
+            "get",
+            "--json",
+            "--path",
+            "/tmp/project",
+        ])
+        .expect("automation config get should parse");
+        assert!(matches!(
+            get.command,
+            Some(Commands::Automation {
+                action:
+                    AutomationAction::Config {
+                        action:
+                            AutomationConfigAction::Get {
+                                scope: AutomationConfigScope::Project,
+                                json,
+                                path
+                            }
+                    }
+            }) if json && path.as_deref() == Some("/tmp/project")
+        ));
+
+        let explain = Cli::try_parse_from([
+            "tracedecay",
+            "automation",
+            "config",
+            "explain",
+            "--json",
+            "--scope",
+            "global",
+        ])
+        .expect("automation config explain should parse");
+        assert!(matches!(
+            explain.command,
+            Some(Commands::Automation {
+                action:
+                    AutomationAction::Config {
+                        action:
+                            AutomationConfigAction::Explain {
+                                scope: AutomationConfigScope::Global,
+                                json,
+                                path
+                            }
+                    }
+            }) if json && path.is_none()
+        ));
+
+        let enable = Cli::try_parse_from([
+            "tracedecay",
+            "automation",
+            "config",
+            "enable",
+            "--scope",
+            "global",
+        ])
+        .expect("automation config enable should parse");
+        assert!(matches!(
+            enable.command,
+            Some(Commands::Automation {
+                action:
+                    AutomationAction::Config {
+                        action:
+                            AutomationConfigAction::Enable {
+                                scope: AutomationConfigScope::Global,
+                                path
+                            }
+                    }
+            }) if path.is_none()
+        ));
+
+        let disable = Cli::try_parse_from(["tracedecay", "automation", "config", "disable"])
+            .expect("automation config disable should parse");
+        assert!(matches!(
+            disable.command,
+            Some(Commands::Automation {
+                action:
+                    AutomationAction::Config {
+                        action:
+                            AutomationConfigAction::Disable {
+                                scope: AutomationConfigScope::Project,
+                                path
+                            }
+                    }
+            }) if path.is_none()
+        ));
+
+        let set = Cli::try_parse_from([
+            "tracedecay",
+            "automation",
+            "config",
+            "set",
+            "--backend",
+            "codex-app-server",
+            "--host-mode",
+            "delegated-host",
+            "--model",
+            "gpt-test",
+            "--timeout-secs",
+            "120",
+            "--scheduler-tick-secs",
+            "30",
+            "--max-tokens",
+            "4096",
+            "--temperature",
+            "0.2",
+            "--require-dashboard-approval",
+            "true",
+            "--auto-apply-memory-ops",
+            "false",
+            "--auto-enable-skills",
+            "false",
+            "--memory-curator",
+            "true",
+            "--memory-curator-schedule",
+            "manual",
+            "--memory-curator-interval-secs",
+            "900",
+            "--memory-curator-cooldown-secs",
+            "300",
+            "--memory-curator-min-idle-secs",
+            "120",
+            "--memory-curator-stale-lock-secs",
+            "3600",
+            "--session-reflector",
+            "true",
+            "--session-reflector-schedule",
+            "interval",
+            "--session-reflector-interval-secs",
+            "1800",
+            "--session-reflector-cooldown-secs",
+            "600",
+            "--session-reflector-min-idle-secs",
+            "60",
+            "--session-reflector-stale-lock-secs",
+            "7200",
+            "--skill-writer",
+            "true",
+            "--skill-writer-schedule",
+            "manual",
+            "--skill-writer-interval-secs",
+            "",
+            "--skill-writer-cooldown-secs",
+            "none",
+        ])
+        .expect("automation config set should parse");
+        let Some(Commands::Automation {
+            action:
+                AutomationAction::Config {
+                    action:
+                        AutomationConfigAction::Set {
+                            scope,
+                            backend,
+                            host_mode,
+                            model,
+                            timeout_secs,
+                            scheduler_tick_secs,
+                            max_tokens,
+                            temperature,
+                            require_dashboard_approval,
+                            auto_apply_memory_ops,
+                            auto_enable_skills,
+                            memory_curator,
+                            memory_curator_schedule,
+                            memory_curator_interval_secs,
+                            memory_curator_cooldown_secs,
+                            memory_curator_min_idle_secs,
+                            memory_curator_stale_lock_secs,
+                            session_reflector,
+                            session_reflector_schedule,
+                            session_reflector_interval_secs,
+                            session_reflector_cooldown_secs,
+                            session_reflector_min_idle_secs,
+                            session_reflector_stale_lock_secs,
+                            skill_writer,
+                            skill_writer_schedule,
+                            skill_writer_interval_secs,
+                            skill_writer_cooldown_secs,
+                            skill_writer_min_idle_secs,
+                            skill_writer_stale_lock_secs,
+                            path,
+                        },
+                },
+        }) = set.command
+        else {
+            panic!("automation config set should parse into Set action");
+        };
+        assert_eq!(scope, AutomationConfigScope::Project);
+        assert_eq!(backend.as_deref(), Some("codex-app-server"));
+        assert_eq!(host_mode.as_deref(), Some("delegated-host"));
+        assert_eq!(model.as_deref(), Some("gpt-test"));
+        assert_eq!(timeout_secs, Some(120));
+        assert_eq!(scheduler_tick_secs, Some(30));
+        assert_eq!(max_tokens.as_deref(), Some("4096"));
+        assert_eq!(temperature.as_deref(), Some("0.2"));
+        assert_eq!(require_dashboard_approval, Some(true));
+        assert_eq!(auto_apply_memory_ops, Some(false));
+        assert_eq!(auto_enable_skills, Some(false));
+        assert_eq!(memory_curator, Some(true));
+        assert_eq!(memory_curator_schedule.as_deref(), Some("manual"));
+        assert_eq!(memory_curator_interval_secs.as_deref(), Some("900"));
+        assert_eq!(memory_curator_cooldown_secs.as_deref(), Some("300"));
+        assert_eq!(memory_curator_min_idle_secs.as_deref(), Some("120"));
+        assert_eq!(memory_curator_stale_lock_secs.as_deref(), Some("3600"));
+        assert_eq!(session_reflector, Some(true));
+        assert_eq!(session_reflector_schedule.as_deref(), Some("interval"));
+        assert_eq!(session_reflector_interval_secs.as_deref(), Some("1800"));
+        assert_eq!(session_reflector_cooldown_secs.as_deref(), Some("600"));
+        assert_eq!(session_reflector_min_idle_secs.as_deref(), Some("60"));
+        assert_eq!(session_reflector_stale_lock_secs.as_deref(), Some("7200"));
+        assert_eq!(skill_writer, Some(true));
+        assert_eq!(skill_writer_schedule.as_deref(), Some("manual"));
+        assert_eq!(skill_writer_interval_secs.as_deref(), Some(""));
+        assert_eq!(skill_writer_cooldown_secs.as_deref(), Some("none"));
+        assert!(skill_writer_min_idle_secs.is_none());
+        assert!(skill_writer_stale_lock_secs.is_none());
+        assert!(path.is_none());
+    }
+
+    #[test]
+    fn automation_run_memory_curation_parses_manual_dry_run_flags() {
+        let cli = Cli::try_parse_from([
+            "tracedecay",
+            "automation",
+            "run",
+            "memory-curation",
+            "--dry-run",
+            "true",
+            "--max-clusters",
+            "8",
+            "--min-confidence",
+            "0.7",
+            "--path",
+            "/tmp/project",
+        ])
+        .expect("automation memory-curation run should parse");
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Automation {
+                action:
+                    AutomationAction::Run {
+                        action:
+                            AutomationRunAction::MemoryCuration {
+                                dry_run,
+                                max_clusters,
+                                min_confidence,
+                                path,
+                            }
+                    }
+            }) if dry_run
+                && max_clusters == 8
+                && (min_confidence - 0.7).abs() < f64::EPSILON
+                && path.as_deref() == Some("/tmp/project")
+        ));
+    }
+
+    #[test]
+    fn automation_run_session_reflection_parses_manual_dry_run_flags() {
+        let cli = Cli::try_parse_from([
+            "tracedecay",
+            "automation",
+            "run",
+            "session-reflection",
+            "--dry-run",
+            "true",
+            "--provider",
+            "codex",
+            "--query",
+            "remember decisions",
+            "--evidence-limit",
+            "12",
+            "--storage-scope",
+            "hermes_profile",
+            "--hermes-home",
+            "/tmp/hermes-profile",
+            "--scope",
+            "session",
+            "--session-id",
+            "session-123",
+            "--include-summaries",
+            "false",
+            "--sort",
+            "hybrid",
+            "--source",
+            "hermes",
+            "--role",
+            "assistant",
+            "--start-time",
+            "1715100000",
+            "--end-time",
+            "1715100100",
+            "--path",
+            "/tmp/project",
+        ])
+        .expect("automation session-reflection run should parse");
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Automation {
+                action:
+                    AutomationAction::Run {
+                        action:
+                            AutomationRunAction::SessionReflection {
+                                dry_run,
+                                provider,
+                                query,
+                                evidence_limit,
+                                storage_scope,
+                                hermes_home,
+                                scope,
+                                session_id,
+                                include_summaries,
+                                sort,
+                                source,
+                                role,
+                                start_time,
+                                end_time,
+                                path,
+                            }
+                    }
+            }) if dry_run
+                && provider == "codex"
+                && query == "remember decisions"
+                && evidence_limit == 12
+                && storage_scope == "hermes_profile"
+                && hermes_home.as_deref() == Some("/tmp/hermes-profile")
+                && scope == "session"
+                && session_id.as_deref() == Some("session-123")
+                && !include_summaries
+                && sort == "hybrid"
+                && source.as_deref() == Some("hermes")
+                && role.as_deref() == Some("assistant")
+                && start_time == Some(1_715_100_000)
+                && end_time == Some(1_715_100_100)
+                && path.as_deref() == Some("/tmp/project")
+        ));
+    }
+
+    #[test]
+    fn automation_run_skill_writing_parses_manual_dry_run_flags() {
+        let cli = Cli::try_parse_from([
+            "tracedecay",
+            "automation",
+            "run",
+            "skill-writing",
+            "--dry-run",
+            "true",
+            "--provider",
+            "cursor",
+            "--query",
+            "workflow corrections",
+            "--evidence-limit",
+            "9",
+            "--path",
+            "/tmp/project",
+        ])
+        .expect("automation skill-writing run should parse");
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Automation {
+                action:
+                    AutomationAction::Run {
+                        action:
+                            AutomationRunAction::SkillWriting {
+                                dry_run,
+                                provider,
+                                query,
+                                evidence_limit,
+                                path,
+                            }
+                    }
+            }) if dry_run
+                && provider == "cursor"
+                && query == "workflow corrections"
+                && evidence_limit == 9
+                && path.as_deref() == Some("/tmp/project")
+        ));
+    }
+
+    #[test]
+    fn automation_runs_commands_parse_history_flags() {
+        let list = Cli::try_parse_from([
+            "tracedecay",
+            "automation",
+            "runs",
+            "list",
+            "--limit",
+            "5",
+            "--json",
+            "--path",
+            "/tmp/project",
+        ])
+        .expect("automation runs list should parse");
+
+        assert!(matches!(
+            list.command,
+            Some(Commands::Automation {
+                action:
+                    AutomationAction::Runs {
+                        action:
+                            AutomationRunsAction::List {
+                                limit,
+                                json,
+                                path,
+                            }
+                    }
+            }) if limit == 5 && json && path.as_deref() == Some("/tmp/project")
+        ));
+
+        let view = Cli::try_parse_from([
+            "tracedecay",
+            "automation",
+            "runs",
+            "view",
+            "run-123",
+            "--json",
+            "--path",
+            "/tmp/project",
+        ])
+        .expect("automation runs view should parse");
+
+        assert!(matches!(
+            view.command,
+            Some(Commands::Automation {
+                action:
+                    AutomationAction::Runs {
+                        action:
+                            AutomationRunsAction::View { run_id, json, path }
+                    }
+            }) if run_id == "run-123" && json && path.as_deref() == Some("/tmp/project")
+        ));
+
+        let artifact = Cli::try_parse_from([
+            "tracedecay",
+            "automation",
+            "runs",
+            "artifact",
+            "run-123",
+            "codex_handoff",
+            "--json",
+            "--path",
+            "/tmp/project",
+        ])
+        .expect("automation runs artifact should parse");
+
+        assert!(matches!(
+            artifact.command,
+            Some(Commands::Automation {
+                action:
+                    AutomationAction::Runs {
+                        action:
+                            AutomationRunsAction::Artifact {
+                                run_id,
+                                kind,
+                                json,
+                                path
+                            }
+                    }
+            }) if run_id == "run-123"
+                && kind == "codex_handoff"
+                && json
+                && path.as_deref() == Some("/tmp/project")
+        ));
+    }
+
+    #[test]
+    fn automation_skills_commands_parse_lifecycle_flags() {
+        let draft = Cli::try_parse_from([
+            "tracedecay",
+            "automation",
+            "skills",
+            "draft",
+            "--id",
+            "repo-hygiene",
+            "--title",
+            "Repository hygiene",
+            "--summary",
+            "Keep checks focused",
+            "--category",
+            "maintenance",
+            "--body",
+            "Run focused tests.",
+            "--pinned",
+        ])
+        .expect("automation skills draft should parse");
+        assert!(matches!(
+            draft.command,
+            Some(Commands::Automation {
+                action:
+                    AutomationAction::Skills {
+                        action:
+                            AutomationSkillsAction::Draft {
+                                id,
+                                title,
+                                summary,
+                                category,
+                                body,
+                                pinned,
+                            }
+                    }
+            }) if id == "repo-hygiene"
+                && title == "Repository hygiene"
+                && summary == "Keep checks focused"
+                && category == "maintenance"
+                && body == "Run focused tests."
+                && pinned
+        ));
+
+        let update = Cli::try_parse_from([
+            "tracedecay",
+            "automation",
+            "skills",
+            "update",
+            "repo-hygiene",
+            "--summary",
+            "Updated",
+            "--pinned",
+            "false",
+        ])
+        .expect("automation skills update should parse");
+        assert!(matches!(
+            update.command,
+            Some(Commands::Automation {
+                action:
+                    AutomationAction::Skills {
+                        action:
+                            AutomationSkillsAction::Update {
+                                id,
+                                summary,
+                                pinned,
+                                ..
+                            }
+                    }
+            }) if id == "repo-hygiene"
+                && summary.as_deref() == Some("Updated")
+                && pinned == Some(false)
+        ));
+
+        let approve = Cli::try_parse_from([
+            "tracedecay",
+            "automation",
+            "skills",
+            "approve",
+            "repo-hygiene",
+        ])
+        .expect("automation skills approve should parse");
+        assert!(matches!(
+            approve.command,
+            Some(Commands::Automation {
+                action:
+                    AutomationAction::Skills {
+                        action: AutomationSkillsAction::Approve { id }
+                    }
+            }) if id == "repo-hygiene"
+        ));
+
+        let install = Cli::try_parse_from([
+            "tracedecay",
+            "automation",
+            "skills",
+            "install",
+            "--target",
+            "cursor",
+            "--output",
+            "/tmp/plugin",
+            "--json",
+        ])
+        .expect("automation skills install should parse");
+        assert!(matches!(
+            install.command,
+            Some(Commands::Automation {
+                action:
+                    AutomationAction::Skills {
+                        action:
+                            AutomationSkillsAction::Install {
+                                target,
+                                output,
+                                plugin_artifact,
+                                json,
+                            }
+                    }
+            }) if target == AutomationSkillsInstallTarget::Cursor
+                && output == "/tmp/plugin"
+                && !plugin_artifact
+                && json
+        ));
+
+        let opencode_install = Cli::try_parse_from([
+            "tracedecay",
+            "automation",
+            "skills",
+            "install",
+            "--target",
+            "opencode",
+            "--output",
+            "/tmp/AGENTS.md",
+        ])
+        .expect("automation skills install should accept opencode alias");
+        assert!(matches!(
+            opencode_install.command,
+            Some(Commands::Automation {
+                action:
+                    AutomationAction::Skills {
+                        action:
+                            AutomationSkillsAction::Install {
+                                target,
+                                output,
+                                plugin_artifact,
+                                json,
+                            }
+                    }
+            }) if target == AutomationSkillsInstallTarget::OpenCode
+                && output == "/tmp/AGENTS.md"
+                && !plugin_artifact
+                && !json
+        ));
+
+        let codex_artifact = Cli::try_parse_from([
+            "tracedecay",
+            "automation",
+            "skills",
+            "install",
+            "--target",
+            "codex",
+            "--output",
+            "/tmp/codex-plugin",
+            "--plugin-artifact",
+        ])
+        .expect("automation skills install codex artifact should parse");
+        assert!(matches!(
+            codex_artifact.command,
+            Some(Commands::Automation {
+                action:
+                    AutomationAction::Skills {
+                        action:
+                            AutomationSkillsAction::Install {
+                                target,
+                                output,
+                                plugin_artifact,
+                                json,
+                            }
+                    }
+            }) if target == AutomationSkillsInstallTarget::Codex
+                && output == "/tmp/codex-plugin"
+                && plugin_artifact
+                && !json
         ));
     }
 

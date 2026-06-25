@@ -1384,7 +1384,7 @@ pub(super) async fn handle_message_search(
         .ok_or_else(|| TraceDecayError::Config {
             message: "missing required parameter: query".to_string(),
         })?;
-    let provider = optional_search_provider_arg(&args);
+    let requested_provider = optional_search_provider_arg(&args);
     let project_key = args
         .get("project_key")
         .and_then(Value::as_str)
@@ -1439,14 +1439,8 @@ pub(super) async fn handle_message_search(
             }),
         ));
     };
-    if provider.is_none() || provider == Some("hermes") {
-        // Hermes history lives in per-profile state.db stores normally swept
-        // by the serve/dashboard startup catch-ups; an incremental
-        // search-time catch-up makes the `tracedecay tool` / generated-plugin
-        // path self-sufficient (cursor-based, so it is cheap when fresh).
-        let _ = crate::sessions::hermes::ingest_for_project(&db, &target_root).await;
-    }
-    let results = if let Some(provider) = provider {
+    let _ = crate::sessions::ingest_global_sources(&db, &target_root).await;
+    let results = if let Some(provider) = requested_provider {
         db.search_session_messages_filtered(
             provider,
             project_key,
@@ -1471,7 +1465,8 @@ pub(super) async fn handle_message_search(
         Some(&target_root),
         &json!({
             "status": "ok",
-            "provider": provider.unwrap_or("all"),
+            "provider": requested_provider.unwrap_or("all"),
+            "requested_provider": requested_provider,
             "selected_project_root": target_root,
             "project_key": project_key,
             "parent_session_id": parent_session_id,

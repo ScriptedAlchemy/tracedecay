@@ -8,18 +8,28 @@ use crate::memory::encoding::HolographicEncoder;
 
 pub(crate) type VectorStateFingerprint = (i64, i64, i64, u64);
 
+pub(crate) fn normalize_fact_metadata(mut row: Value) -> Value {
+    if let Some(obj) = row.as_object_mut() {
+        if let Some(raw) = obj.get("metadata").and_then(Value::as_str) {
+            let parsed = serde_json::from_str::<Value>(raw).unwrap_or(Value::Null);
+            obj.insert("metadata".to_string(), parsed);
+        }
+    }
+    row
+}
+
 pub(crate) async fn fact_rows(
     state: &DashboardState,
     query: &str,
     limit: i64,
 ) -> Result<Vec<Value>, String> {
     let q = query.trim();
-    if q.is_empty() {
+    let rows = if q.is_empty() {
         query_rows(
             &state.mem_conn,
             "SELECT fact_id, content, category, tags, trust_score,
                     retrieval_count, access_count, last_recalled_at,
-                    helpful_count, created_at, updated_at,
+                    helpful_count, metadata, created_at, updated_at,
                     hrr_vector IS NOT NULL AS has_hrr
              FROM memory_facts
              ORDER BY trust_score DESC, updated_at DESC
@@ -33,7 +43,7 @@ pub(crate) async fn fact_rows(
             &state.mem_conn,
             "SELECT fact_id, content, category, tags, trust_score,
                     retrieval_count, access_count, last_recalled_at,
-                    helpful_count, created_at, updated_at,
+                    helpful_count, metadata, created_at, updated_at,
                     hrr_vector IS NOT NULL AS has_hrr
              FROM memory_facts
              WHERE content LIKE ?1 ESCAPE '\\' OR tags LIKE ?1 ESCAPE '\\'
@@ -42,7 +52,8 @@ pub(crate) async fn fact_rows(
             libsql::params![like, limit],
         )
         .await
-    }
+    }?;
+    Ok(rows.into_iter().map(normalize_fact_metadata).collect())
 }
 
 pub(crate) async fn entity_rows(state: &DashboardState, limit: i64) -> Result<Vec<Value>, String> {
@@ -215,7 +226,7 @@ pub(crate) async fn fact_detail_row(
         &state.mem_conn,
         "SELECT fact_id, content, category, tags, trust_score,
                 retrieval_count, access_count, last_recalled_at,
-                helpful_count, created_at, updated_at,
+                helpful_count, metadata, created_at, updated_at,
                 hrr_vector IS NOT NULL AS has_hrr
          FROM memory_facts
          WHERE fact_id = ?1
@@ -223,7 +234,7 @@ pub(crate) async fn fact_detail_row(
         libsql::params![fact_id],
     )
     .await?;
-    Ok(rows.into_iter().next())
+    Ok(rows.into_iter().next().map(normalize_fact_metadata))
 }
 
 pub(crate) async fn fact_entities(
@@ -252,7 +263,7 @@ pub(crate) async fn vector_facts(
         (
             "SELECT f.fact_id, f.content, f.category, f.trust_score, f.retrieval_count,
                     f.hrr_vector, b.bank_id, b.bank_name, COUNT(fe.entity_id) AS entity_count,
-                    f.access_count, f.last_recalled_at, f.created_at
+                    f.access_count, f.last_recalled_at, f.created_at, f.updated_at, f.metadata
              FROM memory_facts f
              LEFT JOIN memory_banks b ON b.bank_name = f.category
              LEFT JOIN memory_fact_entities fe ON fe.fact_id = f.fact_id
@@ -267,7 +278,7 @@ pub(crate) async fn vector_facts(
         (
             "SELECT f.fact_id, f.content, f.category, f.trust_score, f.retrieval_count,
                     f.hrr_vector, b.bank_id, b.bank_name, COUNT(fe.entity_id) AS entity_count,
-                    f.access_count, f.last_recalled_at, f.created_at
+                    f.access_count, f.last_recalled_at, f.created_at, f.updated_at, f.metadata
              FROM memory_facts f
              LEFT JOIN memory_banks b ON b.bank_name = f.category
              LEFT JOIN memory_fact_entities fe ON fe.fact_id = f.fact_id
@@ -317,6 +328,12 @@ pub(crate) async fn vector_facts(
         let access_count: i64 = row.get(9).unwrap_or(0);
         let last_recalled_at: Option<i64> = row.get(10).unwrap_or(None);
         let created_at: i64 = row.get(11).unwrap_or(0);
+        let updated_at: i64 = row.get(12).unwrap_or(0);
+        let metadata = row
+            .get::<String>(13)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .unwrap_or(Value::Null);
         out.push((
             serde_json::json!({
                 "fact_id": fact_id,
@@ -327,6 +344,8 @@ pub(crate) async fn vector_facts(
                 "access_count": access_count,
                 "last_recalled_at": last_recalled_at,
                 "created_at": created_at,
+                "updated_at": updated_at,
+                "metadata": metadata,
                 "bank_id": bank_id,
                 "bank_name": bank_name,
                 "entity_count": entity_count,

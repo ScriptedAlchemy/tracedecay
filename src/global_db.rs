@@ -80,6 +80,13 @@ pub struct AnalyticsEventRecord {
     pub metadata_json: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionToolUsageRow {
+    pub tool_names: String,
+    pub text: String,
+    pub metadata_json: String,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct AnalyticsEventQuery {
     pub provider: Option<String>,
@@ -2195,6 +2202,47 @@ impl GlobalDb {
         }
         events.reverse();
         Ok(events)
+    }
+
+    pub async fn session_tool_usage_rows(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<SessionToolUsageRow>, String> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT COALESCE(tool_names, '') AS tool_names,
+                        COALESCE(text, '') AS text,
+                        COALESCE(metadata_json, '') AS metadata_json
+                 FROM session_messages
+                 ORDER BY timestamp, ordinal
+                 LIMIT ?1",
+                [i64::try_from(limit).unwrap_or(i64::MAX)],
+            )
+            .await
+            .map_err(|e| format!("failed to query session tool usage rows: {e}"))?;
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| format!("failed to read session tool usage rows: {e}"))?
+        {
+            out.push(SessionToolUsageRow {
+                tool_names: row
+                    .get::<String>(0)
+                    .map_err(|e| format!("failed to decode session tool usage tool_names: {e}"))?,
+                text: row
+                    .get::<String>(1)
+                    .map_err(|e| format!("failed to decode session tool usage text: {e}"))?,
+                metadata_json: row.get::<String>(2).map_err(|e| {
+                    format!("failed to decode session tool usage metadata_json: {e}")
+                })?,
+            });
+        }
+        Ok(out)
     }
 
     /// Inserts or replaces a provider message. Returns `false` on any DB error.

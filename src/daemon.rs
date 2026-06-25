@@ -14,6 +14,10 @@ use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
+#[cfg(unix)]
+use tokio::task::JoinHandle;
+#[cfg(unix)]
+use tokio::time::Duration;
 
 use crate::client_identity::DaemonClientIdentity;
 use crate::errors::{Result, TraceDecayError};
@@ -563,9 +567,7 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
     set_owner_only_permissions(&socket_path, 0o600)?;
     eprintln!("[tracedecay] daemon listening on {}", socket_path.display());
     let engine = DaemonEngine::default();
-    #[allow(clippy::expect_used)]
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .expect("failed to register SIGTERM handler");
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
     loop {
         let stream = tokio::select! {
@@ -575,7 +577,7 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         };
         let engine = engine.clone();
         tokio::spawn(async move {
-            if let Err(e) = serve_socket_client(stream, engine).await {
+            if let Err(e) = Box::pin(serve_socket_client(stream, engine)).await {
                 eprintln!("[tracedecay] daemon client error: {e}");
             }
         });
@@ -620,6 +622,8 @@ async fn prepare_socket_path(socket_path: &Path) -> Result<()> {
 struct DaemonEngine {
     /// Shared daemon state, partitioned by the client-scoped project server key.
     project_servers: Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, Arc<crate::mcp::McpServer>>>>,
+    /// Background automation loops, partitioned with the same client/project identity as MCP state.
+    automation_schedulers: Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, JoinHandle<()>>>>,
 }
 
 #[cfg(unix)]
@@ -659,7 +663,11 @@ impl DaemonEngine {
 
         let mut servers = self.project_servers.lock().await;
         if let Some(server) = servers.get(&key) {
-            return Ok(Arc::clone(server));
+            let server = Arc::clone(server);
+            drop(servers);
+            self.ensure_automation_scheduler(key, canonical_project_path, handshake.clone())
+                .await;
+            return Ok(server);
         }
 
         let cg = open_project_for_handshake(&canonical_project_path, handshake).await?;
@@ -673,11 +681,66 @@ impl DaemonEngine {
             false,
         )
         .await;
-        servers.insert(key, Arc::clone(&server));
+        servers.insert(key.clone(), Arc::clone(&server));
+        drop(servers);
+        self.ensure_automation_scheduler(key, canonical_project_path, handshake.clone())
+            .await;
         Ok(server)
     }
 
+    async fn ensure_automation_scheduler(
+        &self,
+        key: ProjectServerKey,
+        project_path: PathBuf,
+        handshake: DaemonHandshake,
+    ) {
+        {
+            let schedulers = self.automation_schedulers.lock().await;
+            if schedulers.contains_key(&key) {
+                return;
+            }
+        }
+
+        let scheduler_configured =
+            match automation_scheduler_configured_for_project(&project_path, &handshake).await {
+                Ok(configured) => configured,
+                Err(e) => {
+                    eprintln!("[tracedecay] automation scheduler config error: {e}");
+                    false
+                }
+            };
+        if scheduler_configured {
+            self.start_automation_scheduler(key, project_path, handshake)
+                .await;
+        }
+    }
+
+    async fn start_automation_scheduler(
+        &self,
+        key: ProjectServerKey,
+        project_path: PathBuf,
+        handshake: DaemonHandshake,
+    ) {
+        let mut schedulers = self.automation_schedulers.lock().await;
+        if schedulers.contains_key(&key) {
+            return;
+        }
+        let handle = tokio::spawn(async move {
+            Box::pin(run_automation_scheduler_loop(project_path, handshake)).await;
+        });
+        schedulers.insert(key, handle);
+    }
+
     async fn shutdown_all(&self) {
+        let scheduler_handles: Vec<JoinHandle<()>> = {
+            let mut schedulers = self.automation_schedulers.lock().await;
+            schedulers.drain().map(|(_, handle)| handle).collect()
+        };
+        for handle in scheduler_handles {
+            handle.abort();
+            let _ = handle.await;
+        }
+
         let servers: Vec<Arc<crate::mcp::McpServer>> = {
             let servers = self.project_servers.lock().await;
             servers.values().cloned().collect()
@@ -689,6 +752,180 @@ impl DaemonEngine {
 }
 
 #[cfg(unix)]
+async fn run_automation_scheduler_loop(project_path: PathBuf, handshake: DaemonHandshake) {
+    loop {
+        if let Err(e) = Box::pin(run_automation_scheduler_tick(&project_path, &handshake)).await {
+            eprintln!("[tracedecay] automation scheduler tick failed: {e}");
+        }
+        let tick_secs = Box::pin(automation_scheduler_tick_secs_for_project(
+            &project_path,
+            &handshake,
+        ))
+        .await;
+        tokio::time::sleep(Duration::from_secs(tick_secs)).await;
+    }
+}
+
+#[cfg(unix)]
+async fn automation_scheduler_tick_secs_for_project(
+    project_path: &Path,
+    handshake: &DaemonHandshake,
+) -> u64 {
+    match open_existing_project_with_options(project_path, handshake.open_options()).await {
+        Ok(cg) => {
+            match effective_automation_config_for_project(&cg, &handshake.client_identity).await {
+                Ok(config) => config.scheduler_tick_secs,
+                Err(e) => {
+                    eprintln!("[tracedecay] automation scheduler config error: {e}");
+                    crate::automation::config::DEFAULT_SCHEDULER_TICK_SECS
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("[tracedecay] automation scheduler project open failed: {e}");
+            crate::automation::config::DEFAULT_SCHEDULER_TICK_SECS
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn run_automation_scheduler_tick(
+    project_path: &Path,
+    handshake: &DaemonHandshake,
+) -> Result<()> {
+    use crate::automation::backend::CodexAppServerBackend;
+    use crate::automation::run_ledger::AutomationTrigger;
+    use crate::automation::runner::{
+        run_memory_curator_with_backend, run_session_reflector_with_backend,
+        run_skill_writer_with_backend, MemoryCuratorAutomationOptions,
+        SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
+    };
+
+    let cg = open_existing_project_with_options(project_path, handshake.open_options()).await?;
+    let control =
+        crate::automation::scheduler::load_scheduler_control(&cg.store_layout().dashboard_root)
+            .await?;
+    if control.paused {
+        return Ok(());
+    }
+    let config = effective_automation_config_for_project(&cg, &handshake.client_identity).await?;
+    if !automation_scheduler_configured(&config) {
+        return Ok(());
+    }
+    let backend = CodexAppServerBackend::from_automation_config(&config);
+    let mut first_error: Option<TraceDecayError> = None;
+
+    if let Err(e) = run_memory_curator_with_backend(
+        &cg,
+        &config,
+        &backend,
+        MemoryCuratorAutomationOptions {
+            trigger: AutomationTrigger::Scheduler,
+            ..MemoryCuratorAutomationOptions::default()
+        },
+    )
+    .await
+    {
+        eprintln!("[tracedecay] automation scheduler memory_curator failed: {e}");
+        first_error.get_or_insert(e);
+    }
+    if let Err(e) = run_session_reflector_with_backend(
+        &cg,
+        &config,
+        &backend,
+        SessionReflectorAutomationOptions {
+            trigger: AutomationTrigger::Scheduler,
+            ..SessionReflectorAutomationOptions::default()
+        },
+    )
+    .await
+    {
+        eprintln!("[tracedecay] automation scheduler session_reflector failed: {e}");
+        first_error.get_or_insert(e);
+    }
+    if let Err(e) = run_skill_writer_with_backend(
+        &cg,
+        &config,
+        &backend,
+        SkillWriterAutomationOptions {
+            trigger: AutomationTrigger::Scheduler,
+            ..SkillWriterAutomationOptions::default()
+        },
+    )
+    .await
+    {
+        eprintln!("[tracedecay] automation scheduler skill_writer failed: {e}");
+        first_error.get_or_insert(e);
+    }
+    match first_error {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
+
+#[cfg(unix)]
+async fn effective_automation_config_for_project(
+    cg: &crate::tracedecay::TraceDecay,
+    client_identity: &DaemonClientIdentity,
+) -> Result<crate::automation::config::AutomationConfig> {
+    use crate::automation::config::{effective_config, load_project_config};
+
+    let global = user_config_for_client(client_identity).automation;
+    let project = load_project_config(&cg.store_layout().dashboard_root).await?;
+    effective_config(&global, project.as_ref())
+}
+
+#[cfg(unix)]
+async fn automation_scheduler_configured_for_project(
+    project_path: &Path,
+    handshake: &DaemonHandshake,
+) -> Result<bool> {
+    let cg = open_existing_project_with_options(project_path, handshake.open_options()).await?;
+    let config = effective_automation_config_for_project(&cg, &handshake.client_identity).await?;
+    Ok(automation_scheduler_configured(&config))
+}
+
+#[cfg(unix)]
+fn user_config_for_client(
+    client_identity: &DaemonClientIdentity,
+) -> crate::user_config::UserConfig {
+    let path = client_identity.profile_root.join("config.toml");
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return crate::user_config::UserConfig::default();
+    };
+    toml::from_str(&contents).unwrap_or_default()
+}
+
+#[cfg(unix)]
+fn automation_scheduler_configured(config: &crate::automation::config::AutomationConfig) -> bool {
+    use crate::automation::config::{AutomationBackend, AutomationHostMode};
+    use crate::automation::scheduler::{parse_schedule, AutomationSchedule};
+
+    if !config.enabled
+        || config.host_mode == AutomationHostMode::DelegatedHost
+        || config.backend != AutomationBackend::CodexAppServer
+    {
+        return false;
+    }
+    [
+        &config.tasks.memory_curator,
+        &config.tasks.session_reflector,
+        &config.tasks.skill_writer,
+    ]
+    .into_iter()
+    .any(|task| {
+        if !task.enabled {
+            return false;
+        }
+        match parse_schedule(task.schedule.as_deref()) {
+            Ok(AutomationSchedule::Manual) | Err(_) => false,
+            Ok(AutomationSchedule::ConfiguredInterval) => task.interval_secs.is_some(),
+            Ok(AutomationSchedule::Interval { .. }) => true,
+        }
+    })
+}
+
+#[cfg(unix)]
 async fn serve_socket_client(stream: tokio::net::UnixStream, engine: DaemonEngine) -> Result<()> {
     let mut transport = UnixStreamTransport::new(stream);
     let Some(line) = transport.read_line().await? else {
@@ -696,7 +933,7 @@ async fn serve_socket_client(stream: tokio::net::UnixStream, engine: DaemonEngin
     };
     let handshake = DaemonHandshake::from_line(&line)?;
     if handshake.project_path.is_some() {
-        let server = match engine.project_server(&handshake).await {
+        let server = match Box::pin(engine.project_server(&handshake)).await {
             Ok(server) => server,
             Err(e) => {
                 write_project_open_error(&mut transport, &e).await?;
@@ -1275,6 +1512,137 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn automation_scheduler_starts_when_any_task_has_interval() {
+        use crate::automation::config::{
+            AutomationBackend, AutomationConfig, AutomationHostMode, AutomationTaskConfig,
+        };
+
+        let mut config = AutomationConfig {
+            enabled: true,
+            backend: AutomationBackend::CodexAppServer,
+            ..AutomationConfig::default()
+        };
+        config.tasks.memory_curator = AutomationTaskConfig {
+            enabled: true,
+            schedule: Some("every:5m".to_string()),
+            interval_secs: None,
+            cooldown_secs: None,
+            ..AutomationTaskConfig::default()
+        };
+
+        assert!(super::automation_scheduler_configured(&config));
+
+        config.tasks.memory_curator.schedule = Some("manual".to_string());
+        assert!(!super::automation_scheduler_configured(&config));
+
+        config.tasks.memory_curator.schedule = Some("interval".to_string());
+        config.tasks.memory_curator.interval_secs = None;
+        assert!(!super::automation_scheduler_configured(&config));
+        config.tasks.memory_curator.interval_secs = Some(300);
+        assert!(super::automation_scheduler_configured(&config));
+
+        config.tasks.memory_curator.enabled = false;
+        config.tasks.session_reflector = AutomationTaskConfig {
+            enabled: true,
+            schedule: Some("hourly".to_string()),
+            interval_secs: None,
+            cooldown_secs: None,
+            ..AutomationTaskConfig::default()
+        };
+        assert!(super::automation_scheduler_configured(&config));
+
+        config.tasks.session_reflector.enabled = false;
+        config.tasks.skill_writer = AutomationTaskConfig {
+            enabled: true,
+            schedule: Some("daily".to_string()),
+            interval_secs: None,
+            cooldown_secs: None,
+            ..AutomationTaskConfig::default()
+        };
+        assert!(super::automation_scheduler_configured(&config));
+
+        config.tasks.memory_curator.schedule = Some("every:5m".to_string());
+        config.backend = AutomationBackend::ExternalCommand;
+        assert!(!super::automation_scheduler_configured(&config));
+
+        config.backend = AutomationBackend::CodexAppServer;
+        config.host_mode = AutomationHostMode::DelegatedHost;
+        assert!(!super::automation_scheduler_configured(&config));
+
+        config.host_mode = AutomationHostMode::Standalone;
+        config.enabled = false;
+        assert!(!super::automation_scheduler_configured(&config));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn automation_scheduler_loads_client_profile_config() {
+        let profile = TempDir::new().expect("profile temp dir");
+        std::fs::write(
+            profile.path().join("config.toml"),
+            "[automation]\n\
+             enabled = true\n\
+             backend = \"codex_app_server\"\n\
+             \n\
+             [automation.tasks.memory_curator]\n\
+             enabled = true\n\
+             schedule = \"every:5m\"\n",
+        )
+        .expect("write config");
+        let client_identity = test_client_identity_for(profile.path().to_path_buf());
+
+        let config = super::user_config_for_client(&client_identity);
+
+        assert!(config.automation.enabled);
+        assert!(super::automation_scheduler_configured(&config.automation));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn automation_scheduler_tick_secs_loads_dashboard_project_config() {
+        use crate::automation::config::{save_project_config, AutomationConfigPatch};
+
+        let dir = TempDir::new().expect("temp dir");
+        let project = dir.path().canonicalize().expect("canonical temp dir");
+        let client_identity = test_client_identity_for(project.join("profile"));
+        std::fs::create_dir_all(project.join("src")).expect("src dir");
+        std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
+        let cg = crate::tracedecay::TraceDecay::init_with_options(
+            &project,
+            crate::tracedecay::TraceDecayOpenOptions {
+                profile_root: Some(client_identity.profile_root.clone()),
+                global_db_path: Some(client_identity.global_db_path.clone()),
+            },
+        )
+        .await
+        .expect("project init");
+        save_project_config(
+            &cg.store_layout().dashboard_root,
+            &AutomationConfigPatch {
+                scheduler_tick_secs: Some(17),
+                ..AutomationConfigPatch::default()
+            },
+        )
+        .await
+        .expect("save automation config");
+        let handshake = DaemonHandshake {
+            project_path: Some(project.clone()),
+            scope_prefix: None,
+            timings: false,
+            allow_init: false,
+            client_identity,
+        };
+
+        let tick_secs = Box::pin(super::automation_scheduler_tick_secs_for_project(
+            &project, &handshake,
+        ))
+        .await;
+
+        assert_eq!(tick_secs, 17);
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn socket_client_serves_initialize_after_handshake() {
         let dir = TempDir::new().expect("temp dir");
@@ -1332,6 +1700,178 @@ mod tests {
             .await
             .expect("server task")
             .expect("server result");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn existing_project_server_reconciles_scheduler_after_config_change() {
+        use crate::automation::backend::AgentTaskKind;
+        use crate::automation::config::{
+            save_project_config, AutomationBackend, AutomationConfigPatch, AutomationTaskPatch,
+        };
+        use crate::automation::run_ledger::{
+            append_run_record, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
+        };
+
+        let dir = TempDir::new().expect("temp dir");
+        let project = dir.path().canonicalize().expect("canonical temp dir");
+        let client_identity = test_client_identity_for(project.join("profile"));
+        std::fs::create_dir_all(project.join("src")).expect("src dir");
+        std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
+        let cg = crate::tracedecay::TraceDecay::init_with_options(
+            &project,
+            crate::tracedecay::TraceDecayOpenOptions {
+                profile_root: Some(client_identity.profile_root.clone()),
+                global_db_path: Some(client_identity.global_db_path.clone()),
+            },
+        )
+        .await
+        .expect("project init");
+        let dashboard_root = cg.store_layout().dashboard_root.clone();
+        let handshake = DaemonHandshake {
+            project_path: Some(project.clone()),
+            scope_prefix: None,
+            timings: false,
+            allow_init: false,
+            client_identity,
+        };
+        let key = super::ProjectServerKey::from_handshake(project.clone(), &handshake);
+        let engine = super::DaemonEngine::default();
+
+        let first_server = Box::pin(engine.project_server(&handshake))
+            .await
+            .expect("initial project server");
+        assert!(engine.automation_schedulers.lock().await.is_empty());
+
+        let now = crate::tracedecay::current_timestamp();
+        append_run_record(
+            &dashboard_root,
+            &AutomationRunLedgerRecord {
+                schema_version: 2,
+                run_id: "recent-scheduler-run".to_string(),
+                trigger: AutomationTrigger::Scheduler,
+                task: AgentTaskKind::MemoryCurator,
+                task_key: Some("memory_curator".to_string()),
+                backend: "codex_app_server".to_string(),
+                host_mode: Some("standalone".to_string()),
+                prompt_version: Some("memory_curator:v1".to_string()),
+                response_schema: None,
+                strict_json: None,
+                model: None,
+                status: AutomationRunStatus::Succeeded,
+                evidence_hash: None,
+                input_hash: None,
+                output_hash: None,
+                proposed_ops: None,
+                applied_ops: None,
+                rejected_ops: None,
+                validation_report: None,
+                reviewed_count: 0,
+                accepted_count: 0,
+                rejected_count: 0,
+                skipped_count: 0,
+                error: None,
+                error_classification: None,
+                error_retryable: None,
+                fallback_status: None,
+                report_ref: None,
+                artifacts: Vec::new(),
+                started_at: (now - 1).to_string(),
+                completed_at: now.to_string(),
+            },
+        )
+        .await
+        .expect("seed recent scheduler ledger");
+        save_project_config(
+            &dashboard_root,
+            &AutomationConfigPatch {
+                enabled: Some(true),
+                backend: Some(AutomationBackend::CodexAppServer),
+                memory_curator: AutomationTaskPatch {
+                    enabled: Some(true),
+                    schedule: Some(Some("interval".to_string())),
+                    interval_secs: Some(Some(3600)),
+                    ..AutomationTaskPatch::default()
+                },
+                ..AutomationConfigPatch::default()
+            },
+        )
+        .await
+        .expect("save automation config");
+
+        let second_server = Box::pin(engine.project_server(&handshake))
+            .await
+            .expect("existing project server");
+        assert!(std::sync::Arc::ptr_eq(&first_server, &second_server));
+        assert!(engine.automation_schedulers.lock().await.contains_key(&key));
+
+        engine.shutdown_all().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn automation_scheduler_tick_respects_pause_control_without_backend_call() {
+        use crate::automation::config::{
+            save_project_config, AutomationBackend, AutomationConfigPatch, AutomationTaskPatch,
+        };
+        use crate::automation::run_ledger::load_run_records;
+        use crate::automation::scheduler::{save_scheduler_control, AutomationSchedulerControl};
+
+        let dir = TempDir::new().expect("temp dir");
+        let project = dir.path().canonicalize().expect("canonical temp dir");
+        let client_identity = test_client_identity_for(project.join("profile"));
+        std::fs::create_dir_all(project.join("src")).expect("src dir");
+        std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
+        let cg = crate::tracedecay::TraceDecay::init_with_options(
+            &project,
+            crate::tracedecay::TraceDecayOpenOptions {
+                profile_root: Some(client_identity.profile_root.clone()),
+                global_db_path: Some(client_identity.global_db_path.clone()),
+            },
+        )
+        .await
+        .expect("project init");
+        let dashboard_root = cg.store_layout().dashboard_root.clone();
+        save_project_config(
+            &dashboard_root,
+            &AutomationConfigPatch {
+                enabled: Some(true),
+                backend: Some(AutomationBackend::CodexAppServer),
+                memory_curator: AutomationTaskPatch {
+                    enabled: Some(true),
+                    schedule: Some(Some("every:1m".to_string())),
+                    ..AutomationTaskPatch::default()
+                },
+                ..AutomationConfigPatch::default()
+            },
+        )
+        .await
+        .expect("save automation config");
+        save_scheduler_control(
+            &dashboard_root,
+            &AutomationSchedulerControl { paused: true },
+        )
+        .await
+        .expect("save paused scheduler control");
+        let handshake = DaemonHandshake {
+            project_path: Some(project.clone()),
+            scope_prefix: None,
+            timings: false,
+            allow_init: false,
+            client_identity,
+        };
+
+        Box::pin(super::run_automation_scheduler_tick(&project, &handshake))
+            .await
+            .expect("paused scheduler tick should exit cleanly");
+
+        let records = load_run_records(&dashboard_root, 10)
+            .await
+            .expect("load run ledger");
+        assert!(
+            records.is_empty(),
+            "paused scheduler tick must not call backends or append run records"
+        );
     }
 
     #[cfg(unix)]

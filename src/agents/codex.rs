@@ -63,7 +63,7 @@ impl AgentIntegration for CodexIntegration {
         ] {
             super::ensure_project_local_safe_path(project_path, &path)?;
         }
-        install_codex_repo_plugin(project_path, &ctx.tracedecay_bin)?;
+        install_codex_repo_plugin(&ctx.home, project_path, &ctx.tracedecay_bin)?;
         sweep_legacy_project_codex_config(project_path);
         print_hook_trust_guidance();
         Ok(())
@@ -110,6 +110,7 @@ impl AgentIntegration for CodexIntegration {
                     &repo_dir,
                     &ctx.tracedecay_bin,
                     InstallScope::ProjectLocal,
+                    &ctx.home,
                 )?;
                 install_codex_marketplace_entry(
                     &codex_repo_marketplace_path(&project_path),
@@ -542,7 +543,7 @@ fn install_codex_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
 
 fn install_codex_personal_bootstrap(home: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
     let install_dir = codex_plugin_install_dir(home);
-    install_codex_plugin_bundle(&install_dir, tracedecay_bin, InstallScope::Global)?;
+    install_codex_plugin_bundle(&install_dir, tracedecay_bin, InstallScope::Global, home)?;
     install_codex_marketplace_entry(
         &codex_personal_marketplace_path(home),
         "personal",
@@ -554,7 +555,7 @@ fn install_codex_personal_bootstrap(home: &Path, tracedecay_bin: &str) -> Result
 
 fn install_codex_cached_plugin(home: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
     let target = codex_plugin_current_cached_install_dir(home);
-    install_codex_plugin_bundle(&target, tracedecay_bin, InstallScope::Global)?;
+    install_codex_plugin_bundle(&target, tracedecay_bin, InstallScope::Global, home)?;
     for stale_dir in codex_plugin_cached_install_dirs(home) {
         if stale_dir != target {
             remove_codex_plugin_install(&stale_dir)?;
@@ -563,9 +564,14 @@ fn install_codex_cached_plugin(home: &Path, tracedecay_bin: &str) -> Result<Path
     Ok(target)
 }
 
-fn install_codex_repo_plugin(project_path: &Path, tracedecay_bin: &str) -> Result<()> {
+fn install_codex_repo_plugin(home: &Path, project_path: &Path, tracedecay_bin: &str) -> Result<()> {
     let install_dir = codex_repo_plugin_install_dir(project_path);
-    install_codex_plugin_bundle(&install_dir, tracedecay_bin, InstallScope::ProjectLocal)?;
+    install_codex_plugin_bundle(
+        &install_dir,
+        tracedecay_bin,
+        InstallScope::ProjectLocal,
+        home,
+    )?;
     install_codex_marketplace_entry(
         &codex_repo_marketplace_path(project_path),
         "local-repo",
@@ -611,6 +617,30 @@ fn install_codex_plugin_bundle(
     install_dir: &Path,
     tracedecay_bin: &str,
     scope: InstallScope,
+    profile_home: &Path,
+) -> Result<()> {
+    write_codex_plugin_bundle_base(install_dir, tracedecay_bin, scope)?;
+    install_codex_managed_skill_overlay(profile_home, install_dir).map(|_| ())
+}
+
+/// Export a complete shareable Codex plugin bundle with active managed skills.
+pub fn export_codex_plugin_artifact(
+    profile_root: &Path,
+    output: &Path,
+    tracedecay_bin: &str,
+) -> Result<crate::automation::skill_targets::SkillInstallSummary> {
+    write_codex_plugin_bundle_base(output, tracedecay_bin, InstallScope::Global)?;
+    crate::automation::skill_targets::export_native_skill_overlay(
+        profile_root,
+        crate::automation::skill_targets::SkillInstallTarget::Codex,
+        output,
+    )
+}
+
+fn write_codex_plugin_bundle_base(
+    install_dir: &Path,
+    tracedecay_bin: &str,
+    scope: InstallScope,
 ) -> Result<()> {
     if let Some(parent) = install_dir.parent() {
         std::fs::create_dir_all(parent).map_err(|e| TraceDecayError::Config {
@@ -619,6 +649,18 @@ fn install_codex_plugin_bundle(
     }
     remove_codex_plugin_install(install_dir)?;
     write_codex_plugin_files(install_dir, tracedecay_bin, scope)
+}
+
+fn install_codex_managed_skill_overlay(
+    profile_home: &Path,
+    install_dir: &Path,
+) -> Result<crate::automation::skill_targets::SkillInstallSummary> {
+    let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(profile_home);
+    crate::automation::skill_targets::install_managed_skills(
+        &profile_root,
+        crate::automation::skill_targets::SkillInstallTarget::Codex,
+        install_dir,
+    )
 }
 
 fn write_codex_plugin_files(
@@ -814,9 +856,14 @@ fn remove_codex_plugin_skills_dir(install_dir: &Path) -> Result<()> {
             message: format!("failed to remove {}: {e}", skills_dir.display()),
         })?;
     } else if metadata.is_dir() {
+        remove_codex_managed_skill_overlay(install_dir);
         remove_codex_plugin_managed_skills(install_dir, &skills_dir)?;
     }
     Ok(())
+}
+
+fn remove_codex_managed_skill_overlay(install_dir: &Path) {
+    std::fs::remove_dir_all(install_dir.join("skills/agent-managed")).ok();
 }
 
 fn remove_codex_plugin_managed_skills(install_dir: &Path, skills_dir: &Path) -> Result<()> {

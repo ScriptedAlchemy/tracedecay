@@ -137,6 +137,11 @@
   --color-muted: rgba(117, 244, 210, 0.1);
   --color-muted-foreground: var(--ts-text-3);
   --color-secondary: rgba(122, 167, 255, 0.1);
+  /* Gotcha: --color-secondary is a 10%-opacity blue TINT, not a readable text
+     color, so the Tailwind `text-secondary` utility is near-invisible as
+     foreground. Use `text-text-secondary` (which maps to --ts-text-2) for
+     secondary copy; reserve `bg-secondary`/`border-secondary` for surfaces. */
+  --color-accent: var(--ts-blue);
   --color-destructive: var(--ts-red);
   --color-warning: var(--ts-amber);
   --color-success: var(--ts-green);
@@ -779,6 +784,7 @@ select:focus-visible {
   --color-muted: rgba(0, 137, 123, 0.08);
   --color-muted-foreground: var(--ts-text-3);
   --color-secondary: rgba(58, 95, 192, 0.08);
+  --color-accent: var(--ts-blue);
   --color-destructive: var(--ts-red);
   --color-warning: var(--ts-amber);
   --color-success: var(--ts-green);

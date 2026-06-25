@@ -6,8 +6,43 @@ import type {
   MemoryCuratorStatusResponse,
   MemoryOplogEvent,
 } from "../types";
+import type { AutomationRunApiMethod } from "./automationTasks";
+import { errorMessage } from "./errors";
+import { useAutomationConfig } from "./useAutomationConfig";
+import { useAutomationRuns } from "./useAutomationRuns";
+import { useFactProposals } from "./useFactProposals";
+import { useManagedSkills } from "./useManagedSkills";
 
 export type CurationTab = "plan" | "history" | "activity";
+
+export type CurationApi = Pick<
+  typeof defaultApi,
+  | "applyFactProposal"
+  | "approveManagedSkill"
+  | "archiveManagedSkill"
+  | "disableManagedSkill"
+  | "discardManagedSkillUpdate"
+  | "getAutomationSchedulerStatus"
+  | "getFactProposals"
+  | "getManagedSkill"
+  | "getManagedSkills"
+  | "getMemoryAutomationConfig"
+  | "getMemoryAutomationRunArtifact"
+  | "getMemoryAutomationRunArtifacts"
+  | "getMemoryAutomationRuns"
+  | "getMemoryCuratorActivity"
+  | "getMemoryCuratorPreview"
+  | "getMemoryCuratorStatus"
+  | "getMemoryOplog"
+  | "patchMemoryAutomationConfig"
+  | "pauseAutomationScheduler"
+  | AutomationRunApiMethod
+  | "postMemoryCurate"
+  | "rejectFactProposal"
+  | "resetMemoryAutomationConfig"
+  | "restoreManagedSkill"
+  | "resumeAutomationScheduler"
+>;
 
 export function useCurationData({
   api = defaultApi,
@@ -16,7 +51,7 @@ export function useCurationData({
   pollFastMs = 900,
   pollIdleMs = 2500,
 }: {
-  api?: typeof defaultApi;
+  api?: CurationApi;
   onApplied?: () => void;
   now?: () => string;
   pollFastMs?: number;
@@ -39,6 +74,50 @@ export function useCurationData({
   const [activity, setActivity] = useState<MemoryCuratorActivityEvent[]>([]);
   const [activityLoading, setActivityLoading] = useState(false);
   const [activityError, setActivityError] = useState("");
+  const {
+    configResponse,
+    configDraft,
+    configLoading,
+    configSaving,
+    configResetting,
+    configError,
+    configFieldErrors,
+    schedulerStatus,
+    schedulerStatusLoading,
+    schedulerStatusError,
+    schedulerActioning,
+    configDirty,
+    loadConfig,
+    loadSchedulerStatus,
+    setSchedulerPaused,
+    updateConfigDraft,
+    updateConfigTaskDraft,
+    resetConfigDraft,
+    resetConfigToDefaults,
+    saveConfigDraft,
+  } = useAutomationConfig(api);
+  const {
+    managedSkills,
+    selectedManagedSkillId,
+    selectedManagedSkill,
+    managedSkillUsage,
+    managedSkillRecommendations,
+    managedSkillImprovementRecommendations,
+    managedSkillsLoading,
+    managedSkillsError,
+    managedSkillActioning,
+    loadManagedSkills,
+    loadManagedSkill,
+    runManagedSkillAction,
+  } = useManagedSkills(api);
+  const {
+    factProposals,
+    factProposalsLoading,
+    factProposalsError,
+    factProposalActioning,
+    loadFactProposals,
+    runFactProposalAction,
+  } = useFactProposals({ api, onApplied });
   const activityRef = useRef<HTMLDivElement>(null);
   const previewSavedAtRef = useRef<string | null>(null);
   const previewLoadSeq = useRef(0);
@@ -57,6 +136,21 @@ export function useCurationData({
     setPreviewStaleReason(staleReason);
   }, []);
 
+  const clearSavedPreview = useCallback(() => {
+    previewSavedAtRef.current = null;
+    setReport(null);
+    setPreviewSavedAt(null);
+    setPreviewStale(false);
+    setPreviewStaleReason("");
+  }, []);
+
+  const setMemoryPreviewFromRun = useCallback((nextReport: MemoryCurateResponse) => {
+    setReport(nextReport);
+    setPreviewSavedAt(null);
+    setPreviewStale(false);
+    setPreviewStaleReason("");
+  }, []);
+
   const loadSavedPreview = useCallback((force = false) => {
     const ticket = ++previewLoadSeq.current;
     return api
@@ -71,16 +165,12 @@ export function useCurationData({
             response.stale_reason || "",
           );
         } else if (!response.report && !loading && !applying) {
-          previewSavedAtRef.current = null;
-          setReport(null);
-          setPreviewSavedAt(null);
-          setPreviewStale(false);
-          setPreviewStaleReason("");
+          clearSavedPreview();
         }
         return response;
       })
       .catch(() => {});
-  }, [api, applySavedPreview, applying, loading]);
+  }, [api, applySavedPreview, applying, clearSavedPreview, loading]);
 
   const loadActivity = useCallback((showSpinner = false) => {
     if (showSpinner) setActivityLoading(true);
@@ -97,7 +187,7 @@ export function useCurationData({
           loadSavedPreview(false);
         }
       })
-      .catch((err) => setActivityError(err instanceof Error ? err.message : String(err)))
+      .catch((err) => setActivityError(errorMessage(err)))
       .finally(() => {
         if (showSpinner) setActivityLoading(false);
       });
@@ -109,7 +199,7 @@ export function useCurationData({
     api
       .getMemoryCuratorStatus()
       .then((response) => setStatus(response))
-      .catch((err) => setStatusError(err instanceof Error ? err.message : String(err)))
+      .catch((err) => setStatusError(errorMessage(err)))
       .finally(() => setStatusLoading(false));
   }, [api]);
 
@@ -121,12 +211,43 @@ export function useCurationData({
         setOplog(response.events || []);
         if (response.error) setOplogError(response.error);
       })
-      .catch((err) => setOplogError(err instanceof Error ? err.message : String(err)));
+      .catch((err) => setOplogError(errorMessage(err)));
   }, [api]);
+
+  const {
+    automationRuns,
+    automationRunsError,
+    automationRunActioning,
+    automationRunError,
+    automationRunArtifacts,
+    automationRunArtifact,
+    automationRunArtifactLoading,
+    automationRunArtifactError,
+    loadAutomationRuns,
+    loadAutomationRunArtifact,
+    runAutomationTask,
+  } = useAutomationRuns({
+    api,
+    pollFastMs,
+    setActiveTab,
+    setMemoryPreviewFromRun,
+    loadActivity,
+    loadStatus,
+    loadFactProposals,
+    loadManagedSkills,
+  });
 
   useEffect(() => {
     loadSavedPreview(true);
   }, [loadSavedPreview]);
+
+  useEffect(() => {
+    loadConfig().catch(() => {});
+  }, [loadConfig]);
+
+  useEffect(() => {
+    loadSchedulerStatus(false).catch(() => {});
+  }, [loadSchedulerStatus]);
 
   const preview = useCallback(async () => {
     setLoading(true);
@@ -135,24 +256,20 @@ export function useCurationData({
     loadActivity(true);
     try {
       const response = await api.postMemoryCurate({ dry_run: true });
-      setReport(response);
       const savedAt = now();
-      previewSavedAtRef.current = savedAt;
-      setPreviewSavedAt(savedAt);
-      setPreviewStale(false);
-      setPreviewStaleReason("");
+      applySavedPreview(response, savedAt);
       await loadSavedPreview(true);
       loadActivity();
       loadStatus();
       setActiveTab("plan");
       return response;
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
       throw err;
     } finally {
       setLoading(false);
     }
-  }, [api, loadActivity, loadSavedPreview, loadStatus, now]);
+  }, [api, applySavedPreview, loadActivity, loadSavedPreview, loadStatus, now]);
 
   const apply = useCallback(async () => {
     previewLoadSeq.current += 1;
@@ -162,23 +279,19 @@ export function useCurationData({
     loadActivity(true);
     try {
       const response = await api.postMemoryCurate({ dry_run: false });
-      setReport(response);
-      previewSavedAtRef.current = null;
-      setPreviewSavedAt(null);
-      setPreviewStale(false);
-      setPreviewStaleReason("");
+      applySavedPreview(response, null);
       setConfirmOpen(false);
       loadActivity();
       loadStatus();
       onApplied?.();
       return response;
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
       throw err;
     } finally {
       setApplying(false);
     }
-  }, [api, loadActivity, loadStatus, onApplied]);
+  }, [api, applySavedPreview, loadActivity, loadStatus, onApplied]);
 
   useEffect(() => {
     if (activeTab === "plan" && !loading && !applying) {
@@ -195,8 +308,19 @@ export function useCurationData({
   useEffect(() => {
     if (activeTab === "history") {
       loadOplog();
+      loadAutomationRuns();
+      loadSchedulerStatus(false).catch(() => {});
+      loadFactProposals();
+      loadManagedSkills();
     }
-  }, [activeTab, loadOplog]);
+  }, [
+    activeTab,
+    loadAutomationRuns,
+    loadFactProposals,
+    loadManagedSkills,
+    loadOplog,
+    loadSchedulerStatus,
+  ]);
 
   useEffect(() => {
     if (activeTab === "activity" && activity.length === 0) {
@@ -234,17 +358,66 @@ export function useCurationData({
     statusError,
     oplog,
     oplogError,
+    automationRuns,
+    automationRunsError,
+    automationRunActioning,
+    automationRunError,
+    automationRunArtifacts,
+    automationRunArtifact,
+    automationRunArtifactLoading,
+    automationRunArtifactError,
+    factProposals,
+    factProposalsLoading,
+    factProposalsError,
+    factProposalActioning,
+    managedSkills,
+    selectedManagedSkillId,
+    selectedManagedSkill,
+    managedSkillUsage,
+    managedSkillRecommendations,
+    managedSkillImprovementRecommendations,
+    managedSkillsLoading,
+    managedSkillsError,
+    managedSkillActioning,
     activity,
     activityLoading,
     activityError,
+    configResponse,
+    configDraft,
+    configLoading,
+    configSaving,
+    configResetting,
+    configError,
+    configFieldErrors,
+    schedulerStatus,
+    schedulerStatusLoading,
+    schedulerStatusError,
+    schedulerActioning,
+    configDirty,
     activityRef,
     panelRef,
     setConfirmOpen,
     setActiveTab,
     preview,
     apply,
+    runAutomationTask,
     loadActivity,
     loadStatus,
     loadOplog,
+    loadAutomationRuns,
+    loadAutomationRunArtifact,
+    loadFactProposals,
+    runFactProposalAction,
+    loadManagedSkills,
+    loadManagedSkill,
+    runManagedSkillAction,
+    loadConfig,
+    loadSchedulerStatus,
+    setSchedulerPaused,
+    updateConfigDraft,
+    updateConfigTaskDraft,
+    resetConfigDraft,
+    resetConfigToDefaults,
+    saveConfigDraft,
   };
 }
