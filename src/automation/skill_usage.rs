@@ -10,6 +10,7 @@ use crate::tracedecay::current_timestamp;
 mod analytics;
 mod recommendations;
 
+pub(crate) use analytics::analytics_import_key_for_request;
 pub use analytics::{ingest_analytics_events, ingest_project_analytics_events};
 pub use recommendations::{skill_improvement_recommendations, stale_skill_recommendations};
 
@@ -236,28 +237,41 @@ pub async fn record_skill_usage(
     _actor: impl Into<String>,
     targets: Vec<String>,
     target: Option<String>,
-    _metadata: Option<serde_json::Value>,
+    metadata: Option<serde_json::Value>,
 ) -> Result<SkillUsageRecord> {
     let skill_id = skill.metadata.id.clone();
     let timestamp = current_timestamp();
     let mut ledger = load_skill_usage_ledger(profile_root).await?;
-    let record = ledger
-        .records
-        .entry(skill_id.clone())
-        .or_insert_with(|| SkillUsageRecord::new(skill_id, timestamp));
-    record.merge_skill_metadata(skill);
-    record.record(&SkillUsageEvent {
-        skill_name: skill.metadata.id.clone(),
-        action,
-        timestamp,
-        target,
-    });
-    for target in targets {
-        if let Some(target) = normalize_target(&target) {
-            insert_sorted_unique(&mut record.targets, target);
+    let updated = {
+        let record = ledger
+            .records
+            .entry(skill_id.clone())
+            .or_insert_with(|| SkillUsageRecord::new(skill_id, timestamp));
+        record.merge_skill_metadata(skill);
+        record.record(&SkillUsageEvent {
+            skill_name: skill.metadata.id.clone(),
+            action,
+            timestamp,
+            target,
+        });
+        for target in targets {
+            if let Some(target) = normalize_target(&target) {
+                insert_sorted_unique(&mut record.targets, target);
+            }
         }
+        record.clone()
+    };
+    if let Some(import_key) = metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("imported_analytics_event_key"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+    {
+        ledger
+            .imported_analytics_events
+            .insert(import_key.to_string());
     }
-    let updated = record.clone();
     save_skill_usage_ledger(profile_root, &ledger).await?;
     Ok(updated)
 }

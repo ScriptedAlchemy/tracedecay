@@ -103,15 +103,28 @@ fn analytics_import_key(
     action: SkillUsageAction,
 ) -> String {
     if let Some(request_id) = analytics_request_id(event) {
-        return format!(
-            "{}:{}:request:{request_id}:{}:{:?}",
-            event.project_id, event.provider, skill_id, action
+        return analytics_import_key_for_request(
+            &event.project_id,
+            &event.provider,
+            &request_id,
+            skill_id,
+            action,
         );
     }
     format!(
         "{}:{}:{}:{}:{:?}",
         event.project_id, event.provider, event.id, skill_id, action
     )
+}
+
+pub(crate) fn analytics_import_key_for_request(
+    project_id: &str,
+    provider: &str,
+    request_id: &str,
+    skill_id: &str,
+    action: SkillUsageAction,
+) -> String {
+    format!("{project_id}:{provider}:request:{request_id}:{skill_id}:{action:?}")
 }
 
 fn should_skip_analytics_event(event: &AnalyticsEventRecord) -> bool {
@@ -136,10 +149,9 @@ fn analytics_request_id(event: &AnalyticsEventRecord) -> Option<String> {
         .or_else(|| metadata.pointer("/metadata/request_id"))
         .or_else(|| metadata.pointer("/runtime/request_id"))
         .or_else(|| metadata.pointer("/function/request_id"))
-        .and_then(|value| value.as_str())
-        .map(str::trim)
+        .and_then(request_id_value)
+        .map(|request_id| request_id.trim().to_string())
         .filter(|request_id| !request_id.is_empty())
-        .map(ToOwned::to_owned)
 }
 
 fn analytics_action(event: &AnalyticsEventRecord) -> SkillUsageAction {
@@ -156,5 +168,13 @@ fn analytics_action(event: &AnalyticsEventRecord) -> SkillUsageAction {
             SkillUsageAction::Patch
         }
         _ => SkillUsageAction::Use,
+    }
+}
+
+fn request_id_value(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        _ => None,
     }
 }

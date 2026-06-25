@@ -1686,10 +1686,19 @@ impl McpServer {
         } else {
             None
         };
+        let mut handler_arguments = arguments;
+        if crate::analytics::is_skill_view_tool(tool_name) {
+            if let Some(request_id) = json_rpc_request_id_string(&id) {
+                if let Some(map) = handler_arguments.as_object_mut() {
+                    map.insert("__mcp_request_id".to_string(), json!(request_id));
+                }
+            }
+        }
+
         let dispatch_outcome = handle_tool_call_with_registry(
             &cg,
             tool_name,
-            arguments,
+            handler_arguments,
             server_stats,
             self.scope_prefix(),
             self.registry_db.as_deref(),
@@ -2110,6 +2119,14 @@ fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> AnalyticsEventI
         hint_id: None,
         outcome: Some(input.outcome.to_string()),
         metadata_json: Some(metadata.to_string()),
+    }
+}
+
+fn json_rpc_request_id_string(id: &Value) -> Option<String> {
+    match id {
+        Value::String(id) => Some(id.clone()),
+        Value::Number(id) => Some(id.to_string()),
+        _ => None,
     }
 }
 

@@ -10377,6 +10377,7 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
     )
     .await
     .unwrap();
+    assert!(list.touched_files.is_empty());
     let payload = extract_json(&list.value);
     assert_eq!(payload["status"], "ok");
     assert_eq!(payload["count"], 1);
@@ -10406,12 +10407,17 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
     let view = handle_tool_call(
         &cg,
         "tracedecay_skill_view",
-        json!({"id": "active-skill", "include_support_files": false}),
+        json!({
+            "id": "active-skill",
+            "include_support_files": false,
+            "__mcp_request_id": "req-active-view",
+        }),
         None,
         None,
     )
     .await
     .unwrap();
+    assert!(view.touched_files.is_empty());
     let payload = extract_json(&view.value);
     assert_eq!(payload["status"], "ok");
     assert_eq!(payload["skill"]["metadata"]["id"], "active-skill");
@@ -10446,6 +10452,45 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
     assert_eq!(usage_record.view_count, 2);
     assert_eq!(usage_record.use_count, 1);
     assert!(usage_record.targets.iter().any(|target| target == "mcp"));
+
+    global_db
+        .append_analytics_event(&tracedecay::global_db::AnalyticsEventInsert {
+            provider: "mcp".to_string(),
+            project_id: GlobalDb::canonical_project_key(cg.project_root()),
+            session_id: Some("mcp-skill-session".to_string()),
+            timestamp: tracedecay::tracedecay::current_timestamp(),
+            event_kind: "mcp_tool_call".to_string(),
+            hook_name: None,
+            tool_name: Some("tracedecay_skill_view".to_string()),
+            tool_category: None,
+            skill_name: None,
+            hint_category: None,
+            hint_id: None,
+            outcome: Some("success".to_string()),
+            metadata_json: Some(
+                json!({
+                    "request_id": "req-active-view",
+                    "function": {
+                        "name": "tracedecay_skill_view",
+                        "arguments": { "id": "active-skill" }
+                    }
+                })
+                .to_string(),
+            ),
+        })
+        .await
+        .unwrap();
+    let list_after_view = handle_tool_call(
+        &cg,
+        "tracedecay_skill_list",
+        json!({"state": "active"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&list_after_view.value);
+    assert_eq!(payload["skills"][0]["usage_summary"]["view_count"], 2);
 
     close_test_graph(cg).await;
     drop(env_lock);

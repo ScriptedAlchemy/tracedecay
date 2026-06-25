@@ -8,9 +8,9 @@ use crate::automation::managed_skills::{
 };
 use crate::automation::run_ledger::{find_run_record, read_run_artifact_payload};
 use crate::automation::skill_usage::{
-    ingest_project_analytics_events, record_skill_usage, skill_improvement_recommendations,
-    stale_skill_recommendations, summarize_skill_usage, summarize_skill_usage_for,
-    SkillUsageAction,
+    analytics_import_key_for_request, ingest_project_analytics_events, record_skill_usage,
+    skill_improvement_recommendations, stale_skill_recommendations, summarize_skill_usage,
+    summarize_skill_usage_for, SkillUsageAction,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::mcp::tools::ToolResult;
@@ -24,11 +24,11 @@ fn config_error(message: impl Into<String>) -> TraceDecayError {
     }
 }
 
-fn tool_json(cg: &TraceDecay, value: &Value) -> ToolResult {
+fn tool_json(value: &Value) -> ToolResult {
     let formatted = serde_json::to_string_pretty(value).unwrap_or_default();
     ToolResult {
         value: json!({ "content": [{ "type": "text", "text": formatted }] }),
-        touched_files: vec![cg.project_root().display().to_string()],
+        touched_files: vec![],
     }
 }
 
@@ -128,7 +128,7 @@ pub(super) async fn handle_skill_list(cg: &TraceDecay, args: Value) -> Result<To
             })
             .collect::<Vec<_>>(),
     });
-    Ok(tool_json(cg, &payload))
+    Ok(tool_json(&payload))
 }
 
 pub(super) async fn handle_skill_view(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
@@ -152,6 +152,16 @@ pub(super) async fn handle_skill_view(cg: &TraceDecay, args: Value) -> Result<To
         Some(json!({
             "tool": "tracedecay_skill_view",
             "include_support_files": include_support_files,
+            "imported_analytics_event_key": args
+                .get("__mcp_request_id")
+                .and_then(Value::as_str)
+                .map(|request_id| analytics_import_key_for_request(
+                    &crate::global_db::GlobalDb::canonical_project_key(cg.project_root()),
+                    "mcp",
+                    request_id,
+                    &skill.metadata.id,
+                    SkillUsageAction::View,
+                )),
         })),
     )
     .await?;
@@ -179,7 +189,7 @@ pub(super) async fn handle_skill_view(cg: &TraceDecay, args: Value) -> Result<To
         "improvement_recommendation": improvement_recommendation,
         "support_files_included": include_support_files,
     });
-    Ok(tool_json(cg, &payload))
+    Ok(tool_json(&payload))
 }
 
 pub(super) async fn handle_automation_run_artifact_view(
@@ -208,7 +218,7 @@ pub(super) async fn handle_automation_run_artifact_view(
         "artifact": artifact,
         "payload": payload,
     });
-    Ok(tool_json(cg, &payload))
+    Ok(tool_json(&payload))
 }
 
 async fn sync_project_skill_analytics(
@@ -226,7 +236,7 @@ async fn sync_project_skill_analytics(
     .map(|_| ())
 }
 
-pub(super) fn handle_hermes_skill_bridge(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
+pub(super) fn handle_hermes_skill_bridge(_cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
     let hermes_home = required_str(args, "hermes_home")?;
     let snapshot = load_hermes_skill_bridge(
         std::path::Path::new(hermes_home),
@@ -239,5 +249,5 @@ pub(super) fn handle_hermes_skill_bridge(cg: &TraceDecay, args: &Value) -> Resul
         "status": "ok",
         "bridge": snapshot,
     });
-    Ok(tool_json(cg, &payload))
+    Ok(tool_json(&payload))
 }
