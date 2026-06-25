@@ -717,16 +717,16 @@ fn windows_python_launcher(script_name: &str) -> String {
     format!(
         "@echo off\r\n\
 setlocal\r\n\
-where py >nul 2>nul\r\n\
+where python >nul 2>nul\r\n\
 if not errorlevel 1 (\r\n\
-  py -3 \"%~dp0{script_name}\" %*\r\n\
-  exit /b %ERRORLEVEL%\r\n\
+  python \"%~dp0{script_name}\" %*\r\n\
+  if not errorlevel 1 exit /b 0\r\n\
 )\r\n\
 where python3 >nul 2>nul\r\n\
 if not errorlevel 1 (\r\n\
   python3 \"%~dp0{script_name}\" %*\r\n\
-  exit /b %ERRORLEVEL%\r\n\
+  if not errorlevel 1 exit /b 0\r\n\
 )\r\n\
-python \"%~dp0{script_name}\" %*\r\n"
+py -3 \"%~dp0{script_name}\" %*\r\n"
     )
 }
