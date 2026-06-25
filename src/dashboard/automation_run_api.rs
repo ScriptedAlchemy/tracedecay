@@ -131,10 +131,12 @@ pub(crate) async fn memory_curator(
         "memory-curator",
         AgentTaskKind::MemoryCurator,
         move |state, run_id| async move {
-            automation_run_service::curation_agent_plan_payload_with_run_id(
-                &state,
-                request,
-                Some(run_id),
+            Box::pin(
+                automation_run_service::curation_agent_plan_payload_with_run_id(
+                    &state,
+                    request,
+                    Some(run_id),
+                ),
             )
             .await
         },
@@ -155,10 +157,12 @@ pub(crate) async fn session_reflection(
         "session-reflection",
         AgentTaskKind::SessionReflector,
         move |state, run_id| async move {
-            automation_run_service::session_reflection_run_payload_with_run_id(
-                &state,
-                request,
-                Some(run_id),
+            Box::pin(
+                automation_run_service::session_reflection_run_payload_with_run_id(
+                    &state,
+                    request,
+                    Some(run_id),
+                ),
             )
             .await
         },
@@ -179,10 +183,12 @@ pub(crate) async fn skill_writing(
         "skill-writing",
         AgentTaskKind::SkillWriter,
         move |state, run_id| async move {
-            automation_run_service::skill_writing_run_payload_with_run_id(
-                &state,
-                request,
-                Some(run_id),
+            Box::pin(
+                automation_run_service::skill_writing_run_payload_with_run_id(
+                    &state,
+                    request,
+                    Some(run_id),
+                ),
             )
             .await
         },
