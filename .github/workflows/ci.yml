@@ -107,11 +107,11 @@ jobs:
     name: Build Windows test archive
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on:
-    - self-hosted
-    - Windows
-    - X64
-    - github-runner-windows-1
-    - tracedecay
+      - self-hosted
+      - Windows
+      - X64
+      - github-runner-windows-1
+      - tracedecay
     env:
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
@@ -199,11 +199,11 @@ jobs:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     needs: [windows-test-build]
     runs-on:
-    - self-hosted
-    - Windows
-    - X64
-    - github-runner-windows-1
-    - tracedecay
+      - self-hosted
+      - Windows
+      - X64
+      - github-runner-windows-1
+      - tracedecay
     strategy:
       fail-fast: false
       matrix:
