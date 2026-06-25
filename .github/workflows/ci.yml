@@ -121,8 +121,9 @@ jobs:
           node-version: 22
 
       - name: Install ast-grep
+        shell: pwsh
         run: |
-          npm install --global "@ast-grep/cli@${AST_GREP_VERSION}"
+          npm install --global "@ast-grep/cli@$env:AST_GREP_VERSION"
           ast-grep --version
 
       - name: Install sccache
@@ -163,21 +164,15 @@ jobs:
             ~/.cargo/git/db/
           key: ${{ steps.windows-rust-cache.outputs.cache-primary-key }}
 
-      - name: Upload Windows nextest archive
-        uses: actions/upload-artifact@v7
-        with:
-          name: ${{ env.WINDOWS_NEXTEST_ARTIFACT }}
-          path: |
-            ${{ env.WINDOWS_NEXTEST_ARCHIVE }}
-            windows-test-tools
-          compression-level: 0
-          if-no-files-found: error
-          retention-days: 3
-
       - name: Show sccache stats
         if: always()
         shell: pwsh
-        run: '& $env:SCCACHE_PATH --show-stats'
+        run: |
+          if ($env:SCCACHE_PATH -and (Test-Path $env:SCCACHE_PATH)) {
+            & $env:SCCACHE_PATH --show-stats
+          } else {
+            Write-Host "sccache was not installed; skipping stats"
+          }
 
   clippy:
     name: Clippy
