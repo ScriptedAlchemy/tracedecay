@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -19,6 +20,8 @@ env:
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
   AST_GREP_VERSION: "0.44.0"
+  WINDOWS_SELF_HOSTED_LABELS: '["self-hosted","Windows","X64"]'
+  WINDOWS_HOSTED_RUNNER: '"windows-latest"'
 
 jobs:
   commit-messages:
@@ -95,15 +98,75 @@ jobs:
       - name: Run tests
         run: cargo nextest run --workspace --profile ci
 
+  select-windows-runner:
+    name: Select Windows runner
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    runs-on: ubuntu-latest
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+      source: ${{ steps.pick.outputs.source }}
+    steps:
+      - name: Pick Windows runner
+        id: pick
+        env:
+          GH_TOKEN: ${{ secrets.WINDOWS_RUNNER_TOKEN || github.token }}
+          SELF_HOSTED_LABELS: ${{ env.WINDOWS_SELF_HOSTED_LABELS }}
+          HOSTED_RUNNER: ${{ env.WINDOWS_HOSTED_RUNNER }}
+        run: |
+          set -euo pipefail
+          query_runners() {
+            local api_path="$1"
+            local err_file="$2"
+            local json
+            json="$(gh api "$api_path" 2>"$err_file" || true)"
+            if [ -z "$json" ]; then
+              sed "s/^/${api_path}: /" "$err_file" >&2
+              printf '{"runners":[]}'
+            else
+              printf '%s' "$json"
+            fi
+          }
+          owner="${GITHUB_REPOSITORY%%/*}"
+          repo_runners="$(query_runners "repos/${GITHUB_REPOSITORY}/actions/runners?per_page=100" repo-runner-api.err)"
+          org_runners="$(query_runners "orgs/${owner}/actions/runners?per_page=100" org-runner-api.err)"
+          runners_json="$(jq -s '{runners: [.[].runners[]?]}' <<<"$repo_runners"$'\n'"$org_runners")"
+          if jq -e --argjson required "$SELF_HOSTED_LABELS" '
+            any(
+              .runners[];
+              .status == "online"
+              and (.busy | not)
+              and (
+                [.labels[].name | ascii_downcase] as $labels
+                | all($required[]; . as $need | ($labels | index($need | ascii_downcase)) != null)
+              )
+            )
+          ' <<<"$runners_json" >/dev/null; then
+            echo "runner=$SELF_HOSTED_LABELS" >> "$GITHUB_OUTPUT"
+            echo "source=self-hosted" >> "$GITHUB_OUTPUT"
+            echo "Using self-hosted Windows runner labels: $SELF_HOSTED_LABELS"
+          else
+            echo "runner=$HOSTED_RUNNER" >> "$GITHUB_OUTPUT"
+            echo "source=github-hosted" >> "$GITHUB_OUTPUT"
+            echo "No online idle self-hosted Windows runner found; using $HOSTED_RUNNER"
+          fi
+
   windows-test-build:
     name: Build Windows test archive
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
-    runs-on: windows-latest
+    needs: [select-windows-runner]
+    runs-on: ${{ fromJSON(needs.select-windows-runner.outputs.runner) }}
     env:
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@v7
+
+      - name: Report Windows runner
+        shell: pwsh
+        run: |
+          Write-Host "Windows runner source: ${{ needs.select-windows-runner.outputs.source }}"
+          hostname
+          whoami
 
       - uses: dtolnay/rust-toolchain@stable
 
