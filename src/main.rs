@@ -709,6 +709,170 @@ fn format_memory_status_report(
     )
 }
 
+async fn handle_status_command(
+    path: Option<String>,
+    project_id: Option<String>,
+    project_path: Option<String>,
+    json: bool,
+    short: bool,
+    details: bool,
+    runtime: bool,
+) -> tracedecay::errors::Result<()> {
+    let project_path = resolve_cli_project_root(path, project_id, project_path).await?;
+    let cg = if TraceDecay::has_initialized_store(&project_path).await {
+        match TraceDecay::open(&project_path).await {
+            Ok(cg) => cg,
+            Err(_) => TraceDecay::open_read_only(&project_path).await?,
+        }
+    } else if !io::stdin().is_terminal() {
+        eprintln!(
+            "No TraceDecay index found at '{}'. Non-interactive: skipping index creation (run `tracedecay init`).",
+            project_path.display()
+        );
+        return Ok(());
+    } else {
+        eprint!(
+            "No TraceDecay index found at '{}'. Create one now? [Y/n] ",
+            project_path.display()
+        );
+        io::stderr().flush().ok();
+        let mut answer = String::new();
+        io::stdin().lock().read_line(&mut answer).map_err(|e| {
+            tracedecay::errors::TraceDecayError::Config {
+                message: format!("failed to read stdin: {e}"),
+            }
+        })?;
+        let answer = answer.trim();
+        if answer.is_empty() || answer.eq_ignore_ascii_case("y") {
+            commands::init_and_index(&project_path, &[], &[], false).await?
+        } else {
+            return Ok(());
+        }
+    };
+    if runtime {
+        let snap = tracedecay::runtime_telemetry::collect(&cg).await?;
+        if json {
+            println!("{}", tracedecay::runtime_telemetry::to_pretty_json(&snap));
+        } else {
+            print!("{}", tracedecay::runtime_telemetry::to_text_report(&snap));
+        }
+        return Ok(());
+    }
+    let stats = cg.get_stats().await?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&stats).unwrap_or_default()
+        );
+        return Ok(());
+    }
+
+    let tokens_saved = cg.get_tokens_saved().await.unwrap_or(0);
+    let gdb = tracedecay::global_db::GlobalDb::open().await;
+    let global_tokens_saved = match &gdb {
+        Some(db) => {
+            db.upsert(&project_path, tokens_saved).await;
+            db.global_tokens_saved()
+                .await
+                .map(|total| total.saturating_sub(tokens_saved))
+                .filter(|&other| other > 0)
+        }
+        None => None,
+    };
+    let mut config = tracedecay::user_config::UserConfig::load();
+    let now = current_unix_timestamp();
+    let worldwide = if now - config.last_worldwide_fetch_at < 60 {
+        (config.last_worldwide_total > 0).then_some(config.last_worldwide_total)
+    } else if let Some(total) = tracedecay::cloud::fetch_worldwide_total() {
+        config.last_worldwide_total = total;
+        config.last_worldwide_fetch_at = now;
+        config.save_if_exists();
+        Some(total)
+    } else {
+        (config.last_worldwide_total > 0).then_some(config.last_worldwide_total)
+    };
+    let country_flags = if now - config.last_flags_fetch_at < 1800 {
+        config.cached_country_flags.clone()
+    } else {
+        let fresh = tracedecay::cloud::fetch_country_flags();
+        if !fresh.is_empty() {
+            config.cached_country_flags = fresh.clone();
+            config.last_flags_fetch_at = now;
+            config.save_if_exists();
+        }
+        if fresh.is_empty() && !config.cached_country_flags.is_empty() {
+            config.cached_country_flags.clone()
+        } else {
+            fresh
+        }
+    };
+    if !short {
+        print!("{}", include_str!("resources/logo.ansi"));
+    }
+    let branch_info = cg.active_branch().map(|_| {
+        let ts_dir = tracedecay::config::get_tracedecay_dir(&project_path);
+        let meta = tracedecay::branch_meta::load_branch_meta(&ts_dir);
+        let has_tracking = meta.as_ref().is_some_and(|m| !m.branches.is_empty());
+        let display_branch = if has_tracking {
+            cg.serving_branch().unwrap_or("[single-db]").to_string()
+        } else {
+            "[single-db]".to_string()
+        };
+        let parent = meta.and_then(|m| m.branches.get(cg.serving_branch()?)?.parent.clone());
+        tracedecay::display::BranchInfo {
+            branch: display_branch,
+            parent,
+            is_fallback: cg.is_fallback(),
+        }
+    });
+    if let Some(ref db) = gdb {
+        tracedecay::accounting::parser::ingest(db).await;
+    }
+    let cost_info = match &gdb {
+        Some(db) => {
+            tracedecay::accounting::quick_cost_summary(
+                db,
+                tokens_saved,
+                global_tokens_saved.unwrap_or(0),
+            )
+            .await
+        }
+        None => None,
+    };
+    if short {
+        tracedecay::display::print_status_header(
+            &stats,
+            tokens_saved,
+            global_tokens_saved,
+            worldwide,
+            &country_flags,
+            branch_info.as_ref(),
+            cost_info.as_ref(),
+        );
+    } else {
+        tracedecay::display::print_status_table(
+            &stats,
+            tokens_saved,
+            global_tokens_saved,
+            worldwide,
+            &country_flags,
+            branch_info.as_ref(),
+            cost_info.as_ref(),
+            details,
+        );
+    }
+
+    if !tracedecay::config::is_in_gitignore(&project_path) {
+        let dir_name = tracedecay::config::active_data_dir_name(&project_path);
+        eprintln!(
+            "\n\x1b[33mWarning: {dir_name} is not in .gitignore — \
+             run `echo {dir_name} >> .gitignore` to exclude it from git.\x1b[0m"
+        );
+    }
+    global::check_for_update(&mut config, false, true);
+    Ok(())
+}
+
 async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
     match command {
         Commands::Init {
@@ -738,174 +902,16 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
             details,
             runtime,
         } => {
-            let project_path = resolve_cli_project_root(path, project_id, project_path).await?;
-            let cg = if TraceDecay::has_initialized_store(&project_path).await {
-                match TraceDecay::open(&project_path).await {
-                    Ok(cg) => cg,
-                    Err(_) => TraceDecay::open_read_only(&project_path).await?,
-                }
-            } else if !io::stdin().is_terminal() {
-                eprintln!(
-                    "No TraceDecay index found at '{}'. Non-interactive: skipping index creation (run `tracedecay init`).",
-                    project_path.display()
-                );
-                return Ok(());
-            } else {
-                eprint!(
-                    "No TraceDecay index found at '{}'. Create one now? [Y/n] ",
-                    project_path.display()
-                );
-                io::stderr().flush().ok();
-                let mut answer = String::new();
-                io::stdin().lock().read_line(&mut answer).map_err(|e| {
-                    tracedecay::errors::TraceDecayError::Config {
-                        message: format!("failed to read stdin: {e}"),
-                    }
-                })?;
-                let answer = answer.trim();
-                if answer.is_empty() || answer.eq_ignore_ascii_case("y") {
-                    commands::init_and_index(&project_path, &[], &[], false).await?
-                } else {
-                    return Ok(());
-                }
-            };
-            if runtime {
-                let snap = tracedecay::runtime_telemetry::collect(&cg).await?;
-                if json {
-                    println!("{}", tracedecay::runtime_telemetry::to_pretty_json(&snap));
-                } else {
-                    print!("{}", tracedecay::runtime_telemetry::to_text_report(&snap));
-                }
-                return Ok(());
-            }
-            let stats = cg.get_stats().await?;
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&stats).unwrap_or_default()
-                );
-            } else {
-                let tokens_saved = cg.get_tokens_saved().await.unwrap_or(0);
-                // Register project and read global total in one open.
-                // Subtract this project's count so "Global" means "all other projects".
-                let gdb = tracedecay::global_db::GlobalDb::open().await;
-                let global_tokens_saved = match &gdb {
-                    Some(db) => {
-                        db.upsert(&project_path, tokens_saved).await;
-                        db.global_tokens_saved()
-                            .await
-                            .map(|total| total.saturating_sub(tokens_saved))
-                            .filter(|&other| other > 0)
-                    }
-                    None => None,
-                };
-                // Fetch worldwide total (1s timeout, 60s client cache TTL)
-                let mut config = tracedecay::user_config::UserConfig::load();
-                let now = current_unix_timestamp();
-                let worldwide = if now - config.last_worldwide_fetch_at < 60 {
-                    // Use cached value
-                    if config.last_worldwide_total > 0 {
-                        Some(config.last_worldwide_total)
-                    } else {
-                        None
-                    }
-                } else if let Some(total) = tracedecay::cloud::fetch_worldwide_total() {
-                    config.last_worldwide_total = total;
-                    config.last_worldwide_fetch_at = now;
-                    config.save_if_exists();
-                    Some(total)
-                } else if config.last_worldwide_total > 0 {
-                    Some(config.last_worldwide_total) // fallback to cache
-                } else {
-                    None
-                };
-                // Fetch country flags (30 min cache)
-                let country_flags = if now - config.last_flags_fetch_at < 1800 {
-                    config.cached_country_flags.clone()
-                } else {
-                    let fresh = tracedecay::cloud::fetch_country_flags();
-                    if !fresh.is_empty() {
-                        config.cached_country_flags = fresh.clone();
-                        config.last_flags_fetch_at = now;
-                        config.save_if_exists();
-                    }
-                    if fresh.is_empty() && !config.cached_country_flags.is_empty() {
-                        config.cached_country_flags.clone()
-                    } else {
-                        fresh
-                    }
-                };
-                if !short {
-                    print!("{}", include_str!("resources/logo.ansi"));
-                }
-                let branch_info = cg.active_branch().map(|_| {
-                    let ts_dir = tracedecay::config::get_tracedecay_dir(&project_path);
-                    let meta = tracedecay::branch_meta::load_branch_meta(&ts_dir);
-                    let has_tracking = meta.as_ref().is_some_and(|m| !m.branches.is_empty());
-                    let display_branch = if has_tracking {
-                        cg.serving_branch().unwrap_or("[single-db]").to_string()
-                    } else {
-                        "[single-db]".to_string()
-                    };
-                    let parent =
-                        meta.and_then(|m| m.branches.get(cg.serving_branch()?)?.parent.clone());
-                    tracedecay::display::BranchInfo {
-                        branch: display_branch,
-                        parent,
-                        is_fallback: cg.is_fallback(),
-                    }
-                });
-                // Ingest new session data so cost info is up-to-date.
-                if let Some(ref db) = gdb {
-                    tracedecay::accounting::parser::ingest(db).await;
-                }
-                // Best-effort cost summary for the status header.
-                let cost_info = match &gdb {
-                    Some(db) => {
-                        tracedecay::accounting::quick_cost_summary(
-                            db,
-                            tokens_saved,
-                            global_tokens_saved.unwrap_or(0),
-                        )
-                        .await
-                    }
-                    None => None,
-                };
-                if short {
-                    tracedecay::display::print_status_header(
-                        &stats,
-                        tokens_saved,
-                        global_tokens_saved,
-                        worldwide,
-                        &country_flags,
-                        branch_info.as_ref(),
-                        cost_info.as_ref(),
-                    );
-                } else {
-                    tracedecay::display::print_status_table(
-                        &stats,
-                        tokens_saved,
-                        global_tokens_saved,
-                        worldwide,
-                        &country_flags,
-                        branch_info.as_ref(),
-                        cost_info.as_ref(),
-                        details,
-                    );
-                }
-
-                // Warn if the data dir is not in .gitignore
-                if !tracedecay::config::is_in_gitignore(&project_path) {
-                    let dir_name = tracedecay::config::active_data_dir_name(&project_path);
-                    eprintln!(
-                        "\n\x1b[33mWarning: {dir_name} is not in .gitignore — \
-                         run `echo {dir_name} >> .gitignore` to exclude it from git.\x1b[0m"
-                    );
-                }
-
-                // Version check (5 min cache, always show for status)
-                global::check_for_update(&mut config, false, true);
-            }
+            handle_status_command(
+                path,
+                project_id,
+                project_path,
+                json,
+                short,
+                details,
+                runtime,
+            )
+            .await?;
         }
         Commands::Tool {
             project,
