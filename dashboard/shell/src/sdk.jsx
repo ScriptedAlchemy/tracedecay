@@ -33,13 +33,16 @@ export async function fetchJSON(url, init) {
   const res = await fetch(url, init);
   if (!res.ok) {
     let detail = `${res.status} ${res.statusText}`;
+    let body;
     try {
-      const body = await res.json();
+      body = await res.json();
       if (body && body.detail) detail = String(body.detail);
     } catch {
       /* non-JSON error body */
     }
-    throw new Error(detail);
+    const error = new Error(detail);
+    if (body !== undefined) error.body = body;
+    throw error;
   }
   return res.json();
 }

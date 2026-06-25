@@ -41,6 +41,7 @@ import AssociationGraph from "./AssociationGraph";
 import CurationPanel from "./CurationPanel";
 import { NUM_BADGE } from "./ui";
 import { MiniBar } from "./MiniBar";
+import { Stat } from "../../lib/primitives";
 import { categoryColorMap, slotColor } from "./viz/colors";
 import { PanelError, PanelLoading } from "./viz/Status";
 import { Sparkline } from "./viz/Sparkline";
@@ -105,32 +106,6 @@ function highlighted(snippet?: string, fallback?: string | null) {
   }
   if (last < text.length) parts.push(text.slice(last));
   return parts;
-}
-
-function Stat({
-  label,
-  value,
-  hint,
-}: {
-  label: string;
-  value: string | number;
-  /** Plain-language explanation surfaced as a native tooltip. */
-  hint?: string;
-}) {
-  return (
-    <div
-      className="hm-stat border border-border bg-background/50 px-3 py-2"
-      title={hint}
-      style={hint ? { cursor: "help" } : undefined}
-    >
-      <div className="hm-stat-value font-mono-ui text-lg leading-none text-foreground">
-        {value}
-      </div>
-      <div className="hm-stat-label mt-1 text-xs tracking-[0.08em] text-text-tertiary">
-        {label}
-      </div>
-    </div>
-  );
 }
 
 function DataBars<T>({
@@ -215,36 +190,35 @@ function SystemStrip({
 
   return (
     <div className="hm-system-strip grid gap-3 sm:grid-cols-[repeat(2,minmax(0,1fr))] xl:grid-cols-[repeat(7,minmax(0,1fr))]">
-      <Stat label="memory provider" value={activeMemory} />
-      <Stat label="context engine" value={provider.context_engine || "compressor"} />
-      <Stat label="context engine tools" value={pluginEngine?.tools?.length ?? 0} />
+      <Stat className="hm-stat" label="memory provider" value={activeMemory} />
+      <Stat className="hm-stat" label="context engine" value={provider.context_engine || "compressor"} />
+      <Stat className="hm-stat" label="context engine tools" value={pluginEngine?.tools?.length ?? 0} />
       <Stat
+        className="hm-stat"
         label="curator tools"
         value={curatorTools?.enabled ? `${curatorTools.count ?? 0} enabled` : "not used"}
-        hint={
+        title={
           curatorTools?.enabled
             ? "Evidence-gathering tools the memory curator can call while reviewing facts."
             : "The memory curator runs without LLM tool calls here — duplicates are detected with built-in vector-similarity analysis instead."
         }
       />
       <Stat
+        className="hm-stat"
         label="curator agents"
         value={agentToolsets > 0 ? agentToolsets : "none"}
-        hint={
+        title={
           agentToolsets > 0
             ? "Agent toolsets the curator can delegate cleanup work to."
             : "No agent-driven curation is configured. Curation previews and applies still work — they use the built-in deduplication planner."
         }
       />
-      <Stat label="database" value={db.exists ? "ready" : "missing"} />
-      <div className="hm-stat hm-path-stat min-w-0 border border-border bg-background/50 px-3 py-2 sm:col-span-2 xl:col-span-1">
-        <div className="hm-stat-value truncate font-mono-ui text-xs text-foreground">
-          {db.path}
-        </div>
-        <div className="hm-stat-label mt-1 text-xs tracking-[0.08em] text-text-tertiary">
-          storage path
-        </div>
-      </div>
+      <Stat className="hm-stat" label="database" value={db.exists ? "ready" : "missing"} />
+      <Stat
+        className="hm-stat hm-path-stat min-w-0 sm:col-span-2 xl:col-span-1"
+        label="storage path"
+        value={db.path}
+      />
     </div>
   );
 }
@@ -308,25 +282,28 @@ function MemoryHealthCard({
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
         <div className="grid min-w-0 gap-3 grid-cols-2 xl:grid-cols-4">
-          <Stat label="facts" value={memory.fact_count} />
-          <Stat label="entities" value={memory.entity_count} />
-          <Stat label="banks" value={memory.bank_count} />
-          <Stat label="capacity / bank" value={memory.estimated_capacity} />
+          <Stat className="hm-stat" label="facts" value={memory.fact_count} />
+          <Stat className="hm-stat" label="entities" value={memory.entity_count} />
+          <Stat className="hm-stat" label="banks" value={memory.bank_count} />
+          <Stat className="hm-stat" label="capacity / bank" value={memory.estimated_capacity} />
           <Stat
+            className="hm-stat"
             label="largest bank utilization"
             value={`${status.largest_bank_fact_count}/${memory.estimated_capacity} (${utilizationPct.toFixed(1)}%)`}
-            hint={`Largest bank: ${largestBank.bank_name}`}
+            title={`Largest bank: ${largestBank.bank_name}`}
           />
-          <Stat label="missing vectors" value={memory.missing_vector_count} />
+          <Stat className="hm-stat" label="missing vectors" value={memory.missing_vector_count} />
           <Stat
+            className="hm-stat"
             label="below recall floor"
             value={memory.below_default_recall_threshold_count}
-            hint="Facts currently below the default recall trust threshold (0.30)."
+            title="Facts currently below the default recall trust threshold (0.30)."
           />
           <Stat
+            className="hm-stat"
             label="feedback"
             value={`${memory.helpful_count}/${memory.unhelpful_count}`}
-            hint="Helpful vs unhelpful feedback events recorded against stored facts."
+            title="Helpful vs unhelpful feedback events recorded against stored facts."
           />
         </div>
         <div className="grid min-w-0 gap-3 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">

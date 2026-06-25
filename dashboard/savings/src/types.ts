@@ -142,6 +142,55 @@ export interface ModelsResponse {
   };
 }
 
+export interface DiagnosticsCountRow {
+  count: number;
+  [key: string]: string | number;
+}
+
+export interface DiagnosticsRecentEvent {
+  timestamp?: number | null;
+  event_kind?: string;
+  hook_name?: string;
+  tool_name?: string;
+  outcome?: string;
+}
+
+export interface DiagnosticsRecentHook {
+  ts_unix_ms?: number | null;
+  agent?: string;
+  hook_name?: string;
+  session_id?: string;
+  tool_name?: string;
+  prompt_category?: string;
+}
+
+export interface DiagnosticsResponse {
+  available: boolean;
+  source: string;
+  message_count: number;
+  event_count: number;
+  tool_call_count: number;
+  mcp_tool_call_count: number;
+  tracedecay_call_count: number;
+  hook_call_count: number;
+  events_per_hour?: number;
+  ratios: {
+    events_per_message: number;
+    tool_calls_per_message: number;
+    mcp_tool_calls_per_message: number;
+    hook_calls_per_message: number;
+  };
+  by_event_kind: DiagnosticsCountRow[];
+  by_tool: DiagnosticsCountRow[];
+  by_mcp_tool: DiagnosticsCountRow[];
+  by_tool_category: DiagnosticsCountRow[];
+  by_outcome: DiagnosticsCountRow[];
+  by_hook: DiagnosticsCountRow[];
+  by_prompt_category: DiagnosticsCountRow[];
+  recent_events: DiagnosticsRecentEvent[];
+  recent_hooks: DiagnosticsRecentHook[];
+}
+
 export interface PricingResponse {
   source: string;
   fetched_at: number | null;

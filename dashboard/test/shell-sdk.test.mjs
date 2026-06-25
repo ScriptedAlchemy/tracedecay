@@ -41,15 +41,26 @@ test("fetchJSON returns parsed body on success", async () => {
 });
 
 test("fetchJSON prefers JSON detail on failure", async () => {
+  const body = {
+    detail: "token expired",
+    validation_errors: [{ field: "token", message: "token expired" }],
+  };
   await withMockedFetch(
     async () => ({
       ok: false,
       status: 403,
       statusText: "Forbidden",
-      json: async () => ({ detail: "token expired" }),
+      json: async () => body,
     }),
     async () => {
-      await assert.rejects(() => sdk.fetchJSON("/nope"), /token expired/);
+      await assert.rejects(
+        async () => sdk.fetchJSON("/nope"),
+        (err) => {
+          assert.match(err.message, /token expired/);
+          assert.deepEqual(err.body, body);
+          return true;
+        },
+      );
     },
   );
 });

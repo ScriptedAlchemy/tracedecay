@@ -237,6 +237,7 @@ export async function buildPlugin(
 export async function buildHolographicPlugin() {
   await buildPlugin("holographic", "holographic-memory", {
     tailwind: true,
+    primitives: true,
   });
 }
 

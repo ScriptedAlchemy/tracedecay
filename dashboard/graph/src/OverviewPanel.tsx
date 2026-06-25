@@ -16,16 +16,23 @@ import {
 } from "./types";
 import type { GraphNode, GraphOverview } from "./types";
 
+// Language → design token (with the historical dark hex as fallback), mirroring
+// KIND_FAMILY_COLORS in ./types so the bar swatches re-theme with the shell's
+// light palette instead of pinning dark-only hex. Each language rides a
+// matching --ts-* accent token (javascript shares --ts-amber by hue family).
 const LANGUAGE_COLORS: Record<string, string> = {
-  rust: "#f7c76a",
-  typescript: "#7aa7ff",
-  javascript: "#ffd97a",
-  python: "#67e8a9",
-  markdown: "#a8c8c0",
-  json: "#6f9189",
-  toml: "#6f9189",
-  shell: "#75f4d2",
-  web: "#ff7ab6",
+  rust: "var(--ts-amber, #f7c76a)",
+  typescript: "var(--ts-blue, #7aa7ff)",
+  // Reuse the warm amber token (same hue family as the historical JS yellow)
+  // with the original dark hex as fallback, so the swatch re-themes in light
+  // mode instead of pinning a dark-only literal. See ./types KIND_FAMILY_COLORS.
+  javascript: "var(--ts-amber, #ffd97a)",
+  python: "var(--ts-green, #67e8a9)",
+  markdown: "var(--ts-text-2, #a8c8c0)",
+  json: "var(--ts-text-3, #6f9189)",
+  toml: "var(--ts-text-3, #6f9189)",
+  shell: "var(--ts-cyan, #75f4d2)",
+  web: "var(--ts-pink, #ff7ab6)",
 };
 
 export default function OverviewPanel({
@@ -84,7 +91,7 @@ export default function OverviewPanel({
               keyName="label"
               rows={overview.files_by_language.slice(0, 9).map((row) => ({
                 label: row.language,
-                color: LANGUAGE_COLORS[row.language] || "#6f9189",
+                color: LANGUAGE_COLORS[row.language] || "var(--ts-text-3, #6f9189)",
                 value: fmt(row.count),
               }))}
               onPick={(row) => onFilterLanguage(String(row.label))}

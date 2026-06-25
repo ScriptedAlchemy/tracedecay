@@ -13,7 +13,9 @@ import type { PriceTable } from "./pricing";
 import SavingsOverviewPanel from "./SavingsOverviewPanel";
 import SessionsPanel from "./SessionsPanel";
 import ModelsPanel from "./ModelsPanel";
+import DiagnosticsPanel from "./DiagnosticsPanel";
 import type {
+  DiagnosticsResponse,
   LedgerResponse,
   ModelsResponse,
   PricingResponse,
@@ -25,6 +27,7 @@ const VIEWS = [
   { id: "savings", label: "Savings" },
   { id: "sessions", label: "Sessions" },
   { id: "models", label: "Models & Pricing" },
+  { id: "diagnostics", label: "Diagnostics" },
 ] as const;
 
 type ViewId = (typeof VIEWS)[number]["id"];
@@ -46,6 +49,7 @@ export default function SavingsExplorer() {
   const [ledger, setLedger] = useState<LedgerResponse | null>(null);
   const [sessions, setSessions] = useState<SessionsResponse | null>(null);
   const [models, setModels] = useState<ModelsResponse | null>(null);
+  const [diagnostics, setDiagnostics] = useState<DiagnosticsResponse | null>(null);
   const [pricing, setPricing] = useState<PricingResponse | null>(null);
   const [error, setError] = useState<string>("");
   // Bumped by the Retry button; every fetch effect below depends on it.
@@ -111,6 +115,11 @@ export default function SavingsExplorer() {
     if (view !== "models") return;
     return fetchIntoState(() => api.models({ range }), setModels, { clearBeforeLoad: true });
   }, [view, range, retryToken]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (view !== "diagnostics") return;
+    return fetchIntoState(() => api.diagnostics(), setDiagnostics, { clearBeforeLoad: true });
+  }, [view, retryToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const sessionStats = overview?.sessions;
 
@@ -193,6 +202,7 @@ export default function SavingsExplorer() {
       {view === "models" && (
         <ModelsPanel data={models} pricing={pricing} prices={prices} />
       )}
+      {view === "diagnostics" && <DiagnosticsPanel data={diagnostics} />}
     </div>
   );
 }
