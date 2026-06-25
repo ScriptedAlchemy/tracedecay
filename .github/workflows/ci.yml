@@ -95,14 +95,10 @@ jobs:
       - name: Run tests
         run: cargo nextest run --workspace --profile ci
 
-  windows-test-shards:
-    name: Test Windows ${{ matrix.partition }}/8
+  windows-test-build:
+    name: Build Windows test archive
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        partition: [1, 2, 3, 4, 5, 6, 7, 8]
     env:
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
@@ -135,38 +131,69 @@ jobs:
             ${{ runner.os }}-cargo-test-
             ${{ runner.os }}-cargo-
 
-      - name: Run Windows test shard
+      - name: Build Windows nextest archive
         shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $partition = [int]"${{ matrix.partition }}"
-          $partitions = 8
-          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
-          $package = $metadata.packages | Where-Object { $_.name -eq "tracedecay" } | Select-Object -First 1
-          $targets = @($package.targets | Where-Object { $_.kind -contains "test" } | Sort-Object name)
-          $selected = New-Object System.Collections.Generic.List[string]
-          for ($i = 0; $i -lt $targets.Count; $i++) {
-            if (($i % $partitions) -eq ($partition - 1)) {
-              $selected.Add($targets[$i].name)
-            }
-          }
-          if ($selected.Count -eq 0) {
-            throw "No integration test targets selected for Windows shard $partition/$partitions"
-          }
-          Write-Host "Windows shard $partition/$partitions running $($selected.Count) integration test targets"
-          $nextestArgs = @("nextest", "run", "-p", "tracedecay", "--profile", "ci")
-          if ($partition -eq 1) {
-            $nextestArgs += @("--lib", "--bin", "tracedecay")
-          }
-          foreach ($target in $selected) {
-            $nextestArgs += @("--test", $target)
-          }
-          cargo @nextestArgs
+        run: cargo nextest archive -p tracedecay --profile ci --lib --bin tracedecay --tests --archive-file windows-nextest-archive.tar.zst
+
+      - name: Upload Windows nextest archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-nextest-archive
+          path: windows-nextest-archive.tar.zst
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Show sccache stats
         if: always()
         shell: pwsh
         run: '& $env:SCCACHE_PATH --show-stats'
+
+  windows-test-shards:
+    name: Test Windows ${{ matrix.partition }}/16
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    needs: [windows-test-build]
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install ast-grep
+        shell: pwsh
+        run: |
+          npm install --global "@ast-grep/cli@$env:AST_GREP_VERSION"
+          ast-grep --version
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Download Windows nextest archive
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-nextest-archive
+          path: .
+
+      - name: Run Windows test shard
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $partition = [int]"${{ matrix.partition }}"
+          $partitions = 16
+          $testThreads = 1
+          $partitionArg = "hash:$partition/$partitions"
+          $workspace = (Get-Location).Path
+          $archive = Join-Path $workspace "windows-nextest-archive.tar.zst"
+          $targetDir = Join-Path $workspace "target"
+          $cargoMetadata = Join-Path $targetDir "nextest/cargo-metadata.json"
+          $binariesMetadata = Join-Path $targetDir "nextest/binaries-metadata.json"
+          cargo nextest run --archive-file $archive --extract-to $workspace --extract-overwrite --profile ci --no-run
+          Write-Host "Windows shard $partition/$partitions running archive partition $partitionArg with $testThreads test threads"
+          $nextestArgs = @("nextest", "run", "--cargo-metadata", $cargoMetadata, "--binaries-metadata", $binariesMetadata, "--workspace-remap", $workspace, "--target-dir-remap", $targetDir, "--profile", "ci", "--partition", $partitionArg, "--test-threads", $testThreads)
+          cargo @nextestArgs
 
   windows-test:
     name: Test Windows
