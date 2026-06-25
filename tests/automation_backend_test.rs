@@ -568,6 +568,7 @@ impl FakeCodexAppServer {
             .collect()
     }
 
+    #[cfg(target_os = "linux")]
     fn child_pid(&self) -> u32 {
         for _ in 0..100 {
             if let Ok(raw) = fs::read_to_string(&self.pid) {
@@ -576,6 +577,11 @@ impl FakeCodexAppServer {
             thread::sleep(Duration::from_millis(20));
         }
         panic!("fake codex app-server did not write pid file");
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn child_pid(&self) -> u32 {
+        0
     }
 }
 
@@ -698,13 +704,14 @@ fn make_executable(_path: &Path) {}
 fn windows_python_launcher(script_name: &str) -> String {
     format!(
         "@echo off\r\n\
+setlocal\r\n\
 where py >nul 2>nul\r\n\
-if %ERRORLEVEL% EQU 0 (\r\n\
+if not errorlevel 1 (\r\n\
   py -3 \"%~dp0{script_name}\" %*\r\n\
   exit /b %ERRORLEVEL%\r\n\
 )\r\n\
 where python3 >nul 2>nul\r\n\
-if %ERRORLEVEL% EQU 0 (\r\n\
+if not errorlevel 1 (\r\n\
   python3 \"%~dp0{script_name}\" %*\r\n\
   exit /b %ERRORLEVEL%\r\n\
 )\r\n\

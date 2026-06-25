@@ -512,13 +512,14 @@ pub(crate) fn make_executable(_path: &Path) {}
 fn windows_python_launcher(script_name: &str) -> String {
     format!(
         "@echo off\r\n\
+setlocal\r\n\
 where py >nul 2>nul\r\n\
-if %ERRORLEVEL% EQU 0 (\r\n\
+if not errorlevel 1 (\r\n\
   py -3 \"%~dp0{script_name}\" %*\r\n\
   exit /b %ERRORLEVEL%\r\n\
 )\r\n\
 where python3 >nul 2>nul\r\n\
-if %ERRORLEVEL% EQU 0 (\r\n\
+if not errorlevel 1 (\r\n\
   python3 \"%~dp0{script_name}\" %*\r\n\
   exit /b %ERRORLEVEL%\r\n\
 )\r\n\
