@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -215,10 +216,30 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Download Windows nextest archive
-        uses: actions/download-artifact@v8
-        with:
-          name: ${{ env.WINDOWS_NEXTEST_ARTIFACT }}
-          path: .
+        shell: pwsh
+        timeout-minutes: 20
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_RUN_ID: ${{ github.run_id }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+          }
+          $artifactsUrl = "https://api.github.com/repos/$env:GH_REPOSITORY/actions/runs/$env:GH_RUN_ID/artifacts?per_page=100"
+          $artifacts = Invoke-RestMethod -Uri $artifactsUrl -Headers $headers
+          $artifact = @($artifacts.artifacts | Where-Object { $_.name -eq $env:WINDOWS_NEXTEST_ARTIFACT }) | Select-Object -First 1
+          if (!$artifact) {
+            throw "Missing artifact named $env:WINDOWS_NEXTEST_ARTIFACT in run $env:GH_RUN_ID"
+          }
+          $zipPath = Join-Path $env:RUNNER_TEMP "$($artifact.name).zip"
+          $downloadUrl = "https://api.github.com/repos/$env:GH_REPOSITORY/actions/artifacts/$($artifact.id)/zip"
+          Invoke-WebRequest -Uri $downloadUrl -Headers $headers -OutFile $zipPath
+          Expand-Archive -Path $zipPath -DestinationPath (Get-Location).Path -Force
+          Remove-Item $zipPath -Force
 
       - name: Verify Windows test artifact
         shell: pwsh
