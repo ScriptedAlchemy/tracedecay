@@ -8,7 +8,6 @@ on:
 
 permissions:
   contents: read
-  actions: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -20,10 +19,6 @@ env:
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
   AST_GREP_VERSION: "0.44.0"
-  WINDOWS_NEXTEST_ARTIFACT: windows-nextest-archive
-  WINDOWS_NEXTEST_ARCHIVE: windows-nextest-archive.tar.zst
-  WINDOWS_TEST_PARTITIONS: "16"
-  WINDOWS_TEST_THREADS: "1"
 
 jobs:
   commit-messages:
@@ -104,8 +99,8 @@ jobs:
       - name: Run tests
         run: cargo nextest run --workspace --profile ci
 
-  windows-test-build:
-    name: Build Windows test archive
+  windows-test:
+    name: Test Windows
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on:
       - self-hosted
@@ -126,17 +121,9 @@ jobs:
           node-version: 22
 
       - name: Install ast-grep
-        shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
-          $toolsDir = Join-Path (Get-Location).Path "windows-test-tools"
-          New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
-          npm install --prefix $toolsDir "@ast-grep/cli@$env:AST_GREP_VERSION"
-          $astGrepExe = Join-Path $toolsDir "node_modules/@ast-grep/cli/ast-grep.exe"
-          if (!(Test-Path $astGrepExe)) {
-            throw "Missing archived ast-grep executable at $astGrepExe"
-          }
-          & $astGrepExe --version
+          npm install --global "@ast-grep/cli@${AST_GREP_VERSION}"
+          ast-grep --version
 
       - name: Install sccache
         uses: mozilla-actions/sccache-action@v0.0.10
@@ -152,9 +139,9 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-          key: ${{ runner.os }}-windows-nextest-archive-${{ hashFiles('Cargo.lock', '**/Cargo.toml', '.cargo/config.toml', '.config/nextest.toml') }}
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-windows-nextest-archive-
+            ${{ runner.os }}-cargo-test-
             ${{ runner.os }}-cargo-
 
       - name: Report Windows cache mode
@@ -163,9 +150,8 @@ jobs:
           "Windows Rust cache hit: ${{ steps.windows-rust-cache.outputs.cache-hit }}" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
           "Windows Rust cache matched key: ${{ steps.windows-rust-cache.outputs.cache-matched-key }}" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
 
-      - name: Build Windows nextest archive
-        shell: pwsh
-        run: cargo nextest archive -p tracedecay --profile ci --lib --bin tracedecay --tests --archive-file $env:WINDOWS_NEXTEST_ARCHIVE
+      - name: Run Windows tests
+        run: cargo nextest run --workspace --profile ci
 
       - name: Save Windows Rust cache
         if: steps.windows-rust-cache.outputs.cache-hit != 'true'
@@ -192,126 +178,6 @@ jobs:
         if: always()
         shell: pwsh
         run: '& $env:SCCACHE_PATH --show-stats'
-
-  windows-test-shards:
-    name: Test Windows ${{ matrix.partition }}/16
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
-    needs: [windows-test-build]
-    runs-on:
-      - self-hosted
-      - Windows
-      - X64
-      - github-runner-windows-1
-      - tracedecay
-    strategy:
-      fail-fast: false
-      matrix:
-        partition: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-
-      - name: Download Windows nextest archive
-        shell: pwsh
-        timeout-minutes: 20
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPOSITORY: ${{ github.repository }}
-          GH_RUN_ID: ${{ github.run_id }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          $headers = @{
-            Authorization = "Bearer $env:GH_TOKEN"
-            Accept = "application/vnd.github+json"
-            "X-GitHub-Api-Version" = "2022-11-28"
-          }
-          $artifactsUrl = "https://api.github.com/repos/$env:GH_REPOSITORY/actions/runs/$env:GH_RUN_ID/artifacts?per_page=100"
-          $artifacts = Invoke-RestMethod -Uri $artifactsUrl -Headers $headers
-          $artifact = @($artifacts.artifacts | Where-Object { $_.name -eq $env:WINDOWS_NEXTEST_ARTIFACT }) | Select-Object -First 1
-          if (!$artifact) {
-            throw "Missing artifact named $env:WINDOWS_NEXTEST_ARTIFACT in run $env:GH_RUN_ID"
-          }
-          $zipPath = Join-Path $env:RUNNER_TEMP "$($artifact.name).zip"
-          $downloadUrl = "https://api.github.com/repos/$env:GH_REPOSITORY/actions/artifacts/$($artifact.id)/zip"
-          & curl.exe --fail --location --retry 5 --retry-delay 2 `
-            --header "Authorization: Bearer $env:GH_TOKEN" `
-            --header "Accept: application/vnd.github+json" `
-            --header "X-GitHub-Api-Version: 2022-11-28" `
-            --output $zipPath `
-            $downloadUrl
-          if ($LASTEXITCODE -ne 0) {
-            throw "curl failed to download artifact $($artifact.id) with exit code $LASTEXITCODE"
-          }
-          Expand-Archive -Path $zipPath -DestinationPath (Get-Location).Path -Force
-          Remove-Item $zipPath -Force
-
-      - name: Verify Windows test artifact
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $archive = Join-Path (Get-Location).Path $env:WINDOWS_NEXTEST_ARCHIVE
-          if (!(Test-Path $archive)) {
-            throw "Missing Windows nextest archive at $archive"
-          }
-          $archiveInfo = Get-Item $archive
-          if ($archiveInfo.Length -le 0) {
-            throw "Windows nextest archive is empty at $archive"
-          }
-          $toolsDir = Join-Path (Get-Location).Path "windows-test-tools"
-          $binDir = Join-Path $toolsDir "node_modules/@ast-grep/cli"
-          $astGrepExe = Join-Path $binDir "ast-grep.exe"
-          if (!(Test-Path $astGrepExe)) {
-            throw "Missing archived ast-grep executable at $astGrepExe"
-          }
-          $binDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          & $astGrepExe --version
-          $archiveMiB = [math]::Round($archiveInfo.Length / 1MB, 2)
-          "Windows nextest archive: ${archiveMiB} MiB" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
-
-      - name: Run Windows test shard
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $partition = [int]"${{ matrix.partition }}"
-          $partitions = [int]"$env:WINDOWS_TEST_PARTITIONS"
-          $testThreads = [int]"$env:WINDOWS_TEST_THREADS"
-          $partitionArg = "slice:$partition/$partitions"
-          $workspace = (Get-Location).Path
-          $archive = Join-Path $workspace $env:WINDOWS_NEXTEST_ARCHIVE
-          $targetDir = Join-Path $workspace "target"
-          $cargoMetadata = Join-Path $targetDir "nextest/cargo-metadata.json"
-          $binariesMetadata = Join-Path $targetDir "nextest/binaries-metadata.json"
-          cargo nextest run --archive-file $archive --extract-to $workspace --extract-overwrite --profile ci --no-run
-          Write-Host "Windows shard $partition/$partitions running archive partition $partitionArg with $testThreads test threads"
-          $nextestArgs = @("nextest", "run", "--cargo-metadata", $cargoMetadata, "--binaries-metadata", $binariesMetadata, "--workspace-remap", $workspace, "--target-dir-remap", $targetDir, "--profile", "ci", "--partition", $partitionArg, "--test-threads", $testThreads)
-          cargo @nextestArgs
-
-      - name: Upload Windows shard diagnostics
-        if: failure() || cancelled()
-        uses: actions/upload-artifact@v7
-        with:
-          name: windows-shard-${{ matrix.partition }}-diagnostics
-          path: target/nextest
-          compression-level: 0
-          if-no-files-found: warn
-          retention-days: 3
-
-  windows-test:
-    name: Test Windows
-    if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref)) }}
-    needs: [windows-test-shards]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check Windows shards
-        run: |
-          if [ "${{ needs.windows-test-shards.result }}" != "success" ]; then
-            echo "Windows test shards finished with: ${{ needs.windows-test-shards.result }}" >&2
-            exit 1
-          fi
 
   clippy:
     name: Clippy
