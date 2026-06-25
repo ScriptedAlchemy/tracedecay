@@ -459,14 +459,12 @@ mod tests {
             fs::create_dir_all(&profile_root).unwrap();
             let home = home.canonicalize().unwrap();
             let profile_root = home.join(".tracedecay");
+            let global_db_path = profile_root.join("global.db");
             Self {
                 _home: EnvVarGuard::set("HOME", &home),
                 _userprofile: EnvVarGuard::set("USERPROFILE", &home),
                 _data_dir: EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root),
-                _global_db: EnvVarGuard::set(
-                    "TRACEDECAY_GLOBAL_DB",
-                    profile_root.join("global.db"),
-                ),
+                _global_db: EnvVarGuard::set("TRACEDECAY_GLOBAL_DB", &global_db_path),
             }
         }
     }
@@ -621,21 +619,20 @@ mod tests {
         let target_project = dir.path().join("target");
         fs::create_dir_all(active_project.join("src")).unwrap();
         fs::create_dir_all(target_project.join("src")).unwrap();
-        fs::write(
-            active_project.join("src/lib.rs"),
-            "pub fn active_only_symbol() {}\n",
-        )
-        .unwrap();
-        fs::write(
-            target_project.join("src/lib.rs"),
-            "pub fn target_only_symbol() {}\n",
-        )
-        .unwrap();
+        fs::write(active_project.join("src/active.rs"), "pub fn active() {}\n").unwrap();
+        fs::write(target_project.join("src/target.rs"), "pub fn target() {}\n").unwrap();
 
         let active = TraceDecay::init(&active_project).await.unwrap();
         let target = TraceDecay::init(&target_project).await.unwrap();
-        active.index_all().await.unwrap();
-        target.index_all().await.unwrap();
+        let target_still_stale = target
+            .sync_if_stale(&["src/target.rs".to_string()])
+            .await
+            .unwrap();
+        assert!(
+            !target_still_stale,
+            "target fixture source should be indexed for selected-project file listing"
+        );
+        let registry = GlobalDb::open().await.unwrap();
         let target_project_id = target
             .store_layout()
             .identity
@@ -644,28 +641,29 @@ mod tests {
             .expect("target project should be registered")
             .to_string();
 
-        let result = handle_tool_call(
+        let result = handle_tool_call_with_registry(
             &active,
-            "tracedecay_search",
+            "tracedecay_files",
             json!({
-                "query": "target_only_symbol",
                 "project_id": target_project_id,
-                "limit": 5
+                "path": "src"
             }),
             None,
             Some("tests"),
+            Some(&registry),
+            false,
         )
         .await
         .unwrap();
         let text = result.value["content"][0]["text"].as_str().unwrap();
 
         assert!(
-            text.contains("target_only_symbol"),
-            "selected registered project search should return target graph results: {text}"
+            text.contains("target.rs"),
+            "selected registered project file listing should return target graph results: {text}"
         );
         assert!(
-            !text.contains("active_only_symbol"),
-            "selected registered project search should not query the active graph: {text}"
+            !text.contains("active.rs"),
+            "selected registered project file listing should not query the active graph: {text}"
         );
 
         active.checkpoint().await.unwrap();
