@@ -11,6 +11,8 @@ mod cli;
 mod commands;
 mod cost_cmd;
 mod global;
+mod hook_cmd;
+mod sessions_cmd;
 mod status_cmd;
 mod tool_command;
 
@@ -598,122 +600,28 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
             // exists only for clap match exhaustiveness.
             unreachable!("extract-worker handled by early dispatch")
         }
-        Commands::HookPreToolUse => {
-            tracedecay::hooks::hook_pre_tool_use();
-        }
-        Commands::HookPromptSubmit => {
-            tracedecay::hooks::hook_prompt_submit().await;
-        }
-        Commands::HookStop => {
-            tracedecay::hooks::hook_stop().await;
-        }
-        Commands::HookKiroPreToolUse => {
-            let code = tracedecay::hooks::hook_kiro_pre_tool_use();
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookKiroPromptSubmit => {
-            let code = tracedecay::hooks::hook_kiro_prompt_submit().await;
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookKiroPostToolUse => {
-            let code = tracedecay::hooks::hook_kiro_post_tool_use().await;
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookCursorSubagentStart => {
-            let code = tracedecay::hooks::hook_cursor_subagent_start();
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookCursorPostToolUse => {
-            let code = tracedecay::hooks::hook_cursor_post_tool_use();
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookCursorBeforeSubmitPrompt => {
-            let code = tracedecay::hooks::hook_cursor_before_submit_prompt().await;
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookCursorPreCompact => {
-            let code = tracedecay::hooks::hook_cursor_pre_compact().await;
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookCursorAfterFileEdit => {
-            let code = tracedecay::hooks::hook_cursor_after_file_edit().await;
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookCursorSessionStart => {
-            let code = tracedecay::hooks::hook_cursor_session_start().await;
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookCursorSessionEnd => {
-            let code = tracedecay::hooks::hook_cursor_session_end().await;
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookCursorAfterShell => {
-            let code = tracedecay::hooks::hook_cursor_after_shell().await;
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookCursorWorkspaceOpen => {
-            let code = tracedecay::hooks::hook_cursor_workspace_open().await;
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookCursorStop => {
-            let code = tracedecay::hooks::hook_cursor_stop().await;
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookCodexSessionStart => {
-            let code = tracedecay::hooks::hook_codex_session_start().await;
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookCodexUserPromptSubmit => {
-            let code = tracedecay::hooks::hook_codex_user_prompt_submit().await;
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookCodexSubagentStart => {
-            let code = tracedecay::hooks::hook_codex_subagent_start();
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookCodexPostToolUse => {
-            let code = tracedecay::hooks::hook_codex_post_tool_use().await;
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookCodexPostCompact => {
-            let code = tracedecay::hooks::hook_codex_post_compact().await;
-            if code != 0 {
-                process::exit(code);
-            }
+        hook_command @ (Commands::HookPreToolUse
+        | Commands::HookPromptSubmit
+        | Commands::HookStop
+        | Commands::HookKiroPreToolUse
+        | Commands::HookKiroPromptSubmit
+        | Commands::HookKiroPostToolUse
+        | Commands::HookCursorSubagentStart
+        | Commands::HookCursorPostToolUse
+        | Commands::HookCursorBeforeSubmitPrompt
+        | Commands::HookCursorPreCompact
+        | Commands::HookCursorAfterFileEdit
+        | Commands::HookCursorSessionStart
+        | Commands::HookCursorSessionEnd
+        | Commands::HookCursorAfterShell
+        | Commands::HookCursorWorkspaceOpen
+        | Commands::HookCursorStop
+        | Commands::HookCodexSessionStart
+        | Commands::HookCodexUserPromptSubmit
+        | Commands::HookCodexSubagentStart
+        | Commands::HookCodexPostToolUse
+        | Commands::HookCodexPostCompact) => {
+            hook_cmd::handle_hook_command(hook_command).await?;
         }
         Commands::Dashboard {
             path,
@@ -898,7 +806,7 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
             }
         }
         Commands::Sessions { action } => {
-            handle_sessions_action(action).await?;
+            sessions_cmd::handle_sessions_action(action).await?;
         }
         Commands::Branch { action } => {
             commands::handle_branch_action(action).await?;
@@ -956,99 +864,6 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
         }
     }
     Ok(())
-}
-
-async fn handle_sessions_action(action: SessionsAction) -> tracedecay::errors::Result<()> {
-    match action {
-        SessionsAction::Ingest {
-            provider,
-            project_id,
-            project_path,
-        } => {
-            let project_path = resolve_cli_project_root(None, project_id, project_path).await?;
-            let db = tracedecay::sessions::cursor::open_project_session_db(&project_path)
-                .await
-                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-                    message: format!(
-                        "could not open project session database for {}",
-                        project_path.display()
-                    ),
-                })?;
-            let _ = optional_session_provider_scope(provider.as_deref())?;
-            let stats = ingest_selected_session_sources(&db, &project_path).await;
-            println!(
-                "ingested {} session(s), {} message(s)",
-                stats.sessions_upserted, stats.messages_upserted
-            );
-        }
-        SessionsAction::Search {
-            query,
-            provider,
-            limit,
-            project_id,
-            project_path,
-        } => {
-            let project_path = resolve_cli_project_root(None, project_id, project_path).await?;
-            let db = tracedecay::sessions::cursor::open_project_session_db(&project_path)
-                .await
-                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-                    message: format!(
-                        "could not open project session database for {}",
-                        project_path.display()
-                    ),
-                })?;
-            let selected_provider = optional_session_provider_scope(provider.as_deref())?;
-            let _ = tracedecay::sessions::ingest_global_sources(&db, &project_path).await;
-            let results = if let Some(provider) = selected_provider {
-                db.search_session_messages(provider, None, &query, limit)
-                    .await
-            } else {
-                db.search_session_messages_all_providers_filtered(
-                    None,
-                    &query,
-                    limit,
-                    tracedecay::sessions::SessionSearchScope::All,
-                    None,
-                )
-                .await
-            };
-            for result in results {
-                println!(
-                    "[{}] {} {}: {}",
-                    result.session.provider,
-                    result.session.project_key,
-                    result.message.role,
-                    result.message.text.replace('\n', " ")
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn ingest_selected_session_sources(
-    db: &tracedecay::global_db::GlobalDb,
-    project_root: &std::path::Path,
-) -> tracedecay::sessions::source::TranscriptIngestStats {
-    tracedecay::sessions::ingest_global_sources(db, project_root).await
-}
-
-fn optional_session_provider_scope(
-    provider: Option<&str>,
-) -> tracedecay::errors::Result<Option<&str>> {
-    match provider.map(str::trim).filter(|provider| !provider.is_empty()) {
-        None | Some("all") => Ok(None),
-        Some(
-            provider @ ("cursor" | "claude" | "codex" | "vibe" | "cline" | "roo-code" | "kilo"
-            | "kiro" | "hermes"),
-        ) => Ok(Some(provider)),
-        other => Err(tracedecay::errors::TraceDecayError::Config {
-            message: format!(
-                "unknown session provider '{}' (expected all, cursor, claude, codex, vibe, cline, roo-code, kilo, kiro, or hermes)",
-                other.unwrap_or_default()
-            ),
-        }),
-    }
 }
 
 fn should_skip_startup_maintenance(command: &Commands) -> bool {
