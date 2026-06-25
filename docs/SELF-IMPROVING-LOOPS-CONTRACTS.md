@@ -37,7 +37,7 @@ Timestamp semantics follow the Hermes memory-curator rule:
 
 TraceDecay-owned managed skills live under the profile `agent_managed/skills` store and static bundled skills stay immutable. Managed skill metadata includes id, title, summary, category, targets, lifecycle state, pinned flag, checksum, timestamps, and provenance. Support files are restricted to `references`, `templates`, `scripts`, and `assets`.
 
-Agent-authored or backend-authored changes enter pending approval first. Activation, disable, archive, restore, and staged updates are explicit lifecycle operations. Pinned, user-authored, shipped, and Hermes-owned skills are protected from automatic mutation.
+Agent-authored or backend-authored changes enter pending approval first. Activation, disable, archive, restore, and staged updates are explicit lifecycle operations. Pinned and user-authored skills are excluded from automatic archive or patch recommendations; shipped and Hermes-owned skills remain outside TraceDecay-owned mutation surfaces.
 
 ## Telemetry And Recommendations
 
