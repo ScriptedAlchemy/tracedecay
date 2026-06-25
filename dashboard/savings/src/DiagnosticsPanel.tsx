@@ -9,6 +9,11 @@ import type {
   DiagnosticsResponse,
 } from "./types";
 
+type RecentTableColumn<T> = {
+  header: string;
+  value: (row: T) => string | number | null | undefined;
+};
+
 function fmtRatio(value: number | undefined): string {
   return value == null ? "0.00" : value.toFixed(2);
 }
@@ -26,26 +31,34 @@ function countRows(
     .map((row) => ({ label: rowLabel(row, key), value: Number(row.count) || 0 }));
 }
 
-function EventTable({ rows }: { rows: DiagnosticsRecentEvent[] }) {
-  if (!rows.length) return <EmptyState variant="dashed">No recent events</EmptyState>;
+function RecentTable<T>({
+  rows,
+  empty,
+  columns,
+  rowKey,
+}: {
+  rows: T[];
+  empty: string;
+  columns: Array<RecentTableColumn<T>>;
+  rowKey: (row: T, index: number) => string;
+}) {
+  if (!rows.length) return <EmptyState variant="dashed">{empty}</EmptyState>;
   return (
     <div className="tss-table-scroll">
       <table className="tss-table">
         <thead>
           <tr>
-            <th>Kind</th>
-            <th>Tool</th>
-            <th>Hook</th>
-            <th>Outcome</th>
+            {columns.map((column) => (
+              <th key={column.header}>{column.header}</th>
+            ))}
           </tr>
         </thead>
         <tbody>
           {rows.slice(0, 10).map((row, index) => (
-            <tr key={`${row.timestamp || 0}-${index}`}>
-              <td>{row.event_kind || "-"}</td>
-              <td>{row.tool_name || "-"}</td>
-              <td>{row.hook_name || "-"}</td>
-              <td>{row.outcome || "-"}</td>
+            <tr key={rowKey(row, index)}>
+              {columns.map((column) => (
+                <td key={column.header}>{column.value(row) || "-"}</td>
+              ))}
             </tr>
           ))}
         </tbody>
@@ -54,31 +67,35 @@ function EventTable({ rows }: { rows: DiagnosticsRecentEvent[] }) {
   );
 }
 
-function HookTable({ rows }: { rows: DiagnosticsRecentHook[] }) {
-  if (!rows.length) return <EmptyState variant="dashed">No recent hooks</EmptyState>;
+function EventTable({ rows }: { rows: DiagnosticsRecentEvent[] }) {
   return (
-    <div className="tss-table-scroll">
-      <table className="tss-table">
-        <thead>
-          <tr>
-            <th>Agent</th>
-            <th>Hook</th>
-            <th>Tool</th>
-            <th>Prompt</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.slice(0, 10).map((row, index) => (
-            <tr key={`${row.ts_unix_ms || 0}-${index}`}>
-              <td>{row.agent || "-"}</td>
-              <td>{row.hook_name || "-"}</td>
-              <td>{row.tool_name || "-"}</td>
-              <td>{row.prompt_category || "-"}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <RecentTable
+      rows={rows}
+      empty="No recent events"
+      rowKey={(row, index) => `${row.timestamp || 0}-${index}`}
+      columns={[
+        { header: "Kind", value: (row) => row.event_kind },
+        { header: "Tool", value: (row) => row.tool_name },
+        { header: "Hook", value: (row) => row.hook_name },
+        { header: "Outcome", value: (row) => row.outcome },
+      ]}
+    />
+  );
+}
+
+function HookTable({ rows }: { rows: DiagnosticsRecentHook[] }) {
+  return (
+    <RecentTable
+      rows={rows}
+      empty="No recent hooks"
+      rowKey={(row, index) => `${row.ts_unix_ms || 0}-${index}`}
+      columns={[
+        { header: "Agent", value: (row) => row.agent },
+        { header: "Hook", value: (row) => row.hook_name },
+        { header: "Tool", value: (row) => row.tool_name },
+        { header: "Prompt", value: (row) => row.prompt_category },
+      ]}
+    />
   );
 }
 
