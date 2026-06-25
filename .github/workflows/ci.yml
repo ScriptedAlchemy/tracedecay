@@ -107,7 +107,6 @@ jobs:
       - Windows
       - X64
       - github-runner-windows-1
-      - tracedecay
     env:
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
