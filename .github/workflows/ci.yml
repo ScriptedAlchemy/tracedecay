@@ -1,0 +1,404 @@
+name: CI
+
+on:
+  push:
+    branches: [master, feature/holographic-memory]
+  pull_request:
+    branches: ['**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  AST_GREP_VERSION: "0.44.0"
+
+jobs:
+  commit-messages:
+    name: Commit Messages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Validate PR commit messages
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: scripts/check-conventional-commits.sh "$BASE_SHA..$HEAD_SHA"
+
+      - name: Validate pushed commit messages
+        if: github.event_name == 'push'
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            if git rev-parse "${HEAD_SHA}^" >/dev/null 2>&1; then
+              RANGE="${HEAD_SHA}^..${HEAD_SHA}"
+            else
+              RANGE="$HEAD_SHA"
+            fi
+          else
+            RANGE="${BEFORE_SHA}..${HEAD_SHA}"
+          fi
+          scripts/check-conventional-commits.sh "$RANGE"
+
+  test:
+    name: Test ${{ matrix.name }}
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            runner: '"ubuntu-latest"'
+          - name: macOS
+            runner: '"macos-14"'
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install ast-grep
+        run: |
+          npm install --global "@ast-grep/cli@${AST_GREP_VERSION}"
+          ast-grep --version
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Cache Cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-
+            ${{ runner.os }}-cargo-
+
+      - name: Run tests
+        run: cargo nextest run --workspace --profile ci
+
+  windows-test:
+    name: Test Windows
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    runs-on:
+      - self-hosted
+      - Windows
+      - X64
+      - github-runner-windows-1
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install ast-grep
+        shell: pwsh
+        run: |
+          npm install --global "@ast-grep/cli@$env:AST_GREP_VERSION"
+          ast-grep --version
+
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Restore Windows Rust cache
+        id: windows-rust-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-
+            ${{ runner.os }}-cargo-
+
+      - name: Report Windows cache mode
+        shell: pwsh
+        run: |
+          "Windows Rust cache hit: ${{ steps.windows-rust-cache.outputs.cache-hit }}" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "Windows Rust cache matched key: ${{ steps.windows-rust-cache.outputs.cache-matched-key }}" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+      - name: Run Windows tests
+        run: cargo nextest run --workspace --profile ci
+
+      - name: Save Windows Rust cache
+        if: steps.windows-rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ steps.windows-rust-cache.outputs.cache-primary-key }}
+
+      - name: Show sccache stats
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:SCCACHE_PATH -and (Test-Path $env:SCCACHE_PATH)) {
+            & $env:SCCACHE_PATH --show-stats
+          } else {
+            Write-Host "sccache was not installed; skipping stats"
+          }
+
+  clippy:
+    name: Clippy
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Cache Cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-clippy-
+            ${{ runner.os }}-cargo-
+      - name: Run blocking Clippy policy
+        run: cargo clippy --workspace --all-targets
+
+  fmt:
+    name: Format
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  dashboard:
+    name: Dashboard
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      DASHBOARD_DIST_FILES: >-
+        shell/dist/shell.js
+        shell/dist/shell.css
+        holographic/dist/index.js
+        holographic/dist/style.css
+        lcm/dist/index.js
+        lcm/dist/style.css
+        graph/dist/index.js
+        graph/dist/style.css
+        savings/dist/index.js
+        savings/dist/style.css
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Build dashboard assets
+        working-directory: dashboard
+        run: npm run build
+
+      - name: Run dashboard unit tests
+        working-directory: dashboard
+        run: npm test
+
+      - name: Verify embedded dist artifacts
+        working-directory: dashboard
+        run: |
+          set -euo pipefail
+          for f in $DASHBOARD_DIST_FILES; do
+            if [ ! -s "$f" ]; then
+              echo "missing or empty dist artifact: $f" >&2
+              exit 1
+            fi
+          done
+          # shellcheck disable=SC2086
+          sha256sum $DASHBOARD_DIST_FILES > /tmp/dashboard-dist.sha
+          npm run build
+          sha256sum -c /tmp/dashboard-dist.sha
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install ast-grep
+        run: |
+          npm install --global "@ast-grep/cli@${AST_GREP_VERSION}"
+          ast-grep --version
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Cache Cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-dashboard-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-dashboard-
+            ${{ runner.os }}-cargo-
+
+      - name: Run dashboard integration tests
+        run: cargo nextest run --test dashboard_api_test --no-fail-fast
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('dashboard/package-lock.json') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-
+
+      - name: Install Playwright Chromium
+        working-directory: dashboard
+        run: npx playwright install --with-deps chromium
+
+      - name: Prebuild dashboard binary for smoke
+        run: cargo build --bin tracedecay
+
+      - name: Run dashboard smoke (empty LCM)
+        working-directory: dashboard
+        env:
+          TRACEDECAY_GLOBAL_DB: ${{ runner.temp }}/tracedecay-dashboard-smoke-empty.db
+        run: |
+          set -euo pipefail
+          rm -f "$TRACEDECAY_GLOBAL_DB"
+          attempts=0
+          max_attempts=3
+          until [ "$attempts" -ge "$max_attempts" ]; do
+            attempts=$((attempts + 1))
+            echo "Smoke attempt ${attempts}/${max_attempts}..."
+            if npm run smoke -- --expect-lcm=empty; then
+              exit 0
+            fi
+            if [ "$attempts" -lt "$max_attempts" ]; then
+              sleep 10
+            fi
+          done
+          echo "Dashboard smoke failed after ${max_attempts} attempts" >&2
+          exit 1
+
+      - name: Run dashboard mobile smoke
+        working-directory: dashboard
+        env:
+          TRACEDECAY_GLOBAL_DB: ${{ runner.temp }}/tracedecay-dashboard-smoke-mobile.db
+        run: |
+          set -euo pipefail
+          rm -f "$TRACEDECAY_GLOBAL_DB"
+          npm run smoke:mobile -- --expect-lcm=empty
+
+  hermes-integration:
+    name: Hermes integration (stock)
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Stock (upstream) Hermes pin — the generated plugin must keep working
+      # against this exact upstream commit. Bump deliberately after rerunning
+      # scripts/hermes_stock_integration.sh against the new ref locally.
+      HERMES_UPSTREAM_REPO: https://github.com/NousResearch/hermes-agent.git
+      HERMES_UPSTREAM_REF: 9dd9ef0ec99a87f078f7272b4323df5440b4b3f9
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install ast-grep
+        run: |
+          npm install --global "@ast-grep/cli@${AST_GREP_VERSION}"
+          ast-grep --version
+
+      - name: Cache Cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-hermes-integration-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-hermes-integration-
+            ${{ runner.os }}-cargo-
+
+      - name: Build tracedecay binary
+        run: cargo build --bin tracedecay
+
+      - name: Run generated-plugin unit checks (no Hermes required)
+        run: python3 scripts/hermes_plugin_unit_check.py
+
+      - name: Clone stock Hermes at pinned ref
+        run: |
+          set -euo pipefail
+          git init -q "$RUNNER_TEMP/hermes-upstream"
+          git -C "$RUNNER_TEMP/hermes-upstream" remote add origin "$HERMES_UPSTREAM_REPO"
+          git -C "$RUNNER_TEMP/hermes-upstream" fetch --depth 1 origin "$HERMES_UPSTREAM_REF"
+          git -C "$RUNNER_TEMP/hermes-upstream" checkout --detach FETCH_HEAD
+
+      - uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: ${{ runner.temp }}/hermes-upstream/uv.lock
+          cache-suffix: hermes-${{ env.HERMES_UPSTREAM_REF }}
+
+      - name: Set up stock Hermes environment
+        working-directory: ${{ runner.temp }}/hermes-upstream
+        run: uv sync --frozen --no-dev
+
+      - name: Run stock Hermes integration checks
+        env:
+          TRACEDECAY_BIN: ${{ github.workspace }}/target/debug/tracedecay
+          HERMES_UPSTREAM_DIR: ${{ runner.temp }}/hermes-upstream
+        run: scripts/hermes_stock_integration.sh
