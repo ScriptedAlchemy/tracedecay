@@ -19,6 +19,10 @@ env:
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
   AST_GREP_VERSION: "0.44.0"
+  WINDOWS_NEXTEST_ARTIFACT: windows-nextest-archive
+  WINDOWS_NEXTEST_ARCHIVE: windows-nextest-archive.tar.zst
+  WINDOWS_TEST_PARTITIONS: "16"
+  WINDOWS_TEST_THREADS: "1"
 
 jobs:
   commit-messages:
@@ -81,7 +85,7 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Cache Cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -126,31 +130,51 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
-      - name: Cache Cargo
-        uses: actions/cache@v4
+      - name: Restore Windows Rust cache
+        id: windows-rust-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+            target
+          key: ${{ runner.os }}-windows-nextest-archive-${{ hashFiles('Cargo.lock', '**/Cargo.toml', '.cargo/config.toml', '.config/nextest.toml') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-test-
+            ${{ runner.os }}-windows-nextest-archive-
             ${{ runner.os }}-cargo-
+
+      - name: Report Windows cache mode
+        shell: pwsh
+        run: |
+          "Windows Rust cache hit: ${{ steps.windows-rust-cache.outputs.cache-hit }}" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "Windows Rust cache matched key: ${{ steps.windows-rust-cache.outputs.cache-matched-key }}" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
 
       - name: Build Windows nextest archive
         shell: pwsh
-        run: cargo nextest archive -p tracedecay --profile ci --lib --bin tracedecay --tests --archive-file windows-nextest-archive.tar.zst
+        run: cargo nextest archive -p tracedecay --profile ci --lib --bin tracedecay --tests --archive-file $env:WINDOWS_NEXTEST_ARCHIVE
+
+      - name: Save Windows Rust cache
+        if: steps.windows-rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target
+          key: ${{ steps.windows-rust-cache.outputs.cache-primary-key }}
 
       - name: Upload Windows nextest archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: windows-nextest-archive
+          name: ${{ env.WINDOWS_NEXTEST_ARTIFACT }}
           path: |
-            windows-nextest-archive.tar.zst
+            ${{ env.WINDOWS_NEXTEST_ARCHIVE }}
             windows-test-tools
+          compression-level: 0
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 3
 
       - name: Show sccache stats
         if: always()
@@ -175,15 +199,23 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Download Windows nextest archive
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
-          name: windows-nextest-archive
+          name: ${{ env.WINDOWS_NEXTEST_ARTIFACT }}
           path: .
 
-      - name: Add archived ast-grep to PATH
+      - name: Verify Windows test artifact
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          $archive = Join-Path (Get-Location).Path $env:WINDOWS_NEXTEST_ARCHIVE
+          if (!(Test-Path $archive)) {
+            throw "Missing Windows nextest archive at $archive"
+          }
+          $archiveInfo = Get-Item $archive
+          if ($archiveInfo.Length -le 0) {
+            throw "Windows nextest archive is empty at $archive"
+          }
           $toolsDir = Join-Path (Get-Location).Path "windows-test-tools"
           $binDir = Join-Path $toolsDir "node_modules/@ast-grep/cli"
           $astGrepExe = Join-Path $binDir "ast-grep.exe"
@@ -192,17 +224,19 @@ jobs:
           }
           $binDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           & $astGrepExe --version
+          $archiveMiB = [math]::Round($archiveInfo.Length / 1MB, 2)
+          "Windows nextest archive: ${archiveMiB} MiB" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
 
       - name: Run Windows test shard
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $partition = [int]"${{ matrix.partition }}"
-          $partitions = 16
-          $testThreads = 1
+          $partitions = [int]"$env:WINDOWS_TEST_PARTITIONS"
+          $testThreads = [int]"$env:WINDOWS_TEST_THREADS"
           $partitionArg = "slice:$partition/$partitions"
           $workspace = (Get-Location).Path
-          $archive = Join-Path $workspace "windows-nextest-archive.tar.zst"
+          $archive = Join-Path $workspace $env:WINDOWS_NEXTEST_ARCHIVE
           $targetDir = Join-Path $workspace "target"
           $cargoMetadata = Join-Path $targetDir "nextest/cargo-metadata.json"
           $binariesMetadata = Join-Path $targetDir "nextest/binaries-metadata.json"
@@ -210,6 +244,16 @@ jobs:
           Write-Host "Windows shard $partition/$partitions running archive partition $partitionArg with $testThreads test threads"
           $nextestArgs = @("nextest", "run", "--cargo-metadata", $cargoMetadata, "--binaries-metadata", $binariesMetadata, "--workspace-remap", $workspace, "--target-dir-remap", $targetDir, "--profile", "ci", "--partition", $partitionArg, "--test-threads", $testThreads)
           cargo @nextestArgs
+
+      - name: Upload Windows shard diagnostics
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-shard-${{ matrix.partition }}-diagnostics
+          path: target/nextest
+          compression-level: 0
+          if-no-files-found: warn
+          retention-days: 3
 
   windows-test:
     name: Test Windows
@@ -235,7 +279,7 @@ jobs:
         with:
           components: clippy
       - name: Cache Cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -323,7 +367,7 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Cache Cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -338,7 +382,7 @@ jobs:
         run: cargo nextest run --test dashboard_api_test --no-fail-fast
 
       - name: Cache Playwright browsers
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('dashboard/package-lock.json') }}
@@ -405,7 +449,7 @@ jobs:
           ast-grep --version
 
       - name: Cache Cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index/
