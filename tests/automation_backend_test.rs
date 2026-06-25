@@ -28,6 +28,10 @@ fn fake_codex_response_timeout() -> Duration {
     }
 }
 
+fn fake_codex_response_timeout_secs() -> u64 {
+    fake_codex_response_timeout().as_secs()
+}
+
 struct EchoBackend;
 
 impl AgentTaskBackend for EchoBackend {
@@ -268,7 +272,7 @@ fn codex_app_server_backend_from_automation_config_forwards_runtime_limits() {
     let backend = CodexAppServerBackend::from_automation_config(&AutomationConfig {
         backend: AutomationBackend::CodexAppServer,
         model: Some("automation-model".to_string()),
-        timeout_secs: 5,
+        timeout_secs: fake_codex_response_timeout_secs(),
         max_tokens: Some(1024),
         temperature: Some(0.4),
         ..AutomationConfig::default()
@@ -307,7 +311,7 @@ fn codex_app_server_backend_uses_env_runtime_limits_when_config_omits_them() {
     let backend = CodexAppServerBackend::from_automation_config(&AutomationConfig {
         backend: AutomationBackend::CodexAppServer,
         model: Some("automation-model".to_string()),
-        timeout_secs: 5,
+        timeout_secs: fake_codex_response_timeout_secs(),
         max_tokens: None,
         temperature: None,
         ..AutomationConfig::default()
@@ -351,7 +355,7 @@ fn codex_app_server_backend_propagates_timeout_errors_and_reaps_child() {
 
 #[test]
 fn codex_app_server_backend_propagates_malformed_json_errors_and_reaps_child() {
-    let (err, pid) = backend_error_for_behavior("malformed", Duration::from_secs(5));
+    let (err, pid) = backend_error_for_behavior("malformed", fake_codex_response_timeout());
 
     assert!(
         err.contains("expected ident") || err.contains("expected value"),
@@ -366,7 +370,7 @@ fn codex_app_server_backend_propagates_malformed_json_errors_and_reaps_child() {
 
 #[test]
 fn codex_app_server_backend_propagates_empty_output_errors_and_reaps_child() {
-    let (err, pid) = backend_error_for_behavior("empty", Duration::from_secs(5));
+    let (err, pid) = backend_error_for_behavior("empty", fake_codex_response_timeout());
 
     assert!(
         err.contains("codex app-server returned an empty summary"),
