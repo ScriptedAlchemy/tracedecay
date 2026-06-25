@@ -6,10 +6,11 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use super::automation_run_service::{self, SessionReflectionRunRequest};
 use super::memory_api::{
     default_agent_plan_max_clusters, default_agent_plan_min_confidence, default_dry_run,
 };
-use super::memory_service;
+use super::memory_service::{push_curation_activity, push_curation_activity_with_level};
 use super::util::http_detail;
 use super::DashboardState;
 use crate::automation::backend::{
@@ -25,7 +26,29 @@ use crate::sessions::lcm::{LcmGrepSort, LcmScope};
 use crate::tracedecay::current_timestamp;
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct AutomationRunBody {
+#[serde(deny_unknown_fields)]
+pub(crate) struct MemoryCuratorRunBody {
+    #[serde(default = "default_dry_run")]
+    dry_run: bool,
+    #[serde(default = "default_agent_plan_max_clusters")]
+    max_clusters: usize,
+    #[serde(default = "default_agent_plan_min_confidence")]
+    min_confidence: f64,
+}
+
+impl Default for MemoryCuratorRunBody {
+    fn default() -> Self {
+        Self {
+            dry_run: default_dry_run(),
+            max_clusters: default_agent_plan_max_clusters(),
+            min_confidence: default_agent_plan_min_confidence(),
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SessionReflectionRunBody {
     #[serde(default = "default_dry_run")]
     dry_run: bool,
     provider: Option<String>,
@@ -41,50 +64,82 @@ pub(crate) struct AutomationRunBody {
     role: Option<String>,
     start_time: Option<i64>,
     end_time: Option<i64>,
-    #[serde(default = "default_agent_plan_max_clusters")]
-    max_clusters: usize,
-    #[serde(default = "default_agent_plan_min_confidence")]
-    min_confidence: f64,
 }
 
-impl Default for AutomationRunBody {
-    fn default() -> Self {
+impl From<SessionReflectionRunBody> for SessionReflectionRunRequest {
+    fn from(body: SessionReflectionRunBody) -> Self {
         Self {
-            dry_run: default_dry_run(),
-            provider: None,
-            query: None,
-            evidence_limit: None,
-            storage_scope: None,
-            hermes_home: None,
-            scope: None,
-            session_id: None,
-            include_summaries: None,
-            sort: None,
-            source: None,
-            role: None,
-            start_time: None,
-            end_time: None,
-            max_clusters: default_agent_plan_max_clusters(),
-            min_confidence: default_agent_plan_min_confidence(),
+            provider: body.provider,
+            query: body.query,
+            evidence_limit: body.evidence_limit,
+            storage_scope: body.storage_scope,
+            hermes_home: body.hermes_home,
+            scope: body.scope,
+            session_id: body.session_id,
+            include_summaries: body.include_summaries,
+            sort: body.sort,
+            source: body.source,
+            role: body.role,
+            start_time: body.start_time,
+            end_time: body.end_time,
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SkillWritingRunBody {
+    #[serde(default = "default_dry_run")]
+    dry_run: bool,
+    provider: Option<String>,
+    query: Option<String>,
+    evidence_limit: Option<usize>,
+}
+
+#[derive(Debug)]
+enum AutomationRunBody {
+    MemoryCurator(MemoryCuratorRunBody),
+    SessionReflection(SessionReflectionRunBody),
+    SkillWriting(SkillWritingRunBody),
+}
+
+impl AutomationRunBody {
+    fn task(&self) -> AgentTaskKind {
+        match self {
+            Self::MemoryCurator(_) => AgentTaskKind::MemoryCurator,
+            Self::SessionReflection(_) => AgentTaskKind::SessionReflector,
+            Self::SkillWriting(_) => AgentTaskKind::SkillWriter,
+        }
+    }
+
+    fn dry_run(&self) -> bool {
+        match self {
+            Self::MemoryCurator(body) => body.dry_run,
+            Self::SessionReflection(body) => body.dry_run,
+            Self::SkillWriting(body) => body.dry_run,
         }
     }
 }
 
 pub(crate) async fn memory_curator(
     State(state): State<DashboardState>,
-    body: Option<axum::extract::Json<AutomationRunBody>>,
+    body: Option<axum::extract::Json<MemoryCuratorRunBody>>,
 ) -> (StatusCode, Json<Value>) {
-    run_dashboard_task_endpoint(state, body, AgentTaskKind::MemoryCurator, "memory-curator").await
+    run_dashboard_task_endpoint(
+        state,
+        AutomationRunBody::MemoryCurator(body.map(|body| body.0).unwrap_or_default()),
+        "memory-curator",
+    )
+    .await
 }
 
 pub(crate) async fn session_reflection(
     State(state): State<DashboardState>,
-    body: Option<axum::extract::Json<AutomationRunBody>>,
+    body: Option<axum::extract::Json<SessionReflectionRunBody>>,
 ) -> (StatusCode, Json<Value>) {
     run_dashboard_task_endpoint(
         state,
-        body,
-        AgentTaskKind::SessionReflector,
+        AutomationRunBody::SessionReflection(body.map(|body| body.0).unwrap_or_default()),
         "session-reflection",
     )
     .await
@@ -92,22 +147,25 @@ pub(crate) async fn session_reflection(
 
 pub(crate) async fn skill_writing(
     State(state): State<DashboardState>,
-    body: Option<axum::extract::Json<AutomationRunBody>>,
+    body: Option<axum::extract::Json<SkillWritingRunBody>>,
 ) -> (StatusCode, Json<Value>) {
-    run_dashboard_task_endpoint(state, body, AgentTaskKind::SkillWriter, "skill-writing").await
+    run_dashboard_task_endpoint(
+        state,
+        AutomationRunBody::SkillWriting(body.map(|body| body.0).unwrap_or_default()),
+        "skill-writing",
+    )
+    .await
 }
 
 async fn run_dashboard_task_endpoint(
     state: DashboardState,
-    body: Option<axum::extract::Json<AutomationRunBody>>,
-    task: AgentTaskKind,
+    body: AutomationRunBody,
     task_label: &'static str,
 ) -> (StatusCode, Json<Value>) {
-    let body = body.map(|body| body.0).unwrap_or_default();
-    if !body.dry_run {
+    if !body.dry_run() {
         return dry_run_only_response(task_label);
     }
-    enqueue_dashboard_run(state, task, body).await
+    enqueue_dashboard_run(state, body).await
 }
 
 pub(crate) async fn artifact_list(
@@ -221,9 +279,9 @@ fn expected_artifact_chain_kinds() -> Vec<&'static str> {
 
 async fn enqueue_dashboard_run(
     state: DashboardState,
-    task: AgentTaskKind,
     body: AutomationRunBody,
 ) -> (StatusCode, Json<Value>) {
+    let task = body.task();
     let run_id = dashboard_run_id(task);
     let queued =
         match append_dashboard_job_record(&state, &run_id, task, AutomationRunStatus::Queued, None)
@@ -280,46 +338,38 @@ async fn run_dashboard_job(
         }
     }
 
-    let result = match task {
-        AgentTaskKind::MemoryCurator => {
-            Box::pin(memory_service::curation_agent_plan_payload_with_run_id(
-                &state,
-                body.max_clusters,
-                body.min_confidence,
-                Some(run_id.clone()),
-            ))
+    let result = match body {
+        AutomationRunBody::MemoryCurator(body) => {
+            Box::pin(
+                automation_run_service::curation_agent_plan_payload_with_run_id(
+                    &state,
+                    body.max_clusters,
+                    body.min_confidence,
+                    Some(run_id.clone()),
+                ),
+            )
             .await
         }
-        AgentTaskKind::SessionReflector => {
-            Box::pin(memory_service::session_reflection_run_payload_with_run_id(
-                &state,
-                memory_service::SessionReflectionRunRequest {
-                    provider: body.provider,
-                    query: body.query,
-                    evidence_limit: body.evidence_limit,
-                    storage_scope: body.storage_scope,
-                    hermes_home: body.hermes_home,
-                    scope: body.scope,
-                    session_id: body.session_id,
-                    include_summaries: body.include_summaries,
-                    sort: body.sort,
-                    source: body.source,
-                    role: body.role,
-                    start_time: body.start_time,
-                    end_time: body.end_time,
-                },
-                Some(run_id.clone()),
-            ))
+        AutomationRunBody::SessionReflection(body) => {
+            Box::pin(
+                automation_run_service::session_reflection_run_payload_with_run_id(
+                    &state,
+                    body.into(),
+                    Some(run_id.clone()),
+                ),
+            )
             .await
         }
-        AgentTaskKind::SkillWriter => {
-            Box::pin(memory_service::skill_writing_run_payload_with_run_id(
-                &state,
-                body.provider,
-                body.query,
-                body.evidence_limit,
-                Some(run_id.clone()),
-            ))
+        AutomationRunBody::SkillWriting(body) => {
+            Box::pin(
+                automation_run_service::skill_writing_run_payload_with_run_id(
+                    &state,
+                    body.provider,
+                    body.query,
+                    body.evidence_limit,
+                    Some(run_id.clone()),
+                ),
+            )
             .await
         }
     };
@@ -415,7 +465,7 @@ async fn append_failed_if_missing(
         return;
     }
     if task == AgentTaskKind::MemoryCurator {
-        memory_service::push_curation_activity_with_level(
+        push_curation_activity_with_level(
             state,
             "failure",
             format!("Dashboard memory-curator automation run failed: {err}"),
@@ -446,49 +496,49 @@ async fn push_dashboard_task_skip_activity(
     reason: &str,
 ) {
     let task_label = dashboard_task_label(task);
-    memory_service::push_curation_activity(
+    push_curation_activity(
         state,
         "queued",
         format!("Queued dashboard {task_label} automation run"),
         true,
     )
     .await;
-    memory_service::push_curation_activity(
+    push_curation_activity(
         state,
         "evidence",
         format!("Skipped evidence collection for dashboard {task_label} automation run: {reason}"),
         true,
     )
     .await;
-    memory_service::push_curation_activity(
+    push_curation_activity(
         state,
         "backend",
         format!("Skipped backend call for dashboard {task_label} automation run: {reason}"),
         true,
     )
     .await;
-    memory_service::push_curation_activity(
+    push_curation_activity(
         state,
         "validation",
         format!("Skipped dashboard {task_label} automation run: {reason}"),
         true,
     )
     .await;
-    memory_service::push_curation_activity(
+    push_curation_activity(
         state,
         "apply",
         format!("No mutations applied for dashboard {task_label} automation run: {reason}"),
         true,
     )
     .await;
-    memory_service::push_curation_activity(
+    push_curation_activity(
         state,
         "report",
         format!("Dashboard {task_label} automation run skipped: {reason}"),
         true,
     )
     .await;
-    memory_service::push_curation_activity(
+    push_curation_activity(
         state,
         "finish",
         format!("Finished skipped dashboard {task_label} automation run: {reason}"),
