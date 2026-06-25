@@ -231,6 +231,7 @@ export function useCurationData({
     pollFastMs,
     setActiveTab,
     setMemoryPreviewFromRun,
+    loadMemoryPreview: loadSavedPreview,
     loadActivity,
     loadStatus,
     loadFactProposals,

@@ -754,6 +754,79 @@ describe("useCurationData", () => {
     });
   });
 
+  it("refreshes automation outputs when polling observes terminal runs", async () => {
+    const queuedMemoryRun = {
+      schema_version: 2,
+      run_id: "queued-memory-run",
+      trigger: "dashboard",
+      task: "memory_curator",
+      backend: "codex_app_server",
+      status: "queued",
+      accepted_count: 0,
+      rejected_count: 0,
+      started_at: "2026-06-24T00:00:00Z",
+      completed_at: "2026-06-24T00:00:00Z",
+    };
+    const queuedReflectionRun = {
+      ...queuedMemoryRun,
+      run_id: "queued-reflection-run",
+      task: "session_reflector",
+    };
+    const queuedSkillRun = {
+      ...queuedMemoryRun,
+      run_id: "queued-skill-run",
+      task: "skill_writer",
+    };
+    const api = makeApi({
+      getMemoryAutomationRuns: vi.fn()
+        .mockResolvedValueOnce({
+          records: [queuedMemoryRun, queuedReflectionRun, queuedSkillRun],
+          count: 3,
+          limit: 20,
+          error: "",
+        })
+        .mockResolvedValueOnce({
+          records: [
+            { ...queuedMemoryRun, status: "succeeded" },
+            { ...queuedReflectionRun, status: "succeeded" },
+            { ...queuedSkillRun, status: "succeeded" },
+          ],
+          count: 3,
+          limit: 20,
+          error: "",
+        }),
+    });
+    const { result } = renderHook(() =>
+      useCurationData({ api, pollFastMs: 25 }),
+    );
+
+    await waitFor(() => {
+      expect(result.current.configDraft).toBeTruthy();
+    });
+
+    vi.useFakeTimers();
+
+    await act(async () => {
+      await result.current.loadAutomationRuns();
+    });
+
+    vi.mocked(api.getMemoryCuratorPreview).mockClear();
+    vi.mocked(api.getMemoryCuratorActivity).mockClear();
+    vi.mocked(api.getMemoryCuratorStatus).mockClear();
+    vi.mocked(api.getFactProposals).mockClear();
+    vi.mocked(api.getManagedSkills).mockClear();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(25);
+    });
+
+    expect(api.getMemoryCuratorPreview).toHaveBeenCalledTimes(1);
+    expect(api.getMemoryCuratorActivity).toHaveBeenCalledTimes(1);
+    expect(api.getMemoryCuratorStatus).toHaveBeenCalledTimes(1);
+    expect(api.getFactProposals).toHaveBeenCalledTimes(1);
+    expect(api.getManagedSkills).toHaveBeenCalledTimes(1);
+  });
+
   it("loads and applies fact proposals from the history tab", async () => {
     const pendingProposal = {
       schema_version: 1,

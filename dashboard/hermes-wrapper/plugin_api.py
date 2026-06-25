@@ -12,6 +12,8 @@ It does not reimplement any data access. The wrapper:
   ``/lcm/*`` -> upstream ``/api/plugins/hermes-lcm/*``,
   ``/graph/*`` -> upstream ``/api/plugins/graph/*``, and
   ``/savings/*`` -> upstream ``/api/plugins/savings/*``,
+  ``/analytics/*`` -> upstream ``/api/plugins/analytics/*``,
+  ``/automation/*`` -> upstream ``/api/automation/*``,
 - exposes upstream ``/api/capabilities`` at ``/capabilities`` so the UI (and
   future Hermes-specific extensions) can feature-detect the backend.
 
@@ -583,6 +585,24 @@ async def post_savings(path: str, request: Request) -> JSONResponse:
     body = await request.body()
     return await run_in_threadpool(
         _proxy, "POST", f"/api/plugins/savings/{path}", request, body
+    )
+
+
+@router.get("/analytics/{path:path}")
+def get_analytics(path: str, request: Request) -> JSONResponse:
+    return _proxy("GET", f"/api/plugins/analytics/{path}", request, None)
+
+
+@router.get("/automation/{path:path}")
+def get_automation(path: str, request: Request) -> JSONResponse:
+    return _proxy("GET", f"/api/automation/{path}", request, None)
+
+
+@router.post("/automation/{path:path}")
+async def post_automation(path: str, request: Request) -> JSONResponse:
+    body = await request.body()
+    return await run_in_threadpool(
+        _proxy, "POST", f"/api/automation/{path}", request, body
     )
 
 
