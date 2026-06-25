@@ -125,6 +125,85 @@ fn write_codex_subagent_rollout(
     path
 }
 
+fn write_codex_rollout_with_goal_context(
+    home: &std::path::Path,
+    project: &std::path::Path,
+    session: &str,
+) -> std::path::PathBuf {
+    let dir = home.join(".codex/sessions/2026/01/01");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("rollout-2026-01-01T00-00-15-{session}.jsonl"));
+    let contents = format!(
+        "{}\n{}\n{}\n{}\n",
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:15.000Z",
+            "type": "session_meta",
+            "payload": {"id": session, "cwd": project.to_string_lossy(), "model": "gpt-5.5"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:15.100Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "Current goal for this thread\nobjective: ensure all provider session messages are ingested\nremaining token budget: 12000"
+                }]
+            }
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:15.200Z",
+            "type": "response_item",
+            "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "duplicate assistant response"}]}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:16.000Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "Continue implementation"}
+        }),
+    );
+    std::fs::write(&path, contents).unwrap();
+    path
+}
+
+fn write_codex_rollout_with_non_goal_response_item(
+    home: &std::path::Path,
+    project: &std::path::Path,
+    session: &str,
+) -> std::path::PathBuf {
+    let dir = home.join(".codex/sessions/2026/01/01");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("rollout-2026-01-01T00-00-16-{session}.jsonl"));
+    let contents = format!(
+        "{}\n{}\n{}\n",
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:16.000Z",
+            "type": "session_meta",
+            "payload": {"id": session, "cwd": project.to_string_lossy(), "model": "gpt-5.5"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:16.100Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "what is the current goal and remaining token budget?"
+                }]
+            }
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:17.000Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "Continue implementation"}
+        }),
+    );
+    std::fs::write(&path, contents).unwrap();
+    path
+}
+
 fn write_codex_rollout_with_compaction(
     home: &std::path::Path,
     project: &std::path::Path,
@@ -175,6 +254,61 @@ fn write_codex_rollout_with_compaction(
     );
     std::fs::write(&path, contents).unwrap();
     path
+}
+
+#[tokio::test]
+async fn codex_goal_response_item_is_cataloged_as_context() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    write_codex_rollout_with_goal_context(&home, &project, "codex-goal-context");
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = CodexSource::with_home(&home);
+
+    let stats = ingest_source(&db, &source, &project, None).await;
+    assert_eq!(stats.messages_upserted, 2);
+
+    let results = db
+        .search_session_messages(
+            "codex",
+            Some(project.to_string_lossy().as_ref()),
+            "provider session messages",
+            10,
+        )
+        .await;
+    assert_eq!(results.len(), 1);
+    let goal = &results[0].message;
+    assert_eq!(goal.role, "system");
+    assert_eq!(goal.kind.as_deref(), Some("context"));
+    assert!(goal.text.contains("remaining token budget: 12000"));
+
+    let metadata: serde_json::Value =
+        serde_json::from_str(goal.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["source"], "codex_goal_context");
+    assert_eq!(metadata["source_event"], "response_item");
+}
+
+#[tokio::test]
+async fn codex_regular_response_item_goal_words_are_not_cataloged() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    write_codex_rollout_with_non_goal_response_item(&home, &project, "codex-non-goal-context");
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = CodexSource::with_home(&home);
+
+    let stats = ingest_source(&db, &source, &project, None).await;
+    assert_eq!(stats.messages_upserted, 1);
+
+    let results = db
+        .search_session_messages(
+            "codex",
+            Some(project.to_string_lossy().as_ref()),
+            "remaining token budget",
+            10,
+        )
+        .await;
+    assert!(results.is_empty());
 }
 
 #[tokio::test]
