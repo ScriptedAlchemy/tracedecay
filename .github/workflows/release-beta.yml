@@ -41,7 +41,7 @@ jobs:
             target: aarch64-unknown-linux-gnu
             archive: tar.gz
           - name: x86_64-windows
-            runner: windows-latest
+            runner: [self-hosted, Windows, X64, github-runner-windows-1, tracedecay]
             target: x86_64-pc-windows-msvc
             archive: zip
 

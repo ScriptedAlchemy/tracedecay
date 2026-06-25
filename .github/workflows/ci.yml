@@ -79,6 +79,10 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Install ast-grep
         run: |
           npm install --global "@ast-grep/cli@${AST_GREP_VERSION}"
@@ -173,6 +177,10 @@ jobs:
           whoami
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
 
       - name: Install ast-grep
         shell: pwsh
