@@ -201,7 +201,6 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            target
           key: ${{ runner.os }}-windows-nextest-archive-${{ hashFiles('Cargo.lock', '**/Cargo.toml', '.cargo/config.toml', '.config/nextest.toml') }}
           restore-keys: |
             ${{ runner.os }}-windows-nextest-archive-
@@ -225,7 +224,6 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            target
           key: ${{ steps.windows-rust-cache.outputs.cache-primary-key }}
 
       - name: Upload Windows nextest archive
