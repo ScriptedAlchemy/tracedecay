@@ -103,9 +103,15 @@ jobs:
       - name: Run tests
         run: cargo nextest run --workspace --profile ci
 
-  windows-test:
-    name: Test Windows
+  windows-test-shard:
+    name: Test Windows (${{ matrix.partition }})
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        partition:
+          - hash:1/2
+          - hash:2/2
     runs-on:
       - self-hosted
       - Windows
@@ -159,7 +165,7 @@ jobs:
           "Windows Rust cache matched key: ${{ steps.windows-rust-cache.outputs.cache-matched-key }}" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
 
       - name: Run Windows tests
-        run: cargo nextest run --workspace --profile ci
+        run: cargo nextest run --workspace --profile ci --partition ${{ matrix.partition }}
 
       - name: Save Windows Rust cache
         if: steps.windows-rust-cache.outputs.cache-hit != 'true'
@@ -180,6 +186,19 @@ jobs:
           } else {
             Write-Host "sccache was not installed; skipping stats"
           }
+
+  windows-test:
+    name: Test Windows
+    needs: windows-test-shard
+    if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref)) }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Windows shard results
+        run: |
+          if [ "${{ needs.windows-test-shard.result }}" != "success" ]; then
+            echo "Windows shard result: ${{ needs.windows-test-shard.result }}"
+            exit 1
+          fi
 
   clippy:
     name: Clippy
