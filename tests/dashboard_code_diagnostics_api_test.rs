@@ -70,6 +70,63 @@ fn code_diagnostics_dashboard_api_exposes_engines_and_applies_settings() {
             reloaded["settings"]["languages"]["rust"]["command_override"],
             "/opt/tracedecay-test/rust-analyzer"
         );
+
+        let (status, toggled) = patch_json_body(
+            &agent,
+            &url,
+            &serde_json::json!({
+                "languages": {
+                    "rust": {
+                        "enabled": true
+                    }
+                }
+            }),
+        );
+        assert_eq!(status, 200, "toggle patch failed: {toggled}");
+        assert_eq!(toggled["settings"]["languages"]["rust"]["enabled"], true);
+        assert_eq!(
+            toggled["settings"]["languages"]["rust"]["command_override"],
+            "/opt/tracedecay-test/rust-analyzer"
+        );
+
+        let (status, command_only) = patch_json_body(
+            &agent,
+            &url,
+            &serde_json::json!({
+                "languages": {
+                    "rust": {
+                        "command_override": "/opt/tracedecay-test/rust-analyzer-2"
+                    }
+                }
+            }),
+        );
+        assert_eq!(status, 200, "command patch failed: {command_only}");
+        assert_eq!(
+            command_only["settings"]["languages"]["rust"]["enabled"],
+            true
+        );
+        assert_eq!(
+            command_only["settings"]["languages"]["rust"]["command_override"],
+            "/opt/tracedecay-test/rust-analyzer-2"
+        );
+
+        let (status, cleared) = patch_json_body(
+            &agent,
+            &url,
+            &serde_json::json!({
+                "languages": {
+                    "rust": {
+                        "command_override": null
+                    }
+                }
+            }),
+        );
+        assert_eq!(status, 200, "clear patch failed: {cleared}");
+        assert_eq!(cleared["settings"]["languages"]["rust"]["enabled"], true);
+        assert_eq!(
+            cleared["settings"]["languages"]["rust"]["command_override"],
+            Value::Null
+        );
     });
 }
 

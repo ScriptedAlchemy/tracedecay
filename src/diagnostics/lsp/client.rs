@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -289,7 +290,39 @@ fn file_uri(path: &Path) -> String {
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(path)
     };
-    format!("file://{}", absolute.to_string_lossy())
+    file_uri_from_path_text(&absolute.to_string_lossy())
+}
+
+fn file_uri_from_path_text(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let encoded = percent_encode_file_uri_path(&normalized);
+    if normalized.starts_with("//") {
+        format!("file:{encoded}")
+    } else if looks_like_windows_drive_path(&normalized) {
+        format!("file:///{encoded}")
+    } else {
+        format!("file://{encoded}")
+    }
+}
+
+fn looks_like_windows_drive_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/'
+}
+
+fn percent_encode_file_uri_path(path: &str) -> String {
+    let mut encoded = String::with_capacity(path.len());
+    for byte in path.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' => {
+                encoded.push(*byte as char);
+            }
+            _ => {
+                let _ = write!(encoded, "%{byte:02X}");
+            }
+        }
+    }
+    encoded
 }
 
 #[derive(Debug, Deserialize)]
@@ -368,4 +401,25 @@ struct LspRange {
 struct LspPosition {
     line: u32,
     character: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::file_uri_from_path_text;
+
+    #[test]
+    fn file_uri_encodes_lsp_paths() {
+        assert_eq!(
+            file_uri_from_path_text("/tmp/trace decay/main#one.rs"),
+            "file:///tmp/trace%20decay/main%23one.rs"
+        );
+        assert_eq!(
+            file_uri_from_path_text(r"C:\repo with spaces\src\main.rs"),
+            "file:///C:/repo%20with%20spaces/src/main.rs"
+        );
+        assert_eq!(
+            file_uri_from_path_text("/tmp/100% real.rs"),
+            "file:///tmp/100%25%20real.rs"
+        );
+    }
 }

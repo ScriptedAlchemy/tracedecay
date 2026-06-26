@@ -6,16 +6,14 @@ use std::time::Duration;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::Json;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 
 use super::util::{http_detail, JsonError};
 use super::DashboardState;
 use crate::diagnostics::lsp::adapters::LspAdapterDefinition;
 use crate::diagnostics::lsp::client::LspDocument;
-use crate::diagnostics::lsp::settings::{
-    save_settings, IdleBackfillMode, LanguageDiagnosticsSettings,
-};
+use crate::diagnostics::lsp::settings::{save_settings, IdleBackfillMode};
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
 
@@ -24,9 +22,25 @@ struct SettingsPatch {
     #[serde(default)]
     idle_backfill: Option<IdleBackfillMode>,
     #[serde(default)]
-    languages: BTreeMap<String, LanguageDiagnosticsSettings>,
+    languages: BTreeMap<String, LanguageSettingsPatch>,
     #[serde(default)]
     custom_adapters: Option<Vec<LspAdapterDefinition>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct LanguageSettingsPatch {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_command_override_patch")]
+    command_override: CommandOverridePatch,
+}
+
+#[derive(Debug, Clone, Default)]
+enum CommandOverridePatch {
+    #[default]
+    Missing,
+    Null,
+    Value(String),
 }
 
 pub(crate) async fn overview(State(state): State<DashboardState>) -> ApiResult {
@@ -45,8 +59,20 @@ pub(crate) async fn patch_settings(
     if let Some(mode) = patch.idle_backfill {
         settings.idle_backfill = mode;
     }
-    for (language, language_settings) in patch.languages {
-        settings.languages.insert(language, language_settings);
+    for (language, language_patch) in patch.languages {
+        let language_settings = settings.languages.entry(language).or_default();
+        if let Some(enabled) = language_patch.enabled {
+            language_settings.enabled = enabled;
+        }
+        match language_patch.command_override {
+            CommandOverridePatch::Missing => {}
+            CommandOverridePatch::Null => {
+                language_settings.command_override = None;
+            }
+            CommandOverridePatch::Value(command_override) => {
+                language_settings.command_override = Some(command_override);
+            }
+        }
     }
     if let Some(custom_adapters) = patch.custom_adapters {
         settings.custom_adapters = custom_adapters;
@@ -270,6 +296,18 @@ fn bad_request(err: &impl ToString) -> JsonError {
             "detail": err.to_string(),
         })),
     )
+}
+
+fn deserialize_command_override_patch<'de, D>(
+    deserializer: D,
+) -> std::result::Result<CommandOverridePatch, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(match Option::<String>::deserialize(deserializer)? {
+        Some(value) => CommandOverridePatch::Value(value),
+        None => CommandOverridePatch::Null,
+    })
 }
 
 fn internal_error(err: &impl ToString) -> JsonError {
