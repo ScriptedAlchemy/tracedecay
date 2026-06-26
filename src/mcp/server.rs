@@ -220,6 +220,18 @@ fn format_per_file_staleness_banner(
     lines.join("\n")
 }
 
+fn needs_lazy_sync_before_dispatch(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "tracedecay_ast_grep_rewrite"
+            | "tracedecay_insert_at"
+            | "tracedecay_insert_at_symbol"
+            | "tracedecay_multi_str_replace"
+            | "tracedecay_replace_symbol"
+            | "tracedecay_str_replace"
+    )
+}
+
 /// Read the on-disk mtime (UNIX seconds) for `relative_path` joined onto
 /// `project_root`. Returns `None` when the file is missing or stat fails.
 fn file_mtime_secs(project_root: &std::path::Path, relative_path: &str) -> Option<i64> {
@@ -486,10 +498,10 @@ pub struct McpServer {
 impl McpServer {
     /// Creates a new MCP server backed by the given code graph.
     ///
-    /// Index freshness is maintained by a lazy staleness check
-    /// ([`maybe_sync_if_stale`](Self::maybe_sync_if_stale)) invoked at the
-    /// start of every `tools/call` and gated by a 30 s cooldown — there
-    /// is no background watcher task. This replaces the
+    /// Index freshness for source-editing tools is maintained by a lazy
+    /// staleness check ([`maybe_sync_if_stale`](Self::maybe_sync_if_stale))
+    /// gated by a 30 s cooldown — there is no background watcher task. This
+    /// replaces the
     /// `notify-debouncer-full` watcher removed in v6.x (#80), which was
     /// the source of severe CPU and memory pressure on large monorepos
     /// where nested ignored directories (`apps/*/node_modules`,
@@ -566,26 +578,12 @@ impl McpServer {
             timings_enabled: AtomicBool::new(false),
             last_staleness_check_at: AtomicI64::new(0),
             worktree_mismatch,
-            startup_catch_up_done: AtomicBool::new(false),
-            transcript_ingest_done: Arc::new(AtomicBool::new(false)),
+            startup_catch_up_done: AtomicBool::new(true),
+            transcript_ingest_done: Arc::new(AtomicBool::new(true)),
             ledger_writes_started: Arc::new(AtomicU64::new(0)),
             ledger_writes_finished: Arc::new(AtomicU64::new(0)),
             ledger_write_notify: Arc::new(tokio::sync::Notify::new()),
         });
-
-        // Catch-up sync (#414): pick up changes made while the server
-        // was down — terminal `git pull`, IDE edits before the agent
-        // launched, files touched by another tool. Detached + weak so
-        // it never extends the server's lifetime; non-blocking so MCP
-        // `initialize` doesn't wait on the walk.
-        {
-            let weak = Arc::downgrade(&server);
-            tokio::spawn(async move {
-                if let Some(s) = weak.upgrade() {
-                    s.run_startup_catch_up_sync().await;
-                }
-            });
-        }
 
         tokio::task::spawn_blocking(move || {
             let _ = cleanup_expired_response_handles(
@@ -758,23 +756,27 @@ impl McpServer {
         }
     }
 
-    /// Catch-up sync run once at startup (#414). Bypasses the 30 s
-    /// cooldown in [`Self::maybe_sync_if_stale`] so changes made while
-    /// the server was down — a terminal `git pull`, IDE edits before
-    /// the agent launched, files touched by another tool — are
-    /// reconciled by the time the first MCP tool call arrives. The
-    /// staleness-check stamp is updated on the way out so the first
-    /// tool call doesn't re-walk the tree.
+    /// Catch-up sync helper for tests and explicit callers. Bypasses the 30 s
+    /// cooldown in [`Self::maybe_sync_if_stale`] so changes made while the
+    /// server was down — a terminal `git pull`, IDE edits before the agent
+    /// launched, files touched by another tool — can be reconciled before
+    /// assertions or source-editing work. The staleness-check stamp is updated
+    /// on the way out so the next lazy sync doesn't immediately re-walk the
+    /// tree.
     ///
     /// The completion flag is flipped on every exit path (including
     /// errors) so [`Self::wait_for_startup_catch_up`] never hangs.
     pub async fn run_startup_catch_up_sync(&self) {
+        self.startup_catch_up_done.store(false, Ordering::Release);
+        self.transcript_ingest_done.store(false, Ordering::Release);
+
         let cg = self.cg_snapshot().await;
         let stale = cg.find_stale_files().await;
         if !stale.is_empty() {
             if let Err(e) = cg.sync_if_stale_silent(&stale).await {
                 eprintln!("[tracedecay] startup catch-up sync failed: {e}");
                 self.startup_catch_up_done.store(true, Ordering::Release);
+                self.transcript_ingest_done.store(true, Ordering::Release);
                 return;
             }
         }
@@ -860,12 +862,12 @@ impl McpServer {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
+        let previous = self.last_staleness_check_at.load(Ordering::Acquire);
         let last_sync = cg.last_sync_timestamp().await;
-        if now.saturating_sub(last_sync) < 30 {
+        if previous != 0 && now.saturating_sub(last_sync) < 30 {
             return;
         }
 
-        let previous = self.last_staleness_check_at.load(Ordering::Acquire);
         if now.saturating_sub(previous) < 30 {
             return;
         }
@@ -1664,10 +1666,14 @@ impl McpServer {
         // this call reads the right index. Cheap no-op check when no drift.
         let cg = self.reopen_if_branch_drifted().await;
 
-        // Notification-free freshness: walk the tree and resync any stale
-        // files, gated by a 30 s cooldown. Replaces the embedded watcher
-        // (see McpServer::new). No-op on the hot path most of the time.
-        self.maybe_sync_if_stale().await;
+        // Notification-free freshness is useful before tools that edit source
+        // files in the index. Read-only graph queries should not block behind
+        // a full project walk; on very large indexes (especially when
+        // node_modules was intentionally included) that turns diagnostics and
+        // search into sync operations.
+        if needs_lazy_sync_before_dispatch(tool_name) {
+            self.maybe_sync_if_stale().await;
+        }
 
         self.stats.tool_calls.fetch_add(1, Ordering::Relaxed);
         eprintln!("[tracedecay] tool call: {tool_name}");
@@ -2133,7 +2139,7 @@ fn json_rpc_request_id_string(id: &Value) -> Option<String> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod staleness_banner_tests {
-    use super::{format_per_file_staleness_banner, humanize_age};
+    use super::{format_per_file_staleness_banner, humanize_age, needs_lazy_sync_before_dispatch};
     use std::fs;
     use tempfile::tempdir;
 
@@ -2176,5 +2182,35 @@ mod staleness_banner_tests {
         // Missing files still get listed (e.g. file deleted between
         // sync and tool response). Age falls back to 0s.
         assert!(banner.contains("does/not/exist.rs"));
+    }
+
+    #[test]
+    fn read_only_tools_skip_lazy_sync_before_dispatch() {
+        for tool in [
+            "tracedecay_active_project",
+            "tracedecay_context",
+            "tracedecay_files",
+            "tracedecay_runtime",
+            "tracedecay_search",
+            "tracedecay_status",
+            "tracedecay_storage_status",
+        ] {
+            assert!(
+                !needs_lazy_sync_before_dispatch(tool),
+                "{tool} should stay available when lazy sync is stuck"
+            );
+        }
+
+        for tool in [
+            "tracedecay_insert_at",
+            "tracedecay_multi_str_replace",
+            "tracedecay_replace_symbol",
+            "tracedecay_str_replace",
+        ] {
+            assert!(
+                needs_lazy_sync_before_dispatch(tool),
+                "{tool} should still get the normal lazy freshness check"
+            );
+        }
     }
 }

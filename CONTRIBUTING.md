@@ -121,11 +121,20 @@ refactor: simplify reference resolver lookup
 
 Keep the first line under 72 characters. Add a body explaining *why* if the change isn't obvious.
 
+Install the local `commit-msg` hook once per checkout:
+
+```bash
+scripts/install-git-hooks.sh
+```
+
 CI validates commit subjects with:
 
 ```bash
 scripts/check-conventional-commits.sh origin/master..HEAD
 ```
+
+Run the same command locally before pushing to lint every non-merge commit in a
+branch range. Merge commits are skipped to match CI behavior.
 
 ## Pull Requests
 

@@ -504,7 +504,16 @@ Returns feature flags and server configuration. Used by the UI and wrappers to d
     "lcm": true,
     "graph": true,
     "curation": true,
-    "llm_curation": false
+    "automation": true,
+    "llm_curation": true,
+    "managed_skills": true
+  },
+  "automation": {
+    "enabled": true,
+    "mode": "standalone_backend",
+    "backend": "codex_app_server",
+    "host_mode": "standalone",
+    "availability": {"available": true, "reason": ""}
   },
   "dashboards": ["holographic", "hermes-lcm", "graph"]
 }
@@ -516,7 +525,9 @@ Returns feature flags and server configuration. Used by the UI and wrappers to d
 - `features.memory`: Whether the project database is available
 - `features.lcm`: Whether the LCM session store is available
 - `features.curation`: Whether similarity-dedup curation tools are enabled
-- `features.llm_curation`: Whether an LLM-backed curation planner is available. Always `false` in standalone; the Hermes wrapper flips this when it adds an LLM planner that generates ops for `POST /curate/apply`
+- `features.automation`: Whether TraceDecay automation is enabled with a supported backend
+- `features.llm_curation`: Whether TraceDecay can run LLM-backed curation through standalone automation. Delegated hosts keep planning host-owned and submit ops through `POST /curate/apply`.
+- `automation.mode`: `"disabled"`, `"standalone_backend"`, or `"delegated_host"`; `delegated_host` is provider-neutral and may be used by Hermes, Codex app-server orchestration, Claude Code CLI, Cursor Agent CLI, or another host that owns the intelligence layer.
 
 ---
 
@@ -768,10 +779,10 @@ Same structure with `applied_counts` showing what was actually deleted and
 
 #### `POST /api/plugins/holographic/curate/apply`
 
-Generic curation-ops apply endpoint. This is the contract external planners
-(e.g. an LLM-backed Hermes wrapper, advertised via `features.llm_curation`)
-build against. Per-op failures are reported per-op in `results`; the request
-only fails wholesale (400) on a malformed body.
+Generic curation-ops apply endpoint. Standalone automation backends and
+delegated host planners use this contract. Per-op failures are
+reported per-op in `results`; the request only fails wholesale (400) on a
+malformed body.
 
 **Request Body:**
 ```json
@@ -1070,12 +1081,12 @@ fetch('/api/capabilities')
 | `features.graph` | Code-graph API is available | Show Code Graph tab |
 | `features.savings` | Savings & Cost API is available | Show Savings & Cost tab |
 | `features.curation` | Similarity-dedup curation tools are available | Show Curation panel, enable curate actions |
-| `features.llm_curation` | An LLM-backed curation planner is available (Hermes wrapper only) | Enable LLM plan actions that target `POST /curate/apply` |
+| `features.llm_curation` | An LLM-backed curation planner is available through standalone automation or a delegated host wrapper | Enable LLM plan actions that target `POST /curate/apply` |
 
 There is no archive flag: curation deletes are permanent, and no archive or
 restore endpoints exist. Always check the capability flags rather than
-assuming availability — they may change based on database state and host
-(standalone vs Hermes).
+assuming availability — they may change based on database state and host mode
+(standalone backend vs delegated host).
 
 ---
 
