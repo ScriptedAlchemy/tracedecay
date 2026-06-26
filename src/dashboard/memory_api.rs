@@ -16,12 +16,13 @@
 //!   `holographic_plus` soft-archived facts; tracedecay does not).
 //! - Banks are named after their category directly (no `cat:` prefix).
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
+use super::automation_run_service;
 use super::memory_analysis::{SIMILARITY_DEFAULT_THRESHOLD, SIMILARITY_PAIR_CAP};
 use super::memory_service;
 use super::util::{coerce_limit, http_detail, query_i64, JsonPath, JsonQuery};
@@ -57,19 +58,54 @@ pub(crate) struct LimitParams {
     limit: Option<i64>,
 }
 
+#[derive(Deserialize)]
+pub(crate) struct FactProposalParams {
+    state: Option<String>,
+    limit: Option<i64>,
+}
+
+#[derive(Deserialize, Default)]
+pub(crate) struct FactProposalApplyBody {
+    reviewer: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+pub(crate) struct FactProposalRejectBody {
+    reviewer: Option<String>,
+    reason: Option<String>,
+}
+
 #[derive(Deserialize, Default)]
 pub(crate) struct CurateBody {
     #[serde(default = "default_dry_run")]
     dry_run: bool,
 }
 
-fn default_dry_run() -> bool {
+pub(crate) fn default_dry_run() -> bool {
     true
 }
 
 #[derive(Deserialize)]
 pub(crate) struct CurateApplyBody {
     ops: Vec<Value>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct AgentPlanBody {
+    #[serde(default = "default_dry_run")]
+    dry_run: bool,
+    #[serde(default = "default_agent_plan_max_clusters")]
+    max_clusters: usize,
+    #[serde(default = "default_agent_plan_min_confidence")]
+    min_confidence: f64,
+}
+
+pub(crate) fn default_agent_plan_max_clusters() -> usize {
+    crate::dashboard::memory_curate::CURATION_DEFAULT_MAX_CLUSTERS
+}
+
+pub(crate) fn default_agent_plan_min_confidence() -> f64 {
+    crate::dashboard::memory_curate::CURATION_DEFAULT_MIN_CONFIDENCE
 }
 
 async fn largest_bank_fact_count(state: &DashboardState) -> Result<i64, String> {
@@ -358,10 +394,184 @@ pub(crate) async fn curation_activity(
     Json(memory_service::curation_activity_payload(&state, limit).await)
 }
 
+/// `GET /api/plugins/holographic/curation/runs` — recent standalone
+/// automation backend runs, loaded from the append-only project sidecar ledger.
+pub(crate) async fn curation_runs(
+    State(state): State<DashboardState>,
+    JsonQuery(params): JsonQuery<LimitParams>,
+) -> Json<Value> {
+    let limit = coerce_limit(params.limit, 50, 200) as usize;
+    match crate::automation::run_ledger::load_run_records(&state.dashboard_root, limit).await {
+        Ok(records) => {
+            let count = records.len();
+            Json(json!({
+                "records": records,
+                "count": count,
+                "limit": limit,
+                "error": "",
+            }))
+        }
+        Err(err) => Json(json!({
+            "records": [],
+            "count": 0,
+            "limit": limit,
+            "error": err.to_string(),
+        })),
+    }
+}
+
+/// `GET /api/plugins/holographic/fact-proposals` — session-reflector fact
+/// proposals awaiting approval, plus historical applied/rejected decisions.
+pub(crate) async fn fact_proposals(
+    State(state): State<DashboardState>,
+    JsonQuery(params): JsonQuery<FactProposalParams>,
+) -> (StatusCode, Json<Value>) {
+    let proposal_state = match parse_fact_proposal_state(params.state.as_deref()) {
+        Ok(state) => state,
+        Err(message) => return (StatusCode::BAD_REQUEST, Json(http_detail(&message))),
+    };
+    let limit = coerce_limit(params.limit, 50, 200) as usize;
+    match crate::automation::fact_proposals::list_fact_proposals(
+        &state.dashboard_root,
+        proposal_state,
+        limit,
+    )
+    .await
+    {
+        Ok(proposals) => (
+            StatusCode::OK,
+            Json(json!({
+                "proposals": proposals,
+                "count": proposals.len(),
+                "limit": limit,
+                "error": "",
+            })),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(http_detail(&err.to_string())),
+        ),
+    }
+}
+
+/// `POST /api/plugins/holographic/fact-proposals/{proposal_id}/apply` —
+/// approval-gated session-reflector fact write.
+pub(crate) async fn fact_proposal_apply(
+    State(state): State<DashboardState>,
+    Path(proposal_id): Path<String>,
+    body: Option<axum::extract::Json<FactProposalApplyBody>>,
+) -> (StatusCode, Json<Value>) {
+    let reviewer = body.and_then(|body| body.0.reviewer);
+    match crate::automation::fact_proposals::apply_fact_proposal(
+        &state.dashboard_root,
+        &state.mem_conn,
+        &proposal_id,
+        reviewer,
+    )
+    .await
+    {
+        Ok(proposal) => (
+            StatusCode::OK,
+            Json(json!({
+                "proposal": proposal,
+                "error": "",
+            })),
+        ),
+        Err(err) => fact_proposal_error(&err),
+    }
+}
+
+/// `POST /api/plugins/holographic/fact-proposals/{proposal_id}/reject` —
+/// explicit rejection for a pending session-reflector proposal.
+pub(crate) async fn fact_proposal_reject(
+    State(state): State<DashboardState>,
+    Path(proposal_id): Path<String>,
+    body: Option<axum::extract::Json<FactProposalRejectBody>>,
+) -> (StatusCode, Json<Value>) {
+    let body = body.map(|body| body.0).unwrap_or_default();
+    match crate::automation::fact_proposals::reject_fact_proposal(
+        &state.dashboard_root,
+        &proposal_id,
+        body.reviewer,
+        body.reason,
+    )
+    .await
+    {
+        Ok(proposal) => (
+            StatusCode::OK,
+            Json(json!({
+                "proposal": proposal,
+                "error": "",
+            })),
+        ),
+        Err(err) => fact_proposal_error(&err),
+    }
+}
+
+fn parse_fact_proposal_state(
+    state: Option<&str>,
+) -> Result<Option<crate::automation::fact_proposals::FactProposalState>, String> {
+    use crate::automation::fact_proposals::FactProposalState;
+
+    let Some(state) = state else {
+        return Ok(None);
+    };
+    match state.trim().to_ascii_lowercase().as_str() {
+        "" => Ok(None),
+        "pending" | "pending_approval" => Ok(Some(FactProposalState::PendingApproval)),
+        "applied" => Ok(Some(FactProposalState::Applied)),
+        "rejected" => Ok(Some(FactProposalState::Rejected)),
+        _ => Err(format!(
+            "unknown fact proposal state '{state}' (expected pending_approval, applied, rejected)"
+        )),
+    }
+}
+
+fn fact_proposal_error(err: &crate::errors::TraceDecayError) -> (StatusCode, Json<Value>) {
+    let message = err.to_string();
+    let status = if message.contains("not found") {
+        StatusCode::NOT_FOUND
+    } else if message.contains("not pending") || message.contains("no add_fact_request") {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    (status, Json(http_detail(&message)))
+}
+
 /// `GET /api/plugins/holographic/curation/preview` — returns the last saved
 /// dry-run preview, or null if none has been run this server session.
 pub(crate) async fn curation_preview(State(state): State<DashboardState>) -> Json<Value> {
     Json(memory_service::curation_preview_payload(&state).await)
+}
+
+/// `POST /api/plugins/holographic/curation/agent-plan` — standalone backend
+/// curation planner. Delegated-host mode skips TraceDecay-owned backend calls.
+pub(crate) async fn curation_agent_plan(
+    State(state): State<DashboardState>,
+    axum::Json(body): axum::Json<AgentPlanBody>,
+) -> (StatusCode, Json<Value>) {
+    if !body.dry_run {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(http_detail(
+                "agent-plan currently supports dry_run=true only; apply validated ops separately",
+            )),
+        );
+    }
+    match Box::pin(automation_run_service::curation_agent_plan_payload(
+        &state,
+        body.max_clusters,
+        body.min_confidence,
+    ))
+    .await
+    {
+        Ok(payload) => (StatusCode::OK, Json(payload)),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(http_detail(&format!("Agent curation plan failed: {e}"))),
+        ),
+    }
 }
 
 /// `POST /api/plugins/holographic/curate` — similarity-based deduplication

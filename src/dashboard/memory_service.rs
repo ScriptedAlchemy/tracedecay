@@ -338,6 +338,9 @@ fn projection_point(meta: &Value, x: f64, y: f64) -> Value {
         "content": meta.get("content").and_then(Value::as_str).map(|s| s.chars().take(200).collect::<String>()).unwrap_or_default(),
         "trust_score": meta.get("trust_score").cloned().unwrap_or(json!(0.0)),
         "retrieval_count": meta.get("retrieval_count").cloned().unwrap_or(json!(0)),
+        "created_at": meta.get("created_at").cloned().unwrap_or(json!(0)),
+        "updated_at": meta.get("updated_at").cloned().unwrap_or(json!(0)),
+        "metadata": meta.get("metadata").cloned().unwrap_or(Value::Null),
         "bank_id": meta.get("bank_id").cloned().unwrap_or(Value::Null),
         "bank_name": meta.get("bank_name").cloned().unwrap_or(Value::Null),
         "entity_count": meta.get("entity_count").cloned().unwrap_or(json!(0)),
@@ -641,18 +644,28 @@ pub(crate) async fn curation_status_payload(state: &DashboardState) -> Value {
     })
 }
 
-async fn push_curation_activity(
+pub(crate) async fn push_curation_activity(
     state: &DashboardState,
     phase: &str,
     message: impl Into<String>,
     dry_run: bool,
+) {
+    push_curation_activity_with_level(state, phase, message, dry_run, "info").await;
+}
+
+pub(crate) async fn push_curation_activity_with_level(
+    state: &DashboardState,
+    phase: &str,
+    message: impl Into<String>,
+    dry_run: bool,
+    level: &str,
 ) {
     let mut events = state.curation_activity.write().await;
     events.push(json!({
         "ts": crate::timeutil::now_iso_utc(),
         "phase": phase,
         "message": message.into(),
-        "level": "info",
+        "level": level,
         "dry_run": dry_run,
     }));
     if events.len() > 300 {
@@ -750,6 +763,17 @@ pub(crate) async fn delete_fact(state: &DashboardState, fact_id: i64) -> Result<
 pub(crate) async fn curate_payload(state: &DashboardState, dry_run: bool) -> Result<Value, String> {
     push_curation_activity(
         state,
+        "queued",
+        if dry_run {
+            "Queued similarity-dedup curation preview"
+        } else {
+            "Queued similarity-dedup curation apply"
+        },
+        dry_run,
+    )
+    .await;
+    push_curation_activity(
+        state,
         "start",
         if dry_run {
             "Starting similarity-dedup curation preview"
@@ -759,7 +783,45 @@ pub(crate) async fn curate_payload(state: &DashboardState, dry_run: bool) -> Res
         dry_run,
     )
     .await;
-    let (actions, hygiene_candidates, counts, total) = build_delete_plan(state).await?;
+    push_curation_activity(
+        state,
+        "evidence",
+        "Collecting similarity and hygiene evidence",
+        dry_run,
+    )
+    .await;
+    push_curation_activity(
+        state,
+        "backend",
+        "Running deterministic similarity-dedup planner",
+        dry_run,
+    )
+    .await;
+    let (actions, hygiene_candidates, counts, total) = match build_delete_plan(state).await {
+        Ok(plan) => plan,
+        Err(err) => {
+            push_curation_activity_with_level(
+                state,
+                "failure",
+                format!("Curation evidence collection failed: {err}"),
+                dry_run,
+                "error",
+            )
+            .await;
+            return Err(err);
+        }
+    };
+    push_curation_activity(
+        state,
+        "validation",
+        format!(
+            "Validated deterministic curation plan: {} delete action(s), {} hygiene candidate(s)",
+            actions.len(),
+            hygiene_candidates.as_array().map_or(0, Vec::len)
+        ),
+        dry_run,
+    )
+    .await;
 
     let report = json!({
         "ran": true,
@@ -793,6 +855,17 @@ pub(crate) async fn curate_payload(state: &DashboardState, dry_run: bool) -> Res
         *state.curate_preview.write().await = Some(entry);
         push_curation_activity(
             state,
+            "report",
+            format!(
+                "Preview report ready: {} delete action(s), {} active fact(s) scanned",
+                actions.len(),
+                total
+            ),
+            true,
+        )
+        .await;
+        push_curation_activity(
+            state,
             "finish",
             format!(
                 "Preview completed: {} delete action(s), {} active fact(s) scanned",
@@ -807,6 +880,27 @@ pub(crate) async fn curate_payload(state: &DashboardState, dry_run: bool) -> Res
 
     let mut applied = 0i64;
     let mut skipped = 0i64;
+    push_curation_activity(
+        state,
+        "report",
+        format!(
+            "Apply report ready: {} delete action(s), {} active fact(s) scanned",
+            actions.len(),
+            total
+        ),
+        false,
+    )
+    .await;
+    push_curation_activity(
+        state,
+        "apply",
+        format!(
+            "Applying {} deterministic curation action(s)",
+            actions.len()
+        ),
+        false,
+    )
+    .await;
     if let Some(action_list) = report.get("actions").and_then(Value::as_array) {
         for action in action_list {
             let Some(fact_id) = action.get("fact_id").and_then(Value::as_i64) else {
@@ -834,6 +928,16 @@ pub(crate) async fn curate_payload(state: &DashboardState, dry_run: bool) -> Res
     let mut applied_counts = Map::new();
     if applied > 0 {
         applied_counts.insert("delete".to_string(), json!(applied));
+    }
+    if skipped > 0 {
+        push_curation_activity_with_level(
+            state,
+            "rejection",
+            format!("{skipped} deterministic curation action(s) were skipped during apply"),
+            false,
+            "warning",
+        )
+        .await;
     }
     push_curation_activity(
         state,
@@ -963,6 +1067,20 @@ pub(crate) async fn apply_merge_op(state: &DashboardState, op: &Value) -> (Value
 }
 
 pub(crate) async fn curate_apply_payload(state: &DashboardState, ops: &[Value]) -> Value {
+    push_curation_activity(
+        state,
+        "queued",
+        format!("Queued explicit apply for {} curation op(s)", ops.len()),
+        false,
+    )
+    .await;
+    push_curation_activity(
+        state,
+        "apply",
+        format!("Applying {} explicit curation op(s)", ops.len()),
+        false,
+    )
+    .await;
     let mut results: Vec<Value> = Vec::with_capacity(ops.len());
     let mut deleted = 0i64;
     let mut merged = 0i64;
@@ -994,6 +1112,25 @@ pub(crate) async fn curate_apply_payload(state: &DashboardState, ops: &[Value]) 
         results.push(result);
     }
 
+    push_curation_activity(
+        state,
+        "validation",
+        format!(
+            "Validated explicit apply results: {deleted} delete op(s), {merged} merge op(s), {errors} error(s)"
+        ),
+        false,
+    )
+    .await;
+    if errors > 0 {
+        push_curation_activity_with_level(
+            state,
+            "rejection",
+            format!("{errors} explicit curation op(s) were rejected or failed"),
+            false,
+            "warning",
+        )
+        .await;
+    }
     if deleted > 0 || merged > 0 {
         *state.curate_preview.write().await = None;
         super::curate_preview_store::clear(&state.dashboard_root).await;
@@ -1004,16 +1141,35 @@ pub(crate) async fn curate_apply_payload(state: &DashboardState, ops: &[Value]) 
                 &json!({ "mode": "ops", "deleted": deleted, "merged": merged, "errors": errors }),
             )
             .await;
-        push_curation_activity(
+    }
+    push_curation_activity(
+        state,
+        "report",
+        format!(
+            "Explicit apply report ready: {deleted} delete op(s), {merged} merge op(s), {errors} error(s)"
+        ),
+        false,
+    )
+    .await;
+    if errors > 0 && deleted == 0 && merged == 0 {
+        push_curation_activity_with_level(
             state,
-            "finish",
-            format!(
-                "Explicit apply completed: {deleted} delete op(s), {merged} merge op(s), {errors} op(s) errored"
-            ),
+            "failure",
+            format!("All {errors} explicit curation op(s) failed validation or apply"),
             false,
+            "error",
         )
         .await;
     }
+    push_curation_activity(
+        state,
+        "finish",
+        format!(
+            "Explicit apply completed: {deleted} delete op(s), {merged} merge op(s), {errors} op(s) errored"
+        ),
+        false,
+    )
+    .await;
 
     json!({
         "results": results,

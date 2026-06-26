@@ -23,6 +23,12 @@
 
 mod analytics_api;
 pub(crate) mod assets;
+mod automation_config_api;
+mod automation_fact_proposals_api;
+mod automation_run_api;
+mod automation_run_service;
+mod automation_scheduler_api;
+mod automation_skills_api;
 mod curate_preview_store;
 mod graph_api;
 mod graph_queries;
@@ -50,6 +56,8 @@ use axum::Router;
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
 
+use crate::automation::backend;
+use crate::automation::config::{self, AutomationBackend, AutomationHostMode};
 use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
@@ -377,8 +385,114 @@ pub(crate) fn router(state: DashboardState) -> Router {
             get(memory_api::curation_activity),
         )
         .route(
+            "/api/plugins/holographic/curation/runs",
+            get(memory_api::curation_runs),
+        )
+        .route(
+            "/api/plugins/holographic/fact-proposals",
+            get(memory_api::fact_proposals),
+        )
+        .route(
+            "/api/plugins/holographic/fact-proposals/{proposal_id}/apply",
+            post(memory_api::fact_proposal_apply),
+        )
+        .route(
+            "/api/plugins/holographic/fact-proposals/{proposal_id}/reject",
+            post(memory_api::fact_proposal_reject),
+        )
+        .route(
             "/api/plugins/holographic/curation/preview",
             get(memory_api::curation_preview),
+        )
+        .route(
+            "/api/plugins/holographic/curation/config",
+            get(automation_config_api::get_config)
+                .patch(automation_config_api::patch_config)
+                .delete(automation_config_api::reset_config),
+        )
+        .route(
+            "/api/plugins/holographic/curation/agent-plan",
+            post(memory_api::curation_agent_plan),
+        )
+        .route(
+            "/api/automation/skills",
+            get(automation_skills_api::list).post(automation_skills_api::draft),
+        )
+        .route(
+            "/api/automation/skills/draft",
+            post(automation_skills_api::draft),
+        )
+        .route(
+            "/api/automation/skills/{id}",
+            get(automation_skills_api::view).patch(automation_skills_api::update),
+        )
+        .route(
+            "/api/automation/skills/{id}/approve",
+            post(automation_skills_api::approve),
+        )
+        .route(
+            "/api/automation/skills/{id}/discard-update",
+            post(automation_skills_api::discard_update),
+        )
+        .route(
+            "/api/automation/skills/{id}/disable",
+            post(automation_skills_api::disable),
+        )
+        .route(
+            "/api/automation/skills/{id}/archive",
+            post(automation_skills_api::archive),
+        )
+        .route(
+            "/api/automation/skills/{id}/restore",
+            post(automation_skills_api::restore),
+        )
+        .route(
+            "/api/automation/fact-proposals",
+            get(automation_fact_proposals_api::list),
+        )
+        .route(
+            "/api/automation/fact-proposals/{id}",
+            get(automation_fact_proposals_api::view),
+        )
+        .route(
+            "/api/automation/fact-proposals/{id}/apply",
+            post(automation_fact_proposals_api::apply),
+        )
+        .route(
+            "/api/automation/fact-proposals/{id}/reject",
+            post(automation_fact_proposals_api::reject),
+        )
+        .route(
+            "/api/automation/run/memory-curator",
+            post(automation_run_api::memory_curator),
+        )
+        .route(
+            "/api/automation/run/session-reflection",
+            post(automation_run_api::session_reflection),
+        )
+        .route(
+            "/api/automation/run/skill-writing",
+            post(automation_run_api::skill_writing),
+        )
+        .route(
+            "/api/automation/scheduler/status",
+            get(automation_scheduler_api::status),
+        )
+        .route(
+            "/api/automation/scheduler/pause",
+            post(automation_scheduler_api::pause),
+        )
+        .route(
+            "/api/automation/scheduler/resume",
+            post(automation_scheduler_api::resume),
+        )
+        .route(
+            "/api/automation/runs/{run_id}/artifacts",
+            get(automation_run_api::artifact_list),
+        )
+        .route(
+            "/api/automation/runs/{run_id}/artifacts/{kind}",
+            get(automation_run_api::artifact_payload),
         )
         .route("/api/plugins/holographic/curate", post(memory_api::curate))
         .route(
@@ -425,6 +539,10 @@ pub(crate) fn router(state: DashboardState) -> Router {
         .route("/api/plugins/analytics/hints", get(analytics_api::hints))
         .route("/api/plugins/analytics/usage", get(analytics_api::usage))
         .route(
+            "/api/plugins/analytics/diagnostics",
+            get(analytics_api::diagnostics),
+        )
+        .route(
             "/api/plugins/analytics/underused",
             get(analytics_api::underused),
         )
@@ -437,10 +555,31 @@ pub(crate) fn router(state: DashboardState) -> Router {
         .with_state(state)
 }
 
-/// Capability discovery for hosts and future Hermes-side extensions. The UI
+/// Capability discovery for hosts and future delegated-host extensions. The UI
 /// (or a wrapper) can probe this to decide which panels/actions to enable.
 async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
     let has_lcm = state.lcm_conn.is_some();
+    let global_automation = crate::user_config::UserConfig::load().automation;
+    let project_automation = config::load_project_config(&state.dashboard_root)
+        .await
+        .ok()
+        .flatten();
+    let automation = config::effective_config(&global_automation, project_automation.as_ref())
+        .unwrap_or(global_automation);
+    let automation_backend = automation.backend;
+    let automation_host_mode = automation.host_mode;
+    let backend_availability = backend::backend_availability(&automation);
+    let automation_backend_supported =
+        matches!(automation_backend, AutomationBackend::CodexAppServer);
+    let automation_configured = automation.enabled && automation_backend_supported;
+    let automation_mode = if !automation_configured {
+        "disabled"
+    } else if automation_host_mode == AutomationHostMode::DelegatedHost {
+        "delegated_host"
+    } else {
+        "standalone_backend"
+    };
+    let standalone_automation = automation_mode == "standalone_backend";
     Json(json!({
         "name": "tracedecay-dashboard",
         "version": env!("CARGO_PKG_VERSION"),
@@ -461,14 +600,22 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
             "graph": true,
             "analytics": true,
             // Similarity-based dedup curation (delete/merge ops via /curate
-            // and /curate/apply). LLM-proposed curation is a host-side
-            // extension (the Hermes wrapper flips llm_curation when it adds
-            // an LLM planner that calls /curate/apply).
+            // and /curate/apply). LLM-proposed curation is served by the
+            // configured standalone automation backend when enabled.
             "curation": true,
-            "llm_curation": false,
+            "automation": automation_configured,
+            "llm_curation": standalone_automation,
+            "managed_skills": true,
             // Savings & Cost tab: savings-ledger analytics + per-session
             // cost accounting with OpenRouter-backed pricing.
             "savings": true,
+        },
+        "automation": {
+            "enabled": automation.enabled,
+            "mode": automation_mode,
+            "backend": automation_backend,
+            "host_mode": automation_host_mode,
+            "availability": backend_availability,
         },
         "dashboards": ["holographic", "hermes-lcm", "graph", "savings"],
     }))
