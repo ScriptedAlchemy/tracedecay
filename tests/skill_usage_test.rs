@@ -3,8 +3,9 @@ use tracedecay::automation::managed_skills::{
     ManagedSkillProvenance, ManagedSkillSource,
 };
 use tracedecay::automation::skill_usage::{
-    ingest_analytics_events, record_skill_usage_event, skill_improvement_recommendations,
-    stale_skill_recommendations, summarize_skill_usage, SkillUsageAction, SkillUsageEvent,
+    ingest_analytics_events, record_skill_usage, record_skill_usage_event,
+    skill_improvement_recommendations, stale_skill_recommendations, summarize_skill_usage,
+    SkillUsageAction, SkillUsageEvent,
 };
 use tracedecay::global_db::AnalyticsEventRecord;
 
@@ -247,6 +248,66 @@ async fn analytics_ingest_dedupes_tracedecay_skill_view_by_request_id() {
             .unwrap();
     assert_eq!(record.view_count, 1);
     assert_eq!(record.targets, vec!["codex"]);
+}
+
+#[tokio::test]
+async fn direct_skill_view_marks_matching_analytics_request_imported() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let skill = create_managed_skill_draft(
+        &profile_root,
+        draft("repo-hygiene", ManagedSkillSource::AutomationRun),
+    )
+    .await
+    .unwrap();
+
+    record_skill_usage(
+        &profile_root,
+        &skill,
+        SkillUsageAction::View,
+        "mcp",
+        vec!["mcp".to_string()],
+        Some("mcp".to_string()),
+        Some(serde_json::json!({
+            "imported_analytics_event_key": "project:mcp:request:req-view-1:repo-hygiene:View",
+        })),
+    )
+    .await
+    .unwrap();
+
+    let touched = ingest_analytics_events(
+        &profile_root,
+        &[AnalyticsEventRecord {
+            id: 13,
+            provider: "mcp".to_string(),
+            project_id: "project".to_string(),
+            session_id: Some("session".to_string()),
+            timestamp: 300,
+            event_kind: "mcp_tool_call".to_string(),
+            hook_name: None,
+            tool_name: Some("tracedecay_skill_view".to_string()),
+            tool_category: None,
+            skill_name: None,
+            hint_category: None,
+            hint_id: None,
+            outcome: Some("success".to_string()),
+            metadata_json: Some(
+                r#"{"request_id":"req-view-1","function":{"name":"tracedecay_skill_view","arguments":{"id":"repo-hygiene"}}}"#
+                    .to_string(),
+            ),
+        }],
+    )
+    .await
+    .unwrap();
+
+    assert!(touched.is_empty());
+    let record =
+        tracedecay::automation::skill_usage::load_skill_usage_record(&profile_root, "repo-hygiene")
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(record.view_count, 1);
+    assert_eq!(record.targets, vec!["mcp"]);
 }
 
 #[tokio::test]
