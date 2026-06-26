@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.13](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.12...v0.0.13) - 2026-06-26
+
+### Added
+
+- add dashboard automation controls
+- add dashboard automation APIs
+- expose automation through mcp tools
+- add self-improving automation foundation
+- support linked worktree store resolution
+
+### Fixed
+
+- avoid lazy sync for read-only MCP tools
+- refresh Hermes dashboard automation routes
+- reject duplicate managed skill drafts
+- dedupe mcp skill view analytics
+- preserve automation clears and run ids
+- catalog Codex goal context response items
+- preserve serve remote store fallback
+
+### Other
+
+- simplify PR 131 wording
+- document self-improving automation loops
+- simplify dashboard skill api errors
+- simplify managed skill mcp handler lookups
+- tune Windows CI runtime
+- lower precompact summary cap
+- harden Windows CI timing paths
+- Merge pull request #121 from spa5k/feat/worktree-native-store-resolution
+- share git common dir resolution
+- document linked worktree store resolution
+
 ### Added
 
 - support linked git worktrees resolving the initialized repository store by git common directory
