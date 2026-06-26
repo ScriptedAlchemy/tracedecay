@@ -53,7 +53,7 @@ const CHUNK_ROWS: usize = 2000;
 /// scanning.
 pub async fn ingest_for_project(db: &GlobalDb, project_root: &Path) -> TranscriptIngestStats {
     let mut homes = Vec::new();
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = crate::sessions::home_dir() {
         homes.push(home.join(".hermes"));
     }
     if let Some(env_home) = std::env::var_os("HERMES_HOME") {

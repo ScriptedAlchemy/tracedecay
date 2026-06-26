@@ -2,6 +2,8 @@
 
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write as IoWrite};
+#[cfg(windows)]
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -18,6 +20,8 @@ pub struct CodexAppServerSummaryConfig {
     pub codex_bin: String,
     pub model: Option<String>,
     pub timeout: Duration,
+    pub max_tokens: Option<u32>,
+    pub temperature: Option<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +36,8 @@ impl Default for CodexAppServerSummaryConfig {
             codex_bin: "codex".to_string(),
             model: None,
             timeout: Duration::from_secs(90),
+            max_tokens: None,
+            temperature: None,
         }
     }
 }
@@ -49,6 +55,26 @@ impl CodexAppServerSummaryConfig {
             .and_then(|secs| secs.parse::<u64>().ok())
         {
             config.timeout = Duration::from_secs(secs.clamp(5, 300));
+        }
+        if let Some(max_tokens) =
+            non_empty_env("TRACEDECAY_CODEX_SUMMARY_MAX_TOKENS").and_then(|value| {
+                value
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|max_tokens| *max_tokens > 0)
+            })
+        {
+            config.max_tokens = Some(max_tokens);
+        }
+        if let Some(temperature) =
+            non_empty_env("TRACEDECAY_CODEX_SUMMARY_TEMPERATURE").and_then(|value| {
+                value
+                    .parse::<f32>()
+                    .ok()
+                    .filter(|temperature| temperature.is_finite() && *temperature >= 0.0)
+            })
+        {
+            config.temperature = Some(temperature);
         }
         config
     }
@@ -69,9 +95,17 @@ pub fn summarize_with_codex_app_server(
     config: &CodexAppServerSummaryConfig,
 ) -> Result<CodexAppServerSummary> {
     let prompt = build_codex_summary_prompt(request);
+    run_prompt_with_codex_app_server(&prompt, config, "tracedecay_codex_summary")
+}
+
+pub fn run_prompt_with_codex_app_server(
+    prompt: &str,
+    config: &CodexAppServerSummaryConfig,
+    thread_source: &str,
+) -> Result<CodexAppServerSummary> {
     let model = configured_model(config);
-    let child = Command::new(&config.codex_bin)
-        .arg("app-server")
+    let mut command = codex_app_server_command(&config.codex_bin);
+    let child = command
         .env(CODEX_SUMMARY_CHILD_ENV, "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -123,7 +157,7 @@ pub fn summarize_with_codex_app_server(
     wait_for_response(&line_rx, deadline, 0)?;
     send_json(&mut stdin, &json!({"method": "initialized", "params": {}}))?;
 
-    let thread_params = build_summary_thread_start_params(model);
+    let thread_params = build_ephemeral_thread_start_params(model, thread_source);
     send_json(
         &mut stdin,
         &json!({"method": "thread/start", "id": 1, "params": thread_params}),
@@ -151,6 +185,12 @@ pub fn summarize_with_codex_app_server(
     if let Some(model) = model {
         turn_params["model"] = json!(model);
     }
+    if let Some(max_tokens) = config.max_tokens {
+        turn_params["maxOutputTokens"] = json!(max_tokens);
+    }
+    if let Some(temperature) = config.temperature {
+        turn_params["temperature"] = json!(temperature);
+    }
     send_json(
         &mut stdin,
         &json!({"method": "turn/start", "id": 2, "params": turn_params}),
@@ -171,10 +211,35 @@ pub fn summarize_with_codex_app_server(
     Ok(summary)
 }
 
-fn build_summary_thread_start_params(model: Option<&str>) -> Value {
+fn codex_app_server_command(codex_bin: &str) -> Command {
+    let mut command = command_for_codex_bin(codex_bin);
+    command.arg("app-server");
+    command
+}
+
+#[cfg(windows)]
+fn command_for_codex_bin(codex_bin: &str) -> Command {
+    let extension = Path::new(codex_bin)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase);
+    if matches!(extension.as_deref(), Some("bat" | "cmd")) {
+        let mut command = Command::new("cmd");
+        command.arg("/D").arg("/C").arg(codex_bin);
+        return command;
+    }
+    Command::new(codex_bin)
+}
+
+#[cfg(not(windows))]
+fn command_for_codex_bin(codex_bin: &str) -> Command {
+    Command::new(codex_bin)
+}
+
+fn build_ephemeral_thread_start_params(model: Option<&str>, thread_source: &str) -> Value {
     let mut params = json!({
         "ephemeral": true,
-        "threadSource": "tracedecay_codex_summary"
+        "threadSource": thread_source
     });
     if let Some(model) = model {
         params["model"] = json!(model);
@@ -188,10 +253,26 @@ struct ChildGuard {
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
+        kill_child_process_tree(&mut self.child);
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
 }
+
+#[cfg(windows)]
+fn kill_child_process_tree(child: &mut Child) {
+    let _ = Command::new("taskkill")
+        .arg("/PID")
+        .arg(child.id().to_string())
+        .arg("/T")
+        .arg("/F")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(not(windows))]
+fn kill_child_process_tree(_child: &mut Child) {}
 
 fn send_json(stdin: &mut impl IoWrite, value: &Value) -> Result<()> {
     writeln!(stdin, "{value}")?;
@@ -475,7 +556,8 @@ mod tests {
 
     #[test]
     fn summary_thread_start_params_are_ephemeral_and_identified() {
-        let params = build_summary_thread_start_params(Some("gpt-5.5-codex"));
+        let params =
+            build_ephemeral_thread_start_params(Some("gpt-5.5-codex"), "tracedecay_codex_summary");
 
         assert_eq!(params["ephemeral"], json!(true));
         assert_eq!(params["threadSource"], json!("tracedecay_codex_summary"));

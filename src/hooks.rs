@@ -103,6 +103,43 @@ fn now_unix_millis() -> u64 {
         .unwrap_or_default()
 }
 
+fn record_hook_invoked(root: Option<&Path>, agent: HintAgent, hook_name: &str, event_json: &str) {
+    let parsed: Value = serde_json::from_str(event_json).unwrap_or(Value::Null);
+    record_hook_analytics(
+        root,
+        "hook_invoked",
+        serde_json::json!({
+            "agent": agent.as_key(),
+            "hook_name": hook_name,
+            "hook_event_name": text_field(&parsed, &["hook_event_name", "hookEventName"]),
+            "session_id": event_session_id(&parsed),
+            "tool_name": text_field(&parsed, &["tool_name", "toolName", "name"]),
+            "command": text_field(&parsed, &["command", "cmd", "shell_command"]),
+            "prompt_category": inferred_prompt_category(&parsed),
+        }),
+    );
+}
+
+fn inferred_prompt_category(parsed: &Value) -> Option<&'static str> {
+    let text = prompt_like_text(parsed)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if text.is_empty() {
+        return None;
+    }
+    if is_code_research_prompt(&text) {
+        Some("code_research")
+    } else if text.contains("test") || text.contains("failing") || text.contains("ci") {
+        Some("test_or_ci")
+    } else if text.contains("dashboard") || text.contains("ui") || text.contains("frontend") {
+        Some("dashboard_or_ui")
+    } else if text.contains("bug") || text.contains("fix") || text.contains("error") {
+        Some("debug_or_fix")
+    } else {
+        Some("general")
+    }
+}
+
 fn record_hint_analytics(
     root: Option<&Path>,
     event: &str,
@@ -157,6 +194,7 @@ fn record_hint_emitted(
 /// Claude to use tracedecay MCP tools instead.
 pub fn hook_pre_tool_use() {
     let tool_input = std::env::var("TOOL_INPUT").unwrap_or_default();
+    record_hook_invoked(None, HintAgent::Claude, "preToolUse", &tool_input);
     let decision = evaluate_hook_decision(&tool_input);
     if !decision.is_empty() {
         println!("{decision}");
@@ -241,6 +279,7 @@ fn is_code_research_prompt(prompt: &str) -> bool {
 /// from Claude's hook handler because Claude expects a JSON decision on stdout.
 pub fn hook_kiro_pre_tool_use() -> i32 {
     let event = read_hook_event!();
+    record_hook_invoked(None, HintAgent::Kiro, "preToolUse", &event);
     if let Some(reason) = evaluate_kiro_pre_tool_use(&event) {
         eprintln!("{reason}");
         2
@@ -255,6 +294,8 @@ pub fn hook_kiro_pre_tool_use() -> i32 {
 /// stdout. This intentionally does not reuse the Claude hook output schema.
 pub fn hook_cursor_subagent_start() -> i32 {
     let event = read_hook_event!();
+    let root = cursor_project_root_from_event(&event);
+    record_hook_invoked(root.as_deref(), HintAgent::Cursor, "subagentStart", &event);
     if let Some(decision) = evaluate_cursor_subagent_start(&event) {
         println!("{decision}");
     }
@@ -274,6 +315,8 @@ pub fn hook_cursor_subagent_start() -> i32 {
 /// persisted under `.tracedecay/`.
 pub fn hook_cursor_post_tool_use() -> i32 {
     let event = read_hook_event!();
+    let root = cursor_project_root_from_event(&event);
+    record_hook_invoked(root.as_deref(), HintAgent::Cursor, "postToolUse", &event);
     if let Some(decision) = cursor_post_tool_use_decision(&event) {
         println!("{decision}");
     }
@@ -289,6 +332,13 @@ pub fn hook_cursor_post_tool_use() -> i32 {
 /// submission, even if the tail ingest times out.
 pub async fn hook_cursor_before_submit_prompt() -> i32 {
     let event = read_hook_event!();
+    let root = cursor_project_root_from_event(&event);
+    record_hook_invoked(
+        root.as_deref(),
+        HintAgent::Cursor,
+        "beforeSubmitPrompt",
+        &event,
+    );
     reset_counter_for_cursor_event(&event).await;
     ingest_cursor_transcript_for_event(
         &event,
@@ -313,6 +363,8 @@ pub async fn hook_cursor_before_submit_prompt() -> i32 {
 /// so an empty object is emitted. Fail-open.
 pub async fn hook_cursor_session_end() -> i32 {
     let event = read_hook_event!();
+    let root = cursor_project_root_from_event(&event);
+    record_hook_invoked(root.as_deref(), HintAgent::Cursor, "sessionEnd", &event);
     ingest_cursor_transcript_for_event(
         &event,
         Some(CURSOR_CATCH_UP_INGEST_MAX_BYTES),
@@ -331,6 +383,8 @@ pub async fn hook_cursor_session_end() -> i32 {
 /// we emit an empty object and never ask the agent to continue. Fail-open.
 pub async fn hook_cursor_stop() -> i32 {
     let event = read_hook_event!();
+    let root = cursor_project_root_from_event(&event);
+    record_hook_invoked(root.as_deref(), HintAgent::Cursor, "stop", &event);
     ingest_cursor_transcript_for_event(
         &event,
         Some(CURSOR_CATCH_UP_INGEST_MAX_BYTES),
@@ -350,6 +404,8 @@ pub async fn hook_cursor_stop() -> i32 {
 /// summary node. The hook is fail-open and emits Cursor's empty object shape.
 pub async fn hook_cursor_pre_compact() -> i32 {
     let event = read_hook_event!();
+    let root = cursor_project_root_from_event(&event);
+    record_hook_invoked(root.as_deref(), HintAgent::Cursor, "preCompact", &event);
     if std::env::var(crate::sessions::cursor_agent::CURSOR_SUMMARY_CHILD_ENV).is_err() {
         let mut config = crate::sessions::cursor_agent::CursorAgentSummaryConfig::from_env();
         config.timeout = config.timeout.min(CURSOR_PRE_COMPACT_SUMMARY_BUDGET);
@@ -518,6 +574,8 @@ async fn cursor_pre_compact_for_event_inner(
 /// time-based debounce is needed. Fail-open and silent.
 pub async fn hook_cursor_after_file_edit() -> i32 {
     let event = read_hook_event!();
+    let root = cursor_project_root_from_event(&event);
+    record_hook_invoked(root.as_deref(), HintAgent::Cursor, "afterFileEdit", &event);
     targeted_sync_for_cursor_after_file_edit(&event).await;
     0
 }
@@ -529,6 +587,8 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
 /// for the resolved workspace. Never blocks session creation.
 pub async fn hook_cursor_session_start() -> i32 {
     let event = read_hook_event!();
+    let root = cursor_project_root_from_event(&event);
+    record_hook_invoked(root.as_deref(), HintAgent::Cursor, "sessionStart", &event);
     // Catch-up ingest for resumed sessions whose transcript grew while no agent
     // was attached. No-op (no transcript_path) for brand-new sessions. Fail-open.
     ingest_cursor_transcript_for_event(
@@ -537,7 +597,6 @@ pub async fn hook_cursor_session_start() -> i32 {
         CURSOR_SESSION_INGEST_BUDGET,
     )
     .await;
-    let root = cursor_project_root_from_event(&event);
     let mut context = cursor_session_context_for_root(root.as_deref()).await;
     if session_start_from_compaction(&event) {
         append_context_recovery_hint(&mut context);
@@ -595,6 +654,13 @@ async fn codex_session_context_for_event(event_json: &str) -> (String, HookWorks
 /// guard (and the sync lock no-ops concurrent runs). Fail-open and silent.
 pub async fn hook_cursor_after_shell() -> i32 {
     let event = read_hook_event!();
+    let root = cursor_project_root_from_event(&event);
+    record_hook_invoked(
+        root.as_deref(),
+        HintAgent::Cursor,
+        "afterShellExecution",
+        &event,
+    );
     sync_after_cursor_shell_event(&event).await;
     0
 }
@@ -606,6 +672,8 @@ pub async fn hook_cursor_after_shell() -> i32 {
 /// don't load plugins, so the output is an empty object. Fail-open.
 pub async fn hook_cursor_workspace_open() -> i32 {
     let event = read_hook_event!();
+    let root = cursor_project_root_from_event(&event);
+    record_hook_invoked(root.as_deref(), HintAgent::Cursor, "workspaceOpen", &event);
     workspace_open_for_cursor_event(&event).await;
     println!("{}", serde_json::json!({}));
     0
@@ -1616,6 +1684,8 @@ fn now_unix_secs() -> i64 {
 /// tracedecay MCP tools and reporting index freshness for the session `cwd`.
 pub async fn hook_codex_session_start() -> i32 {
     let event = read_hook_event!();
+    let root = codex_project_root_from_event(&event);
+    record_hook_invoked(root.as_deref(), HintAgent::Codex, "SessionStart", &event);
     let (mut context, _) = codex_session_context_for_event(&event).await;
     if session_start_from_compaction(&event) {
         append_context_recovery_hint(&mut context);
@@ -1633,6 +1703,13 @@ pub async fn hook_codex_session_start() -> i32 {
 /// tracedecay steering context as `SessionStart`. Never blocks the prompt.
 pub async fn hook_codex_user_prompt_submit() -> i32 {
     let event = read_hook_event!();
+    let root = codex_project_root_from_event(&event);
+    record_hook_invoked(
+        root.as_deref(),
+        HintAgent::Codex,
+        "UserPromptSubmit",
+        &event,
+    );
     reset_counter_for_codex_event(&event).await;
     let context = codex_user_prompt_submit_context_for_event(&event).await;
     println!(
@@ -1659,6 +1736,8 @@ pub async fn codex_user_prompt_submit_context_for_event(event: &str) -> String {
 /// so this injects `additionalContext` instead of denying.
 pub fn hook_codex_subagent_start() -> i32 {
     let event = read_hook_event!();
+    let root = codex_project_root_from_event(&event);
+    record_hook_invoked(root.as_deref(), HintAgent::Codex, "SubagentStart", &event);
     let count = record_codex_subagent_start(&event);
     let output = evaluate_codex_subagent_start(&event);
     eprintln!(
@@ -1680,6 +1759,8 @@ pub fn hook_codex_subagent_start() -> i32 {
 /// incremental sync. Fail-open and silent.
 pub async fn hook_codex_post_tool_use() -> i32 {
     let event = read_hook_event!();
+    let root = codex_project_root_from_event(&event);
+    record_hook_invoked(root.as_deref(), HintAgent::Codex, "PostToolUse", &event);
     codex_post_tool_use(&event).await;
     0
 }
@@ -1692,6 +1773,8 @@ pub async fn hook_codex_post_tool_use() -> i32 {
 /// deterministic summary node. Fail-open: compaction must never block Codex.
 pub async fn hook_codex_post_compact() -> i32 {
     let event = read_hook_event!();
+    let root = codex_project_root_from_event(&event);
+    record_hook_invoked(root.as_deref(), HintAgent::Codex, "PostCompact", &event);
     if std::env::var_os(crate::sessions::codex_app_server::CODEX_SUMMARY_CHILD_ENV).is_none() {
         codex_post_compact(&event).await;
     }
@@ -2241,6 +2324,7 @@ pub async fn hook_prompt_submit() {
 /// transcripts for the resolved workspace.
 pub async fn hook_kiro_prompt_submit() -> i32 {
     let event = read_hook_event!();
+    record_hook_invoked(None, HintAgent::Kiro, "userPromptSubmit", &event);
     reset_counter_for_kiro_event(&event).await;
     ingest_kiro_transcript_for_event(
         &event,
@@ -2258,6 +2342,7 @@ pub async fn hook_kiro_prompt_submit() -> i32 {
 /// silent incremental sync. Missing indexes and concurrent syncs are no-ops.
 pub async fn hook_kiro_post_tool_use() -> i32 {
     let event = read_hook_event!();
+    record_hook_invoked(None, HintAgent::Kiro, "postToolUse", &event);
     match sync_for_kiro_event(&event).await {
         Ok(()) => 0,
         Err(e) => {

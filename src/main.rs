@@ -1,15 +1,19 @@
 // Rust guideline compliant 2025-10-17
 // Updated 2026-03-23: compact bordered table for status output
 use clap::Parser;
-use std::io::{self, BufRead, IsTerminal, Write};
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 
-use tracedecay::tracedecay::TraceDecay;
-
+mod agent_cmd;
+mod automation_cli;
 mod cli;
 mod commands;
+mod cost_cmd;
 mod global;
+mod hook_cmd;
+mod sessions_cmd;
+mod status_cmd;
 mod tool_command;
 
 pub use tracedecay::serve;
@@ -159,140 +163,6 @@ impl Drop for Spinner {
     }
 }
 
-fn hermes_profile_targets(
-    home: &std::path::Path,
-) -> tracedecay::errors::Result<Vec<Option<String>>> {
-    let mut targets = vec![None];
-    let profiles_dir = home.join(".hermes/profiles");
-    let entries = match std::fs::read_dir(&profiles_dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(targets),
-        Err(e) => {
-            return Err(tracedecay::errors::TraceDecayError::Config {
-                message: format!(
-                    "failed to read Hermes profiles directory {}: {e}",
-                    profiles_dir.display()
-                ),
-            });
-        }
-    };
-
-    let mut profile_names = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|e| tracedecay::errors::TraceDecayError::Config {
-            message: format!(
-                "failed to read Hermes profiles directory {}: {e}",
-                profiles_dir.display()
-            ),
-        })?;
-        let file_type =
-            entry
-                .file_type()
-                .map_err(|e| tracedecay::errors::TraceDecayError::Config {
-                    message: format!(
-                        "failed to inspect Hermes profile {}: {e}",
-                        entry.path().display()
-                    ),
-                })?;
-        if !file_type.is_dir() {
-            continue;
-        }
-        let name = entry.file_name().into_string().map_err(|_| {
-            tracedecay::errors::TraceDecayError::Config {
-                message: format!(
-                    "Hermes profile path is not valid UTF-8: {}",
-                    entry.path().display()
-                ),
-            }
-        })?;
-        profile_names.push(name);
-    }
-    profile_names.sort();
-    targets.extend(profile_names.into_iter().map(Some));
-    Ok(targets)
-}
-
-fn validate_hermes_profile_flags(
-    agent: Option<&str>,
-    profile: &Option<String>,
-    all_profiles: bool,
-) -> tracedecay::errors::Result<()> {
-    if profile.is_some() && agent != Some("hermes") {
-        return Err(tracedecay::errors::TraceDecayError::Config {
-            message: "`--profile` is only supported with `--agent hermes`".to_string(),
-        });
-    }
-    if all_profiles && agent != Some("hermes") {
-        return Err(tracedecay::errors::TraceDecayError::Config {
-            message: "`--all-profiles` is only supported with `--agent hermes`".to_string(),
-        });
-    }
-    Ok(())
-}
-
-/// Validates `--project-root` (Hermes plugin project pin): hermes-only and
-/// absolute, so the generated plugin never depends on the install cwd.
-fn validate_hermes_project_root_flag(
-    agent: Option<&str>,
-    project_root: &Option<String>,
-) -> tracedecay::errors::Result<Option<std::path::PathBuf>> {
-    let Some(project_root) = project_root else {
-        return Ok(None);
-    };
-    if agent != Some("hermes") {
-        return Err(tracedecay::errors::TraceDecayError::Config {
-            message: "`--project-root` is only supported with `--agent hermes`".to_string(),
-        });
-    }
-    let path = std::path::PathBuf::from(project_root);
-    if !path.is_absolute() {
-        return Err(tracedecay::errors::TraceDecayError::Config {
-            message: format!("`--project-root` must be an absolute path, got '{project_root}'"),
-        });
-    }
-    Ok(Some(path))
-}
-
-fn validate_codex_automation_flags(
-    agent: Option<&str>,
-    automation: bool,
-) -> tracedecay::errors::Result<()> {
-    if !automation {
-        return Ok(());
-    }
-    if agent != Some("codex") {
-        return Err(tracedecay::errors::TraceDecayError::Config {
-            message: "`--automation` is only supported with `--agent codex`".to_string(),
-        });
-    }
-    Ok(())
-}
-
-fn validate_codex_automation_project_path() -> tracedecay::errors::Result<std::path::PathBuf> {
-    let project_path =
-        std::env::current_dir().map_err(|e| tracedecay::errors::TraceDecayError::Config {
-            message: format!("could not determine current project directory: {e}"),
-        })?;
-    std::fs::canonicalize(&project_path).map_err(|e| tracedecay::errors::TraceDecayError::Config {
-        message: format!(
-            "could not canonicalize project directory {}: {e}",
-            project_path.display()
-        ),
-    })
-}
-
-fn hermes_selected_profile_targets(
-    home: &std::path::Path,
-    profile: &Option<String>,
-    all_profiles: bool,
-) -> tracedecay::errors::Result<Vec<Option<String>>> {
-    if all_profiles {
-        hermes_profile_targets(home)
-    } else {
-        Ok(vec![profile.clone()])
-    }
-}
-
 /// Stack size for the thread driving the async entrypoint. Windows gives the
 /// process main thread only 1 MiB of stack (Linux and macOS give 8 MiB), and
 /// the combined CLI + MCP tool-dispatch futures exceed that in unoptimized
@@ -302,11 +172,10 @@ fn hermes_selected_profile_targets(
 const ASYNC_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 fn main() {
-    let cli = Cli::parse();
     let spawned = std::thread::Builder::new()
         .name("tracedecay-main".to_string())
         .stack_size(ASYNC_STACK_BYTES)
-        .spawn(move || async_main(cli));
+        .spawn(async_main);
     let result = match spawned {
         Ok(handle) => match handle.join() {
             Ok(result) => result,
@@ -323,7 +192,8 @@ fn main() {
     }
 }
 
-fn async_main(cli: Cli) -> tracedecay::errors::Result<()> {
+fn async_main() -> tracedecay::errors::Result<()> {
+    let cli = Cli::parse();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_stack_size(ASYNC_STACK_BYTES)
@@ -542,7 +412,7 @@ fn tracedecay_home_dir() -> tracedecay::errors::Result<PathBuf> {
     })
 }
 
-fn tracedecay_bin_on_path() -> tracedecay::errors::Result<String> {
+pub(crate) fn tracedecay_bin_on_path() -> tracedecay::errors::Result<String> {
     tracedecay::agents::which_tracedecay().ok_or_else(|| {
         tracedecay::errors::TraceDecayError::Config {
             message: "tracedecay not found on PATH".to_string(),
@@ -591,18 +461,6 @@ fn run_post_update_tasks() -> tracedecay::errors::Result<()> {
     Ok(())
 }
 
-async fn largest_memory_bank_fact_count_at(db_path: &Path) -> tracedecay::errors::Result<usize> {
-    let db = libsql::Builder::new_local(db_path).build().await?;
-    let conn = db.connect()?;
-    let mut rows = conn
-        .query("SELECT COALESCE(MAX(fact_count), 0) FROM memory_banks", ())
-        .await?;
-    let Some(row) = rows.next().await? else {
-        return Ok(0);
-    };
-    Ok(row.get::<i64>(0).unwrap_or(0).max(0) as usize)
-}
-
 async fn resolve_registered_project_root(
     project_id: Option<String>,
     project_path: Option<String>,
@@ -630,7 +488,7 @@ async fn resolve_registered_project_root(
         .map(Some)
 }
 
-async fn resolve_cli_project_root(
+pub(crate) async fn resolve_cli_project_root(
     path: Option<String>,
     project_id: Option<String>,
     project_path: Option<String>,
@@ -641,55 +499,20 @@ async fn resolve_cli_project_root(
     Ok(tracedecay::config::resolve_path_with_discovery(path))
 }
 
-fn format_memory_status_report(
-    status: &tracedecay::memory::types::MemoryStatus,
-    largest_bank_facts: usize,
-) -> String {
-    let capacity = status.estimated_capacity.max(1);
-    let utilization_pct = largest_bank_facts as f64 / capacity as f64 * 100.0;
-    format!(
-        concat!(
-            "Holographic memory status\n",
-            "facts: {}\n",
-            "entities: {}\n",
-            "banks: {}\n",
-            "algebra: {}\n",
-            "hrr dim: {}\n",
-            "capacity / bank: {}\n",
-            "largest bank utilization: {}/{} ({:.1}%)\n",
-            "below recall floor: {}\n",
-            "missing vectors: {}\n",
-            "helpful feedback: {}\n",
-            "unhelpful feedback: {}\n",
-            "trust buckets: <0.25={}  0.25-0.50={}  0.50-0.75={}  0.75-1.00={}\n",
-            "legacy backfill complete: {}\n",
-            "repair: missing_vectors_repaired={}  banks_rebuilt={}\n"
-        ),
-        status.fact_count,
-        status.entity_count,
-        status.bank_count,
-        status.algebra_name,
-        status.hrr_dim,
-        status.estimated_capacity,
-        largest_bank_facts,
-        status.estimated_capacity,
-        utilization_pct,
-        status.below_default_recall_threshold_count,
-        status.missing_vector_count,
-        status.helpful_count,
-        status.unhelpful_count,
-        status.trust_0_025_count,
-        status.trust_025_050_count,
-        status.trust_050_075_count,
-        status.trust_075_100_count,
-        if status.legacy_backfill_complete {
-            "yes"
-        } else {
-            "no"
-        },
-        status.repair.missing_vectors_repaired,
-        status.repair.banks_rebuilt,
-    )
+pub(crate) fn parse_lcm_scope_arg(
+    value: &str,
+) -> tracedecay::errors::Result<tracedecay::sessions::lcm::LcmScope> {
+    use tracedecay::sessions::lcm::LcmScope;
+    match value.trim().replace('-', "_").as_str() {
+        "all" => Ok(LcmScope::All),
+        "session" => Ok(LcmScope::Session),
+        "current" => Ok(LcmScope::Current),
+        other => Err(tracedecay::errors::TraceDecayError::Config {
+            message: format!(
+                "invalid session-reflection --scope '{other}'; expected all, session, or current"
+            ),
+        }),
+    }
 }
 
 async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
@@ -721,174 +544,16 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
             details,
             runtime,
         } => {
-            let project_path = resolve_cli_project_root(path, project_id, project_path).await?;
-            let cg = if TraceDecay::has_initialized_store(&project_path).await {
-                match TraceDecay::open(&project_path).await {
-                    Ok(cg) => cg,
-                    Err(_) => TraceDecay::open_read_only(&project_path).await?,
-                }
-            } else if !io::stdin().is_terminal() {
-                eprintln!(
-                    "No TraceDecay index found at '{}'. Non-interactive: skipping index creation (run `tracedecay init`).",
-                    project_path.display()
-                );
-                return Ok(());
-            } else {
-                eprint!(
-                    "No TraceDecay index found at '{}'. Create one now? [Y/n] ",
-                    project_path.display()
-                );
-                io::stderr().flush().ok();
-                let mut answer = String::new();
-                io::stdin().lock().read_line(&mut answer).map_err(|e| {
-                    tracedecay::errors::TraceDecayError::Config {
-                        message: format!("failed to read stdin: {e}"),
-                    }
-                })?;
-                let answer = answer.trim();
-                if answer.is_empty() || answer.eq_ignore_ascii_case("y") {
-                    commands::init_and_index(&project_path, &[], &[], false).await?
-                } else {
-                    return Ok(());
-                }
-            };
-            if runtime {
-                let snap = tracedecay::runtime_telemetry::collect(&cg).await?;
-                if json {
-                    println!("{}", tracedecay::runtime_telemetry::to_pretty_json(&snap));
-                } else {
-                    print!("{}", tracedecay::runtime_telemetry::to_text_report(&snap));
-                }
-                return Ok(());
-            }
-            let stats = cg.get_stats().await?;
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&stats).unwrap_or_default()
-                );
-            } else {
-                let tokens_saved = cg.get_tokens_saved().await.unwrap_or(0);
-                // Register project and read global total in one open.
-                // Subtract this project's count so "Global" means "all other projects".
-                let gdb = tracedecay::global_db::GlobalDb::open().await;
-                let global_tokens_saved = match &gdb {
-                    Some(db) => {
-                        db.upsert(&project_path, tokens_saved).await;
-                        db.global_tokens_saved()
-                            .await
-                            .map(|total| total.saturating_sub(tokens_saved))
-                            .filter(|&other| other > 0)
-                    }
-                    None => None,
-                };
-                // Fetch worldwide total (1s timeout, 60s client cache TTL)
-                let mut config = tracedecay::user_config::UserConfig::load();
-                let now = current_unix_timestamp();
-                let worldwide = if now - config.last_worldwide_fetch_at < 60 {
-                    // Use cached value
-                    if config.last_worldwide_total > 0 {
-                        Some(config.last_worldwide_total)
-                    } else {
-                        None
-                    }
-                } else if let Some(total) = tracedecay::cloud::fetch_worldwide_total() {
-                    config.last_worldwide_total = total;
-                    config.last_worldwide_fetch_at = now;
-                    config.save_if_exists();
-                    Some(total)
-                } else if config.last_worldwide_total > 0 {
-                    Some(config.last_worldwide_total) // fallback to cache
-                } else {
-                    None
-                };
-                // Fetch country flags (30 min cache)
-                let country_flags = if now - config.last_flags_fetch_at < 1800 {
-                    config.cached_country_flags.clone()
-                } else {
-                    let fresh = tracedecay::cloud::fetch_country_flags();
-                    if !fresh.is_empty() {
-                        config.cached_country_flags = fresh.clone();
-                        config.last_flags_fetch_at = now;
-                        config.save_if_exists();
-                    }
-                    if fresh.is_empty() && !config.cached_country_flags.is_empty() {
-                        config.cached_country_flags.clone()
-                    } else {
-                        fresh
-                    }
-                };
-                if !short {
-                    print!("{}", include_str!("resources/logo.ansi"));
-                }
-                let branch_info = cg.active_branch().map(|_| {
-                    let ts_dir = tracedecay::config::get_tracedecay_dir(&project_path);
-                    let meta = tracedecay::branch_meta::load_branch_meta(&ts_dir);
-                    let has_tracking = meta.as_ref().is_some_and(|m| !m.branches.is_empty());
-                    let display_branch = if has_tracking {
-                        cg.serving_branch().unwrap_or("[single-db]").to_string()
-                    } else {
-                        "[single-db]".to_string()
-                    };
-                    let parent =
-                        meta.and_then(|m| m.branches.get(cg.serving_branch()?)?.parent.clone());
-                    tracedecay::display::BranchInfo {
-                        branch: display_branch,
-                        parent,
-                        is_fallback: cg.is_fallback(),
-                    }
-                });
-                // Ingest new session data so cost info is up-to-date.
-                if let Some(ref db) = gdb {
-                    tracedecay::accounting::parser::ingest(db).await;
-                }
-                // Best-effort cost summary for the status header.
-                let cost_info = match &gdb {
-                    Some(db) => {
-                        tracedecay::accounting::quick_cost_summary(
-                            db,
-                            tokens_saved,
-                            global_tokens_saved.unwrap_or(0),
-                        )
-                        .await
-                    }
-                    None => None,
-                };
-                if short {
-                    tracedecay::display::print_status_header(
-                        &stats,
-                        tokens_saved,
-                        global_tokens_saved,
-                        worldwide,
-                        &country_flags,
-                        branch_info.as_ref(),
-                        cost_info.as_ref(),
-                    );
-                } else {
-                    tracedecay::display::print_status_table(
-                        &stats,
-                        tokens_saved,
-                        global_tokens_saved,
-                        worldwide,
-                        &country_flags,
-                        branch_info.as_ref(),
-                        cost_info.as_ref(),
-                        details,
-                    );
-                }
-
-                // Warn if the data dir is not in .gitignore
-                if !tracedecay::config::is_in_gitignore(&project_path) {
-                    let dir_name = tracedecay::config::active_data_dir_name(&project_path);
-                    eprintln!(
-                        "\n\x1b[33mWarning: {dir_name} is not in .gitignore — \
-                         run `echo {dir_name} >> .gitignore` to exclude it from git.\x1b[0m"
-                    );
-                }
-
-                // Version check (5 min cache, always show for status)
-                global::check_for_update(&mut config, false, true);
-            }
+            status_cmd::handle_status_command(
+                path,
+                project_id,
+                project_path,
+                json,
+                short,
+                details,
+                runtime,
+            )
+            .await?;
         }
         Commands::Tool {
             project,
@@ -906,226 +571,19 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
             no_dashboard,
             automation,
         } => {
-            validate_hermes_profile_flags(agent.as_deref(), &profile, all_profiles)?;
-            let pinned_project_root =
-                validate_hermes_project_root_flag(agent.as_deref(), &project_root)?;
-            validate_codex_automation_flags(agent.as_deref(), automation)?;
-            let home = tracedecay::agents::home_dir().ok_or_else(|| {
-                tracedecay::errors::TraceDecayError::Config {
-                    message: "could not determine home directory".to_string(),
-                }
-            })?;
-            let tracedecay_bin = tracedecay::agents::which_tracedecay().ok_or_else(|| {
-                tracedecay::errors::TraceDecayError::Config {
-                    message: "tracedecay not found on PATH. Install it from this repo first:\n  \
-                          cargo binstall --git https://github.com/ScriptedAlchemy/tracedecay tracedecay\n  \
-                          cargo install --git https://github.com/ScriptedAlchemy/tracedecay tracedecay"
-                        .to_string(),
-                }
-            })?;
-            if local {
-                let project_path = std::env::current_dir().map_err(|e| {
-                    tracedecay::errors::TraceDecayError::Config {
-                        message: format!("could not determine current project directory: {e}"),
-                    }
-                })?;
-                let ctx = tracedecay::agents::InstallContext {
-                    home: home.clone(),
-                    tracedecay_bin: tracedecay_bin.clone(),
-                    tool_permissions: tracedecay::agents::expected_tool_perms(),
-                    profile: profile.clone(),
-                    project_root: pinned_project_root.clone(),
-                    dashboard: !no_dashboard,
-                };
-                let mut installed_names: Vec<String> = Vec::new();
-
-                if let Some(id) = agent {
-                    let ag = tracedecay::agents::get_integration(&id)?;
-                    for target_profile in
-                        hermes_selected_profile_targets(&home, &profile, all_profiles)?
-                    {
-                        let ctx = tracedecay::agents::InstallContext {
-                            home: home.clone(),
-                            tracedecay_bin: tracedecay_bin.clone(),
-                            tool_permissions: tracedecay::agents::expected_tool_perms(),
-                            profile: target_profile,
-                            project_root: pinned_project_root.clone(),
-                            dashboard: !no_dashboard,
-                        };
-                        ag.install_local(&ctx, &project_path)?;
-                        ag.post_install(Some(&project_path)).await;
-                        if automation && id == "codex" {
-                            let scoped_project_path = validate_codex_automation_project_path()?;
-                            tracedecay::agents::codex::install_codex_native_automation(
-                                &home,
-                                &scoped_project_path,
-                            )?;
-                        }
-                    }
-                    installed_names.push(ag.name().to_string());
-                } else {
-                    let (to_install, _) =
-                        tracedecay::agents::pick_integrations_interactive(&home, &[])?;
-                    for id in &to_install {
-                        let ag = tracedecay::agents::get_integration(id)?;
-                        if ag.supports_local_install() {
-                            ag.install_local(&ctx, &project_path)?;
-                            ag.post_install(Some(&project_path)).await;
-                            installed_names.push(ag.name().to_string());
-                        } else {
-                            eprintln!(
-                                "Skipping {}: project-local install is not supported",
-                                ag.name()
-                            );
-                        }
-                    }
-                }
-
-                eprintln!();
-                if installed_names.is_empty() {
-                    eprintln!("No local changes.");
-                } else {
-                    for name in &installed_names {
-                        eprintln!("\x1b[32m+\x1b[0m {name} (local)");
-                    }
-                }
-                return Ok(());
-            }
-
-            let mut user_cfg = tracedecay::user_config::UserConfig::load();
-            tracedecay::agents::migrate_installed_agents(&home, &mut user_cfg);
-
-            let mut installed_names: Vec<String> = Vec::new();
-            let mut removed_names: Vec<String> = Vec::new();
-            let project_path = std::env::current_dir().ok();
-
-            if let Some(id) = agent {
-                let ag = tracedecay::agents::get_integration(&id)?;
-                let name = ag.name().to_string();
-                for target_profile in
-                    hermes_selected_profile_targets(&home, &profile, all_profiles)?
-                {
-                    let ctx = tracedecay::agents::InstallContext {
-                        home: home.clone(),
-                        tracedecay_bin: tracedecay_bin.clone(),
-                        tool_permissions: tracedecay::agents::expected_tool_perms(),
-                        profile: target_profile,
-                        project_root: pinned_project_root.clone(),
-                        dashboard: !no_dashboard,
-                    };
-                    ag.install(&ctx)?;
-                    ag.post_install(project_path.as_deref()).await;
-                    if automation && id == "codex" {
-                        let scoped_project_path = validate_codex_automation_project_path()?;
-                        tracedecay::agents::codex::install_codex_native_automation(
-                            &home,
-                            &scoped_project_path,
-                        )?;
-                    }
-                }
-                if !user_cfg.installed_agents.contains(&id) {
-                    user_cfg.installed_agents.push(id);
-                    installed_names.push(name);
-                }
-                user_cfg.save();
-            } else {
-                let (to_install, to_uninstall) = tracedecay::agents::pick_integrations_interactive(
-                    &home,
-                    &user_cfg.installed_agents,
-                )?;
-
-                for id in &to_uninstall {
-                    let ag = tracedecay::agents::get_integration(id)?;
-                    let ctx = tracedecay::agents::InstallContext {
-                        home: home.clone(),
-                        tracedecay_bin: tracedecay_bin.clone(),
-                        tool_permissions: tracedecay::agents::expected_tool_perms(),
-                        profile: profile.clone(),
-                        project_root: pinned_project_root.clone(),
-                        dashboard: !no_dashboard,
-                    };
-                    ag.uninstall(&ctx)?;
-                    removed_names.push(ag.name().to_string());
-                    user_cfg.installed_agents.retain(|a| a != id);
-                }
-                for id in &to_install {
-                    let ag = tracedecay::agents::get_integration(id)?;
-                    let ctx = tracedecay::agents::InstallContext {
-                        home: home.clone(),
-                        tracedecay_bin: tracedecay_bin.clone(),
-                        tool_permissions: tracedecay::agents::expected_tool_perms(),
-                        profile: profile.clone(),
-                        project_root: pinned_project_root.clone(),
-                        dashboard: !no_dashboard,
-                    };
-                    ag.install(&ctx)?;
-                    ag.post_install(project_path.as_deref()).await;
-                    installed_names.push(ag.name().to_string());
-                    if !user_cfg.installed_agents.contains(id) {
-                        user_cfg.installed_agents.push(id.clone());
-                    }
-                }
-                user_cfg.save();
-            }
-
-            eprintln!();
-            if installed_names.is_empty() && removed_names.is_empty() {
-                eprintln!("No changes.");
-            } else {
-                for name in &installed_names {
-                    eprintln!("\x1b[32m+\x1b[0m {name}");
-                }
-                for name in &removed_names {
-                    eprintln!("\x1b[31m-\x1b[0m {name}");
-                }
-            }
-
-            user_cfg.last_installed_version = env!("CARGO_PKG_VERSION").to_string();
-            user_cfg.save();
-
-            tracedecay::agents::offer_git_post_commit_hook(&tracedecay_bin);
+            agent_cmd::handle_install_command(
+                agent,
+                local,
+                profile,
+                all_profiles,
+                project_root,
+                no_dashboard,
+                automation,
+            )
+            .await?;
         }
         Commands::Reinstall => {
-            let home = tracedecay::agents::home_dir().ok_or_else(|| {
-                tracedecay::errors::TraceDecayError::Config {
-                    message: "could not determine home directory".to_string(),
-                }
-            })?;
-            let tracedecay_bin = tracedecay::agents::which_tracedecay().ok_or_else(|| {
-                tracedecay::errors::TraceDecayError::Config {
-                    message: "tracedecay not found on PATH".to_string(),
-                }
-            })?;
-            let mut user_cfg = tracedecay::user_config::UserConfig::load();
-            tracedecay::agents::migrate_installed_agents(&home, &mut user_cfg);
-
-            if user_cfg.installed_agents.is_empty() {
-                eprintln!("No installed agents found. Run `tracedecay install` first.");
-            } else {
-                let agents = user_cfg.installed_agents.clone();
-                let project_path = std::env::current_dir().ok();
-                eprintln!(
-                    "Reinstalling {} agent(s): {}",
-                    agents.len(),
-                    agents.join(", ")
-                );
-                for id in &agents {
-                    let ag = tracedecay::agents::get_integration(id)?;
-                    let ctx = tracedecay::agents::InstallContext {
-                        home: home.clone(),
-                        tracedecay_bin: tracedecay_bin.clone(),
-                        tool_permissions: tracedecay::agents::expected_tool_perms(),
-                        profile: None,
-                        project_root: None,
-                        dashboard: true,
-                    };
-                    ag.install(&ctx)?;
-                    ag.post_install(project_path.as_deref()).await;
-                }
-                eprintln!("\x1b[32m✔\x1b[0m All agents reinstalled");
-                user_cfg.last_installed_version = env!("CARGO_PKG_VERSION").to_string();
-                user_cfg.save();
-            }
+            agent_cmd::handle_reinstall_command().await?;
         }
         Commands::UpdatePlugin => {
             refresh_generated_plugins()?;
@@ -1135,172 +593,35 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
             profile,
             all_profiles,
         } => {
-            validate_hermes_profile_flags(agent.as_deref(), &profile, all_profiles)?;
-            let home = tracedecay::agents::home_dir().ok_or_else(|| {
-                tracedecay::errors::TraceDecayError::Config {
-                    message: "could not determine home directory".to_string(),
-                }
-            })?;
-            let mut user_cfg = tracedecay::user_config::UserConfig::load();
-            tracedecay::agents::migrate_installed_agents(&home, &mut user_cfg);
-
-            if let Some(id) = agent {
-                let ag = tracedecay::agents::get_integration(&id)?;
-                for target_profile in
-                    hermes_selected_profile_targets(&home, &profile, all_profiles)?
-                {
-                    let ctx = tracedecay::agents::InstallContext {
-                        home: home.clone(),
-                        tracedecay_bin: String::new(),
-                        tool_permissions: tracedecay::agents::expected_tool_perms(),
-                        profile: target_profile,
-                        project_root: None,
-                        dashboard: true,
-                    };
-                    ag.uninstall(&ctx)?;
-                }
-                user_cfg.installed_agents.retain(|a| a != &id);
-                user_cfg.save();
-            } else {
-                for id in user_cfg.installed_agents.clone() {
-                    if let Ok(ag) = tracedecay::agents::get_integration(&id) {
-                        let ctx = tracedecay::agents::InstallContext {
-                            home: home.clone(),
-                            tracedecay_bin: String::new(),
-                            tool_permissions: tracedecay::agents::expected_tool_perms(),
-                            profile: None,
-                            project_root: None,
-                            dashboard: true,
-                        };
-                        ag.uninstall(&ctx).ok();
-                    }
-                }
-                user_cfg.installed_agents.clear();
-                user_cfg.save();
-                eprintln!("All agent integrations removed.");
-            }
+            agent_cmd::handle_uninstall_command(agent, profile, all_profiles).await?;
         }
         Commands::ExtractWorker => {
             // Handled by the early dispatch at the top of run(); this arm
             // exists only for clap match exhaustiveness.
             unreachable!("extract-worker handled by early dispatch")
         }
-        Commands::HookPreToolUse => {
-            tracedecay::hooks::hook_pre_tool_use();
-        }
-        Commands::HookPromptSubmit => {
-            tracedecay::hooks::hook_prompt_submit().await;
-        }
-        Commands::HookStop => {
-            tracedecay::hooks::hook_stop().await;
-        }
-        Commands::HookKiroPreToolUse => {
-            let code = tracedecay::hooks::hook_kiro_pre_tool_use();
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookKiroPromptSubmit => {
-            let code = tracedecay::hooks::hook_kiro_prompt_submit().await;
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookKiroPostToolUse => {
-            let code = tracedecay::hooks::hook_kiro_post_tool_use().await;
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookCursorSubagentStart => {
-            let code = tracedecay::hooks::hook_cursor_subagent_start();
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookCursorPostToolUse => {
-            let code = tracedecay::hooks::hook_cursor_post_tool_use();
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookCursorBeforeSubmitPrompt => {
-            let code = tracedecay::hooks::hook_cursor_before_submit_prompt().await;
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookCursorPreCompact => {
-            let code = tracedecay::hooks::hook_cursor_pre_compact().await;
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookCursorAfterFileEdit => {
-            let code = tracedecay::hooks::hook_cursor_after_file_edit().await;
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookCursorSessionStart => {
-            let code = tracedecay::hooks::hook_cursor_session_start().await;
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookCursorSessionEnd => {
-            let code = tracedecay::hooks::hook_cursor_session_end().await;
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookCursorAfterShell => {
-            let code = tracedecay::hooks::hook_cursor_after_shell().await;
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookCursorWorkspaceOpen => {
-            let code = tracedecay::hooks::hook_cursor_workspace_open().await;
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookCursorStop => {
-            let code = tracedecay::hooks::hook_cursor_stop().await;
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookCodexSessionStart => {
-            let code = tracedecay::hooks::hook_codex_session_start().await;
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookCodexUserPromptSubmit => {
-            let code = tracedecay::hooks::hook_codex_user_prompt_submit().await;
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookCodexSubagentStart => {
-            let code = tracedecay::hooks::hook_codex_subagent_start();
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookCodexPostToolUse => {
-            let code = tracedecay::hooks::hook_codex_post_tool_use().await;
-            if code != 0 {
-                process::exit(code);
-            }
-        }
-        Commands::HookCodexPostCompact => {
-            let code = tracedecay::hooks::hook_codex_post_compact().await;
-            if code != 0 {
-                process::exit(code);
-            }
+        hook_command @ (Commands::HookPreToolUse
+        | Commands::HookPromptSubmit
+        | Commands::HookStop
+        | Commands::HookKiroPreToolUse
+        | Commands::HookKiroPromptSubmit
+        | Commands::HookKiroPostToolUse
+        | Commands::HookCursorSubagentStart
+        | Commands::HookCursorPostToolUse
+        | Commands::HookCursorBeforeSubmitPrompt
+        | Commands::HookCursorPreCompact
+        | Commands::HookCursorAfterFileEdit
+        | Commands::HookCursorSessionStart
+        | Commands::HookCursorSessionEnd
+        | Commands::HookCursorAfterShell
+        | Commands::HookCursorWorkspaceOpen
+        | Commands::HookCursorStop
+        | Commands::HookCodexSessionStart
+        | Commands::HookCodexUserPromptSubmit
+        | Commands::HookCodexSubagentStart
+        | Commands::HookCodexPostToolUse
+        | Commands::HookCodexPostCompact) => {
+            hook_cmd::handle_hook_command(hook_command).await?;
         }
         Commands::Dashboard {
             path,
@@ -1460,158 +781,7 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
             by_task,
             export,
         } => {
-            // Refresh LiteLLM pricing if cache is older than 24h
-            tracedecay::accounting::pricing::refresh_if_stale();
-
-            let gdb = match tracedecay::global_db::GlobalDb::open().await {
-                Some(db) => db,
-                None => {
-                    eprintln!("Could not open global database.");
-                    process::exit(1);
-                }
-            };
-
-            // Ingest new session data before querying
-            let ingest_stats = tracedecay::accounting::parser::ingest(&gdb).await;
-            if ingest_stats.turns_inserted > 0 {
-                eprintln!(
-                    "Ingested {} new turns from Claude Code sessions.",
-                    ingest_stats.turns_inserted
-                );
-            }
-
-            let since = tracedecay::accounting::metrics::parse_range(&range);
-            let tokens_saved = gdb.global_tokens_saved().await.unwrap_or(0);
-            let summary =
-                tracedecay::accounting::metrics::cost_summary(&gdb, since, tokens_saved).await;
-
-            let Some(s) = summary else {
-                println!(
-                    "No session data found. Use Claude Code and then run `tracedecay cost` to see spending."
-                );
-                return Ok(());
-            };
-
-            if let Some(ref fmt) = export {
-                match fmt.as_str() {
-                    "json" => {
-                        let obj = serde_json::json!({
-                            "range": range,
-                            "total_cost_usd": s.total_cost,
-                            "total_input_tokens": s.total_input_tokens,
-                            "total_output_tokens": s.total_output_tokens,
-                            "tokens_saved": s.tokens_saved,
-                            "efficiency_ratio": s.efficiency_ratio,
-                            "by_model": s.by_model.iter().map(|(m, c, t)| serde_json::json!({"model": m, "cost": c, "tokens": t})).collect::<Vec<_>>(),
-                            "by_category": s.by_category.iter().map(|(cat, c, n)| serde_json::json!({"category": cat, "cost": c, "turns": n})).collect::<Vec<_>>(),
-                        });
-                        println!("{}", serde_json::to_string_pretty(&obj).unwrap_or_default());
-                    }
-                    "csv" => {
-                        if by_model {
-                            println!("model,cost_usd,tokens");
-                            for (model, cost, tokens) in &s.by_model {
-                                println!("{model},{cost:.4},{tokens}");
-                            }
-                        } else if by_task {
-                            println!("category,cost_usd,turns");
-                            for (cat, cost, turns) in &s.by_category {
-                                println!("{cat},{cost:.4},{turns}");
-                            }
-                        } else {
-                            println!(
-                                "total_cost_usd,input_tokens,output_tokens,tokens_saved,efficiency"
-                            );
-                            println!(
-                                "{:.4},{},{},{},{:.4}",
-                                s.total_cost,
-                                s.total_input_tokens,
-                                s.total_output_tokens,
-                                s.tokens_saved,
-                                s.efficiency_ratio
-                            );
-                        }
-                    }
-                    _ => eprintln!("Unknown export format '{fmt}'. Use 'json' or 'csv'."),
-                }
-            } else if by_model {
-                let total = s.total_cost.max(0.001);
-                println!(
-                    "  {:<24} {:>10} {:>10} {:>6}",
-                    "Model", "Cost", "Tokens", "Share"
-                );
-                for (model, cost, tokens) in &s.by_model {
-                    let share = cost / total * 100.0;
-                    let tok_str = tracedecay::display::format_token_count(*tokens);
-                    println!(
-                        "  {:<24} {:>9} {:>10} {:>5.0}%",
-                        model,
-                        format!("${cost:.2}"),
-                        tok_str,
-                        share
-                    );
-                }
-            } else if by_task {
-                println!("  {:<16} {:>10} {:>6}", "Category", "Cost", "Turns");
-                for (cat, cost, turns) in &s.by_category {
-                    println!("  {:<16} {:>9} {:>6}", cat, format!("${cost:.2}"), turns);
-                }
-            } else {
-                // Default summary
-                let today_since = tracedecay::accounting::metrics::parse_range("today");
-                let today_cost = gdb.total_cost_since(today_since).await.unwrap_or(0.0);
-                let today_breakdown = gdb
-                    .token_breakdown_since(today_since)
-                    .await
-                    .unwrap_or((0, 0, 0));
-
-                let fmt_row = |label: &str, cost: f64, input: u64, output: u64, cache_read: u64| {
-                    let input_s = tracedecay::display::format_token_count(input);
-                    let output_s = tracedecay::display::format_token_count(output);
-                    let cache_pct = if input + cache_read > 0 {
-                        (cache_read as f64 / (input + cache_read) as f64) * 100.0
-                    } else {
-                        0.0
-                    };
-                    println!(
-                        "  {:<10} {:>9} {:>10} {:>10} {:>9.0}%",
-                        label,
-                        format!("${cost:.2}"),
-                        input_s,
-                        output_s,
-                        cache_pct
-                    );
-                };
-
-                println!(
-                    "  {:<10} {:>10} {:>10} {:>10} {:>10}",
-                    "Period", "Cost", "Input", "Output", "Cache-hit"
-                );
-                fmt_row(
-                    "Today",
-                    today_cost,
-                    today_breakdown.0,
-                    today_breakdown.1,
-                    today_breakdown.2,
-                );
-                fmt_row(
-                    &range,
-                    s.total_cost,
-                    s.total_input_tokens,
-                    s.total_output_tokens,
-                    s.total_cache_read_tokens,
-                );
-
-                if s.tokens_saved > 0 {
-                    let saved_str = tracedecay::display::format_token_count(s.tokens_saved);
-                    println!();
-                    println!(
-                        "  Savings  {} tokens ({:.0}% efficiency)",
-                        saved_str,
-                        s.efficiency_ratio * 100.0
-                    );
-                }
-            }
+            cost_cmd::handle_cost(range, by_model, by_task, export).await?;
         }
         Commands::Bench {
             queries,
@@ -1636,7 +806,7 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
             }
         }
         Commands::Sessions { action } => {
-            handle_sessions_action(action).await?;
+            sessions_cmd::handle_sessions_action(action).await?;
         }
         Commands::Branch { action } => {
             commands::handle_branch_action(action).await?;
@@ -1652,7 +822,8 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                 let cg = crate::serve::ensure_initialized(&project_path).await?;
                 let status = cg.project_memory_status().await?;
                 let largest_bank_fact_count =
-                    largest_memory_bank_fact_count_at(&cg.store_layout().graph_db_path).await?;
+                    status_cmd::largest_memory_bank_fact_count_at(&cg.store_layout().graph_db_path)
+                        .await?;
                 let largest_bank_utilization_pct = if status.estimated_capacity > 0 {
                     largest_bank_fact_count as f64 / status.estimated_capacity as f64 * 100.0
                 } else {
@@ -1671,7 +842,7 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                 } else {
                     print!(
                         "{}",
-                        format_memory_status_report(&status, largest_bank_fact_count)
+                        status_cmd::format_memory_status_report(&status, largest_bank_fact_count)
                     );
                 }
             }
@@ -1679,6 +850,9 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                 commands::handle_memory_action(other).await?;
             }
         },
+        Commands::Automation { action } => {
+            automation_cli::handle_automation_command(action).await?;
+        }
         Commands::Migrate { action } => {
             commands::handle_migrate_action(action).await?;
         }
@@ -1690,121 +864,6 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
         }
     }
     Ok(())
-}
-
-#[derive(Clone, Copy)]
-enum SessionProvider {
-    Cursor,
-    Codex,
-    All,
-}
-
-async fn handle_sessions_action(action: SessionsAction) -> tracedecay::errors::Result<()> {
-    match action {
-        SessionsAction::Ingest {
-            provider,
-            project_id,
-            project_path,
-        } => {
-            let project_path = resolve_cli_project_root(None, project_id, project_path).await?;
-            let db = tracedecay::sessions::cursor::open_project_session_db(&project_path)
-                .await
-                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-                    message: format!(
-                        "could not open project session database for {}",
-                        project_path.display()
-                    ),
-                })?;
-            let provider = parse_session_provider(provider.as_deref())?;
-            let stats = ingest_selected_session_sources(&db, &project_path, provider).await;
-            println!(
-                "ingested {} session(s), {} message(s)",
-                stats.sessions_upserted, stats.messages_upserted
-            );
-        }
-        SessionsAction::Search {
-            query,
-            provider,
-            limit,
-            project_id,
-            project_path,
-        } => {
-            let project_path = resolve_cli_project_root(None, project_id, project_path).await?;
-            let db = tracedecay::sessions::cursor::open_project_session_db(&project_path)
-                .await
-                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-                    message: format!(
-                        "could not open project session database for {}",
-                        project_path.display()
-                    ),
-                })?;
-            let results = match optional_session_search_provider(provider.as_deref()) {
-                Some(provider) => {
-                    db.search_session_messages(provider, None, &query, limit)
-                        .await
-                }
-                None => {
-                    db.search_session_messages_all_providers_filtered(
-                        None,
-                        &query,
-                        limit,
-                        tracedecay::sessions::SessionSearchScope::All,
-                        None,
-                    )
-                    .await
-                }
-            };
-            for result in results {
-                println!(
-                    "[{}] {} {}: {}",
-                    result.session.provider,
-                    result.session.project_key,
-                    result.message.role,
-                    result.message.text.replace('\n', " ")
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn ingest_selected_session_sources(
-    db: &tracedecay::global_db::GlobalDb,
-    project_root: &std::path::Path,
-    provider: SessionProvider,
-) -> tracedecay::sessions::source::TranscriptIngestStats {
-    match provider {
-        SessionProvider::All => tracedecay::sessions::ingest_global_sources(db, project_root).await,
-        SessionProvider::Cursor => {
-            let Some(source) = tracedecay::sessions::cursor::CursorSweepSource::new() else {
-                return tracedecay::sessions::source::TranscriptIngestStats::default();
-            };
-            tracedecay::sessions::source::ingest_source(db, &source, project_root, None).await
-        }
-        SessionProvider::Codex => {
-            let Some(source) = tracedecay::sessions::codex::CodexSource::new() else {
-                return tracedecay::sessions::source::TranscriptIngestStats::default();
-            };
-            tracedecay::sessions::source::ingest_source(db, &source, project_root, None).await
-        }
-    }
-}
-
-fn parse_session_provider(provider: Option<&str>) -> tracedecay::errors::Result<SessionProvider> {
-    match provider.unwrap_or("all") {
-        "cursor" => Ok(SessionProvider::Cursor),
-        "codex" => Ok(SessionProvider::Codex),
-        "all" => Ok(SessionProvider::All),
-        other => Err(tracedecay::errors::TraceDecayError::Config {
-            message: format!("unknown session provider '{other}' (expected cursor, codex, or all)"),
-        }),
-    }
-}
-
-fn optional_session_search_provider(provider: Option<&str>) -> Option<&str> {
-    provider
-        .map(str::trim)
-        .filter(|provider| !provider.is_empty() && *provider != "all")
 }
 
 fn should_skip_startup_maintenance(command: &Commands) -> bool {
@@ -1891,294 +950,7 @@ fn is_local_install_command(command: &Commands) -> bool {
 }
 
 #[cfg(test)]
-mod startup_tests {
-    use super::{
-        hermes_profile_targets, hermes_selected_profile_targets, is_local_install_command,
-        run_update_steps, should_skip_agent_install_maintenance, should_skip_startup_maintenance,
-        validate_hermes_profile_flags, validate_hermes_project_root_flag, Commands,
-    };
-    use std::cell::RefCell;
-    use tempfile::TempDir;
-
-    #[test]
-    fn doctor_skips_startup_maintenance() {
-        let command = Commands::Doctor {
-            agent: Some("kiro".to_string()),
-        };
-        assert!(should_skip_startup_maintenance(&command));
-    }
-
-    #[test]
-    fn explicit_agent_config_commands_skip_startup_maintenance() {
-        assert!(should_skip_startup_maintenance(&Commands::Install {
-            agent: Some("kiro".to_string()),
-            local: false,
-            profile: None,
-            all_profiles: false,
-            project_root: None,
-            no_dashboard: false,
-            automation: false,
-        }));
-        assert!(should_skip_startup_maintenance(&Commands::Reinstall));
-        assert!(should_skip_startup_maintenance(&Commands::UpdatePlugin));
-        assert!(should_skip_startup_maintenance(&Commands::Update));
-        assert!(should_skip_startup_maintenance(&Commands::PostUpdate));
-        assert!(should_skip_startup_maintenance(&Commands::Uninstall {
-            agent: Some("kiro".to_string()),
-            profile: None,
-            all_profiles: false,
-        }));
-    }
-
-    #[test]
-    fn normal_commands_keep_startup_maintenance() {
-        assert!(!should_skip_startup_maintenance(&Commands::Status {
-            path: None,
-            project_id: None,
-            project_path: None,
-            json: false,
-            short: false,
-            details: false,
-            runtime: false,
-        }));
-    }
-
-    #[test]
-    fn agent_install_maintenance_is_selective() {
-        // Skip the implicit reinstall scan on the hot path (`serve`), on the
-        // explicit install commands (they already install), and on per-call
-        // tool invocations.
-        assert!(should_skip_agent_install_maintenance(&Commands::Serve {
-            path: None,
-            timings: false,
-        }));
-        assert!(should_skip_agent_install_maintenance(&Commands::Install {
-            agent: Some("cursor".to_string()),
-            local: false,
-            profile: None,
-            all_profiles: false,
-            project_root: None,
-            no_dashboard: false,
-            automation: false,
-        }));
-        assert!(should_skip_agent_install_maintenance(&Commands::Reinstall));
-        // `update-plugin` promises byte-identical configs; the implicit
-        // silent-reinstall prelude would rewrite them.
-        assert!(should_skip_agent_install_maintenance(
-            &Commands::UpdatePlugin
-        ));
-        assert!(should_skip_agent_install_maintenance(&Commands::Update));
-        assert!(should_skip_agent_install_maintenance(&Commands::PostUpdate));
-        assert!(should_skip_agent_install_maintenance(&Commands::Tool {
-            project: None,
-            name: Some("message_search".to_string()),
-            args: Vec::new(),
-        }));
-
-        // Also skip for uninstall (about to remove configs) and doctor (a
-        // read-only diagnostic) — restoring the original #84 intent.
-        assert!(should_skip_agent_install_maintenance(
-            &Commands::Uninstall {
-                agent: Some("cursor".to_string()),
-                profile: None,
-                all_profiles: false,
-            }
-        ));
-        assert!(should_skip_agent_install_maintenance(&Commands::Doctor {
-            agent: Some("cursor".to_string()),
-        }));
-
-        // Run maintenance for normal everyday command invocations so a binary
-        // upgrade re-syncs agent config.
-        assert!(!should_skip_agent_install_maintenance(&Commands::Init {
-            path: None,
-            skip_folders: Vec::new(),
-            include_folders: Vec::new(),
-        }));
-        assert!(!should_skip_agent_install_maintenance(&Commands::Status {
-            path: None,
-            project_id: None,
-            project_path: None,
-            json: false,
-            short: false,
-            details: false,
-            runtime: false,
-        }));
-    }
-
-    #[test]
-    fn update_steps_run_post_update_after_upgrade() {
-        let calls = RefCell::new(Vec::new());
-
-        run_update_steps(
-            || {
-                calls.borrow_mut().push("upgrade");
-                Ok(())
-            },
-            || {
-                calls.borrow_mut().push("post-update");
-                Ok(())
-            },
-        )
-        .expect("update steps should succeed");
-
-        assert_eq!(calls.into_inner(), vec!["upgrade", "post-update"]);
-    }
-
-    #[test]
-    fn update_steps_stop_after_upgrade_failure() {
-        let calls = RefCell::new(Vec::new());
-
-        let result = run_update_steps(
-            || {
-                calls.borrow_mut().push("upgrade");
-                Err(tracedecay::errors::TraceDecayError::Config {
-                    message: "upgrade failed".to_string(),
-                })
-            },
-            || {
-                calls.borrow_mut().push("post-update");
-                Ok(())
-            },
-        );
-
-        assert!(result.is_err());
-        assert_eq!(calls.into_inner(), vec!["upgrade"]);
-    }
-
-    #[test]
-    fn serve_skips_startup_maintenance() {
-        // `tracedecay serve` is the MCP hot path with a 30 s client-side
-        // `initialize` timeout (#84). Pre-serve maintenance work
-        // (worldwide-counter flush, install-stale check, silent reinstall)
-        // must NOT run on this path.
-        assert!(should_skip_startup_maintenance(&Commands::Serve {
-            path: None,
-            timings: false,
-        }));
-    }
-
-    #[test]
-    fn claude_and_kiro_hooks_skip_startup_maintenance() {
-        // Claude and Kiro lifecycle hooks are agent-invoked hot-path
-        // commands, exactly like the Cursor/Codex hooks already in the
-        // skip-list. They must skip the synchronous `try_flush` network
-        // round-trip (and the rest of the pre-command startup maintenance)
-        // so they stay fast on every tool-use/prompt/stop event (#84).
-        assert!(should_skip_startup_maintenance(&Commands::HookPreToolUse));
-        assert!(should_skip_startup_maintenance(&Commands::HookPromptSubmit));
-        assert!(should_skip_startup_maintenance(&Commands::HookStop));
-        assert!(should_skip_startup_maintenance(
-            &Commands::HookKiroPreToolUse
-        ));
-        assert!(should_skip_startup_maintenance(
-            &Commands::HookKiroPromptSubmit
-        ));
-        assert!(should_skip_startup_maintenance(
-            &Commands::HookKiroPostToolUse
-        ));
-    }
-
-    #[test]
-    fn local_install_detection_tracks_dispatch_preamble_behavior() {
-        let local = Commands::Install {
-            agent: Some("hermes".to_string()),
-            local: true,
-            profile: Some("dev".to_string()),
-            all_profiles: false,
-            project_root: None,
-            no_dashboard: false,
-            automation: false,
-        };
-        let global = Commands::Install {
-            agent: Some("hermes".to_string()),
-            local: false,
-            profile: Some("dev".to_string()),
-            all_profiles: false,
-            project_root: None,
-            no_dashboard: false,
-            automation: false,
-        };
-
-        assert!(is_local_install_command(&local));
-        assert!(!is_local_install_command(&global));
-    }
-
-    #[test]
-    fn hermes_profile_flags_are_restricted_to_hermes() {
-        let profile = Some("dev".to_string());
-        let none_profile: Option<String> = None;
-
-        let profile_err = validate_hermes_profile_flags(Some("cursor"), &profile, false)
-            .expect_err("non-hermes --profile should fail");
-        assert!(format!("{profile_err}")
-            .contains("`--profile` is only supported with `--agent hermes`"));
-
-        let all_profiles_err = validate_hermes_profile_flags(Some("cursor"), &none_profile, true)
-            .expect_err("non-hermes --all-profiles should fail");
-        assert!(format!("{all_profiles_err}")
-            .contains("`--all-profiles` is only supported with `--agent hermes`"));
-
-        assert!(validate_hermes_profile_flags(Some("hermes"), &profile, false).is_ok());
-        assert!(validate_hermes_profile_flags(Some("hermes"), &none_profile, true).is_ok());
-    }
-
-    #[test]
-    fn hermes_project_root_flag_requires_hermes_and_absolute_paths() {
-        let temp = TempDir::new().expect("tempdir should exist");
-        let absolute = temp.path().join("project-root");
-        let absolute_str = absolute.to_string_lossy().to_string();
-        let absolute_flag = Some(absolute_str.clone());
-
-        let agent_err = validate_hermes_project_root_flag(Some("cursor"), &absolute_flag)
-            .expect_err("non-hermes project-root should fail");
-        assert!(format!("{agent_err}")
-            .contains("`--project-root` is only supported with `--agent hermes`"));
-
-        let relative_flag = Some("relative/project".to_string());
-        let relative_err = validate_hermes_project_root_flag(Some("hermes"), &relative_flag)
-            .expect_err("relative project-root should fail");
-        assert!(format!("{relative_err}").contains("`--project-root` must be an absolute path"));
-
-        assert_eq!(
-            validate_hermes_project_root_flag(Some("hermes"), &absolute_flag)
-                .expect("absolute hermes project-root should pass"),
-            Some(absolute)
-        );
-    }
-
-    #[test]
-    fn hermes_profile_target_helpers_preserve_default_and_sorted_profiles() {
-        let temp = TempDir::new().expect("tempdir should exist");
-        let profiles_dir = temp.path().join(".hermes/profiles");
-        std::fs::create_dir_all(profiles_dir.join("zeta")).expect("zeta profile dir");
-        std::fs::create_dir_all(profiles_dir.join("alpha")).expect("alpha profile dir");
-        std::fs::write(profiles_dir.join("README.txt"), "not a profile")
-            .expect("profile marker file");
-
-        let all_targets =
-            hermes_profile_targets(temp.path()).expect("profile discovery should work");
-        assert_eq!(
-            all_targets,
-            vec![None, Some("alpha".to_string()), Some("zeta".to_string()),]
-        );
-
-        let selected =
-            hermes_selected_profile_targets(temp.path(), &Some("dev".to_string()), false)
-                .expect("explicit profile selection should not scan disk");
-        assert_eq!(selected, vec![Some("dev".to_string())]);
-
-        let selected_all = hermes_selected_profile_targets(temp.path(), &None, true)
-            .expect("all-profiles selection should enumerate profiles");
-        assert_eq!(selected_all, all_targets);
-    }
-
-    // These tests intentionally stay on pure parse/dispatch guard seams. Direct
-    // invocation of blocking or destructive run arms (serve/dashboard/upgrade,
-    // install mutations, status network paths, hooks that `process::exit`) is
-    // documented in docs/MAIN-RUN-DISPATCH-NOTE.md §5 and remains covered, where
-    // appropriate, by spawn-the-binary integration tests instead.
-}
+mod startup_tests;
 
 // handle_branch_action, handle_wipe, handle_list, handle_no_command,
 // init_and_index, and print_sync_doctor have been moved to src/commands.rs.

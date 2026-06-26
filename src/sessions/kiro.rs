@@ -48,7 +48,7 @@ impl KiroSource {
     /// Source rooted at the real Kiro IDE storage. Returns `None` when home
     /// cannot be resolved.
     pub fn new() -> Option<Self> {
-        let home = dirs::home_dir()?;
+        let home = crate::sessions::home_dir()?;
         Some(Self::with_home(&home))
     }
 

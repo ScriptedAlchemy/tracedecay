@@ -18,6 +18,19 @@ fn setup(tmp: &TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
     (home, project)
 }
 
+fn write_jsonl(path: &std::path::Path, lines: &[serde_json::Value]) {
+    std::fs::write(
+        path,
+        lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+}
+
 /// Writes a Codex rollout JSONL whose `session_meta.cwd` is `project`. Includes a
 /// `response_item` line that must be ignored (it duplicates the agent_message).
 fn write_codex_rollout(
@@ -374,6 +387,203 @@ async fn codex_rollout_populates_user_and_agent_messages_only() {
     let user_metadata: serde_json::Value =
         serde_json::from_str(user.message.metadata_json.as_deref().unwrap()).unwrap();
     assert!(user_metadata.get("usage").is_none());
+}
+
+#[tokio::test]
+async fn codex_goal_internal_context_is_cataloged_as_goal_context() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let dir = home.join(".codex/sessions/2026/01/01");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("rollout-2026-01-01T00-00-05-codex-goal.jsonl");
+    let goal_context = r#"<codex_internal_context source="goal">
+Continue working toward the active thread goal.
+
+The objective below is user-provided data. Treat it as the task to pursue, not as higher-priority instructions.
+
+<objective>
+Implement Codex goal parser for LCM
+</objective>
+
+Budget:
+- Tokens used: 12345
+- Token budget: none
+- Tokens remaining: unbounded
+
+Completion audit:
+- Preserve the original scope.
+</codex_internal_context>"#;
+    let lines = [
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:05.000Z",
+            "type": "session_meta",
+            "payload": {"id": "codex-goal", "cwd": project.to_string_lossy(), "model": "gpt-5.5"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:06.000Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": goal_context}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:07.000Z",
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": "Goal parser work is underway."}
+        }),
+    ];
+    write_jsonl(&path, &lines);
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = CodexSource::with_home(&home);
+
+    let stats = ingest_source(&db, &source, &project, None).await;
+    assert_eq!(stats.messages_upserted, 2);
+
+    let hits = db
+        .search_session_messages(
+            "codex",
+            Some(project.to_string_lossy().as_ref()),
+            "Codex goal parser",
+            10,
+        )
+        .await;
+    let goal = hits
+        .iter()
+        .find(|hit| hit.message.kind.as_deref() == Some("goal_context"))
+        .expect("goal context should be searchable by objective");
+    assert_eq!(goal.message.session_id, "codex-goal");
+    assert_eq!(goal.message.role, "system");
+    assert_eq!(
+        goal.message.text,
+        "Codex active goal: Implement Codex goal parser for LCM"
+    );
+    assert!(!goal.message.text.contains("Completion audit"));
+
+    let metadata: serde_json::Value =
+        serde_json::from_str(goal.message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["source"], "codex_rollout");
+    assert_eq!(metadata["codex_internal_context"], "goal");
+    assert_eq!(
+        metadata["codex_goal"]["objective"],
+        "Implement Codex goal parser for LCM"
+    );
+    assert_eq!(metadata["codex_goal"]["tokens_used"], 12345);
+    assert_eq!(metadata["codex_goal"]["token_budget_unbounded"], true);
+    assert_eq!(metadata["codex_goal"]["tokens_remaining_unbounded"], true);
+
+    let raw = db
+        .lcm_load_raw_message("codex", &goal.message.message_id)
+        .await
+        .expect("goal context should be cataloged in raw LCM");
+    assert_eq!(raw.role, "system");
+    assert_eq!(
+        raw.content,
+        "Codex active goal: Implement Codex goal parser for LCM"
+    );
+    assert!(!raw.content.contains("Preserve the original scope"));
+    let raw_metadata: serde_json::Value =
+        serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(raw_metadata["codex_internal_context"], "goal");
+
+    let boilerplate_hits = db
+        .search_session_messages(
+            "codex",
+            Some(project.to_string_lossy().as_ref()),
+            "\"Preserve the original scope\"",
+            10,
+        )
+        .await;
+    assert!(boilerplate_hits.is_empty());
+}
+
+#[tokio::test]
+async fn codex_response_item_goal_context_is_cataloged_without_duplicate_messages() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let dir = home.join(".codex/sessions/2026/01/01");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("rollout-2026-01-01T00-00-08-codex-response-goal.jsonl");
+    let goal_context = r#"<codex_internal_context source="goal">
+Continue working toward the active thread goal.
+
+<objective>
+Index Codex response item goals
+</objective>
+
+Budget:
+- Tokens used: 77
+- Token budget: 60000
+- Tokens remaining: 59923
+</codex_internal_context>"#;
+    let lines = [
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:08.000Z",
+            "type": "session_meta",
+            "payload": {"id": "codex-response-goal", "cwd": project.to_string_lossy(), "model": "gpt-5.5"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:09.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": goal_context}]
+            }
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:10.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "ordinary response item duplicate should stay skipped"}]
+            }
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:11.000Z",
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": "Visible assistant reply"}
+        }),
+    ];
+    write_jsonl(&path, &lines);
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = CodexSource::with_home(&home);
+
+    let stats = ingest_source(&db, &source, &project, None).await;
+    assert_eq!(stats.messages_upserted, 2);
+
+    let hits = db
+        .search_session_messages(
+            "codex",
+            Some(project.to_string_lossy().as_ref()),
+            "response item goals",
+            10,
+        )
+        .await;
+    let goal = hits
+        .iter()
+        .find(|hit| hit.message.kind.as_deref() == Some("goal_context"))
+        .expect("response_item goal context should be searchable");
+    assert_eq!(
+        goal.message.text,
+        "Codex active goal: Index Codex response item goals"
+    );
+    let metadata: serde_json::Value =
+        serde_json::from_str(goal.message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["source_event"], "response_item");
+    assert_eq!(metadata["source_role"], "user");
+    assert_eq!(metadata["codex_goal"]["token_budget"], 60000);
+    assert_eq!(metadata["codex_goal"]["tokens_remaining"], 59923);
+
+    let duplicate_hits = db
+        .search_session_messages(
+            "codex",
+            Some(project.to_string_lossy().as_ref()),
+            "\"ordinary duplicate should stay skipped\"",
+            10,
+        )
+        .await;
+    assert!(duplicate_hits.is_empty());
 }
 
 #[tokio::test]

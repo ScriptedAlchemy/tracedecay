@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +19,14 @@ pub mod shared;
 pub mod source;
 pub(crate) mod transcript_backfill;
 pub mod vibe;
+
+pub(crate) fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()))
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
+}
 
 /// Ingest transcripts from every path-discoverable agent whose sessions
 /// belong to `project_root`, into the active project session store (`db`).

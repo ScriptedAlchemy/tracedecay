@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::automation::config::AutomationConfig;
+
 /// User-level tracedecay configuration.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserConfig {
@@ -86,6 +88,11 @@ pub struct UserConfig {
     /// pathological grammar / input combo.
     #[serde(default = "default_extraction_timeout_secs")]
     pub extraction_timeout_secs: u64,
+
+    /// Global defaults for self-improvement automation. Project/profile
+    /// dashboard sidecars may override these values.
+    #[serde(default, skip_serializing_if = "AutomationConfig::is_default")]
+    pub automation: AutomationConfig,
 }
 
 fn default_true() -> bool {
@@ -120,6 +127,7 @@ impl Default for UserConfig {
             last_installed_version: String::new(),
             previous_version: String::new(),
             extraction_timeout_secs: default_extraction_timeout_secs(),
+            automation: AutomationConfig::default(),
         }
     }
 }
