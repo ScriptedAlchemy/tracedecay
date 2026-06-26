@@ -217,6 +217,7 @@ fn default_scheduler_tick_secs() -> u64 {
     DEFAULT_SCHEDULER_TICK_SECS
 }
 
+#[allow(clippy::option_option)]
 fn deserialize_clearable_field<'de, D, T>(
     deserializer: D,
 ) -> std::result::Result<Option<Option<T>>, D::Error>

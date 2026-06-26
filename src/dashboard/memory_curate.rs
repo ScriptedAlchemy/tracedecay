@@ -14,6 +14,7 @@
 //! (the evidence guard) and applies them through the canonical store paths.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use serde_json::{json, Map, Value};
@@ -24,7 +25,7 @@ use super::memory_service::{
     apply_delete_op, apply_merge_op, build_delete_plan, delete_fact, similarity_computation,
 };
 use super::util::{qmarks, query_rows};
-use super::{storage_mode_label, token_count, DashboardState};
+use super::{code_diagnostics_broker, storage_mode_label, token_count, DashboardState};
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
@@ -135,6 +136,11 @@ async fn cli_state(cg: &TraceDecay) -> DashboardState {
         curate_preview: Arc::new(RwLock::new(None)),
         curation_activity: Arc::new(RwLock::new(Vec::new())),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
+        code_diagnostics: Arc::new(RwLock::new(code_diagnostics_broker(
+            cg.project_root().to_path_buf(),
+            crate::diagnostics::lsp::settings::CodeDiagnosticsSettings::default(),
+        ))),
+        code_diagnostics_backfill_started: Arc::new(AtomicBool::new(false)),
     }
 }
 

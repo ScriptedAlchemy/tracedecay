@@ -1,7 +1,7 @@
 use super::{
     AutomationAction, AutomationConfigAction, AutomationConfigScope, AutomationRunAction,
     AutomationRunsAction, AutomationSkillsAction, AutomationSkillsInstallTarget, BranchAction, Cli,
-    Commands, DaemonAction, MemoryAction, MigrateAction, SessionsAction,
+    Commands, DaemonAction, LspAction, MemoryAction, MigrateAction, SessionsAction,
 };
 use clap::{error::ErrorKind, CommandFactory, Parser};
 
@@ -104,6 +104,19 @@ fn update_help_describes_refresh_scope() {
 
     assert!(help.contains("update"));
     assert!(help.contains("Refresh the tracedecay binary, generated plugins, and daemon"));
+}
+
+#[test]
+fn lsp_servers_command_parses_json_flag() {
+    let cli = Cli::try_parse_from(["tracedecay", "lsp", "servers", "--json"])
+        .expect("lsp servers should parse");
+
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Lsp {
+            action: LspAction::Servers { json: true }
+        })
+    ));
 }
 
 #[test]

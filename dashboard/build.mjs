@@ -7,6 +7,7 @@
  *   shell/dist/shell.js + shell.css   Standalone host shell.
  *   holographic/dist/index.js         Holographic-memory plugin bundle.
  *   graph/dist/index.js               Code graph explorer plugin bundle.
+ *   code-diagnostics/dist/index.js    LSP code diagnostics plugin bundle.
  *   savings/dist/index.js             Savings plugin bundle.
  *   lcm/dist/index.js + style.css     Copied from lcm/src.
  *   hermes-wrapper/dist/*             Combined Hermes dashboard plugin.
@@ -32,6 +33,7 @@ async function main() {
     buildShell(),
     buildHolographicPlugin(),
     buildPlugin("graph", "code graph", { primitives: true }),
+    buildPlugin("code-diagnostics", "code diagnostics", { primitives: true }),
     buildPlugin("savings", "savings & cost", { primitives: true }),
     buildPlugin("lcm", "LCM", { primitives: true }),
   ]);

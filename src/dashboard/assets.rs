@@ -34,9 +34,87 @@ pub(crate) const LCM_JS: &str = include_str!("../../dashboard/lcm/dist/index.js"
 pub(crate) const LCM_CSS: &str = include_str!("../../dashboard/lcm/dist/style.css");
 pub(crate) const GRAPH_JS: &str = include_str!("../../dashboard/graph/dist/index.js");
 pub(crate) const GRAPH_CSS: &str = include_str!("../../dashboard/graph/dist/style.css");
+pub(crate) const CODE_DIAGNOSTICS_JS: &str =
+    include_str!("../../dashboard/code-diagnostics/dist/index.js");
+pub(crate) const CODE_DIAGNOSTICS_CSS: &str =
+    include_str!("../../dashboard/code-diagnostics/dist/style.css");
 pub(crate) const SAVINGS_JS: &str = include_str!("../../dashboard/savings/dist/index.js");
 pub(crate) const SAVINGS_CSS: &str = include_str!("../../dashboard/savings/dist/style.css");
 const ASSET_STAMP: &str = env!("TRACEDECAY_DASHBOARD_ASSET_STAMP");
+
+pub(crate) struct DashboardPlugin {
+    pub(crate) name: &'static str,
+    pub(crate) label: &'static str,
+    pub(crate) description: &'static str,
+    pub(crate) icon: &'static str,
+}
+
+pub(crate) const DASHBOARD_PLUGINS: &[DashboardPlugin] = &[
+    DashboardPlugin {
+        name: "holographic",
+        label: "Holographic Memory",
+        description: "Holographic memory explorer + curation",
+        icon: "BrainCircuit",
+    },
+    DashboardPlugin {
+        name: "hermes-lcm",
+        label: "LCM",
+        description: "Lossless Context Management dashboard tab.",
+        icon: "Database",
+    },
+    DashboardPlugin {
+        name: "graph",
+        label: "Code Graph",
+        description: "Search and explore the indexed code graph.",
+        icon: "Network",
+    },
+    DashboardPlugin {
+        name: "savings",
+        label: "Savings & Cost",
+        description: "Token savings ledger and session cost accounting.",
+        icon: "PiggyBank",
+    },
+    DashboardPlugin {
+        name: "code-diagnostics",
+        label: "Code Diagnostics",
+        description: "LSP-backed compiler and type diagnostics.",
+        icon: "Bug",
+    },
+];
+
+struct PluginAsset {
+    plugin: &'static str,
+    js: &'static str,
+    css: &'static str,
+}
+
+const PLUGIN_ASSETS: &[PluginAsset] = &[
+    PluginAsset {
+        plugin: "holographic",
+        js: HOLOGRAPHIC_JS,
+        css: HOLOGRAPHIC_CSS,
+    },
+    PluginAsset {
+        plugin: "hermes-lcm",
+        js: LCM_JS,
+        css: LCM_CSS,
+    },
+    PluginAsset {
+        plugin: "graph",
+        js: GRAPH_JS,
+        css: GRAPH_CSS,
+    },
+    PluginAsset {
+        plugin: "code-diagnostics",
+        js: CODE_DIAGNOSTICS_JS,
+        css: CODE_DIAGNOSTICS_CSS,
+    },
+    PluginAsset {
+        plugin: "savings",
+        js: SAVINGS_JS,
+        css: SAVINGS_CSS,
+    },
+];
 
 /// `ETag` value for every embedded asset: the compile-time bundle stamp,
 /// quoted per RFC 9110.
@@ -113,15 +191,15 @@ pub(crate) async fn plugin_asset(
 ) -> Response {
     let serve =
         |body: &'static str, content_type| static_response(&headers, body.as_bytes(), content_type);
-    match (plugin.as_str(), file.as_str()) {
-        ("holographic", "index.js") => serve(HOLOGRAPHIC_JS, "application/javascript"),
-        ("holographic", "style.css") => serve(HOLOGRAPHIC_CSS, "text/css"),
-        ("hermes-lcm", "index.js") => serve(LCM_JS, "application/javascript"),
-        ("hermes-lcm", "style.css") => serve(LCM_CSS, "text/css"),
-        ("graph", "index.js") => serve(GRAPH_JS, "application/javascript"),
-        ("graph", "style.css") => serve(GRAPH_CSS, "text/css"),
-        ("savings", "index.js") => serve(SAVINGS_JS, "application/javascript"),
-        ("savings", "style.css") => serve(SAVINGS_CSS, "text/css"),
+    let Some(asset) = PLUGIN_ASSETS
+        .iter()
+        .find(|asset| asset.plugin == plugin.as_str())
+    else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match file.as_str() {
+        "index.js" => serve(asset.js, "application/javascript"),
+        "style.css" => serve(asset.css, "text/css"),
         _ => StatusCode::NOT_FOUND.into_response(),
     }
 }
