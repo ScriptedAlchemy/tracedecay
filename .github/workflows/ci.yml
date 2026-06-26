@@ -114,9 +114,6 @@ jobs:
           - hash:2/3
           - hash:3/3
     runs-on:
-      - self-hosted
-      - Windows
-      - X64
       - windows-runner
     env:
       RUSTC_WRAPPER: sccache
