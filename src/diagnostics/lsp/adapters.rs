@@ -35,7 +35,7 @@ pub struct LspInstallOption {
     pub notes: Option<String>,
 }
 
-/// Built-in language-server adapters for the Phase 1 dashboard surface.
+/// Built-in language-server adapters for the dashboard surface.
 pub fn builtin_adapters() -> Vec<LspAdapterDefinition> {
     vec![
         adapter(AdapterSpec {

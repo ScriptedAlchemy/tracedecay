@@ -140,15 +140,13 @@ impl PreparedRefresh {
         let mut diagnostics = Vec::new();
         for batch in self.batches {
             let mut client_slot = batch.client.lock().await;
-            if client_slot.is_none() {
-                *client_slot = Some(
+            let client = match client_slot.as_mut() {
+                Some(client) => client,
+                None => client_slot.insert(
                     StdioLspClient::start(&self.command, &self.args, &batch.workspace_root)
                         .await
                         .map_err(|err| err.to_string())?,
-                );
-            }
-            let Some(client) = client_slot.as_mut() else {
-                return Err("LSP client should be initialized".to_string());
+                ),
             };
             let result = client
                 .collect_document_diagnostics(

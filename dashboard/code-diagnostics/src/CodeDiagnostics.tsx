@@ -131,7 +131,6 @@ export default function CodeDiagnostics() {
                       patch({
                         languages: {
                           [engine.language]: {
-                            enabled: engine.enabled,
                             command_override: commandOverride,
                           },
                         },
