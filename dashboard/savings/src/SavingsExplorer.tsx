@@ -1,9 +1,3 @@
-/**
- * Savings & Cost tab root: view switcher (Savings / Sessions / Models &
- * Pricing) + time-range selector, loading data from
- * `/api/plugins/savings/*` and the shared price table from `/pricing`.
- */
-
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { cn } from "../../lib/sdk";
 import { ErrorPanel } from "../../lib/primitives";
@@ -13,7 +7,9 @@ import type { PriceTable } from "./pricing";
 import SavingsOverviewPanel from "./SavingsOverviewPanel";
 import SessionsPanel from "./SessionsPanel";
 import ModelsPanel from "./ModelsPanel";
+import DiagnosticsPanel from "./DiagnosticsPanel";
 import type {
+  DiagnosticsResponse,
   LedgerResponse,
   ModelsResponse,
   PricingResponse,
@@ -25,6 +21,7 @@ const VIEWS = [
   { id: "savings", label: "Savings" },
   { id: "sessions", label: "Sessions" },
   { id: "models", label: "Models & Pricing" },
+  { id: "diagnostics", label: "Diagnostics" },
 ] as const;
 
 type ViewId = (typeof VIEWS)[number]["id"];
@@ -46,6 +43,7 @@ export default function SavingsExplorer() {
   const [ledger, setLedger] = useState<LedgerResponse | null>(null);
   const [sessions, setSessions] = useState<SessionsResponse | null>(null);
   const [models, setModels] = useState<ModelsResponse | null>(null);
+  const [diagnostics, setDiagnostics] = useState<DiagnosticsResponse | null>(null);
   const [pricing, setPricing] = useState<PricingResponse | null>(null);
   const [error, setError] = useState<string>("");
   // Bumped by the Retry button; every fetch effect below depends on it.
@@ -55,15 +53,11 @@ export default function SavingsExplorer() {
 
   const retry = useCallback(() => setRetryToken((token) => token + 1), []);
 
-  /**
-   * Runs `fetch()` inside an effect, dropping the response after unmount or
-   * a dependency change so stale results never overwrite newer ones.
-   */
-  function fetchIntoState<T>(
+  const fetchIntoState = useCallback(<T,>(
     fetch: () => Promise<T>,
     setState: (value: T | null) => void,
     { clearBeforeLoad = false }: { clearBeforeLoad?: boolean } = {},
-  ): () => void {
+  ): () => void => {
     let active = true;
     setError("");
     if (clearBeforeLoad) setState(null);
@@ -78,12 +72,8 @@ export default function SavingsExplorer() {
     return () => {
       active = false;
     };
-  }
+  }, []);
 
-  // Each view fetches only what it renders. The overview (meta strip +
-  // savings stats) and the price table take no range/page params, so they
-  // load once; `sessions` is the only request that depends on the page, so
-  // paging the sessions table costs exactly one request.
   useEffect(() => {
     const cancelOverview = fetchIntoState(() => api.overview(), setOverview);
     const cancelPricing = fetchIntoState(() => api.pricing(), setPricing);
@@ -91,12 +81,12 @@ export default function SavingsExplorer() {
       cancelOverview();
       cancelPricing();
     };
-  }, [retryToken]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [fetchIntoState, retryToken]);
 
   useEffect(() => {
     if (view !== "savings") return;
     return fetchIntoState(() => api.ledger({ range }), setLedger, { clearBeforeLoad: true });
-  }, [view, range, retryToken]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [fetchIntoState, view, range, retryToken]);
 
   useEffect(() => {
     if (view !== "sessions") return;
@@ -105,12 +95,17 @@ export default function SavingsExplorer() {
       setSessions,
       { clearBeforeLoad: true },
     );
-  }, [view, range, page, retryToken]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [fetchIntoState, view, range, page, retryToken]);
 
   useEffect(() => {
     if (view !== "models") return;
     return fetchIntoState(() => api.models({ range }), setModels, { clearBeforeLoad: true });
-  }, [view, range, retryToken]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [fetchIntoState, view, range, retryToken]);
+
+  useEffect(() => {
+    if (view !== "diagnostics") return;
+    return fetchIntoState(() => api.diagnostics(), setDiagnostics, { clearBeforeLoad: true });
+  }, [fetchIntoState, view, retryToken]);
 
   const sessionStats = overview?.sessions;
 
@@ -193,6 +188,7 @@ export default function SavingsExplorer() {
       {view === "models" && (
         <ModelsPanel data={models} pricing={pricing} prices={prices} />
       )}
+      {view === "diagnostics" && <DiagnosticsPanel data={diagnostics} />}
     </div>
   );
 }

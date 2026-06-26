@@ -70,22 +70,32 @@ export function SkeletonLines({
   );
 }
 
-/** Big-value + small-label stat tile. */
+/** Big-value + small-label stat tile.
+ *
+ * `title` surfaces a plain-language explanation as a native browser tooltip
+ * (and a `help` cursor) on the whole tile — used by holographic stat rows that
+ * need to explain what a number means without adding visible chrome. */
 export function Stat({
   label,
   value,
   hint,
+  title,
   variant = "default",
   className,
 }: {
   label: string;
   value: React.ReactNode;
   hint?: string;
+  /** Native tooltip text for the whole tile; sets cursor: help when present. */
+  title?: string;
   variant?: "default" | "compact";
   className?: string;
 }) {
   return (
-    <div className={cn("tdp-stat", variant === "compact" && "tdp-stat-compact", className)}>
+    <div
+      className={cn("tdp-stat", variant === "compact" && "tdp-stat-compact", className)}
+      title={title}
+    >
       <div className="tdp-stat-value">{value}</div>
       <div className="tdp-stat-label">{label}</div>
       {hint && <div className="tdp-stat-hint">{hint}</div>}

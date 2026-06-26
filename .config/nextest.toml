@@ -6,7 +6,7 @@ slow-timeout = { period = "10s", terminate-after = 36 }
 final-status-level = "slow"
 
 [[profile.ci.overrides]]
-filter = 'binary_id(tracedecay::mcp_handler_test)'
+filter = 'all()'
 platform = { host = 'cfg(windows)' }
 retries = 2
 flaky-result = 'pass'

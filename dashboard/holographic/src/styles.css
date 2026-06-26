@@ -27,6 +27,7 @@
   --color-border: rgba(139, 255, 218, 0.16);
   --color-primary: #75f4d2;
   --color-secondary: #7aa7ff;
+  --color-accent: #7aa7ff;
   --color-muted: rgba(117, 244, 210, 0.1);
   --color-muted-foreground: #6f9189;
   --color-destructive: #ff6b7a;
@@ -191,23 +192,40 @@ input[type="range"] {
   gap: 0.35rem;
   min-height: 4.1rem;
   align-content: start;
+  /* Override the shared .tdp-stat defaults with tighter radius, holographic
+   * sheen, and SystemStrip's denser padding. */
+  border: 1px solid var(--hm-line);
   border-radius: 14px;
+  padding: 0.5rem 0.75rem;
   background:
     linear-gradient(180deg, color-mix(in srgb, var(--hm-text) 4%, transparent), transparent 42%),
     color-mix(in srgb, var(--hm-bg) 48%, transparent);
 }
 
-.hm-stat-value {
+.hm-stat .tdp-stat-value {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   overflow-wrap: anywhere;
+  color: var(--hm-text);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 1.125rem;
+  line-height: 1;
 }
 
-.hm-stat-label {
+.hm-stat .tdp-stat-label {
   margin-top: 0;
   line-height: 1.25;
   text-transform: lowercase;
+  color: var(--hm-text-3);
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+}
+
+/* The storage-path stat shows a long filesystem path; shrink it and let the
+ * shared .tdp-stat-value ellipsis handle truncation. */
+.hm-path-stat .tdp-stat-value {
+  font-size: 0.75rem;
 }
 
 /* Reset default browser paragraph margins for plain card copy only. Paragraphs
@@ -282,12 +300,12 @@ input[type="range"] {
     border-radius: 12px;
   }
 
-  .hm-system-strip .hm-stat-value {
+  .hm-system-strip .hm-stat .tdp-stat-value {
     font-size: 0.95rem;
     line-height: 1.1;
   }
 
-  .hm-system-strip .hm-stat-label {
+  .hm-system-strip .hm-stat .tdp-stat-label {
     font-size: 0.66rem;
     letter-spacing: 0.05em;
   }

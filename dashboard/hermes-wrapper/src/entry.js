@@ -10,7 +10,8 @@
  *   1. evaluates each child bundle against a window Proxy whose
  *      `__HERMES_PLUGIN_SDK__.fetchJSON` rewrites the child's API base
  *      (`/api/plugins/holographic`, `/api/plugins/hermes-lcm`,
- *      `/api/plugins/graph`, `/api/plugins/savings`) onto this plugin's API
+ *      `/api/plugins/graph`, `/api/plugins/savings`, `/api/automation`,
+ *      `/api/plugins/analytics`) onto this plugin's API
  *      prefix (`/api/plugins/tracedecay/...`), which plugin_api.py
  *      reverse-proxies to a local `tracedecay dashboard` server;
  *   2. captures the components the child bundles register (without touching
@@ -36,6 +37,8 @@
     ["/api/plugins/hermes-lcm", "/api/plugins/" + PLUGIN + "/lcm"],
     ["/api/plugins/graph", "/api/plugins/" + PLUGIN + "/graph"],
     ["/api/plugins/savings", "/api/plugins/" + PLUGIN + "/savings"],
+    ["/api/automation", "/api/plugins/" + PLUGIN + "/automation"],
+    ["/api/plugins/analytics", "/api/plugins/" + PLUGIN + "/analytics"],
   ];
 
   function rewriteUrl(url) {

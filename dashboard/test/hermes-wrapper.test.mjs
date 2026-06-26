@@ -108,6 +108,8 @@ test("wrapper rewrites child API calls and keeps child registrations isolated", 
     [`${assetBase}/holographic.js`]: `
 window.__HERMES_PLUGIN_SDK__.fetchJSON("/api/plugins/holographic");
 window.__HERMES_PLUGIN_SDK__.fetchJSON("/api/plugins/holographic/similarity?limit=2");
+window.__HERMES_PLUGIN_SDK__.fetchJSON("/api/automation/run/memory-curator");
+window.__HERMES_PLUGIN_SDK__.fetchJSON("/api/automation/skills?state=pending");
 window.__HERMES_PLUGIN_SDK__.fetchJSON("/api/plugins/other");
 window.__HERMES_PLUGIN_SDK__.authedFetch("/api/plugins/hermes-lcm/search?q=abc");
 window.__boundResult = window.boundProbe();
@@ -126,6 +128,7 @@ window.__HERMES_PLUGINS__.register("graph", function Graph(){ return null; });
     [`${assetBase}/savings.js`]: `
 window.__HERMES_PLUGIN_SDK__.fetchJSON("/api/plugins/savings/overview");
 window.__HERMES_PLUGIN_SDK__.fetchJSON("/api/plugins/savings/ledger?range=30d");
+window.__HERMES_PLUGIN_SDK__.fetchJSON("/api/plugins/analytics/diagnostics");
 window.__HERMES_PLUGINS__.register("savings", function Savings(){ return null; });
 `,
   };
@@ -154,12 +157,15 @@ window.__HERMES_PLUGINS__.register("savings", function Savings(){ return null; }
     [
       "/api/plugins/tracedecay/holographic",
       "/api/plugins/tracedecay/holographic/similarity?limit=2",
+      "/api/plugins/tracedecay/automation/run/memory-curator",
+      "/api/plugins/tracedecay/automation/skills?state=pending",
       "/api/plugins/other",
       "/api/plugins/tracedecay/lcm/overview",
       "/api/plugins/tracedecay/graph",
       "/api/plugins/tracedecay/graph/nodes?limit=5",
       "/api/plugins/tracedecay/savings/overview",
       "/api/plugins/tracedecay/savings/ledger?range=30d",
+      "/api/plugins/tracedecay/analytics/diagnostics",
     ].sort(),
   );
   assert.deepEqual(loaded.authedFetchCalls.map(([url]) => url).sort(), [
