@@ -13,6 +13,9 @@ use std::time::{Duration, Instant};
 use common::{canonical_existing_path, spawn_tracedecay_daemon, tracedecay_command_with_home};
 use serde_json::{json, Value};
 use tempfile::TempDir;
+use tracedecay::storage::{
+    default_profile_project_id, write_enrollment_marker, EnrollmentMarker, StorageMode,
+};
 
 fn init_project_with_cli(home: &Path, project: &Path) {
     std::fs::create_dir_all(project.join("src")).unwrap();
@@ -33,6 +36,21 @@ fn init_project_with_cli(home: &Path, project: &Path) {
     assert!(
         output.status.success(),
         "tracedecay init failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn git(project: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(project)
+        .output()
+        .expect("git should run");
+    assert!(
+        output.status.success(),
+        "git {:?} failed\nstdout:\n{}\nstderr:\n{}",
+        args,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -611,6 +629,182 @@ fn daemon_project_handshake_uses_client_profile_identity() {
         "daemon should open the client's profile-sharded project\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn daemon_first_touch_init_does_not_mask_existing_profile_config_errors() {
+    let daemon_home = TempDir::new().unwrap();
+    let client_home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let daemon_home_path = canonical_existing_path(daemon_home.path());
+    let client_home_path = canonical_existing_path(client_home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&client_home_path, &project_path);
+
+    let project_id = default_profile_project_id(&project_path);
+    let config_path = client_home_path
+        .join(".tracedecay/projects")
+        .join(project_id)
+        .join("config.json");
+    std::fs::write(&config_path, b"{not json").unwrap();
+
+    let _daemon = spawn_tracedecay_daemon(&daemon_home_path);
+    let socket_path = common::daemon_socket_path(&daemon_home_path);
+    let project_arg = project_path.to_string_lossy().to_string();
+    let output = tracedecay_command_with_home(&client_home_path)
+        .current_dir(&project_path)
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+        .args([
+            "tool",
+            "--project",
+            &project_arg,
+            "fact_store",
+            "--json",
+            "--args",
+            r#"{"action":"add","content":"do not hide config errors","fact_type":"decision"}"#,
+        ])
+        .output()
+        .expect("tracedecay tool should run");
+
+    assert!(
+        !output.status.success(),
+        "first-touch daemon dispatch must not reinitialize over an existing bad config\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("failed to parse config file"),
+        "expected malformed config error, got:\n{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(config_path).unwrap(),
+        "{not json",
+        "bad config should remain unchanged after rejected first-touch init"
+    );
+}
+
+#[test]
+fn daemon_project_handshake_uses_registry_backed_profile_store_without_marker() {
+    let daemon_home = TempDir::new().unwrap();
+    let client_home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let daemon_home_path = canonical_existing_path(daemon_home.path());
+    let client_home_path = canonical_existing_path(client_home.path());
+    let project_path = canonical_existing_path(project.path());
+
+    std::fs::create_dir_all(project_path.join("src")).unwrap();
+    std::fs::write(
+        project_path.join("src/lib.rs"),
+        "pub fn answer() -> u32 { 42 }\n",
+    )
+    .unwrap();
+    write_enrollment_marker(
+        &project_path,
+        &EnrollmentMarker {
+            project_id: "proj_daemon_registry".to_string(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+
+    let output = tracedecay_command_with_home(&client_home_path)
+        .arg("init")
+        .current_dir(&project_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("tracedecay init should run");
+    assert!(
+        output.status.success(),
+        "tracedecay init failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::remove_dir_all(project_path.join(".tracedecay")).unwrap();
+
+    let _daemon = spawn_tracedecay_daemon(&daemon_home_path);
+    let socket_path = common::daemon_socket_path(&daemon_home_path);
+    let project_arg = project_path.to_string_lossy().to_string();
+    let output = tracedecay_command_with_home(&client_home_path)
+        .current_dir(&project_path)
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+        .args(["tool", "--project", &project_arg, "active_project"])
+        .output()
+        .expect("tracedecay tool active_project should run");
+
+    assert!(
+        output.status.success(),
+        "daemon should open registry-backed profile store without a checkout marker\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("proj_daemon_registry"),
+        "active_project should report the registered profile store id\nstdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn daemon_project_handshake_uses_registered_remote_store_after_rename() {
+    let daemon_home = TempDir::new().unwrap();
+    let client_home = TempDir::new().unwrap();
+    let workspace = TempDir::new().unwrap();
+    let daemon_home_path = canonical_existing_path(daemon_home.path());
+    let client_home_path = canonical_existing_path(client_home.path());
+    let original_path = workspace.path().join("repo-before-rename");
+    let renamed_path = workspace.path().join("repo-after-rename");
+
+    std::fs::create_dir_all(&original_path).unwrap();
+    git(&original_path, &["init"]);
+    git(
+        &original_path,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:ScriptedAlchemy/tracedecay.git",
+        ],
+    );
+    init_project_with_cli(&client_home_path, &original_path);
+    let original_project_id = default_profile_project_id(&canonical_existing_path(&original_path));
+    std::fs::rename(&original_path, &renamed_path).unwrap();
+    let renamed_path = canonical_existing_path(&renamed_path);
+
+    let _daemon = spawn_tracedecay_daemon(&daemon_home_path);
+    let socket_path = common::daemon_socket_path(&daemon_home_path);
+    let project_arg = renamed_path.to_string_lossy().to_string();
+    let output = tracedecay_command_with_home(&client_home_path)
+        .current_dir(&renamed_path)
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+        .args(["tool", "--project", &project_arg, "active_project"])
+        .output()
+        .expect("tracedecay tool active_project should run");
+
+    assert!(
+        output.status.success(),
+        "daemon should open renamed checkout through the registered git remote store\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        client_home_path
+            .join(".tracedecay/projects")
+            .join(&original_project_id)
+            .join("tracedecay.db")
+            .exists(),
+        "original profile shard should remain the selected initialized store"
+    );
+    assert!(
+        !client_home_path
+            .join(".tracedecay/projects")
+            .join(default_profile_project_id(&renamed_path))
+            .join("tracedecay.db")
+            .exists(),
+        "daemon must not create a second path-hash profile shard for the renamed checkout"
     );
 }
 
