@@ -2,6 +2,10 @@
 
 Replace compile-time, feature-gated language extractors with dynamically loaded plugins so that new languages can be added without recompiling or releasing the main binary.
 
+This is a target design. TraceDecay still uses compile-time language extractor
+features today; plugin discovery and management commands remain implementation
+work.
+
 ---
 
 ## Problem with the current model
@@ -135,12 +139,14 @@ impl LanguageExtractor for ElixirExtractor { … }
 
 ---
 
-## Plugin discovery
+## Plugin discovery (target)
 
-tracedecay searches the following directories in order, stopping at the first match for a given extension:
+When implemented, TraceDecay should search the following directories in order,
+stopping at the first match for a given extension:
 
-1. `$TRACEDECAY_PLUGIN_PATH` (colon-separated, same convention as `PATH`; the legacy `TRACEDECAY_PLUGIN_PATH` is still honored as a fallback)
-2. `.tracedecay/plugins/` in the current project root (an existing `.tracedecay/plugins/` is still honored as a fallback)
+1. `$TRACEDECAY_PLUGIN_PATH` (colon-separated, same convention as `PATH`)
+2. `.tracedecay/plugins/` in the current project root only if project-local
+   plugin discovery is approved for the active storage mode
 3. `~/.tracedecay/plugins/`
 4. Platform config dir (`%APPDATA%\tracedecay\plugins` on Windows, `~/Library/Application Support/tracedecay/plugins` on macOS)
 
