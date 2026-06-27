@@ -62,6 +62,13 @@ cargo nextest run --no-default-features --features lite
    cargo clippy --workspace --all-targets
    ```
 
+### Rebrand compatibility changes
+
+For changes touching naming, legacy env vars, storage paths, generated agent
+config, plugin paths, or cleanup behavior, follow
+[`docs/REBRAND-COMPATIBILITY-POLICY.md`](docs/REBRAND-COMPATIBILITY-POLICY.md).
+Update compatibility warnings, migration cleanup, and docs together.
+
 ### Clippy policy
 
 The CI `Clippy` job runs the same command contributors should run locally before
