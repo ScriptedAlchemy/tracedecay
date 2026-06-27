@@ -1,6 +1,6 @@
 // Rust guideline compliant 2025-10-17
 // Updated 2026-03-23: compact bordered table for status output
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process;
@@ -194,7 +194,11 @@ fn main() {
 }
 
 fn async_main() -> tracedecay::errors::Result<()> {
-    let cli = Cli::parse();
+    let args: Vec<String> = std::env::args().collect();
+    if render_dynamic_command_help(&args) {
+        return Ok(());
+    }
+    let cli = Cli::parse_from(args);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_stack_size(ASYNC_STACK_BYTES)
@@ -203,6 +207,24 @@ fn async_main() -> tracedecay::errors::Result<()> {
             message: format!("failed to start async runtime: {e}"),
         })?;
     runtime.block_on(run(cli))
+}
+
+fn render_dynamic_command_help(args: &[String]) -> bool {
+    let command_args = args.get(1..).unwrap_or_default();
+    let is_tool_command_help = matches!(
+        command_args,
+        [command, help] if command == "tool" && matches!(help.as_str(), "-h" | "--help")
+    );
+    if !is_tool_command_help {
+        return false;
+    }
+
+    let mut command = Cli::command();
+    if let Some(tool) = command.find_subcommand_mut("tool") {
+        let _ = tool.print_long_help();
+        println!();
+    }
+    true
 }
 
 async fn run(cli: Cli) -> tracedecay::errors::Result<()> {

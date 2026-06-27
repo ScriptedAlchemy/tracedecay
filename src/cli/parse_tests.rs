@@ -3,10 +3,52 @@ use super::{
     AutomationRunsAction, AutomationSkillsAction, AutomationSkillsInstallTarget, BranchAction, Cli,
     Commands, DaemonAction, LspAction, MemoryAction, MigrateAction, SessionsAction,
 };
-use clap::{error::ErrorKind, CommandFactory, Parser};
+use clap::{error::ErrorKind, Command, CommandFactory, Parser};
 
 fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| value.to_string()).collect()
+}
+
+fn visible_subcommand_paths(command: &Command) -> Vec<Vec<String>> {
+    fn collect(command: &Command, prefix: Vec<String>, paths: &mut Vec<Vec<String>>) {
+        for subcommand in command.get_subcommands().filter(|sub| !sub.is_hide_set()) {
+            let mut path = prefix.clone();
+            path.push(subcommand.get_name().to_string());
+            paths.push(path.clone());
+            collect(subcommand, path, paths);
+        }
+    }
+
+    let mut paths = Vec::new();
+    collect(command, Vec::new(), &mut paths);
+    paths
+}
+
+#[test]
+fn visible_subcommands_accept_clap_help() {
+    let command = Cli::command();
+    for path in visible_subcommand_paths(&command) {
+        if path == ["tool"] {
+            continue;
+        }
+
+        let args = std::iter::once("tracedecay".to_string())
+            .chain(path.iter().cloned())
+            .chain(std::iter::once("--help".to_string()));
+        let err = match Cli::try_parse_from(args) {
+            Ok(_) => panic!(
+                "`tracedecay {} --help` should short-circuit parsing",
+                path.join(" ")
+            ),
+            Err(err) => err,
+        };
+        assert_eq!(
+            err.kind(),
+            ErrorKind::DisplayHelp,
+            "`tracedecay {} --help` should display help",
+            path.join(" ")
+        );
+    }
 }
 
 #[test]
