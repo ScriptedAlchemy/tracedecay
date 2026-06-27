@@ -956,7 +956,7 @@ async fn open_project_for_handshake(
     let open_options = handshake.open_options();
     match open_existing_project_with_options(project_path, open_options.clone()).await {
         Ok(cg) => Ok(cg),
-        Err(open_err) if handshake.allow_init => {
+        Err(open_err) if handshake.allow_init && is_missing_index_error(&open_err) => {
             match crate::tracedecay::TraceDecay::init_with_options(project_path, open_options).await
             {
                 Ok(cg) => Ok(cg),
@@ -964,6 +964,24 @@ async fn open_project_for_handshake(
             }
         }
         Err(open_err) => Err(open_err),
+    }
+}
+
+fn is_missing_index_error(err: &TraceDecayError) -> bool {
+    matches!(
+        err,
+        TraceDecayError::Config { message }
+            if message.contains("no TraceDecay index found")
+                || message.contains("no TraceDecay database found")
+    )
+}
+
+fn missing_index_error(project_path: &Path) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!(
+            "no TraceDecay index found at '{}' — run 'tracedecay init' first",
+            project_path.display()
+        ),
     }
 }
 
@@ -985,13 +1003,8 @@ async fn open_existing_project_with_options(
                     cg.ensure_schema_current().await?;
                     Ok(cg)
                 }
-                Err(_) if matches!(open_err, TraceDecayError::Config { .. }) => {
-                    Err(TraceDecayError::Config {
-                        message: format!(
-                            "no TraceDecay index found at '{}' — run 'tracedecay init' first",
-                            project_path.display()
-                        ),
-                    })
+                Err(_) if is_missing_index_error(&open_err) => {
+                    Err(missing_index_error(project_path))
                 }
                 Err(_) => Err(open_err),
             }

@@ -633,6 +633,59 @@ fn daemon_project_handshake_uses_client_profile_identity() {
 }
 
 #[test]
+fn daemon_first_touch_init_does_not_mask_existing_profile_config_errors() {
+    let daemon_home = TempDir::new().unwrap();
+    let client_home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let daemon_home_path = canonical_existing_path(daemon_home.path());
+    let client_home_path = canonical_existing_path(client_home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&client_home_path, &project_path);
+
+    let project_id = default_profile_project_id(&project_path);
+    let config_path = client_home_path
+        .join(".tracedecay/projects")
+        .join(project_id)
+        .join("config.json");
+    std::fs::write(&config_path, b"{not json").unwrap();
+
+    let _daemon = spawn_tracedecay_daemon(&daemon_home_path);
+    let socket_path = common::daemon_socket_path(&daemon_home_path);
+    let project_arg = project_path.to_string_lossy().to_string();
+    let output = tracedecay_command_with_home(&client_home_path)
+        .current_dir(&project_path)
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+        .args([
+            "tool",
+            "--project",
+            &project_arg,
+            "fact_store",
+            "--json",
+            "--args",
+            r#"{"action":"add","content":"do not hide config errors","fact_type":"decision"}"#,
+        ])
+        .output()
+        .expect("tracedecay tool should run");
+
+    assert!(
+        !output.status.success(),
+        "first-touch daemon dispatch must not reinitialize over an existing bad config\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("failed to parse config file"),
+        "expected malformed config error, got:\n{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(config_path).unwrap(),
+        "{not json",
+        "bad config should remain unchanged after rejected first-touch init"
+    );
+}
+
+#[test]
 fn daemon_project_handshake_uses_registry_backed_profile_store_without_marker() {
     let daemon_home = TempDir::new().unwrap();
     let client_home = TempDir::new().unwrap();
