@@ -954,12 +954,16 @@ async fn open_project_for_handshake(
     handshake: &DaemonHandshake,
 ) -> Result<crate::tracedecay::TraceDecay> {
     let open_options = handshake.open_options();
-    if handshake.allow_init
-        && !crate::tracedecay::TraceDecay::is_initialized_with_options(project_path, &open_options)
-    {
-        crate::tracedecay::TraceDecay::init_with_options(project_path, open_options).await
-    } else {
-        open_existing_project_with_options(project_path, open_options).await
+    match open_existing_project_with_options(project_path, open_options.clone()).await {
+        Ok(cg) => Ok(cg),
+        Err(open_err) if handshake.allow_init => {
+            match crate::tracedecay::TraceDecay::init_with_options(project_path, open_options).await
+            {
+                Ok(cg) => Ok(cg),
+                Err(_) => Err(open_err),
+            }
+        }
+        Err(open_err) => Err(open_err),
     }
 }
 
@@ -967,36 +971,32 @@ async fn open_existing_project_with_options(
     project_path: &Path,
     open_options: crate::tracedecay::TraceDecayOpenOptions,
 ) -> Result<crate::tracedecay::TraceDecay> {
-    if crate::tracedecay::TraceDecay::is_initialized_with_options(project_path, &open_options) {
-        return match crate::tracedecay::TraceDecay::open_with_options(
-            project_path,
-            open_options.clone(),
-        )
-        .await
-        {
-            Ok(cg) => Ok(cg),
-            Err(open_err) => {
-                match crate::tracedecay::TraceDecay::open_read_only_with_options(
-                    project_path,
-                    open_options,
-                )
-                .await
-                {
-                    Ok(cg) => {
-                        cg.ensure_schema_current().await?;
-                        Ok(cg)
-                    }
-                    Err(_) => Err(open_err),
+    match crate::tracedecay::TraceDecay::open_with_options(project_path, open_options.clone()).await
+    {
+        Ok(cg) => Ok(cg),
+        Err(open_err) => {
+            match crate::tracedecay::TraceDecay::open_read_only_with_options(
+                project_path,
+                open_options,
+            )
+            .await
+            {
+                Ok(cg) => {
+                    cg.ensure_schema_current().await?;
+                    Ok(cg)
                 }
+                Err(_) if matches!(open_err, TraceDecayError::Config { .. }) => {
+                    Err(TraceDecayError::Config {
+                        message: format!(
+                            "no TraceDecay index found at '{}' — run 'tracedecay init' first",
+                            project_path.display()
+                        ),
+                    })
+                }
+                Err(_) => Err(open_err),
             }
-        };
+        }
     }
-    Err(TraceDecayError::Config {
-        message: format!(
-            "no TraceDecay index found at '{}' — run 'tracedecay init' first",
-            project_path.display()
-        ),
-    })
 }
 
 #[cfg(unix)]
