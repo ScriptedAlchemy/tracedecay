@@ -36,6 +36,8 @@ pub enum HintCategory {
     Impact,
     SymbolLookup,
     FileLookup,
+    ProjectContext,
+    SessionRecall,
     ExploreSubagent,
     SubagentStartContext,
 }
@@ -51,6 +53,8 @@ impl HintCategory {
             HintCategory::Impact => "impact",
             HintCategory::SymbolLookup => "symbol_lookup",
             HintCategory::FileLookup => "file_lookup",
+            HintCategory::ProjectContext => "project_context",
+            HintCategory::SessionRecall => "session_recall",
             HintCategory::ExploreSubagent => "explore_subagent",
             HintCategory::SubagentStartContext => "subagent_start_context",
         }
@@ -66,6 +70,8 @@ impl HintCategory {
             "impact" => Some(HintCategory::Impact),
             "symbol_lookup" => Some(HintCategory::SymbolLookup),
             "file_lookup" => Some(HintCategory::FileLookup),
+            "project_context" => Some(HintCategory::ProjectContext),
+            "session_recall" => Some(HintCategory::SessionRecall),
             "explore_subagent" => Some(HintCategory::ExploreSubagent),
             "subagent_start_context" => Some(HintCategory::SubagentStartContext),
             _ => None,
@@ -197,6 +203,30 @@ pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
         ));
     }
 
+    let text = combined_text(input);
+    if asks_for_session_recall(&text) {
+        return Some(hint(
+            HintCategory::SessionRecall,
+            "For prior conversation context, consider TraceDecay session search.",
+            "tracedecay_message_search searches ingested agent transcripts across providers; tracedecay_lcm_grep can search bounded raw-message snippets and summaries when you need session-level recall before re-discovering context.",
+            false,
+        ));
+    }
+
+    if asks_for_project_context(&text)
+        || input
+            .command
+            .as_deref()
+            .is_some_and(is_project_discovery_command)
+    {
+        return Some(hint(
+            HintCategory::ProjectContext,
+            "For other repos or registered projects, consider TraceDecay project registry tools.",
+            "tracedecay_project_list shows known projects; tracedecay_project_search can find a sibling repo by name/path/remote; pass project_path or project_id to tracedecay_context/search for cross-project code context before scanning parent directories.",
+            false,
+        ));
+    }
+
     if input
         .command
         .as_deref()
@@ -245,7 +275,6 @@ pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
         ));
     }
 
-    let text = combined_text(input);
     if text.is_empty() {
         return None;
     }
@@ -377,6 +406,34 @@ fn is_shell_search_command(command: &str) -> bool {
     }
 }
 
+fn is_project_discovery_command(command: &str) -> bool {
+    let tokens = super::shell_words(command);
+    let Some(first) = tokens.first() else {
+        return false;
+    };
+    let program = first.trim_start_matches('(').to_ascii_lowercase();
+    match program.as_str() {
+        "find" | "fd" | "fdfind" => tokens
+            .iter()
+            .skip(1)
+            .any(|token| is_parent_or_projects_path(token)),
+        "rg" | "ripgrep" | "grep" => tokens
+            .iter()
+            .skip(1)
+            .any(|token| is_parent_or_projects_path(token)),
+        _ => false,
+    }
+}
+
+fn is_parent_or_projects_path(token: &str) -> bool {
+    let token = token.trim_matches(|c| matches!(c, '(' | ')' | '"' | '\''));
+    token == ".."
+        || token.starts_with("../")
+        || token.contains("/../")
+        || token.contains("/projects/")
+        || token.ends_with("/projects")
+}
+
 fn is_recursive_grep_flag(token: &str) -> bool {
     if token == "--recursive" {
         return true;
@@ -442,6 +499,67 @@ fn asks_for_broad_read(text: &str) -> bool {
     )
 }
 
+fn asks_for_project_context(text: &str) -> bool {
+    contains_any(
+        text,
+        &[
+            "another repo",
+            "another repository",
+            "other repo",
+            "other repository",
+            "external repo",
+            "external repository",
+            "sibling repo",
+            "sibling repository",
+            "neighbor repo",
+            "neighbor repository",
+            "nearby repo",
+            "nearby repository",
+            "next door",
+            "registered project",
+            "project registry",
+            "project listing",
+            "project list",
+            "project search",
+            "cross-project",
+            "cross project",
+        ],
+    ) || (contains_any(text, &[" repo", " repository", "workspace"])
+        && contains_any(
+            text,
+            &[
+                "find",
+                "locate",
+                "search",
+                "where",
+                "defined",
+                "lives",
+                "orchestrator",
+            ],
+        ))
+}
+
+fn asks_for_session_recall(text: &str) -> bool {
+    contains_any(
+        text,
+        &[
+            "where did we",
+            "what did we",
+            "when did we",
+            "did we talk",
+            "talk about",
+            "discuss before",
+            "mentioned before",
+            "prior conversation",
+            "previous conversation",
+            "earlier conversation",
+            "session search",
+            "session recall",
+            "conversation history",
+        ],
+    )
+}
+
 fn asks_for_symbol_lookup(text: &str) -> bool {
     contains_any(
         text,
@@ -495,6 +613,57 @@ mod tests {
             assert!(hint.context.contains("tracedecay_context"), "{name}");
             assert!(hint.nonblocking, "semantic-search hints must stay soft");
         }
+    }
+
+    #[test]
+    fn parent_directory_find_gets_project_registry_hint() {
+        let hint = decide_hint(&ToolHintInput {
+            tool_name: Some("shell".to_string()),
+            command: Some("find .. -maxdepth 3 -type f -iname '*runner*'".to_string()),
+            prompt: Some(
+                "Find where the clean-ci Windows runner orchestrator is defined".to_string(),
+            ),
+            session_id: Some("session-1".to_string()),
+            ..ToolHintInput::default()
+        })
+        .unwrap();
+
+        assert_eq!(hint.category.as_key(), "project_context");
+        assert!(hint.context.contains("tracedecay_project_list"));
+        assert!(hint.context.contains("tracedecay_project_search"));
+    }
+
+    #[test]
+    fn external_repo_shell_search_prefers_project_registry_hint() {
+        let hint = decide_hint(&ToolHintInput {
+            tool_name: Some("shell".to_string()),
+            command: Some("rg -n \"proxmox|windows|runner|clean-ci\" .".to_string()),
+            prompt: Some(
+                "Find the runner orchestrator repo and update its Windows boxes".to_string(),
+            ),
+            session_id: Some("session-1".to_string()),
+            ..ToolHintInput::default()
+        })
+        .unwrap();
+
+        assert_eq!(hint.category.as_key(), "project_context");
+        assert!(hint.message.contains("registered projects"));
+    }
+
+    #[test]
+    fn prior_conversation_prompt_gets_session_recall_hint() {
+        let hint = decide_hint(&ToolHintInput {
+            prompt: Some(
+                "Where did we talk about clean-ci and the runner orchestrator before?".to_string(),
+            ),
+            session_id: Some("session-1".to_string()),
+            ..ToolHintInput::default()
+        })
+        .unwrap();
+
+        assert_eq!(hint.category.as_key(), "session_recall");
+        assert!(hint.context.contains("tracedecay_message_search"));
+        assert!(hint.context.contains("tracedecay_lcm_grep"));
     }
 
     #[test]

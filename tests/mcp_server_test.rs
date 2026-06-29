@@ -2119,6 +2119,78 @@ async fn search_call_writes_mcp_runtime_analytics_event() {
     assert_eq!(metadata["before_tokens"], before);
     assert_eq!(metadata["after_tokens"], after);
     assert_eq!(metadata["tokens_saved"], before - after);
+    assert_eq!(metadata["transport"], "mcp");
+    assert_eq!(metadata["tool_kind"], "mcp_tool");
+}
+
+#[tokio::test]
+// Intentional: serializes env-mutating savings tests; #[tokio::test]
+// defaults to a current-thread runtime, so no executor thread blocks.
+#[allow(clippy::await_holding_lock)]
+async fn context_call_writes_memory_match_analytics_without_fact_bodies() {
+    let _env_guard = SAVINGS_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tmp_global = persistent_temp_dir();
+    let _env = isolated_savings_env(&tmp_global.join("global.db"));
+
+    let (server, _proj_tmp) = setup_server().await;
+    let server_handle = server.clone();
+    let db_path = locked_global_db_path();
+
+    let fact_content =
+        "Durable context memory analytics should report counts without leaking fact bodies.";
+    let added = call_tool(
+        server.clone(),
+        9005,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": fact_content,
+            "category": "decision",
+            "entity": "context memory analytics",
+            "trust": 0.94,
+            "source": "mcp-server-memory-analytics-test"
+        }),
+    )
+    .await;
+    assert!(added["error"].is_null(), "fact add should not error");
+
+    let resp = call_tool(
+        server,
+        9006,
+        "tracedecay_context",
+        json!({
+            "task": "context memory analytics",
+            "format": "json",
+            "session_id": "mcp-session-9006"
+        }),
+    )
+    .await;
+    assert!(resp["error"].is_null(), "context should not error");
+
+    server_handle.ledger_writes_settled().await;
+    let event = expect_mcp_runtime_event(
+        &db_path,
+        "tracedecay_context",
+        "mcp-session-9006",
+        "durable context MCP runtime analytics event",
+    )
+    .await;
+    let metadata = analytics_metadata(&event);
+
+    assert_eq!(event.outcome.as_deref(), Some("success"));
+    assert_eq!(metadata["context_memory"]["include_memory"], true);
+    assert!(
+        metadata["context_memory"]["match_count"]
+            .as_u64()
+            .is_some_and(|count| count >= 1),
+        "context analytics should expose bounded memory match counts: {metadata}"
+    );
+    assert!(
+        !metadata.to_string().contains(fact_content),
+        "analytics metadata must not persist fact bodies"
+    );
 }
 
 #[tokio::test]
@@ -2166,6 +2238,9 @@ async fn failed_tool_call_writes_mcp_runtime_analytics_event() {
     assert_eq!(metadata["before_tokens"], 0);
     assert_eq!(metadata["after_tokens"], 0);
     assert_eq!(metadata["tokens_saved"], 0);
+    assert_eq!(metadata["transport"], "mcp");
+    assert_eq!(metadata["tool_kind"], "mcp_tool");
+    assert_eq!(metadata["failure_reason"], "tool_dispatch_error");
 }
 
 #[tokio::test]

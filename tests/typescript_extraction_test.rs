@@ -306,6 +306,38 @@ import * as path from 'path';
 }
 
 #[test]
+fn test_ts_import_type_records_ignored_dependency_candidates() {
+    let source = r#"
+import type { Foo, Bar as Baz } from "pkg";
+import { localThing } from "./local";
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract("imports.ts", source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let use_refs: Vec<_> = result
+        .unresolved_refs
+        .iter()
+        .filter(|r| r.reference_kind == EdgeKind::Uses)
+        .collect();
+
+    assert!(
+        use_refs.iter().any(|r| r.reference_name == "npm:pkg#Foo"),
+        "expected npm dependency candidate for Foo, got {use_refs:#?}"
+    );
+    assert!(
+        use_refs.iter().any(|r| r.reference_name == "npm:pkg#Bar"),
+        "expected npm dependency candidate to use exported name before alias, got {use_refs:#?}"
+    );
+    assert!(
+        !use_refs
+            .iter()
+            .any(|r| r.reference_name == "npm:./local#localThing"),
+        "relative project imports should not be dependency candidates"
+    );
+}
+
+#[test]
 fn test_ts_async_function() {
     let source = r#"
 export async function fetchData(url: string): Promise<string> {

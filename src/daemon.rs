@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use std::fmt::Write;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(unix)]
@@ -293,11 +295,7 @@ pub fn uninstall_service(stop: bool) -> Result<PathBuf> {
 }
 
 pub fn service_status(socket_path: &Path) -> String {
-    let socket_state = if socket_path.exists() {
-        "present"
-    } else {
-        "missing"
-    };
+    let socket_state = daemon_socket_state(socket_path);
     format!(
         "service: {}\nsocket: {} ({})\nlogs: journalctl --user -u {} -f\n",
         systemd_user_service_path().map_or_else(
@@ -308,6 +306,28 @@ pub fn service_status(socket_path: &Path) -> String {
         socket_state,
         SERVICE_NAME
     )
+}
+
+#[cfg(unix)]
+fn daemon_socket_state(socket_path: &Path) -> &'static str {
+    if !socket_path.exists() {
+        return "missing";
+    }
+    match StdUnixStream::connect(socket_path) {
+        Ok(_) => "connectable",
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => "stale",
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => "present but not accessible",
+        Err(_) => "present but unreachable",
+    }
+}
+
+#[cfg(not(unix))]
+fn daemon_socket_state(socket_path: &Path) -> &'static str {
+    if socket_path.exists() {
+        "present"
+    } else {
+        "missing"
+    }
 }
 
 fn format_daemon_log_line(event: &str, fields: &[(&str, String)]) -> String {
@@ -1600,6 +1620,54 @@ mod tests {
         let status = super::service_status(&PathBuf::from("/tmp/tracedecay.sock"));
 
         assert!(status.contains("logs: journalctl --user -u tracedecay.service -f"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn service_status_reports_missing_socket() {
+        let dir = TempDir::new().expect("temp dir");
+        let socket = dir.path().join("missing.sock");
+
+        let status = super::service_status(&socket);
+
+        assert!(
+            status.contains(&format!("socket: {} (missing)", socket.display())),
+            "status should report missing socket, got:\n{status}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn service_status_reports_unconnectable_socket_file() {
+        let dir = TempDir::new().expect("temp dir");
+        let socket = dir.path().join("unconnectable.sock");
+        std::fs::write(&socket, "").expect("unconnectable socket placeholder");
+
+        let status = super::service_status(&socket);
+
+        assert!(
+            status.contains(&format!("socket: {} (stale)", socket.display()))
+                || status.contains(&format!(
+                    "socket: {} (present but unreachable)",
+                    socket.display()
+                )),
+            "status should report an unconnectable socket, got:\n{status}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn service_status_reports_connectable_socket() {
+        let dir = TempDir::new().expect("temp dir");
+        let socket = dir.path().join("daemon.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind socket");
+
+        let status = super::service_status(&socket);
+
+        assert!(
+            status.contains(&format!("socket: {} (connectable)", socket.display())),
+            "status should report connectable socket, got:\n{status}"
+        );
     }
 
     #[cfg(unix)]

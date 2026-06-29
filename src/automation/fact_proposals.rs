@@ -166,6 +166,9 @@ pub async fn record_session_fact_proposals(
             .ok_or_else(|| config_error("accepted fact proposal missing add_fact_request"))?;
         let add_fact_request = serde_json::from_value::<AddFactRequest>(add_fact_request)
             .map_err(|e| config_error(format!("invalid accepted fact add_fact_request: {e}")))?;
+        if pending_add_fact_request_exists(&store, &add_fact_request) {
+            continue;
+        }
         let proposal = value.get("proposal").cloned();
         let validation = value.get("validation").cloned();
         let record = FactProposalRecord {
@@ -212,6 +215,21 @@ pub async fn record_session_fact_proposals(
     }
     save_fact_proposal_store(dashboard_root, &store).await?;
     Ok(records)
+}
+
+fn pending_add_fact_request_exists(store: &FactProposalStore, request: &AddFactRequest) -> bool {
+    let content = normalize_fact_content(&request.content);
+    store.proposals.iter().any(|proposal| {
+        proposal.state == FactProposalState::PendingApproval
+            && proposal.add_fact_request.as_ref().is_some_and(|existing| {
+                existing.category == request.category
+                    && normalize_fact_content(&existing.content) == content
+            })
+    })
+}
+
+fn normalize_fact_content(content: &str) -> String {
+    content.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 pub async fn apply_fact_proposal(

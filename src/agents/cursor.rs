@@ -923,6 +923,17 @@ fn doctor_check_session_ingest(dc: &mut DoctorCounters, project_path: &Path) {
     let health = tokio::task::block_in_place(|| {
         handle.block_on(async {
             let db = crate::sessions::cursor::open_project_session_db(project_path).await?;
+            let placeholder_paths = db.literal_workspace_placeholder_transcript_paths(10).await;
+            if !placeholder_paths.is_empty() {
+                dc.warn(&format!(
+                    "Cursor transcript ingest has {} path(s) with a literal workspace placeholder; \
+                     Cursor did not expand `${{workspaceFolder}}`, so session recall will miss those transcripts",
+                    placeholder_paths.len(),
+                ));
+                for path in &placeholder_paths {
+                    dc.info(&format!("  - {path}"));
+                }
+            }
             Some(db.session_ingest_health().await)
         })
     });

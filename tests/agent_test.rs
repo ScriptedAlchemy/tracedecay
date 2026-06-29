@@ -12,6 +12,7 @@ use tracedecay::automation::managed_skills::{
 };
 use tracedecay::branch_meta;
 use tracedecay::config::USER_DATA_DIR_ENV;
+use tracedecay::sessions::SessionRecord;
 use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::TraceDecay;
 
@@ -4557,6 +4558,52 @@ fn test_healthcheck_cursor_local_install_checks_project_config() {
     assert_eq!(
         dc.issues, 0,
         "local Cursor healthcheck should pass without global ~/.cursor config"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_cursor_healthcheck_warns_on_literal_workspace_folder_transcript_path() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    CursorIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+    let cg = TraceDecay::init(project.path()).await.unwrap();
+    let db = tracedecay::sessions::cursor::open_project_session_db(project.path())
+        .await
+        .expect("session db should open for initialized project");
+    assert!(
+        db.upsert_session(&SessionRecord {
+            provider: "cursor".to_string(),
+            session_id: "cursor-placeholder-session".to_string(),
+            project_key: project.path().to_string_lossy().to_string(),
+            project_path: project.path().to_string_lossy().to_string(),
+            title: Some("placeholder path".to_string()),
+            started_at: Some(1_715_000_000),
+            ended_at: None,
+            transcript_path: Some(
+                "${workspaceFolder}/.cursor/sessions/cursor-placeholder-session.jsonl".to_string(),
+            ),
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        })
+        .await,
+        "session row should insert"
+    );
+    cg.close();
+
+    let mut dc = DoctorCounters::new();
+    let hctx = HealthcheckContext {
+        home: home.path().to_path_buf(),
+        project_path: project.path().to_path_buf(),
+    };
+    CursorIntegration.healthcheck(&mut dc, &hctx);
+    assert!(
+        dc.warnings > 0,
+        "literal workspaceFolder transcript paths should be reported"
     );
 }
 

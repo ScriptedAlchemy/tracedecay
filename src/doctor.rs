@@ -179,6 +179,31 @@ async fn check_stale_stores(dc: &mut DoctorCounters) {
 
     check_orphan_store_manifests(dc, &project_paths);
     check_stale_code_projects(dc, &gdb).await;
+    if let Some(profile_root) = profile_root.as_deref() {
+        let drift = registry_drift_findings(&gdb, profile_root).await;
+        if drift.is_empty() {
+            dc.pass("No registry/store manifest identity drift");
+        } else {
+            dc.warn(&format!(
+                "{} registry/store manifest identity drift finding(s):",
+                drift.len()
+            ));
+            for finding in drift.iter().take(10) {
+                dc.info(&format!(
+                    "  • {} {} {}: registry={} manifest={} ({})",
+                    finding.project_id,
+                    finding.store_id,
+                    finding.field,
+                    finding.registry_value,
+                    finding.manifest_value,
+                    finding.manifest_path.display()
+                ));
+            }
+            if drift.len() > 10 {
+                dc.info(&format!("  … and {} more", drift.len() - 10));
+            }
+        }
+    }
     if stale.is_empty() {
         dc.pass("No stale projects in global DB");
         return;
@@ -287,6 +312,76 @@ fn code_project_root_exists(project: &crate::global_db::CodeProjectRecord) -> bo
     Path::new(&project.canonical_root).exists() || Path::new(&project.display_root).exists()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RegistryDriftFinding {
+    project_id: String,
+    store_id: String,
+    field: &'static str,
+    registry_value: String,
+    manifest_value: String,
+    manifest_path: PathBuf,
+}
+
+async fn registry_drift_findings(
+    global_db: &crate::global_db::GlobalDb,
+    profile_root: &Path,
+) -> Vec<RegistryDriftFinding> {
+    let mut findings = Vec::new();
+    for project in global_db.list_code_projects(usize::MAX).await {
+        let Some(context) = global_db
+            .project_registry_context_by_id(&project.project_id)
+            .await
+        else {
+            continue;
+        };
+        for store_context in context.stores {
+            let store = store_context.store;
+            let Some(manifest_path) = resolve_registry_manifest_path(profile_root, &store) else {
+                continue;
+            };
+            let Ok(manifest) = crate::storage::read_store_manifest(&manifest_path) else {
+                continue;
+            };
+            let manifest_project_id = manifest
+                .project_id
+                .as_deref()
+                .unwrap_or("<missing>")
+                .to_string();
+            if manifest_project_id != store.project_id {
+                findings.push(RegistryDriftFinding {
+                    project_id: project.project_id.clone(),
+                    store_id: store.store_id.clone(),
+                    field: "project_id",
+                    registry_value: store.project_id.clone(),
+                    manifest_value: manifest_project_id,
+                    manifest_path: manifest_path.clone(),
+                });
+            }
+
+            let registry_project_root = comparable_path(Path::new(&project.canonical_root));
+            let manifest_project_root = comparable_path(&manifest.project_root);
+            if registry_project_root != manifest_project_root {
+                findings.push(RegistryDriftFinding {
+                    project_id: project.project_id.clone(),
+                    store_id: store.store_id.clone(),
+                    field: "project_root",
+                    registry_value: registry_project_root,
+                    manifest_value: manifest_project_root,
+                    manifest_path,
+                });
+            }
+        }
+    }
+    findings
+}
+
+fn comparable_path(path: &Path) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .to_string()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DoctorStorageStatus {
     RepoLocal,
@@ -384,6 +479,45 @@ fn classify_registry_storage(
     } else {
         None
     }
+}
+
+fn resolve_registry_manifest_path(
+    profile_root: &Path,
+    store: &crate::global_db::StoreInstanceRecord,
+) -> Option<PathBuf> {
+    if store.storage_mode != "profile_sharded" {
+        return None;
+    }
+    let store_relpath = registry_relpath(&store.store_relpath);
+    let manifest_relpath = store
+        .manifest_relpath
+        .as_ref()
+        .map(|relpath| registry_relpath(relpath));
+    for profile_root in registry_profile_roots(profile_root) {
+        let Ok(data_root) =
+            crate::storage::StoreArtifactPath::resolve(&profile_root, &store_relpath)
+        else {
+            continue;
+        };
+        let data_root = data_root.absolute_path();
+        if let Some(relpath) = manifest_relpath.as_ref() {
+            for root in [&profile_root, &data_root] {
+                let Ok(path) = crate::storage::StoreArtifactPath::resolve(root, relpath) else {
+                    continue;
+                };
+                let path = path.absolute_path();
+                if path.is_file() {
+                    return Some(path);
+                }
+            }
+        } else {
+            let path = data_root.join(crate::storage::STORE_MANIFEST_FILENAME);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 fn registry_relpath(value: &str) -> PathBuf {
@@ -549,6 +683,10 @@ fn print_summary(dc: &DoctorCounters) {
 mod tests {
     use super::*;
     use crate::global_db::StoreInstanceUpsert;
+    use crate::storage::{
+        StorageMode, StoreKind, StoreManifest, STORE_MANIFEST_FILENAME,
+        STORE_MANIFEST_SCHEMA_VERSION,
+    };
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
@@ -727,6 +865,82 @@ mod tests {
             classify_project_storage_with_registry(&project_root, &db, Some(&profile_root)).await,
             DoctorStorageStatus::Stale
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn registry_drift_findings_report_manifest_identity_mismatches(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::TempDir::new()?;
+        let profile_root = canonical_temp_path(&dir.path().join("profile"));
+        let registry_root = canonical_temp_path(&dir.path().join("registry-repo"));
+        let manifest_root = canonical_temp_path(&dir.path().join("manifest-repo"));
+        let shard_relpath = Path::new("projects").join("proj_registry");
+        let shard_root = profile_root.join(&shard_relpath);
+        std::fs::create_dir_all(&registry_root)?;
+        std::fs::create_dir_all(&manifest_root)?;
+        std::fs::create_dir_all(&shard_root)?;
+        std::fs::write(shard_root.join("tracedecay.db"), b"graph")?;
+        std::fs::write(shard_root.join("sessions.db"), b"sessions")?;
+        std::fs::write(shard_root.join("branch-meta.json"), b"{}")?;
+        let manifest = StoreManifest {
+            schema_version: STORE_MANIFEST_SCHEMA_VERSION,
+            project_id: Some("proj_manifest".to_string()),
+            store_kind: StoreKind::CodeProject,
+            storage_mode: StorageMode::ProfileSharded,
+            project_root: manifest_root.clone(),
+            data_root: shard_root.clone(),
+            graph_db_relpath: "tracedecay.db".into(),
+            sessions_db_relpath: "sessions.db".into(),
+            branch_meta_relpath: "branch-meta.json".into(),
+        };
+        std::fs::write(
+            shard_root.join(STORE_MANIFEST_FILENAME),
+            serde_json::to_string_pretty(&manifest)?,
+        )?;
+
+        let db = crate::global_db::GlobalDb::open_at(&dir.path().join("global.db"))
+            .await
+            .ok_or_else(|| std::io::Error::other("could not open global db"))?;
+        db.upsert_code_project("proj_registry", &registry_root, None, None, Some("main"))
+            .await
+            .ok_or_else(|| std::io::Error::other("could not upsert project"))?;
+        db.upsert_store_instance(StoreInstanceUpsert {
+            store_id: "store:proj_registry:profile_sharded".to_string(),
+            project_id: "proj_registry".to_string(),
+            store_kind: "code_project".to_string(),
+            storage_mode: "profile_sharded".to_string(),
+            store_relpath: shard_relpath.to_string_lossy().to_string(),
+            manifest_relpath: Some(
+                shard_relpath
+                    .join(STORE_MANIFEST_FILENAME)
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+            last_verified_at: Some(1_800_000_000),
+            last_write_at: Some(1_800_000_000),
+        })
+        .await
+        .ok_or_else(|| std::io::Error::other("could not upsert store"))?;
+
+        let findings = registry_drift_findings(&db, &profile_root).await;
+        let fields: Vec<_> = findings.iter().map(|finding| finding.field).collect();
+        assert!(
+            fields.contains(&"project_id"),
+            "expected project_id drift finding, got {findings:#?}"
+        );
+        assert!(
+            fields.contains(&"project_root"),
+            "expected project_root drift finding, got {findings:#?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.registry_value == "proj_registry"
+                    && finding.manifest_value == "proj_manifest"),
+            "project_id finding should include registry and manifest values: {findings:#?}"
+        );
+
         Ok(())
     }
 }

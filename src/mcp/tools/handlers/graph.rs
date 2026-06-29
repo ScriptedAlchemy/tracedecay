@@ -2,7 +2,7 @@
 //! `impact`, `node`, `similar`, `rename_preview`, `callers_for`, `by_qualified_name`,
 //! `signature`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 
 use serde_json::{json, Value};
@@ -72,6 +72,7 @@ pub(super) async fn handle_search(
     let results = cg.search(query, limit).await?;
     let results = filter_by_scope(results, scope_prefix, |r| &r.node.file_path);
     let coverage_hint = cg.index_coverage_hint(results.len());
+    let ignored_dependency_hint = ignored_dependency_hint(cg, query, limit).await?;
 
     let touched_files = unique_file_paths(results.iter().map(|r| r.node.file_path.as_str()));
 
@@ -90,11 +91,15 @@ pub(super) async fn handle_search(
         })
         .collect();
 
-    let output_value = if let Some(hint) = coverage_hint {
-        json!({
-            "results": items,
-            "index_coverage_hint": hint,
-        })
+    let output_value = if coverage_hint.is_some() || ignored_dependency_hint.is_some() {
+        let mut value = json!({ "results": items });
+        if let Some(hint) = coverage_hint {
+            value["index_coverage_hint"] = json!(hint);
+        }
+        if let Some(hint) = ignored_dependency_hint {
+            value["ignored_dependency_hint"] = hint;
+        }
+        value
     } else {
         json!(items)
     };
@@ -105,6 +110,64 @@ pub(super) async fn handle_search(
         touched_files,
         || render_search_md(&output_value),
     ))
+}
+
+async fn ignored_dependency_hint(
+    cg: &TraceDecay,
+    query: &str,
+    limit: usize,
+) -> Result<Option<Value>> {
+    let query = query.trim().to_ascii_lowercase();
+    if query.is_empty() {
+        return Ok(None);
+    }
+    let db = if cg.is_read_only() {
+        cg.open_project_store_db_read_only().await?
+    } else {
+        cg.open_project_store_db().await?
+    };
+    let refs = db.get_unresolved_refs().await?;
+    let mut seen = BTreeSet::new();
+    let mut candidates = Vec::new();
+    for unresolved in refs {
+        let Some((module, symbol)) = parse_ignored_dependency_candidate(&unresolved.reference_name)
+        else {
+            continue;
+        };
+        let haystack = format!("{module} {symbol}").to_ascii_lowercase();
+        if !haystack.contains(&query) {
+            continue;
+        }
+        if !seen.insert((
+            module.to_string(),
+            symbol.to_string(),
+            unresolved.file_path.clone(),
+            unresolved.line,
+        )) {
+            continue;
+        }
+        candidates.push(json!({
+            "module": module,
+            "symbol": symbol,
+            "import_file": unresolved.file_path,
+            "line": user_line(unresolved.line),
+        }));
+        if candidates.len() >= limit.clamp(1, 20) {
+            break;
+        }
+    }
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(json!({
+        "message": "No indexed symbol matched, but project imports reference matching symbols from an ignored dependency. Keep node_modules ignored for normal sync; use bounded lazy dependency indexing for the listed module if this symbol is needed.",
+        "candidates": candidates,
+        "suggested_action": "lazy_index_ignored_dependency",
+    })))
+}
+
+fn parse_ignored_dependency_candidate(reference_name: &str) -> Option<(&str, &str)> {
+    reference_name.strip_prefix("npm:")?.split_once('#')
 }
 
 fn render_search_md(value: &Value) -> String {
@@ -145,6 +208,24 @@ fn render_search_md(value: &Value) -> String {
         .and_then(Value::as_str)
     {
         md.blank().heading(3, "Index Coverage Hint").line(msg);
+    }
+    if let Some(hint) = value.get("ignored_dependency_hint") {
+        let msg = hint
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("Matching ignored dependency candidates were found.");
+        md.blank().heading(3, "Ignored Dependency Hint").line(msg);
+        if let Some(candidates) = hint.get("candidates").and_then(Value::as_array) {
+            for candidate in candidates {
+                let module = render::field_str(candidate, "module");
+                let symbol = render::field_str(candidate, "symbol");
+                let file = render::field_str(candidate, "import_file");
+                let line = render::field_i64(candidate, "line");
+                md.bullet(&format!(
+                    "`{module}` exports `{symbol}` referenced at {file}:{line}"
+                ));
+            }
+        }
     }
     md.render()
 }
