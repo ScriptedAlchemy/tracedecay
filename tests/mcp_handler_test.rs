@@ -6730,6 +6730,84 @@ async fn message_search_catches_up_provider_transcripts_before_querying() {
 }
 
 #[tokio::test]
+async fn message_search_can_skip_catch_up_for_read_only_audits() {
+    let (cg, _dir) = setup_project().await;
+    let home = cg.project_root().join("home");
+    let project = cg.project_root().to_path_buf();
+    let project_text = project.to_string_lossy();
+
+    let codex_dir = home.join(".codex/sessions/2026/01/01");
+    fs::create_dir_all(&codex_dir).unwrap();
+    fs::write(
+        codex_dir.join("rollout-2026-01-01T00-00-00-codex-readonly.jsonl"),
+        format!(
+            "{}\n{}\n",
+            json!({
+                "timestamp": "2026-01-01T00:00:00.000Z",
+                "type": "session_meta",
+                "payload": {"id": "codex-readonly", "cwd": project_text}
+            }),
+            json!({
+                "timestamp": "2026-01-01T00:00:01.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": "Read only transcript catchup should not import this."
+                }
+            })
+        ),
+    )
+    .unwrap();
+
+    let read_only_result = handle_tool_call(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "query": "read only transcript catchup",
+            "provider": "codex",
+            "catch_up": false,
+            "limit": 5
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let read_only = extract_json(&read_only_result.value);
+    assert_eq!(read_only["status"], "ok");
+    assert_eq!(read_only["catch_up"], false);
+    assert_eq!(read_only["count"], 0);
+
+    let db = open_active_project_session_db(&cg).await;
+    let skipped = db
+        .search_session_messages("codex", None, "read only transcript catchup", 10)
+        .await;
+    assert!(
+        skipped.is_empty(),
+        "catch_up=false must not ingest provider transcripts"
+    );
+
+    let catch_up_result = handle_tool_call(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "query": "read only transcript catchup",
+            "provider": "codex",
+            "limit": 5
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let catch_up = extract_json(&catch_up_result.value);
+    assert_eq!(catch_up["status"], "ok");
+    assert_eq!(catch_up["catch_up"], true);
+    assert_eq!(catch_up["count"], 1);
+    assert_eq!(catch_up["results"][0]["message"]["provider"], "codex");
+}
+
+#[tokio::test]
 async fn message_search_reads_profile_sharded_session_db() {
     let _guard = GLOBAL_DB_ENV_LOCK.lock().await;
     let dir = test_temp_dir();

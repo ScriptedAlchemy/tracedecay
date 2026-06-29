@@ -2276,7 +2276,7 @@ fn def_message_search() -> ToolDefinition {
     def(
         "tracedecay_message_search",
         "Message Search",
-        "Search ingested transcript messages across all supported providers by default. Every search first catches up all supported provider adapters for the selected project; pass provider only when explicitly scoping results to one provider.",
+        "Search ingested transcript messages across all supported providers by default. Every search first catches up all supported provider adapters for the selected project unless catch_up is false; pass provider only when explicitly scoping results to one provider.",
         json!({
             "type": "object",
             "properties": {
@@ -2296,6 +2296,10 @@ fn def_message_search() -> ToolDefinition {
                 "include_subagents": {
                     "type": "boolean",
                     "description": "Whether to include child subagent sessions in results (default: true)."
+                },
+                "catch_up": {
+                    "type": "boolean",
+                    "description": "Whether to ingest/catch up local provider transcripts before searching (default: true). Set false for strictly read-only audits of already-ingested messages."
                 },
                 "parent_session_id": {
                     "type": "string",

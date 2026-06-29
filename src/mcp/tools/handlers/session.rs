@@ -1399,6 +1399,10 @@ pub(super) async fn handle_message_search(
         .get("include_subagents")
         .and_then(Value::as_bool)
         .unwrap_or(true);
+    let catch_up = args
+        .get("catch_up")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
     let mut scope = parse_message_search_scope(&args)?;
     if !include_subagents && matches!(scope, SessionSearchScope::All) {
         scope = SessionSearchScope::ParentsOnly;
@@ -1439,7 +1443,9 @@ pub(super) async fn handle_message_search(
             }),
         ));
     };
-    let _ = crate::sessions::ingest_global_sources(&db, &target_root).await;
+    if catch_up {
+        let _ = crate::sessions::ingest_global_sources(&db, &target_root).await;
+    }
     let results = if let Some(provider) = requested_provider {
         db.search_session_messages_filtered(
             provider,
@@ -1471,6 +1477,7 @@ pub(super) async fn handle_message_search(
             "project_key": project_key,
             "parent_session_id": parent_session_id,
             "include_subagents": include_subagents,
+            "catch_up": catch_up,
             "scope": match scope {
                 SessionSearchScope::All => "all",
                 SessionSearchScope::ParentsOnly => "parents_only",
