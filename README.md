@@ -684,7 +684,7 @@ All tracedecay users contribute to an anonymous aggregate counter. `tracedecay s
 
 ## Index Freshness
 
-tracedecay keeps the graph up to date without a background daemon or an OS-level file watcher.
+tracedecay keeps the graph up to date without an OS-level file watcher. The optional MCP daemon reuses server state across clients; it does not watch files in the background.
 
 **On-demand staleness check.** Every MCP tool call checks whether any indexed files have been modified since the last sync. If stale files are found, they are re-extracted before the tool response is returned. A 30-second cooldown prevents back-to-back calls from re-walking the tree on every keystroke.
 
@@ -699,13 +699,23 @@ cp scripts/post-commit .git/hooks/post-commit
 chmod +x .git/hooks/post-commit
 ```
 
+### Daemon Debugging
+
+The daemon is a long-running MCP server for clients that share one local socket. Its logs go to stderr; when installed as a Linux user service, systemd captures them in journald.
+
+```bash
+tracedecay daemon install-service     # install/start Linux systemd user service
+tracedecay daemon status              # service path, socket state, log command
+systemctl --user status tracedecay.service --no-pager
+journalctl --user -u tracedecay.service -f
+tracedecay status --runtime --json    # process + DB/WAL/SHM telemetry snapshot
+```
+
+Scheduler logs use stable `event=... key=value` fields such as `event=scheduler_tick`, `event=scheduler_task`, `task=memory_curator`, `outcome=skipped`, and `reason=not_configured`, so they can be filtered directly from journald.
+
 ### Upgrading from 5.x
 
-The standalone daemon command from 5.x-era installs and its
-launchd/systemd/Windows Service autostart were removed in 6.0.0. The embedded
-OS-level file watcher that replaced the daemon was itself removed in 6.1.0 (it
-caused runaway CPU and memory on large monorepos with deep `node_modules` or
-`target` trees). The on-demand staleness model above is the current design.
+The old cross-platform watcher/autostart daemon from 5.x-era installs was removed in 6.0.0. The embedded OS-level file watcher that replaced it was itself removed in 6.1.0 (it caused runaway CPU and memory on large monorepos with deep `node_modules` or `target` trees). The current daemon is MCP transport/process reuse, not file watching; the on-demand staleness model above is still the freshness design.
 
 ---
 
@@ -732,6 +742,7 @@ tracedecay sync --doctor [path]     # Sync and list added/modified/removed files
 tracedecay status [path]            # Show statistics + cost summary
 tracedecay status [path] --json     # Show statistics (JSON output)
 tracedecay status --details         # Include node-kind breakdown
+tracedecay status --runtime         # Capture process + DB/WAL/SHM telemetry
 tracedecay dashboard                # Start local web dashboard (default port 7341)
 tracedecay dashboard --port 8080    # Start dashboard on custom port
 tracedecay dashboard --port 0       # Auto-select a free port
@@ -748,7 +759,10 @@ tracedecay reinstall                # Refresh settings for all installed agents
 tracedecay update-plugin            # Refresh generated plugin code/assets only; never writes agent configs
 tracedecay uninstall [--agent NAME] [--profile NAME] # Remove agent integration
 tracedecay serve                    # Start MCP server
+tracedecay daemon status            # Show daemon service/socket/log hints
+tracedecay daemon install-service   # Install/start Linux systemd user service
 tracedecay monitor                  # Live TUI showing MCP calls across all projects
+tracedecay update                   # Refresh binary, generated plugins, and daemon
 tracedecay upgrade                  # Self-update to latest version
 tracedecay channel [stable|beta]    # Show or switch update channel
 tracedecay doctor [--agent NAME]    # Check installation health
@@ -1013,6 +1027,7 @@ Large projects take longer on the first full index.
 | `TRACEDECAY_BIN` | Path to the tracedecay binary (used by Hermes wrapper for spawn mode). |
 | `TRACEDECAY_DASHBOARD_PROJECT` | Project root path for Hermes dashboard spawn mode (defaults to Hermes' cwd). |
 | `TRACEDECAY_DASHBOARD_URL` | Full URL to an already-running dashboard (Hermes external URL mode). |
+| `TRACEDECAY_DAEMON_SOCKET` | Override the Unix socket used by MCP daemon clients. |
 | `HERMES_HOME` | Path to Hermes profile directory for profile-scoped plugin installation. |
 | `TRACEDECAY_OFFLINE` | Set to `1` to skip network requests for pricing data (Savings & Cost tab uses bundled fallback). |
 | `DISABLE_TRACEDECAY` | Set to `true` to disable the MCP server entirely (exits cleanly without initializing). |

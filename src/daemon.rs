@@ -1,5 +1,6 @@
 #[cfg(unix)]
 use std::collections::HashMap;
+use std::fmt::Write;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -298,14 +299,161 @@ pub fn service_status(socket_path: &Path) -> String {
         "missing"
     };
     format!(
-        "service: {}\nsocket: {} ({})\n",
+        "service: {}\nsocket: {} ({})\nlogs: journalctl --user -u {} -f\n",
         systemd_user_service_path().map_or_else(
             |e| format!("unavailable: {e}"),
             |path| path.display().to_string()
         ),
         socket_path.display(),
-        socket_state
+        socket_state,
+        SERVICE_NAME
     )
+}
+
+fn format_daemon_log_line(event: &str, fields: &[(&str, String)]) -> String {
+    let mut line = format!("[tracedecay] event={}", quote_log_value(event));
+    for (key, value) in fields {
+        line.push(' ');
+        line.push_str(key);
+        line.push('=');
+        line.push_str(&quote_log_value(value));
+    }
+    line
+}
+
+fn quote_log_value(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'/' | b':'))
+    {
+        return value.to_string();
+    }
+
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            ch if ch.is_control() => {
+                let _ = write!(escaped, "\\u{{{:x}}}", ch as u32);
+            }
+            ch => escaped.push(ch),
+        }
+    }
+    format!("\"{escaped}\"")
+}
+
+fn log_daemon_event(event: &str, fields: &[(&str, String)]) {
+    eprintln!("{}", format_daemon_log_line(event, fields));
+}
+
+#[cfg(unix)]
+fn scheduler_task_log_fields(
+    project_path: &Path,
+    task: crate::automation::backend::AgentTaskKind,
+    outcome: &str,
+) -> Vec<(&'static str, String)> {
+    vec![
+        ("project", project_path.display().to_string()),
+        (
+            "task",
+            crate::automation::backend::task_key(task).to_string(),
+        ),
+        ("outcome", outcome.to_string()),
+    ]
+}
+
+#[cfg(unix)]
+fn log_scheduler_task_start(project_path: &Path, task: crate::automation::backend::AgentTaskKind) {
+    log_daemon_event(
+        "scheduler_task",
+        &scheduler_task_log_fields(project_path, task, "start"),
+    );
+}
+
+#[cfg(unix)]
+fn scheduler_task_error_log_fields(
+    project_path: &Path,
+    task: crate::automation::backend::AgentTaskKind,
+    error: &TraceDecayError,
+) -> Vec<(&'static str, String)> {
+    vec![
+        ("project", project_path.display().to_string()),
+        (
+            "task",
+            crate::automation::backend::task_key(task).to_string(),
+        ),
+        ("error", error.to_string()),
+    ]
+}
+
+#[cfg(unix)]
+fn log_scheduler_task_error(
+    project_path: &Path,
+    task: crate::automation::backend::AgentTaskKind,
+    error: &TraceDecayError,
+) {
+    log_daemon_event(
+        "scheduler_task_error",
+        &scheduler_task_error_log_fields(project_path, task, error),
+    );
+}
+
+#[cfg(unix)]
+fn scheduler_record_log_fields(
+    project_path: &Path,
+    record: &crate::automation::run_ledger::AutomationRunLedgerRecord,
+) -> Vec<(&'static str, String)> {
+    use crate::automation::run_ledger::AutomationRunStatus;
+
+    let outcome = match record.status {
+        AutomationRunStatus::Succeeded => "complete",
+        AutomationRunStatus::Failed => "error",
+        AutomationRunStatus::Skipped => "skipped",
+        AutomationRunStatus::Queued => "queued",
+        AutomationRunStatus::Running => "running",
+    };
+    let task = record
+        .task_key
+        .as_deref()
+        .unwrap_or_else(|| crate::automation::backend::task_key(record.task))
+        .to_string();
+    let mut fields = vec![
+        ("project", project_path.display().to_string()),
+        ("task", task),
+        ("outcome", outcome.to_string()),
+        ("run_id", record.run_id.clone()),
+    ];
+    if let Some(reason) = record.fallback_status.as_ref().or(record.error.as_ref()) {
+        fields.push(("reason", reason.clone()));
+    }
+    fields
+}
+
+#[cfg(all(unix, test))]
+fn daemon_scheduler_record_log_line(
+    project_path: &Path,
+    record: &crate::automation::run_ledger::AutomationRunLedgerRecord,
+) -> String {
+    format_daemon_log_line(
+        "scheduler_task",
+        &scheduler_record_log_fields(project_path, record),
+    )
+}
+
+#[cfg(unix)]
+fn log_daemon_scheduler_record(
+    project_path: &Path,
+    record: &crate::automation::run_ledger::AutomationRunLedgerRecord,
+) {
+    log_daemon_event(
+        "scheduler_task",
+        &scheduler_record_log_fields(project_path, record),
+    );
 }
 
 pub fn unavailable_error(socket_path: &Path) -> TraceDecayError {
@@ -391,7 +539,13 @@ async fn proxy_request_line_to_daemon(
                 transport.write_line("\n").await?;
                 transport.flush().await?;
             } else {
-                eprintln!("[tracedecay] daemon proxy dropped notification after error: {err}");
+                log_daemon_event(
+                    "daemon_proxy_drop",
+                    &[
+                        ("outcome", "dropped_notification".to_string()),
+                        ("error", err.to_string()),
+                    ],
+                );
             }
         }
     }
@@ -565,7 +719,10 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
 
     let listener = UnixListener::bind(&socket_path)?;
     set_owner_only_permissions(&socket_path, 0o600)?;
-    eprintln!("[tracedecay] daemon listening on {}", socket_path.display());
+    log_daemon_event(
+        "daemon_listening",
+        &[("socket", socket_path.display().to_string())],
+    );
     let engine = DaemonEngine::default();
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
@@ -578,10 +735,17 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         let engine = engine.clone();
         tokio::spawn(async move {
             if let Err(e) = Box::pin(serve_socket_client(stream, engine)).await {
-                eprintln!("[tracedecay] daemon client error: {e}");
+                log_daemon_event(
+                    "daemon_client",
+                    &[("outcome", "error".to_string()), ("error", e.to_string())],
+                );
             }
         });
     }
+    log_daemon_event(
+        "daemon_shutdown",
+        &[("socket", socket_path.display().to_string())],
+    );
     engine.shutdown_all().await;
     let _ = std::fs::remove_file(&socket_path);
     Ok(())
@@ -670,7 +834,11 @@ impl DaemonEngine {
             return Ok(server);
         }
 
-        let cg = open_project_for_handshake(&canonical_project_path, handshake).await?;
+        let cg = Box::pin(open_project_for_handshake(
+            &canonical_project_path,
+            handshake,
+        ))
+        .await?;
         let accounting_db = accounting_db_for_handshake(handshake).await;
         let registry_db = registry_db_for_handshake(handshake).await;
         let server = crate::mcp::McpServer::new_with_dbs(
@@ -705,7 +873,14 @@ impl DaemonEngine {
             match automation_scheduler_configured_for_project(&project_path, &handshake).await {
                 Ok(configured) => configured,
                 Err(e) => {
-                    eprintln!("[tracedecay] automation scheduler config error: {e}");
+                    log_daemon_event(
+                        "scheduler_config",
+                        &[
+                            ("project", project_path.display().to_string()),
+                            ("outcome", "error".to_string()),
+                            ("error", e.to_string()),
+                        ],
+                    );
                     false
                 }
             };
@@ -754,14 +929,35 @@ impl DaemonEngine {
 #[cfg(unix)]
 async fn run_automation_scheduler_loop(project_path: PathBuf, handshake: DaemonHandshake) {
     loop {
+        log_daemon_event(
+            "scheduler_tick",
+            &[
+                ("project", project_path.display().to_string()),
+                ("outcome", "start".to_string()),
+            ],
+        );
         if let Err(e) = Box::pin(run_automation_scheduler_tick(&project_path, &handshake)).await {
-            eprintln!("[tracedecay] automation scheduler tick failed: {e}");
+            log_daemon_event(
+                "scheduler_tick",
+                &[
+                    ("project", project_path.display().to_string()),
+                    ("outcome", "error".to_string()),
+                    ("error", e.to_string()),
+                ],
+            );
         }
         let tick_secs = Box::pin(automation_scheduler_tick_secs_for_project(
             &project_path,
             &handshake,
         ))
         .await;
+        log_daemon_event(
+            "scheduler_sleep",
+            &[
+                ("project", project_path.display().to_string()),
+                ("next_tick_secs", tick_secs.to_string()),
+            ],
+        );
         tokio::time::sleep(Duration::from_secs(tick_secs)).await;
     }
 }
@@ -776,13 +972,27 @@ async fn automation_scheduler_tick_secs_for_project(
             match effective_automation_config_for_project(&cg, &handshake.client_identity).await {
                 Ok(config) => config.scheduler_tick_secs,
                 Err(e) => {
-                    eprintln!("[tracedecay] automation scheduler config error: {e}");
+                    log_daemon_event(
+                        "scheduler_config",
+                        &[
+                            ("project", project_path.display().to_string()),
+                            ("outcome", "error".to_string()),
+                            ("error", e.to_string()),
+                        ],
+                    );
                     crate::automation::config::DEFAULT_SCHEDULER_TICK_SECS
                 }
             }
         }
         Err(e) => {
-            eprintln!("[tracedecay] automation scheduler project open failed: {e}");
+            log_daemon_event(
+                "scheduler_project_open",
+                &[
+                    ("project", project_path.display().to_string()),
+                    ("outcome", "error".to_string()),
+                    ("error", e.to_string()),
+                ],
+            );
             crate::automation::config::DEFAULT_SCHEDULER_TICK_SECS
         }
     }
@@ -793,7 +1003,7 @@ async fn run_automation_scheduler_tick(
     project_path: &Path,
     handshake: &DaemonHandshake,
 ) -> Result<()> {
-    use crate::automation::backend::CodexAppServerBackend;
+    use crate::automation::backend::{AgentTaskKind, CodexAppServerBackend};
     use crate::automation::run_ledger::AutomationTrigger;
     use crate::automation::runner::{
         run_memory_curator_with_backend, run_session_reflector_with_backend,
@@ -806,16 +1016,33 @@ async fn run_automation_scheduler_tick(
         crate::automation::scheduler::load_scheduler_control(&cg.store_layout().dashboard_root)
             .await?;
     if control.paused {
+        log_daemon_event(
+            "scheduler_tick",
+            &[
+                ("project", project_path.display().to_string()),
+                ("outcome", "skipped".to_string()),
+                ("reason", "paused".to_string()),
+            ],
+        );
         return Ok(());
     }
     let config = effective_automation_config_for_project(&cg, &handshake.client_identity).await?;
     if !automation_scheduler_configured(&config) {
+        log_daemon_event(
+            "scheduler_tick",
+            &[
+                ("project", project_path.display().to_string()),
+                ("outcome", "skipped".to_string()),
+                ("reason", "not_configured".to_string()),
+            ],
+        );
         return Ok(());
     }
     let backend = CodexAppServerBackend::from_automation_config(&config);
     let mut first_error: Option<TraceDecayError> = None;
 
-    if let Err(e) = run_memory_curator_with_backend(
+    log_scheduler_task_start(project_path, AgentTaskKind::MemoryCurator);
+    match run_memory_curator_with_backend(
         &cg,
         &config,
         &backend,
@@ -826,10 +1053,14 @@ async fn run_automation_scheduler_tick(
     )
     .await
     {
-        eprintln!("[tracedecay] automation scheduler memory_curator failed: {e}");
-        first_error.get_or_insert(e);
+        Ok(run) => log_daemon_scheduler_record(project_path, &run.ledger_record),
+        Err(e) => {
+            log_scheduler_task_error(project_path, AgentTaskKind::MemoryCurator, &e);
+            first_error.get_or_insert(e);
+        }
     }
-    if let Err(e) = run_session_reflector_with_backend(
+    log_scheduler_task_start(project_path, AgentTaskKind::SessionReflector);
+    match run_session_reflector_with_backend(
         &cg,
         &config,
         &backend,
@@ -840,10 +1071,14 @@ async fn run_automation_scheduler_tick(
     )
     .await
     {
-        eprintln!("[tracedecay] automation scheduler session_reflector failed: {e}");
-        first_error.get_or_insert(e);
+        Ok(run) => log_daemon_scheduler_record(project_path, &run.ledger_record),
+        Err(e) => {
+            log_scheduler_task_error(project_path, AgentTaskKind::SessionReflector, &e);
+            first_error.get_or_insert(e);
+        }
     }
-    if let Err(e) = run_skill_writer_with_backend(
+    log_scheduler_task_start(project_path, AgentTaskKind::SkillWriter);
+    match run_skill_writer_with_backend(
         &cg,
         &config,
         &backend,
@@ -854,8 +1089,11 @@ async fn run_automation_scheduler_tick(
     )
     .await
     {
-        eprintln!("[tracedecay] automation scheduler skill_writer failed: {e}");
-        first_error.get_or_insert(e);
+        Ok(run) => log_daemon_scheduler_record(project_path, &run.ledger_record),
+        Err(e) => {
+            log_scheduler_task_error(project_path, AgentTaskKind::SkillWriter, &e);
+            first_error.get_or_insert(e);
+        }
     }
     match first_error {
         Some(err) => Err(err),
@@ -1312,6 +1550,120 @@ mod tests {
             global_db_path: profile_root.join("global.db"),
             profile_root,
         }
+    }
+
+    #[test]
+    fn daemon_log_line_formats_stable_key_value_fields() {
+        let line = super::format_daemon_log_line(
+            "scheduler_task",
+            &[
+                ("task", "memory_curator".to_string()),
+                ("outcome", "not due yet".to_string()),
+                ("project", "/tmp/example project".to_string()),
+            ],
+        );
+
+        assert_eq!(
+            line,
+            "[tracedecay] event=scheduler_task task=memory_curator outcome=\"not due yet\" project=\"/tmp/example project\""
+        );
+    }
+
+    #[test]
+    fn daemon_log_line_escapes_quotes_and_backslashes() {
+        let line = super::format_daemon_log_line(
+            "client_error",
+            &[("error", r#"failed at "step" \ retry"#.to_string())],
+        );
+
+        assert_eq!(
+            line,
+            r#"[tracedecay] event=client_error error="failed at \"step\" \\ retry""#
+        );
+    }
+
+    #[test]
+    fn daemon_log_line_escapes_control_characters() {
+        let line = super::format_daemon_log_line(
+            "client_error",
+            &[("error", "first\nsecond\rthird\tfourth".to_string())],
+        );
+
+        assert_eq!(
+            line,
+            r#"[tracedecay] event=client_error error="first\nsecond\rthird\tfourth""#
+        );
+    }
+
+    #[test]
+    fn service_status_includes_journalctl_debug_command() {
+        let status = super::service_status(&PathBuf::from("/tmp/tracedecay.sock"));
+
+        assert!(status.contains("logs: journalctl --user -u tracedecay.service -f"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scheduler_task_start_log_uses_task_key_and_project() {
+        let line = super::format_daemon_log_line(
+            "scheduler_task",
+            &super::scheduler_task_log_fields(
+                std::path::Path::new("/tmp/project with spaces"),
+                crate::automation::backend::AgentTaskKind::SkillWriter,
+                "start",
+            ),
+        );
+
+        assert_eq!(
+            line,
+            "[tracedecay] event=scheduler_task project=\"/tmp/project with spaces\" task=skill_writer outcome=start"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scheduler_record_log_preserves_skipped_status_and_reason() {
+        let record = crate::automation::run_ledger::AutomationRunLedgerRecord {
+            schema_version: 2,
+            run_id: "run-123".to_string(),
+            trigger: crate::automation::run_ledger::AutomationTrigger::Scheduler,
+            task: crate::automation::backend::AgentTaskKind::MemoryCurator,
+            task_key: Some("memory_curator".to_string()),
+            backend: "codex_app_server".to_string(),
+            host_mode: Some("standalone".to_string()),
+            prompt_version: Some("memory_curator:v1".to_string()),
+            response_schema: None,
+            strict_json: None,
+            model: None,
+            status: crate::automation::run_ledger::AutomationRunStatus::Skipped,
+            evidence_hash: None,
+            input_hash: None,
+            output_hash: None,
+            proposed_ops: None,
+            applied_ops: None,
+            rejected_ops: None,
+            validation_report: None,
+            reviewed_count: 0,
+            accepted_count: 0,
+            rejected_count: 0,
+            skipped_count: 1,
+            error: None,
+            error_classification: None,
+            error_retryable: None,
+            fallback_status: Some("scheduler_interval_not_elapsed".to_string()),
+            report_ref: None,
+            artifacts: Vec::new(),
+            started_at: "1000".to_string(),
+            completed_at: "1001".to_string(),
+        };
+
+        let line =
+            super::daemon_scheduler_record_log_line(std::path::Path::new("/tmp/project"), &record);
+
+        assert_eq!(
+            line,
+            "[tracedecay] event=scheduler_task project=/tmp/project task=memory_curator outcome=skipped run_id=run-123 reason=scheduler_interval_not_elapsed"
+        );
     }
 
     #[test]

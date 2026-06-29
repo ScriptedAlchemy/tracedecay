@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 use super::artifacts::{sha256_json, write_improvement_artifacts};
 use super::backend::{
-    agent_task_contract, classify_agent_task_error_message, extract_single_json_object,
+    agent_task_contract, classify_agent_task_error_message, extract_json_object_prefix,
     prompt_version, task_key, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
 };
 use super::config::{AutomationBackend, AutomationConfig, AutomationHostMode};
@@ -450,7 +450,7 @@ impl<'a> AgentRunFinalizer<'a> {
         match response
             .output_json
             .clone()
-            .map_or_else(|| extract_single_json_object(&response.output_text), Ok)
+            .map_or_else(|| extract_json_object_prefix(&response.output_text), Ok)
         {
             Ok(output) => Ok(output),
             Err(err) => {
