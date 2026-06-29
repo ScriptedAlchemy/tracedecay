@@ -36,6 +36,60 @@ async fn skill_writer_runner_skips_when_task_is_disabled() {
 }
 
 #[tokio::test]
+async fn skill_writer_default_provider_searches_all_providers() {
+    let temp = tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let cg = init_project(temp.path()).await;
+    let db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
+        .await
+        .expect("session db open");
+    seed_session_message_in_db(
+        &db,
+        cg.project_root(),
+        SeedSessionMessage {
+            provider: "codex",
+            session_id: "skill-writer-codex-default",
+            message_id: "skill-writer-codex-default-message-001",
+            role: "assistant",
+            timestamp: 1_715_000_001,
+            text: "Codex workflow correction repeated skill tool pattern evidence should be found by the default skill writer provider.",
+            source: None,
+        },
+    )
+    .await;
+    let backend = SkillJsonBackend::new(json!({"skills": []}));
+    let config = AutomationConfig {
+        enabled: true,
+        backend: AutomationBackend::CodexAppServer,
+        host_mode: AutomationHostMode::Standalone,
+        tasks: AutomationTaskSet {
+            skill_writer: AutomationTaskConfig {
+                enabled: true,
+                schedule: Some("manual".to_string()),
+                ..AutomationTaskConfig::default()
+            },
+            ..AutomationTaskSet::default()
+        },
+        ..AutomationConfig::default()
+    };
+
+    let run = run_skill_writer_with_backend(
+        &cg,
+        &config,
+        &backend,
+        SkillWriterAutomationOptions {
+            profile_root: Some(profile_root),
+            ..SkillWriterAutomationOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(backend.calls(), 1);
+    assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
+}
+
+#[tokio::test]
 async fn skill_writer_runner_creates_pending_skill_drafts_for_approval() {
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
