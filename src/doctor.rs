@@ -336,7 +336,10 @@ async fn registry_drift_findings(
         };
         for store_context in context.stores {
             let store = store_context.store;
-            let Some(manifest_path) = resolve_registry_manifest_path(profile_root, &store) else {
+            let Some(manifest_path) = registry_store_artifacts(profile_root, &store)
+                .into_iter()
+                .find_map(|artifacts| artifacts.manifest_path)
+            else {
                 continue;
             };
             let Ok(manifest) = crate::storage::read_store_manifest(&manifest_path) else {
@@ -436,63 +439,43 @@ fn classify_registry_storage(
     if store.storage_mode != "profile_sharded" {
         return None;
     }
-    let store_relpath = registry_relpath(&store.store_relpath);
-    let manifest_relpath = store
-        .manifest_relpath
-        .as_ref()
-        .map(|relpath| registry_relpath(relpath));
-    let mut resolved_any_root = false;
-    let mut manifest_exists = false;
-    for profile_root in registry_profile_roots(profile_root) {
-        let Ok(data_root) =
-            crate::storage::StoreArtifactPath::resolve(&profile_root, &store_relpath)
-        else {
-            continue;
-        };
-        resolved_any_root = true;
-        let data_root = data_root.absolute_path();
-        if data_root
-            .join(crate::config::db_filename(&data_root))
-            .exists()
-        {
-            return Some(DoctorStorageStatus::ProfileSharded);
-        }
-        manifest_exists |= manifest_relpath.as_ref().map_or_else(
-            || {
-                data_root
-                    .join(crate::storage::STORE_MANIFEST_FILENAME)
-                    .is_file()
-            },
-            |relpath| {
-                [&profile_root, &data_root].iter().any(|root| {
-                    crate::storage::StoreArtifactPath::resolve(root, relpath)
-                        .ok()
-                        .is_some_and(|path| path.absolute_path().is_file())
-                })
-            },
-        );
-    }
-    if manifest_exists {
+    let artifacts = registry_store_artifacts(profile_root, store);
+    if artifacts
+        .iter()
+        .any(|artifacts| artifacts.graph_db_path.exists())
+    {
+        Some(DoctorStorageStatus::ProfileSharded)
+    } else if artifacts
+        .iter()
+        .any(|artifacts| artifacts.manifest_path.is_some())
+    {
         Some(DoctorStorageStatus::ManifestReconstructable)
-    } else if resolved_any_root {
-        Some(DoctorStorageStatus::Stale)
-    } else {
+    } else if artifacts.is_empty() {
         None
+    } else {
+        Some(DoctorStorageStatus::Stale)
     }
 }
 
-fn resolve_registry_manifest_path(
+#[derive(Debug, Clone)]
+struct RegistryStoreArtifacts {
+    graph_db_path: PathBuf,
+    manifest_path: Option<PathBuf>,
+}
+
+fn registry_store_artifacts(
     profile_root: &Path,
     store: &crate::global_db::StoreInstanceRecord,
-) -> Option<PathBuf> {
+) -> Vec<RegistryStoreArtifacts> {
     if store.storage_mode != "profile_sharded" {
-        return None;
+        return Vec::new();
     }
     let store_relpath = registry_relpath(&store.store_relpath);
     let manifest_relpath = store
         .manifest_relpath
         .as_ref()
         .map(|relpath| registry_relpath(relpath));
+    let mut artifacts = Vec::new();
     for profile_root in registry_profile_roots(profile_root) {
         let Ok(data_root) =
             crate::storage::StoreArtifactPath::resolve(&profile_root, &store_relpath)
@@ -500,24 +483,33 @@ fn resolve_registry_manifest_path(
             continue;
         };
         let data_root = data_root.absolute_path();
-        if let Some(relpath) = manifest_relpath.as_ref() {
-            for root in [&profile_root, &data_root] {
-                let Ok(path) = crate::storage::StoreArtifactPath::resolve(root, relpath) else {
-                    continue;
-                };
-                let path = path.absolute_path();
-                if path.is_file() {
-                    return Some(path);
-                }
-            }
-        } else {
-            let path = data_root.join(crate::storage::STORE_MANIFEST_FILENAME);
-            if path.is_file() {
-                return Some(path);
-            }
-        }
+        artifacts.push(RegistryStoreArtifacts {
+            graph_db_path: data_root.join(crate::config::db_filename(&data_root)),
+            manifest_path: registry_manifest_path(
+                &profile_root,
+                &data_root,
+                manifest_relpath.as_deref(),
+            ),
+        });
     }
-    None
+    artifacts
+}
+
+fn registry_manifest_path(
+    profile_root: &Path,
+    data_root: &Path,
+    manifest_relpath: Option<&Path>,
+) -> Option<PathBuf> {
+    if let Some(relpath) = manifest_relpath {
+        return [profile_root, data_root].iter().find_map(|root| {
+            crate::storage::StoreArtifactPath::resolve(root, relpath)
+                .ok()
+                .map(|path| path.absolute_path())
+                .filter(|path| path.is_file())
+        });
+    }
+    let path = data_root.join(crate::storage::STORE_MANIFEST_FILENAME);
+    path.is_file().then_some(path)
 }
 
 fn registry_relpath(value: &str) -> PathBuf {

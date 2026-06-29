@@ -91,6 +91,51 @@ impl Database {
         collect_rows(&mut rows, row_to_unresolved_ref, "get_unresolved_refs").await
     }
 
+    /// Returns bounded ignored-dependency unresolved references matching `query`.
+    pub async fn search_ignored_dependency_refs(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<UnresolvedRef>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let query = query.trim().to_ascii_lowercase();
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let pattern = format!(
+            "%{}%",
+            query
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        let mut rows = self
+            .conn()
+            .query(
+                "SELECT from_node_id, reference_name, reference_kind, line, col, file_path
+                 FROM unresolved_refs
+                 WHERE reference_name >= 'npm:'
+                   AND reference_name < 'npm;'
+                   AND lower(replace(substr(reference_name, 5), '#', ' ')) LIKE ?1 ESCAPE '\\'
+                 LIMIT ?2",
+                params![pattern, i64::try_from(limit).unwrap_or(i64::MAX)],
+            )
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to query ignored dependency refs: {e}"),
+                operation: "search_ignored_dependency_refs".to_string(),
+            })?;
+
+        collect_rows(
+            &mut rows,
+            row_to_unresolved_ref,
+            "search_ignored_dependency_refs",
+        )
+        .await
+    }
+
     /// Removes all unresolved references.
     pub async fn clear_unresolved_refs(&self) -> Result<()> {
         self.conn()

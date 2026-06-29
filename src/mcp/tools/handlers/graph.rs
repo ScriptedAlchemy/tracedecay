@@ -19,7 +19,7 @@ const CONTEXT_MEMORY_MATCH_LIMIT_MAX: usize = 10;
 const CONTEXT_MEMORY_SNIPPET_CHARS: usize = 240;
 
 use super::super::render::{self, Md};
-use super::super::ToolResult;
+use super::super::{ToolResult, INTERNAL_TOOL_ANALYTICS_KEY};
 use super::support::{
     effective_path, filter_by_scope, require_node_id, string_array_values, unique_file_paths,
 };
@@ -39,7 +39,13 @@ where
     F: FnOnce() -> String,
 {
     let text = render::finalize(Some(cg.project_root()), args, value, md);
-    text_tool_result(&text, touched_files)
+    let mut result = text_tool_result(&text, touched_files);
+    if let Some(analytics) = value.get(INTERNAL_TOOL_ANALYTICS_KEY).cloned() {
+        if let Some(object) = result.value.as_object_mut() {
+            object.insert(INTERNAL_TOOL_ANALYTICS_KEY.to_string(), analytics);
+        }
+    }
+    result
 }
 
 fn text_tool_result(text: &str, touched_files: Vec<String>) -> ToolResult {
@@ -121,12 +127,15 @@ async fn ignored_dependency_hint(
     if query.is_empty() {
         return Ok(None);
     }
+    let candidate_limit = limit.clamp(1, 20);
     let db = if cg.is_read_only() {
         cg.open_project_store_db_read_only().await?
     } else {
         cg.open_project_store_db().await?
     };
-    let refs = db.get_unresolved_refs().await?;
+    let refs = db
+        .search_ignored_dependency_refs(&query, candidate_limit)
+        .await?;
     let mut seen = BTreeSet::new();
     let mut candidates = Vec::new();
     for unresolved in refs {
@@ -152,7 +161,7 @@ async fn ignored_dependency_hint(
             "import_file": unresolved.file_path,
             "line": user_line(unresolved.line),
         }));
-        if candidates.len() >= limit.clamp(1, 20) {
+        if candidates.len() >= candidate_limit {
             break;
         }
     }
@@ -319,6 +328,16 @@ pub(super) async fn handle_context(
             "memory_matches".to_string(),
             serde_json::to_value(&memory_matches).unwrap_or_else(|_| json!([])),
         );
+        object.insert(
+            INTERNAL_TOOL_ANALYTICS_KEY.to_string(),
+            json!({
+                "context_memory": context_memory_analytics_value(
+                    &memory_options,
+                    &memory_matches,
+                    memory_matches_error.as_deref()
+                ),
+            }),
+        );
         if let Some(err) = memory_matches_error {
             object.insert("memory_matches_error".to_string(), json!(err));
         }
@@ -358,6 +377,25 @@ fn context_memory_options(args: &Value) -> ContextMemoryOptions {
         limit,
         min_trust,
     }
+}
+
+fn context_memory_analytics_value(
+    options: &ContextMemoryOptions,
+    memory_matches: &[FactSearchResult],
+    memory_matches_error: Option<&str>,
+) -> Value {
+    let fact_ids: Vec<Value> = memory_matches
+        .iter()
+        .map(|hit| Value::from(hit.fact.fact_id))
+        .collect();
+    json!({
+        "include_memory": options.include_memory,
+        "limit": options.limit,
+        "min_trust": options.min_trust,
+        "match_count": fact_ids.len(),
+        "fact_ids": fact_ids,
+        "error": memory_matches_error,
+    })
 }
 
 async fn context_memory_matches(

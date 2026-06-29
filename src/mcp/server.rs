@@ -22,6 +22,7 @@ use crate::tracedecay::TraceDecay;
 
 use super::tools::{
     explore_call_budget, get_tool_definitions_with_budget, handle_tool_call_with_registry,
+    INTERNAL_TOOL_ANALYTICS_KEY,
 };
 use super::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
 
@@ -1937,6 +1938,7 @@ impl McpServer {
                 }
 
                 mark_semantic_tool_error(&mut result.value);
+                strip_internal_tool_analytics(&mut result.value);
                 JsonRpcResponse::success(id, result.value)
             }
             Err(e) => {
@@ -2165,43 +2167,30 @@ fn append_tool_response_analytics(
         .and_then(Value::as_f64)
         .unwrap_or(0.5)
         .clamp(0.0, 1.0);
-    let payload = response.and_then(tool_result_json_payload);
-    let memory_matches = payload
-        .as_ref()
-        .and_then(|payload| payload.get("memory_matches"))
-        .and_then(Value::as_array);
-    let fact_ids: Vec<Value> = memory_matches
-        .into_iter()
-        .flatten()
-        .filter_map(|hit| {
-            hit.get("fact")
-                .and_then(|fact| fact.get("fact_id"))
-                .and_then(Value::as_i64)
-        })
-        .map(Value::from)
-        .collect();
-    let match_count = fact_ids.len();
-    let memory_error = payload
-        .as_ref()
-        .and_then(|payload| payload.get("memory_matches_error"))
-        .and_then(Value::as_str);
+    if let Some(context_memory) = response.and_then(tool_result_context_memory_analytics) {
+        metadata["context_memory"] = context_memory.clone();
+        return;
+    }
     metadata["context_memory"] = json!({
         "include_memory": include_memory,
         "limit": limit,
         "min_trust": min_trust,
-        "match_count": match_count,
-        "fact_ids": fact_ids,
-        "error": memory_error,
+        "match_count": 0,
+        "fact_ids": [],
+        "error": null,
     });
 }
 
-fn tool_result_json_payload(response: &Value) -> Option<Value> {
+fn tool_result_context_memory_analytics(response: &Value) -> Option<&Value> {
     response
-        .get("content")
-        .and_then(Value::as_array)?
-        .iter()
-        .filter_map(|item| item.get("text").and_then(Value::as_str))
-        .find_map(|text| serde_json::from_str::<Value>(text).ok())
+        .get(INTERNAL_TOOL_ANALYTICS_KEY)?
+        .get("context_memory")
+}
+
+fn strip_internal_tool_analytics(value: &mut Value) {
+    if let Some(object) = value.as_object_mut() {
+        object.remove(INTERNAL_TOOL_ANALYTICS_KEY);
+    }
 }
 
 fn json_rpc_request_id_string(id: &Value) -> Option<String> {
