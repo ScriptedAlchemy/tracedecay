@@ -9,7 +9,7 @@ use std::path::{Component, Path, PathBuf};
 use serde_json::Value;
 
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{GlobalDb, ProjectRegistryContext};
+use crate::global_db::{CodeProjectRecord, GlobalDb, ProjectRegistryContext};
 
 /// Extracts the `node_id` parameter from tool arguments, accepting `id` as a
 /// fallback alias. LLMs occasionally shorten `node_id` to `id`; this avoids a
@@ -194,27 +194,97 @@ pub(super) async fn project_registry_context(
             });
         }
     };
-    let context = if let Some(project_id) = project_id {
-        db.project_registry_context_by_id(project_id).await
-    } else if let Some(project_path) = project_path {
-        db.project_registry_context_by_alias(Path::new(project_path))
-            .await
-    } else {
-        return Ok(None);
-    };
+    let context = resolve_project_registry_context(db, project_id, project_path).await;
 
     context
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "registered project not found for selector".to_string(),
-        })
+        .ok_or_else(|| unresolved_project_selector_error(project_id, project_path))
         .map(Some)
+}
+
+async fn resolve_project_registry_context(
+    db: &GlobalDb,
+    project_id: Option<&str>,
+    project_path: Option<&str>,
+) -> Option<ProjectRegistryContext> {
+    if let Some(project_id) = project_id {
+        return db.project_registry_context_by_id(project_id).await;
+    }
+    let project_path = project_path?;
+    if let Some(context) = db
+        .project_registry_context_by_alias(Path::new(project_path))
+        .await
+    {
+        return Some(context);
+    }
+    let basename = bare_project_name(project_path)?;
+    unique_project_basename_context(db, basename).await
+}
+
+async fn unique_project_basename_context(
+    db: &GlobalDb,
+    basename: &str,
+) -> Option<ProjectRegistryContext> {
+    let mut matching_ids = Vec::new();
+    for project in db.search_code_projects(basename, usize::MAX).await {
+        if !project_basename_matches(&project, basename)
+            || matching_ids.contains(&project.project_id)
+        {
+            continue;
+        }
+        matching_ids.push(project.project_id);
+        if matching_ids.len() > 1 {
+            return None;
+        }
+    }
+    let project_id = matching_ids.into_iter().next()?;
+    db.project_registry_context_by_id(&project_id).await
+}
+
+fn bare_project_name(value: &str) -> Option<&str> {
+    let mut components = Path::new(value).components();
+    let first = components.next()?;
+    if components.next().is_some() {
+        return None;
+    }
+    match first {
+        Component::Normal(name) => name.to_str().filter(|name| !name.is_empty()),
+        _ => None,
+    }
+}
+
+fn project_basename_matches(project: &CodeProjectRecord, basename: &str) -> bool {
+    [
+        project.display_root.as_str(),
+        project.canonical_root.as_str(),
+    ]
+    .into_iter()
+    .filter_map(|root| Path::new(root).file_name())
+    .any(|name| name == basename)
+}
+
+fn unresolved_project_selector_error(
+    project_id: Option<&str>,
+    project_path: Option<&str>,
+) -> TraceDecayError {
+    let selector = project_id
+        .map(|value| format!("project_id={value}"))
+        .or_else(|| project_path.map(|value| format!("project_path={value}")))
+        .unwrap_or_else(|| "empty selector".to_string());
+    TraceDecayError::Config {
+        message: format!(
+            "registered project not found for selector ({selector}); run tracedecay_project_search to find the registered project_id or full project_path"
+        ),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use tempfile::TempDir;
 
-    use super::{require_node_id, string_array_values};
+    use crate::global_db::GlobalDb;
+
+    use super::{require_node_id, string_array_values, unique_project_basename_context};
 
     #[test]
     fn test_require_node_id_canonical() {
@@ -253,5 +323,51 @@ mod tests {
         );
         assert!(string_array_values(&args, "missing").is_empty());
         assert!(string_array_values(&args, "not_array").is_empty());
+    }
+
+    #[tokio::test]
+    async fn unique_project_basename_context_scans_past_first_search_page(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = TempDir::new()?;
+        let db = GlobalDb::open_at(&dir.path().join("global.db"))
+            .await
+            .ok_or_else(|| std::io::Error::other("failed to open test global db"))?;
+
+        let first_exact = dir.path().join("first").join("target");
+        std::fs::create_dir_all(&first_exact)?;
+        db.upsert_code_project("z_exact_old", &first_exact, None, None, Some("main"))
+            .await
+            .ok_or_else(|| std::io::Error::other("failed to insert first exact project"))?;
+
+        for index in 0..100 {
+            let root = dir
+                .path()
+                .join("noise")
+                .join(format!("target-noise-{index:03}"));
+            std::fs::create_dir_all(&root)?;
+            db.upsert_code_project(
+                &format!("n_noise_{index:03}"),
+                &root,
+                None,
+                None,
+                Some("main"),
+            )
+            .await
+            .ok_or_else(|| std::io::Error::other("failed to insert noise project"))?;
+        }
+
+        let second_exact = dir.path().join("second").join("target");
+        std::fs::create_dir_all(&second_exact)?;
+        db.upsert_code_project("a_exact_new", &second_exact, None, None, Some("main"))
+            .await
+            .ok_or_else(|| std::io::Error::other("failed to insert second exact project"))?;
+
+        assert!(
+            unique_project_basename_context(&db, "target")
+                .await
+                .is_none(),
+            "duplicate exact basenames must fail closed even when one match falls outside the first search page"
+        );
+        Ok(())
     }
 }

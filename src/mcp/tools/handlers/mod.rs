@@ -680,6 +680,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn graph_reader_selector_dispatch_accepts_unique_project_basename() {
+        let _env_lock = SELECTOR_ENV_LOCK.lock().await;
+        let dir = TempDir::new().unwrap();
+        let _env = SelectorEnv::new(dir.path());
+        let active_project = dir.path().join("active");
+        let target_project = dir.path().join("target");
+        fs::create_dir_all(active_project.join("src")).unwrap();
+        fs::create_dir_all(target_project.join("src")).unwrap();
+        fs::write(active_project.join("src/active.rs"), "pub fn active() {}\n").unwrap();
+        fs::write(target_project.join("src/target.rs"), "pub fn target() {}\n").unwrap();
+
+        let active = TraceDecay::init(&active_project).await.unwrap();
+        let target = TraceDecay::init(&target_project).await.unwrap();
+        target.index_all().await.unwrap();
+        let registry = GlobalDb::open().await.unwrap();
+
+        let result = handle_tool_call_with_registry(
+            &active,
+            "tracedecay_search",
+            json!({
+                "project_selector": {"path": "target"},
+                "query": "target",
+                "limit": 5,
+            }),
+            None,
+            None,
+            Some(&registry),
+            false,
+        )
+        .await
+        .unwrap();
+        let text = result.value["content"][0]["text"].as_str().unwrap();
+
+        assert!(
+            text.contains("target"),
+            "unique basename selector should return target graph results: {text}"
+        );
+        assert!(
+            !text.contains("active"),
+            "unique basename selector should not query the active graph: {text}"
+        );
+
+        active.checkpoint().await.unwrap();
+        target.checkpoint().await.unwrap();
+        active.close();
+        target.close();
+    }
+
+    #[tokio::test]
+    async fn graph_reader_selector_rejects_ambiguous_project_basename() {
+        let _env_lock = SELECTOR_ENV_LOCK.lock().await;
+        let dir = TempDir::new().unwrap();
+        let _env = SelectorEnv::new(dir.path());
+        let active_project = dir.path().join("active");
+        let first_target = dir.path().join("first").join("target");
+        let second_target = dir.path().join("second").join("target");
+        fs::create_dir_all(active_project.join("src")).unwrap();
+        fs::create_dir_all(first_target.join("src")).unwrap();
+        fs::create_dir_all(second_target.join("src")).unwrap();
+        fs::write(active_project.join("src/active.rs"), "pub fn active() {}\n").unwrap();
+        fs::write(first_target.join("src/first.rs"), "pub fn first() {}\n").unwrap();
+        fs::write(second_target.join("src/second.rs"), "pub fn second() {}\n").unwrap();
+
+        let active = TraceDecay::init(&active_project).await.unwrap();
+        let first = TraceDecay::init(&first_target).await.unwrap();
+        let second = TraceDecay::init(&second_target).await.unwrap();
+        first.index_all().await.unwrap();
+        second.index_all().await.unwrap();
+        let registry = GlobalDb::open().await.unwrap();
+
+        let err = handle_tool_call_with_registry(
+            &active,
+            "tracedecay_search",
+            json!({
+                "project_selector": {"path": "target"},
+                "query": "target",
+            }),
+            None,
+            None,
+            Some(&registry),
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{err}").contains("registered project not found for selector"),
+            "ambiguous basename selector should be rejected: {err}"
+        );
+
+        active.checkpoint().await.unwrap();
+        first.checkpoint().await.unwrap();
+        second.checkpoint().await.unwrap();
+        active.close();
+        first.close();
+        second.close();
+    }
+
+    #[tokio::test]
     async fn unsupported_selector_tool_rejects_explicit_project_selector() {
         let _env_lock = SELECTOR_ENV_LOCK.lock().await;
         let dir = TempDir::new().unwrap();
