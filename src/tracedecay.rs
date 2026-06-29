@@ -4368,6 +4368,30 @@ impl TraceDecay {
         Ok(results)
     }
 
+    /// Search facts without updating recall/access counters. This is for
+    /// background enrichment surfaces such as `tracedecay_context`, where a
+    /// memory match is supporting context rather than an explicit recall.
+    pub async fn search_facts_untracked(
+        &self,
+        request: SearchFactsRequest,
+    ) -> Result<Vec<FactSearchResult>> {
+        let db = self.open_project_store_db().await?;
+        let mut results = FactRetriever::new(db.conn())
+            .search_untracked(
+                &request.query,
+                request.category,
+                request.min_trust,
+                request.limit.unwrap_or(DEFAULT_FACT_LIMIT),
+            )
+            .await?;
+        if !request.include_why {
+            for result in &mut results {
+                result.why = None;
+            }
+        }
+        Ok(results)
+    }
+
     pub async fn probe_entity(
         &self,
         entity: &str,

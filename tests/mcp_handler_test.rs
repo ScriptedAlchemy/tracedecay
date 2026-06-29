@@ -2035,6 +2035,153 @@ async fn test_context() {
     assert!(!text.is_empty());
 }
 
+#[tokio::test]
+async fn context_includes_matching_memory_facts() {
+    let (cg, _dir) = setup_project().await;
+    let added = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": "Helper function reviews should check durable memory before broad file search.",
+            "category": "decision",
+            "entity": "helper function",
+            "tags": ["context", "memory"],
+            "trust": 0.91,
+            "source": "mcp-context-test"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
+    let fact_id = added["fact"]["fact_id"].as_i64().unwrap();
+    let before_context = cg.get_fact(fact_id).await.unwrap().unwrap();
+
+    let markdown_result = handle_tool_call(
+        &cg,
+        "tracedecay_context",
+        json!({"task": "helper function durable memory review"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let markdown = extract_text(&markdown_result.value);
+    assert!(markdown.contains("### Memory Matches"));
+    assert!(markdown.contains(&format!("fact_id={fact_id}")));
+    assert!(markdown.contains("Helper function reviews should check durable memory"));
+
+    let json_result = handle_tool_call(
+        &cg,
+        "tracedecay_context",
+        json!({"task": "helper function durable memory review", "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&json_result.value)).unwrap();
+    assert!(payload["memory_matches"]
+        .as_array()
+        .is_some_and(|matches| matches
+            .iter()
+            .any(|hit| hit["fact"]["fact_id"].as_i64() == Some(fact_id))));
+
+    let after_context = cg.get_fact(fact_id).await.unwrap().unwrap();
+    assert_eq!(
+        after_context.retrieval_count, before_context.retrieval_count,
+        "context memory enrichment should not count as an explicit memory retrieval"
+    );
+    assert_eq!(
+        after_context.access_count, before_context.access_count,
+        "context memory enrichment should not count as an explicit memory recall"
+    );
+}
+
+#[tokio::test]
+async fn context_memory_matches_use_project_store_when_serving_branch_db() {
+    fn git(project: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(project)
+            .output()
+            .unwrap_or_else(|err| panic!("git {args:?} failed to spawn: {err}"));
+        assert!(
+            output.status.success(),
+            "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let _guard = GLOBAL_DB_ENV_LOCK.lock().await;
+    let dir = test_temp_dir();
+    let project = dir.path().join("repo");
+    let home = dir.path().join("home");
+    let _home_guard = HomeEnvGuard::set(&home);
+    let _global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
+
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn f() -> u32 { 1 }\n").unwrap();
+    git(&project, &["init"]);
+    git(&project, &["config", "user.email", "test@test.com"]);
+    git(&project, &["config", "user.name", "Test"]);
+    git(&project, &["add", "."]);
+    git(&project, &["commit", "-m", "initial"]);
+    git(&project, &["branch", "-M", "main"]);
+
+    let cg = TestTraceDecay::new(TraceDecay::init(&project).await.unwrap());
+    index_all_retrying_sync_lock(&cg).await;
+    git(&project, &["checkout", "-b", "feature"]);
+    let cg = TestTraceDecay::new(TraceDecay::open(&project).await.unwrap());
+    assert_ne!(
+        cg.db_path(),
+        cg.store_layout().graph_db_path,
+        "test must serve a branch DB distinct from the shared project store"
+    );
+
+    let added = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": "Branch context recall must read project-scoped memory facts",
+            "category": "project",
+            "entity": "Branch context recall",
+            "trust": 0.91
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
+    let fact_id = added["fact"]["fact_id"]
+        .as_i64()
+        .expect("fact_store add should return numeric id");
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_context",
+        json!({"task": "branch context recall project-scoped memory", "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    assert!(
+        payload["memory_matches"]
+            .as_array()
+            .is_some_and(|matches| matches
+                .iter()
+                .any(|hit| hit["fact"]["fact_id"].as_i64() == Some(fact_id))),
+        "context memory matches must come from the shared project memory store"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 3. tracedecay_callers
 // ---------------------------------------------------------------------------

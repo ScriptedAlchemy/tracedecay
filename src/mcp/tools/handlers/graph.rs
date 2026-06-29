@@ -9,9 +9,12 @@ use serde_json::{json, Value};
 
 use crate::context::format_context_as_markdown;
 use crate::errors::{Result, TraceDecayError};
+use crate::memory::types::{FactSearchResult, SearchFactsRequest};
 use crate::path_tree::format_compact_path_list;
 use crate::tracedecay::TraceDecay;
 use crate::types::{BuildContextOptions, EdgeKind, Node, NodeKind, TaskContext, Visibility};
+
+const CONTEXT_MEMORY_MATCH_LIMIT: usize = 3;
 
 use super::super::render::{self, Md};
 use super::super::ToolResult;
@@ -164,6 +167,10 @@ pub(super) async fn handle_context(
     let options = build_context_options(&args, scope_prefix);
 
     let context = cg.build_context(task, &options).await?;
+    let (memory_matches, memory_matches_error) = match context_memory_matches(cg, task).await {
+        Ok(matches) => (matches, None),
+        Err(err) => (Vec::new(), Some(err.to_string())),
+    };
     let touched_files = unique_file_paths(
         context
             .subgraph
@@ -178,6 +185,19 @@ pub(super) async fn handle_context(
             ),
     );
     let mut output = format_context_as_markdown(&context);
+    if !memory_matches.is_empty() {
+        let _ = writeln!(output, "\n### Memory Matches");
+        for hit in &memory_matches {
+            let fact = &hit.fact;
+            let _ = writeln!(
+                output,
+                "- fact_id={} category={} trust={:.2} score={:.3}: {}",
+                fact.fact_id, fact.category, fact.trust_score, hit.score, fact.content
+            );
+        }
+    } else if let Some(err) = &memory_matches_error {
+        let _ = writeln!(output, "\n### Memory Matches\nUnavailable: {err}");
+    }
     if let Some(hint) = cg.index_coverage_hint(context.subgraph.nodes.len()) {
         let _ = writeln!(
             output,
@@ -201,7 +221,16 @@ pub(super) async fn handle_context(
         );
     }
 
-    let value = serde_json::to_value(&context).unwrap_or_else(|_| json!({}));
+    let mut value = serde_json::to_value(&context).unwrap_or_else(|_| json!({}));
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "memory_matches".to_string(),
+            serde_json::to_value(&memory_matches).unwrap_or_else(|_| json!([])),
+        );
+        if let Some(err) = memory_matches_error {
+            object.insert("memory_matches_error".to_string(), json!(err));
+        }
+    }
     Ok(rendered_tool_result(
         cg,
         &args,
@@ -209,6 +238,17 @@ pub(super) async fn handle_context(
         touched_files,
         || output,
     ))
+}
+
+async fn context_memory_matches(cg: &TraceDecay, task: &str) -> Result<Vec<FactSearchResult>> {
+    cg.search_facts_untracked(SearchFactsRequest {
+        query: task.to_string(),
+        category: None,
+        limit: Some(CONTEXT_MEMORY_MATCH_LIMIT),
+        min_trust: Some(0.5),
+        include_why: false,
+    })
+    .await
 }
 
 fn build_context_options(args: &Value, scope_prefix: Option<&str>) -> BuildContextOptions {

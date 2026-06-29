@@ -199,7 +199,8 @@ pub fn explore_call_budget(total_nodes: u64) -> u8 {
 pub fn context_description(node_count: u64, budget: u8) -> String {
     format!(
         "Build an AI-ready context for a task description. Returns relevant symbols, \
-         relationships, and optionally code snippets.\n\n\
+         relationships, up to three untracked project memory matches when available, \
+         and optionally code snippets.\n\n\
          CALL BUDGET: {budget} calls maximum for this project ({node_count} nodes). \
          Stop after {budget} calls. If the question is not fully answered, synthesise \
          from what you have — do not exceed the budget."
