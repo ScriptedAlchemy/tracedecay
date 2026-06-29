@@ -40,6 +40,62 @@ test("fetchJSON returns parsed body on success", async () => {
   assert.deepEqual(seen, [["/ok", { method: "POST" }]]);
 });
 
+test("project scoped fetchJSON rewrites plugin and capability API calls", async () => {
+  const seen = [];
+  await withMockedFetch(
+    async (url, init) => {
+      seen.push([url, init]);
+      return {
+        ok: true,
+        json: async () => ({ ok: true }),
+      };
+    },
+    async () => {
+      sdk.setSelectedProjectId("proj_alpha");
+      await sdk.fetchJSON("/api/plugins/holographic/status?limit=2", { method: "GET" });
+      await sdk.fetchJSON("/api/automation/skills");
+      await sdk.fetchJSON("/api/capabilities");
+      await sdk.authedFetch("/api/plugins/graph/search?q=fn");
+    },
+  );
+
+  assert.deepEqual(seen, [
+    ["/api/projects/proj_alpha/plugins/holographic/status?limit=2", { method: "GET" }],
+    ["/api/projects/proj_alpha/automation/skills", undefined],
+    ["/api/projects/proj_alpha/capabilities", undefined],
+    ["/api/projects/proj_alpha/plugins/graph/search?q=fn", undefined],
+  ]);
+  sdk.setSelectedProjectId("");
+});
+
+test("project scoping leaves daemon APIs and absolute URLs unchanged", async () => {
+  const seen = [];
+  await withMockedFetch(
+    async (url, init) => {
+      seen.push([url, init]);
+      return {
+        ok: true,
+        json: async () => ({ ok: true }),
+      };
+    },
+    async () => {
+      sdk.setSelectedProjectId("proj_beta");
+      await sdk.fetchJSON("/api/projects");
+      await sdk.fetchJSON("/api/projects/proj_beta");
+      await sdk.fetchJSON("/api/dashboard/plugins");
+      await sdk.fetchJSON("https://example.test/api/plugins/holographic");
+    },
+  );
+
+  assert.deepEqual(seen, [
+    ["/api/projects", undefined],
+    ["/api/projects/proj_beta", undefined],
+    ["/api/dashboard/plugins", undefined],
+    ["https://example.test/api/plugins/holographic", undefined],
+  ]);
+  sdk.setSelectedProjectId("");
+});
+
 test("fetchJSON prefers JSON detail on failure", async () => {
   const body = {
     detail: "token expired",

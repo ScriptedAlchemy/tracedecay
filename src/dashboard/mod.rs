@@ -42,6 +42,7 @@ mod memory_api;
 pub mod memory_curate;
 mod memory_queries;
 mod memory_service;
+mod projects;
 mod savings_api;
 mod savings_pricing;
 mod token_count;
@@ -51,12 +52,15 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use axum::extract::State;
-use axum::response::Json;
-use axum::routing::{get, post};
+use axum::body::Body;
+use axum::extract::{Path as AxumPath, State};
+use axum::http::{Request, StatusCode, Uri};
+use axum::response::{IntoResponse, Json, Response};
+use axum::routing::{any, get, post};
 use axum::Router;
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
+use tower::ServiceExt;
 
 use crate::automation::backend;
 use crate::automation::config::{self, AutomationBackend, AutomationHostMode};
@@ -87,6 +91,8 @@ pub(crate) struct CuratePreviewEntry {
 
 #[derive(Clone)]
 pub(crate) struct DashboardState {
+    /// Registered project id for profile-backed stores, when known.
+    pub(crate) project_id: Option<String>,
     /// Active code-graph database. This can be branch-specific.
     pub(crate) graph_conn: libsql::Connection,
     /// Display path of the active code-graph database.
@@ -231,9 +237,11 @@ pub(crate) async fn resolve_project_memory_store(cg: &TraceDecay) -> (libsql::Co
     })
 }
 
-/// Builds the dashboard state shared by the CLI `run` path and the
-/// `tracedecay_dashboard` MCP tool.
-pub(crate) async fn build_state(cg: &TraceDecay) -> DashboardState {
+async fn build_state_inner(
+    cg: &TraceDecay,
+    repair_memory_on_startup: bool,
+    warm_token_counts: bool,
+) -> DashboardState {
     let (mem_conn, mem_db_path) = resolve_project_memory_store(cg).await;
     let lcm = resolve_lcm_store(cg).await;
     // Re-hydrate the last dry-run curation preview from its sidecar so it
@@ -252,6 +260,7 @@ pub(crate) async fn build_state(cg: &TraceDecay) -> DashboardState {
         .map(|p| p.display().to_string())
         .unwrap_or_default();
     let state = DashboardState {
+        project_id: cg.store_layout().identity.project_id.clone(),
         graph_conn: cg.dashboard_connection(),
         graph_db_path: cg.dashboard_db_path().display().to_string(),
         mem_conn,
@@ -271,13 +280,29 @@ pub(crate) async fn build_state(cg: &TraceDecay) -> DashboardState {
         code_diagnostics: Arc::new(RwLock::new(code_diagnostics)),
         code_diagnostics_backfill_started: Arc::new(AtomicBool::new(false)),
     };
-    if let Err(err) = memory_api::repair_derived_memory(&state).await {
-        eprintln!("Dashboard memory repair skipped: {err}");
+    if repair_memory_on_startup {
+        if let Err(err) = memory_api::repair_derived_memory(&state).await {
+            eprintln!("Dashboard memory repair skipped: {err}");
+        }
     }
     // Pre-count non-usage messages in the background so the first Savings
     // tab paint doesn't pay the initial BPE pass over the session store.
-    token_count::spawn_warm(state.clone());
+    if warm_token_counts {
+        token_count::spawn_warm(state.clone());
+    }
     state
+}
+
+/// Builds the dashboard state shared by the CLI `run` path and the
+/// `tracedecay_dashboard` MCP tool.
+pub(crate) async fn build_state(cg: &TraceDecay) -> DashboardState {
+    build_state_inner(cg, true, true).await
+}
+
+/// Builds a lightweight cached state for a non-active project selected from the
+/// dashboard project picker.
+pub(crate) async fn build_selected_project_state(cg: &TraceDecay) -> DashboardState {
+    build_state_inner(cg, false, false).await
 }
 
 /// Detached catch-up ingest for transcript sources (Claude, Codex, Vibe,
@@ -301,7 +326,7 @@ fn spawn_session_catch_up_ingest(project_root: PathBuf) {
     });
 }
 
-fn config_error(message: impl Into<String>) -> TraceDecayError {
+pub(crate) fn config_error(message: impl Into<String>) -> TraceDecayError {
     TraceDecayError::Config {
         message: message.into(),
     }
@@ -372,6 +397,7 @@ pub(crate) async fn bind_dashboard(
 }
 
 pub(crate) fn router(state: DashboardState) -> Router {
+    let runtime = projects::DashboardRuntime::new(state);
     Router::new()
         .route("/", get(assets::index_html))
         .route("/shell/{file}", get(assets::shell_asset))
@@ -379,8 +405,22 @@ pub(crate) fn router(state: DashboardState) -> Router {
             "/dashboard-plugins/{plugin}/dist/{file}",
             get(assets::plugin_asset),
         )
-        .route("/api/capabilities", get(capabilities))
         .route("/api/dashboard/plugins", get(plugins_list))
+        .route("/api/projects", get(projects::list))
+        .route("/api/projects/{project_id}", get(projects::context))
+        .route(
+            "/api/projects/{project_id}/{*tail}",
+            any(project_scoped_api_gateway),
+        )
+        .route("/api/capabilities", any(active_api_gateway))
+        .route("/api/plugins/{*tail}", any(active_api_gateway))
+        .route("/api/automation/{*tail}", any(active_api_gateway))
+        .with_state(runtime)
+}
+
+fn project_api_router() -> Router<DashboardState> {
+    Router::new()
+        .route("/api/capabilities", get(capabilities))
         // Holographic memory plugin API (mirrors holographic_plus plugin_api.py)
         .route("/api/plugins/holographic/", get(memory_api::overview))
         .route("/api/plugins/holographic", get(memory_api::overview))
@@ -590,7 +630,77 @@ pub(crate) fn router(state: DashboardState) -> Router {
         .route("/api/plugins/savings/sessions", get(savings_api::sessions))
         .route("/api/plugins/savings/models", get(savings_api::models))
         .route("/api/plugins/savings/pricing", get(savings_api::pricing))
-        .with_state(state)
+}
+
+async fn active_api_gateway(
+    State(runtime): State<projects::DashboardRuntime>,
+    req: Request<Body>,
+) -> Response {
+    forward_project_request(runtime.active_state(), req).await
+}
+
+async fn project_scoped_api_gateway(
+    State(runtime): State<projects::DashboardRuntime>,
+    AxumPath((project_id, tail)): AxumPath<(String, String)>,
+    mut req: Request<Body>,
+) -> Response {
+    let state_result = if tail.starts_with("plugins/holographic") {
+        runtime.memory_state_for_project(&project_id).await
+    } else {
+        runtime.state_for_project(&project_id).await
+    };
+    let state = match state_result {
+        Ok(state) => state,
+        Err(err) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "status": "not_found",
+                    "detail": err.to_string(),
+                    "project_id": project_id,
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let query = req
+        .uri()
+        .query()
+        .map(|query| format!("?{query}"))
+        .unwrap_or_default();
+    let rewritten = format!("/api/{tail}{query}");
+    match rewritten.parse::<Uri>() {
+        Ok(uri) => {
+            *req.uri_mut() = uri;
+            forward_project_request(state, req).await
+        }
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "status": "bad_request",
+                "detail": format!("invalid project-scoped dashboard path: {err}"),
+            })),
+        )
+            .into_response(),
+    }
+}
+
+async fn forward_project_request(state: DashboardState, req: Request<Body>) -> Response {
+    let (mut parts, body) = req.into_parts();
+    parts.extensions.clear();
+    let req = Request::from_parts(parts, body);
+    match project_api_router().with_state(state).oneshot(req).await {
+        Ok(response) => response,
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "status": "error",
+                "detail": format!("dashboard project route failed: {err}"),
+            })),
+        )
+            .into_response(),
+    }
 }
 
 /// Capability discovery for hosts and future delegated-host extensions. The UI
@@ -622,6 +732,7 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
         "name": "tracedecay-dashboard",
         "version": env!("CARGO_PKG_VERSION"),
         "mode": "standalone",
+        "project_id": state.project_id,
         "project_root": state.project_root.display().to_string(),
         "storage_mode": state.storage_mode,
         "store_root": state.store_root.display().to_string(),
