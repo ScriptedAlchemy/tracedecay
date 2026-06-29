@@ -529,6 +529,20 @@ Returns feature flags and server configuration. Used by the UI and wrappers to d
 - `features.llm_curation`: Whether TraceDecay can run LLM-backed curation through standalone automation. Delegated hosts keep planning host-owned and submit ops through `POST /curate/apply`.
 - `automation.mode`: `"disabled"`, `"standalone_backend"`, or `"delegated_host"`; `delegated_host` is provider-neutral and may be used by Hermes, Codex app-server orchestration, Claude Code CLI, Cursor Agent CLI, or another host that owns the intelligence layer.
 
+### Automation Scheduler Debugging
+
+The dashboard scheduler panel reads `GET /api/automation/scheduler/status` and can pause or resume the scheduler with `/pause` and `/resume`. The status response includes the effective automation config, control file path, tick cadence, and per-task due/skip reasons.
+
+When the daemon runs the scheduler, its stderr/journald logs use stable `event=... key=value` fields:
+
+```bash
+tracedecay daemon status
+journalctl --user -u tracedecay.service -f
+journalctl --user -u tracedecay.service --since "1 hour ago" | grep 'event=scheduler'
+```
+
+Useful events include `event=scheduler_tick`, `event=scheduler_sleep`, `event=scheduler_task`, and `event=scheduler_task_error`.
+
 ---
 
 ### Holographic Memory API
@@ -1332,6 +1346,22 @@ echo "$TRACEDECAY_GLOBAL_DB"
 export TRACEDECAY_GLOBAL_DB=/path/to/sessions.db
 tracedecay dashboard
 ```
+
+### Automation Scheduler Not Running
+
+```bash
+# Check effective automation config and backend availability
+tracedecay automation config explain --json
+
+# Check run history for memory_curator/session_reflector/skill_writer
+tracedecay automation runs list --json
+
+# Check daemon socket/service/log path
+tracedecay daemon status
+journalctl --user -u tracedecay.service --since "1 hour ago" | grep 'event=scheduler'
+```
+
+If the config shows `enabled: false`, `backend: "disabled"`, `host_mode: "delegated_host"`, or task schedules set to `manual`, the daemon scheduler will skip work. The scheduler status panel shows the same skip reasons without requiring shell access.
 
 ### Frontend Assets Not Updating
 

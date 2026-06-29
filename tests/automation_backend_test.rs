@@ -8,7 +8,7 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use tracedecay::automation::backend::{
-    backend_availability, classify_agent_task_error_message, extract_single_json_object,
+    backend_availability, classify_agent_task_error_message, extract_json_object_prefix,
     AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
     CodexAppServerBackend,
 };
@@ -46,7 +46,7 @@ impl AgentTaskBackend for EchoBackend {
             run_id: request.run_id.clone(),
             task: request.task,
             output_text: request.prompt.clone(),
-            output_json: extract_single_json_object(&request.prompt).ok(),
+            output_json: extract_json_object_prefix(&request.prompt).ok(),
             model: Some("test-model".to_string()),
             input_tokens: Some(12),
             output_tokens: Some(34),
@@ -84,26 +84,55 @@ fn backend_contract_round_trips_structured_task_output() {
 #[test]
 fn extracts_one_plain_or_fenced_json_object() {
     assert_eq!(
-        extract_single_json_object(r#" { "ok": true } "#).unwrap()["ok"],
+        extract_json_object_prefix(r#" { "ok": true } "#).unwrap()["ok"],
         true
     );
     assert_eq!(
-        extract_single_json_object("```json\n{\"task\":\"skill_writer\"}\n```").unwrap()["task"],
+        extract_json_object_prefix("```json\n{\"task\":\"skill_writer\"}\n```").unwrap()["task"],
         "skill_writer"
     );
 }
 
 #[test]
-fn rejects_non_object_extra_text_and_multiple_json_values() {
-    for text in [
-        r#"[{"ok":true}]"#,
-        r#"prefix {"ok":true}"#,
-        r#"{"ok":true} suffix"#,
-        r#"{"ok":true} {"again":true}"#,
-        "```json\n{\"ok\":true}\n```\nextra",
-    ] {
+fn extracts_first_json_object_with_trailing_explanation() {
+    assert_eq!(
+        extract_json_object_prefix("{\"ops\": []}\n\nNo changes were needed.").unwrap()["ops"],
+        json!([])
+    );
+    assert_eq!(
+        extract_json_object_prefix("```json\n{\"facts\":[]}\n```\n\nSummary: no facts.").unwrap()
+            ["facts"],
+        json!([])
+    );
+    assert_eq!(
+        extract_json_object_prefix("{\"skills\": []}\n{\"ignored\": true}").unwrap()["skills"],
+        json!([])
+    );
+}
+
+#[test]
+fn extracts_fenced_json_with_nested_markdown_fence_in_string() {
+    let body = json!({
+        "skills": [{
+            "name": "shell-example",
+            "body_markdown": "Run:\n```sh\ntracedecay status\n```"
+        }]
+    });
+    let response = format!("```json\n{body}\n```\n\nCreated a skill.");
+
+    let extracted = extract_json_object_prefix(&response).unwrap();
+
+    assert_eq!(
+        extracted["skills"][0]["body_markdown"],
+        "Run:\n```sh\ntracedecay status\n```"
+    );
+}
+
+#[test]
+fn rejects_non_object_and_prefix_text() {
+    for text in [r#"[{"ok":true}]"#, r#"prefix {"ok":true}"#] {
         assert!(
-            extract_single_json_object(text).is_err(),
+            extract_json_object_prefix(text).is_err(),
             "accepted non-strict JSON output: {text}"
         );
     }
@@ -239,6 +268,42 @@ fn codex_app_server_backend_run_task_uses_injected_config() {
     assert_eq!(backend_request["evidence_hash"], "sha256:evidence");
     assert_eq!(backend_request["prompt"], r#"{"skills":[]}"#);
     assert_eq!(backend_request["context"], json!({"kind":"test"}));
+}
+
+#[test]
+fn codex_app_server_backend_uses_first_schema_matching_json_object() {
+    let fake = FakeCodexAppServer::new_with_behavior("json_after_echo");
+    let backend = CodexAppServerBackend::from_config(CodexAppServerSummaryConfig {
+        codex_bin: fake.bin.display().to_string(),
+        model: Some("configured-model".to_string()),
+        timeout: fake_codex_response_timeout(),
+        max_tokens: None,
+        temperature: None,
+    });
+    let request = AgentTaskRequest::new(
+        "run_app_server_echo".to_string(),
+        AgentTaskKind::MemoryCurator,
+        r#"{"ops":[]}"#.to_string(),
+        None,
+        json!({}),
+    );
+
+    let response = backend.run_task(&request).unwrap();
+
+    assert_eq!(response.output_json.unwrap()["ops"], json!([]));
+    assert_process_gone(fake.child_pid());
+}
+
+#[test]
+fn codex_app_server_backend_rejects_nested_schema_matching_json_object() {
+    let (err, pid) =
+        backend_error_for_behavior("json_wrapped_response", fake_codex_response_timeout());
+
+    assert!(
+        err.contains("automation backend output must include a ops array"),
+        "unexpected error: {err}"
+    );
+    assert_process_gone(pid);
 }
 
 #[test]
@@ -636,6 +701,14 @@ with open(log_path, "a", encoding="utf-8") as log:
                     payload = json.dumps(dict(facts=[]))
                 else:
                     payload = json.dumps(dict(ops=[]))
+                print(json.dumps(dict(method="item/agentMessage/delta", params=dict(delta=payload, model="actual-model"))), flush=True)
+                print(json.dumps(dict(method="turn/completed")), flush=True)
+            elif behavior == "json_after_echo":
+                payload = json.dumps(dict(run_id="echo", task="memory_curator")) + "\n" + json.dumps(dict(ops=[]))
+                print(json.dumps(dict(method="item/agentMessage/delta", params=dict(delta=payload, model="actual-model"))), flush=True)
+                print(json.dumps(dict(method="turn/completed")), flush=True)
+            elif behavior == "json_wrapped_response":
+                payload = json.dumps(dict(result=dict(ops=[])))
                 print(json.dumps(dict(method="item/agentMessage/delta", params=dict(delta=payload, model="actual-model"))), flush=True)
                 print(json.dumps(dict(method="turn/completed")), flush=True)
             else:

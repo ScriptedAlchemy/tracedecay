@@ -350,11 +350,7 @@ impl AgentTaskBackend for CodexAppServerBackend {
         let output_json = request
             .contract
             .strict_json
-            .then(|| {
-                let value = extract_single_json_object(&summary.text)?;
-                validate_response_schema(&value, &request.contract)?;
-                Ok::<Value, TraceDecayError>(value)
-            })
+            .then(|| extract_response_json_object(&summary.text, &request.contract))
             .transpose()?;
         Ok(AgentTaskResponse {
             run_id: request.run_id.clone(),
@@ -368,11 +364,53 @@ impl AgentTaskBackend for CodexAppServerBackend {
     }
 }
 
-pub fn extract_single_json_object(text: &str) -> Result<Value> {
+pub fn extract_json_object_prefix(text: &str) -> Result<Value> {
     let candidate = strip_optional_json_fence(text)?;
-    let mut deserializer = serde_json::Deserializer::from_str(candidate);
-    let value = Value::deserialize(&mut deserializer)?;
-    deserializer.end()?;
+    parse_json_object_prefix(candidate)
+}
+
+fn extract_response_json_object(text: &str, contract: &AgentTaskContract) -> Result<Value> {
+    let mut schema_error = None;
+    for (start, _) in text.char_indices().filter(|(_, ch)| *ch == '{') {
+        if !is_json_object_candidate_boundary(&text[..start]) {
+            continue;
+        }
+        let Ok(value) = parse_json_object_prefix(&text[start..]) else {
+            continue;
+        };
+        if let Err(err) = validate_response_schema(&value, contract) {
+            if schema_error.is_none() {
+                schema_error = Some(err);
+            }
+            continue;
+        }
+
+        return Ok(value);
+    }
+
+    if let Some(err) = schema_error {
+        return Err(err);
+    }
+
+    let value = extract_json_object_prefix(text)?;
+    validate_response_schema(&value, contract)?;
+    Ok(value)
+}
+
+fn is_json_object_candidate_boundary(prefix: &str) -> bool {
+    prefix
+        .chars()
+        .rev()
+        .find(|ch| !ch.is_whitespace())
+        .is_none_or(|ch| matches!(ch, '}' | ']'))
+}
+
+fn parse_json_object_prefix(candidate: &str) -> Result<Value> {
+    let mut stream = serde_json::Deserializer::from_str(candidate).into_iter::<Value>();
+    let value = match stream.next() {
+        Some(value) => value?,
+        None => return config_error("automation backend output must be a JSON object"),
+    };
     if !value.is_object() {
         return config_error("automation backend output must be a JSON object");
     }
@@ -405,10 +443,6 @@ fn strip_optional_json_fence(text: &str) -> Result<&str> {
     let Some(closing_start) = after_opening.rfind("```") else {
         return config_error("automation backend JSON fence is missing closing fence");
     };
-    let trailing = after_opening[closing_start + "```".len()..].trim();
-    if !trailing.is_empty() {
-        return config_error("automation backend JSON fence has trailing content");
-    }
     let mut inner = &after_opening[..closing_start];
     if let Some(rest) = inner.strip_prefix("json") {
         inner = rest;
