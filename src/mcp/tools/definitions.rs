@@ -199,7 +199,8 @@ pub fn explore_call_budget(total_nodes: u64) -> u8 {
 pub fn context_description(node_count: u64, budget: u8) -> String {
     format!(
         "Build an AI-ready context for a task description. Returns relevant symbols, \
-         relationships, and optionally code snippets.\n\n\
+         relationships, up to three untracked project memory matches when available, \
+         and optionally code snippets.\n\n\
          CALL BUDGET: {budget} calls maximum for this project ({node_count} nodes). \
          Stop after {budget} calls. If the question is not fully answered, synthesise \
          from what you have — do not exceed the budget."
@@ -715,6 +716,18 @@ fn def_context() -> ToolDefinition {
                 "max_per_file": {
                     "type": "number",
                     "description": "Maximum symbols from a single file in results. Prevents one large file from dominating (default: max_nodes/3, minimum 3)"
+                },
+                "include_memory": {
+                    "type": "boolean",
+                    "description": "When true, include up to memory_limit matching project memory facts as a separate context lane (default: true)"
+                },
+                "memory_limit": {
+                    "type": "number",
+                    "description": "Maximum memory facts to include when include_memory is true (default: 3, max: 10)"
+                },
+                "memory_min_trust": {
+                    "type": "number",
+                    "description": "Minimum trust score for memory facts included in context (default: 0.5)"
                 }
             })),
             "required": ["task"]
@@ -2276,7 +2289,7 @@ fn def_message_search() -> ToolDefinition {
     def(
         "tracedecay_message_search",
         "Message Search",
-        "Search ingested transcript messages across all supported providers by default. Every search first catches up all supported provider adapters for the selected project; pass provider only when explicitly scoping results to one provider.",
+        "Search ingested transcript messages across all supported providers by default. Every search first catches up all supported provider adapters for the selected project unless catch_up is false; pass provider only when explicitly scoping results to one provider.",
         json!({
             "type": "object",
             "properties": {
@@ -2296,6 +2309,10 @@ fn def_message_search() -> ToolDefinition {
                 "include_subagents": {
                     "type": "boolean",
                     "description": "Whether to include child subagent sessions in results (default: true)."
+                },
+                "catch_up": {
+                    "type": "boolean",
+                    "description": "Whether to ingest/catch up local provider transcripts before searching (default: true). Set false for strictly read-only audits of already-ingested messages."
                 },
                 "parent_session_id": {
                     "type": "string",

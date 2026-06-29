@@ -2035,6 +2035,248 @@ async fn test_context() {
     assert!(!text.is_empty());
 }
 
+#[tokio::test]
+async fn context_includes_matching_memory_facts() {
+    let (cg, _dir) = setup_project().await;
+    let added = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": "Helper function reviews should check durable memory before broad file search.",
+            "category": "decision",
+            "entity": "helper function",
+            "tags": ["context", "memory"],
+            "trust": 0.91,
+            "source": "mcp-context-test"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
+    let fact_id = added["fact"]["fact_id"].as_i64().unwrap();
+    let before_context = cg.get_fact(fact_id).await.unwrap().unwrap();
+
+    let markdown_result = handle_tool_call(
+        &cg,
+        "tracedecay_context",
+        json!({"task": "helper function durable memory review"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let markdown = extract_text(&markdown_result.value);
+    assert!(markdown.contains("### Memory Matches"));
+    assert!(markdown.contains(&format!("fact_id={fact_id}")));
+    assert!(markdown.contains("Helper function reviews should check durable memory"));
+
+    let json_result = handle_tool_call(
+        &cg,
+        "tracedecay_context",
+        json!({"task": "helper function durable memory review", "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&json_result.value)).unwrap();
+    assert!(payload["memory_matches"]
+        .as_array()
+        .is_some_and(|matches| matches
+            .iter()
+            .any(|hit| hit["fact"]["fact_id"].as_i64() == Some(fact_id))));
+
+    let after_context = cg.get_fact(fact_id).await.unwrap().unwrap();
+    assert_eq!(
+        after_context.retrieval_count, before_context.retrieval_count,
+        "context memory enrichment should not count as an explicit memory retrieval"
+    );
+    assert_eq!(
+        after_context.access_count, before_context.access_count,
+        "context memory enrichment should not count as an explicit memory recall"
+    );
+}
+
+#[tokio::test]
+async fn context_memory_controls_filter_disable_and_compact_markdown() {
+    let (cg, _dir) = setup_project().await;
+    let long_content = format!("Long memory control fact {}", "x".repeat(320));
+    handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": long_content,
+            "category": "decision",
+            "entity": "long memory control",
+            "tags": ["context-memory-controls"],
+            "trust": 0.92,
+            "source": "mcp-context-test"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": "Low trust memory control fact should stay filtered.",
+            "category": "decision",
+            "entity": "low trust memory control",
+            "tags": ["context-memory-controls"],
+            "trust": 0.2,
+            "source": "mcp-context-test"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let disabled = handle_tool_call(
+        &cg,
+        "tracedecay_context",
+        json!({
+            "task": "long memory control fact",
+            "format": "json",
+            "include_memory": false
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let disabled_payload: Value = serde_json::from_str(extract_text(&disabled.value)).unwrap();
+    assert_eq!(
+        disabled_payload["memory_matches"].as_array().map(Vec::len),
+        Some(0)
+    );
+
+    let filtered = handle_tool_call(
+        &cg,
+        "tracedecay_context",
+        json!({
+            "task": "low trust memory control fact",
+            "format": "json",
+            "memory_min_trust": 0.9
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let filtered_payload: Value = serde_json::from_str(extract_text(&filtered.value)).unwrap();
+    assert!(!filtered_payload["memory_matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|hit| hit["fact"]["content"]
+            .as_str()
+            .is_some_and(|content| content.contains("Low trust memory control"))));
+
+    let markdown = handle_tool_call(
+        &cg,
+        "tracedecay_context",
+        json!({"task": "long memory control fact", "memory_limit": 1}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&markdown.value);
+    assert!(text.contains("Long memory control fact"));
+    assert!(text.contains("..."));
+    assert!(!text.contains(&"x".repeat(300)));
+}
+
+#[tokio::test]
+async fn context_memory_matches_use_project_store_when_serving_branch_db() {
+    fn git(project: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(project)
+            .output()
+            .unwrap_or_else(|err| panic!("git {args:?} failed to spawn: {err}"));
+        assert!(
+            output.status.success(),
+            "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let _guard = GLOBAL_DB_ENV_LOCK.lock().await;
+    let dir = test_temp_dir();
+    let project = dir.path().join("repo");
+    let home = dir.path().join("home");
+    let _home_guard = HomeEnvGuard::set(&home);
+    let _global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
+
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn f() -> u32 { 1 }\n").unwrap();
+    git(&project, &["init"]);
+    git(&project, &["config", "user.email", "test@test.com"]);
+    git(&project, &["config", "user.name", "Test"]);
+    git(&project, &["add", "."]);
+    git(&project, &["commit", "-m", "initial"]);
+    git(&project, &["branch", "-M", "main"]);
+
+    let cg = TestTraceDecay::new(TraceDecay::init(&project).await.unwrap());
+    index_all_retrying_sync_lock(&cg).await;
+    git(&project, &["checkout", "-b", "feature"]);
+    let cg = TestTraceDecay::new(TraceDecay::open(&project).await.unwrap());
+    assert_ne!(
+        cg.db_path(),
+        cg.store_layout().graph_db_path,
+        "test must serve a branch DB distinct from the shared project store"
+    );
+
+    let added = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": "Branch context recall must read project-scoped memory facts",
+            "category": "project",
+            "entity": "Branch context recall",
+            "trust": 0.91
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
+    let fact_id = added["fact"]["fact_id"]
+        .as_i64()
+        .expect("fact_store add should return numeric id");
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_context",
+        json!({"task": "branch context recall project-scoped memory", "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    assert!(
+        payload["memory_matches"]
+            .as_array()
+            .is_some_and(|matches| matches
+                .iter()
+                .any(|hit| hit["fact"]["fact_id"].as_i64() == Some(fact_id))),
+        "context memory matches must come from the shared project memory store"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 3. tracedecay_callers
 // ---------------------------------------------------------------------------
@@ -6730,6 +6972,84 @@ async fn message_search_catches_up_provider_transcripts_before_querying() {
 }
 
 #[tokio::test]
+async fn message_search_can_skip_catch_up_for_read_only_audits() {
+    let (cg, _dir) = setup_project().await;
+    let home = cg.project_root().join("home");
+    let project = cg.project_root().to_path_buf();
+    let project_text = project.to_string_lossy();
+
+    let codex_dir = home.join(".codex/sessions/2026/01/01");
+    fs::create_dir_all(&codex_dir).unwrap();
+    fs::write(
+        codex_dir.join("rollout-2026-01-01T00-00-00-codex-readonly.jsonl"),
+        format!(
+            "{}\n{}\n",
+            json!({
+                "timestamp": "2026-01-01T00:00:00.000Z",
+                "type": "session_meta",
+                "payload": {"id": "codex-readonly", "cwd": project_text}
+            }),
+            json!({
+                "timestamp": "2026-01-01T00:00:01.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": "Read only transcript catchup should not import this."
+                }
+            })
+        ),
+    )
+    .unwrap();
+
+    let read_only_result = handle_tool_call(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "query": "read only transcript catchup",
+            "provider": "codex",
+            "catch_up": false,
+            "limit": 5
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let read_only = extract_json(&read_only_result.value);
+    assert_eq!(read_only["status"], "ok");
+    assert_eq!(read_only["catch_up"], false);
+    assert_eq!(read_only["count"], 0);
+
+    let db = open_active_project_session_db(&cg).await;
+    let skipped = db
+        .search_session_messages("codex", None, "read only transcript catchup", 10)
+        .await;
+    assert!(
+        skipped.is_empty(),
+        "catch_up=false must not ingest provider transcripts"
+    );
+
+    let catch_up_result = handle_tool_call(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "query": "read only transcript catchup",
+            "provider": "codex",
+            "limit": 5
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let catch_up = extract_json(&catch_up_result.value);
+    assert_eq!(catch_up["status"], "ok");
+    assert_eq!(catch_up["catch_up"], true);
+    assert_eq!(catch_up["count"], 1);
+    assert_eq!(catch_up["results"][0]["message"]["provider"], "codex");
+}
+
+#[tokio::test]
 async fn message_search_reads_profile_sharded_session_db() {
     let _guard = GLOBAL_DB_ENV_LOCK.lock().await;
     let dir = test_temp_dir();
@@ -6885,10 +7205,22 @@ async fn seed_lcm_tool_result_message(
     text: impl Into<String>,
     ordinal: i64,
 ) {
+    seed_lcm_tool_result_message_for_provider(cg, "cursor", session_id, message_id, text, ordinal)
+        .await;
+}
+
+async fn seed_lcm_tool_result_message_for_provider(
+    cg: &TraceDecay,
+    provider: &str,
+    session_id: &str,
+    message_id: &str,
+    text: impl Into<String>,
+    ordinal: i64,
+) {
     let db = open_active_project_session_db(cg).await;
     assert!(
         db.upsert_session(&SessionRecord {
-            provider: "cursor".to_string(),
+            provider: provider.to_string(),
             session_id: session_id.to_string(),
             project_key: cg.project_root().to_string_lossy().to_string(),
             project_path: cg.project_root().to_string_lossy().to_string(),
@@ -6906,7 +7238,7 @@ async fn seed_lcm_tool_result_message(
     );
     assert!(
         db.upsert_session_message(&SessionMessageRecord {
-            provider: "cursor".to_string(),
+            provider: provider.to_string(),
             message_id: message_id.to_string(),
             session_id: session_id.to_string(),
             role: "tool".to_string(),
@@ -12576,6 +12908,85 @@ async fn lcm_status_reports_dag_store_and_config_diagnostics_over_mcp() {
     assert_eq!(lcm["config"]["fresh_tail_count"], 2);
     assert_eq!(lcm["config"]["summary_fan_in"], 4);
     assert_eq!(lcm["config"]["compression_boundary_cooldown_seconds"], 60);
+}
+
+#[tokio::test]
+async fn lcm_status_all_provider_aggregates_provider_counts() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message_for_provider(
+        &cg,
+        "cursor",
+        "cursor-session",
+        "cursor-msg",
+        "alpha beta",
+        1,
+    )
+    .await;
+    seed_lcm_session_message_for_provider(
+        &cg,
+        "codex",
+        "codex-session",
+        "codex-msg",
+        "gamma delta epsilon",
+        2,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_status",
+        json!({"provider": "all"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["provider"], "all");
+    assert_eq!(payload["lcm"]["raw_message_count"], 2);
+    assert_eq!(payload["lcm"]["store"]["messages"], 2);
+    assert_eq!(payload["lcm"]["store"]["estimated_tokens"], 5);
+}
+
+#[tokio::test]
+async fn lcm_status_all_provider_counts_payload_health_once() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_tool_result_message_for_provider(
+        &cg,
+        "cursor",
+        "lcm-status-all-payload-cursor",
+        "lcm-status-all-payload-cursor-message",
+        format!("cursor payload\n{}", "cursor-body ".repeat(30_000)),
+        1,
+    )
+    .await;
+    seed_lcm_tool_result_message_for_provider(
+        &cg,
+        "codex",
+        "lcm-status-all-payload-codex",
+        "lcm-status-all-payload-codex-message",
+        format!("codex payload\n{}", "codex-body ".repeat(30_000)),
+        2,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_status",
+        json!({"provider": "all"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["lcm"]["payload"]["externalized_count"], 2);
+    assert_eq!(payload["lcm"]["payload"]["orphan_file_count"], 0);
+    assert_eq!(payload["lcm"]["payload"]["missing_count"], 0);
 }
 
 // Repeated LCM tool calls in one process must reuse the per-process

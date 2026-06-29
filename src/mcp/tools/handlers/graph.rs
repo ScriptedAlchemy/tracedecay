@@ -9,9 +9,14 @@ use serde_json::{json, Value};
 
 use crate::context::format_context_as_markdown;
 use crate::errors::{Result, TraceDecayError};
+use crate::memory::types::{FactSearchResult, SearchFactsRequest};
 use crate::path_tree::format_compact_path_list;
 use crate::tracedecay::TraceDecay;
 use crate::types::{BuildContextOptions, EdgeKind, Node, NodeKind, TaskContext, Visibility};
+
+const CONTEXT_MEMORY_MATCH_LIMIT: usize = 3;
+const CONTEXT_MEMORY_MATCH_LIMIT_MAX: usize = 10;
+const CONTEXT_MEMORY_SNIPPET_CHARS: usize = 240;
 
 use super::super::render::{self, Md};
 use super::super::ToolResult;
@@ -164,6 +169,15 @@ pub(super) async fn handle_context(
     let options = build_context_options(&args, scope_prefix);
 
     let context = cg.build_context(task, &options).await?;
+    let memory_options = context_memory_options(&args);
+    let (memory_matches, memory_matches_error) = if memory_options.include_memory {
+        match context_memory_matches(cg, task, &memory_options).await {
+            Ok(matches) => (matches, None),
+            Err(err) => (Vec::new(), Some(err.to_string())),
+        }
+    } else {
+        (Vec::new(), None)
+    };
     let touched_files = unique_file_paths(
         context
             .subgraph
@@ -178,6 +192,23 @@ pub(super) async fn handle_context(
             ),
     );
     let mut output = format_context_as_markdown(&context);
+    if !memory_matches.is_empty() {
+        let _ = writeln!(output, "\n### Memory Matches");
+        for hit in &memory_matches {
+            let fact = &hit.fact;
+            let _ = writeln!(
+                output,
+                "- fact_id={} category={} trust={:.2} score={:.3}: {}",
+                fact.fact_id,
+                fact.category,
+                fact.trust_score,
+                hit.score,
+                compact_memory_content(&fact.content)
+            );
+        }
+    } else if let Some(err) = &memory_matches_error {
+        let _ = writeln!(output, "\n### Memory Matches\nUnavailable: {err}");
+    }
     if let Some(hint) = cg.index_coverage_hint(context.subgraph.nodes.len()) {
         let _ = writeln!(
             output,
@@ -201,7 +232,16 @@ pub(super) async fn handle_context(
         );
     }
 
-    let value = serde_json::to_value(&context).unwrap_or_else(|_| json!({}));
+    let mut value = serde_json::to_value(&context).unwrap_or_else(|_| json!({}));
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "memory_matches".to_string(),
+            serde_json::to_value(&memory_matches).unwrap_or_else(|_| json!([])),
+        );
+        if let Some(err) = memory_matches_error {
+            object.insert("memory_matches_error".to_string(), json!(err));
+        }
+    }
     Ok(rendered_tool_result(
         cg,
         &args,
@@ -209,6 +249,66 @@ pub(super) async fn handle_context(
         touched_files,
         || output,
     ))
+}
+
+struct ContextMemoryOptions {
+    include_memory: bool,
+    limit: usize,
+    min_trust: f64,
+}
+
+fn context_memory_options(args: &Value) -> ContextMemoryOptions {
+    let include_memory = args
+        .get("include_memory")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let limit = args
+        .get("memory_limit")
+        .and_then(Value::as_u64)
+        .map(|value| value as usize)
+        .unwrap_or(CONTEXT_MEMORY_MATCH_LIMIT)
+        .clamp(1, CONTEXT_MEMORY_MATCH_LIMIT_MAX);
+    let min_trust = args
+        .get("memory_min_trust")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.5)
+        .clamp(0.0, 1.0);
+    ContextMemoryOptions {
+        include_memory,
+        limit,
+        min_trust,
+    }
+}
+
+async fn context_memory_matches(
+    cg: &TraceDecay,
+    task: &str,
+    options: &ContextMemoryOptions,
+) -> Result<Vec<FactSearchResult>> {
+    cg.search_facts_untracked(SearchFactsRequest {
+        query: task.to_string(),
+        category: None,
+        limit: Some(options.limit),
+        min_trust: Some(options.min_trust),
+        include_why: false,
+    })
+    .await
+}
+
+fn compact_memory_content(content: &str) -> String {
+    let mut snippet = String::new();
+    let mut truncated = false;
+    for (idx, ch) in content.chars().enumerate() {
+        if idx >= CONTEXT_MEMORY_SNIPPET_CHARS {
+            truncated = true;
+            break;
+        }
+        snippet.push(ch);
+    }
+    if truncated {
+        snippet.push_str("...");
+    }
+    snippet
 }
 
 fn build_context_options(args: &Value, scope_prefix: Option<&str>) -> BuildContextOptions {

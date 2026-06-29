@@ -108,7 +108,7 @@ pub struct SkillWriterAutomationOptions {
     pub trigger: AutomationTrigger,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
-    #[serde(default = "default_session_provider")]
+    #[serde(default = "default_skill_writer_provider")]
     pub provider: String,
     #[serde(default = "default_skill_writer_query")]
     pub query: String,
@@ -123,7 +123,7 @@ impl Default for SkillWriterAutomationOptions {
         Self {
             trigger: AutomationTrigger::ManualCli,
             run_id: None,
-            provider: default_session_provider(),
+            provider: default_skill_writer_provider(),
             query: default_skill_writer_query(),
             evidence_limit: default_skill_writer_evidence_limit(),
             profile_root: None,
@@ -500,7 +500,8 @@ async fn build_skill_writer_evidence(
         Some(path) => path,
         None => crate::storage::default_profile_root()?,
     };
-    let provider = normalized_non_empty(&options.provider).unwrap_or_else(default_session_provider);
+    let provider =
+        normalized_non_empty(&options.provider).unwrap_or_else(default_skill_writer_provider);
     let query = normalized_non_empty(&options.query).unwrap_or_else(default_skill_writer_query);
     let evidence_limit = options.evidence_limit.clamp(1, 50);
 
@@ -701,6 +702,10 @@ fn session_reflector_lcm_db_path(
 
 fn default_session_provider() -> String {
     "cursor".to_string()
+}
+
+fn default_skill_writer_provider() -> String {
+    "all".to_string()
 }
 
 fn default_lcm_storage_scope() -> String {

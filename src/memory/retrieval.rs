@@ -40,6 +40,29 @@ impl<'a> FactRetriever<'a> {
         min_trust: Option<f64>,
         limit: usize,
     ) -> Result<Vec<FactSearchResult>> {
+        self.search_with_tracking(query, category, min_trust, limit, true)
+            .await
+    }
+
+    pub async fn search_untracked(
+        &self,
+        query: &str,
+        category: Option<MemoryCategory>,
+        min_trust: Option<f64>,
+        limit: usize,
+    ) -> Result<Vec<FactSearchResult>> {
+        self.search_with_tracking(query, category, min_trust, limit, false)
+            .await
+    }
+
+    async fn search_with_tracking(
+        &self,
+        query: &str,
+        category: Option<MemoryCategory>,
+        min_trust: Option<f64>,
+        limit: usize,
+        track_recalls: bool,
+    ) -> Result<Vec<FactSearchResult>> {
         let min_trust = min_trust.unwrap_or(DEFAULT_MIN_TRUST);
         let limit = normalized_limit(limit);
         let query_tokens = tokenize(query);
@@ -135,13 +158,15 @@ impl<'a> FactRetriever<'a> {
         });
         results.truncate(limit);
 
-        // Access tracking for the facts actually RETURNED to the caller —
-        // candidates scanned and dropped above never count, and the other
-        // retrieval modes (probe/list/related/reason) deliberately do not
-        // bump access_count. Batched single UPDATE, fire-and-forget: a
-        // tracking failure must never fail the search itself.
-        let returned_ids: Vec<i64> = results.iter().map(|result| result.fact.fact_id).collect();
-        let _ = self.store.record_fact_recalls(&returned_ids).await;
+        if track_recalls {
+            // Access tracking for the facts actually RETURNED to the caller —
+            // candidates scanned and dropped above never count, and the other
+            // retrieval modes (probe/list/related/reason) deliberately do not
+            // bump access_count. Batched single UPDATE, fire-and-forget: a
+            // tracking failure must never fail the search itself.
+            let returned_ids: Vec<i64> = results.iter().map(|result| result.fact.fact_id).collect();
+            let _ = self.store.record_fact_recalls(&returned_ids).await;
+        }
 
         Ok(results)
     }

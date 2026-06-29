@@ -32,7 +32,7 @@ const PLACEHOLDER_PREFIXES: [&str; 5] = [
 ];
 const PLACEHOLDER_TEXT_COLUMNS: [&str; 4] =
     ["content", "snippet_text", "index_text", "metadata_json"];
-const TERM_SEPARATORS: [char; 3] = ['-', ':', '/'];
+const TERM_SEPARATORS: [char; 4] = ['-', ':', '/', '#'];
 const RAW_GREP_RECENCY_EXPR: &str = "COALESCE(r.timestamp, r.store_id)";
 const SUMMARY_GREP_RECENCY_EXPR: &str =
     "COALESCE(n.source_time_end, n.source_time_start, n.created_at)";
@@ -500,7 +500,24 @@ pub(crate) async fn status(
     if !lcm_table_exists(conn, "lcm_raw_messages").await? {
         return Ok(empty_status(schema_version, gc_config));
     }
+    if provider == "all" {
+        return aggregate_provider_status(conn, storage_root, session_id, deep, gc_config).await;
+    }
 
+    status_for_provider(conn, storage_root, provider, session_id, deep, gc_config).await
+}
+
+async fn status_for_provider(
+    conn: &Connection,
+    storage_root: &Path,
+    provider: &str,
+    session_id: Option<&str>,
+    deep: bool,
+    gc_config: &LcmGcConfig,
+) -> Result<LcmStatus, LcmError> {
+    let schema_version = schema::schema_version(conn)
+        .await
+        .unwrap_or(LCM_SCHEMA_VERSION);
     let payload_health = payload_health_detail(
         conn,
         storage_root,
@@ -559,6 +576,187 @@ pub(crate) async fn status(
             legacy_truncated_count,
         },
     })
+}
+
+async fn aggregate_provider_status(
+    conn: &Connection,
+    storage_root: &Path,
+    session_id: Option<&str>,
+    deep: bool,
+    gc_config: &LcmGcConfig,
+) -> Result<LcmStatus, LcmError> {
+    let schema_version = schema::schema_version(conn)
+        .await
+        .unwrap_or(LCM_SCHEMA_VERSION);
+    let providers = lcm_status_providers(conn, session_id).await?;
+    if providers.is_empty() {
+        return Ok(empty_status(schema_version, gc_config));
+    }
+
+    let mut aggregate = empty_status(schema_version, gc_config);
+    for provider in providers {
+        let status =
+            status_for_provider(conn, storage_root, &provider, session_id, deep, gc_config).await?;
+        merge_lcm_status(&mut aggregate, status);
+    }
+    let payload_health =
+        payload_health_detail(conn, storage_root, "all", session_id, deep, 20, gc_config).await?;
+    aggregate.external_payload_count = payload_health.payload.externalized_count;
+    aggregate.missing_payload_count = payload_health.payload.missing_count;
+    aggregate.unreferenced_payload_count = payload_health.payload.unreferenced_count;
+    aggregate.payload = payload_health.payload;
+    aggregate.payload_gc = payload_health.payload_gc;
+    aggregate.storage_scope = Some("project_local".to_string());
+    aggregate.dag.compression_ratio = python_round_ratio_to_tenths(
+        aggregate.dag.total_source_tokens,
+        aggregate.dag.total_tokens,
+    );
+    aggregate.redaction.enabled = aggregate.redaction.lossy_records > 0;
+    Ok(aggregate)
+}
+
+async fn lcm_status_providers(
+    conn: &Connection,
+    session_id: Option<&str>,
+) -> Result<Vec<String>, LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT DISTINCT provider
+             FROM (
+                 SELECT provider, session_id FROM lcm_raw_messages
+                 UNION
+                 SELECT provider, session_id FROM lcm_summary_nodes
+                 UNION
+                 SELECT provider, session_id FROM lcm_external_payloads
+                 UNION
+                 SELECT provider, current_session_id AS session_id FROM lcm_lifecycle_state
+             )
+             WHERE (?1 IS NULL OR session_id = ?1)
+             ORDER BY provider",
+            params![util::opt_text(session_id)],
+        )
+        .await?;
+    let mut providers = Vec::new();
+    while let Some(row) = rows.next().await? {
+        providers.push(row.get(0)?);
+    }
+    Ok(providers)
+}
+
+fn merge_lcm_status(target: &mut LcmStatus, source: LcmStatus) {
+    target.raw_message_count += source.raw_message_count;
+    target.summary_node_count += source.summary_node_count;
+    target.external_payload_count += source.external_payload_count;
+    target.missing_payload_count += source.missing_payload_count;
+    target.unreferenced_payload_count += source.unreferenced_payload_count;
+    target.maintenance_debt_count += source.maintenance_debt_count;
+    target.store.messages += source.store.messages;
+    target.store.estimated_tokens += source.store.estimated_tokens;
+    target.dag.total_nodes += source.dag.total_nodes;
+    target.dag.total_tokens += source.dag.total_tokens;
+    target.dag.total_source_tokens += source.dag.total_source_tokens;
+    for (depth, source_depth) in source.dag.depths {
+        let target_depth = target
+            .dag
+            .depths
+            .entry(depth)
+            .or_insert_with(|| LcmDagDepthStatus {
+                count: 0,
+                tokens: 0,
+                source_tokens: 0,
+            });
+        target_depth.count += source_depth.count;
+        target_depth.tokens += source_depth.tokens;
+        target_depth.source_tokens += source_depth.source_tokens;
+    }
+    merge_payload_status(&mut target.payload, source.payload);
+    merge_payload_gc_status(&mut target.payload_gc, source.payload_gc);
+    target.lifecycle.lifecycle_state_count += source.lifecycle.lifecycle_state_count;
+    target.lifecycle.frontier_count += source.lifecycle.frontier_count;
+    target.lifecycle.maintenance_debt_count += source.lifecycle.maintenance_debt_count;
+    target.redaction.lossy_records += source.redaction.lossy_records;
+    target.redaction.legacy_truncated_count += source.redaction.legacy_truncated_count;
+}
+
+fn merge_payload_status(target: &mut LcmPayloadStatus, source: LcmPayloadStatus) {
+    target.externalized_count += source.externalized_count;
+    target.missing_count += source.missing_count;
+    target.unreferenced_count += source.unreferenced_count;
+    target.placeholder_ref_count += source.placeholder_ref_count;
+    target.missing_placeholder_metadata_count += source.missing_placeholder_metadata_count;
+    target.missing_placeholder_file_count += source.missing_placeholder_file_count;
+    target.gc_candidate_count += source.gc_candidate_count;
+    target.root_contained &= source.root_contained;
+    target.orphan_file_count += source.orphan_file_count;
+    target.tombstoned_count += source.tombstoned_count;
+    target.referenced_count += source.referenced_count;
+    target.total_bytes += source.total_bytes;
+    target.referenced_bytes += source.referenced_bytes;
+    target.orphan_file_bytes += source.orphan_file_bytes;
+    target.reclaimable_bytes += source.reclaimable_bytes;
+    target.reclaimable_bytes_after_grace += source.reclaimable_bytes_after_grace;
+    target.integrity_mismatch_count = match (
+        target.integrity_mismatch_count,
+        source.integrity_mismatch_count,
+    ) {
+        (Some(left), Some(right)) => Some(left + right),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    };
+}
+
+fn merge_payload_gc_status(target: &mut LcmPayloadGcStatus, source: LcmPayloadGcStatus) {
+    target.last_gc_at = max_option_i64(target.last_gc_at, source.last_gc_at);
+    target.last_gc_duration_ms =
+        max_option_u64(target.last_gc_duration_ms, source.last_gc_duration_ms);
+    if target.last_gc_status.as_deref() != Some("failed") {
+        target.last_gc_status = source.last_gc_status.or(target.last_gc_status.take());
+    }
+    target.last_gc_error = source.last_gc_error.or(target.last_gc_error.take());
+    target.last_reaped_refs = sum_option_i64(target.last_reaped_refs, source.last_reaped_refs);
+    target.last_reaped_bytes = sum_option_u64(target.last_reaped_bytes, source.last_reaped_bytes);
+    target.next_run_eligible_at =
+        min_option_i64(target.next_run_eligible_at, source.next_run_eligible_at);
+}
+
+fn max_option_i64(left: Option<i64>, right: Option<i64>) -> Option<i64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn min_option_i64(left: Option<i64>, right: Option<i64>) -> Option<i64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn sum_option_i64(left: Option<i64>, right: Option<i64>) -> Option<i64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left + right),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn max_option_u64(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn sum_option_u64(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left + right),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
 }
 
 async fn lcm_table_exists(conn: &Connection, table_name: &str) -> Result<bool, LcmError> {
@@ -1940,7 +2138,8 @@ async fn payload_byte_counts_for_scope(
         .query(
             "SELECT payload_ref, byte_count
              FROM lcm_external_payloads
-             WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)",
+             WHERE (?1 = 'all' OR provider = ?1)
+               AND (?2 IS NULL OR session_id = ?2)",
             params![provider, util::opt_text(session_id)],
         )
         .await?;
@@ -1962,7 +2161,8 @@ async fn payload_ref_locations_for_scope(
         .query(
             "SELECT store_id, message_id, session_id, storage_kind, payload_ref, content, snippet_text, index_text, metadata_json
              FROM lcm_raw_messages
-             WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)",
+             WHERE (?1 = 'all' OR provider = ?1)
+               AND (?2 IS NULL OR session_id = ?2)",
             params![provider, util::opt_text(session_id)],
         )
         .await?;
@@ -2097,7 +2297,7 @@ async fn tombstoned_count(
         .query(
             "SELECT COUNT(*)
              FROM lcm_raw_messages
-             WHERE provider = ?1
+             WHERE (?1 = 'all' OR provider = ?1)
                AND (?2 IS NULL OR session_id = ?2)
                AND (
                     content LIKE ?3 COLLATE NOCASE
@@ -2177,7 +2377,8 @@ async fn metadata_refs_for_scope(
         .query(
             "SELECT payload_ref
              FROM lcm_external_payloads
-             WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)",
+             WHERE (?1 = 'all' OR provider = ?1)
+               AND (?2 IS NULL OR session_id = ?2)",
             params![provider, util::opt_text(session_id)],
         )
         .await?;
@@ -2204,12 +2405,13 @@ async fn placeholder_refs_for_scope(
     let sql = format!(
         "SELECT content, snippet_text, index_text, metadata_json
          FROM lcm_raw_messages
-         WHERE provider = ?
+         WHERE (? = 'all' OR provider = ?)
            AND (? IS NULL OR session_id = ?)
            AND ({placeholder_predicates})"
     );
     let session_value = util::opt_text(session_id);
     let mut values = vec![
+        Value::Text(provider.to_string()),
         Value::Text(provider.to_string()),
         session_value.clone(),
         session_value,
@@ -2505,7 +2707,7 @@ fn sanitize_fts5_query(query: &str) -> String {
 fn is_fts5_special_char(ch: char) -> bool {
     matches!(
         ch,
-        '"' | '(' | ')' | '*' | '^' | '-' | ':' | '{' | '}' | '.'
+        '"' | '(' | ')' | '*' | '^' | '-' | ':' | '{' | '}' | '.' | '#'
     )
 }
 
