@@ -161,6 +161,18 @@ jobs:
           "Windows Rust cache hit: ${{ steps.windows-rust-cache.outputs.cache-hit }}" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
           "Windows Rust cache matched key: ${{ steps.windows-rust-cache.outputs.cache-matched-key }}" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
 
+      - name: Reset sccache daemon
+        shell: pwsh
+        run: |
+          if ($env:SCCACHE_PATH -and (Test-Path $env:SCCACHE_PATH)) {
+            & $env:SCCACHE_PATH --stop-server
+          } elseif (Get-Command sccache -ErrorAction SilentlyContinue) {
+            sccache --stop-server
+          } else {
+            Write-Host "sccache was not installed; skipping daemon reset"
+          }
+          exit 0
+
       - name: Run Windows tests
         run: cargo nextest run --workspace --profile ci --test-threads 64
 
@@ -180,6 +192,8 @@ jobs:
         run: |
           if ($env:SCCACHE_PATH -and (Test-Path $env:SCCACHE_PATH)) {
             & $env:SCCACHE_PATH --show-stats
+          } elseif (Get-Command sccache -ErrorAction SilentlyContinue) {
+            sccache --show-stats
           } else {
             Write-Host "sccache was not installed; skipping stats"
           }
