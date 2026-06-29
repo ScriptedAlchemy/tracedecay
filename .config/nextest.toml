@@ -7,6 +7,8 @@ final-status-level = "slow"
 
 [test-groups]
 windows-dashboard-server = { max-threads = 4 }
+windows-tracedecay-init = { max-threads = 1 }
+windows-init-heavy = { max-threads = 8 }
 windows-profile-storage = { max-threads = 1 }
 windows-session-sqlite = { max-threads = 16 }
 windows-process-heavy = { max-threads = 4 }
@@ -25,6 +27,16 @@ platform = { host = 'cfg(windows)' }
 test-group = 'windows-dashboard-server'
 
 [[profile.ci.overrides]]
+filter = 'binary(=agent_test) | binary(=branch_db_safety_test) | binary(=cli_non_interactive_test) | binary(=mcp_cli_serve_test)'
+platform = { host = 'cfg(windows)' }
+test-group = 'windows-tracedecay-init'
+
+[[profile.ci.overrides]]
+filter = 'binary(=automation_memory_curator_runner_test) | binary(=automation_runner_test) | binary(=automation_session_reflector_runner_test) | binary(=automation_skill_writer_runner_test) | binary(=branch_drift_test) | binary(=integration_test) | binary(=regression_core_engine_test) | binary(=tracedecay_test)'
+platform = { host = 'cfg(windows)' }
+test-group = 'windows-init-heavy'
+
+[[profile.ci.overrides]]
 filter = 'binary(=storage_resolver_test) | binary(=profile_storage_migration_test) | binary(=cursor_transcript_ingest_test)'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-profile-storage'
@@ -35,7 +47,7 @@ platform = { host = 'cfg(windows)' }
 test-group = 'windows-session-sqlite'
 
 [[profile.ci.overrides]]
-filter = 'binary(=mcp_cli_serve_test) | binary(=tool_first_touch_test) | binary(=lsp_code_diagnostics_test) | binary(=mcp_dashboard_tool_test) | binary(=extract_worker_test)'
+filter = 'binary(=tool_first_touch_test) | binary(=lsp_code_diagnostics_test) | binary(=mcp_dashboard_tool_test) | binary(=extract_worker_test)'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-process-heavy'
 

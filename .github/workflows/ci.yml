@@ -171,8 +171,65 @@ jobs:
           }
           exit 0
 
+      - name: Clean stale Windows test processes
+        shell: pwsh
+        run: |
+          $workspace = (Resolve-Path $env:GITHUB_WORKSPACE).Path
+          $repoWorkPath = "\_work\tracedecay\tracedecay"
+          $all = Get-CimInstance Win32_Process
+          $stale = foreach ($process in $all) {
+            if ($process.Name -notin @("tracedecay.exe", "cargo.exe", "cargo-nextest.exe", "rustc.exe", "link.exe", "sccache.exe")) {
+              continue
+            }
+            if (-not $process.CommandLine) {
+              continue
+            }
+            $inCurrentWorkspace = $process.CommandLine.IndexOf($workspace, [StringComparison]::OrdinalIgnoreCase) -ge 0
+            $inRepoWorktree = $process.CommandLine.IndexOf($repoWorkPath, [StringComparison]::OrdinalIgnoreCase) -ge 0
+            if (-not $inCurrentWorkspace -and -not $inRepoWorktree) {
+              continue
+            }
+            $parent = $all | Where-Object { $_.ProcessId -eq $process.ParentProcessId }
+            if (-not $parent) {
+              $process
+            }
+          }
+          foreach ($process in $stale) {
+            Write-Host "Stopping stale process $($process.Name) pid=$($process.ProcessId)"
+            Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+          }
+
       - name: Run Windows tests
         run: cargo nextest run --workspace --profile ci --test-threads 64
+
+      - name: Clean abandoned Windows test children
+        if: always()
+        shell: pwsh
+        run: |
+          $workspace = (Resolve-Path $env:GITHUB_WORKSPACE).Path
+          $repoWorkPath = "\_work\tracedecay\tracedecay"
+          $all = Get-CimInstance Win32_Process
+          $stale = foreach ($process in $all) {
+            if ($process.Name -ne "tracedecay.exe") {
+              continue
+            }
+            if (-not $process.CommandLine) {
+              continue
+            }
+            $inCurrentWorkspace = $process.CommandLine.IndexOf($workspace, [StringComparison]::OrdinalIgnoreCase) -ge 0
+            $inRepoWorktree = $process.CommandLine.IndexOf($repoWorkPath, [StringComparison]::OrdinalIgnoreCase) -ge 0
+            if (-not $inCurrentWorkspace -and -not $inRepoWorktree) {
+              continue
+            }
+            $parent = $all | Where-Object { $_.ProcessId -eq $process.ParentProcessId }
+            if (-not $parent) {
+              $process
+            }
+          }
+          foreach ($process in $stale) {
+            Write-Host "Stopping abandoned tracedecay child pid=$($process.ProcessId)"
+            Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+          }
 
       - name: Save Windows Rust cache
         if: steps.windows-rust-cache.outputs.cache-hit != 'true'
