@@ -2101,6 +2101,101 @@ async fn context_includes_matching_memory_facts() {
 }
 
 #[tokio::test]
+async fn context_memory_controls_filter_disable_and_compact_markdown() {
+    let (cg, _dir) = setup_project().await;
+    let long_content = format!("Long memory control fact {}", "x".repeat(320));
+    handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": long_content,
+            "category": "decision",
+            "entity": "long memory control",
+            "tags": ["context-memory-controls"],
+            "trust": 0.92,
+            "source": "mcp-context-test"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": "Low trust memory control fact should stay filtered.",
+            "category": "decision",
+            "entity": "low trust memory control",
+            "tags": ["context-memory-controls"],
+            "trust": 0.2,
+            "source": "mcp-context-test"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let disabled = handle_tool_call(
+        &cg,
+        "tracedecay_context",
+        json!({
+            "task": "long memory control fact",
+            "format": "json",
+            "include_memory": false
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let disabled_payload: Value = serde_json::from_str(extract_text(&disabled.value)).unwrap();
+    assert_eq!(
+        disabled_payload["memory_matches"].as_array().map(Vec::len),
+        Some(0)
+    );
+
+    let filtered = handle_tool_call(
+        &cg,
+        "tracedecay_context",
+        json!({
+            "task": "low trust memory control fact",
+            "format": "json",
+            "memory_min_trust": 0.9
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let filtered_payload: Value = serde_json::from_str(extract_text(&filtered.value)).unwrap();
+    assert!(!filtered_payload["memory_matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|hit| hit["fact"]["content"]
+            .as_str()
+            .is_some_and(|content| content.contains("Low trust memory control"))));
+
+    let markdown = handle_tool_call(
+        &cg,
+        "tracedecay_context",
+        json!({"task": "long memory control fact", "memory_limit": 1}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&markdown.value);
+    assert!(text.contains("Long memory control fact"));
+    assert!(text.contains("..."));
+    assert!(!text.contains(&"x".repeat(300)));
+}
+
+#[tokio::test]
 async fn context_memory_matches_use_project_store_when_serving_branch_db() {
     fn git(project: &Path, args: &[&str]) {
         let output = Command::new("git")

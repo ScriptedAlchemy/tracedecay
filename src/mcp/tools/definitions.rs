@@ -716,6 +716,18 @@ fn def_context() -> ToolDefinition {
                 "max_per_file": {
                     "type": "number",
                     "description": "Maximum symbols from a single file in results. Prevents one large file from dominating (default: max_nodes/3, minimum 3)"
+                },
+                "include_memory": {
+                    "type": "boolean",
+                    "description": "When true, include up to memory_limit matching project memory facts as a separate context lane (default: true)"
+                },
+                "memory_limit": {
+                    "type": "number",
+                    "description": "Maximum memory facts to include when include_memory is true (default: 3, max: 10)"
+                },
+                "memory_min_trust": {
+                    "type": "number",
+                    "description": "Minimum trust score for memory facts included in context (default: 0.5)"
                 }
             })),
             "required": ["task"]
