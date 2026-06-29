@@ -6885,10 +6885,22 @@ async fn seed_lcm_tool_result_message(
     text: impl Into<String>,
     ordinal: i64,
 ) {
+    seed_lcm_tool_result_message_for_provider(cg, "cursor", session_id, message_id, text, ordinal)
+        .await;
+}
+
+async fn seed_lcm_tool_result_message_for_provider(
+    cg: &TraceDecay,
+    provider: &str,
+    session_id: &str,
+    message_id: &str,
+    text: impl Into<String>,
+    ordinal: i64,
+) {
     let db = open_active_project_session_db(cg).await;
     assert!(
         db.upsert_session(&SessionRecord {
-            provider: "cursor".to_string(),
+            provider: provider.to_string(),
             session_id: session_id.to_string(),
             project_key: cg.project_root().to_string_lossy().to_string(),
             project_path: cg.project_root().to_string_lossy().to_string(),
@@ -6906,7 +6918,7 @@ async fn seed_lcm_tool_result_message(
     );
     assert!(
         db.upsert_session_message(&SessionMessageRecord {
-            provider: "cursor".to_string(),
+            provider: provider.to_string(),
             message_id: message_id.to_string(),
             session_id: session_id.to_string(),
             role: "tool".to_string(),
@@ -12576,6 +12588,85 @@ async fn lcm_status_reports_dag_store_and_config_diagnostics_over_mcp() {
     assert_eq!(lcm["config"]["fresh_tail_count"], 2);
     assert_eq!(lcm["config"]["summary_fan_in"], 4);
     assert_eq!(lcm["config"]["compression_boundary_cooldown_seconds"], 60);
+}
+
+#[tokio::test]
+async fn lcm_status_all_provider_aggregates_provider_counts() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message_for_provider(
+        &cg,
+        "cursor",
+        "cursor-session",
+        "cursor-msg",
+        "alpha beta",
+        1,
+    )
+    .await;
+    seed_lcm_session_message_for_provider(
+        &cg,
+        "codex",
+        "codex-session",
+        "codex-msg",
+        "gamma delta epsilon",
+        2,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_status",
+        json!({"provider": "all"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["provider"], "all");
+    assert_eq!(payload["lcm"]["raw_message_count"], 2);
+    assert_eq!(payload["lcm"]["store"]["messages"], 2);
+    assert_eq!(payload["lcm"]["store"]["estimated_tokens"], 5);
+}
+
+#[tokio::test]
+async fn lcm_status_all_provider_counts_payload_health_once() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_tool_result_message_for_provider(
+        &cg,
+        "cursor",
+        "lcm-status-all-payload-cursor",
+        "lcm-status-all-payload-cursor-message",
+        format!("cursor payload\n{}", "cursor-body ".repeat(30_000)),
+        1,
+    )
+    .await;
+    seed_lcm_tool_result_message_for_provider(
+        &cg,
+        "codex",
+        "lcm-status-all-payload-codex",
+        "lcm-status-all-payload-codex-message",
+        format!("codex payload\n{}", "codex-body ".repeat(30_000)),
+        2,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_status",
+        json!({"provider": "all"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["lcm"]["payload"]["externalized_count"], 2);
+    assert_eq!(payload["lcm"]["payload"]["orphan_file_count"], 0);
+    assert_eq!(payload["lcm"]["payload"]["missing_count"], 0);
 }
 
 // Repeated LCM tool calls in one process must reuse the per-process

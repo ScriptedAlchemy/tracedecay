@@ -1055,6 +1055,100 @@ async fn list_all_reports_profile_sharded_store_without_stale_label() {
 }
 
 #[tokio::test]
+async fn projects_list_json_reads_global_registry() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let db = GlobalDb::open_at(&profile_root(home.path()).join("global.db"))
+        .await
+        .unwrap();
+    register_profile_sharded_store(&db, project.path(), "proj_cli").await;
+    drop(db);
+
+    let mut command = tracedecay_command(home.path(), project.path());
+    command.args(["projects", "list", "--json"]);
+    let output = run_with_timeout(command, cli_timeout());
+
+    assert!(
+        output.status.success(),
+        "projects list --json should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(payload["projects"][0]["project_id"], "proj_cli");
+    assert_eq!(payload["projects"][0]["default_branch"], "main");
+}
+
+#[tokio::test]
+async fn projects_search_text_matches_registered_alias() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let db = GlobalDb::open_at(&profile_root(home.path()).join("global.db"))
+        .await
+        .unwrap();
+    register_profile_sharded_store(&db, project.path(), "proj_cli").await;
+    drop(db);
+
+    let mut command = tracedecay_command(home.path(), project.path());
+    command.args(["projects", "search", "proj_cli"]);
+    let output = run_with_timeout(command, cli_timeout());
+
+    assert!(
+        output.status.success(),
+        "projects search should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("proj_cli") && stdout.contains("main"),
+        "search output should include project id and branch\nstdout:\n{stdout}"
+    );
+}
+
+#[tokio::test]
+async fn projects_context_resolves_project_id_and_path() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let db = GlobalDb::open_at(&profile_root(home.path()).join("global.db"))
+        .await
+        .unwrap();
+    register_profile_sharded_store(&db, project.path(), "proj_cli").await;
+    drop(db);
+
+    let mut by_id = tracedecay_command(home.path(), project.path());
+    by_id.args(["projects", "context", "proj_cli", "--json"]);
+    let by_id_output = run_with_timeout(by_id, cli_timeout());
+    assert!(
+        by_id_output.status.success(),
+        "projects context by id should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&by_id_output.stdout),
+        String::from_utf8_lossy(&by_id_output.stderr)
+    );
+    let by_id_payload: serde_json::Value = serde_json::from_slice(&by_id_output.stdout).unwrap();
+    assert_eq!(by_id_payload["project"]["project_id"], "proj_cli");
+    assert_eq!(
+        by_id_payload["stores"][0]["store"]["storage_mode"],
+        "profile_sharded"
+    );
+
+    let mut by_path = tracedecay_command(home.path(), project.path());
+    by_path.args(["projects", "context", project.path().to_str().unwrap()]);
+    let by_path_output = run_with_timeout(by_path, cli_timeout());
+    assert!(
+        by_path_output.status.success(),
+        "projects context by path should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&by_path_output.stdout),
+        String::from_utf8_lossy(&by_path_output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&by_path_output.stdout);
+    assert!(
+        stdout.contains("Project: proj_cli") && stdout.contains("profile_sharded"),
+        "path context output should include project and store\nstdout:\n{stdout}"
+    );
+}
+
+#[tokio::test]
 async fn wipe_all_removes_profile_sharded_store_and_global_row() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();

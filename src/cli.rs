@@ -361,6 +361,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: SessionsAction,
     },
+    /// Inspect registered TraceDecay projects from the global registry
+    Projects {
+        #[command(subcommand)]
+        action: ProjectsAction,
+    },
     /// Manage multi-branch indexing
     Branch {
         #[command(subcommand)]
@@ -392,6 +397,38 @@ pub enum Commands {
         /// List ALL tracked projects from the global DB
         #[arg(short, long)]
         all: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ProjectsAction {
+    /// List registered projects
+    List {
+        /// Maximum projects to show
+        #[arg(long, default_value_t = 25)]
+        limit: usize,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Search registered projects by id, path, alias, remote, or branch
+    Search {
+        /// Query text
+        query: String,
+        /// Maximum projects to show
+        #[arg(long, default_value_t = 25)]
+        limit: usize,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show registry context for one project id or path
+    Context {
+        /// Project id, root path, or registered alias
+        selector: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 

@@ -147,7 +147,8 @@ pub async fn referenced_payload_refs(
         .query(
             "SELECT storage_kind, payload_ref, content, snippet_text, index_text, metadata_json
              FROM lcm_raw_messages
-             WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)",
+             WHERE (?1 = 'all' OR provider = ?1)
+               AND (?2 IS NULL OR session_id = ?2)",
             params![provider, util::opt_text(session_id)],
         )
         .await?;
@@ -282,7 +283,8 @@ pub async fn payload_metadata_refs_for_scope(
         .query(
             "SELECT payload_ref
              FROM lcm_external_payloads
-             WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)",
+             WHERE (?1 = 'all' OR provider = ?1)
+               AND (?2 IS NULL OR session_id = ?2)",
             params![provider, util::opt_text(session_id)],
         )
         .await?;
