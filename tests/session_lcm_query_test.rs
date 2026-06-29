@@ -417,6 +417,38 @@ async fn grep_like_fallback_recalls_infix_slash_query_matches() {
 }
 
 #[tokio::test]
+async fn grep_like_fallback_handles_hash_separator_queries() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &["the log references issue#123 inside a Cursor transcript".to_string()],
+    )
+    .await;
+
+    let hits = db
+        .lcm_grep(LcmGrepRequest {
+            provider: "cursor".into(),
+            query: "issue#123".into(),
+            scope: LcmScope::Session,
+            session_id: Some("session-1".into()),
+            include_summaries: false,
+            limit: 10,
+            sort: LcmGrepSort::Recency,
+            source: None,
+            role: None,
+            start_time: None,
+            end_time: None,
+        })
+        .await
+        .expect("hash separator grep should not produce an FTS syntax error");
+
+    assert!(hits.iter().any(|hit| hit.store_id == Some(store_ids[0])));
+}
+
+#[tokio::test]
 async fn grep_quotes_reserved_operator_looking_query_text() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;

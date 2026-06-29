@@ -32,7 +32,7 @@ const PLACEHOLDER_PREFIXES: [&str; 5] = [
 ];
 const PLACEHOLDER_TEXT_COLUMNS: [&str; 4] =
     ["content", "snippet_text", "index_text", "metadata_json"];
-const TERM_SEPARATORS: [char; 3] = ['-', ':', '/'];
+const TERM_SEPARATORS: [char; 4] = ['-', ':', '/', '#'];
 const RAW_GREP_RECENCY_EXPR: &str = "COALESCE(r.timestamp, r.store_id)";
 const SUMMARY_GREP_RECENCY_EXPR: &str =
     "COALESCE(n.source_time_end, n.source_time_start, n.created_at)";
@@ -2707,7 +2707,7 @@ fn sanitize_fts5_query(query: &str) -> String {
 fn is_fts5_special_char(ch: char) -> bool {
     matches!(
         ch,
-        '"' | '(' | ')' | '*' | '^' | '-' | ':' | '{' | '}' | '.'
+        '"' | '(' | ')' | '*' | '^' | '-' | ':' | '{' | '}' | '.' | '#'
     )
 }
 
