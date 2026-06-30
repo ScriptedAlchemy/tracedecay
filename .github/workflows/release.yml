@@ -20,6 +20,10 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: Build ${{ matrix.name }}
