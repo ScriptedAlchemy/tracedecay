@@ -1700,6 +1700,43 @@ export const value = 1;
 }
 
 #[tokio::test]
+async fn test_search_skips_ignored_dependency_hint_when_results_fill_limit() {
+    let dir = test_temp_dir();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::create_dir_all(project.join("node_modules/pkg")).unwrap();
+    fs::write(
+        project.join("src/app.ts"),
+        r#"export function Foo() {
+  return "local";
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        project.join("node_modules/pkg/index.d.ts"),
+        "export interface Foo { value: string }\n",
+    )
+    .unwrap();
+
+    let (cg, _env) = init_test_project(project).await;
+    cg.index_all().await.unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_search",
+        json!({"query": "Foo", "limit": 1, "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    assert_eq!(payload.as_array().map(Vec::len), Some(1));
+    assert_eq!(payload[0]["name"].as_str(), Some("Foo"));
+}
+
+#[tokio::test]
 async fn test_context_appends_index_coverage_hint_for_skipped_generated_dirs() {
     let (cg, _env, _dir) = setup_generated_dir_project(false).await;
 

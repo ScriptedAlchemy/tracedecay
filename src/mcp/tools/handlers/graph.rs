@@ -78,7 +78,11 @@ pub(super) async fn handle_search(
     let results = cg.search(query, limit).await?;
     let results = filter_by_scope(results, scope_prefix, |r| &r.node.file_path);
     let coverage_hint = cg.index_coverage_hint(results.len());
-    let ignored_dependency_hint = ignored_dependency_hint(cg, query, limit).await?;
+    let ignored_dependency_hint = if should_check_ignored_dependency_hint(results.len(), limit) {
+        ignored_dependency_hint(cg, query, limit).await?
+    } else {
+        None
+    };
 
     let touched_files = unique_file_paths(results.iter().map(|r| r.node.file_path.as_str()));
 
@@ -116,6 +120,10 @@ pub(super) async fn handle_search(
         touched_files,
         || render_search_md(&output_value),
     ))
+}
+
+fn should_check_ignored_dependency_hint(result_count: usize, limit: usize) -> bool {
+    result_count == 0 || result_count < limit.clamp(1, 20)
 }
 
 async fn ignored_dependency_hint(
