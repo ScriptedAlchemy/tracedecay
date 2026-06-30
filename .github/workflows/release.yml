@@ -197,7 +197,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "${{ steps.release.outputs.tag }}" binaries/tracedecay-* --clobber
+          find binaries -type f -name 'tracedecay-*' -print -exec \
+            gh release upload "${{ steps.release.outputs.tag }}" {} --repo "${{ github.repository }}" --clobber \;
 
   update-homebrew:
     name: Update Homebrew tap
