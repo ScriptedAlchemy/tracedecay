@@ -15,5 +15,6 @@ docs/superpowers
 cache/
 generated-illustrations/
 *.log
+__pycache__/
 *~
 *#
