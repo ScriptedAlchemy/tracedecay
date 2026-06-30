@@ -41,6 +41,7 @@ fn tool_json(project_root: Option<&Path>, value: &Value) -> ToolResult {
     ToolResult {
         value: json!({ "content": [{ "type": "text", "text": text }] }),
         touched_files: Vec::new(),
+        internal_analytics: None,
     }
 }
 
@@ -147,6 +148,7 @@ fn lcm_preflight_tool_json(value: &Value) -> ToolResult {
     ToolResult {
         value: json!({ "content": [{ "type": "text", "text": text }] }),
         touched_files: Vec::new(),
+        internal_analytics: None,
     }
 }
 
@@ -308,6 +310,7 @@ fn lcm_expand_query_tool_json(project_root: Option<&Path>, value: &Value) -> Too
     ToolResult {
         value: json!({ "content": [{ "type": "text", "text": text }] }),
         touched_files: Vec::new(),
+        internal_analytics: None,
     }
 }
 

@@ -2171,6 +2171,13 @@ async fn context_call_writes_memory_match_analytics_without_fact_bodies() {
         resp["result"].get("_tracedecay_analytics").is_none(),
         "internal analytics metadata must not leak to clients"
     );
+    assert!(
+        !resp["result"]
+            .to_string()
+            .contains("context_memory_analytics")
+            && !resp["result"].to_string().contains("_tracedecay_analytics"),
+        "internal analytics metadata must not leak inside response content"
+    );
 
     server_handle.ledger_writes_settled().await;
     let event = expect_mcp_runtime_event(

@@ -6,6 +6,7 @@
 
 pub mod analysis;
 pub mod dashboard;
+mod dependency_hints;
 pub mod edit;
 pub mod git;
 pub mod graph;
@@ -147,6 +148,7 @@ fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
     Ok(ToolResult {
         value: json!({ "content": [{ "type": "text", "text": formatted }] }),
         touched_files: Vec::new(),
+        internal_analytics: None,
     })
 }
 

@@ -2,7 +2,7 @@
 //! `impact`, `node`, `similar`, `rename_preview`, `callers_for`, `by_qualified_name`,
 //! `signature`.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use serde_json::{json, Value};
@@ -17,9 +17,11 @@ use crate::types::{BuildContextOptions, EdgeKind, Node, NodeKind, TaskContext, V
 const CONTEXT_MEMORY_MATCH_LIMIT: usize = 3;
 const CONTEXT_MEMORY_MATCH_LIMIT_MAX: usize = 10;
 const CONTEXT_MEMORY_SNIPPET_CHARS: usize = 240;
+const CONTEXT_MEMORY_ANALYTICS_KEY: &str = "context_memory_analytics";
 
 use super::super::render::{self, Md};
-use super::super::{ToolResult, INTERNAL_TOOL_ANALYTICS_KEY};
+use super::super::ToolResult;
+use super::dependency_hints;
 use super::support::{
     effective_path, filter_by_scope, require_node_id, string_array_values, unique_file_paths,
 };
@@ -38,14 +40,26 @@ fn rendered_tool_result<F>(
 where
     F: FnOnce() -> String,
 {
+    let internal_analytics = value.get(CONTEXT_MEMORY_ANALYTICS_KEY).cloned();
+    let public_value;
+    let value = if internal_analytics.is_some() {
+        public_value = strip_internal_context_memory_analytics(value);
+        &public_value
+    } else {
+        value
+    };
     let text = render::finalize(Some(cg.project_root()), args, value, md);
     let mut result = text_tool_result(&text, touched_files);
-    if let Some(analytics) = value.get(INTERNAL_TOOL_ANALYTICS_KEY).cloned() {
-        if let Some(object) = result.value.as_object_mut() {
-            object.insert(INTERNAL_TOOL_ANALYTICS_KEY.to_string(), analytics);
-        }
-    }
+    result.internal_analytics = internal_analytics;
     result
+}
+
+fn strip_internal_context_memory_analytics(value: &Value) -> Value {
+    let mut value = value.clone();
+    if let Some(object) = value.as_object_mut() {
+        object.remove(CONTEXT_MEMORY_ANALYTICS_KEY);
+    }
+    value
 }
 
 fn text_tool_result(text: &str, touched_files: Vec<String>) -> ToolResult {
@@ -54,6 +68,7 @@ fn text_tool_result(text: &str, touched_files: Vec<String>) -> ToolResult {
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
+        internal_analytics: None,
     }
 }
 
@@ -78,11 +93,12 @@ pub(super) async fn handle_search(
     let results = cg.search(query, limit).await?;
     let results = filter_by_scope(results, scope_prefix, |r| &r.node.file_path);
     let coverage_hint = cg.index_coverage_hint(results.len());
-    let ignored_dependency_hint = if should_check_ignored_dependency_hint(results.len(), limit) {
-        ignored_dependency_hint(cg, query, limit).await?
-    } else {
-        None
-    };
+    let ignored_dependency_hint =
+        if dependency_hints::should_check_ignored_dependency_hint(results.len(), limit) {
+            dependency_hints::ignored_dependency_hint(cg, query, limit, scope_prefix).await?
+        } else {
+            None
+        };
 
     let touched_files = unique_file_paths(results.iter().map(|r| r.node.file_path.as_str()));
 
@@ -120,71 +136,6 @@ pub(super) async fn handle_search(
         touched_files,
         || render_search_md(&output_value),
     ))
-}
-
-fn should_check_ignored_dependency_hint(result_count: usize, limit: usize) -> bool {
-    result_count == 0 || result_count < limit.clamp(1, 20)
-}
-
-async fn ignored_dependency_hint(
-    cg: &TraceDecay,
-    query: &str,
-    limit: usize,
-) -> Result<Option<Value>> {
-    let query = query.trim().to_ascii_lowercase();
-    if query.is_empty() {
-        return Ok(None);
-    }
-    let candidate_limit = limit.clamp(1, 20);
-    let db = if cg.is_read_only() {
-        cg.open_project_store_db_read_only().await?
-    } else {
-        cg.open_project_store_db().await?
-    };
-    let refs = db
-        .search_ignored_dependency_refs(&query, candidate_limit)
-        .await?;
-    let mut seen = BTreeSet::new();
-    let mut candidates = Vec::new();
-    for unresolved in refs {
-        let Some((module, symbol)) = parse_ignored_dependency_candidate(&unresolved.reference_name)
-        else {
-            continue;
-        };
-        let haystack = format!("{module} {symbol}").to_ascii_lowercase();
-        if !haystack.contains(&query) {
-            continue;
-        }
-        if !seen.insert((
-            module.to_string(),
-            symbol.to_string(),
-            unresolved.file_path.clone(),
-            unresolved.line,
-        )) {
-            continue;
-        }
-        candidates.push(json!({
-            "module": module,
-            "symbol": symbol,
-            "import_file": unresolved.file_path,
-            "line": user_line(unresolved.line),
-        }));
-        if candidates.len() >= candidate_limit {
-            break;
-        }
-    }
-    if candidates.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(json!({
-        "message": "No indexed symbol matched, but project imports reference matching symbols from an ignored dependency. Keep node_modules ignored for normal sync; use bounded lazy dependency indexing for the listed module if this symbol is needed.",
-        "candidates": candidates,
-        "suggested_action": "lazy_index_ignored_dependency",
-    })))
-}
-
-fn parse_ignored_dependency_candidate(reference_name: &str) -> Option<(&str, &str)> {
-    reference_name.strip_prefix("npm:")?.split_once('#')
 }
 
 fn render_search_md(value: &Value) -> String {
@@ -337,7 +288,7 @@ pub(super) async fn handle_context(
             serde_json::to_value(&memory_matches).unwrap_or_else(|_| json!([])),
         );
         object.insert(
-            INTERNAL_TOOL_ANALYTICS_KEY.to_string(),
+            CONTEXT_MEMORY_ANALYTICS_KEY.to_string(),
             json!({
                 "context_memory": context_memory_analytics_value(
                     &memory_options,

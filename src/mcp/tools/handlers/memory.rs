@@ -35,6 +35,7 @@ fn text_tool_result(text: &str) -> ToolResult {
     ToolResult {
         value: json!({ "content": [{ "type": "text", "text": text }] }),
         touched_files: vec![],
+        internal_analytics: None,
     }
 }
 

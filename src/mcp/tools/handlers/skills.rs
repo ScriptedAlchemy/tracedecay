@@ -34,6 +34,7 @@ fn tool_json(value: &Value) -> ToolResult {
     ToolResult {
         value: json!({ "content": [{ "type": "text", "text": formatted }] }),
         touched_files: vec![],
+        internal_analytics: None,
     }
 }
 

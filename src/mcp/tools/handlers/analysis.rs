@@ -216,6 +216,7 @@ pub(super) async fn handle_dead_code(
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
+        internal_analytics: None,
     })
 }
 
@@ -282,6 +283,7 @@ pub(super) async fn handle_module_api(
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
+        internal_analytics: None,
     })
 }
 
@@ -304,6 +306,7 @@ pub(super) async fn handle_circular(cg: &TraceDecay, args: Value) -> Result<Tool
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
+        internal_analytics: None,
     })
 }
 
@@ -379,6 +382,7 @@ pub(super) async fn handle_hotspots(
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
+        internal_analytics: None,
     })
 }
 
@@ -486,6 +490,7 @@ pub(super) async fn handle_unused_imports(
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
+        internal_analytics: None,
     })
 }
 
@@ -576,6 +581,7 @@ pub(super) async fn handle_rank(
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
+        internal_analytics: None,
     })
 }
 
@@ -632,6 +638,7 @@ pub(super) async fn handle_largest(
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
+        internal_analytics: None,
     })
 }
 
@@ -689,6 +696,7 @@ pub(super) async fn handle_coupling(
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
+        internal_analytics: None,
     })
 }
 
@@ -736,6 +744,7 @@ pub(super) async fn handle_inheritance_depth(
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
+        internal_analytics: None,
     })
 }
 
@@ -812,6 +821,7 @@ pub(super) async fn handle_distribution(
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
+        internal_analytics: None,
     })
 }
 
@@ -913,6 +923,7 @@ pub(super) async fn handle_recursion(
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
+        internal_analytics: None,
     })
 }
 
@@ -1192,6 +1203,7 @@ pub(super) async fn handle_complexity(
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
+        internal_analytics: None,
     })
 }
 
@@ -1256,6 +1268,7 @@ pub(super) async fn handle_doc_coverage(
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
+        internal_analytics: None,
     })
 }
 
@@ -1305,6 +1318,7 @@ pub(super) async fn handle_god_class(
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
+        internal_analytics: None,
     })
 }
 
@@ -1488,6 +1502,7 @@ pub(super) async fn handle_unsafe_patterns(
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files: touched,
+        internal_analytics: None,
     })
 }
 
@@ -1604,6 +1619,7 @@ pub(super) async fn handle_diagnostics(cg: &TraceDecay, args: Value) -> Result<T
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files: unique_file_paths(diagnostics.iter().map(|d| d.file.as_str())),
+        internal_analytics: None,
     })
 }
 
@@ -1647,6 +1663,7 @@ pub(super) async fn handle_constructors(
                 "content": [{ "type": "text", "text": format!("No struct, class, or case-class named '{struct_name}' found.") }]
             }),
             touched_files: vec![],
+            internal_analytics: None,
         });
     }
 
@@ -1717,6 +1734,7 @@ pub(super) async fn handle_constructors(
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files: touched,
+        internal_analytics: None,
     })
 }
 
@@ -2096,6 +2114,7 @@ pub(super) async fn handle_field_sites(
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files: touched,
+        internal_analytics: None,
     })
 }
 

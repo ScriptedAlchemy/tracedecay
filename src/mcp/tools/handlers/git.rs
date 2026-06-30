@@ -36,6 +36,7 @@ fn git_error_result(cg: &TraceDecay, operation: &str, message: &str) -> ToolResu
             "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files: vec![],
+        internal_analytics: None,
     }
 }
 
@@ -146,6 +147,7 @@ pub(super) async fn handle_affected(cg: &TraceDecay, args: Value) -> Result<Tool
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
+        internal_analytics: None,
     })
 }
 
@@ -256,6 +258,7 @@ pub(super) async fn handle_diff_context(cg: &TraceDecay, args: Value) -> Result<
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
+        internal_analytics: None,
     })
 }
 
@@ -665,6 +668,7 @@ pub(super) async fn handle_changelog(cg: &TraceDecay, args: Value) -> Result<Too
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
+        internal_analytics: None,
     })
 }
 
@@ -696,6 +700,7 @@ pub(super) async fn handle_commit_context(cg: &TraceDecay, args: Value) -> Resul
         return Ok(ToolResult {
             value: json!({"content": [{"type": "text", "text": text}]}),
             touched_files: vec![],
+            internal_analytics: None,
         });
     }
 
@@ -758,6 +763,7 @@ pub(super) async fn handle_commit_context(cg: &TraceDecay, args: Value) -> Resul
     Ok(ToolResult {
         value: json!({"content": [{"type": "text", "text": text}]}),
         touched_files: changed_files,
+        internal_analytics: None,
     })
 }
 
@@ -895,6 +901,7 @@ pub(super) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<To
     Ok(ToolResult {
         value: json!({"content": [{"type": "text", "text": text}]}),
         touched_files: changed_files,
+        internal_analytics: None,
     })
 }
 
@@ -917,6 +924,7 @@ pub(super) fn handle_branch_list(cg: &TraceDecay) -> ToolResult {
             "content": [{ "type": "text", "text": project_response_text(cg, &output) }]
         }),
         touched_files: vec![],
+        internal_analytics: None,
     }
 }
 
@@ -967,6 +975,7 @@ pub(super) async fn handle_branch_search(cg: &TraceDecay, args: Value) -> Result
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
+        internal_analytics: None,
     })
 }
 
@@ -1019,6 +1028,7 @@ pub(super) async fn handle_branch_diff(cg: &TraceDecay, args: Value) -> Result<T
                 "content": [{ "type": "text", "text": text }]
             }),
             touched_files: vec![],
+            internal_analytics: None,
         });
     }
 
@@ -1153,6 +1163,7 @@ pub(super) async fn handle_branch_diff(cg: &TraceDecay, args: Value) -> Result<T
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
+        internal_analytics: None,
     })
 }
 

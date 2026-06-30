@@ -523,20 +523,10 @@ fn asks_for_project_context(text: &str) -> bool {
             "project search",
             "cross-project",
             "cross project",
+            "orchestrator repo",
+            "orchestrator repository",
         ],
-    ) || (contains_any(text, &[" repo", " repository", "workspace"])
-        && contains_any(
-            text,
-            &[
-                "find",
-                "locate",
-                "search",
-                "where",
-                "defined",
-                "lives",
-                "orchestrator",
-            ],
-        ))
+    )
 }
 
 fn asks_for_session_recall(text: &str) -> bool {
@@ -648,6 +638,20 @@ mod tests {
 
         assert_eq!(hint.category.as_key(), "project_context");
         assert!(hint.message.contains("registered projects"));
+    }
+
+    #[test]
+    fn ordinary_workspace_search_stays_a_search_hint() {
+        let hint = decide_hint(&ToolHintInput {
+            tool_name: Some("shell".to_string()),
+            command: Some("rg -n \"helper\" .".to_string()),
+            prompt: Some("Search the workspace for the helper definition".to_string()),
+            session_id: Some("session-1".to_string()),
+            ..ToolHintInput::default()
+        })
+        .unwrap();
+
+        assert_eq!(hint.category, HintCategory::Search);
     }
 
     #[test]

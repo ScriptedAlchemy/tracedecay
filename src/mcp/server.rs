@@ -22,7 +22,6 @@ use crate::tracedecay::TraceDecay;
 
 use super::tools::{
     explore_call_budget, get_tool_definitions_with_budget, handle_tool_call_with_registry,
-    INTERNAL_TOOL_ANALYTICS_KEY,
 };
 use super::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
 
@@ -1793,7 +1792,7 @@ impl McpServer {
                         timestamp: ts,
                         request_id: &request_id,
                         arguments: &analytics_arguments,
-                        response: Some(&result.value),
+                        internal_analytics: result.internal_analytics.as_ref(),
                     });
                     self.spawn_observed_ledger_write(async move {
                         gdb.record_savings(
@@ -1938,7 +1937,6 @@ impl McpServer {
                 }
 
                 mark_semantic_tool_error(&mut result.value);
-                strip_internal_tool_analytics(&mut result.value);
                 JsonRpcResponse::success(id, result.value)
             }
             Err(e) => {
@@ -1976,7 +1974,7 @@ impl McpServer {
             timestamp: crate::tracedecay::current_timestamp(),
             request_id,
             arguments,
-            response: None,
+            internal_analytics: None,
         });
         self.spawn_observed_ledger_write(async move {
             if let Err(e) = gdb.append_analytics_event(&event).await {
@@ -2098,7 +2096,7 @@ struct McpToolAnalyticsEvent<'a> {
     timestamp: i64,
     request_id: &'a Value,
     arguments: &'a Value,
-    response: Option<&'a Value>,
+    internal_analytics: Option<&'a Value>,
 }
 
 fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> AnalyticsEventInsert {
@@ -2124,7 +2122,7 @@ fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> AnalyticsEventI
     append_tool_response_analytics(
         input.tool_name,
         input.arguments,
-        input.response,
+        input.internal_analytics,
         &mut metadata,
     );
     AnalyticsEventInsert {
@@ -2147,7 +2145,7 @@ fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> AnalyticsEventI
 fn append_tool_response_analytics(
     tool_name: &str,
     arguments: &Value,
-    response: Option<&Value>,
+    internal_analytics: Option<&Value>,
     metadata: &mut Value,
 ) {
     if tool_name != "tracedecay_context" {
@@ -2167,7 +2165,7 @@ fn append_tool_response_analytics(
         .and_then(Value::as_f64)
         .unwrap_or(0.5)
         .clamp(0.0, 1.0);
-    if let Some(context_memory) = response.and_then(tool_result_context_memory_analytics) {
+    if let Some(context_memory) = internal_analytics.and_then(|value| value.get("context_memory")) {
         metadata["context_memory"] = context_memory.clone();
         return;
     }
@@ -2179,18 +2177,6 @@ fn append_tool_response_analytics(
         "fact_ids": [],
         "error": null,
     });
-}
-
-fn tool_result_context_memory_analytics(response: &Value) -> Option<&Value> {
-    response
-        .get(INTERNAL_TOOL_ANALYTICS_KEY)?
-        .get("context_memory")
-}
-
-fn strip_internal_tool_analytics(value: &mut Value) {
-    if let Some(object) = value.as_object_mut() {
-        object.remove(INTERNAL_TOOL_ANALYTICS_KEY);
-    }
 }
 
 fn json_rpc_request_id_string(id: &Value) -> Option<String> {

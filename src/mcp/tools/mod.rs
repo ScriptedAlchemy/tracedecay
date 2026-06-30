@@ -24,8 +24,6 @@ pub use handlers::{
 /// Maximum character length for a tool response before truncation.
 const MAX_RESPONSE_CHARS: usize = 15_000;
 
-pub(crate) const INTERNAL_TOOL_ANALYTICS_KEY: &str = "_tracedecay_analytics";
-
 /// A tool definition exposed by the MCP server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
@@ -52,4 +50,7 @@ pub struct ToolResult {
     pub value: Value,
     /// Unique file paths referenced in the result.
     pub touched_files: Vec<String>,
+    /// Internal analytics metadata for the server runtime. This must never be
+    /// serialized into the tool response payload.
+    pub internal_analytics: Option<Value>,
 }

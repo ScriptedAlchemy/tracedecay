@@ -339,6 +339,7 @@ pub(super) async fn handle_gini(
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
+        internal_analytics: None,
     })
 }
 
@@ -388,6 +389,7 @@ pub(super) async fn handle_dependency_depth(
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
+        internal_analytics: None,
     })
 }
 
@@ -466,6 +468,7 @@ pub(super) async fn handle_health(
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
+        internal_analytics: None,
     })
 }
 
@@ -485,6 +488,7 @@ pub(super) async fn handle_runtime(cg: &TraceDecay, args: Value) -> Result<ToolR
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
+        internal_analytics: None,
     })
 }
 
@@ -630,6 +634,7 @@ pub(super) async fn handle_dsm(
             "content": [{ "type": "text", "text": truncated_json_envelope_with_handle(Some(cg.project_root()), &formatted) }]
         }),
         touched_files: vec![],
+        internal_analytics: None,
     })
 }
 
@@ -984,6 +989,7 @@ pub(super) async fn handle_test_risk(
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
+        internal_analytics: None,
     })
 }
 
@@ -1071,6 +1077,7 @@ pub(super) async fn handle_test_map(
     Ok(ToolResult {
         value: json!({"content": [{"type": "text", "text": text}]}),
         touched_files,
+        internal_analytics: None,
     })
 }
 
@@ -1146,6 +1153,7 @@ fn session_tool_result(cg: &TraceDecay, args: &Value, output: &Value) -> ToolRes
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
+        internal_analytics: None,
     }
 }
 

@@ -34,6 +34,7 @@ fn text_tool_result<T: Serialize>(result: &T, touched_files: Vec<String>) -> Too
             "content": [{ "type": "text", "text": serde_json::to_string(result).unwrap_or_default() }]
         }),
         touched_files,
+        internal_analytics: None,
     }
 }
 

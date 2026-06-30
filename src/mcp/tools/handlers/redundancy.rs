@@ -64,6 +64,7 @@ pub(super) async fn handle_redundancy(
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
+        internal_analytics: None,
     })
 }
 

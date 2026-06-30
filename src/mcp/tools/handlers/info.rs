@@ -146,6 +146,7 @@ pub(super) async fn handle_status(
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
+        internal_analytics: None,
     })
 }
 
@@ -265,6 +266,7 @@ pub(super) fn handle_active_project(
             "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
         touched_files: vec![],
+        internal_analytics: None,
     }
 }
 
@@ -331,6 +333,7 @@ pub(super) async fn handle_storage_status(
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
+        internal_analytics: None,
     })
 }
 
@@ -402,6 +405,7 @@ fn render_registry_result(root: Option<&Path>, args: &Value, payload: &Value) ->
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![],
+        internal_analytics: None,
     }
 }
 
@@ -625,6 +629,7 @@ pub(super) async fn handle_files(
             "content": [{ "type": "text", "text": truncate_response(&output) }]
         }),
         touched_files,
+        internal_analytics: None,
     })
 }
 
@@ -752,6 +757,7 @@ pub(super) async fn handle_port_status(cg: &TraceDecay, args: Value) -> Result<T
                 "content": [{ "type": "text", "text": "No valid node kinds specified." }]
             }),
             touched_files: vec![],
+            internal_analytics: None,
         });
     }
 
@@ -856,6 +862,7 @@ pub(super) async fn handle_port_status(cg: &TraceDecay, args: Value) -> Result<T
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
+        internal_analytics: None,
     })
 }
 
@@ -903,6 +910,7 @@ pub(super) async fn handle_port_order(cg: &TraceDecay, args: Value) -> Result<To
                 "content": [{ "type": "text", "text": "No valid node kinds specified." }]
             }),
             touched_files: vec![],
+            internal_analytics: None,
         });
     }
 
@@ -925,6 +933,7 @@ pub(super) async fn handle_port_order(cg: &TraceDecay, args: Value) -> Result<To
                 "content": [{ "type": "text", "text": text }]
             }),
             touched_files: vec![],
+            internal_analytics: None,
         });
     }
 
@@ -1232,6 +1241,7 @@ pub(super) async fn handle_port_order(cg: &TraceDecay, args: Value) -> Result<To
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
+        internal_analytics: None,
     })
 }
 
@@ -1355,6 +1365,7 @@ pub(super) async fn handle_simplify_scan(
     Ok(ToolResult {
         value: json!({"content": [{"type": "text", "text": text}]}),
         touched_files: files,
+        internal_analytics: None,
     })
 }
 
@@ -1527,6 +1538,7 @@ pub(super) async fn handle_type_hierarchy(cg: &TraceDecay, args: Value) -> Resul
     Ok(ToolResult {
         value: json!({"content": [{"type": "text", "text": truncate_response(&output)}]}),
         touched_files,
+        internal_analytics: None,
     })
 }
 
@@ -1613,6 +1625,7 @@ pub(super) async fn handle_body(
                 "content": [{ "type": "text", "text": format!("No symbol named '{symbol}' found.") }]
             }),
             touched_files: vec![],
+            internal_analytics: None,
         });
     }
 
@@ -1654,6 +1667,7 @@ pub(super) async fn handle_body(
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files: touched,
+        internal_analytics: None,
     })
 }
 
@@ -1889,6 +1903,7 @@ pub(super) async fn handle_todos(
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files: touched,
+        internal_analytics: None,
     })
 }
 
@@ -2061,6 +2076,7 @@ pub(super) async fn handle_read(cg: &TraceDecay, args: Value) -> Result<ToolResu
                 "content": [{ "type": "text", "text": serde_json::to_string(&stub).unwrap_or_default() }]
             }),
             touched_files: vec![display_file],
+            internal_analytics: None,
         });
     }
 
@@ -2127,6 +2143,7 @@ pub(super) async fn handle_read(cg: &TraceDecay, args: Value) -> Result<ToolResu
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![display_file],
+        internal_analytics: None,
     })
 }
 
@@ -2185,6 +2202,7 @@ pub(super) async fn handle_outline(cg: &TraceDecay, args: Value) -> Result<ToolR
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files: vec![display_file],
+        internal_analytics: None,
     })
 }
 
@@ -2359,6 +2377,7 @@ pub(super) fn handle_config(cg: &TraceDecay, args: &Value) -> Result<ToolResult>
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files: touched,
+        internal_analytics: None,
     })
 }
 
@@ -2563,6 +2582,7 @@ pub(super) async fn handle_signature_search(
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files: touched,
+        internal_analytics: None,
     })
 }
 

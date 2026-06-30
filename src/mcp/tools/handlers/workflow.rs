@@ -209,6 +209,7 @@ pub(super) async fn handle_diagnose(cg: &TraceDecay, args: Value) -> Result<Tool
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files: touched.into_iter().collect(),
+        internal_analytics: None,
     })
 }
 
@@ -292,6 +293,7 @@ pub(super) async fn handle_run_affected_tests(cg: &TraceDecay, args: Value) -> R
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
+        internal_analytics: None,
     })
 }
 
@@ -493,6 +495,7 @@ fn empty_result(message: &str) -> ToolResult {
             })).unwrap_or_default() }]
         }),
         touched_files: vec![],
+        internal_analytics: None,
     }
 }
 
@@ -511,6 +514,7 @@ fn error_result(kind: &str, operation: &str, message: &str) -> ToolResult {
             })).unwrap_or_default() }]
         }),
         touched_files: vec![],
+        internal_analytics: None,
     }
 }
 

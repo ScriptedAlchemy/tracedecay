@@ -50,6 +50,7 @@ fn dashboard_tool_result(cg: &TraceDecay, payload: &Value) -> ToolResult {
             "content": [{ "type": "text", "text": truncated_json_envelope_with_handle(Some(cg.project_root()), &formatted) }]
         }),
         touched_files: vec![],
+        internal_analytics: None,
     }
 }
 
