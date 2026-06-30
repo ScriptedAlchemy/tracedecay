@@ -13,10 +13,11 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{AnalyticsEventInsert, GlobalDb};
+use crate::global_db::GlobalDb;
 use crate::mcp::response_handles::{
     cleanup_expired_response_handles, response_handle_stats_json, RESPONSE_RETRIEVE_TOOL,
 };
+use crate::mcp::tool_analytics::{mcp_tool_analytics_event, McpToolAnalyticsEvent};
 use crate::path_tree::format_compact_annotated_path_list;
 use crate::tracedecay::TraceDecay;
 
@@ -1792,6 +1793,7 @@ impl McpServer {
                         timestamp: ts,
                         request_id: &request_id,
                         arguments: &analytics_arguments,
+                        response: Some(&result.value),
                     });
                     self.spawn_observed_ledger_write(async move {
                         gdb.record_savings(
@@ -1973,6 +1975,7 @@ impl McpServer {
             timestamp: crate::tracedecay::current_timestamp(),
             request_id,
             arguments,
+            response: None,
         });
         self.spawn_observed_ledger_write(async move {
             if let Err(e) = gdb.append_analytics_event(&event).await {
@@ -2081,51 +2084,6 @@ fn mcp_analytics_session_id(arguments: &Value) -> Option<String> {
         .find_map(|value| {
             string_field(value, "session_id").or_else(|| string_field(value, "sessionId"))
         })
-}
-
-struct McpToolAnalyticsEvent<'a> {
-    project_root: &'a std::path::Path,
-    session_id: Option<String>,
-    tool_name: &'a str,
-    outcome: &'a str,
-    raw_file_tokens: u64,
-    response_tokens: u64,
-    net_saved_tokens: u64,
-    timestamp: i64,
-    request_id: &'a Value,
-    arguments: &'a Value,
-}
-
-fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> AnalyticsEventInsert {
-    let category = crate::accounting::classifier::classify(&[input.tool_name], &[]);
-    let mut metadata = json!({
-        "request_id": input.request_id,
-        "before_tokens": input.raw_file_tokens,
-        "after_tokens": input.response_tokens,
-        "tokens_saved": input.net_saved_tokens,
-    });
-    if crate::analytics::is_skill_view_tool(input.tool_name) {
-        metadata["arguments"] = input.arguments.clone();
-        metadata["function"] = json!({
-            "name": input.tool_name,
-            "arguments": input.arguments,
-        });
-    }
-    AnalyticsEventInsert {
-        provider: "mcp".to_string(),
-        project_id: GlobalDb::canonical_project_key(input.project_root),
-        session_id: input.session_id,
-        timestamp: input.timestamp,
-        event_kind: "mcp_tool_call".to_string(),
-        hook_name: None,
-        tool_name: Some(input.tool_name.to_string()),
-        tool_category: Some(category.as_str().to_string()),
-        skill_name: None,
-        hint_category: None,
-        hint_id: None,
-        outcome: Some(input.outcome.to_string()),
-        metadata_json: Some(metadata.to_string()),
-    }
 }
 
 fn json_rpc_request_id_string(id: &Value) -> Option<String> {

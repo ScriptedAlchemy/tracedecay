@@ -20,6 +20,7 @@ const CONTEXT_MEMORY_SNIPPET_CHARS: usize = 240;
 
 use super::super::render::{self, Md};
 use super::super::ToolResult;
+use super::dependency_hints;
 use super::support::{
     effective_path, filter_by_scope, require_node_id, string_array_values, unique_file_paths,
 };
@@ -72,6 +73,14 @@ pub(super) async fn handle_search(
     let results = cg.search(query, limit).await?;
     let results = filter_by_scope(results, scope_prefix, |r| &r.node.file_path);
     let coverage_hint = cg.index_coverage_hint(results.len());
+    let has_symbol_result = results
+        .iter()
+        .any(|result| result.node.kind != NodeKind::Use);
+    let ignored_dependency_hint = if has_symbol_result {
+        None
+    } else {
+        dependency_hints::ignored_dependency_hint(cg, query, limit).await?
+    };
 
     let touched_files = unique_file_paths(results.iter().map(|r| r.node.file_path.as_str()));
 
@@ -90,11 +99,15 @@ pub(super) async fn handle_search(
         })
         .collect();
 
-    let output_value = if let Some(hint) = coverage_hint {
-        json!({
-            "results": items,
-            "index_coverage_hint": hint,
-        })
+    let output_value = if coverage_hint.is_some() || ignored_dependency_hint.is_some() {
+        let mut value = json!({ "results": items });
+        if let Some(hint) = coverage_hint {
+            value["index_coverage_hint"] = json!(hint);
+        }
+        if let Some(hint) = ignored_dependency_hint {
+            value["ignored_dependency_hint"] = hint;
+        }
+        value
     } else {
         json!(items)
     };
@@ -146,6 +159,7 @@ fn render_search_md(value: &Value) -> String {
     {
         md.blank().heading(3, "Index Coverage Hint").line(msg);
     }
+    dependency_hints::append_ignored_dependency_hint_md(&mut md, value);
     md.render()
 }
 

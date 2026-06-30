@@ -24,6 +24,11 @@ fn code_diagnostics_dashboard_api_exposes_engines_and_applies_settings() {
                 .any(|engine| engine["language"] == "rust"),
             "rust engine should be advertised"
         );
+        assert_eq!(
+            engine(&initial, "rust")["state"],
+            "inactive",
+            "fixture has .rs files but no Cargo.toml, so rust-analyzer should not auto-start"
+        );
 
         let (status, patched) = patch_json_body(
             &agent,

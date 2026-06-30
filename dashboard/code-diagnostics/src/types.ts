@@ -2,8 +2,8 @@ export type IdleBackfillMode = "off" | "idle";
 export type EngineState =
   | "unavailable"
   | "disabled"
-  | "starting"
-  | "indexing"
+  | "inactive"
+  | "available"
   | "ready"
   | "refreshing"
   | "crashed";

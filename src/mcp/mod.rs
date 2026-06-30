@@ -7,6 +7,7 @@
 /// MCP server implementation.
 pub mod response_handles;
 pub mod server;
+mod tool_analytics;
 
 /// Tool definitions and dispatch.
 pub mod tools;

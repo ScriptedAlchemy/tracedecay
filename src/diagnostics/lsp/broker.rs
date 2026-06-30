@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -6,6 +6,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
+use crate::diagnostics::lsp::activity::adapter_workspace_root;
 use crate::diagnostics::lsp::adapters::{LspAdapterDefinition, LspInstallOption};
 use crate::diagnostics::lsp::client::{LspDocument, StdioLspClient};
 use crate::diagnostics::lsp::settings::CodeDiagnosticsSettings;
@@ -42,8 +43,8 @@ pub enum DiagnosticSeverity {
 pub enum EngineState {
     Unavailable,
     Disabled,
-    Starting,
-    Indexing,
+    Inactive,
+    Available,
     Ready,
     Refreshing,
     Crashed,
@@ -112,7 +113,7 @@ pub struct PreparedRefresh {
 pub struct CompletedRefresh {
     language: String,
     command: String,
-    result: std::result::Result<Vec<CodeDiagnostic>, String>,
+    result: std::result::Result<Vec<CodeDiagnostic>, RefreshFailure>,
 }
 
 impl CompletedRefresh {
@@ -136,7 +137,7 @@ impl PreparedRefresh {
     async fn collect(
         self,
         diagnostics_timeout: Duration,
-    ) -> std::result::Result<Vec<CodeDiagnostic>, String> {
+    ) -> std::result::Result<Vec<CodeDiagnostic>, RefreshFailure> {
         let mut diagnostics = Vec::new();
         for batch in self.batches {
             let mut client_slot = batch.client.lock().await;
@@ -145,7 +146,7 @@ impl PreparedRefresh {
                 None => client_slot.insert(
                     StdioLspClient::start(&self.command, &self.args, &batch.workspace_root)
                         .await
-                        .map_err(|err| err.to_string())?,
+                        .map_err(|err| RefreshFailure::crashed(&err))?,
                 ),
             };
             let result = client
@@ -159,11 +160,26 @@ impl PreparedRefresh {
                 Ok(mut batch_diagnostics) => diagnostics.append(&mut batch_diagnostics),
                 Err(err) => {
                     *client_slot = None;
-                    return Err(err.to_string());
+                    return Err(RefreshFailure::crashed(&err));
                 }
             }
         }
         Ok(diagnostics)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RefreshFailure {
+    state: EngineState,
+    message: String,
+}
+
+impl RefreshFailure {
+    fn crashed(err: &TraceDecayError) -> Self {
+        Self {
+            state: EngineState::Crashed,
+            message: err.to_string(),
+        }
     }
 }
 
@@ -176,6 +192,7 @@ pub struct DiagnosticBroker {
     clients: BTreeMap<LspSessionKey, Arc<Mutex<Option<StdioLspClient>>>>,
     engine_overrides: BTreeMap<String, EngineState>,
     engine_errors: BTreeMap<String, String>,
+    project_languages: BTreeSet<String>,
     backfill: BTreeMap<String, BackfillProgress>,
 }
 
@@ -193,6 +210,7 @@ impl DiagnosticBroker {
             clients: BTreeMap::new(),
             engine_overrides: BTreeMap::new(),
             engine_errors: BTreeMap::new(),
+            project_languages: BTreeSet::new(),
             backfill: BTreeMap::new(),
         }
     }
@@ -201,7 +219,13 @@ impl DiagnosticBroker {
         project_root: impl Into<PathBuf>,
         adapters: Vec<LspAdapterDefinition>,
     ) -> Self {
-        Self::new(project_root, adapters, CodeDiagnosticsSettings::default())
+        let project_languages = adapters
+            .iter()
+            .map(|adapter| adapter.language.clone())
+            .collect();
+        let mut broker = Self::new(project_root, adapters, CodeDiagnosticsSettings::default());
+        broker.update_project_languages(project_languages);
+        broker
     }
 
     pub fn snapshot(&self) -> DiagnosticsSnapshot {
@@ -226,6 +250,29 @@ impl DiagnosticBroker {
         self.clients.clear();
     }
 
+    pub fn update_project_languages(&mut self, languages: BTreeSet<String>) {
+        self.project_languages = languages;
+        for language in &self.project_languages {
+            if self.engine_overrides.get(language) == Some(&EngineState::Inactive) {
+                self.engine_overrides.remove(language);
+            }
+        }
+        let inactive_languages: Vec<String> = self
+            .adapters
+            .iter()
+            .filter(|adapter| !self.project_languages.contains(&adapter.language))
+            .map(|adapter| adapter.language.clone())
+            .collect();
+        for language in inactive_languages {
+            self.remove_language_clients(&language);
+            self.clear_language(&language);
+            self.engine_errors.remove(&language);
+            if self.engine_overrides.get(&language) != Some(&EngineState::Disabled) {
+                self.engine_overrides.remove(&language);
+            }
+        }
+    }
+
     pub fn set_language_enabled(&mut self, language: &str, enabled: bool) {
         self.settings.set_language_enabled(language, enabled);
         if enabled {
@@ -246,6 +293,14 @@ impl DiagnosticBroker {
         if !self.settings.language_enabled(language) {
             self.engine_overrides
                 .insert(language.to_string(), EngineState::Disabled);
+            self.remove_language_clients(language);
+            self.clear_language(language);
+            return Ok(None);
+        }
+        if !self.project_languages.contains(language) {
+            self.engine_overrides
+                .insert(language.to_string(), EngineState::Inactive);
+            self.engine_errors.remove(language);
             self.remove_language_clients(language);
             self.clear_language(language);
             return Ok(None);
@@ -276,7 +331,8 @@ impl DiagnosticBroker {
         let mut documents_by_root: BTreeMap<PathBuf, Vec<LspDocument>> = BTreeMap::new();
         for document in documents {
             let workspace_root =
-                workspace_root_for_document(&self.project_root, &adapter, &document);
+                adapter_workspace_root(&self.project_root, &adapter, &document.relative_path)
+                    .unwrap_or_else(|| self.project_root.clone());
             documents_by_root
                 .entry(workspace_root)
                 .or_default()
@@ -345,10 +401,11 @@ impl DiagnosticBroker {
                 self.engine_overrides.insert(language, EngineState::Ready);
                 Ok(())
             }
-            Err(message) => {
+            Err(failure) => {
+                let message = failure.message;
                 self.engine_errors.insert(language.clone(), message.clone());
                 self.engine_overrides
-                    .insert(language.clone(), EngineState::Crashed);
+                    .insert(language.clone(), failure.state);
                 self.remove_language_clients(&language);
                 Err(TraceDecayError::Config { message })
             }
@@ -449,7 +506,13 @@ impl DiagnosticBroker {
                     .engine_overrides
                     .get(&adapter.language)
                     .copied()
-                    .unwrap_or_else(|| default_state(enabled, &command));
+                    .unwrap_or_else(|| {
+                        default_state(
+                            enabled,
+                            self.project_languages.contains(&adapter.language),
+                            &command,
+                        )
+                    });
                 let last_diagnostic_update = self
                     .diagnostics
                     .iter()
@@ -473,38 +536,18 @@ impl DiagnosticBroker {
     }
 }
 
-fn default_state(enabled: bool, command: &str) -> EngineState {
+fn default_state(enabled: bool, active: bool, command: &str) -> EngineState {
     if !enabled {
         return EngineState::Disabled;
     }
+    if !active {
+        return EngineState::Inactive;
+    }
     if command_available(command) {
-        EngineState::Ready
+        EngineState::Available
     } else {
         EngineState::Unavailable
     }
-}
-
-fn workspace_root_for_document(
-    project_root: &Path,
-    adapter: &LspAdapterDefinition,
-    document: &LspDocument,
-) -> PathBuf {
-    let file = project_root.join(&document.relative_path);
-    let mut current = file.parent();
-    while let Some(dir) = current {
-        if adapter
-            .root_markers
-            .iter()
-            .any(|marker| dir.join(marker).exists())
-        {
-            return dir.to_path_buf();
-        }
-        if dir == project_root {
-            break;
-        }
-        current = dir.parent();
-    }
-    project_root.to_path_buf()
 }
 
 pub fn command_available(command: &str) -> bool {
