@@ -200,8 +200,13 @@ impl<'a> GraphQueryManager<'a> {
         kind_filter: &str,
     ) -> Result<Vec<Node>> {
         let marker_ids = self.db.collect_test_marker_ids().await?;
-        self.db.populate_test_marker_temp_table(&marker_ids).await?;
-        self.db.populate_test_annotated_targets_temp_table().await?;
+        let test_annotated_targets_filter = if marker_ids.is_empty() {
+            ""
+        } else {
+            self.db.populate_test_marker_temp_table(&marker_ids).await?;
+            self.db.populate_test_annotated_targets_temp_table().await?;
+            "AND id NOT IN (SELECT target FROM temp.test_annotated_targets)"
+        };
 
         let sql = format!(
             "SELECT id, kind, name, qualified_name, file_path, start_line, end_line,
@@ -218,7 +223,7 @@ impl<'a> GraphQueryManager<'a> {
                  WHERE target = nodes.id
                  AND kind IN ('calls', 'implements', 'extends', 'type_of', 'returns', 'receives', 'uses')
              )
-             AND id NOT IN (SELECT target FROM temp.test_annotated_targets)"
+             {test_annotated_targets_filter}"
         );
 
         let mut rows =

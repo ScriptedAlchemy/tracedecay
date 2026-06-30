@@ -18,7 +18,8 @@ async fn create_raw_db() -> (Connection, LibsqlDatabase, TempDir) {
         .expect("failed to build libsql database");
     let conn = db.connect().expect("failed to connect");
     conn.execute_batch(
-        "PRAGMA journal_mode = WAL;
+        "PRAGMA auto_vacuum = INCREMENTAL;
+         PRAGMA journal_mode = WAL;
          PRAGMA foreign_keys = ON;
          PRAGMA busy_timeout = 5000;",
     )

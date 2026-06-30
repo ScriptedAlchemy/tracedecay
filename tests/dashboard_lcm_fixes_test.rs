@@ -793,18 +793,8 @@ fn search_matches_externalized_messages_and_qualifies_summary_fts() {
             "offset past the result set must return an empty page"
         );
         assert_eq!(page_4["total"]["messages"], 3);
-    });
-}
 
-#[test]
-fn search_engine_flag_reports_like_fallback_accurately() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let runtime = create_runtime();
-    runtime.block_on(async {
-        let fixture = start_fixture(true).await;
-        let agent = http_agent();
+        drop_raw_message_fts(&fixture.global_db_path).await;
 
         // Fix 4: with the raw-message FTS table dropped, message search must
         // fall back to LIKE while node FTS still works; the top-level engine

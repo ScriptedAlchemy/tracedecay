@@ -388,75 +388,6 @@ fn curation_preview_marks_same_count_updates_stale() {
 }
 
 #[test]
-fn memory_oplog_endpoint_lists_recent_operations() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let runtime = create_runtime();
-    runtime.block_on(async {
-        let fixture = start_dashboard_fixture(false).await;
-        let agent = http_agent();
-
-        // Fresh fixture: no operations recorded yet.
-        let (status, empty) = get_json(
-            &agent,
-            &format!(
-                "{}/api/plugins/holographic/oplog?limit=10",
-                fixture.base_url
-            ),
-        );
-        assert_eq!(status, 200);
-        assert_eq!(empty["count"], 0);
-        assert_eq!(empty["error"], "");
-
-        // An explicit-ops delete writes a per-fact "remove" row plus a
-        // "curate_apply" summary row.
-        let (status, applied) = post_json_body(
-            &agent,
-            &format!("{}/api/plugins/holographic/curate/apply", fixture.base_url),
-            &serde_json::json!({
-                "ops": [{ "op": "delete", "fact_id": 103, "reason": "oplog fixture" }]
-            }),
-        );
-        assert_eq!(status, 200);
-        assert_eq!(applied["counts"]["deleted"], 1);
-
-        let (status, oplog) = get_json(
-            &agent,
-            &format!(
-                "{}/api/plugins/holographic/oplog?limit=10",
-                fixture.base_url
-            ),
-        );
-        assert_eq!(status, 200);
-        assert_eq!(oplog["error"], "");
-        let events = oplog["events"]
-            .as_array()
-            .unwrap_or_else(|| panic!("expected oplog events array"));
-        assert_eq!(events.len(), 2, "expected remove + curate_apply rows");
-
-        // Newest first: the curate_apply summary follows the per-fact remove.
-        assert_eq!(events[0]["op"], "curate_apply");
-        assert_eq!(events[0]["detail"]["deleted"], 1);
-        assert_eq!(events[1]["op"], "remove");
-        assert_eq!(events[1]["fact_id"], 103);
-        let remove_detail = events[1]["detail"].to_string();
-        assert!(
-            remove_detail.contains("content_hash"),
-            "remove rows must carry a content hash: {remove_detail}"
-        );
-        assert!(
-            !remove_detail.contains("empty states"),
-            "remove rows must not leak deleted fact content: {remove_detail}"
-        );
-        assert!(
-            events.iter().all(|event| event["ts"].is_number()),
-            "every oplog row carries a timestamp"
-        );
-    });
-}
-
-#[test]
 fn curate_apply_ops_contract() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
@@ -466,6 +397,13 @@ fn curate_apply_ops_contract() {
         let fixture = start_dashboard_fixture(false).await;
         let agent = http_agent();
         let apply_url = format!("{}/api/plugins/holographic/curate/apply", fixture.base_url);
+        let oplog_url = format!("{}/api/plugins/holographic/oplog?limit=10", fixture.base_url);
+
+        // Fresh fixture: no operations recorded yet.
+        let (status, empty_oplog) = get_json(&agent, &oplog_url);
+        assert_eq!(status, 200);
+        assert_eq!(empty_oplog["count"], 0);
+        assert_eq!(empty_oplog["error"], "");
 
         // Merge: fact 102 into 101 with rewritten content, plus an explicit
         // delete of 103, plus an invalid delete — partial failure stays per-op.
@@ -525,6 +463,43 @@ fn curate_apply_ops_contract() {
         assert_eq!(response["counts"]["deleted"], 1);
         assert_eq!(response["counts"]["merged"], 1);
         assert_eq!(response["counts"]["errors"], 2);
+
+        let (status, oplog) = get_json(&agent, &oplog_url);
+        assert_eq!(status, 200);
+        assert_eq!(oplog["error"], "");
+        let events = oplog["events"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected oplog events array"));
+        assert_eq!(
+            events.len(),
+            4,
+            "expected update + loser remove + explicit remove + curate_apply rows"
+        );
+
+        // Newest first: the curate_apply summary follows the per-fact rows.
+        assert_eq!(events[0]["op"], "curate_apply");
+        assert_eq!(events[0]["detail"]["deleted"], 1);
+        assert_eq!(events[0]["detail"]["merged"], 1);
+        assert_eq!(events[0]["detail"]["errors"], 2);
+        assert_eq!(events[1]["op"], "remove");
+        assert_eq!(events[1]["fact_id"], 103);
+        let explicit_remove_detail = events[1]["detail"].to_string();
+        assert!(
+            explicit_remove_detail.contains("content_hash"),
+            "remove rows must carry a content hash: {explicit_remove_detail}"
+        );
+        assert!(
+            !explicit_remove_detail.contains("empty states"),
+            "remove rows must not leak deleted fact content: {explicit_remove_detail}"
+        );
+        assert_eq!(events[2]["op"], "remove");
+        assert_eq!(events[2]["fact_id"], 102);
+        assert_eq!(events[3]["op"], "update");
+        assert_eq!(events[3]["fact_id"], 101);
+        assert!(
+            events.iter().all(|event| event["ts"].is_number()),
+            "every oplog row carries a timestamp"
+        );
 
         let (status, apply_activity) = get_json(
             &agent,

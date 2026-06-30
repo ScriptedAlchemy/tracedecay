@@ -426,9 +426,6 @@ fn initialize_fixture_project(fixture: &Fixture) {
         let cg = TraceDecay::init_with_options(&fixture.project_path, open_options)
             .await
             .unwrap_or_else(|e| panic!("initialize fixture project: {e}"));
-        cg.index_all_with_progress(|_, _, _| {})
-            .await
-            .unwrap_or_else(|e| panic!("index fixture project: {e}"));
         cg.checkpoint()
             .await
             .unwrap_or_else(|e| panic!("checkpoint fixture project: {e}"));
@@ -733,18 +730,22 @@ fn run_scenario(id: &str) {
     let scenario = load_scenario(id);
 
     // Phase A: a well-behaved agent's tool sequence must leave a compliant
-    // end-state.
-    let fixture = build_fixture(&scenario.setup);
-    let seeded_sources = fact_ids_by_source(&fixture);
+    // end-state. Scenarios with no well-behaved steps can assert their
+    // baseline on the violation fixture before any violation writes.
+    let mut fixture = build_fixture(&scenario.setup);
+    let mut seeded_sources = fact_ids_by_source(&fixture);
     let mut dry_run_report = None;
-    for step in &scenario.deterministic.well_behaved {
-        let result = execute_step(&fixture, step, &mut dry_run_report);
-        assert!(
-            result.succeeded,
-            "[{id}] well-behaved step was refused; compliant writes must be accepted"
-        );
+    let well_behaved_steps = &scenario.deterministic.well_behaved;
+    if !well_behaved_steps.is_empty() {
+        for step in well_behaved_steps {
+            let result = execute_step(&fixture, step, &mut dry_run_report);
+            assert!(
+                result.succeeded,
+                "[{id}] well-behaved step was refused; compliant writes must be accepted"
+            );
+        }
     }
-    let outcomes = evaluate_assertions(
+    let well_behaved_outcomes = evaluate_assertions(
         &scenario,
         &fixture,
         Phase::WellBehaved,
@@ -752,20 +753,25 @@ fn run_scenario(id: &str) {
         &dry_run_report,
     );
     assert!(
-        outcomes.iter().all(|o| o.passed),
+        well_behaved_outcomes.iter().all(|o| o.passed),
         "[{id}] well-behaved phase failed:\n{}",
-        format_outcomes(&outcomes)
+        format_outcomes(&well_behaved_outcomes)
     );
-    println!("[{id}] well-behaved phase:\n{}", format_outcomes(&outcomes));
+    println!(
+        "[{id}] well-behaved phase:\n{}",
+        format_outcomes(&well_behaved_outcomes)
+    );
 
     // Phase B: a misbehaving sequence must be either defended against by the
     // write path or detected by the assertion set (instrument self-check).
     let Some(violation) = &scenario.deterministic.violation else {
         return;
     };
-    let fixture = build_fixture(&scenario.setup);
-    let seeded_sources = fact_ids_by_source(&fixture);
-    let mut dry_run_report = None;
+    if !well_behaved_steps.is_empty() {
+        fixture = build_fixture(&scenario.setup);
+        seeded_sources = fact_ids_by_source(&fixture);
+    }
+    dry_run_report = None;
     let mut any_step_succeeded = false;
     for step in &violation.steps {
         let result = execute_step(&fixture, step, &mut dry_run_report);

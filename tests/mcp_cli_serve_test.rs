@@ -28,7 +28,7 @@ use tracedecay::serve;
 use tracedecay::storage::{
     default_profile_sharded_layout, write_enrollment_marker, EnrollmentMarker, StorageMode,
 };
-use tracedecay::tracedecay::TraceDecay;
+use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 #[cfg(unix)]
 static READ_ONLY_SERVE_ENV_LOCK: Mutex<()> = Mutex::const_new(());
@@ -37,7 +37,7 @@ async fn init_project_with_file(home: &Path, contents: &str) -> TempDir {
     let dir = TempDir::new().unwrap();
     std::fs::create_dir_all(dir.path().join("src")).unwrap();
     std::fs::write(dir.path().join("src/lib.rs"), contents).unwrap();
-    init_project_with_cli(home, dir.path());
+    init_project_direct(home, dir.path()).await;
     dir
 }
 
@@ -45,26 +45,19 @@ async fn init_project_under(home: &Path, parent: &Path, name: &str, contents: &s
     let path = parent.join(name);
     fs::create_dir_all(path.join("src")).unwrap();
     fs::write(path.join("src/lib.rs"), contents).unwrap();
-    init_project_with_cli(home, &path);
+    init_project_direct(home, &path).await;
     path
 }
 
-fn init_project_with_cli(home: &Path, project: &Path) {
-    let output = tracedecay_command_with_home(home)
-        .arg("init")
-        .current_dir(project)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .expect("tracedecay init should run");
-    assert!(
-        output.status.success(),
-        "tracedecay init failed with status {}\nstdout:\n{}\nstderr:\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+async fn init_project_direct(home: &Path, project: &Path) {
+    let profile_root = profile_root(home);
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(profile_root.clone()),
+        global_db_path: Some(profile_root.join("global.db")),
+    };
+    TraceDecay::init_with_options(project, open_options)
+        .await
+        .expect("tracedecay project should initialize");
 }
 
 async fn register_global_project(home: &Path, project: &Path) {

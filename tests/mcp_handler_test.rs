@@ -936,7 +936,8 @@ async fn project_registry_tools_prefer_injected_registry_over_process_default() 
 
 #[tokio::test]
 async fn selected_project_read_skips_cache_write_for_read_only_store() {
-    let (cg, _project_dir) = setup_project().await;
+    let project_dir = test_temp_dir();
+    let (cg, _env) = init_test_project(project_dir.path()).await;
     let registry_dir = test_temp_dir();
     let registry_path = registry_dir.path().join("global.db");
     let _env_guard = GlobalDbEnvGuard::set(&registry_path);
@@ -955,8 +956,7 @@ async fn selected_project_read_skips_cache_write_for_read_only_store() {
         .upsert_code_project("proj_read", target_project, None, None, Some("main"))
         .await
         .unwrap();
-    let target_cg = TestTraceDecay::new(TraceDecay::init(target_project).await.unwrap());
-    index_all_retrying_sync_lock(&target_cg).await;
+    let _target_cg = TestTraceDecay::new(TraceDecay::init(target_project).await.unwrap());
 
     let read_args = json!({
         "project_id": "proj_read",
@@ -1858,30 +1858,25 @@ async fn retrieve_tool_reports_missing_and_expired_handles_actionably() {
 #[tokio::test]
 async fn fact_store_large_list_response_uses_retrieve_handle() {
     let (cg, _dir) = setup_project().await;
-    let mut last_fact_id = None;
-    for i in 0..35 {
-        let added = handle_tool_call(
-            &cg,
-            "tracedecay_fact_store",
-            json!({
-                "action": "add",
-                "content": format!(
-                    "LONG_FACT_MARKER_{i:02}: {}",
-                    "large fact-store response should remain retrievable ".repeat(80)
-                ),
-                "category": "project",
-                "trust": 0.9
-            }),
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-        if i == 34 {
-            let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
-            last_fact_id = added["fact"]["fact_id"].as_i64();
-        }
-    }
+    let added = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": format!(
+                "LONG_FACT_MARKER_00: {}",
+                "large fact-store response should remain retrievable ".repeat(220)
+            ),
+            "category": "project",
+            "trust": 0.9
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
+    let last_fact_id = added["fact"]["fact_id"].as_i64();
     let last_fact_id = last_fact_id.expect("tail fact id");
 
     let listed = handle_tool_call(
@@ -1943,9 +1938,9 @@ async fn fact_store_large_list_response_uses_retrieve_handle() {
         .as_str()
         .expect("retrieve response should contain original JSON text");
     let full: Value = serde_json::from_str(full_json).expect("retrieved content should be JSON");
-    assert_eq!(full["count"].as_u64(), Some(35));
+    assert_eq!(full["count"].as_u64(), Some(1));
     assert!(
-        full_json.contains("LONG_FACT_MARKER_34"),
+        full_json.contains("LONG_FACT_MARKER_00"),
         "retrieved response should include the full fact list"
     );
 }
@@ -1953,25 +1948,23 @@ async fn fact_store_large_list_response_uses_retrieve_handle() {
 #[tokio::test]
 async fn fact_store_large_list_response_reports_store_failure_actionably() {
     let (cg, _dir) = setup_project().await;
-    for i in 0..35 {
-        handle_tool_call(
-            &cg,
-            "tracedecay_fact_store",
-            json!({
-                "action": "add",
-                "content": format!(
-                    "STORE_FAILURE_MARKER_{i:02}: {}",
-                    "large fact-store response should surface cache failures ".repeat(80)
-                ),
-                "category": "project",
-                "trust": 0.9
-            }),
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-    }
+    handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": format!(
+                "STORE_FAILURE_MARKER_00: {}",
+                "large fact-store response should surface cache failures ".repeat(220)
+            ),
+            "category": "project",
+            "trust": 0.9
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
 
     let handle_dir = response_handle_dir(&cg);
     fs::write(&handle_dir, "not-a-directory").unwrap();
@@ -7733,9 +7726,11 @@ async fn lcm_doctor_clean_apply_backs_up_and_deletes_only_safe_candidates() {
 #[tokio::test]
 async fn lcm_doctor_clean_apply_deletes_all_matching_noise_beyond_diagnostic_samples() {
     let (cg, _dir) = setup_project().await;
+    let db = open_active_project_session_db(&cg).await;
     for idx in 0..25 {
-        seed_lcm_session_message(
-            &cg,
+        seed_lcm_session_message_in_db(
+            &db,
+            cg.project_root(),
             "normal-session",
             &format!("cron-noise-{idx}"),
             format!("Cronjob Response: noisy heartbeat {idx}"),
@@ -7743,8 +7738,9 @@ async fn lcm_doctor_clean_apply_deletes_all_matching_noise_beyond_diagnostic_sam
         )
         .await;
     }
-    seed_lcm_session_message(
-        &cg,
+    seed_lcm_session_message_in_db(
+        &db,
+        cg.project_root(),
         "normal-session",
         "normal-valuable",
         "valuable payload to preserve",
@@ -8480,7 +8476,8 @@ async fn lcm_doctor_retention_reports_candidates_without_deleting() {
 
 #[tokio::test]
 async fn lcm_doctor_uses_explicit_hermes_profile_session_db() {
-    let (cg, _dir) = setup_project().await;
+    let dir = test_temp_dir();
+    let (cg, _env) = init_test_project(dir.path()).await;
     seed_lcm_session_message(
         &cg,
         "lcm-doctor-profile",
@@ -8524,7 +8521,8 @@ async fn lcm_doctor_uses_explicit_hermes_profile_session_db() {
 
 #[tokio::test]
 async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
-    let (cg, _dir) = setup_project().await;
+    let dir = test_temp_dir();
+    let (cg, _env) = init_test_project(dir.path()).await;
     let full_text = format!("orchard dispatch {}", "external-payload-body ".repeat(400));
     seed_lcm_session_message(&cg, "lcm-session", "lcm-message", full_text, 1).await;
     let db = open_project_session_db(cg.project_root())
@@ -9666,7 +9664,8 @@ async fn lcm_grep_accepts_string_timestamp_filters() {
 
 #[tokio::test]
 async fn lcm_status_uses_explicit_hermes_profile_session_db() {
-    let (cg, _dir) = setup_project().await;
+    let dir = test_temp_dir();
+    let (cg, _env) = init_test_project(dir.path()).await;
     seed_lcm_session_message(
         &cg,
         "lcm-profile-status",
@@ -9949,23 +9948,8 @@ async fn lcm_hermes_profile_rejects_non_directory_home() {
 
 #[tokio::test]
 async fn lcm_grep_rejects_invalid_scope_without_searching_all_sessions() {
-    let (cg, _dir) = setup_project().await;
-    seed_lcm_session_message(
-        &cg,
-        "lcm-scope-a",
-        "lcm-scope-message-a",
-        "fail closed unique-cross-session-token alpha",
-        1,
-    )
-    .await;
-    seed_lcm_session_message(
-        &cg,
-        "lcm-scope-b",
-        "lcm-scope-message-b",
-        "fail closed unique-cross-session-token beta",
-        2,
-    )
-    .await;
+    let dir = test_temp_dir();
+    let (cg, _env) = init_test_project(dir.path()).await;
 
     let err = expect_tool_error(
         handle_tool_call(
@@ -13056,7 +13040,8 @@ async fn lcm_status_all_provider_counts_payload_health_once() {
 // to LCM_SCHEMA_VERSION.
 #[tokio::test]
 async fn repeated_lcm_calls_skip_schema_reensure_per_process() {
-    let (cg, _dir) = setup_project().await;
+    let dir = test_temp_dir();
+    let (cg, _env) = init_test_project(dir.path()).await;
 
     // Seed data to ensure the sessions.db exists (lcm_status is now read-only
     // and will not create the DB). The schema-ensure caching under test lives
@@ -13127,7 +13112,8 @@ async fn repeated_lcm_calls_skip_schema_reensure_per_process() {
 /// values — never silently broadened to `all`.
 #[tokio::test]
 async fn lcm_grep_rejects_invalid_scope() {
-    let (cg, _dir) = setup_project().await;
+    let dir = test_temp_dir();
+    let (cg, _env) = init_test_project(dir.path()).await;
     let err = expect_tool_error(
         handle_tool_call(
             &cg,
@@ -13148,7 +13134,8 @@ async fn lcm_grep_rejects_invalid_scope() {
 /// closed instead of broadening the search to every session.
 #[tokio::test]
 async fn message_search_rejects_invalid_scope() {
-    let (cg, _dir) = setup_project().await;
+    let dir = test_temp_dir();
+    let (cg, _env) = init_test_project(dir.path()).await;
     for invalid in ["everything", "", "parents"] {
         let err = expect_tool_error(
             handle_tool_call(

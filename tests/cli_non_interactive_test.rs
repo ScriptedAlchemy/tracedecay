@@ -97,7 +97,9 @@ fn add_tracedecay_path_shim(command: &mut Command, home: &Path) -> PathBuf {
     } else {
         "tracedecay"
     });
-    std::fs::copy(env!("CARGO_BIN_EXE_tracedecay"), &shim).unwrap();
+    if std::fs::hard_link(env!("CARGO_BIN_EXE_tracedecay"), &shim).is_err() {
+        std::fs::copy(env!("CARGO_BIN_EXE_tracedecay"), &shim).unwrap();
+    }
     #[cfg(unix)]
     {
         let mut permissions = std::fs::metadata(&shim).unwrap().permissions();

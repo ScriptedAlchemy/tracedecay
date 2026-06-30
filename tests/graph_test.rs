@@ -47,6 +47,111 @@ fn make_node(id: &str, name: &str, file_path: &str, visibility: Visibility) -> N
     }
 }
 
+async fn seed_dead_code_marker_perf_fixture(db: &Database) {
+    db.conn()
+        .execute_batch(
+            "BEGIN;
+             WITH RECURSIVE seq(i) AS (
+                 SELECT 0 UNION ALL SELECT i + 1 FROM seq WHERE i < 49999
+             )
+             INSERT OR REPLACE INTO nodes (
+                 id, kind, name, qualified_name, file_path,
+                 start_line, end_line, start_column, end_column,
+                 docstring, signature, visibility, is_async,
+                 branches, loops, returns, max_nesting,
+                 unsafe_blocks, unchecked_calls, assertions,
+                 updated_at, attrs_start_line, parent_id
+             )
+             SELECT
+                 printf('n-noise-%d', i),
+                 'annotation_usage',
+                 printf('derive_Foo_%d', i),
+                 printf('crate::derive_Foo_%d', i),
+                 'src/noise.rs',
+                 1, 10, 0, 1, NULL,
+                 printf('fn derive_Foo_%d()', i),
+                 'private',
+                 0, 0, 0, 0, 0, 0, 0, 0, 1000, 1, NULL
+             FROM seq;
+
+             WITH RECURSIVE seq(i) AS (
+                 SELECT 0 UNION ALL SELECT i + 1 FROM seq WHERE i < 999
+             )
+             INSERT OR REPLACE INTO nodes (
+                 id, kind, name, qualified_name, file_path,
+                 start_line, end_line, start_column, end_column,
+                 docstring, signature, visibility, is_async,
+                 branches, loops, returns, max_nesting,
+                 unsafe_blocks, unchecked_calls, assertions,
+                 updated_at, attrs_start_line, parent_id
+             )
+             SELECT
+                 printf('n-marker-%d', i),
+                 'annotation_usage',
+                 CASE i % 4
+                     WHEN 0 THEN 'test'
+                     WHEN 1 THEN 'tokio::test'
+                     WHEN 2 THEN 'wasm_bindgen_test'
+                     ELSE 'async_std::test'
+                 END,
+                 CASE i % 4
+                     WHEN 0 THEN 'crate::test'
+                     WHEN 1 THEN 'crate::tokio::test'
+                     WHEN 2 THEN 'crate::wasm_bindgen_test'
+                     ELSE 'crate::async_std::test'
+                 END,
+                 'src/markers.rs',
+                 1, 10, 0, 1, NULL,
+                 CASE i % 4
+                     WHEN 0 THEN 'fn test()'
+                     WHEN 1 THEN 'fn tokio::test()'
+                     WHEN 2 THEN 'fn wasm_bindgen_test()'
+                     ELSE 'fn async_std::test()'
+                 END,
+                 'private',
+                 0, 0, 0, 0, 0, 0, 0, 0, 1000, 1, NULL
+             FROM seq;
+
+             WITH RECURSIVE seq(i) AS (
+                 SELECT 0 UNION ALL SELECT i + 1 FROM seq WHERE i < 4999
+             )
+             INSERT OR REPLACE INTO nodes (
+                 id, kind, name, qualified_name, file_path,
+                 start_line, end_line, start_column, end_column,
+                 docstring, signature, visibility, is_async,
+                 branches, loops, returns, max_nesting,
+                 unsafe_blocks, unchecked_calls, assertions,
+                 updated_at, attrs_start_line, parent_id
+             )
+             SELECT
+                 printf('n-fn-%d', i),
+                 'function',
+                 printf('worker_%d', i),
+                 printf('crate::worker_%d', i),
+                 'src/fns.rs',
+                 1, 10, 0, 1, NULL,
+                 printf('fn worker_%d()', i),
+                 'private',
+                 0, 0, 0, 0, 0, 0, 0, 0, 1000, 1, NULL
+             FROM seq;
+
+             WITH RECURSIVE seq(i) AS (
+                 SELECT 2500 UNION ALL SELECT i + 1 FROM seq WHERE i < 4999
+             )
+             INSERT OR IGNORE INTO edges (source, target, kind, line)
+             SELECT 'n-fn-0', printf('n-fn-%d', i), 'calls', 1 FROM seq;
+
+             WITH RECURSIVE seq(i) AS (
+                 SELECT 0 UNION ALL SELECT i + 1 FROM seq WHERE i < 999
+             )
+             INSERT OR IGNORE INTO edges (source, target, kind, line)
+             SELECT printf('n-marker-%d', i), printf('n-fn-%d', i), 'annotates', 1 FROM seq;
+             COMMIT;",
+        )
+        .await
+        .expect("failed to seed dead-code marker perf fixture");
+}
+
 /// Sets up a call chain: main -> process -> validate -> check.
 /// Returns the database and temp dir.
 async fn setup_call_chain() -> (Database, TempDir) {
@@ -1216,89 +1321,7 @@ async fn test_file_churn_nonexistent_dir() {
 #[tokio::test]
 async fn dead_code_marker_resolve_is_single_pass() {
     let (db, _dir) = setup_db().await;
-
-    let mut nodes: Vec<Node> = Vec::with_capacity(60_000);
-
-    // 50K noise annotation_usage nodes that should NOT match the marker
-    // patterns — these drive the LIKE scan cost.
-    for i in 0..50_000_u32 {
-        let mut n = make_node(
-            &format!("n-noise-{i}"),
-            &format!("derive_Foo_{i}"),
-            "src/noise.rs",
-            Visibility::Private,
-        );
-        n.kind = NodeKind::AnnotationUsage;
-        nodes.push(n);
-    }
-
-    // 1K real test-marker annotation_usage nodes, evenly across the 4 patterns.
-    // 250 of each pattern: bare `test`, `tokio::test`, `wasm_bindgen_test`,
-    // `async_std::test`.
-    let patterns: [&str; 4] = [
-        "test",
-        "tokio::test",
-        "wasm_bindgen_test",
-        "async_std::test",
-    ];
-    for i in 0..1_000_u32 {
-        let pat = patterns[(i as usize) % patterns.len()];
-        let mut n = make_node(
-            &format!("n-marker-{i}"),
-            pat,
-            "src/markers.rs",
-            Visibility::Private,
-        );
-        n.kind = NodeKind::AnnotationUsage;
-        nodes.push(n);
-    }
-
-    // 5K private function nodes. Naming: `fn_{i}` — `name NOT LIKE 'test%'`
-    // filter in the dead-code SQL excludes anything starting with `test`,
-    // so use a neutral prefix.
-    for i in 0..5_000_u32 {
-        nodes.push(make_node(
-            &format!("n-fn-{i}"),
-            &format!("worker_{i}"),
-            "src/fns.rs",
-            Visibility::Private,
-        ));
-    }
-
-    db.insert_nodes(&nodes)
-        .await
-        .expect("bulk insert nodes failed");
-
-    // Half the functions (i = 2500..4999) are live via a calls edge from
-    // `n-fn-0` (acting as a synthetic root). The first 1000 unreferenced
-    // functions (i = 0..999) carry a test-marker annotates edge — those
-    // must be excluded from dead-code as well. The remaining 1500
-    // (i = 1000..2499) are the genuine dead set.
-    let mut edges: Vec<Edge> = Vec::with_capacity(2_500 + 1_000);
-
-    // Live edges — `calls` from worker_0 to workers 2500..4999.
-    for i in 2_500..5_000_u32 {
-        edges.push(Edge {
-            source: "n-fn-0".to_string(),
-            target: format!("n-fn-{i}"),
-            kind: EdgeKind::Calls,
-            line: Some(1),
-        });
-    }
-
-    // Test-marker annotates — n-marker-{i} annotates n-fn-{i} for i in 0..999.
-    for i in 0..1_000_u32 {
-        edges.push(Edge {
-            source: format!("n-marker-{i}"),
-            target: format!("n-fn-{i}"),
-            kind: EdgeKind::Annotates,
-            line: Some(1),
-        });
-    }
-
-    db.insert_edges(&edges)
-        .await
-        .expect("bulk insert edges failed");
+    seed_dead_code_marker_perf_fixture(&db).await;
 
     let qm = GraphQueryManager::new(&db);
 
