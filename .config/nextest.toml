@@ -5,8 +5,69 @@ flaky-result = "fail"
 slow-timeout = { period = "10s", terminate-after = 36 }
 final-status-level = "slow"
 
+[test-groups]
+windows-dashboard-server = { max-threads = 2 }
+windows-tracedecay-init = { max-threads = 1 }
+windows-init-heavy = { max-threads = 4 }
+windows-profile-storage = { max-threads = 1 }
+windows-session-sqlite = { max-threads = 8 }
+windows-process-heavy = { max-threads = 2 }
+windows-subprocess = { max-threads = 1 }
+windows-memory-eval = { max-threads = 1 }
+windows-timing-sensitive = { max-threads = 1 }
+
 [[profile.ci.overrides]]
 filter = 'all()'
 platform = { host = 'cfg(windows)' }
 retries = 2
 flaky-result = 'pass'
+
+[[profile.ci.overrides]]
+filter = 'binary(=dashboard_api_test) | binary(=dashboard_analytics_api_test) | binary(=dashboard_automation_api_test) | binary(=dashboard_automation_config_api_test) | binary(=dashboard_automation_skills_api_test) | binary(=dashboard_code_diagnostics_api_test) | binary(=dashboard_graph_api_test) | binary(=dashboard_lcm_api_test) | binary(=dashboard_lcm_fixes_test) | binary(=dashboard_memory_curation_api_test) | binary(=dashboard_savings_api_test)'
+platform = { host = 'cfg(windows)' }
+test-group = 'windows-dashboard-server'
+
+[[profile.ci.overrides]]
+filter = 'binary(=agent_test) | binary(=branch_db_safety_test) | binary(=cli_non_interactive_test) | binary(=mcp_cli_serve_test)'
+platform = { host = 'cfg(windows)' }
+test-group = 'windows-tracedecay-init'
+
+[[profile.ci.overrides]]
+filter = 'binary(=automation_memory_curator_runner_test) | binary(=automation_runner_test) | binary(=automation_session_reflector_runner_test) | binary(=automation_skill_writer_runner_test) | binary(=branch_drift_test) | binary(=integration_test) | binary(=regression_core_engine_test) | binary(=tracedecay_test)'
+platform = { host = 'cfg(windows)' }
+test-group = 'windows-init-heavy'
+
+[[profile.ci.overrides]]
+filter = 'binary(=storage_resolver_test) | binary(=profile_storage_migration_test) | binary(=cursor_transcript_ingest_test)'
+platform = { host = 'cfg(windows)' }
+test-group = 'windows-profile-storage'
+
+[[profile.ci.overrides]]
+filter = 'binary(=session_lcm_compression_test) | binary(=session_lcm_query_test) | binary(=session_lcm_payload_test) | binary(=session_global_db_test) | binary(=session_transcript_backfill_test) | binary(=codex_transcript_ingest_test) | binary(=hermes_transcript_ingest_test) | binary(=cline_like_transcript_ingest_test) | binary(=corruption_test) | binary(=db_query_test) | binary(=mcp_handler_test) | binary(=mcp_server_test) | binary(=memory_test) | binary(=multi_mcp_coordination_test)'
+platform = { host = 'cfg(windows)' }
+test-group = 'windows-session-sqlite'
+
+[[profile.ci.overrides]]
+filter = 'binary(=tool_first_touch_test) | binary(=lsp_code_diagnostics_test) | binary(=mcp_dashboard_tool_test) | binary(=extract_worker_test)'
+platform = { host = 'cfg(windows)' }
+test-group = 'windows-process-heavy'
+
+[[profile.ci.overrides]]
+filter = 'binary(=automation_backend_test)'
+platform = { host = 'cfg(windows)' }
+test-group = 'windows-subprocess'
+
+[[profile.ci.overrides]]
+filter = 'binary(=memory_eval_test)'
+platform = { host = 'cfg(windows)' }
+test-group = 'windows-memory-eval'
+
+[[profile.ci.overrides]]
+filter = 'binary(=cli_non_interactive_test) | binary(=cursor_transcript_ingest_test) | binary(=memory_eval_test) | test(=curation_agent_plan_skips_when_automation_is_disabled_and_records_history) | test(=daily_model_series_limits_days_not_model_rows) | test(=memory_fact_store_update_trust_delta_uses_direct_fact_lookup)'
+platform = { host = 'cfg(windows)' }
+threads-required = "num-test-threads"
+
+[[profile.ci.overrides]]
+filter = 'test(=dead_code_marker_resolve_is_single_pass)'
+platform = { host = 'cfg(windows)' }
+test-group = 'windows-timing-sensitive'
