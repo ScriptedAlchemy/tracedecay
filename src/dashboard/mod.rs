@@ -644,6 +644,20 @@ async fn project_scoped_api_gateway(
     AxumPath((project_id, tail)): AxumPath<(String, String)>,
     mut req: Request<Body>,
 ) -> Response {
+    if runtime.active_project_id() != Some(project_id.as_str())
+        && !matches!(req.method(), &Method::GET | &Method::HEAD)
+    {
+        return (
+            StatusCode::METHOD_NOT_ALLOWED,
+            Json(json!({
+                "status": "read_only_project",
+                "detail": "project-scoped dashboard APIs are read-only for non-active projects",
+                "project_id": project_id,
+            })),
+        )
+            .into_response();
+    }
+
     let selected = match runtime.selected_project_state(&project_id).await {
         Ok(selected) => selected,
         Err(err) => {
@@ -658,17 +672,6 @@ async fn project_scoped_api_gateway(
                 .into_response();
         }
     };
-    if !selected.is_active && !matches!(req.method(), &Method::GET | &Method::HEAD) {
-        return (
-            StatusCode::METHOD_NOT_ALLOWED,
-            Json(json!({
-                "status": "read_only_project",
-                "detail": "project-scoped dashboard APIs are read-only for non-active projects",
-                "project_id": project_id,
-            })),
-        )
-            .into_response();
-    }
 
     let query = req
         .uri()

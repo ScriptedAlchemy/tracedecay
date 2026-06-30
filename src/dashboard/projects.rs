@@ -47,15 +47,11 @@ impl DashboardRuntime {
         if self.active.project_id.as_deref() == Some(project_id) {
             return Ok(SelectedProjectState {
                 state: self.active.clone(),
-                is_active: true,
             });
         }
 
         if let Some(state) = self.project_states.read().await.get(project_id).cloned() {
-            return Ok(SelectedProjectState {
-                state,
-                is_active: false,
-            });
+            return Ok(SelectedProjectState { state });
         }
 
         let db = GlobalDb::open()
@@ -72,16 +68,12 @@ impl DashboardRuntime {
             .write()
             .await
             .insert(project_id.to_string(), state.clone());
-        Ok(SelectedProjectState {
-            state,
-            is_active: false,
-        })
+        Ok(SelectedProjectState { state })
     }
 }
 
 pub(crate) struct SelectedProjectState {
     pub(crate) state: DashboardState,
-    pub(crate) is_active: bool,
 }
 
 #[derive(Debug, Deserialize)]
