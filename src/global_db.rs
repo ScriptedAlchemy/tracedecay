@@ -3205,6 +3205,54 @@ impl GlobalDb {
             .is_ok_and(|n| n > 0)
     }
 
+    /// Insert parsed turns in one transaction, returning the number of new rows.
+    pub async fn insert_turns(&self, turns: &[crate::types::CostTurn]) -> usize {
+        if self.conn.execute("BEGIN IMMEDIATE", ()).await.is_err() {
+            return 0;
+        }
+
+        let mut inserted = 0;
+        for turn in turns {
+            let result = self
+                .conn
+                .execute(
+                    "INSERT OR IGNORE INTO turns
+                     (message_id, project_hash, session_id, model, timestamp,
+                      input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
+                      cost_usd, category, tool_names)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    params![
+                        turn.message_id.clone(),
+                        turn.project_hash.clone(),
+                        turn.session_id.clone(),
+                        turn.model.clone(),
+                        turn.timestamp as i64,
+                        turn.input_tokens as i64,
+                        turn.output_tokens as i64,
+                        turn.cache_write_tokens as i64,
+                        turn.cache_read_tokens as i64,
+                        turn.cost_usd,
+                        turn.category.clone(),
+                        turn.tool_names.clone(),
+                    ],
+                )
+                .await;
+            if let Ok(n) = result {
+                inserted += n as usize;
+            } else {
+                let _ = self.conn.execute("ROLLBACK", ()).await;
+                return 0;
+            }
+        }
+
+        if self.conn.execute("COMMIT", ()).await.is_ok() {
+            inserted
+        } else {
+            let _ = self.conn.execute("ROLLBACK", ()).await;
+            0
+        }
+    }
+
     /// Total cost in USD since a given unix timestamp.
     pub async fn total_cost_since(&self, since: u64) -> Option<f64> {
         let mut rows = self
