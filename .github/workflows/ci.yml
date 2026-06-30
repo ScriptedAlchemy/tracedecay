@@ -106,15 +106,7 @@ jobs:
   windows-test:
     name: Test Windows
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
-    runs-on:
-      - self-hosted
-      - Windows
-      - X64
-      - windows-runner
-    env:
-      RUSTC_WRAPPER: sccache
-      SCCACHE_WEBDAV_ENDPOINT: http://10.10.10.20:8080/cache
-      SCCACHE_WEBDAV_KEY_PREFIX: tracedecay/windows-msvc
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
 
@@ -134,42 +126,14 @@ jobs:
           npm install --global "@ast-grep/cli@$env:AST_GREP_VERSION"
           ast-grep --version
 
-      - name: Install sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
-
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
-      - name: Restore Windows Rust cache
-        id: windows-rust-cache
-        uses: actions/cache/restore@v6
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-test-
-            ${{ runner.os }}-cargo-
-
-      - name: Report Windows cache mode
-        shell: pwsh
-        run: |
-          "Windows Rust cache hit: ${{ steps.windows-rust-cache.outputs.cache-hit }}" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
-          "Windows Rust cache matched key: ${{ steps.windows-rust-cache.outputs.cache-matched-key }}" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
-
-      - name: Reset sccache daemon
-        shell: pwsh
-        run: |
-          if ($env:SCCACHE_PATH -and (Test-Path $env:SCCACHE_PATH)) {
-            & $env:SCCACHE_PATH --stop-server
-          } elseif (Get-Command sccache -ErrorAction SilentlyContinue) {
-            sccache --stop-server
-          } else {
-            Write-Host "sccache was not installed; skipping daemon reset"
-          }
-          exit 0
+          shared-key: windows-test
+          cache-on-failure: true
 
       - name: Clean stale Windows test processes
         shell: pwsh
@@ -229,28 +193,6 @@ jobs:
           foreach ($process in $stale) {
             Write-Host "Stopping abandoned tracedecay child pid=$($process.ProcessId)"
             Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
-          }
-
-      - name: Save Windows Rust cache
-        if: steps.windows-rust-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: ${{ steps.windows-rust-cache.outputs.cache-primary-key }}
-
-      - name: Show sccache stats
-        if: always()
-        shell: pwsh
-        run: |
-          if ($env:SCCACHE_PATH -and (Test-Path $env:SCCACHE_PATH)) {
-            & $env:SCCACHE_PATH --show-stats
-          } elseif (Get-Command sccache -ErrorAction SilentlyContinue) {
-            sccache --show-stats
-          } else {
-            Write-Host "sccache was not installed; skipping stats"
           }
 
   clippy:
