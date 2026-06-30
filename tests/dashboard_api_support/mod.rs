@@ -6,9 +6,9 @@ pub(crate) use std::process::Command;
 pub(crate) use std::thread;
 
 pub(crate) use crate::common::{
-    create_runtime, fake_codex_bin, get_json, http_agent, install_fake_codex_launcher,
-    pick_free_port, response_to_json, tempdir_or_panic, wait_for_dashboard, EnvVarGuard,
-    GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK,
+    create_runtime, fake_codex_bin, get_json, http_agent, http_agent_with_timeout,
+    install_fake_codex_launcher, pick_free_port, response_to_json, tempdir_or_panic,
+    wait_for_dashboard, EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK,
 };
 pub(crate) use serde_json::Value;
 pub(crate) use tempfile::TempDir;

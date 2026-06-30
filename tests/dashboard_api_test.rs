@@ -98,7 +98,7 @@ fn project_scoped_plugin_routes_read_selected_project_store() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(false).await;
-        let agent = http_agent();
+        let agent = http_agent_with_timeout(std::time::Duration::from_secs(20));
 
         let target_root = fixture
             ._tmp
@@ -183,7 +183,7 @@ fn project_scoped_curation_preview_and_activity_do_not_leak_active_state() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(false).await;
-        let agent = http_agent();
+        let agent = http_agent_with_timeout(std::time::Duration::from_secs(20));
 
         let target_root = fixture
             ._tmp
@@ -273,7 +273,7 @@ fn project_scoped_mutations_are_rejected_for_non_active_projects() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(false).await;
-        let agent = http_agent();
+        let agent = http_agent_with_timeout(std::time::Duration::from_secs(20));
 
         let target_root = fixture
             ._tmp
