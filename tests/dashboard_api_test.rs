@@ -176,6 +176,134 @@ fn project_scoped_plugin_routes_read_selected_project_store() {
 }
 
 #[test]
+fn project_scoped_curation_preview_and_activity_do_not_leak_active_state() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture(false).await;
+        let agent = http_agent();
+
+        let target_root = fixture
+            ._tmp
+            .path()
+            .canonicalize()
+            .expect("fixture root should canonicalize")
+            .join("target-project");
+        let target_cg = setup_project(&target_root).await;
+        let target_project_id = target_cg
+            .store_layout()
+            .identity
+            .project_id
+            .clone()
+            .expect("profile-backed target should have project_id");
+        target_cg
+            .checkpoint()
+            .await
+            .expect("target project DB should checkpoint before dashboard reopen");
+        target_cg.close();
+
+        let (active_curate_status, active_curate) = post_json_body(
+            &agent,
+            &format!("{}/api/plugins/holographic/curate", fixture.base_url),
+            &serde_json::json!({ "dry_run": true }),
+        );
+        assert_eq!(active_curate_status, 200);
+        assert_eq!(active_curate["dry_run"], true);
+
+        let (active_preview_status, active_preview) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/holographic/curation/preview",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(active_preview_status, 200);
+        assert!(
+            !active_preview["report"].is_null(),
+            "active dry-run should save a preview"
+        );
+        let (active_activity_status, active_activity) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/holographic/curation/activity?limit=75",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(active_activity_status, 200);
+        assert!(
+            active_activity["count"].as_i64().unwrap_or_default() > 0,
+            "active dry-run should record curation activity"
+        );
+
+        let (selected_preview_status, selected_preview) = get_json(
+            &agent,
+            &format!(
+                "{}/api/projects/{}/plugins/holographic/curation/preview",
+                fixture.base_url, target_project_id
+            ),
+        );
+        assert_eq!(selected_preview_status, 200);
+        assert!(
+            selected_preview["report"].is_null(),
+            "selected non-active project must not reuse the active preview: {selected_preview}"
+        );
+
+        let (selected_activity_status, selected_activity) = get_json(
+            &agent,
+            &format!(
+                "{}/api/projects/{}/plugins/holographic/curation/activity?limit=75",
+                fixture.base_url, target_project_id
+            ),
+        );
+        assert_eq!(selected_activity_status, 200);
+        assert_eq!(
+            selected_activity["count"], 0,
+            "selected non-active project must not reuse active curation activity: {selected_activity}"
+        );
+    });
+}
+
+#[test]
+fn project_scoped_mutations_are_rejected_for_non_active_projects() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture(false).await;
+        let agent = http_agent();
+
+        let target_root = fixture
+            ._tmp
+            .path()
+            .canonicalize()
+            .expect("fixture root should canonicalize")
+            .join("target-project");
+        let target_cg = setup_project(&target_root).await;
+        let target_project_id = target_cg
+            .store_layout()
+            .identity
+            .project_id
+            .clone()
+            .expect("profile-backed target should have project_id");
+        target_cg.close();
+
+        let (status, body) = post_json_body(
+            &agent,
+            &format!(
+                "{}/api/projects/{}/plugins/holographic/curate",
+                fixture.base_url, target_project_id
+            ),
+            &serde_json::json!({ "dry_run": true }),
+        );
+        assert_eq!(status, 405);
+        assert_eq!(body["status"], "read_only_project");
+    });
+}
+
+#[test]
 fn holographic_dashboard_endpoints_return_seeded_payloads() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()

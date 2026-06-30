@@ -50,7 +50,7 @@ export function getSelectedProjectId() {
   return selectedProjectId;
 }
 
-export function setSelectedProjectId(projectId) {
+export function setShellSelectedProjectId(projectId) {
   const next = String(projectId || "");
   if (next === selectedProjectId) return;
   selectedProjectId = next;
@@ -62,8 +62,13 @@ export function subscribeSelectedProject(fn) {
   return () => projectListeners.delete(fn);
 }
 
-export function projectScopedUrl(url) {
+function requestMethod(init) {
+  return String(init?.method || "GET").toUpperCase();
+}
+
+export function projectScopedUrl(url, init) {
   if (!selectedProjectId || typeof url !== "string" || !url.startsWith("/")) return url;
+  if (!["GET", "HEAD"].includes(requestMethod(init))) return url;
   if (
     !isScopedApiUrl(url, "/api/plugins") &&
     !isScopedApiUrl(url, "/api/automation") &&
@@ -75,7 +80,7 @@ export function projectScopedUrl(url) {
 }
 
 export function authedFetch(url, init) {
-  return fetch(projectScopedUrl(url), init);
+  return fetch(projectScopedUrl(url, init), init);
 }
 
 export async function fetchJSON(url, init) {
@@ -233,7 +238,6 @@ export function buildSDK() {
     capabilities: null,
     projects: {
       getSelectedProjectId,
-      setSelectedProjectId,
       subscribe: subscribeSelectedProject,
     },
     components: {

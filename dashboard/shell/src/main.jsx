@@ -13,7 +13,7 @@
 
 import React, { useEffect, useState, useCallback, useRef, useSyncExternalStore } from "react";
 import { createRoot } from "react-dom/client";
-import { buildSDK, fetchJSON, cn, setSelectedProjectId as setSDKSelectedProjectId } from "./sdk.jsx";
+import { buildSDK, fetchJSON, cn, setShellSelectedProjectId } from "./sdk.jsx";
 
 // ---------------------------------------------------------------------------
 // Registry
@@ -286,7 +286,7 @@ function App() {
           projectPayload?.active_project_id || rows.find((p) => p.is_active)?.project_id || rows[0]?.project_id || "";
         setProjects(rows);
         setSelectedProjectId(initialProjectId);
-        setSDKSelectedProjectId(initialProjectId);
+        setShellSelectedProjectId(initialProjectId);
         await fetchCapabilities();
         if (cancelled) return;
         setPlugins(list);
@@ -315,7 +315,7 @@ function App() {
       const next = event.target.value;
       if (next === selectedProjectId) return;
       setSelectedProjectId(next);
-      setSDKSelectedProjectId(next);
+      setShellSelectedProjectId(next);
       setCapabilities(null);
       setProjectRevision((rev) => rev + 1);
       setVisited(active ? new Set([active]) : new Set());

@@ -10,17 +10,14 @@ use serde_json::{json, Value};
 use tokio::sync::RwLock;
 
 use super::{build_selected_project_state, config_error, DashboardState};
-use crate::db::Database;
 use crate::errors::Result;
-use crate::global_db::{GlobalDb, ProjectRegistryContext};
-use crate::storage::{self, StoreArtifactPath};
+use crate::global_db::GlobalDb;
 use crate::tracedecay::TraceDecay;
 
 #[derive(Clone)]
 pub(crate) struct DashboardRuntime {
     active: DashboardState,
     project_states: Arc<RwLock<HashMap<String, DashboardState>>>,
-    memory_project_states: Arc<RwLock<HashMap<String, DashboardState>>>,
 }
 
 impl DashboardRuntime {
@@ -28,7 +25,6 @@ impl DashboardRuntime {
         Self {
             active,
             project_states: Arc::new(RwLock::new(HashMap::new())),
-            memory_project_states: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -44,13 +40,22 @@ impl DashboardRuntime {
         self.active.project_root.display().to_string()
     }
 
-    pub(crate) async fn state_for_project(&self, project_id: &str) -> Result<DashboardState> {
+    pub(crate) async fn selected_project_state(
+        &self,
+        project_id: &str,
+    ) -> Result<SelectedProjectState> {
         if self.active.project_id.as_deref() == Some(project_id) {
-            return Ok(self.active.clone());
+            return Ok(SelectedProjectState {
+                state: self.active.clone(),
+                is_active: true,
+            });
         }
 
         if let Some(state) = self.project_states.read().await.get(project_id).cloned() {
-            return Ok(state);
+            return Ok(SelectedProjectState {
+                state,
+                is_active: false,
+            });
         }
 
         let db = GlobalDb::open()
@@ -67,91 +72,16 @@ impl DashboardRuntime {
             .write()
             .await
             .insert(project_id.to_string(), state.clone());
-        Ok(state)
+        Ok(SelectedProjectState {
+            state,
+            is_active: false,
+        })
     }
+}
 
-    pub(crate) async fn memory_state_for_project(
-        &self,
-        project_id: &str,
-    ) -> Result<DashboardState> {
-        if self.active.project_id.as_deref() == Some(project_id) {
-            return Ok(self.active.clone());
-        }
-
-        if let Some(state) = self
-            .memory_project_states
-            .read()
-            .await
-            .get(project_id)
-            .cloned()
-        {
-            return Ok(state);
-        }
-
-        let db = GlobalDb::open()
-            .await
-            .ok_or_else(|| config_error("could not open tracedecay project registry"))?;
-        let context = db
-            .project_registry_context_by_id(project_id)
-            .await
-            .ok_or_else(|| config_error(format!("registered project not found: {project_id}")))?;
-        let state = self.memory_state_from_registry(&context).await?;
-        self.memory_project_states
-            .write()
-            .await
-            .insert(project_id.to_string(), state.clone());
-        Ok(state)
-    }
-
-    async fn memory_state_from_registry(
-        &self,
-        context: &ProjectRegistryContext,
-    ) -> Result<DashboardState> {
-        let profile_root = storage::default_profile_root()?;
-        let store = context
-            .stores
-            .iter()
-            .find(|store| {
-                store.store.store_kind == "code_project"
-                    && store.store.storage_mode == "profile_sharded"
-            })
-            .ok_or_else(|| {
-                config_error(format!(
-                    "registered project has no profile-sharded code-project store: {}",
-                    context.project.project_id
-                ))
-            })?;
-        let store_root =
-            StoreArtifactPath::resolve(&profile_root, Path::new(&store.store.store_relpath))?
-                .absolute_path();
-        let graph_db_path = match store.store.manifest_relpath.as_deref() {
-            Some(relpath) => {
-                let manifest_path =
-                    StoreArtifactPath::resolve(&profile_root, Path::new(relpath))?.absolute_path();
-                match storage::read_store_manifest(&manifest_path) {
-                    Ok(manifest) => store_root.join(manifest.graph_db_relpath),
-                    Err(_) => store_root.join(crate::config::db_filename(&store_root)),
-                }
-            }
-            None => store_root.join(crate::config::db_filename(&store_root)),
-        };
-        let (db, _) = Database::open_read_only(&graph_db_path).await?;
-        let conn = db.conn().clone();
-        let mut state = self.active.clone();
-        state.project_id = Some(context.project.project_id.clone());
-        state.graph_conn = conn.clone();
-        state.graph_db_path = graph_db_path.display().to_string();
-        state.mem_conn = conn;
-        state.mem_db_path = graph_db_path.display().to_string();
-        state.lcm_conn = None;
-        state.lcm_db_path.clear();
-        state.lcm_scope.clone_from(&store.store.storage_mode);
-        state.project_root = PathBuf::from(&context.project.display_root);
-        state.storage_mode.clone_from(&store.store.storage_mode);
-        state.store_root.clone_from(&store_root);
-        state.dashboard_root = store_root.join("dashboard");
-        Ok(state)
-    }
+pub(crate) struct SelectedProjectState {
+    pub(crate) state: DashboardState,
+    pub(crate) is_active: bool,
 }
 
 #[derive(Debug, Deserialize)]

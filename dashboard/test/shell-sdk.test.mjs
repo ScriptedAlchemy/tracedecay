@@ -51,7 +51,7 @@ test("project scoped fetchJSON rewrites plugin and capability API calls", async 
       };
     },
     async () => {
-      sdk.setSelectedProjectId("proj_alpha");
+      sdk.setShellSelectedProjectId("proj_alpha");
       await sdk.fetchJSON("/api/plugins/holographic/status?limit=2", { method: "GET" });
       await sdk.fetchJSON("/api/automation/skills");
       await sdk.fetchJSON("/api/capabilities");
@@ -65,7 +65,7 @@ test("project scoped fetchJSON rewrites plugin and capability API calls", async 
     ["/api/projects/proj_alpha/capabilities", undefined],
     ["/api/projects/proj_alpha/plugins/graph/search?q=fn", undefined],
   ]);
-  sdk.setSelectedProjectId("");
+  sdk.setShellSelectedProjectId("");
 });
 
 test("project scoping leaves daemon APIs and absolute URLs unchanged", async () => {
@@ -79,7 +79,7 @@ test("project scoping leaves daemon APIs and absolute URLs unchanged", async () 
       };
     },
     async () => {
-      sdk.setSelectedProjectId("proj_beta");
+      sdk.setShellSelectedProjectId("proj_beta");
       await sdk.fetchJSON("/api/projects");
       await sdk.fetchJSON("/api/projects/proj_beta");
       await sdk.fetchJSON("/api/dashboard/plugins");
@@ -93,7 +93,47 @@ test("project scoping leaves daemon APIs and absolute URLs unchanged", async () 
     ["/api/dashboard/plugins", undefined],
     ["https://example.test/api/plugins/holographic", undefined],
   ]);
-  sdk.setSelectedProjectId("");
+  sdk.setShellSelectedProjectId("");
+});
+
+test("project scoping leaves mutating API calls on the active project route", async () => {
+  const seen = [];
+  await withMockedFetch(
+    async (url, init) => {
+      seen.push([url, init]);
+      return {
+        ok: true,
+        json: async () => ({ ok: true }),
+      };
+    },
+    async () => {
+      sdk.setShellSelectedProjectId("proj_gamma");
+      await sdk.fetchJSON("/api/plugins/holographic/curate", { method: "POST" });
+      await sdk.authedFetch("/api/automation/run/memory-curator", { method: "PATCH" });
+    },
+  );
+
+  assert.deepEqual(seen, [
+    ["/api/plugins/holographic/curate", { method: "POST" }],
+    ["/api/automation/run/memory-curator", { method: "PATCH" }],
+  ]);
+  sdk.setShellSelectedProjectId("");
+});
+
+test("plugin SDK exposes selected project as read-only subscribed state", () => {
+  const pluginSDK = sdk.buildSDK();
+  const seen = [];
+  const unsubscribe = pluginSDK.projects.subscribe((projectId) => seen.push(projectId));
+
+  assert.equal(pluginSDK.projects.getSelectedProjectId(), "");
+  assert.equal(pluginSDK.projects.setSelectedProjectId, undefined);
+
+  sdk.setShellSelectedProjectId("proj_delta");
+  assert.equal(pluginSDK.projects.getSelectedProjectId(), "proj_delta");
+  assert.deepEqual(seen, ["proj_delta"]);
+
+  unsubscribe();
+  sdk.setShellSelectedProjectId("");
 });
 
 test("fetchJSON prefers JSON detail on failure", async () => {

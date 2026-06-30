@@ -54,7 +54,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::{Path as AxumPath, State};
-use axum::http::{Request, StatusCode, Uri};
+use axum::http::{Method, Request, StatusCode, Uri};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{any, get, post};
 use axum::Router;
@@ -644,13 +644,8 @@ async fn project_scoped_api_gateway(
     AxumPath((project_id, tail)): AxumPath<(String, String)>,
     mut req: Request<Body>,
 ) -> Response {
-    let state_result = if tail.starts_with("plugins/holographic") {
-        runtime.memory_state_for_project(&project_id).await
-    } else {
-        runtime.state_for_project(&project_id).await
-    };
-    let state = match state_result {
-        Ok(state) => state,
+    let selected = match runtime.selected_project_state(&project_id).await {
+        Ok(selected) => selected,
         Err(err) => {
             return (
                 StatusCode::NOT_FOUND,
@@ -663,6 +658,17 @@ async fn project_scoped_api_gateway(
                 .into_response();
         }
     };
+    if !selected.is_active && !matches!(req.method(), &Method::GET | &Method::HEAD) {
+        return (
+            StatusCode::METHOD_NOT_ALLOWED,
+            Json(json!({
+                "status": "read_only_project",
+                "detail": "project-scoped dashboard APIs are read-only for non-active projects",
+                "project_id": project_id,
+            })),
+        )
+            .into_response();
+    }
 
     let query = req
         .uri()
@@ -673,7 +679,7 @@ async fn project_scoped_api_gateway(
     match rewritten.parse::<Uri>() {
         Ok(uri) => {
             *req.uri_mut() = uri;
-            forward_project_request(state, req).await
+            forward_project_request(selected.state, req).await
         }
         Err(err) => (
             StatusCode::BAD_REQUEST,
