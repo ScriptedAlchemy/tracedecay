@@ -13,7 +13,13 @@
 
 import React, { useEffect, useState, useCallback, useRef, useSyncExternalStore } from "react";
 import { createRoot } from "react-dom/client";
-import { buildSDK, fetchJSON, cn, setShellSelectedProjectId } from "./sdk.jsx";
+import {
+  buildSDK,
+  fetchJSON,
+  cn,
+  getSelectedProjectId,
+  setShellSelectedProjectId,
+} from "./sdk.jsx";
 
 // ---------------------------------------------------------------------------
 // Registry
@@ -255,9 +261,10 @@ function App() {
   }, []);
 
   // Fetch capabilities, update SDK, and return the payload (or null on failure).
-  const fetchCapabilities = useCallback(async () => {
+  const fetchCapabilities = useCallback(async (projectId = getSelectedProjectId()) => {
     try {
       const caps = await fetchJSON("/api/capabilities");
+      if (getSelectedProjectId() !== projectId) return null;
       setCapabilities(caps);
       setConnState("ok");
       setLastRefresh(Date.now());
@@ -265,6 +272,8 @@ function App() {
       window.__HERMES_PLUGIN_SDK__.capabilities = caps;
       return caps;
     } catch {
+      if (getSelectedProjectId() !== projectId) return null;
+      window.__HERMES_PLUGIN_SDK__.capabilities = null;
       setConnState("error");
       return null;
     }
@@ -287,7 +296,7 @@ function App() {
         setProjects(rows);
         setSelectedProjectId(initialProjectId);
         setShellSelectedProjectId(initialProjectId);
-        await fetchCapabilities();
+        await fetchCapabilities(initialProjectId);
         if (cancelled) return;
         setPlugins(list);
         if (list.length > 0) {
@@ -317,9 +326,10 @@ function App() {
       setSelectedProjectId(next);
       setShellSelectedProjectId(next);
       setCapabilities(null);
+      window.__HERMES_PLUGIN_SDK__.capabilities = null;
       setProjectRevision((rev) => rev + 1);
       setVisited(active ? new Set([active]) : new Set());
-      await fetchCapabilities();
+      await fetchCapabilities(next);
     },
     [active, fetchCapabilities, selectedProjectId],
   );

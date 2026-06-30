@@ -62,13 +62,8 @@ export function subscribeSelectedProject(fn) {
   return () => projectListeners.delete(fn);
 }
 
-function requestMethod(init) {
-  return String(init?.method || "GET").toUpperCase();
-}
-
 export function projectScopedUrl(url, init) {
   if (!selectedProjectId || typeof url !== "string" || !url.startsWith("/")) return url;
-  if (!["GET", "HEAD"].includes(requestMethod(init))) return url;
   if (
     !isScopedApiUrl(url, "/api/plugins") &&
     !isScopedApiUrl(url, "/api/automation") &&

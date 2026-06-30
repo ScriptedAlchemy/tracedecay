@@ -5,6 +5,7 @@ use std::sync::Arc;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
+use axum::Router;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
@@ -17,13 +18,15 @@ use crate::tracedecay::TraceDecay;
 #[derive(Clone)]
 pub(crate) struct DashboardRuntime {
     active: DashboardState,
+    project_api: Router<DashboardState>,
     project_states: Arc<RwLock<HashMap<String, DashboardState>>>,
 }
 
 impl DashboardRuntime {
-    pub(crate) fn new(active: DashboardState) -> Self {
+    pub(crate) fn new(active: DashboardState, project_api: Router<DashboardState>) -> Self {
         Self {
             active,
+            project_api,
             project_states: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -34,6 +37,10 @@ impl DashboardRuntime {
 
     pub(crate) fn active_project_id(&self) -> Option<&str> {
         self.active.project_id.as_deref()
+    }
+
+    pub(crate) fn project_api_router(&self) -> Router<DashboardState> {
+        self.project_api.clone()
     }
 
     fn active_project_root(&self) -> String {
@@ -61,13 +68,20 @@ impl DashboardRuntime {
             .project_registry_context_by_id(project_id)
             .await
             .ok_or_else(|| config_error(format!("registered project not found: {project_id}")))?;
-        let project_root = PathBuf::from(context.project.display_root);
+        let project_root = PathBuf::from(&context.project.canonical_root);
         let cg = TraceDecay::open_read_only(&project_root).await?;
+        if cg.store_layout().identity.project_id.as_deref() != Some(project_id) {
+            return Err(config_error(format!(
+                "registered project id mismatch for {project_id}: {}",
+                project_root.display()
+            )));
+        }
         let state = build_selected_project_state(&cg).await;
-        self.project_states
-            .write()
-            .await
-            .insert(project_id.to_string(), state.clone());
+        let mut project_states = self.project_states.write().await;
+        if let Some(cached) = project_states.get(project_id).cloned() {
+            return Ok(SelectedProjectState { state: cached });
+        }
+        project_states.insert(project_id.to_string(), state.clone());
         Ok(SelectedProjectState { state })
     }
 }

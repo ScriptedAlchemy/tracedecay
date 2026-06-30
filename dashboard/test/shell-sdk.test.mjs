@@ -96,7 +96,7 @@ test("project scoping leaves daemon APIs and absolute URLs unchanged", async () 
   sdk.setShellSelectedProjectId("");
 });
 
-test("project scoping leaves mutating API calls on the active project route", async () => {
+test("project scoping routes mutating API calls through the selected project guard", async () => {
   const seen = [];
   await withMockedFetch(
     async (url, init) => {
@@ -109,13 +109,13 @@ test("project scoping leaves mutating API calls on the active project route", as
     async () => {
       sdk.setShellSelectedProjectId("proj_gamma");
       await sdk.fetchJSON("/api/plugins/holographic/curate", { method: "POST" });
-      await sdk.authedFetch("/api/automation/run/memory-curator", { method: "PATCH" });
+      await sdk.authedFetch("/api/plugins/holographic/curation/config", { method: "PATCH" });
     },
   );
 
   assert.deepEqual(seen, [
-    ["/api/plugins/holographic/curate", { method: "POST" }],
-    ["/api/automation/run/memory-curator", { method: "PATCH" }],
+    ["/api/projects/proj_gamma/plugins/holographic/curate", { method: "POST" }],
+    ["/api/projects/proj_gamma/plugins/holographic/curation/config", { method: "PATCH" }],
   ]);
   sdk.setShellSelectedProjectId("");
 });

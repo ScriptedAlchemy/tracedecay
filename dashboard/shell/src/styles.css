@@ -557,7 +557,6 @@ select:focus-visible {
 .ts-project-select:focus {
   border-color: var(--ts-line-strong);
   color: var(--ts-text);
-  outline: none;
 }
 
 /* Connection indicator */

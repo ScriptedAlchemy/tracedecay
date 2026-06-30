@@ -397,7 +397,7 @@ pub(crate) async fn bind_dashboard(
 }
 
 pub(crate) fn router(state: DashboardState) -> Router {
-    let runtime = projects::DashboardRuntime::new(state);
+    let runtime = projects::DashboardRuntime::new(state, project_api_router());
     Router::new()
         .route("/", get(assets::index_html))
         .route("/shell/{file}", get(assets::shell_asset))
@@ -636,7 +636,7 @@ async fn active_api_gateway(
     State(runtime): State<projects::DashboardRuntime>,
     req: Request<Body>,
 ) -> Response {
-    forward_project_request(runtime.active_state(), req).await
+    forward_project_request(runtime.project_api_router(), runtime.active_state(), req).await
 }
 
 async fn project_scoped_api_gateway(
@@ -682,7 +682,7 @@ async fn project_scoped_api_gateway(
     match rewritten.parse::<Uri>() {
         Ok(uri) => {
             *req.uri_mut() = uri;
-            forward_project_request(selected.state, req).await
+            forward_project_request(runtime.project_api_router(), selected.state, req).await
         }
         Err(err) => (
             StatusCode::BAD_REQUEST,
@@ -695,11 +695,15 @@ async fn project_scoped_api_gateway(
     }
 }
 
-async fn forward_project_request(state: DashboardState, req: Request<Body>) -> Response {
+async fn forward_project_request(
+    project_api: Router<DashboardState>,
+    state: DashboardState,
+    req: Request<Body>,
+) -> Response {
     let (mut parts, body) = req.into_parts();
     parts.extensions.clear();
     let req = Request::from_parts(parts, body);
-    match project_api_router().with_state(state).oneshot(req).await {
+    match project_api.with_state(state).oneshot(req).await {
         Ok(response) => response,
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
