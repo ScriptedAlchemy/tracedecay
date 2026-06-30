@@ -44,9 +44,8 @@ enum CommandOverridePatch {
 }
 
 pub(crate) async fn overview(State(state): State<DashboardState>) -> ApiResult {
-    sync_project_language_activity(&state).await?;
-    maybe_spawn_idle_backfill(&state).await;
-    let snapshot = state.code_diagnostics.read().await.snapshot();
+    let snapshot = diagnostics_snapshot(&state).await?;
+    maybe_spawn_idle_backfill(&state, &snapshot).await;
     Ok(Json(json!(snapshot)))
 }
 
@@ -87,27 +86,16 @@ pub(crate) async fn patch_settings(
     broker.update_adapters(adapters);
     broker.update_settings(settings);
     drop(broker);
-    sync_project_language_activity(&state).await?;
-    let broker = state.code_diagnostics.read().await;
-    Ok(Json(json!(broker.snapshot())))
+    let snapshot = diagnostics_snapshot(&state).await?;
+    Ok(Json(json!(snapshot)))
 }
 
 pub(crate) async fn refresh_all(State(state): State<DashboardState>) -> ApiResult {
-    sync_project_language_activity(&state).await?;
-    let languages: Vec<String> = state
-        .code_diagnostics
-        .read()
-        .await
-        .snapshot()
-        .engines
-        .into_iter()
-        .filter(|engine| engine.state != EngineState::Inactive)
-        .map(|engine| engine.language)
-        .collect();
+    let languages = refreshable_languages(&state).await?;
     for language in languages {
-        refresh_one(&state, &language).await?;
+        refresh_one_reconciled(&state, &language).await?;
     }
-    let snapshot = state.code_diagnostics.read().await.snapshot();
+    let snapshot = diagnostics_snapshot(&state).await?;
     Ok(Json(json!(snapshot)))
 }
 
@@ -115,13 +103,20 @@ pub(crate) async fn refresh_language(
     State(state): State<DashboardState>,
     AxumPath(language): AxumPath<String>,
 ) -> ApiResult {
-    sync_project_language_activity(&state).await?;
     refresh_one(&state, &language).await?;
-    let snapshot = state.code_diagnostics.read().await.snapshot();
+    let snapshot = diagnostics_snapshot(&state).await?;
     Ok(Json(json!(snapshot)))
 }
 
 async fn refresh_one(state: &DashboardState, language: &str) -> std::result::Result<(), JsonError> {
+    reconcile_project_language_activity(state).await?;
+    refresh_one_reconciled(state, language).await
+}
+
+async fn refresh_one_reconciled(
+    state: &DashboardState,
+    language: &str,
+) -> std::result::Result<(), JsonError> {
     let snapshot = state.code_diagnostics.read().await.snapshot();
     if !snapshot.settings.language_enabled(language) {
         state
@@ -204,9 +199,15 @@ async fn refresh_one(state: &DashboardState, language: &str) -> std::result::Res
     Ok(())
 }
 
-async fn maybe_spawn_idle_backfill(state: &DashboardState) {
-    let snapshot = state.code_diagnostics.read().await.snapshot();
+async fn maybe_spawn_idle_backfill(
+    state: &DashboardState,
+    snapshot: &crate::diagnostics::lsp::broker::DiagnosticsSnapshot,
+) {
     if snapshot.settings.idle_backfill != IdleBackfillMode::Idle {
+        return;
+    }
+    let languages = backfill_languages(snapshot);
+    if languages.is_empty() {
         return;
     }
     if state
@@ -218,16 +219,6 @@ async fn maybe_spawn_idle_backfill(state: &DashboardState) {
     let state = state.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(750)).await;
-        let languages: Vec<String> = state
-            .code_diagnostics
-            .read()
-            .await
-            .snapshot()
-            .engines
-            .into_iter()
-            .filter(|engine| engine.enabled && engine.state != EngineState::Inactive)
-            .map(|engine| engine.language)
-            .collect();
         for language in languages {
             let _ = refresh_one(&state, &language).await;
             tokio::task::yield_now().await;
@@ -235,7 +226,38 @@ async fn maybe_spawn_idle_backfill(state: &DashboardState) {
     });
 }
 
-async fn sync_project_language_activity(
+async fn diagnostics_snapshot(
+    state: &DashboardState,
+) -> std::result::Result<crate::diagnostics::lsp::broker::DiagnosticsSnapshot, JsonError> {
+    reconcile_project_language_activity(state).await?;
+    Ok(state.code_diagnostics.read().await.snapshot())
+}
+
+async fn refreshable_languages(
+    state: &DashboardState,
+) -> std::result::Result<Vec<String>, JsonError> {
+    let snapshot = diagnostics_snapshot(state).await?;
+    Ok(backfill_languages(&snapshot))
+}
+
+fn backfill_languages(
+    snapshot: &crate::diagnostics::lsp::broker::DiagnosticsSnapshot,
+) -> Vec<String> {
+    snapshot
+        .engines
+        .iter()
+        .filter(|engine| {
+            engine.enabled
+                && !matches!(
+                    engine.state,
+                    EngineState::Disabled | EngineState::Inactive | EngineState::Unavailable
+                )
+        })
+        .map(|engine| engine.language.clone())
+        .collect()
+}
+
+async fn reconcile_project_language_activity(
     state: &DashboardState,
 ) -> std::result::Result<(), JsonError> {
     let files = indexed_files(&state.graph_conn)

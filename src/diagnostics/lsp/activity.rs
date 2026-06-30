@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::diagnostics::lsp::adapters::LspAdapterDefinition;
 use crate::diagnostics::lsp::client::LspDocument;
@@ -23,7 +23,7 @@ pub fn adapter_has_project_documents(
 ) -> bool {
     files.iter().any(|file| {
         matches_adapter_extension(adapter, file)
-            && file_has_adapter_root_marker(project_root, adapter, file)
+            && adapter_workspace_root(project_root, adapter, file).is_some()
     })
 }
 
@@ -37,7 +37,7 @@ pub async fn documents_for_adapter(
         if !matches_adapter_extension(adapter, &file) {
             continue;
         }
-        if !file_has_adapter_root_marker(project_root, adapter, &file) {
+        if adapter_workspace_root(project_root, adapter, &file).is_none() {
             continue;
         }
         let path = project_root.join(&file);
@@ -78,13 +78,13 @@ fn matches_adapter_extension(adapter: &LspAdapterDefinition, file: &str) -> bool
         })
 }
 
-fn file_has_adapter_root_marker(
+pub fn adapter_workspace_root(
     project_root: &Path,
     adapter: &LspAdapterDefinition,
     file: &str,
-) -> bool {
+) -> Option<PathBuf> {
     if adapter.root_markers.is_empty() {
-        return true;
+        return Some(project_root.to_path_buf());
     }
     let path = project_root.join(file);
     let mut current = path.parent();
@@ -92,16 +92,16 @@ fn file_has_adapter_root_marker(
         if adapter
             .root_markers
             .iter()
-            .any(|marker| dir.join(marker).is_file())
+            .any(|marker| dir.join(marker).exists())
         {
-            return true;
+            return Some(dir.to_path_buf());
         }
         if dir == project_root {
             break;
         }
         current = dir.parent();
     }
-    false
+    None
 }
 
 #[cfg(test)]
@@ -152,6 +152,34 @@ mod tests {
 
         assert_eq!(documents.len(), 1);
         assert_eq!(documents[0].relative_path, "package/src/lib.fake");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn documents_for_adapter_accepts_directory_root_markers(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let project_root = temp.path();
+        let package_root = project_root.join("package");
+        let source_path = package_root.join("src/lib.fake");
+        let source_parent = source_path.parent().ok_or("source path has no parent")?;
+        tokio::fs::create_dir_all(source_parent).await?;
+        tokio::fs::create_dir(package_root.join(".fake-root")).await?;
+        tokio::fs::write(&source_path, "fake source").await?;
+        let adapter = fake_adapter(".fake-root");
+
+        let documents = documents_for_adapter(
+            project_root,
+            &adapter,
+            vec!["package/src/lib.fake".to_string()],
+        )
+        .await?;
+
+        assert_eq!(documents.len(), 1);
+        assert_eq!(
+            adapter_workspace_root(project_root, &adapter, "package/src/lib.fake"),
+            Some(package_root)
+        );
         Ok(())
     }
 

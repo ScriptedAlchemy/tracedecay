@@ -6,6 +6,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
+use crate::diagnostics::lsp::activity::adapter_workspace_root;
 use crate::diagnostics::lsp::adapters::{LspAdapterDefinition, LspInstallOption};
 use crate::diagnostics::lsp::client::{LspDocument, StdioLspClient};
 use crate::diagnostics::lsp::settings::CodeDiagnosticsSettings;
@@ -43,8 +44,7 @@ pub enum EngineState {
     Unavailable,
     Disabled,
     Inactive,
-    Starting,
-    Indexing,
+    Available,
     Ready,
     Refreshing,
     Crashed,
@@ -113,7 +113,7 @@ pub struct PreparedRefresh {
 pub struct CompletedRefresh {
     language: String,
     command: String,
-    result: std::result::Result<Vec<CodeDiagnostic>, String>,
+    result: std::result::Result<Vec<CodeDiagnostic>, RefreshFailure>,
 }
 
 impl CompletedRefresh {
@@ -137,7 +137,7 @@ impl PreparedRefresh {
     async fn collect(
         self,
         diagnostics_timeout: Duration,
-    ) -> std::result::Result<Vec<CodeDiagnostic>, String> {
+    ) -> std::result::Result<Vec<CodeDiagnostic>, RefreshFailure> {
         let mut diagnostics = Vec::new();
         for batch in self.batches {
             let mut client_slot = batch.client.lock().await;
@@ -146,7 +146,7 @@ impl PreparedRefresh {
                 None => client_slot.insert(
                     StdioLspClient::start(&self.command, &self.args, &batch.workspace_root)
                         .await
-                        .map_err(|err| err.to_string())?,
+                        .map_err(RefreshFailure::crashed)?,
                 ),
             };
             let result = client
@@ -160,11 +160,26 @@ impl PreparedRefresh {
                 Ok(mut batch_diagnostics) => diagnostics.append(&mut batch_diagnostics),
                 Err(err) => {
                     *client_slot = None;
-                    return Err(err.to_string());
+                    return Err(RefreshFailure::crashed(err));
                 }
             }
         }
         Ok(diagnostics)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RefreshFailure {
+    state: EngineState,
+    message: String,
+}
+
+impl RefreshFailure {
+    fn crashed(err: TraceDecayError) -> Self {
+        Self {
+            state: EngineState::Crashed,
+            message: err.to_string(),
+        }
     }
 }
 
@@ -317,7 +332,8 @@ impl DiagnosticBroker {
         let mut documents_by_root: BTreeMap<PathBuf, Vec<LspDocument>> = BTreeMap::new();
         for document in documents {
             let workspace_root =
-                workspace_root_for_document(&self.project_root, &adapter, &document);
+                adapter_workspace_root(&self.project_root, &adapter, &document.relative_path)
+                    .unwrap_or_else(|| self.project_root.clone());
             documents_by_root
                 .entry(workspace_root)
                 .or_default()
@@ -386,10 +402,11 @@ impl DiagnosticBroker {
                 self.engine_overrides.insert(language, EngineState::Ready);
                 Ok(())
             }
-            Err(message) => {
+            Err(failure) => {
+                let message = failure.message;
                 self.engine_errors.insert(language.clone(), message.clone());
                 self.engine_overrides
-                    .insert(language.clone(), engine_state_for_error(&message));
+                    .insert(language.clone(), failure.state);
                 self.remove_language_clients(&language);
                 Err(TraceDecayError::Config { message })
             }
@@ -528,47 +545,10 @@ fn default_state(enabled: bool, active: bool, command: &str) -> EngineState {
         return EngineState::Inactive;
     }
     if command_available(command) {
-        EngineState::Ready
+        EngineState::Available
     } else {
         EngineState::Unavailable
     }
-}
-
-fn engine_state_for_error(message: &str) -> EngineState {
-    let lower = message.to_ascii_lowercase();
-    if lower.contains("not available on path")
-        || lower.contains("unknown binary")
-        || lower.contains("not installed")
-        || lower.contains("no such file or directory")
-        || lower.contains("could not execute process")
-    {
-        EngineState::Unavailable
-    } else {
-        EngineState::Crashed
-    }
-}
-
-fn workspace_root_for_document(
-    project_root: &Path,
-    adapter: &LspAdapterDefinition,
-    document: &LspDocument,
-) -> PathBuf {
-    let file = project_root.join(&document.relative_path);
-    let mut current = file.parent();
-    while let Some(dir) = current {
-        if adapter
-            .root_markers
-            .iter()
-            .any(|marker| dir.join(marker).exists())
-        {
-            return dir.to_path_buf();
-        }
-        if dir == project_root {
-            break;
-        }
-        current = dir.parent();
-    }
-    project_root.to_path_buf()
 }
 
 pub fn command_available(command: &str) -> bool {

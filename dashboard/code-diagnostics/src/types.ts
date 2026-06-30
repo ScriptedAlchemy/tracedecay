@@ -3,8 +3,7 @@ export type EngineState =
   | "unavailable"
   | "disabled"
   | "inactive"
-  | "starting"
-  | "indexing"
+  | "available"
   | "ready"
   | "refreshing"
   | "crashed";

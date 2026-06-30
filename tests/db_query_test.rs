@@ -88,7 +88,7 @@ async fn assert_can_start_new_transaction(db: &Database) {
 }
 
 #[tokio::test]
-async fn test_dependency_import_candidates_query_use_nodes_without_unresolved_refs() {
+async fn test_dependency_import_uses_query_use_nodes_without_unresolved_refs() {
     let db = setup_db().await;
     let mut import_node = sample_node("dep-import", "pkg", "src/app.ts");
     import_node.kind = NodeKind::Use;
@@ -103,16 +103,19 @@ async fn test_dependency_import_candidates_query_use_nodes_without_unresolved_re
         .await
         .expect("insert_nodes failed");
 
-    let candidates = db
-        .dependency_import_candidates("Foo", 5)
+    let imports = db
+        .dependency_import_uses("Foo", 5)
         .await
-        .expect("dependency_import_candidates failed");
+        .expect("dependency_import_uses failed");
 
-    assert_eq!(candidates.len(), 1);
-    assert_eq!(candidates[0].module, "pkg");
-    assert_eq!(candidates[0].symbol, "Foo");
-    assert_eq!(candidates[0].import_file, "src/app.ts");
-    assert_eq!(candidates[0].line, 4);
+    assert_eq!(imports.len(), 1);
+    assert_eq!(imports[0].module, "pkg");
+    assert_eq!(
+        imports[0].signature,
+        "import type { Foo, Bar as Baz } from \"pkg\";"
+    );
+    assert_eq!(imports[0].file_path, "src/app.ts");
+    assert_eq!(imports[0].line, 4);
 }
 
 // -------------------------------------------------------------------------

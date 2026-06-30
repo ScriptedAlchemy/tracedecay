@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
 
+use crate::dependency_imports::candidates_from_type_only_import;
 use crate::errors::Result;
 use crate::mcp::tools::render::{self, Md};
 use crate::tracedecay::TraceDecay;
@@ -13,11 +14,26 @@ pub(super) async fn ignored_dependency_hint(
     if query.is_empty() {
         return Ok(None);
     }
+    let limit = limit.clamp(1, 20);
     let db = cg.open_project_store_db().await?;
+    let query_lower = query.to_ascii_lowercase();
     let candidates = db
-        .dependency_import_candidates(&query, limit.clamp(1, 20))
+        .dependency_import_uses(&query, limit)
         .await?
         .into_iter()
+        .flat_map(|import_use| {
+            candidates_from_type_only_import(
+                &import_use.signature,
+                &import_use.module,
+                &import_use.file_path,
+                import_use.line,
+            )
+        })
+        .filter(|candidate| {
+            candidate.symbol.to_ascii_lowercase().contains(&query_lower)
+                || candidate.module.to_ascii_lowercase().contains(&query_lower)
+        })
+        .take(limit)
         .map(|candidate| {
             json!({
                 "module": candidate.module,

@@ -173,6 +173,25 @@ async fn broker_refresh_documents_populates_cached_diagnostics() {
     );
 }
 
+#[test]
+fn broker_marks_active_command_available_before_first_refresh() {
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("fake_lsp.py");
+    std::fs::write(&script_path, fake_lsp_script()).unwrap();
+    let broker = lsp::broker::DiagnosticBroker::new_for_test(
+        temp.path(),
+        vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
+    );
+
+    let snapshot = broker.snapshot();
+    let status = snapshot
+        .engines
+        .iter()
+        .find(|engine| engine.language == FAKE_LANGUAGE)
+        .expect("fake engine status should be listed");
+    assert_eq!(status.state, lsp::broker::EngineState::Available);
+}
+
 #[tokio::test]
 async fn broker_keeps_diagnostics_for_multiple_languages_in_one_snapshot() {
     let temp = tempfile::tempdir().unwrap();
@@ -261,7 +280,7 @@ async fn broker_marks_missing_lsp_command_unavailable_after_refresh_failure() {
 }
 
 #[tokio::test]
-async fn broker_marks_install_proxy_exit_during_initialize_unavailable() {
+async fn broker_marks_initialize_exit_crashed_without_message_classification() {
     let temp = tempfile::tempdir().unwrap();
     let script_path = temp.path().join("missing_component_lsp.py");
     std::fs::write(
@@ -295,7 +314,7 @@ sys.stderr.flush()
         .iter()
         .find(|engine| engine.language == FAKE_LANGUAGE)
         .expect("fake engine status should be listed");
-    assert_eq!(status.state, lsp::broker::EngineState::Unavailable);
+    assert_eq!(status.state, lsp::broker::EngineState::Crashed);
     assert!(status
         .last_error
         .as_deref()
