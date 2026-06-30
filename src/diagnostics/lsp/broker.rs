@@ -252,10 +252,9 @@ impl DiagnosticBroker {
 
     pub fn update_project_languages(&mut self, languages: BTreeSet<String>) {
         self.project_languages = languages;
-        let active_languages: Vec<String> = self.project_languages.iter().cloned().collect();
-        for language in active_languages {
-            if self.engine_overrides.get(&language) == Some(&EngineState::Inactive) {
-                self.engine_overrides.remove(&language);
+        for language in &self.project_languages {
+            if self.engine_overrides.get(language) == Some(&EngineState::Inactive) {
+                self.engine_overrides.remove(language);
             }
         }
         let inactive_languages: Vec<String> = self

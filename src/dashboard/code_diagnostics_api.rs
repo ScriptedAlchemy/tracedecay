@@ -12,7 +12,7 @@ use super::util::{http_detail, JsonError};
 use super::DashboardState;
 use crate::diagnostics::lsp::activity::{active_languages_for_files, documents_for_adapter};
 use crate::diagnostics::lsp::adapters::LspAdapterDefinition;
-use crate::diagnostics::lsp::broker::EngineState;
+use crate::diagnostics::lsp::broker::{DiagnosticsSnapshot, EngineState};
 use crate::diagnostics::lsp::settings::{save_settings, IdleBackfillMode};
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
@@ -199,10 +199,7 @@ async fn refresh_one_reconciled(
     Ok(())
 }
 
-fn maybe_spawn_idle_backfill(
-    state: &DashboardState,
-    snapshot: &crate::diagnostics::lsp::broker::DiagnosticsSnapshot,
-) {
+fn maybe_spawn_idle_backfill(state: &DashboardState, snapshot: &DiagnosticsSnapshot) {
     if snapshot.settings.idle_backfill != IdleBackfillMode::Idle {
         return;
     }
@@ -228,7 +225,7 @@ fn maybe_spawn_idle_backfill(
 
 async fn diagnostics_snapshot(
     state: &DashboardState,
-) -> std::result::Result<crate::diagnostics::lsp::broker::DiagnosticsSnapshot, JsonError> {
+) -> std::result::Result<DiagnosticsSnapshot, JsonError> {
     reconcile_project_language_activity(state).await?;
     Ok(state.code_diagnostics.read().await.snapshot())
 }
@@ -240,9 +237,7 @@ async fn refreshable_languages(
     Ok(backfill_languages(&snapshot))
 }
 
-fn backfill_languages(
-    snapshot: &crate::diagnostics::lsp::broker::DiagnosticsSnapshot,
-) -> Vec<String> {
+fn backfill_languages(snapshot: &DiagnosticsSnapshot) -> Vec<String> {
     snapshot
         .engines
         .iter()

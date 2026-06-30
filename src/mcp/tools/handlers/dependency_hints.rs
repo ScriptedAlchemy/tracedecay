@@ -10,7 +10,7 @@ pub(super) async fn ignored_dependency_hint(
     query: &str,
     limit: usize,
 ) -> Result<Option<Value>> {
-    let query = query.trim().to_ascii_lowercase();
+    let query = query.trim();
     if query.is_empty() {
         return Ok(None);
     }
@@ -18,7 +18,7 @@ pub(super) async fn ignored_dependency_hint(
     let db = cg.open_project_store_db().await?;
     let query_lower = query.to_ascii_lowercase();
     let candidates = db
-        .dependency_import_uses(&query, limit)
+        .dependency_import_uses(query, limit)
         .await?
         .into_iter()
         .flat_map(|import_use| {

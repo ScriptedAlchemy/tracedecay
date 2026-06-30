@@ -230,11 +230,8 @@ impl Database {
                    AND name NOT LIKE '../%'
                    AND name NOT LIKE '/%'
                  ORDER BY file_path ASC, start_line ASC
-                 LIMIT ?2",
-                params![
-                    like_pattern.as_str(),
-                    limit.saturating_mul(4).max(limit) as i64
-                ],
+                LIMIT ?2",
+                params![like_pattern.as_str(), limit.saturating_mul(4) as i64],
             )
             .await
             .map_err(|e| TraceDecayError::Database {
