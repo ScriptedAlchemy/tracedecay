@@ -6,6 +6,7 @@
 
 pub mod analysis;
 pub mod dashboard;
+mod dependency_hints;
 pub mod edit;
 pub mod git;
 pub mod graph;

@@ -87,6 +87,34 @@ async fn assert_can_start_new_transaction(db: &Database) {
         .expect("test transaction rollback should succeed");
 }
 
+#[tokio::test]
+async fn test_dependency_import_candidates_query_use_nodes_without_unresolved_refs() {
+    let db = setup_db().await;
+    let mut import_node = sample_node("dep-import", "pkg", "src/app.ts");
+    import_node.kind = NodeKind::Use;
+    import_node.start_line = 4;
+    import_node.signature = Some("import type { Foo, Bar as Baz } from \"pkg\";".to_string());
+    let mut relative_import = sample_node("relative-import", "./local", "src/app.ts");
+    relative_import.kind = NodeKind::Use;
+    relative_import.start_line = 5;
+    relative_import.signature = Some("import type { Foo } from \"./local\";".to_string());
+
+    db.insert_nodes(&[import_node, relative_import])
+        .await
+        .expect("insert_nodes failed");
+
+    let candidates = db
+        .dependency_import_candidates("Foo", 5)
+        .await
+        .expect("dependency_import_candidates failed");
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].module, "pkg");
+    assert_eq!(candidates[0].symbol, "Foo");
+    assert_eq!(candidates[0].import_file, "src/app.ts");
+    assert_eq!(candidates[0].line, 4);
+}
+
 // -------------------------------------------------------------------------
 // public db module exports
 // -------------------------------------------------------------------------

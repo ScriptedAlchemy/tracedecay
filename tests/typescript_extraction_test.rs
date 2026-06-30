@@ -306,6 +306,30 @@ import * as path from 'path';
 }
 
 #[test]
+fn test_ts_import_type_does_not_pollute_unresolved_refs_with_dependency_candidates() {
+    let source = r#"
+import type { Foo, Bar as Baz } from "pkg";
+import { localThing } from "./local";
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract("imports.ts", source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let use_refs: Vec<_> = result
+        .unresolved_refs
+        .iter()
+        .filter(|r| r.reference_kind == EdgeKind::Uses)
+        .collect();
+
+    assert!(
+        !use_refs
+            .iter()
+            .any(|r| r.reference_name.starts_with("npm:")),
+        "dependency candidates should not be encoded as unresolved refs: {use_refs:#?}"
+    );
+}
+
+#[test]
 fn test_ts_async_function() {
     let source = r#"
 export async function fetchData(url: string): Promise<string> {

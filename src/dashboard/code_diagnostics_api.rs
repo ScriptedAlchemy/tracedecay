@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -11,8 +10,9 @@ use serde_json::{json, Value};
 
 use super::util::{http_detail, JsonError};
 use super::DashboardState;
+use crate::diagnostics::lsp::activity::{active_languages_for_files, documents_for_adapter};
 use crate::diagnostics::lsp::adapters::LspAdapterDefinition;
-use crate::diagnostics::lsp::client::LspDocument;
+use crate::diagnostics::lsp::broker::EngineState;
 use crate::diagnostics::lsp::settings::{save_settings, IdleBackfillMode};
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
@@ -44,6 +44,7 @@ enum CommandOverridePatch {
 }
 
 pub(crate) async fn overview(State(state): State<DashboardState>) -> ApiResult {
+    sync_project_language_activity(&state).await?;
     maybe_spawn_idle_backfill(&state).await;
     let snapshot = state.code_diagnostics.read().await.snapshot();
     Ok(Json(json!(snapshot)))
@@ -85,10 +86,14 @@ pub(crate) async fn patch_settings(
     let mut broker = state.code_diagnostics.write().await;
     broker.update_adapters(adapters);
     broker.update_settings(settings);
+    drop(broker);
+    sync_project_language_activity(&state).await?;
+    let broker = state.code_diagnostics.read().await;
     Ok(Json(json!(broker.snapshot())))
 }
 
 pub(crate) async fn refresh_all(State(state): State<DashboardState>) -> ApiResult {
+    sync_project_language_activity(&state).await?;
     let languages: Vec<String> = state
         .code_diagnostics
         .read()
@@ -96,6 +101,7 @@ pub(crate) async fn refresh_all(State(state): State<DashboardState>) -> ApiResul
         .snapshot()
         .engines
         .into_iter()
+        .filter(|engine| engine.state != EngineState::Inactive)
         .map(|engine| engine.language)
         .collect();
     for language in languages {
@@ -109,6 +115,7 @@ pub(crate) async fn refresh_language(
     State(state): State<DashboardState>,
     AxumPath(language): AxumPath<String>,
 ) -> ApiResult {
+    sync_project_language_activity(&state).await?;
     refresh_one(&state, &language).await?;
     let snapshot = state.code_diagnostics.read().await.snapshot();
     Ok(Json(json!(snapshot)))
@@ -218,7 +225,7 @@ async fn maybe_spawn_idle_backfill(state: &DashboardState) {
             .snapshot()
             .engines
             .into_iter()
-            .filter(|engine| engine.enabled)
+            .filter(|engine| engine.enabled && engine.state != EngineState::Inactive)
             .map(|engine| engine.language)
             .collect();
         for language in languages {
@@ -226,6 +233,30 @@ async fn maybe_spawn_idle_backfill(state: &DashboardState) {
             tokio::task::yield_now().await;
         }
     });
+}
+
+async fn sync_project_language_activity(
+    state: &DashboardState,
+) -> std::result::Result<(), JsonError> {
+    let files = indexed_files(&state.graph_conn)
+        .await
+        .map_err(|err| internal_error(&err))?;
+    let adapters = {
+        let broker = state.code_diagnostics.read().await;
+        broker
+            .snapshot()
+            .engines
+            .into_iter()
+            .filter_map(|engine| broker.adapter_for(&engine.language))
+            .collect::<Vec<_>>()
+    };
+    let active_languages = active_languages_for_files(&state.project_root, &adapters, &files);
+    state
+        .code_diagnostics
+        .write()
+        .await
+        .update_project_languages(active_languages);
+    Ok(())
 }
 
 async fn indexed_files(conn: &libsql::Connection) -> crate::errors::Result<Vec<String>> {
@@ -239,54 +270,6 @@ async fn indexed_files(conn: &libsql::Connection) -> crate::errors::Result<Vec<S
         }
     }
     Ok(files)
-}
-
-async fn documents_for_adapter(
-    project_root: &Path,
-    adapter: &LspAdapterDefinition,
-    files: Vec<String>,
-) -> crate::errors::Result<Vec<LspDocument>> {
-    let mut documents = Vec::new();
-    for file in files {
-        if !matches_adapter_extension(adapter, &file) {
-            continue;
-        }
-        let path = project_root.join(&file);
-        let Ok(text) = tokio::fs::read_to_string(&path).await else {
-            continue;
-        };
-        documents.push(LspDocument {
-            language: adapter.language.clone(),
-            language_id: language_id_for_file(adapter, &file),
-            relative_path: file,
-            text,
-        });
-    }
-    Ok(documents)
-}
-
-fn language_id_for_file(adapter: &LspAdapterDefinition, file: &str) -> String {
-    let extension = Path::new(file)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or_default();
-    match (adapter.language.as_str(), extension) {
-        ("typescript", "tsx") => "typescriptreact".to_string(),
-        ("javascript", "jsx") => "javascriptreact".to_string(),
-        _ => adapter.language_id.clone(),
-    }
-}
-
-fn matches_adapter_extension(adapter: &LspAdapterDefinition, file: &str) -> bool {
-    Path::new(file)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            adapter
-                .extensions
-                .iter()
-                .any(|candidate| candidate == extension)
-        })
 }
 
 fn bad_request(err: &impl ToString) -> JsonError {

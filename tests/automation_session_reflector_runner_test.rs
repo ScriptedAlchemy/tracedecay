@@ -1,6 +1,7 @@
 mod automation_runner_support;
 
 use automation_runner_support::*;
+use tracedecay::automation::fact_proposals::record_session_fact_proposals;
 
 #[tokio::test]
 async fn session_reflector_runner_skips_when_task_is_disabled() {
@@ -312,6 +313,68 @@ async fn session_reflector_runner_validates_fact_proposals_without_applying() {
     assert_eq!(records[0].accepted_count, 1);
     assert_eq!(records[0].rejected_count, 7);
     assert!(records[0].applied_ops.is_none());
+}
+
+#[tokio::test]
+async fn session_fact_proposals_dedupe_repeated_pending_facts_across_runs() {
+    let temp = tempdir().unwrap();
+    let dashboard_root = temp.path().join("dashboard");
+    let accepted = json!({
+        "add_fact_request": {
+            "content": "Repeated session evidence should produce one pending fact proposal",
+            "category": "project",
+            "source": "session_reflector",
+            "tags": ["session-reflector"],
+            "entities": ["session reflector"],
+            "trust": 0.91,
+            "metadata": {
+                "source_span": {
+                    "session_id": "session-a",
+                    "message_id": "message-a"
+                },
+                "trust_reason": "same durable fact repeated"
+            }
+        },
+        "proposal": {
+            "content": "Repeated session evidence should produce one pending fact proposal"
+        },
+        "validation": {
+            "dedupe": {
+                "nearest_existing_fact_id": null
+            }
+        }
+    });
+
+    let first = record_session_fact_proposals(
+        &dashboard_root,
+        "run-a",
+        Some("evidence-a"),
+        std::slice::from_ref(&accepted),
+        &[],
+    )
+    .await
+    .unwrap();
+    let second = record_session_fact_proposals(
+        &dashboard_root,
+        "run-b",
+        Some("evidence-b"),
+        std::slice::from_ref(&accepted),
+        &[],
+    )
+    .await
+    .unwrap();
+    let proposals = list_fact_proposals(
+        &dashboard_root,
+        Some(FactProposalState::PendingApproval),
+        10,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(first.len(), 1);
+    assert_eq!(second.len(), 0);
+    assert_eq!(proposals.len(), 1);
+    assert_eq!(proposals[0].run_id, "run-a");
 }
 
 #[tokio::test]

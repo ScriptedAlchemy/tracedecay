@@ -261,6 +261,49 @@ async fn broker_marks_missing_lsp_command_unavailable_after_refresh_failure() {
 }
 
 #[tokio::test]
+async fn broker_marks_install_proxy_exit_during_initialize_unavailable() {
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("missing_component_lsp.py");
+    std::fs::write(
+        &script_path,
+        r#"
+import sys
+
+sys.stderr.write("error: unknown binary 'rust-analyzer' in toolchain 'test-toolchain'\n")
+sys.stderr.flush()
+"#,
+    )
+    .unwrap();
+    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
+        temp.path(),
+        vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
+    );
+
+    let err = broker
+        .refresh_documents(
+            FAKE_LANGUAGE,
+            vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
+            std::time::Duration::from_millis(50),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("unknown binary"));
+    let snapshot = broker.snapshot();
+    let status = snapshot
+        .engines
+        .iter()
+        .find(|engine| engine.language == FAKE_LANGUAGE)
+        .expect("fake engine status should be listed");
+    assert_eq!(status.state, lsp::broker::EngineState::Unavailable);
+    assert!(status
+        .last_error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("unknown binary"));
+}
+
+#[tokio::test]
 async fn broker_reuses_warm_lsp_client_between_refreshes() {
     let temp = tempfile::tempdir().unwrap();
     let script_path = temp.path().join("warm_fake_lsp.py");

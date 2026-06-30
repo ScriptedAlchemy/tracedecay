@@ -4,6 +4,7 @@ use libsql::params;
 use super::connection::Database;
 use super::rows::row_to_node;
 use super::sql::{build_qmark_placeholders, collect_rows};
+use crate::dependency_imports::{candidates_from_type_only_import, DependencyImportCandidate};
 use crate::errors::{Result, TraceDecayError};
 use crate::types::*;
 
@@ -199,6 +200,83 @@ impl Database {
             })?;
 
         collect_rows(&mut rows, row_to_node, "search_nodes_by_exact_name").await
+    }
+
+    pub async fn dependency_import_candidates(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<DependencyImportCandidate>> {
+        let query = query.trim();
+        if query.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let query_lower = query.to_ascii_lowercase();
+        let like_pattern = format!("%{query}%");
+        let mut rows = self
+            .conn()
+            .query(
+                "SELECT name, signature, file_path, start_line
+                 FROM nodes
+                 WHERE kind = 'use'
+                   AND signature LIKE ?1
+                   AND name NOT LIKE './%'
+                   AND name NOT LIKE '../%'
+                   AND name NOT LIKE '/%'
+                 ORDER BY file_path ASC, start_line ASC
+                 LIMIT ?2",
+                params![
+                    like_pattern.as_str(),
+                    limit.saturating_mul(4).max(limit) as i64
+                ],
+            )
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to query dependency import candidates: {e}"),
+                operation: "dependency_import_candidates".to_string(),
+            })?;
+
+        let mut candidates = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
+            message: format!("failed to read dependency import candidate: {e}"),
+            operation: "dependency_import_candidates".to_string(),
+        })? {
+            let module = row
+                .get::<String>(0)
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to read dependency import module: {e}"),
+                    operation: "dependency_import_candidates".to_string(),
+                })?;
+            let signature = row
+                .get::<String>(1)
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to read dependency import signature: {e}"),
+                    operation: "dependency_import_candidates".to_string(),
+                })?;
+            let file_path = row
+                .get::<String>(2)
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to read dependency import file path: {e}"),
+                    operation: "dependency_import_candidates".to_string(),
+                })?;
+            let line = row.get::<u32>(3).map_err(|e| TraceDecayError::Database {
+                message: format!("failed to read dependency import line: {e}"),
+                operation: "dependency_import_candidates".to_string(),
+            })?;
+            candidates.extend(
+                candidates_from_type_only_import(&signature, &module, &file_path, line)
+                    .into_iter()
+                    .filter(|candidate| {
+                        candidate.symbol.to_ascii_lowercase().contains(&query_lower)
+                            || candidate.module.to_ascii_lowercase().contains(&query_lower)
+                    }),
+            );
+            if candidates.len() >= limit {
+                candidates.truncate(limit);
+                break;
+            }
+        }
+        Ok(candidates)
     }
 
     /// Returns `true` if the error indicates `SQLite` database corruption.

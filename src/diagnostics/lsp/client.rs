@@ -2,11 +2,14 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 
 use crate::diagnostics::lsp::broker::{CodeDiagnostic, DiagnosticSeverity};
 use crate::errors::{Result, TraceDecayError};
@@ -38,6 +41,7 @@ pub struct StdioLspClient {
     stdin: tokio::process::ChildStdin,
     reader: BufReader<tokio::process::ChildStdout>,
     child: tokio::process::Child,
+    stderr_task: JoinHandle<()>,
 }
 
 impl StdioLspClient {
@@ -47,7 +51,7 @@ impl StdioLspClient {
             .current_dir(project_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| TraceDecayError::Config {
@@ -60,7 +64,12 @@ impl StdioLspClient {
         let stdout = child.stdout.take().ok_or_else(|| TraceDecayError::Config {
             message: format!("failed to open stdout for LSP server '{command}'"),
         })?;
+        let stderr = child.stderr.take().ok_or_else(|| TraceDecayError::Config {
+            message: format!("failed to open stderr for LSP server '{command}'"),
+        })?;
         let mut reader = BufReader::new(stdout);
+        let stderr_capture = Arc::new(Mutex::new(Vec::new()));
+        let stderr_task = spawn_stderr_capture(stderr, Arc::clone(&stderr_capture));
 
         write_message(
             &mut stdin,
@@ -87,7 +96,13 @@ impl StdioLspClient {
             }),
         )
         .await?;
-        wait_for_initialize(&mut reader).await?;
+        if let Err(err) = wait_for_initialize(&mut reader).await {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            let stderr = captured_stderr(&stderr_capture).await;
+            stderr_task.abort();
+            return Err(enrich_start_error(command, err, &stderr));
+        }
         write_message(
             &mut stdin,
             json!({
@@ -104,6 +119,7 @@ impl StdioLspClient {
             stdin,
             reader,
             child,
+            stderr_task,
         })
     }
 
@@ -199,6 +215,40 @@ impl StdioLspClient {
 impl Drop for StdioLspClient {
     fn drop(&mut self) {
         let _ = self.child.start_kill();
+        self.stderr_task.abort();
+    }
+}
+
+fn spawn_stderr_capture(
+    mut stderr: tokio::process::ChildStderr,
+    capture: Arc<Mutex<Vec<u8>>>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut buffer = [0_u8; 1024];
+        while let Ok(bytes_read) = stderr.read(&mut buffer).await {
+            if bytes_read == 0 {
+                break;
+            }
+            let mut captured = capture.lock().await;
+            let remaining = 8192_usize.saturating_sub(captured.len());
+            if remaining > 0 {
+                captured.extend_from_slice(&buffer[..bytes_read.min(remaining)]);
+            }
+        }
+    })
+}
+
+async fn captured_stderr(capture: &Arc<Mutex<Vec<u8>>>) -> String {
+    let captured = capture.lock().await;
+    String::from_utf8_lossy(&captured).trim().to_string()
+}
+
+fn enrich_start_error(command: &str, err: TraceDecayError, stderr: &str) -> TraceDecayError {
+    if stderr.is_empty() {
+        return err;
+    }
+    TraceDecayError::Config {
+        message: format!("{command} failed during initialize: {err}; stderr: {stderr}"),
     }
 }
 

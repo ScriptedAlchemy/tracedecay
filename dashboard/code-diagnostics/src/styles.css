@@ -117,7 +117,8 @@
   color: var(--color-destructive);
 }
 
-.tdcd-state-disabled {
+.tdcd-state-disabled,
+.tdcd-state-inactive {
   color: var(--color-muted-foreground);
 }
 

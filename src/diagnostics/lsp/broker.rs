@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,6 +42,7 @@ pub enum DiagnosticSeverity {
 pub enum EngineState {
     Unavailable,
     Disabled,
+    Inactive,
     Starting,
     Indexing,
     Ready,
@@ -176,6 +177,7 @@ pub struct DiagnosticBroker {
     clients: BTreeMap<LspSessionKey, Arc<Mutex<Option<StdioLspClient>>>>,
     engine_overrides: BTreeMap<String, EngineState>,
     engine_errors: BTreeMap<String, String>,
+    project_languages: BTreeSet<String>,
     backfill: BTreeMap<String, BackfillProgress>,
 }
 
@@ -193,6 +195,7 @@ impl DiagnosticBroker {
             clients: BTreeMap::new(),
             engine_overrides: BTreeMap::new(),
             engine_errors: BTreeMap::new(),
+            project_languages: BTreeSet::new(),
             backfill: BTreeMap::new(),
         }
     }
@@ -201,7 +204,13 @@ impl DiagnosticBroker {
         project_root: impl Into<PathBuf>,
         adapters: Vec<LspAdapterDefinition>,
     ) -> Self {
-        Self::new(project_root, adapters, CodeDiagnosticsSettings::default())
+        let project_languages = adapters
+            .iter()
+            .map(|adapter| adapter.language.clone())
+            .collect();
+        let mut broker = Self::new(project_root, adapters, CodeDiagnosticsSettings::default());
+        broker.update_project_languages(project_languages);
+        broker
     }
 
     pub fn snapshot(&self) -> DiagnosticsSnapshot {
@@ -226,6 +235,30 @@ impl DiagnosticBroker {
         self.clients.clear();
     }
 
+    pub fn update_project_languages(&mut self, languages: BTreeSet<String>) {
+        self.project_languages = languages;
+        let active_languages: Vec<String> = self.project_languages.iter().cloned().collect();
+        for language in active_languages {
+            if self.engine_overrides.get(&language) == Some(&EngineState::Inactive) {
+                self.engine_overrides.remove(&language);
+            }
+        }
+        let inactive_languages: Vec<String> = self
+            .adapters
+            .iter()
+            .filter(|adapter| !self.project_languages.contains(&adapter.language))
+            .map(|adapter| adapter.language.clone())
+            .collect();
+        for language in inactive_languages {
+            self.remove_language_clients(&language);
+            self.clear_language(&language);
+            self.engine_errors.remove(&language);
+            if self.engine_overrides.get(&language) != Some(&EngineState::Disabled) {
+                self.engine_overrides.remove(&language);
+            }
+        }
+    }
+
     pub fn set_language_enabled(&mut self, language: &str, enabled: bool) {
         self.settings.set_language_enabled(language, enabled);
         if enabled {
@@ -246,6 +279,14 @@ impl DiagnosticBroker {
         if !self.settings.language_enabled(language) {
             self.engine_overrides
                 .insert(language.to_string(), EngineState::Disabled);
+            self.remove_language_clients(language);
+            self.clear_language(language);
+            return Ok(None);
+        }
+        if !self.project_languages.contains(language) {
+            self.engine_overrides
+                .insert(language.to_string(), EngineState::Inactive);
+            self.engine_errors.remove(language);
             self.remove_language_clients(language);
             self.clear_language(language);
             return Ok(None);
@@ -348,7 +389,7 @@ impl DiagnosticBroker {
             Err(message) => {
                 self.engine_errors.insert(language.clone(), message.clone());
                 self.engine_overrides
-                    .insert(language.clone(), EngineState::Crashed);
+                    .insert(language.clone(), engine_state_for_error(&message));
                 self.remove_language_clients(&language);
                 Err(TraceDecayError::Config { message })
             }
@@ -449,7 +490,13 @@ impl DiagnosticBroker {
                     .engine_overrides
                     .get(&adapter.language)
                     .copied()
-                    .unwrap_or_else(|| default_state(enabled, &command));
+                    .unwrap_or_else(|| {
+                        default_state(
+                            enabled,
+                            self.project_languages.contains(&adapter.language),
+                            &command,
+                        )
+                    });
                 let last_diagnostic_update = self
                     .diagnostics
                     .iter()
@@ -473,14 +520,31 @@ impl DiagnosticBroker {
     }
 }
 
-fn default_state(enabled: bool, command: &str) -> EngineState {
+fn default_state(enabled: bool, active: bool, command: &str) -> EngineState {
     if !enabled {
         return EngineState::Disabled;
+    }
+    if !active {
+        return EngineState::Inactive;
     }
     if command_available(command) {
         EngineState::Ready
     } else {
         EngineState::Unavailable
+    }
+}
+
+fn engine_state_for_error(message: &str) -> EngineState {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("not available on path")
+        || lower.contains("unknown binary")
+        || lower.contains("not installed")
+        || lower.contains("no such file or directory")
+        || lower.contains("could not execute process")
+    {
+        EngineState::Unavailable
+    } else {
+        EngineState::Crashed
     }
 }
 
