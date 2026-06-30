@@ -164,7 +164,7 @@ jobs:
           }
 
       - name: Run Windows tests
-        run: cargo nextest run --workspace --profile ci --test-threads 32
+        run: cargo nextest run --workspace --profile ci --test-threads num-cpus
 
       - name: Clean abandoned Windows test children
         if: always()
