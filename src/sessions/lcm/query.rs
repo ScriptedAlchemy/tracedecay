@@ -669,7 +669,7 @@ fn merge_lcm_status(target: &mut LcmStatus, source: LcmStatus) {
         target_depth.tokens += source_depth.tokens;
         target_depth.source_tokens += source_depth.source_tokens;
     }
-    merge_payload_status(&mut target.payload, source.payload);
+    merge_payload_status(&mut target.payload, &source.payload);
     merge_payload_gc_status(&mut target.payload_gc, source.payload_gc);
     target.lifecycle.lifecycle_state_count += source.lifecycle.lifecycle_state_count;
     target.lifecycle.frontier_count += source.lifecycle.frontier_count;
@@ -678,7 +678,7 @@ fn merge_lcm_status(target: &mut LcmStatus, source: LcmStatus) {
     target.redaction.legacy_truncated_count += source.redaction.legacy_truncated_count;
 }
 
-fn merge_payload_status(target: &mut LcmPayloadStatus, source: LcmPayloadStatus) {
+fn merge_payload_status(target: &mut LcmPayloadStatus, source: &LcmPayloadStatus) {
     target.externalized_count += source.externalized_count;
     target.missing_count += source.missing_count;
     target.unreferenced_count += source.unreferenced_count;

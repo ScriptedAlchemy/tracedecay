@@ -265,8 +265,7 @@ fn context_memory_options(args: &Value) -> ContextMemoryOptions {
     let limit = args
         .get("memory_limit")
         .and_then(Value::as_u64)
-        .map(|value| value as usize)
-        .unwrap_or(CONTEXT_MEMORY_MATCH_LIMIT)
+        .map_or(CONTEXT_MEMORY_MATCH_LIMIT, |value| value as usize)
         .clamp(1, CONTEXT_MEMORY_MATCH_LIMIT_MAX);
     let min_trust = args
         .get("memory_min_trust")
