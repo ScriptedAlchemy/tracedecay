@@ -380,26 +380,24 @@ async fn seed_daily_limit_regression(
     let accounting = GlobalDb::open_at(global_db_path)
         .await
         .expect("open accounting db");
+    let mut turns = Vec::new();
     for offset in 0..=366 {
-        assert!(
-            accounting
-                .insert_turn(&CostTurn {
-                    message_id: format!("turn-daily-limit-{offset}"),
-                    project_hash: "fixture".to_string(),
-                    session_id: "turns-daily-limit".to_string(),
-                    model: "claude-opus-4-6".to_string(),
-                    timestamp: (latest_day - (offset * 86_400) + 120) as u64,
-                    input_tokens: 100 + offset as u64,
-                    output_tokens: 50,
-                    cache_write_tokens: 0,
-                    cache_read_tokens: 0,
-                    cost_usd: 0.01,
-                    category: "code".to_string(),
-                    tool_names: String::new(),
-                })
-                .await
-        );
+        turns.push(CostTurn {
+            message_id: format!("turn-daily-limit-{offset}"),
+            project_hash: "fixture".to_string(),
+            session_id: "turns-daily-limit".to_string(),
+            model: "claude-opus-4-6".to_string(),
+            timestamp: (latest_day - (offset * 86_400) + 120) as u64,
+            input_tokens: 100 + offset as u64,
+            output_tokens: 50,
+            cache_write_tokens: 0,
+            cache_read_tokens: 0,
+            cost_usd: 0.01,
+            category: "code".to_string(),
+            tool_names: String::new(),
+        });
     }
+    assert_eq!(accounting.insert_turns(&turns).await, turns.len());
 }
 
 async fn start_fixture(seed: FixtureSeed) -> Fixture {

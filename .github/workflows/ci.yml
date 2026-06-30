@@ -57,7 +57,6 @@ jobs:
   test:
     name: Test ${{ matrix.name }}
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
-    needs: windows-test
     runs-on: ${{ fromJSON(matrix.runner) }}
     strategy:
       fail-fast: false
@@ -143,7 +142,7 @@ jobs:
           cache-on-failure: true
 
       - name: Run Windows tests
-        run: cargo nextest run --workspace --profile ci --locked --partition hash:${{ matrix.partition }}/10 --test-threads num-cpus --status-level slow
+        run: cargo nextest run --workspace --profile ci --locked --partition slice:${{ matrix.partition }}/10 --test-threads num-cpus --status-level slow
 
       - name: Clean abandoned Windows test children
         if: always()
@@ -201,7 +200,6 @@ jobs:
   clippy:
     name: Clippy
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
-    needs: windows-test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -231,7 +229,6 @@ jobs:
   dashboard:
     name: Dashboard
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
-    needs: windows-test
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -350,7 +347,6 @@ jobs:
   hermes-integration:
     name: Hermes integration (stock)
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
-    needs: windows-test
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:

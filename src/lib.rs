@@ -29,6 +29,7 @@ pub mod context;
 pub mod daemon;
 pub mod dashboard;
 pub mod db;
+mod dependency_imports;
 pub mod derive_table;
 pub mod diagnose;
 pub mod diagnostics;

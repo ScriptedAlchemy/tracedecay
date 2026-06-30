@@ -106,6 +106,7 @@
   text-overflow: ellipsis;
 }
 
+.tdcd-state-available,
 .tdcd-state-ready {
   border-color: color-mix(in srgb, var(--ts-green, #67e8a9) 45%, transparent);
   color: var(--ts-green, #67e8a9);
@@ -117,7 +118,8 @@
   color: var(--color-destructive);
 }
 
-.tdcd-state-disabled {
+.tdcd-state-disabled,
+.tdcd-state-inactive {
   color: var(--color-muted-foreground);
 }
 

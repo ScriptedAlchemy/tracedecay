@@ -6,9 +6,9 @@ pub(crate) use std::process::Command;
 pub(crate) use std::thread;
 
 pub(crate) use crate::common::{
-    create_runtime, fake_codex_bin, get_json, http_agent, install_fake_codex_launcher,
-    pick_free_port, response_to_json, tempdir_or_panic, wait_for_dashboard, EnvVarGuard,
-    GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK,
+    create_runtime, fake_codex_bin, get_json, http_agent, http_agent_with_timeout,
+    install_fake_codex_launcher, pick_free_port, response_to_json, tempdir_or_panic,
+    wait_for_dashboard, EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK,
 };
 pub(crate) use serde_json::Value;
 pub(crate) use tempfile::TempDir;
@@ -136,6 +136,10 @@ pub(crate) async fn seed_memory_fixture(cg: &TraceDecay) {
         Ok(value) => value,
         Err(err) => panic!("failed to serialize bank_b: {err}"),
     };
+
+    if let Err(err) = conn.execute("BEGIN IMMEDIATE", ()).await {
+        panic!("failed to begin memory fixture transaction: {err}");
+    }
 
     let inserts = [
         (
@@ -274,6 +278,11 @@ pub(crate) async fn seed_memory_fixture(cg: &TraceDecay) {
         {
             panic!("failed to insert memory bank: {err}");
         }
+    }
+
+    if let Err(err) = conn.execute("COMMIT", ()).await {
+        let _ = conn.execute("ROLLBACK", ()).await;
+        panic!("failed to commit memory fixture transaction: {err}");
     }
 }
 

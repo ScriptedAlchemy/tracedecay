@@ -59,13 +59,12 @@ pub(super) async fn handle_redundancy(
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render::generic_md(&output)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
-        touched_files: vec![],
-        internal_analytics: None,
-    })
+        vec![],
+    ))
 }
 
 struct RedundancyOptions<'a> {

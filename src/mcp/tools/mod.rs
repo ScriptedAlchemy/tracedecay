@@ -52,5 +52,45 @@ pub struct ToolResult {
     pub touched_files: Vec<String>,
     /// Internal analytics metadata for the server runtime. This must never be
     /// serialized into the tool response payload.
-    pub internal_analytics: Option<Value>,
+    internal_analytics: Option<Value>,
+}
+
+impl ToolResult {
+    pub fn new(value: Value, touched_files: Vec<String>) -> Self {
+        Self {
+            value,
+            touched_files,
+            internal_analytics: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_internal_analytics(mut self, internal_analytics: Value) -> Self {
+        self.internal_analytics = Some(internal_analytics);
+        self
+    }
+
+    pub fn internal_analytics(&self) -> Option<&Value> {
+        self.internal_analytics.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn tool_result_constructors_keep_internal_analytics_explicit() {
+        let result = ToolResult::new(json!({"content": []}), vec!["src/lib.rs".to_string()]);
+        assert_eq!(result.value, json!({"content": []}));
+        assert_eq!(result.touched_files, vec!["src/lib.rs"]);
+        assert!(result.internal_analytics().is_none());
+
+        let result = result.with_internal_analytics(json!({"context_memory": {"match_count": 1}}));
+        assert_eq!(
+            result.internal_analytics(),
+            Some(&json!({"context_memory": {"match_count": 1}}))
+        );
+    }
 }

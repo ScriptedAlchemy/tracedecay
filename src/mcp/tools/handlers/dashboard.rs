@@ -45,13 +45,12 @@ fn validate_mcp_dashboard_host(host: &str) -> Result<&str> {
 
 fn dashboard_tool_result(cg: &TraceDecay, payload: &Value) -> ToolResult {
     let formatted = serde_json::to_string(payload).unwrap_or_default();
-    ToolResult {
-        value: json!({
+    ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": truncated_json_envelope_with_handle(Some(cg.project_root()), &formatted) }]
         }),
-        touched_files: vec![],
-        internal_analytics: None,
-    }
+        vec![],
+    )
 }
 
 /// Handles `tracedecay_dashboard` tool calls.

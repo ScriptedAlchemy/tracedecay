@@ -62,6 +62,73 @@ fn fact_request(content: &str, category: MemoryCategory, trust: f64) -> AddFactR
     }
 }
 
+async fn seed_newer_unrelated_memory_facts(
+    db: &Database,
+    category: MemoryCategory,
+    content_prefix: &str,
+    entity_prefix: &str,
+    count: usize,
+) {
+    db.conn().execute("BEGIN IMMEDIATE", ()).await.unwrap();
+    for i in 0..count {
+        let fact_id = 10_000 + i as i64;
+        let entity_id = 20_000 + i as i64;
+        let content = format!("{content_prefix} {i}");
+        let entity = format!("{entity_prefix}{i}");
+        let normalized = normalize_entity(&entity).to_ascii_lowercase();
+        let updated_at = 1_900_000_000 + i as i64;
+
+        if let Err(err) = db
+            .conn()
+            .execute(
+                "INSERT INTO memory_facts
+                    (fact_id, content, category, trust_score, created_at, updated_at, source, metadata)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7)",
+                libsql::params![
+                    fact_id,
+                    content,
+                    category.as_str(),
+                    0.9_f64,
+                    updated_at,
+                    "test",
+                    "{}"
+                ],
+            )
+            .await
+        {
+            db.conn().execute("ROLLBACK", ()).await.unwrap();
+            panic!("failed to insert unrelated memory fact: {err}");
+        }
+
+        if let Err(err) = db
+            .conn()
+            .execute(
+                "INSERT INTO memory_entities
+                    (entity_id, name, normalized_name, entity_type, aliases, created_at)
+                 VALUES (?1, ?2, ?3, 'unknown', '[]', ?4)",
+                libsql::params![entity_id, entity, normalized, updated_at],
+            )
+            .await
+        {
+            db.conn().execute("ROLLBACK", ()).await.unwrap();
+            panic!("failed to insert unrelated memory entity: {err}");
+        }
+
+        if let Err(err) = db
+            .conn()
+            .execute(
+                "INSERT INTO memory_fact_entities (fact_id, entity_id) VALUES (?1, ?2)",
+                libsql::params![fact_id, entity_id],
+            )
+            .await
+        {
+            db.conn().execute("ROLLBACK", ()).await.unwrap();
+            panic!("failed to link unrelated memory entity: {err}");
+        }
+    }
+    db.conn().execute("COMMIT", ()).await.unwrap();
+}
+
 async fn dirty_bank_names(db: &Database) -> Vec<String> {
     let mut rows = db
         .conn()
@@ -994,23 +1061,38 @@ async fn remove_fact_incremental_vacuum_reclaims_blob_pages() {
     let store = MemoryStore::new(db.conn());
     let db_path = tmp.path().join("tracedecay.db");
     let mut fact_ids = Vec::new();
+    let vector = HolographicEncoder::serialize(&vec![0.0; HolographicEncoder::DIMENSIONS])
+        .expect("serialize compact HRR vector");
+    assert_eq!(vector.len(), HolographicEncoder::SERIALIZED_F32_BYTES);
 
-    for idx in 0..96 {
-        let fact = store
-            .add_fact(
-                fact_request(
-                    &format!("incremental vacuum blob reclamation fixture {idx}"),
-                    MemoryCategory::Project,
-                    0.8,
-                ),
-                DEFAULT_TRUST,
+    db.conn().execute("BEGIN IMMEDIATE", ()).await.unwrap();
+    for idx in 0..48 {
+        let fact_id = 50_000 + idx;
+        db.conn()
+            .execute(
+                "INSERT INTO memory_facts (
+                    fact_id, content, category, tags, trust_score, created_at,
+                    updated_at, source, metadata, hrr_vector, hrr_algebra, hrr_dim, hrr_precision
+                 )
+                 VALUES (?1, ?2, ?3, '[]', ?4, ?5, ?5, ?6, '{}', ?7, ?8, ?9, ?10)",
+                libsql::params![
+                    fact_id,
+                    format!("incremental vacuum blob reclamation fixture {idx}"),
+                    MemoryCategory::Project.as_str(),
+                    0.8_f64,
+                    1_900_000_000_i64 + idx,
+                    "test",
+                    vector.clone(),
+                    "amari_fhrr",
+                    HolographicEncoder::DIMENSIONS as i64,
+                    HolographicEncoder::HRR_PRECISION,
+                ],
             )
             .await
-            .unwrap()
-            .fact
             .unwrap();
-        fact_ids.push(fact.fact_id);
+        fact_ids.push(fact_id);
     }
+    db.conn().execute("COMMIT", ()).await.unwrap();
     db.conn()
         .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
         .await
@@ -1323,20 +1405,14 @@ async fn fact_retriever_search_includes_old_entity_only_matches() {
         .fact
         .unwrap();
 
-    for i in 0..125 {
-        let mut unrelated = fact_request(
-            &format!("Newer unrelated project fact {i}"),
-            MemoryCategory::Project,
-            0.9,
-        );
-        unrelated.entities = vec![format!("UnrelatedEntity{i}")];
-        store
-            .add_fact(unrelated, DEFAULT_TRUST)
-            .await
-            .unwrap()
-            .fact
-            .unwrap();
-    }
+    seed_newer_unrelated_memory_facts(
+        &db,
+        MemoryCategory::Project,
+        "Newer unrelated project fact",
+        "UnrelatedEntity",
+        125,
+    )
+    .await;
 
     let results = retriever
         .search("EntityNeedle", Some(MemoryCategory::Project), Some(0.3), 5)
@@ -1448,20 +1524,14 @@ async fn fact_retriever_reason_applies_entity_predicates_before_limit() {
         .fact
         .unwrap();
 
-    for i in 0..125 {
-        let mut unrelated = fact_request(
-            &format!("Newer unrelated fact {i}"),
-            MemoryCategory::Decision,
-            0.9,
-        );
-        unrelated.entities = vec![format!("Unrelated {i}")];
-        store
-            .add_fact(unrelated, DEFAULT_TRUST)
-            .await
-            .unwrap()
-            .fact
-            .unwrap();
-    }
+    seed_newer_unrelated_memory_facts(
+        &db,
+        MemoryCategory::Decision,
+        "Newer unrelated fact",
+        "Unrelated",
+        125,
+    )
+    .await;
 
     let results = retriever
         .reason(

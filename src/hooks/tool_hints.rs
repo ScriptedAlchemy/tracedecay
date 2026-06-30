@@ -500,6 +500,10 @@ fn asks_for_broad_read(text: &str) -> bool {
 }
 
 fn asks_for_project_context(text: &str) -> bool {
+    mentions_external_project_scope(text) || asks_for_repo_discovery(text)
+}
+
+fn mentions_external_project_scope(text: &str) -> bool {
     contains_any(
         text,
         &[
@@ -525,6 +529,32 @@ fn asks_for_project_context(text: &str) -> bool {
             "cross project",
             "orchestrator repo",
             "orchestrator repository",
+        ],
+    )
+}
+
+fn asks_for_repo_discovery(text: &str) -> bool {
+    !mentions_current_project_scope(text)
+        && contains_any(text, &[" repo", " repository"])
+        && contains_any(text, &["find", "locate", "where", "which"])
+}
+
+fn mentions_current_project_scope(text: &str) -> bool {
+    contains_any(
+        text,
+        &[
+            "this repo",
+            "this repository",
+            "current repo",
+            "current repository",
+            "current workspace",
+            "this workspace",
+            "in repo",
+            "in repository",
+            "in the repo",
+            "in the repository",
+            "inside repo",
+            "inside the repo",
         ],
     )
 }
@@ -641,17 +671,18 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_workspace_search_stays_a_search_hint() {
+    fn current_repo_shell_search_keeps_normal_search_hint() {
         let hint = decide_hint(&ToolHintInput {
             tool_name: Some("shell".to_string()),
-            command: Some("rg -n \"helper\" .".to_string()),
-            prompt: Some("Search the workspace for the helper definition".to_string()),
+            command: Some("rg -n \"runner\" .".to_string()),
+            prompt: Some("Search this repo for the runner implementation".to_string()),
             session_id: Some("session-1".to_string()),
             ..ToolHintInput::default()
         })
         .unwrap();
 
-        assert_eq!(hint.category, HintCategory::Search);
+        assert_eq!(hint.category.as_key(), "search");
+        assert!(hint.context.contains("tracedecay_search"));
     }
 
     #[test]

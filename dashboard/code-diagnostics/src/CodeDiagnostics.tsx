@@ -14,8 +14,8 @@ import type {
 const STATE_LABELS: Record<EngineState, string> = {
   unavailable: "Unavailable",
   disabled: "Disabled",
-  starting: "Starting",
-  indexing: "Indexing",
+  inactive: "Inactive",
+  available: "Available",
   ready: "Ready",
   refreshing: "Refreshing",
   crashed: "Crashed",

@@ -29,8 +29,57 @@ import { cn as cnImpl } from "../../lib/cn";
 export { makeSequence };
 export const cn = cnImpl;
 
+const projectListeners = new Set();
+let selectedProjectId = "";
+
+function notifyProjectListeners() {
+  for (const fn of projectListeners) {
+    try {
+      fn(selectedProjectId);
+    } catch {
+      /* listener errors should not break plugin fetches */
+    }
+  }
+}
+
+function isScopedApiUrl(url, prefix) {
+  return url === prefix || url.startsWith(`${prefix}/`) || url.startsWith(`${prefix}?`);
+}
+
+export function getSelectedProjectId() {
+  return selectedProjectId;
+}
+
+export function setShellSelectedProjectId(projectId) {
+  const next = String(projectId || "");
+  if (next === selectedProjectId) return;
+  selectedProjectId = next;
+  notifyProjectListeners();
+}
+
+export function subscribeSelectedProject(fn) {
+  projectListeners.add(fn);
+  return () => projectListeners.delete(fn);
+}
+
+export function projectScopedUrl(url, init) {
+  if (!selectedProjectId || typeof url !== "string" || !url.startsWith("/")) return url;
+  if (
+    !isScopedApiUrl(url, "/api/plugins") &&
+    !isScopedApiUrl(url, "/api/automation") &&
+    !isScopedApiUrl(url, "/api/capabilities")
+  ) {
+    return url;
+  }
+  return `/api/projects/${encodeURIComponent(selectedProjectId)}${url.slice("/api".length)}`;
+}
+
+export function authedFetch(url, init) {
+  return fetch(projectScopedUrl(url, init), init);
+}
+
 export async function fetchJSON(url, init) {
-  const res = await fetch(url, init);
+  const res = await authedFetch(url, init);
   if (!res.ok) {
     let detail = `${res.status} ${res.statusText}`;
     let body;
@@ -171,7 +220,7 @@ export function buildSDK() {
     hooks: { useState, useEffect, useCallback, useMemo, useRef, useContext, createContext },
     api: {},
     fetchJSON,
-    authedFetch: (url, init) => fetch(url, init),
+    authedFetch,
     buildWsUrl: (p) => p,
     buildWsAuthParam: () => ["", ""],
     /**
@@ -182,6 +231,10 @@ export function buildSDK() {
      * Null until the first successful fetch.
      */
     capabilities: null,
+    projects: {
+      getSelectedProjectId,
+      subscribe: subscribeSelectedProject,
+    },
     components: {
       Card,
       CardHeader,

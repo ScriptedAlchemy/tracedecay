@@ -145,11 +145,10 @@ fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
         }),
     };
     let formatted = serde_json::to_string(&payload).unwrap_or_default();
-    Ok(ToolResult {
-        value: json!({ "content": [{ "type": "text", "text": formatted }] }),
-        touched_files: Vec::new(),
-        internal_analytics: None,
-    })
+    Ok(ToolResult::new(
+        json!({ "content": [{ "type": "text", "text": formatted }] }),
+        Vec::new(),
+    ))
 }
 
 /// Dispatches a tool call to the appropriate handler.

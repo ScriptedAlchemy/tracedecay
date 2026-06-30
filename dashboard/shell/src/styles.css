@@ -531,6 +531,34 @@ select:focus-visible {
   flex-shrink: 0;
 }
 
+.ts-project-select {
+  appearance: none;
+  background:
+    linear-gradient(45deg, transparent 50%, var(--ts-text-3) 50%) calc(100% - 0.82rem) 50% / 5px 5px no-repeat,
+    linear-gradient(135deg, var(--ts-text-3) 50%, transparent 50%) calc(100% - 0.58rem) 50% / 5px 5px no-repeat,
+    var(--ts-conn-bg);
+  border: 1px solid var(--ts-line);
+  border-radius: 999px;
+  color: var(--ts-text-2);
+  cursor: pointer;
+  font-family: var(--theme-font-mono);
+  font-size: 0.72rem;
+  line-height: 1;
+  max-width: min(22vw, 18rem);
+  min-width: 10rem;
+  overflow: hidden;
+  padding: 0.43rem 1.55rem 0.43rem 0.72rem;
+  text-overflow: ellipsis;
+  transition: background-color 0.16s ease, border-color 0.16s ease, color 0.16s ease;
+  white-space: nowrap;
+}
+
+.ts-project-select:hover,
+.ts-project-select:focus {
+  border-color: var(--ts-line-strong);
+  color: var(--ts-text);
+}
+
 /* Connection indicator */
 .ts-conn-indicator {
   appearance: none;
@@ -814,7 +842,15 @@ select:focus-visible {
   }
 
   .ts-shell-controls {
-    align-self: flex-end;
+    align-self: stretch;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .ts-project-select {
+    flex: 1 1 12rem;
+    max-width: none;
+    min-width: 0;
   }
 
   .ts-conn-time {

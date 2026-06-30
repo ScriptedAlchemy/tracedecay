@@ -13,7 +13,13 @@
 
 import React, { useEffect, useState, useCallback, useRef, useSyncExternalStore } from "react";
 import { createRoot } from "react-dom/client";
-import { buildSDK, fetchJSON, cn } from "./sdk.jsx";
+import {
+  buildSDK,
+  fetchJSON,
+  cn,
+  getSelectedProjectId,
+  setShellSelectedProjectId,
+} from "./sdk.jsx";
 
 // ---------------------------------------------------------------------------
 // Registry
@@ -174,6 +180,14 @@ function injectPluginAssets(manifest) {
 
 const POLL_INTERVAL_MS = 15_000;
 
+function basename(path) {
+  return path?.split("/").filter(Boolean).pop() || path;
+}
+
+function projectLabel(project) {
+  return project?.label || basename(project?.project_root) || project?.project_id || "Project";
+}
+
 // ---------------------------------------------------------------------------
 // App
 // ---------------------------------------------------------------------------
@@ -181,6 +195,9 @@ const POLL_INTERVAL_MS = 15_000;
 function App() {
   const [plugins, setPlugins] = useState([]);
   const [capabilities, setCapabilities] = useState(null);
+  const [projects, setProjects] = useState([]);
+  const [selectedProjectId, setSelectedProjectId] = useState("");
+  const [projectRevision, setProjectRevision] = useState(0);
   const [active, setActive] = useState("");
   // Tabs that have been activated at least once; their panels stay mounted
   // (hidden) afterwards so in-progress exploration survives tab switches.
@@ -244,9 +261,10 @@ function App() {
   }, []);
 
   // Fetch capabilities, update SDK, and return the payload (or null on failure).
-  const fetchCapabilities = useCallback(async () => {
+  const fetchCapabilities = useCallback(async (projectId = getSelectedProjectId()) => {
     try {
       const caps = await fetchJSON("/api/capabilities");
+      if (getSelectedProjectId() !== projectId) return null;
       setCapabilities(caps);
       setConnState("ok");
       setLastRefresh(Date.now());
@@ -254,20 +272,31 @@ function App() {
       window.__HERMES_PLUGIN_SDK__.capabilities = caps;
       return caps;
     } catch {
+      if (getSelectedProjectId() !== projectId) return null;
+      window.__HERMES_PLUGIN_SDK__.capabilities = null;
       setConnState("error");
       return null;
     }
   }, []);
 
-  // Initial load: plugin list + capabilities in parallel.
+  // Initial load: plugin manifests are daemon-wide; project inventory selects
+  // which project-scoped APIs plugin panels should read from.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const [list] = await Promise.all([
+        const [list, projectPayload] = await Promise.all([
           fetchJSON("/api/dashboard/plugins"),
-          fetchCapabilities(),
+          fetchJSON("/api/projects"),
         ]);
+        if (cancelled) return;
+        const rows = Array.isArray(projectPayload?.projects) ? projectPayload.projects : [];
+        const initialProjectId =
+          projectPayload?.active_project_id || rows.find((p) => p.is_active)?.project_id || rows[0]?.project_id || "";
+        setProjects(rows);
+        setSelectedProjectId(initialProjectId);
+        setShellSelectedProjectId(initialProjectId);
+        await fetchCapabilities(initialProjectId);
         if (cancelled) return;
         setPlugins(list);
         if (list.length > 0) {
@@ -289,6 +318,21 @@ function App() {
       cancelled = true;
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const onProjectChange = useCallback(
+    async (event) => {
+      const next = event.target.value;
+      if (next === selectedProjectId) return;
+      setSelectedProjectId(next);
+      setShellSelectedProjectId(next);
+      setCapabilities(null);
+      window.__HERMES_PLUGIN_SDK__.capabilities = null;
+      setProjectRevision((rev) => rev + 1);
+      setVisited(active ? new Set([active]) : new Set());
+      await fetchCapabilities(next);
+    },
+    [active, fetchCapabilities, selectedProjectId],
+  );
 
   // Poll capabilities for connection health — but only while the browser tab
   // is visible; a hidden tab refreshes once on return instead.
@@ -366,8 +410,12 @@ function App() {
 
   const activeManifest = plugins.find((p) => p.name === active);
   const ActiveComponent = registered.get(active);
-  const projectName =
-    capabilities?.project_root?.split("/").filter(Boolean).pop() ?? capabilities?.project_root;
+  const selectedProject =
+    projects.find((p) => p.project_id === selectedProjectId) ||
+    projects.find((p) => p.is_active) ||
+    null;
+  const projectName = selectedProject ? projectLabel(selectedProject) : basename(capabilities?.project_root);
+  const projectRoot = selectedProject?.project_root || capabilities?.project_root;
 
   const connLabel =
     connState === "ok"
@@ -383,7 +431,7 @@ function App() {
           <span className="ts-shell-logo" aria-hidden="true">◳</span>
           <h1 className="ts-shell-title">tracedecay</h1>
           {projectName && (
-            <span className="ts-shell-project" title={capabilities?.project_root}>
+            <span className="ts-shell-project" title={projectRoot}>
               {projectName}
             </span>
           )}
@@ -418,6 +466,22 @@ function App() {
         </div>
 
         <div className="ts-shell-controls">
+          {projects.length > 0 && (
+            <select
+              className="ts-project-select"
+              value={selectedProjectId}
+              onChange={onProjectChange}
+              aria-label="Project"
+              title={projectRoot || "Project"}
+            >
+              {projects.map((project) => (
+                <option key={project.project_id} value={project.project_id}>
+                  {projectLabel(project)}
+                </option>
+              ))}
+            </select>
+          )}
+
           <button
             className={cn("ts-conn-indicator", `ts-conn-indicator-${connState}`)}
             title={connLabel}
@@ -479,7 +543,7 @@ function App() {
             const Component = registered.get(p.name);
             return (
               <div
-                key={p.name}
+                key={`${selectedProjectId || "active"}:${projectRevision}:${p.name}`}
                 role="tabpanel"
                 id={`ts-tabpanel-${p.name}`}
                 aria-labelledby={`ts-tab-${p.name}`}

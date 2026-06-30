@@ -306,7 +306,7 @@ import * as path from 'path';
 }
 
 #[test]
-fn test_ts_import_type_records_ignored_dependency_candidates() {
+fn test_ts_import_type_does_not_pollute_unresolved_refs_with_dependency_candidates() {
     let source = r#"
 import type { Foo, Bar as Baz } from "pkg";
 import { localThing } from "./local";
@@ -322,18 +322,10 @@ import { localThing } from "./local";
         .collect();
 
     assert!(
-        use_refs.iter().any(|r| r.reference_name == "npm:pkg#Foo"),
-        "expected npm dependency candidate for Foo, got {use_refs:#?}"
-    );
-    assert!(
-        use_refs.iter().any(|r| r.reference_name == "npm:pkg#Bar"),
-        "expected npm dependency candidate to use exported name before alias, got {use_refs:#?}"
-    );
-    assert!(
         !use_refs
             .iter()
-            .any(|r| r.reference_name == "npm:./local#localThing"),
-        "relative project imports should not be dependency candidates"
+            .any(|r| r.reference_name.starts_with("npm:")),
+        "dependency candidates should not be encoded as unresolved refs: {use_refs:#?}"
     );
 }
 

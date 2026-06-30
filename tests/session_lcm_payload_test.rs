@@ -12,6 +12,45 @@ use common::{
     lcm_payload_session as sample_session, open_lcm_db,
 };
 
+fn externalized_tool_payload(prefix: &str, fill: char) -> String {
+    fn with_filler(prefix: &str, fill: char, filler_chars: usize) -> String {
+        format!("{prefix}{}", fill.to_string().repeat(filler_chars))
+    }
+
+    let externalizes = |candidate: &str| {
+        tracedecay::sessions::lcm::security::should_externalize(
+            "tool",
+            Some("tool_result"),
+            candidate,
+        )
+    };
+
+    let mut high = 1024;
+    while !externalizes(&with_filler(prefix, fill, high)) {
+        high = high
+            .checked_mul(2)
+            .filter(|next| *next <= 2 * 1024 * 1024)
+            .expect("tool payload fixture should externalize before 2 MiB");
+    }
+
+    let mut low = 0;
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if externalizes(&with_filler(prefix, fill, mid)) {
+            high = mid;
+        } else {
+            low = mid + 1;
+        }
+    }
+
+    let payload = with_filler(prefix, fill, low);
+    assert!(externalizes(&payload));
+    if low > 0 {
+        assert!(!externalizes(&with_filler(prefix, fill, low - 1)));
+    }
+    payload
+}
+
 async fn raw_snippet_and_index(
     db_path: &std::path::Path,
     provider: &str,
@@ -806,7 +845,7 @@ async fn externalized_payload_indexes_placeholder_without_body_text() {
 
     let unique_secret = "uniquebodysecretdonotindex";
     let metadata_secret = "uniquemetadatasecretdonotindex";
-    let payload = format!("tool output {unique_secret}\n{}", "B".repeat(900_000));
+    let payload = externalized_tool_payload(&format!("tool output {unique_secret}\n"), 'B');
     let mut message = raw_message("cursor", "tool-secret", "session-1", "tool", &payload);
     message.metadata_json = Some(format!(r#"{{"payload_preview":"{metadata_secret}"}}"#));
     let store = db.lcm_store(&storage_root);
@@ -863,7 +902,7 @@ async fn lcm_status_reports_missing_and_orphan_payloads_without_previewing_conte
             .await
     );
 
-    let secret = format!("SUPER_SECRET_PAYLOAD\n{}", "S".repeat(300_000));
+    let secret = externalized_tool_payload("SUPER_SECRET_PAYLOAD\n", 'S');
     let message = raw_message("cursor", "message-1", "session-1", "tool", &secret);
     let store = db.lcm_store(&storage_root);
     store
@@ -939,7 +978,7 @@ async fn denies_cross_session_payload_expansion() {
             .await
     );
 
-    let payload = format!("secret tool output\n{}", "S".repeat(300_000));
+    let payload = externalized_tool_payload("secret tool output\n", 'S');
     let message = raw_message("cursor", "message-a", "session-a", "tool", &payload);
     let store = db.lcm_store(&storage_root);
     store
@@ -970,7 +1009,7 @@ async fn delete_external_payload_rejects_referenced_payload_without_hash_verific
             .await
     );
 
-    let payload = format!("active referenced payload\n{}", "R".repeat(300_000));
+    let payload = externalized_tool_payload("active referenced payload\n", 'R');
     let message = raw_message(
         "cursor",
         "referenced-payload",
@@ -1037,7 +1076,7 @@ async fn denies_expansion_after_message_updates_to_new_payload_ref() {
             .await
     );
 
-    let first_payload = format!("first secret tool output\n{}", "F".repeat(300_000));
+    let first_payload = externalized_tool_payload("first secret tool output\n", 'F');
     let mut message = raw_message(
         "cursor",
         "message-update",
@@ -1057,7 +1096,7 @@ async fn denies_expansion_after_message_updates_to_new_payload_ref() {
         .payload_ref
         .expect("first payload ref");
 
-    let second_payload = format!("second secret tool output\n{}", "G".repeat(300_000));
+    let second_payload = externalized_tool_payload("second secret tool output\n", 'G');
     message.text = second_payload.clone();
     store
         .ingest_raw_message(&message)
@@ -1102,7 +1141,7 @@ async fn external_payload_write_rejects_preexisting_symlink_ref() {
             .await
     );
 
-    let payload = format!("tool output\n{}", "C".repeat(900_000));
+    let payload = externalized_tool_payload("tool output\n", 'C');
     let payload_ref = expected_payload_ref("cursor", "session-1", "tool-symlink", &payload);
     let payload_dir = tracedecay::sessions::lcm::payload::payload_dir(&storage_root);
     std::fs::create_dir_all(&payload_dir).unwrap();
@@ -1144,7 +1183,7 @@ async fn external_payload_write_rejects_symlinked_payload_directory() {
             .await
     );
 
-    let payload = format!("tool output\n{}", "D".repeat(900_000));
+    let payload = externalized_tool_payload("tool output\n", 'D');
     let payload_ref = expected_payload_ref("cursor", "session-1", "tool-dir-symlink", &payload);
     let message = raw_message("cursor", "tool-dir-symlink", "session-1", "tool", &payload);
     let store = db.lcm_store(&storage_root);
@@ -1237,9 +1276,9 @@ async fn redaction_applies_before_whole_message_externalization() {
     );
 
     let secret = "sk-prequel1234567890abcdef";
-    let content = format!(
-        "tool output api_key={secret} preexternalredactcanary\n{}",
-        "B".repeat(300_000)
+    let content = externalized_tool_payload(
+        &format!("tool output api_key={secret} preexternalredactcanary\n"),
+        'B',
     );
     let mut message = raw_message(
         "cursor",

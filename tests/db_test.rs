@@ -350,66 +350,6 @@ async fn test_unresolved_refs() {
 }
 
 #[tokio::test]
-async fn test_search_ignored_dependency_refs_is_bounded_and_filtered() {
-    let (db, _dir) = setup_db().await;
-
-    let node = sample_node("ref-node", "my_func", "src/lib.rs");
-    db.insert_node(&node).await.expect("failed to insert node");
-
-    for (index, reference_name) in [
-        "HashMap",
-        "npm:pkg#Foo",
-        "npm:pkg#Food",
-        "npm:pkg#Bar",
-        "npm:other#Foo",
-    ]
-    .iter()
-    .enumerate()
-    {
-        db.insert_unresolved_ref(&UnresolvedRef {
-            from_node_id: "ref-node".to_string(),
-            reference_name: (*reference_name).to_string(),
-            reference_kind: EdgeKind::Uses,
-            line: index as u32,
-            column: 5,
-            file_path: format!("src/{index}.ts"),
-        })
-        .await
-        .expect("failed to insert unresolved ref");
-    }
-
-    let refs = db
-        .search_ignored_dependency_refs("foo", 2)
-        .await
-        .expect("failed to query ignored dependency refs");
-
-    assert_eq!(refs.len(), 2, "query should honor the limit");
-    assert!(refs
-        .iter()
-        .all(|reference| reference.reference_name.starts_with("npm:")));
-    assert!(refs.iter().all(|reference| reference
-        .reference_name
-        .to_ascii_lowercase()
-        .contains("foo")));
-
-    let module_symbol_refs = db
-        .search_ignored_dependency_refs("pkg food", 10)
-        .await
-        .expect("failed to query ignored dependency refs by module and symbol");
-    assert_eq!(module_symbol_refs.len(), 1);
-    assert_eq!(module_symbol_refs[0].reference_name, "npm:pkg#Food");
-
-    let wildcard_refs = db
-        .search_ignored_dependency_refs("%", 10)
-        .await
-        .expect("failed to query ignored dependency refs with escaped wildcard");
-    assert!(
-        wildcard_refs.is_empty(),
-        "wildcard queries should be treated literally"
-    );
-}
-
-#[tokio::test]
 async fn test_batch_insert_nodes() {
     let (db, _dir) = setup_db().await;
 

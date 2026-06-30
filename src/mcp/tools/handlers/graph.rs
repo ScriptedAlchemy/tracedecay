@@ -49,9 +49,12 @@ where
         value
     };
     let text = render::finalize(Some(cg.project_root()), args, value, md);
-    let mut result = text_tool_result(&text, touched_files);
-    result.internal_analytics = internal_analytics;
-    result
+    let result = text_tool_result(&text, touched_files);
+    if let Some(internal_analytics) = internal_analytics {
+        result.with_internal_analytics(internal_analytics)
+    } else {
+        result
+    }
 }
 
 fn strip_internal_context_memory_analytics(value: &Value) -> Value {
@@ -63,13 +66,12 @@ fn strip_internal_context_memory_analytics(value: &Value) -> Value {
 }
 
 fn text_tool_result(text: &str, touched_files: Vec<String>) -> ToolResult {
-    ToolResult {
-        value: json!({
+    ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
-        internal_analytics: None,
-    }
+    )
 }
 
 /// Handles `tracedecay_search` tool calls.
@@ -177,24 +179,7 @@ fn render_search_md(value: &Value) -> String {
     {
         md.blank().heading(3, "Index Coverage Hint").line(msg);
     }
-    if let Some(hint) = value.get("ignored_dependency_hint") {
-        let msg = hint
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("Matching ignored dependency candidates were found.");
-        md.blank().heading(3, "Ignored Dependency Hint").line(msg);
-        if let Some(candidates) = hint.get("candidates").and_then(Value::as_array) {
-            for candidate in candidates {
-                let module = render::field_str(candidate, "module");
-                let symbol = render::field_str(candidate, "symbol");
-                let file = render::field_str(candidate, "import_file");
-                let line = render::field_i64(candidate, "line");
-                md.bullet(&format!(
-                    "`{module}` exports `{symbol}` referenced at {file}:{line}"
-                ));
-            }
-        }
-    }
+    dependency_hints::append_ignored_dependency_hint_md(&mut md, value);
     md.render()
 }
 

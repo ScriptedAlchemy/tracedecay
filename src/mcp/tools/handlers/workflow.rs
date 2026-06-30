@@ -204,13 +204,12 @@ pub(super) async fn handle_diagnose(cg: &TraceDecay, args: Value) -> Result<Tool
     let text = render::finalize(Some(cg.project_root()), &args, &body, || {
         render::generic_md(&body)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
-        touched_files: touched.into_iter().collect(),
-        internal_analytics: None,
-    })
+        touched.into_iter().collect(),
+    ))
 }
 
 fn severity_string(s: Severity) -> &'static str {
@@ -288,13 +287,12 @@ pub(super) async fn handle_run_affected_tests(cg: &TraceDecay, args: Value) -> R
     let text = render::finalize(Some(cg.project_root()), &args, &body, || {
         render::generic_md(&body)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
-        internal_analytics: None,
-    })
+    ))
 }
 
 async fn resolve_changed_paths(
@@ -488,20 +486,19 @@ fn covered_source_ids(name: &str, selected_targets: &[TestTarget]) -> Vec<String
 
 /// Wraps a short status message in a normal `ToolResult`.
 fn empty_result(message: &str) -> ToolResult {
-    ToolResult {
-        value: json!({
+    ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": serde_json::to_string(&json!({
                 "passed": 0, "failed": 0, "results": [], "note": message
             })).unwrap_or_default() }]
         }),
-        touched_files: vec![],
-        internal_analytics: None,
-    }
+        vec![],
+    )
 }
 
 fn error_result(kind: &str, operation: &str, message: &str) -> ToolResult {
-    ToolResult {
-        value: json!({
+    ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": serde_json::to_string(&json!({
                 "passed": 0,
                 "failed": 0,
@@ -513,9 +510,8 @@ fn error_result(kind: &str, operation: &str, message: &str) -> ToolResult {
                 }
             })).unwrap_or_default() }]
         }),
-        touched_files: vec![],
-        internal_analytics: None,
-    }
+        vec![],
+    )
 }
 
 /// Returns the last `n` characters of `s`, trimmed to a char boundary.

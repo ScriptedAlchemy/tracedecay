@@ -9,6 +9,8 @@ use crate::agents::{self, DoctorCounters, HealthcheckContext};
 use crate::display::{format_bytes, format_token_count};
 use crate::tracedecay::TraceDecay;
 
+mod registry_drift;
+
 /// Runs a comprehensive health check of the tracedecay installation.
 pub async fn run_doctor(agent_filter: Option<&str>) {
     debug_assert!(
@@ -180,7 +182,7 @@ async fn check_stale_stores(dc: &mut DoctorCounters) {
     check_orphan_store_manifests(dc, &project_paths);
     check_stale_code_projects(dc, &gdb).await;
     if let Some(profile_root) = profile_root.as_deref() {
-        let drift = registry_drift_findings(&gdb, profile_root).await;
+        let drift = registry_drift::registry_drift_findings(&gdb, profile_root).await;
         if drift.is_empty() {
             dc.pass("No registry/store manifest identity drift");
         } else {
@@ -310,79 +312,6 @@ async fn check_stale_code_projects(dc: &mut DoctorCounters, gdb: &crate::global_
 
 fn code_project_root_exists(project: &crate::global_db::CodeProjectRecord) -> bool {
     Path::new(&project.canonical_root).exists() || Path::new(&project.display_root).exists()
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RegistryDriftFinding {
-    project_id: String,
-    store_id: String,
-    field: &'static str,
-    registry_value: String,
-    manifest_value: String,
-    manifest_path: PathBuf,
-}
-
-async fn registry_drift_findings(
-    global_db: &crate::global_db::GlobalDb,
-    profile_root: &Path,
-) -> Vec<RegistryDriftFinding> {
-    let mut findings = Vec::new();
-    for project in global_db.list_code_projects(usize::MAX).await {
-        let Some(context) = global_db
-            .project_registry_context_by_id(&project.project_id)
-            .await
-        else {
-            continue;
-        };
-        for store_context in context.stores {
-            let store = store_context.store;
-            let Some(manifest_path) = registry_store_artifacts(profile_root, &store)
-                .into_iter()
-                .find_map(|artifacts| artifacts.manifest_path)
-            else {
-                continue;
-            };
-            let Ok(manifest) = crate::storage::read_store_manifest(&manifest_path) else {
-                continue;
-            };
-            let manifest_project_id = manifest
-                .project_id
-                .as_deref()
-                .unwrap_or("<missing>")
-                .to_string();
-            if manifest_project_id != store.project_id {
-                findings.push(RegistryDriftFinding {
-                    project_id: project.project_id.clone(),
-                    store_id: store.store_id.clone(),
-                    field: "project_id",
-                    registry_value: store.project_id.clone(),
-                    manifest_value: manifest_project_id,
-                    manifest_path: manifest_path.clone(),
-                });
-            }
-
-            let registry_project_root = comparable_path(Path::new(&project.canonical_root));
-            let manifest_project_root = comparable_path(&manifest.project_root);
-            if registry_project_root != manifest_project_root {
-                findings.push(RegistryDriftFinding {
-                    project_id: project.project_id.clone(),
-                    store_id: store.store_id.clone(),
-                    field: "project_root",
-                    registry_value: registry_project_root,
-                    manifest_value: manifest_project_root,
-                    manifest_path,
-                });
-            }
-        }
-    }
-    findings
-}
-
-fn comparable_path(path: &Path) -> String {
-    path.canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf())
-        .to_string_lossy()
-        .to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -915,7 +844,7 @@ mod tests {
         .await
         .ok_or_else(|| std::io::Error::other("could not upsert store"))?;
 
-        let findings = registry_drift_findings(&db, &profile_root).await;
+        let findings = registry_drift::registry_drift_findings(&db, &profile_root).await;
         let fields: Vec<_> = findings.iter().map(|finding| finding.field).collect();
         assert!(
             fields.contains(&"project_id"),

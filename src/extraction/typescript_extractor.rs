@@ -1087,18 +1087,6 @@ impl TypeScriptExtractor {
             column: start_column,
             file_path: state.file_path.clone(),
         });
-        if let Some(module_path) = module_path.as_deref() {
-            for candidate in Self::ignored_dependency_import_candidates(&text, module_path) {
-                state.unresolved_refs.push(UnresolvedRef {
-                    from_node_id: id.clone(),
-                    reference_name: candidate,
-                    reference_kind: EdgeKind::Uses,
-                    line: start_line,
-                    column: start_column,
-                    file_path: state.file_path.clone(),
-                });
-            }
-        }
     }
 
     /// Extract a namespace (`internal_module`) declaration.
@@ -1302,44 +1290,6 @@ impl TypeScriptExtractor {
             }
         }
         None
-    }
-
-    fn ignored_dependency_import_candidates(import_text: &str, module_path: &str) -> Vec<String> {
-        if Self::is_project_relative_import(module_path) || !Self::is_type_only_import(import_text)
-        {
-            return Vec::new();
-        }
-        let Some((_, after_open)) = import_text.split_once('{') else {
-            return Vec::new();
-        };
-        let Some((named_imports, _)) = after_open.split_once('}') else {
-            return Vec::new();
-        };
-        named_imports
-            .split(',')
-            .filter_map(Self::named_import_exported_name)
-            .map(|name| format!("npm:{module_path}#{name}"))
-            .collect()
-    }
-
-    fn is_type_only_import(import_text: &str) -> bool {
-        import_text.trim_start().starts_with("import type ")
-    }
-
-    fn is_project_relative_import(module_path: &str) -> bool {
-        module_path.starts_with('.') || module_path.starts_with('/')
-    }
-
-    fn named_import_exported_name(raw: &str) -> Option<String> {
-        let without_type_prefix = raw.trim().strip_prefix("type ").unwrap_or(raw.trim());
-        let exported = without_type_prefix
-            .split_once(" as ")
-            .map_or(without_type_prefix, |(name, _)| name)
-            .trim();
-        if exported.is_empty() {
-            return None;
-        }
-        Some(exported.to_string())
     }
 
     /// Recursively find `call_expression` nodes inside a node and create
