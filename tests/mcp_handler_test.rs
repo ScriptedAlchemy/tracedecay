@@ -8442,7 +8442,8 @@ async fn lcm_doctor_repair_apply_rebuilds_damaged_fts() {
 
 #[tokio::test]
 async fn lcm_doctor_retention_reports_candidates_without_deleting() {
-    let (cg, _dir) = setup_project().await;
+    let dir = test_temp_dir();
+    let (cg, _env) = init_test_project(dir.path()).await;
     seed_lcm_session_message(
         &cg,
         "lcm-doctor-retention",
@@ -8455,7 +8456,11 @@ async fn lcm_doctor_retention_reports_candidates_without_deleting() {
     let result = handle_tool_call(
         &cg,
         "tracedecay_lcm_doctor",
-        json!({"provider": "cursor", "mode": "retention"}),
+        json!({
+            "provider": "cursor",
+            "mode": "retention",
+            "session_id": "lcm-doctor-retention"
+        }),
         None,
         None,
     )
@@ -8974,8 +8979,9 @@ async fn lcm_compress_without_summarizer_requests_auxiliary_summary() {
 
 #[tokio::test]
 async fn lcm_compress_oversized_needs_summary_uses_retrievable_full_payload() {
-    let (cg, _dir) = setup_project().await;
-    let huge_source = "alpha oversized context ".repeat(8_000);
+    let dir = test_temp_dir();
+    let (cg, _env) = init_test_project(dir.path()).await;
+    let huge_source = "alpha oversized context ".repeat(1_000);
 
     let compress = handle_tool_call(
         &cg,
@@ -8990,8 +8996,8 @@ async fn lcm_compress_oversized_needs_summary_uses_retrievable_full_payload() {
             ],
             "current_tokens": 30_000,
             "threshold_tokens": 1_000,
-            "fresh_tail_count": 64,
-            "leaf_chunk_tokens": 20_000,
+            "fresh_tail_count": 2,
+            "leaf_chunk_tokens": 1_000,
             "summarizer": {"mode": "hermes_auxiliary"}
         }),
         None,
@@ -9056,8 +9062,9 @@ async fn lcm_compress_oversized_needs_summary_uses_retrievable_full_payload() {
 
 #[tokio::test]
 async fn lcm_preflight_oversized_replay_preserves_bridge_contract() {
-    let (cg, _dir) = setup_project().await;
-    let huge_source = "preflight oversized active context ".repeat(8_000);
+    let dir = test_temp_dir();
+    let (cg, _env) = init_test_project(dir.path()).await;
+    let huge_source = "preflight oversized active context ".repeat(1_000);
 
     let preflight = handle_tool_call(
         &cg,
@@ -9280,7 +9287,8 @@ async fn lcm_status_response_is_valid_json_and_omits_payload_secrets() {
 
 #[tokio::test]
 async fn lcm_status_reports_lifecycle_fields_and_resolved_storage_scope() {
-    let (cg, _dir) = setup_project().await;
+    let dir = test_temp_dir();
+    let (cg, _env) = init_test_project(dir.path()).await;
     seed_lcm_session_message(
         &cg,
         "lcm-status-frontier",
@@ -9594,7 +9602,8 @@ async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
 
 #[tokio::test]
 async fn lcm_grep_accepts_string_timestamp_filters() {
-    let (cg, _dir) = setup_project().await;
+    let dir = test_temp_dir();
+    let (cg, _env) = init_test_project(dir.path()).await;
     seed_lcm_session_message_with_role_source_timestamp(
         &cg,
         "lcm-string-timestamps",

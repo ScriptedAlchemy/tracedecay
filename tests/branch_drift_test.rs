@@ -7,7 +7,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 use tempfile::TempDir;
 use tracedecay::branch_meta::{save_branch_meta, BranchMeta};
 use tracedecay::config::USER_DATA_DIR_ENV;
@@ -67,13 +67,17 @@ fn canonical_temp_path(path: &Path) -> PathBuf {
     }
 }
 
-fn git(project: &Path, args: &[&str]) {
-    let status = Command::new("git")
+fn git_output(project: &Path, args: &[&str]) -> Output {
+    Command::new("git")
         .args(["-c", "core.hooksPath=.git/no-hooks"])
         .args(args)
         .current_dir(project)
         .output()
-        .expect("git command failed to spawn");
+        .expect("git command failed to spawn")
+}
+
+fn git(project: &Path, args: &[&str]) {
+    let status = git_output(project, args);
     assert!(
         status.status.success(),
         "git {args:?} failed: {}",
@@ -81,17 +85,55 @@ fn git(project: &Path, args: &[&str]) {
     );
 }
 
+fn git_init_dash_b_unsupported(output: &Output) -> bool {
+    let message = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    )
+    .to_lowercase();
+    (message.contains("unknown switch") || message.contains("unknown option"))
+        && (message.contains("`b'") || message.contains("'b'") || message.contains("-b"))
+}
+
+fn init_git_on_main(project: &Path) {
+    let output = git_output(project, &["init", "-b", "main"]);
+    if output.status.success() {
+        return;
+    }
+    assert!(
+        git_init_dash_b_unsupported(&output),
+        "git {:?} failed: {}",
+        ["init", "-b", "main"],
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    git(project, &["init"]);
+    git(project, &["branch", "-M", "main"]);
+}
+
+fn commit_all(project: &Path, message: &str) {
+    git(project, &["add", "."]);
+    git(
+        project,
+        &[
+            "-c",
+            "user.name=TraceDecay Test",
+            "-c",
+            "user.email=tracedecay-test@example.com",
+            "commit",
+            "-m",
+            message,
+        ],
+    );
+}
+
 /// Initialize a git repo on branch `main` with one committed source file.
 fn init_repo_on_main(project: &Path) {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn f() -> u32 { 1 }\n").unwrap();
-    git(project, &["init"]);
-    git(project, &["config", "user.email", "test@test.com"]);
-    git(project, &["config", "user.name", "Test"]);
-    git(project, &["add", "."]);
-    git(project, &["commit", "-m", "initial"]);
-    // Guarantee the branch is named `main` regardless of git's init default.
-    git(project, &["branch", "-M", "main"]);
+    init_git_on_main(project);
+    commit_all(project, "initial");
 }
 
 fn project_data_dir(project: &Path) -> PathBuf {
@@ -302,8 +344,7 @@ async fn open_repairs_missing_tracked_branch_db_before_diagnostics() {
         "pub fn tracked_only() {}\n",
     )
     .unwrap();
-    git(project, &["add", "."]);
-    git(project, &["commit", "-m", "feature"]);
+    commit_all(project, "feature");
 
     TraceDecay::add_branch_tracking(project, "feature/tracked")
         .await

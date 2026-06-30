@@ -27,6 +27,7 @@ use tempfile::TempDir;
 use tracedecay::memory::store::MemoryStore;
 use tracedecay::memory::trust::DEFAULT_TRUST;
 use tracedecay::memory::types::{AddFactRequest, MemoryCategory};
+use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 #[derive(Deserialize)]
 struct Scenario {
@@ -415,6 +416,26 @@ fn canonical_test_dir(path: &Path) -> PathBuf {
         .unwrap_or_else(|e| panic!("failed to canonicalize test dir {}: {e}", path.display()))
 }
 
+fn initialize_fixture_project(fixture: &Fixture) {
+    let profile_root = fixture.home_path.join(".tracedecay");
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(profile_root.clone()),
+        global_db_path: Some(profile_root.join("global.db")),
+    };
+    runtime().block_on(async {
+        let cg = TraceDecay::init_with_options(&fixture.project_path, open_options)
+            .await
+            .unwrap_or_else(|e| panic!("initialize fixture project: {e}"));
+        cg.index_all_with_progress(|_, _, _| {})
+            .await
+            .unwrap_or_else(|e| panic!("index fixture project: {e}"));
+        cg.checkpoint()
+            .await
+            .unwrap_or_else(|e| panic!("checkpoint fixture project: {e}"));
+        cg.close();
+    });
+}
+
 fn build_fixture(setup: &Setup) -> Fixture {
     let home = TempDir::new().expect("home tempdir");
     let project = TempDir::new().expect("project tempdir");
@@ -435,7 +456,7 @@ fn build_fixture(setup: &Setup) -> Fixture {
         std::fs::write(fixture.project_path.join(name), contents)
             .unwrap_or_else(|e| panic!("write fixture file {name}: {e}"));
     }
-    run_ok(&fixture, &["init"]);
+    initialize_fixture_project(&fixture);
     seed_setup_facts(&fixture, &setup.facts);
     #[cfg(unix)]
     {

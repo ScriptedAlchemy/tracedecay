@@ -108,12 +108,12 @@ fn summary_request_for_backlog(
         focus_topic,
         prompt,
         source_range: source_range.clone(),
-        source_messages: source_messages.clone(),
         extraction_request: extraction::build_extraction_request(
             session_id,
             &source_range,
             &source_messages,
         ),
+        source_messages,
     }
 }
 

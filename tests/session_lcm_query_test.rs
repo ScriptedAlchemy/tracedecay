@@ -80,23 +80,70 @@ async fn insert_session(db: &GlobalDb, provider: &str, session_id: &str) {
 
 async fn insert_raw_messages(
     db: &GlobalDb,
+    db_path: &std::path::Path,
     provider: &str,
     session_id: &str,
     contents: &[String],
 ) -> Vec<i64> {
     insert_session(db, provider, session_id).await;
-    let mut store_ids = Vec::new();
+    let mut message_ids = Vec::new();
     for (idx, content) in contents.iter().enumerate() {
         let message_id = format!("{session_id}-message-{:03}", idx + 1);
         let message = raw_message(provider, &message_id, session_id, (idx + 1) as i64, content);
         assert!(db.upsert_session_message(&message).await);
-        let raw = db
-            .lcm_load_raw_message(provider, &message_id)
-            .await
-            .expect("raw message should exist");
-        store_ids.push(raw.store_id);
+        message_ids.push(message_id);
     }
-    store_ids
+
+    if message_ids.is_empty() {
+        return Vec::new();
+    }
+
+    let mut store_ids_by_message_id = std::collections::BTreeMap::new();
+    let raw_db = libsql::Builder::new_local(db_path).build().await.unwrap();
+    let conn = raw_db.connect().unwrap();
+    let placeholders = std::iter::repeat_n("?", message_ids.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT message_id, store_id
+         FROM lcm_raw_messages
+         WHERE provider = ?
+           AND session_id = ?
+           AND message_id IN ({placeholders})
+         ORDER BY message_id"
+    );
+    let mut values = vec![
+        libsql::Value::Text(provider.to_string()),
+        libsql::Value::Text(session_id.to_string()),
+    ];
+    values.extend(message_ids.iter().cloned().map(libsql::Value::Text));
+    let mut rows = conn
+        .query(&sql, libsql::params_from_iter(values))
+        .await
+        .expect("raw message store ids should query after insert");
+    while let Some(row) = rows
+        .next()
+        .await
+        .expect("raw message store id row should read")
+    {
+        let message_id = row
+            .get::<String>(0)
+            .expect("raw message message_id should decode");
+        let store_id = row
+            .get::<i64>(1)
+            .expect("raw message store_id should decode");
+        store_ids_by_message_id.insert(message_id, store_id);
+    }
+
+    assert_eq!(store_ids_by_message_id.len(), message_ids.len());
+    message_ids
+        .into_iter()
+        .map(|message_id| {
+            *store_ids_by_message_id
+                .get(&message_id)
+                .unwrap_or_else(|| panic!("raw message {message_id} should exist"))
+        })
+        .collect()
 }
 
 fn summary_draft(
@@ -152,7 +199,14 @@ async fn load_session_returns_ordered_raw_pages_with_stable_cursor() {
     let contents = (1..=105)
         .map(|idx| format!("message-{idx:03}"))
         .collect::<Vec<_>>();
-    let store_ids = insert_raw_messages(&db, "cursor", "session-1", &contents).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        &isolated_db_path(&tmp),
+        "cursor",
+        "session-1",
+        &contents,
+    )
+    .await;
 
     let first = db
         .lcm_load_session(LcmLoadSessionRequest {
@@ -232,6 +286,7 @@ async fn grep_searches_raw_snippets_and_summary_nodes() {
     let db = open_lcm_db(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
+        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &[
@@ -292,6 +347,7 @@ async fn grep_tokenizes_punctuation_heavy_path_like_queries() {
     let db = open_lcm_db(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
+        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &[
@@ -338,6 +394,7 @@ async fn grep_like_fallback_recalls_infix_hyphen_query_matches() {
     let db = open_lcm_db(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
+        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &[
@@ -387,6 +444,7 @@ async fn grep_like_fallback_recalls_infix_slash_query_matches() {
     let db = open_lcm_db(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
+        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &["the docs mention srcfoo as a fused path token".to_string()],
@@ -422,6 +480,7 @@ async fn grep_like_fallback_handles_hash_separator_queries() {
     let db = open_lcm_db(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
+        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &["the log references issue#123 inside a Cursor transcript".to_string()],
@@ -454,6 +513,7 @@ async fn grep_quotes_reserved_operator_looking_query_text() {
     let db = open_lcm_db(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
+        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &[
@@ -491,6 +551,7 @@ async fn grep_preserves_quoted_phrase_semantics() {
     let db = open_lcm_db(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
+        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &[
@@ -527,6 +588,7 @@ async fn grep_preserves_boolean_or_semantics() {
     let db = open_lcm_db(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
+        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &[
@@ -572,6 +634,7 @@ async fn grep_cjk_query_uses_like_fallback_substring_matching() {
     let db = open_lcm_db(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
+        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &[
@@ -744,6 +807,7 @@ async fn status_reports_schema_frontier_payload_and_debt_counts() {
     let db = open_lcm_db(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
+        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &["alpha".to_string(), "beta".to_string()],
@@ -897,7 +961,14 @@ async fn describe_gives_session_overview_without_full_payload_bodies() {
     let tmp = TempDir::new().unwrap();
     let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
-    let store_ids = insert_raw_messages(&db, "cursor", "session-1", &["alpha".to_string()]).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        &isolated_db_path(&tmp),
+        "cursor",
+        "session-1",
+        &["alpha".to_string()],
+    )
+    .await;
     let payload = format!("describe secret body\n{}", "D".repeat(300_000));
     let mut external = raw_message("cursor", "tool-describe", "session-1", 2, &payload);
     external.role = "tool".to_string();
@@ -947,6 +1018,7 @@ async fn describe_node_and_external_payload_return_metadata_without_body_leaks()
     let db = open_lcm_db(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
+        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &[
@@ -1056,6 +1128,7 @@ async fn expand_returns_sliced_raw_summary_and_payload_content_with_ranges() {
     let db = open_lcm_db(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
+        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &["0123456789abcdef".to_string()],
@@ -1187,7 +1260,14 @@ async fn expand_slices_summary_source_content_and_nested_source_bodies() {
         .join(" ");
     let huge_source = format!("source-prefix-{filler}");
     let huge_source_chars = huge_source.chars().count() as u64;
-    let store_ids = insert_raw_messages(&db, "cursor", "session-1", &[huge_source]).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        &isolated_db_path(&tmp),
+        "cursor",
+        "session-1",
+        &[huge_source],
+    )
+    .await;
     let summary = db
         .lcm_insert_summary_node(summary_draft(
             "cursor",
@@ -1249,8 +1329,14 @@ async fn expand_slices_summary_source_content_and_nested_source_bodies() {
 async fn expand_wrapper_denies_cross_session_summary_nodes() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
-    let store_ids =
-        insert_raw_messages(&db, "cursor", "session-1", &["owned by session one".into()]).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        &isolated_db_path(&tmp),
+        "cursor",
+        "session-1",
+        &["owned by session one".into()],
+    )
+    .await;
     insert_session(&db, "cursor", "session-2").await;
     let summary = db
         .lcm_insert_summary_node(summary_draft(
@@ -1287,6 +1373,7 @@ async fn expand_query_returns_no_match_without_synthesis() {
     let db = open_lcm_db(&tmp).await;
     insert_raw_messages(
         &db,
+        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &["ordinary transcript without the target term".to_string()],
@@ -1324,6 +1411,7 @@ async fn expand_query_selects_summary_and_raw_context_blocks() {
     let db = open_lcm_db(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
+        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &[
@@ -1390,7 +1478,14 @@ async fn expand_query_reports_context_budget_truncation() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
     let long_source = format!("raw lemon details {}", "L".repeat(4000));
-    let store_ids = insert_raw_messages(&db, "cursor", "session-1", &[long_source]).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        &isolated_db_path(&tmp),
+        "cursor",
+        "session-1",
+        &[long_source],
+    )
+    .await;
     let summary = db
         .lcm_insert_summary_node(summary_draft(
             "cursor",
@@ -1437,7 +1532,14 @@ async fn expand_paginates_summary_sources_with_offset_and_limit() {
     let contents: Vec<String> = (1..=5)
         .map(|index| format!("source body {index}"))
         .collect();
-    let store_ids = insert_raw_messages(&db, "cursor", "session-1", &contents).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        &isolated_db_path(&tmp),
+        "cursor",
+        "session-1",
+        &contents,
+    )
+    .await;
     let summary = db
         .lcm_insert_summary_node(summary_draft(
             "cursor",
@@ -1524,6 +1626,7 @@ async fn expand_allows_cross_session_raw_store_id_with_provenance() {
     let db = open_lcm_db(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
+        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &["cross session body".to_string()],
@@ -1648,6 +1751,7 @@ async fn status_reports_dag_depth_distribution_store_estimate_and_config_default
     let db = open_lcm_db(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
+        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &["alpha beta gamma".to_string(), "delta epsilon".to_string()],
@@ -1723,6 +1827,7 @@ async fn status_uses_python_half_even_rounding_for_ratio_ties() {
     let db = open_lcm_db(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
+        &isolated_db_path(&tmp),
         "cursor",
         "session-tie",
         &["alpha".to_string(), "beta".to_string()],
@@ -1756,7 +1861,14 @@ async fn load_session_exact_final_page_omits_next_cursor() {
     let contents = (1..=4)
         .map(|idx| format!("edge-message-{idx}"))
         .collect::<Vec<_>>();
-    let store_ids = insert_raw_messages(&db, "cursor", "session-edge", &contents).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        &isolated_db_path(&tmp),
+        "cursor",
+        "session-edge",
+        &contents,
+    )
+    .await;
     let request = |after_store_id: Option<i64>, limit: usize| LcmLoadSessionRequest {
         provider: "cursor".into(),
         session_id: "session-edge".into(),
@@ -1873,7 +1985,14 @@ async fn content_slices_use_char_offsets_for_multibyte_content() {
     let content = "αβγδε🦀abc".to_string();
     assert_eq!(content.chars().count(), 9);
     assert_eq!(content.len(), 17);
-    let store_ids = insert_raw_messages(&db, "cursor", "session-utf8", &[content]).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        &isolated_db_path(&tmp),
+        "cursor",
+        "session-utf8",
+        &[content],
+    )
+    .await;
 
     let page = db
         .lcm_load_session(LcmLoadSessionRequest {
