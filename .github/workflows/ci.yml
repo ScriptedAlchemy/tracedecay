@@ -142,7 +142,7 @@ jobs:
           cache-on-failure: true
 
       - name: Run Windows tests
-        run: cargo nextest run --workspace --profile ci --locked --partition hash:${{ matrix.partition }}/10 --test-threads num-cpus --status-level slow
+        run: cargo nextest run --workspace --profile ci --locked --partition slice:${{ matrix.partition }}/10 --test-threads num-cpus --status-level slow
 
       - name: Clean abandoned Windows test children
         if: always()

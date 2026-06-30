@@ -6446,20 +6446,24 @@ async fn memory_fact_store_update_trust_delta_uses_direct_fact_lookup() {
     let first: Value = serde_json::from_str(extract_text(&first.value)).unwrap();
     let first_id = first["fact"]["fact_id"].as_i64().unwrap();
 
-    for i in 0..205 {
-        handle_tool_call(
-            &cg,
-            "tracedecay_fact_store",
-            json!({
-                "action": "add",
-                "content": format!("Later fact {i} should not hide the first fact"),
-            }),
-            None,
-            None,
-        )
-        .await
-        .unwrap();
+    let db = cg.open_project_store_db().await.unwrap();
+    db.conn().execute("BEGIN IMMEDIATE", ()).await.unwrap();
+    for i in 0..205i64 {
+        db.conn()
+            .execute(
+                "INSERT INTO memory_facts (
+                    content, category, tags, trust_score, created_at, updated_at, source, metadata
+                 )
+                 VALUES (?1, 'general', '[]', 0.5, ?2, ?2, 'test', '{}')",
+                libsql::params![
+                    format!("Later fact {i} should not hide the first fact"),
+                    9_000_000_000i64 + i,
+                ],
+            )
+            .await
+            .unwrap();
     }
+    db.conn().execute("COMMIT", ()).await.unwrap();
 
     let updated = handle_tool_call(
         &cg,
