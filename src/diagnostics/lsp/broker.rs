@@ -146,7 +146,7 @@ impl PreparedRefresh {
                 None => client_slot.insert(
                     StdioLspClient::start(&self.command, &self.args, &batch.workspace_root)
                         .await
-                        .map_err(RefreshFailure::crashed)?,
+                        .map_err(|err| RefreshFailure::crashed(&err))?,
                 ),
             };
             let result = client
@@ -160,7 +160,7 @@ impl PreparedRefresh {
                 Ok(mut batch_diagnostics) => diagnostics.append(&mut batch_diagnostics),
                 Err(err) => {
                     *client_slot = None;
-                    return Err(RefreshFailure::crashed(err));
+                    return Err(RefreshFailure::crashed(&err));
                 }
             }
         }
@@ -175,7 +175,7 @@ struct RefreshFailure {
 }
 
 impl RefreshFailure {
-    fn crashed(err: TraceDecayError) -> Self {
+    fn crashed(err: &TraceDecayError) -> Self {
         Self {
             state: EngineState::Crashed,
             message: err.to_string(),

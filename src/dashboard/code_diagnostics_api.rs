@@ -45,7 +45,7 @@ enum CommandOverridePatch {
 
 pub(crate) async fn overview(State(state): State<DashboardState>) -> ApiResult {
     let snapshot = diagnostics_snapshot(&state).await?;
-    maybe_spawn_idle_backfill(&state, &snapshot).await;
+    maybe_spawn_idle_backfill(&state, &snapshot);
     Ok(Json(json!(snapshot)))
 }
 
@@ -199,7 +199,7 @@ async fn refresh_one_reconciled(
     Ok(())
 }
 
-async fn maybe_spawn_idle_backfill(
+fn maybe_spawn_idle_backfill(
     state: &DashboardState,
     snapshot: &crate::diagnostics::lsp::broker::DiagnosticsSnapshot,
 ) {
