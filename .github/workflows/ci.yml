@@ -107,6 +107,7 @@ jobs:
     name: Test Windows
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on: windows-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
 
@@ -163,8 +164,11 @@ jobs:
             Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
           }
 
+      - name: Build Windows tests
+        run: cargo nextest run --workspace --profile ci --test-threads num-cpus --no-run
+
       - name: Run Windows tests
-        run: cargo nextest run --workspace --profile ci --test-threads num-cpus
+        run: cargo nextest run --workspace --profile ci --test-threads num-cpus --status-level all
 
       - name: Clean abandoned Windows test children
         if: always()
