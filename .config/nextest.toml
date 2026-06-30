@@ -5,16 +5,19 @@ flaky-result = "fail"
 slow-timeout = { period = "10s", terminate-after = 36 }
 final-status-level = "slow"
 
+[profile.ci.junit]
+path = "junit.xml"
+
 [test-groups]
-windows-dashboard-server = { max-threads = 2 }
-windows-tracedecay-init = { max-threads = 1 }
-windows-init-heavy = { max-threads = 4 }
-windows-profile-storage = { max-threads = 1 }
-windows-session-sqlite = { max-threads = 8 }
-windows-process-heavy = { max-threads = 2 }
-windows-subprocess = { max-threads = 1 }
-windows-memory-eval = { max-threads = 1 }
-windows-timing-sensitive = { max-threads = 1 }
+windows-dashboard-server = { max-threads = 32 }
+windows-tracedecay-init = { max-threads = 32 }
+windows-init-heavy = { max-threads = 32 }
+windows-profile-storage = { max-threads = 32 }
+windows-session-sqlite = { max-threads = 32 }
+windows-process-heavy = { max-threads = 32 }
+windows-subprocess = { max-threads = 32 }
+windows-memory-eval = { max-threads = 32 }
+windows-timing-sensitive = { max-threads = 32 }
 
 [[profile.ci.overrides]]
 filter = 'all()'
@@ -61,11 +64,6 @@ test-group = 'windows-subprocess'
 filter = 'binary(=memory_eval_test)'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-memory-eval'
-
-[[profile.ci.overrides]]
-filter = 'binary(=cli_non_interactive_test) | binary(=cursor_transcript_ingest_test) | binary(=memory_eval_test) | test(=curation_agent_plan_skips_when_automation_is_disabled_and_records_history) | test(=daily_model_series_limits_days_not_model_rows) | test(=memory_fact_store_update_trust_delta_uses_direct_fact_lookup)'
-platform = { host = 'cfg(windows)' }
-threads-required = "num-test-threads"
 
 [[profile.ci.overrides]]
 filter = 'test(=dead_code_marker_resolve_is_single_pass)'

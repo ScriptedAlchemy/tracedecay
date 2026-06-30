@@ -1,5 +1,1 @@
-self-hosted-runner:
-  labels:
-    - windows-runner
-
 config-variables: null

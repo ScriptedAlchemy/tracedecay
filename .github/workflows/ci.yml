@@ -57,6 +57,7 @@ jobs:
   test:
     name: Test ${{ matrix.name }}
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    needs: windows-test
     runs-on: ${{ fromJSON(matrix.runner) }}
     strategy:
       fail-fast: false
@@ -88,30 +89,35 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
-      - name: Cache Cargo
-        uses: actions/cache@v6
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-test-
-            ${{ runner.os }}-cargo-
+          shared-key: ci-test-full-${{ runner.os }}
+          cache-on-failure: true
 
       - name: Run tests
-        run: cargo nextest run --workspace --profile ci
+        run: cargo nextest run --workspace --profile ci --locked
 
-  windows-test:
-    name: Test Windows
+  windows-test-shard:
+    name: Test Windows shard ${{ matrix.partition }}/10
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on: windows-latest
-    timeout-minutes: 90
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     steps:
       - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Use lld-link linker
+        shell: pwsh
+        run: |
+          where.exe lld-link.exe
+          lld-link.exe --version
+          "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=lld-link.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - uses: actions/setup-node@v4
         with:
@@ -130,60 +136,25 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
-      - name: Use lld-link
-        shell: pwsh
-        run: |
-          where.exe lld-link
-          lld-link --version
-          "RUSTFLAGS=-C linker=lld-link.exe" >> $env:GITHUB_ENV
-
-      - name: Cache Rust build
+      - name: Cache Windows Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: windows-test
+          shared-key: ci-test-full-windows-msvc-lld
           cache-on-failure: true
 
-      - name: Clean stale Windows test processes
-        shell: pwsh
-        run: |
-          $workspace = (Resolve-Path $env:GITHUB_WORKSPACE).Path
-          $repoWorkPath = "\_work\tracedecay\tracedecay"
-          $all = Get-CimInstance Win32_Process
-          $stale = foreach ($process in $all) {
-            if ($process.Name -notin @("tracedecay.exe", "cargo.exe", "cargo-nextest.exe", "rustc.exe", "link.exe", "sccache.exe")) {
-              continue
-            }
-            if (-not $process.CommandLine) {
-              continue
-            }
-            $inCurrentWorkspace = $process.CommandLine.IndexOf($workspace, [StringComparison]::OrdinalIgnoreCase) -ge 0
-            $inRepoWorktree = $process.CommandLine.IndexOf($repoWorkPath, [StringComparison]::OrdinalIgnoreCase) -ge 0
-            if (-not $inCurrentWorkspace -and -not $inRepoWorktree) {
-              continue
-            }
-            $parent = $all | Where-Object { $_.ProcessId -eq $process.ParentProcessId }
-            if (-not $parent) {
-              $process
-            }
-          }
-          foreach ($process in $stale) {
-            Write-Host "Stopping stale process $($process.Name) pid=$($process.ProcessId)"
-            Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
-          }
-
-      - name: Build Windows tests
-        run: cargo nextest run --workspace --profile ci --test-threads num-cpus --no-run
-
       - name: Run Windows tests
-        run: cargo nextest run --workspace --profile ci --test-threads num-cpus --status-level all
+        run: cargo nextest run --workspace --profile ci --locked --partition hash:${{ matrix.partition }}/10 --test-threads num-cpus --status-level slow
 
       - name: Clean abandoned Windows test children
         if: always()
         shell: pwsh
         run: |
           $workspace = (Resolve-Path $env:GITHUB_WORKSPACE).Path
-          $repoWorkPath = "\_work\tracedecay\tracedecay"
           $all = Get-CimInstance Win32_Process
+          $liveProcessIds = [System.Collections.Generic.HashSet[uint32]]::new()
+          foreach ($process in $all) {
+            [void]$liveProcessIds.Add([uint32]$process.ProcessId)
+          }
           $stale = foreach ($process in $all) {
             if ($process.Name -ne "tracedecay.exe") {
               continue
@@ -192,12 +163,10 @@ jobs:
               continue
             }
             $inCurrentWorkspace = $process.CommandLine.IndexOf($workspace, [StringComparison]::OrdinalIgnoreCase) -ge 0
-            $inRepoWorktree = $process.CommandLine.IndexOf($repoWorkPath, [StringComparison]::OrdinalIgnoreCase) -ge 0
-            if (-not $inCurrentWorkspace -and -not $inRepoWorktree) {
+            if (-not $inCurrentWorkspace) {
               continue
             }
-            $parent = $all | Where-Object { $_.ProcessId -eq $process.ParentProcessId }
-            if (-not $parent) {
+            if (-not $liveProcessIds.Contains([uint32]$process.ParentProcessId)) {
               $process
             }
           }
@@ -206,9 +175,33 @@ jobs:
             Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
           }
 
+      - name: Upload Windows nextest report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-nextest-junit-${{ matrix.partition }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
+  windows-test:
+    name: Test Windows
+    if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref)) }}
+    needs: windows-test-shard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Windows shards
+        run: |
+          if [ "${{ needs.windows-test-shard.result }}" != "success" ]; then
+            echo "Windows shard result: ${{ needs.windows-test-shard.result }}"
+            exit 1
+          fi
+          echo "All Windows shards passed."
+
   clippy:
     name: Clippy
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    needs: windows-test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -216,19 +209,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - name: Cache Cargo
-        uses: actions/cache@v6
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-clippy-
-            ${{ runner.os }}-cargo-
+          shared-key: ci-clippy-full-${{ runner.os }}
+          cache-on-failure: true
       - name: Run blocking Clippy policy
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   fmt:
     name: Format
@@ -244,6 +231,7 @@ jobs:
   dashboard:
     name: Dashboard
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    needs: windows-test
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -304,20 +292,14 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
-      - name: Cache Cargo
-        uses: actions/cache@v6
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: ${{ runner.os }}-cargo-dashboard-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-dashboard-
-            ${{ runner.os }}-cargo-
+          shared-key: ci-dashboard-full-${{ runner.os }}
+          cache-on-failure: true
 
       - name: Run dashboard integration tests
-        run: cargo nextest run --test dashboard_api_test --no-fail-fast
+        run: cargo nextest run --test dashboard_api_test --no-fail-fast --locked
 
       - name: Cache Playwright browsers
         uses: actions/cache@v6
@@ -332,7 +314,7 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Prebuild dashboard binary for smoke
-        run: cargo build --bin tracedecay
+        run: cargo build --bin tracedecay --locked
 
       - name: Run dashboard smoke (empty LCM)
         working-directory: dashboard
@@ -368,6 +350,7 @@ jobs:
   hermes-integration:
     name: Hermes integration (stock)
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    needs: windows-test
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -386,20 +369,14 @@ jobs:
           npm install --global "@ast-grep/cli@${AST_GREP_VERSION}"
           ast-grep --version
 
-      - name: Cache Cargo
-        uses: actions/cache@v6
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: ${{ runner.os }}-cargo-hermes-integration-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-hermes-integration-
-            ${{ runner.os }}-cargo-
+          shared-key: ci-hermes-integration-full-${{ runner.os }}
+          cache-on-failure: true
 
       - name: Build tracedecay binary
-        run: cargo build --bin tracedecay
+        run: cargo build --bin tracedecay --locked
 
       - name: Run generated-plugin unit checks (no Hermes required)
         run: python3 scripts/hermes_plugin_unit_check.py
