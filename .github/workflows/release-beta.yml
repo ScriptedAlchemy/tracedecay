@@ -64,6 +64,14 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Use lld-link
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          where.exe lld-link
+          lld-link --version
+          "RUSTFLAGS=-C linker=lld-link.exe" >> $env:GITHUB_ENV
+
       - name: Cache Cargo
         uses: actions/cache@v4
         with:

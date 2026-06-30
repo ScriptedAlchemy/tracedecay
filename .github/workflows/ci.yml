@@ -130,6 +130,13 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
+      - name: Use lld-link
+        shell: pwsh
+        run: |
+          where.exe lld-link
+          lld-link --version
+          "RUSTFLAGS=-C linker=lld-link.exe" >> $env:GITHUB_ENV
+
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
