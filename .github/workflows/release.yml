@@ -4,6 +4,11 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing release tag to rebuild and publish, for example v0.0.17"
+        required: false
+        type: string
 
 # Skip beta/prerelease tags — handled by release-beta.yml
 
@@ -39,12 +44,14 @@ jobs:
             target: aarch64-unknown-linux-gnu
             archive: tar.gz
           - name: x86_64-windows
-            runner: [windows-runner]
+            runner: windows-latest
             target: x86_64-pc-windows-msvc
             archive: zip
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
 
       - uses: actions/setup-node@v4
         with:
@@ -62,17 +69,11 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Cache Cargo
-        uses: actions/cache@v4
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.target }}-cargo-release-
-            ${{ runner.os }}-${{ matrix.target }}-cargo-
+          shared-key: release-${{ matrix.target }}
+          cache-on-failure: true
 
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
@@ -81,7 +82,10 @@ jobs:
         id: version
         shell: bash
         run: |
-          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ -n "${{ inputs.release_tag }}" ]; then
+            TAG="${{ inputs.release_tag }}"
+            VERSION="${TAG#v}"
+          elif [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
             TAG="dry-run-${GITHUB_SHA::7}"
             VERSION="${TAG#v}"
           else
@@ -106,12 +110,12 @@ jobs:
         with:
           subject-path: tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.${{ matrix.archive }}
 
-      - name: Upload binary archive (unix)
-        if: matrix.archive == 'tar.gz' && github.event_name == 'release'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: gh release upload ${{ github.ref_name }} tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.${{ matrix.archive }} --clobber
+      - name: Upload binary archive artifact (unix)
+        if: matrix.archive == 'tar.gz'
+        uses: actions/upload-artifact@v6
+        with:
+          name: binary-${{ matrix.name }}
+          path: tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.${{ matrix.archive }}
 
       - name: Package binary (windows)
         if: matrix.archive == 'zip'
@@ -125,12 +129,12 @@ jobs:
         with:
           subject-path: tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.${{ matrix.archive }}
 
-      - name: Upload binary archive (windows)
-        if: matrix.archive == 'zip' && github.event_name == 'release'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: gh release upload ${{ github.ref_name }} tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.${{ matrix.archive }} --clobber
+      - name: Upload binary archive artifact (windows)
+        if: matrix.archive == 'zip'
+        uses: actions/upload-artifact@v6
+        with:
+          name: binary-${{ matrix.name }}
+          path: tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.${{ matrix.archive }}
 
       # --- Homebrew bottle (only for platforms with bottle_tag) ---
 
@@ -151,16 +155,55 @@ jobs:
           subject-path: tracedecay-${{ steps.version.outputs.version }}.${{ matrix.bottle_tag }}.bottle.tar.gz
 
       - name: Upload bottle artifact
-        if: matrix.bottle_tag && github.event_name == 'release'
+        if: matrix.bottle_tag
         uses: actions/upload-artifact@v6
         with:
           name: bottle-${{ matrix.bottle_tag }}
           path: "tracedecay-*.bottle.tar.gz"
 
+  publish-assets:
+    name: Publish release assets
+    if: |
+      needs.build.result == 'success' &&
+      (
+        (github.event_name == 'release' && !github.event.release.prerelease) ||
+        (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+      )
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get release tag
+        id: release
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.release_tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Download binary artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: binary-*
+          path: binaries
+          merge-multiple: true
+
+      - name: Upload binaries to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ steps.release.outputs.tag }}" binaries/tracedecay-* --clobber
+
   update-homebrew:
     name: Update Homebrew tap
-    if: github.event_name == 'release' && !github.event.release.prerelease && needs.build.result == 'success'
-    needs: build
+    if: |
+      needs.build.result == 'success' &&
+      (
+        (github.event_name == 'release' && !github.event.release.prerelease) ||
+        (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+      )
+    needs: [build, publish-assets]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -168,12 +211,19 @@ jobs:
       - name: Get version
         id: version
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.release_tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Download bottle artifacts
         uses: actions/download-artifact@v7
         with:
+          pattern: bottle-*
           path: bottles
           merge-multiple: true
 
@@ -182,12 +232,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           for f in bottles/tracedecay-*.bottle.tar.gz; do
-            gh release upload "${GITHUB_REF_NAME}" "$f" --clobber
+            gh release upload "${{ steps.version.outputs.tag }}" "$f" --clobber
           done
 
       - name: Download source tarball
         run: |
-          curl -sL "https://github.com/${{ github.repository }}/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz" -o "source.tar.gz"
+          curl -sL "https://github.com/${{ github.repository }}/archive/refs/tags/${{ steps.version.outputs.tag }}.tar.gz" -o "source.tar.gz"
 
       - name: Compute SHA256 hashes
         id: hashes
@@ -253,8 +303,13 @@ jobs:
 
   update-scoop:
     name: Update Scoop bucket
-    if: github.event_name == 'release' && !github.event.release.prerelease && needs.build.result == 'success'
-    needs: build
+    if: |
+      needs.build.result == 'success' &&
+      (
+        (github.event_name == 'release' && !github.event.release.prerelease) ||
+        (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+      )
+    needs: [build, publish-assets]
     runs-on: ubuntu-latest
     steps:
       - name: Get release info
@@ -262,15 +317,20 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.release_tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          VERSION="${TAG#v}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
-          gh release download "${GITHUB_REF_NAME}" \
+          gh release download "${TAG}" \
             --repo "${{ github.repository }}" \
-            --pattern "tracedecay-${GITHUB_REF_NAME}-x86_64-windows.zip" \
+            --pattern "tracedecay-${TAG}-x86_64-windows.zip" \
             --dir .
-          SHA256=$(sha256sum "tracedecay-${GITHUB_REF_NAME}-x86_64-windows.zip" | cut -d' ' -f1)
+          SHA256=$(sha256sum "tracedecay-${TAG}-x86_64-windows.zip" | cut -d' ' -f1)
           echo "sha256_win64=${SHA256}" >> "$GITHUB_OUTPUT"
 
       # NOTE: the Scoop bucket (ScriptedAlchemy/scoop-bucket) is an external
@@ -327,8 +387,13 @@ jobs:
   # no MCPB packages, since those are not yet produced by the build matrix.
   update-server-json:
     name: Update server.json manifest
-    if: github.event_name == 'release' && !github.event.release.prerelease && needs.build.result == 'success'
-    needs: build
+    if: |
+      needs.build.result == 'success' &&
+      (
+        (github.event_name == 'release' && !github.event.release.prerelease) ||
+        (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+      )
+    needs: [build, publish-assets]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -340,7 +405,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.release_tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
           VERSION="${TAG#v}"
           REPO="${{ github.repository }}"
           PLATFORMS="aarch64-macos:mcp.tar.gz x86_64-linux:mcp.tar.gz aarch64-linux:mcp.tar.gz x86_64-windows:mcp.zip"
