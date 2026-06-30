@@ -24,17 +24,8 @@ pub(crate) struct DashboardRuntime {
 
 #[derive(Clone)]
 struct CachedProjectState {
-    fingerprint: ProjectCacheFingerprint,
+    registry_context: ProjectRegistryContext,
     state: DashboardState,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ProjectCacheFingerprint(ProjectRegistryContext);
-
-impl ProjectCacheFingerprint {
-    fn from_registry_context(context: &ProjectRegistryContext) -> Self {
-        Self(context.clone())
-    }
 }
 
 impl DashboardRuntime {
@@ -79,9 +70,8 @@ impl DashboardRuntime {
             .project_registry_context_by_id(project_id)
             .await
             .ok_or_else(|| config_error(format!("registered project not found: {project_id}")))?;
-        let fingerprint = ProjectCacheFingerprint::from_registry_context(&context);
         if let Some(cached) = self.project_states.read().await.get(project_id).cloned() {
-            if cached.fingerprint == fingerprint {
+            if cached.registry_context == context {
                 return Ok(SelectedProjectState {
                     state: cached.state,
                 });
@@ -98,7 +88,7 @@ impl DashboardRuntime {
         let state = build_selected_project_state(&cg).await;
         let mut project_states = self.project_states.write().await;
         if let Some(cached) = project_states.get(project_id).cloned() {
-            if cached.fingerprint == fingerprint {
+            if cached.registry_context == context {
                 return Ok(SelectedProjectState {
                     state: cached.state,
                 });
@@ -107,7 +97,7 @@ impl DashboardRuntime {
         project_states.insert(
             project_id.to_string(),
             CachedProjectState {
-                fingerprint,
+                registry_context: context,
                 state: state.clone(),
             },
         );
@@ -214,7 +204,6 @@ pub(crate) async fn context(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::global_db::{
         CodeProjectRecord, GraphScopeRecord, ProjectRegistryContext, ProjectStoreContext,
         StoreArtifactRecord, StoreInstanceRecord,
@@ -276,20 +265,17 @@ mod tests {
     }
 
     #[test]
-    fn project_cache_fingerprint_changes_with_project_metadata() {
+    fn registry_context_changes_with_project_metadata() {
         let base = registry_context();
         let mut changed = registry_context();
         changed.project.canonical_root = "/new-repo".to_string();
         changed.project.last_seen_at += 1;
 
-        assert_ne!(
-            ProjectCacheFingerprint::from_registry_context(&base),
-            ProjectCacheFingerprint::from_registry_context(&changed)
-        );
+        assert_ne!(base, changed);
     }
 
     #[test]
-    fn project_cache_fingerprint_changes_with_store_metadata() {
+    fn registry_context_changes_with_store_metadata() {
         let base = registry_context();
         let mut changed = registry_context();
         changed.stores[0].store.last_write_at = Some(999);
@@ -297,9 +283,6 @@ mod tests {
             "projects/proj_test/branches/feature.db".to_string();
         changed.stores[0].artifacts[0].updated_at = Some(1000);
 
-        assert_ne!(
-            ProjectCacheFingerprint::from_registry_context(&base),
-            ProjectCacheFingerprint::from_registry_context(&changed)
-        );
+        assert_ne!(base, changed);
     }
 }
