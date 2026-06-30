@@ -120,6 +120,7 @@ async fn cli_state(cg: &TraceDecay) -> DashboardState {
     let (mem_conn, mem_db_path) = super::resolve_project_memory_store(cg).await;
     let store_layout = cg.store_layout();
     DashboardState {
+        project_id: store_layout.identity.project_id.clone(),
         graph_conn: cg.dashboard_connection(),
         graph_db_path: cg.dashboard_db_path().display().to_string(),
         mem_conn,

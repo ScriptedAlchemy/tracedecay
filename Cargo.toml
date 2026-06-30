@@ -104,6 +104,7 @@ path = "src/main.rs"
 
 [dependencies]
 axum = "0.8"
+tower = "0.5"
 libsql = "0.9.30"
 tree-sitter = "0.26"
 tree-sitter-language = "0.1"

@@ -280,9 +280,13 @@ pub fn pick_free_port() -> u16 {
 }
 
 pub fn http_agent() -> ureq::Agent {
+    http_agent_with_timeout(Duration::from_secs(4))
+}
+
+pub fn http_agent_with_timeout(timeout: Duration) -> ureq::Agent {
     ureq::Agent::config_builder()
         .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(4)))
+        .timeout_global(Some(timeout))
         .build()
         .into()
 }

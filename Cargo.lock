@@ -4536,6 +4536,7 @@ dependencies = [
  "tokensave-medium-treesitters",
  "tokio",
  "toml",
+ "tower 0.5.3",
  "tracing",
  "tree-sitter",
  "tree-sitter-hlsl",
