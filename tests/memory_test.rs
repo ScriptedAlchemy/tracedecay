@@ -1061,23 +1061,38 @@ async fn remove_fact_incremental_vacuum_reclaims_blob_pages() {
     let store = MemoryStore::new(db.conn());
     let db_path = tmp.path().join("tracedecay.db");
     let mut fact_ids = Vec::new();
+    let vector = HolographicEncoder::serialize(&vec![0.0; HolographicEncoder::DIMENSIONS])
+        .expect("serialize compact HRR vector");
+    assert_eq!(vector.len(), HolographicEncoder::SERIALIZED_F32_BYTES);
 
-    for idx in 0..96 {
-        let fact = store
-            .add_fact(
-                fact_request(
-                    &format!("incremental vacuum blob reclamation fixture {idx}"),
-                    MemoryCategory::Project,
-                    0.8,
-                ),
-                DEFAULT_TRUST,
+    db.conn().execute("BEGIN IMMEDIATE", ()).await.unwrap();
+    for idx in 0..48 {
+        let fact_id = 50_000 + idx;
+        db.conn()
+            .execute(
+                "INSERT INTO memory_facts (
+                    fact_id, content, category, tags, trust_score, created_at,
+                    updated_at, source, metadata, hrr_vector, hrr_algebra, hrr_dim, hrr_precision
+                 )
+                 VALUES (?1, ?2, ?3, '[]', ?4, ?5, ?5, ?6, '{}', ?7, ?8, ?9, ?10)",
+                libsql::params![
+                    fact_id,
+                    format!("incremental vacuum blob reclamation fixture {idx}"),
+                    MemoryCategory::Project.as_str(),
+                    0.8_f64,
+                    1_900_000_000_i64 + idx,
+                    "test",
+                    vector.clone(),
+                    "amari_fhrr",
+                    HolographicEncoder::DIMENSIONS as i64,
+                    HolographicEncoder::HRR_PRECISION,
+                ],
             )
             .await
-            .unwrap()
-            .fact
             .unwrap();
-        fact_ids.push(fact.fact_id);
+        fact_ids.push(fact_id);
     }
+    db.conn().execute("COMMIT", ()).await.unwrap();
     db.conn()
         .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
         .await

@@ -24,6 +24,10 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use serde_json::Value;
 use tempfile::TempDir;
+use tracedecay::memory::store::MemoryStore;
+use tracedecay::memory::trust::DEFAULT_TRUST;
+use tracedecay::memory::types::{AddFactRequest, MemoryCategory};
+use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 #[derive(Deserialize)]
 struct Scenario {
@@ -329,21 +333,6 @@ fn query_scalar(fixture: &Fixture, sql: &str) -> i64 {
     })
 }
 
-fn execute_sql(fixture: &Fixture, sql: &str, params: impl libsql::params::IntoParams) {
-    let db_path = fixture.db_path();
-    let sql = sql.to_string();
-    runtime().block_on(async move {
-        let db = libsql::Builder::new_local(&db_path)
-            .build()
-            .await
-            .unwrap_or_else(|e| panic!("open {}: {e}", db_path.display()));
-        let conn = db.connect().expect("db connect");
-        conn.execute(&sql, params)
-            .await
-            .unwrap_or_else(|e| panic!("execute `{sql}`: {e}"));
-    });
-}
-
 fn fact_ids_by_source(fixture: &Fixture) -> HashMap<String, HashSet<i64>> {
     let db_path = fixture.db_path();
     runtime().block_on(async move {
@@ -366,11 +355,85 @@ fn fact_ids_by_source(fixture: &Fixture) -> HashMap<String, HashSet<i64>> {
     })
 }
 
+fn seed_setup_facts(fixture: &Fixture, facts: &[SeedFact]) {
+    if facts.is_empty() {
+        return;
+    }
+
+    let db_path = fixture.db_path();
+    runtime().block_on(async move {
+        let db = libsql::Builder::new_local(&db_path)
+            .build()
+            .await
+            .unwrap_or_else(|e| panic!("open {}: {e}", db_path.display()));
+        let conn = db.connect().expect("db connect");
+        let store = MemoryStore::new(&conn);
+        for fact in facts {
+            let category = fact
+                .category
+                .parse::<MemoryCategory>()
+                .unwrap_or_else(|e| panic!("invalid seed fact category `{}`: {e}", fact.category));
+            let outcome = store
+                .add_fact(
+                    AddFactRequest {
+                        content: fact.content.clone(),
+                        category,
+                        source: Some(fact.source.clone()),
+                        tags: Vec::new(),
+                        entities: Vec::new(),
+                        trust: Some(fact.trust),
+                        metadata: serde_json::json!({}),
+                    },
+                    DEFAULT_TRUST,
+                )
+                .await
+                .unwrap_or_else(|e| panic!("seed setup fact `{}`: {e}", fact.content));
+            assert!(
+                outcome.fact.is_some(),
+                "seed setup fact should be stored: {}",
+                fact.content
+            );
+            conn.execute(
+                "UPDATE memory_facts SET trust_score = ?1, retrieval_count = ?2, source = ?3 \
+                 WHERE content = ?4",
+                libsql::params![
+                    fact.trust,
+                    fact.retrieval_count,
+                    fact.source.as_str(),
+                    fact.content.as_str()
+                ],
+            )
+            .await
+            .unwrap_or_else(|e| panic!("update seed setup fact `{}`: {e}", fact.content));
+        }
+    });
+}
+
 fn canonical_test_dir(path: &Path) -> PathBuf {
     std::fs::create_dir_all(path)
         .unwrap_or_else(|e| panic!("failed to create test dir {}: {e}", path.display()));
     path.canonicalize()
         .unwrap_or_else(|e| panic!("failed to canonicalize test dir {}: {e}", path.display()))
+}
+
+fn initialize_fixture_project(fixture: &Fixture) {
+    let profile_root = fixture.home_path.join(".tracedecay");
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(profile_root.clone()),
+        global_db_path: Some(profile_root.join("global.db")),
+    };
+    runtime().block_on(async {
+        let cg = TraceDecay::init_with_options(&fixture.project_path, open_options)
+            .await
+            .unwrap_or_else(|e| panic!("initialize fixture project: {e}"));
+        cg.index_all_with_progress(|_, _, _| {})
+            .await
+            .unwrap_or_else(|e| panic!("index fixture project: {e}"));
+        cg.checkpoint()
+            .await
+            .unwrap_or_else(|e| panic!("checkpoint fixture project: {e}"));
+        cg.close();
+    });
 }
 
 fn build_fixture(setup: &Setup) -> Fixture {
@@ -393,32 +456,11 @@ fn build_fixture(setup: &Setup) -> Fixture {
         std::fs::write(fixture.project_path.join(name), contents)
             .unwrap_or_else(|e| panic!("write fixture file {name}: {e}"));
     }
-    run_ok(&fixture, &["init"]);
+    initialize_fixture_project(&fixture);
+    seed_setup_facts(&fixture, &setup.facts);
     #[cfg(unix)]
     {
         fixture._daemon = Some(common::spawn_tracedecay_daemon(&fixture.home_path));
-    }
-    for fact in &setup.facts {
-        let args = serde_json::json!({
-            "action": "add",
-            "content": fact.content,
-            "category": fact.category,
-        });
-        run_ok(
-            &fixture,
-            &["tool", "fact_store", "--args", &args.to_string()],
-        );
-        execute_sql(
-            &fixture,
-            "UPDATE memory_facts SET trust_score = ?1, retrieval_count = ?2, source = ?3 \
-             WHERE content = ?4",
-            libsql::params![
-                fact.trust,
-                fact.retrieval_count,
-                fact.source.as_str(),
-                fact.content.as_str()
-            ],
-        );
     }
     fixture
 }

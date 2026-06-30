@@ -117,13 +117,13 @@ async fn assert_main_db_missing_symbol(project: &Path, symbol: &str, message: &s
     assert!(results.is_empty(), "{message}");
 }
 
-fn assert_fallback_write_refused(err: impl std::fmt::Display) {
+fn assert_fallback_write_refused(operation: &str, err: impl std::fmt::Display) {
     let message = err.to_string();
     assert!(
         message.contains("fallback")
             && (message.contains("tracedecay branch add")
                 || message.contains("Check out a tracked branch")),
-        "unexpected error: {message}"
+        "unexpected {operation} error: {message}"
     );
 }
 
@@ -157,74 +157,39 @@ async fn open_auto_tracks_untracked_branch_and_syncs_its_db() {
 }
 
 #[tokio::test]
-async fn sync_refuses_to_write_when_opened_on_fallback_branch() {
+async fn fallback_writes_are_refused_by_all_sync_entry_points() {
     let (_dir, project, fallback) = open_detached_fallback_project().await;
 
-    let err = fallback.sync().await.unwrap_err();
-    assert_fallback_write_refused(err);
-
-    drop(fallback);
-    assert_main_db_missing_symbol(
-        &project,
-        "detached_only",
-        "fallback sync must not index detached files into main DB",
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn full_index_refuses_to_write_when_opened_on_fallback_branch() {
-    let (_dir, project, fallback) = open_detached_fallback_project().await;
+    let err = fallback
+        .sync()
+        .await
+        .expect_err("sync should refuse fallback writes");
+    assert_fallback_write_refused("sync", err);
 
     let err = match fallback.index_all().await {
         Ok(_) => panic!("full index should refuse fallback writes"),
         Err(err) => err,
     };
-    assert_fallback_write_refused(err);
+    assert_fallback_write_refused("full index", err);
 
-    drop(fallback);
-    assert_main_db_missing_symbol(
-        &project,
-        "detached_only",
-        "fallback full index must not index detached files into main DB",
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn stale_sync_refuses_to_write_when_opened_on_fallback_branch() {
-    let (_dir, project, fallback) = open_detached_fallback_project().await;
+    let stale_files = ["src/detached_only.rs".to_string()];
+    let err = fallback
+        .sync_if_stale(&stale_files)
+        .await
+        .expect_err("stale sync should refuse fallback writes");
+    assert_fallback_write_refused("stale sync", err);
 
     let err = fallback
-        .sync_if_stale(&["src/detached_only.rs".to_string()])
+        .sync_if_stale_silent(&stale_files)
         .await
-        .unwrap_err();
-    assert_fallback_write_refused(err);
+        .expect_err("silent stale sync should refuse fallback writes");
+    assert_fallback_write_refused("silent stale sync", err);
 
     drop(fallback);
     assert_main_db_missing_symbol(
         &project,
         "detached_only",
-        "fallback stale sync must not index detached files into main DB",
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn silent_stale_sync_refuses_to_write_when_opened_on_fallback_branch() {
-    let (_dir, project, fallback) = open_detached_fallback_project().await;
-
-    let err = fallback
-        .sync_if_stale_silent(&["src/detached_only.rs".to_string()])
-        .await
-        .unwrap_err();
-    assert_fallback_write_refused(err);
-
-    drop(fallback);
-    assert_main_db_missing_symbol(
-        &project,
-        "detached_only",
-        "fallback silent stale sync must not index detached files into main DB",
+        "fallback write attempts must not index detached files into main DB",
     )
     .await;
 }

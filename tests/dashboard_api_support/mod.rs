@@ -137,6 +137,10 @@ pub(crate) async fn seed_memory_fixture(cg: &TraceDecay) {
         Err(err) => panic!("failed to serialize bank_b: {err}"),
     };
 
+    if let Err(err) = conn.execute("BEGIN IMMEDIATE", ()).await {
+        panic!("failed to begin memory fixture transaction: {err}");
+    }
+
     let inserts = [
         (
             "INSERT INTO memory_facts
@@ -274,6 +278,11 @@ pub(crate) async fn seed_memory_fixture(cg: &TraceDecay) {
         {
             panic!("failed to insert memory bank: {err}");
         }
+    }
+
+    if let Err(err) = conn.execute("COMMIT", ()).await {
+        let _ = conn.execute("ROLLBACK", ()).await;
+        panic!("failed to commit memory fixture transaction: {err}");
     }
 }
 
