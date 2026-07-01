@@ -486,8 +486,8 @@ pub(crate) async fn start_dashboard_fixture(seed_lcm: bool) -> DashboardFixture 
     start_dashboard_fixture_with_options(seed_lcm, true).await
 }
 
-pub(crate) async fn start_dashboard_fixture_without_memory(seed_lcm: bool) -> DashboardFixture {
-    start_dashboard_fixture_with_options(seed_lcm, false).await
+pub(crate) async fn start_dashboard_fixture_without_memory() -> DashboardFixture {
+    start_dashboard_fixture_with_options(false, false).await
 }
 
 async fn start_dashboard_fixture_with_options(

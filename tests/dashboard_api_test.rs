@@ -10,7 +10,7 @@ fn dashboard_plugin_manifest_assets_are_served() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_dashboard_fixture_without_memory(false).await;
+        let fixture = start_dashboard_fixture_without_memory().await;
         let agent = http_agent();
 
         let (status, plugins) = get_json(
@@ -568,7 +568,7 @@ fn lcm_endpoints_return_empty_state_when_no_rows_exist() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_dashboard_fixture_without_memory(false).await;
+        let fixture = start_dashboard_fixture_without_memory().await;
         let agent = http_agent();
 
         let (status, overview) = get_json(
