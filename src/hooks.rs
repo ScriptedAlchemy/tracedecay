@@ -959,6 +959,11 @@ pub enum CursorShellSyncPlan {
     /// Bootstrap/maintain branch tracking for the given branch (supersedes a
     /// plain sync; the branch-add path copies the parent DB and syncs).
     BranchAdd(String),
+    /// Bootstrap/maintain branch tracking in a newly-created linked worktree.
+    WorktreeBranchAdd {
+        branch: String,
+        worktree_path: String,
+    },
     /// Run a full incremental sync (same-branch change set).
     IncrementalSync,
     /// Ensure the current branch is tracked, then sync it if it already was.
@@ -980,7 +985,14 @@ pub fn cursor_shell_sync_plan_with_current_branch(
     command: &str,
     current_branch: Option<&str>,
 ) -> CursorShellSyncPlan {
-    if let Some(branch) = cursor_branch_switch_target(command) {
+    let raw = shell_words(command);
+    if let Some(parts) = cursor_worktree_add_parts_from_tokens(&raw) {
+        return CursorShellSyncPlan::WorktreeBranchAdd {
+            branch: parts.branch,
+            worktree_path: parts.worktree_path,
+        };
+    }
+    if let Some(branch) = cursor_branch_switch_target_from_tokens(&raw) {
         return CursorShellSyncPlan::BranchAdd(branch);
     }
     if is_git_state_changing_command(command) {
@@ -994,7 +1006,8 @@ pub fn cursor_shell_sync_plan_with_current_branch(
 
 /// Returns the target branch for a branch-changing git command:
 /// `git checkout <branch>`, `git switch <branch>`, `git checkout -b <branch>`,
-/// `git switch -c <branch>`, and `git worktree add <path> <branch>`.
+/// and `git switch -c <branch>`. Worktree creation is classified separately by
+/// [`cursor_shell_sync_plan`], which owns `git worktree add` parsing.
 ///
 /// Path checkouts (`git checkout -- <file>` or obvious file pathspecs), remote
 /// tracking shortcuts such as `git switch --track origin/feature`, and
@@ -1002,7 +1015,11 @@ pub fn cursor_shell_sync_plan_with_current_branch(
 /// `git` are considered.
 pub fn cursor_branch_switch_target(command: &str) -> Option<String> {
     let raw = shell_words(command);
-    let sub_pos = git_subcommand_pos(&raw)?;
+    cursor_branch_switch_target_from_tokens(&raw)
+}
+
+fn cursor_branch_switch_target_from_tokens(raw: &[String]) -> Option<String> {
+    let sub_pos = git_subcommand_pos(raw)?;
     let sub = raw[sub_pos].to_ascii_lowercase();
 
     match sub.as_str() {
@@ -1037,21 +1054,30 @@ pub fn cursor_branch_switch_target(command: &str) -> Option<String> {
             }
             None
         }
-        "worktree" => {
-            let action = raw.get(sub_pos + 1).map(|token| token.to_ascii_lowercase());
-            if action.as_deref() != Some("add") {
-                return None;
-            }
-            cursor_worktree_add_target(&raw[sub_pos + 2..])
-        }
         _ => None,
     }
 }
 
-fn cursor_worktree_add_target(after: &[String]) -> Option<String> {
+fn cursor_worktree_add_parts_from_tokens(raw: &[String]) -> Option<WorktreeAddParts> {
+    let sub_pos = git_subcommand_pos(raw)?;
+    if raw.get(sub_pos)?.eq_ignore_ascii_case("worktree")
+        && raw.get(sub_pos + 1)?.eq_ignore_ascii_case("add")
+    {
+        return cursor_worktree_add_parts(&raw[sub_pos + 2..]);
+    }
+    None
+}
+
+struct WorktreeAddParts {
+    branch: String,
+    worktree_path: String,
+}
+
+fn cursor_worktree_add_parts(after: &[String]) -> Option<WorktreeAddParts> {
     let mut i = 0;
     let mut positional = Vec::new();
     let mut detached = false;
+    let mut new_branch = None;
     while i < after.len() {
         let tok = &after[i];
         if tok == "--" {
@@ -1059,7 +1085,9 @@ fn cursor_worktree_add_target(after: &[String]) -> Option<String> {
             break;
         }
         if matches!(tok.as_str(), "-b" | "-B") {
-            return after.get(i + 1).cloned();
+            new_branch = after.get(i + 1).cloned();
+            i += 2;
+            continue;
         }
         if tok == "-d" || tok == "--detach" {
             detached = true;
@@ -1080,7 +1108,12 @@ fn cursor_worktree_add_target(after: &[String]) -> Option<String> {
     if detached {
         return None;
     }
-    positional.get(1).cloned()
+    let worktree_path = positional.first()?.clone();
+    let branch = new_branch.or_else(|| positional.get(1).cloned())?;
+    Some(WorktreeAddParts {
+        branch,
+        worktree_path,
+    })
 }
 
 fn is_obvious_checkout_pathspec(token: &str) -> bool {
@@ -1237,6 +1270,35 @@ fn resolve_shell_path(cwd: &Path, value: &str) -> PathBuf {
     } else {
         cwd.join(path)
     }
+}
+
+/// Resolves the filesystem root of the worktree created by a
+/// `git worktree add` command. git resolves the worktree path against
+/// `-C <dir>`/`--work-tree` overrides rather than the shell cwd, so those are
+/// honored first. The result is canonicalized when the worktree exists (it
+/// does by the time a post-shell hook fires) so symlinked components resolve
+/// the way git resolved them, falling back to lexical `..` normalization.
+pub fn resolve_worktree_add_root(command: &str, cwd: &Path, worktree_path: &str) -> PathBuf {
+    let tokens = shell_words(command);
+    let base = git_explicit_work_dir(&tokens, cwd).unwrap_or_else(|| cwd.to_path_buf());
+    let joined = resolve_shell_path(&base, worktree_path);
+    joined
+        .canonicalize()
+        .unwrap_or_else(|_| normalize_lexically(&joined))
+}
+
+fn normalize_lexically(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
 }
 
 fn paths_same(a: &Path, b: &Path) -> bool {

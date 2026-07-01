@@ -326,7 +326,9 @@ fn run_with_timeout(mut command: Command, timeout: Duration) -> Output {
             "tracedecay hung after {:?}",
             started.elapsed()
         );
-        std::thread::sleep(Duration::from_millis(50));
+        // Keep the poll tight: every scenario step pays the tail of this
+        // sleep after the CLI exits, and steps run in sequence.
+        std::thread::sleep(Duration::from_millis(5));
     }
 }
 
@@ -498,6 +500,10 @@ fn initialize_fixture_project(fixture: &Fixture) {
         global_db_path: Some(profile_root.join("global.db")),
     };
     runtime().block_on(async {
+        // Pre-create the global DB from the cached empty-schema template so
+        // init and every scenario-step CLI invocation open an existing store
+        // instead of paying full schema creation (slow on Windows).
+        common::write_empty_global_db_schema(&profile_root.join("global.db")).await;
         let cg = TraceDecay::init_with_options(&fixture.project_path, open_options)
             .await
             .unwrap_or_else(|e| panic!("initialize fixture project: {e}"));

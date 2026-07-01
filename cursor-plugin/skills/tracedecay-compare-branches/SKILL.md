@@ -1,6 +1,6 @@
 ---
 name: tracedecay-compare-branches
-description: 'Compare or search another git branch''s code graph without switching your checkout.'
+description: 'Use to compare or search another git branch''s code graph without switching your checkout.'
 disable-model-invocation: true
 ---
 

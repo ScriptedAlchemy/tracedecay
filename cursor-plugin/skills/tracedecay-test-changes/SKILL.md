@@ -1,6 +1,6 @@
 ---
 name: tracedecay-test-changes
-description: 'Test the current changes — run only the affected tests and map failures back to source.'
+description: 'Use to test current changes by running only affected tests and mapping failures back to source.'
 disable-model-invocation: true
 ---
 

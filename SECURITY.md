@@ -100,9 +100,9 @@ The edit tools target a single file with a unique anchor and re-index in place. 
 
 **Windows:** Authenticode code signing via the [SignPath.io Foundation](https://signpath.io/foundation) program is being rolled out so Windows binaries are signed as part of the release workflow (addresses the Smart App Control block reported in #79). Until that lands in a published release, Windows binaries remain unsigned.
 
-### No background daemon
+### Opt-in background daemon
 
-tracedecay runs **no background daemon, system service, or autostart process**. The standalone `tracedecay daemon` command and its launchd/systemd/Windows-Service autostart were removed in 6.0.0. Index freshness is maintained entirely on demand: an on-demand staleness check on each MCP tool call (30-second cooldown) plus a catch-up sync when the MCP server connects. The server lives only for the lifetime of the attached agent and runs with **standard user privileges** — it never requests elevation.
+tracedecay installs **no background daemon, system service, or autostart process by default**. Users can explicitly opt in with `tracedecay daemon install-service`, which installs a per-user systemd service on Linux or a per-user LaunchAgent on macOS. The daemon runs with **standard user privileges** and never requests elevation. Index freshness still relies on on-demand staleness checks, catch-up syncs when MCP clients connect, and bounded hook notifications; the daemon provides shared MCP process/socket reuse and scheduled automation for projects that connect to it.
 
 ### Subprocess-isolated extraction
 

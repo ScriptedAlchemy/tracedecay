@@ -10,10 +10,18 @@ use crate::branch_meta::BranchMeta;
 ///
 /// Returns `None` for detached HEAD or if the repository cannot be opened.
 pub fn current_branch(project_root: &Path) -> Option<String> {
-    if let Some(branch) = current_branch_gix(project_root) {
-        return Some(branch);
+    match current_branch_gix(project_root) {
+        GixHead::Branch(branch) => Some(branch),
+        // A readable repo answered with a detached HEAD; `git symbolic-ref`
+        // would fail the same way, so don't spawn it.
+        GixHead::Detached => None,
+        GixHead::Unavailable => {
+            if !crate::worktree::git_may_resolve_repo(project_root) {
+                return None;
+            }
+            current_branch_git(project_root)
+        }
     }
-    current_branch_git(project_root)
 }
 
 /// Returns true if `branch` exists as a local `refs/heads/*` branch.
@@ -21,32 +29,53 @@ pub fn local_branch_exists(project_root: &Path, branch: &str) -> bool {
     if branch.is_empty() {
         return false;
     }
+    let refname = format!("refs/heads/{branch}");
     if let Ok(repo) = gix::open(project_root) {
-        let refname = format!("refs/heads/{branch}");
-        if repo.find_reference(&refname).is_ok() {
-            return true;
-        }
+        // gix reads loose and packed refs, the same sources `git show-ref`
+        // consults; trust its answer instead of paying a subprocess spawn
+        // to re-ask git.
+        return repo.find_reference(&refname).is_ok();
+    }
+    if !crate::worktree::git_may_resolve_repo(project_root) {
+        return false;
     }
     std::process::Command::new("git")
-        .args([
-            "show-ref",
-            "--verify",
-            "--quiet",
-            &format!("refs/heads/{branch}"),
-        ])
+        .args(["show-ref", "--verify", "--quiet", &refname])
         .current_dir(project_root)
         .status()
         .is_ok_and(|status| status.success())
 }
 
-fn current_branch_gix(project_root: &Path) -> Option<String> {
-    let repo = gix::open(project_root).ok()?;
-    let head = repo.head().ok()?;
-    let name = head.name().as_bstr();
-    let name_str = std::str::from_utf8(name).ok()?;
-    name_str
-        .strip_prefix("refs/heads/")
-        .map(std::string::ToString::to_string)
+/// What gix could learn about HEAD without spawning `git`.
+enum GixHead {
+    /// HEAD points at a local branch.
+    Branch(String),
+    /// A readable repo whose HEAD is detached (or on a non-branch ref).
+    Detached,
+    /// No repo could be opened at this path or its HEAD was unreadable;
+    /// the `git` subprocess fallback should decide.
+    Unavailable,
+}
+
+fn current_branch_gix(project_root: &Path) -> GixHead {
+    let Ok(repo) = gix::open(project_root) else {
+        return GixHead::Unavailable;
+    };
+    let Ok(head) = repo.head() else {
+        return GixHead::Unavailable;
+    };
+    // `Head::name()` is always the literal "HEAD"; the branch HEAD points
+    // to (if any) is the referent.
+    let Some(name) = head.referent_name() else {
+        return GixHead::Detached;
+    };
+    let Ok(name_str) = std::str::from_utf8(name.as_bstr()) else {
+        return GixHead::Unavailable;
+    };
+    match name_str.strip_prefix("refs/heads/") {
+        Some(branch) => GixHead::Branch(branch.to_string()),
+        None => GixHead::Detached,
+    }
 }
 
 fn current_branch_git(project_root: &Path) -> Option<String> {
@@ -78,6 +107,23 @@ fn git_rev_list_count(project_root: &Path, from_ref: &str, to_ref: &str) -> Opti
         .trim()
         .parse()
         .ok()
+}
+
+/// In-process equivalent of `git rev-list --count hidden..tip`: commits
+/// reachable from `tip` but not from `hidden`. Saves a `git` subprocess
+/// spawn on every branch-add parent ranking.
+fn gix_rev_distance(
+    repo: &gix::Repository,
+    tip: gix::ObjectId,
+    hidden: gix::ObjectId,
+) -> Option<usize> {
+    let walk = repo.rev_walk([tip]).with_hidden([hidden]).all().ok()?;
+    let mut count = 0_usize;
+    for info in walk {
+        info.ok()?;
+        count += 1;
+    }
+    Some(count)
 }
 
 /// Auto-detects the default branch (main or master).
@@ -259,7 +305,9 @@ pub fn find_nearest_tracked_ancestor(
         // branch. Rank them by commit distance so a direct parent wins even
         // when multiple merge-bases land in the same timestamp second.
         if base_id == tracked_commit.id {
-            if let Some(distance) = git_rev_list_count(project_root, &tracked_ref, &branch_ref) {
+            let distance = gix_rev_distance(&repo, branch_commit.id, tracked_commit.id)
+                .or_else(|| git_rev_list_count(project_root, &tracked_ref, &branch_ref));
+            if let Some(distance) = distance {
                 let replace = best_ancestor
                     .as_ref()
                     .is_none_or(|(_, best_distance, best_time)| {

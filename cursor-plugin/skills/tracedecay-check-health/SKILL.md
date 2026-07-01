@@ -1,6 +1,6 @@
 ---
 name: tracedecay-check-health
-description: 'Check code health — a scorecard for the repo or a directory with the worst offenders and a prioritized fix list.'
+description: 'Use to check code health for the repo or a directory, including worst offenders and a prioritized fix list.'
 disable-model-invocation: true
 ---
 

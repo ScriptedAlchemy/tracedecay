@@ -1,6 +1,6 @@
 ---
 name: tracedecay-curate-memory
-description: 'Curate, update, delete, or inspect tracedecay memory facts and dashboard curation from an explicit slash workflow.'
+description: 'Use to curate, update, delete, or inspect TraceDecay memory facts and dashboard curation from an explicit slash workflow.'
 disable-model-invocation: true
 ---
 

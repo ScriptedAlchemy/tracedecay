@@ -133,10 +133,15 @@ pub enum Commands {
         /// used with --agent hermes).
         #[arg(long)]
         no_dashboard: bool,
-        /// Install/update a Codex-native project automation in ~/.codex
+        /// Enable the TraceDecay daemon automation loop (memory curator,
+        /// session reflector, skill writer) for the current project
         /// (only used with --agent codex).
         #[arg(long)]
         automation: bool,
+        /// With --automation: opt in to applying accepted memory-curation ops
+        /// (permanent deletes/merges) without dashboard approval.
+        #[arg(long, requires = "automation")]
+        auto_apply: bool,
     },
     /// Refresh settings for all already-installed agents
     Reinstall,

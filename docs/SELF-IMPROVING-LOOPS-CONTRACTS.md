@@ -15,6 +15,20 @@ This is the durable contract for TraceDecay-owned self-improvement loops. Hermes
 | Kiro | Config, ledgers, managed-agent prompt-index content, MCP skill body serving | Managed-agent file ownership and host execution | Existing managed-agent path with prompt index plus `tracedecay_skill_view` |
 | Prompt-only agents | Config, ledgers, prompt-index generation, MCP skill body serving | Prompt ingestion and execution | Compact prompt index plus `tracedecay_skill_view` |
 
+## Cadence And Automation Defaults
+
+Hermes is the reference behavior for self-improvement cadence, but TraceDecay owns its own scheduler in standalone mode. Hermes memory review and skill review are turn/iteration nudges: memory defaults to every 10 user turns when memory is enabled, skill review defaults to every 10 tool-calling iterations, and both run as a whitelisted background review fork after the foreground response. Hermes skill-library curator is separate: it runs after `curator.interval_hours` elapses, defaults to 168 hours, requires the idle gate (`curator.min_idle_hours`, default 2 hours), seeds the first run instead of mutating immediately, snapshots before real runs, and archives rather than deletes.
+
+TraceDecay standalone automation is time-scheduled by the daemon, not by Codex native automations or Hermes cron. The default scheduler tick is 60 seconds. `tracedecay install --agent codex --automation` enables the Codex app-server backend with `require_dashboard_approval=false`, `auto_apply_memory_ops=true`, `auto_enable_skills=false`, and these task cadences:
+
+| Task | Default cadence | Default mutation behavior |
+| --- | --- | --- |
+| `memory_curator` | Every 15 minutes, with a 5-minute cooldown | Validated accepted curation ops auto-apply when `auto_apply_memory_ops=true` and dashboard approval is disabled. |
+| `session_reflector` | Every 15 minutes, with a 5-minute cooldown | Validated accepted session facts auto-apply under the same memory auto-apply policy; otherwise they stay as dashboard fact proposals. |
+| `skill_writer` | Every 60 minutes, after a 15-minute idle window, with a 5-minute cooldown | Creates or updates managed skill drafts; skills are not auto-enabled while `auto_enable_skills=false`. |
+
+The daemon loop is the host for these jobs. It should not create Codex top-level chats for scheduler work, and it should not rely on Codex native recurring automations for liveness. Host backends provide the model call; TraceDecay owns evidence collection, validation, ledgers, apply policy, and scheduler state.
+
 ## Standalone And Delegated Modes
 
 `standalone` means TraceDecay owns backend calls, evidence collection, validation, run ledger writes, approval staging, dashboard review payloads, and optional scheduler execution. Backend output can propose changes, but TraceDecay validates every proposed mutation before it can be applied.
