@@ -1,6 +1,6 @@
 ---
 name: exploring-types-and-traits
-description: 'Use when answering type-level questions: trait implementors, impl blocks, type hierarchies, struct construction sites, field read/write sites, derive-generated methods, or method bodies across implementors.'
+description: 'Use when answering type-level questions: trait implementors/impls, type hierarchies, struct construction sites, field read/write sites, derive-generated methods, or method bodies; maps to tracedecay_implementations, tracedecay_impls, tracedecay_constructors, and tracedecay_field_sites.'
 ---
 
 # Exploring types & traits

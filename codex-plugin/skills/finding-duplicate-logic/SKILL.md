@@ -1,6 +1,6 @@
 ---
 name: finding-duplicate-logic
-description: 'Use before writing a new helper or utility to check whether equivalent code already exists, or when finding duplicate logic, similar symbols, repeated implementations, and consolidation candidates.'
+description: 'Use before writing a new helper or utility to check whether equivalent code already exists, or when finding duplicate logic, similar symbols, repeated implementations, and consolidation candidates with tracedecay_signature_search, tracedecay_similar, tracedecay_context, and tracedecay_redundancy.'
 ---
 
 # Finding duplicate logic

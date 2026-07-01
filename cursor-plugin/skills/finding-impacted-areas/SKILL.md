@@ -1,6 +1,6 @@
 ---
 name: finding-impacted-areas
-description: 'Use when estimating blast radius: what depends on a symbol or file, affected tests, risk of a change, impacted areas for a refactor, or what could break if a target changes.'
+description: 'Use when estimating blast radius: what depends on a symbol/file, affected tests, test mapping, risk of a change, impacted areas for a refactor, or what could break if a target changes. Use before guessing tests or running broad suites.'
 ---
 
 # Finding impacted areas
@@ -13,7 +13,7 @@ description: 'Use when estimating blast radius: what depends on a symbol or file
 4. **Already have changed paths → `tracedecay_diff_context`** (`files`): modified symbols + dependents + affected tests in one call.
 5. **Tests to run:**
    - Reuse `tracedecay_diff_context` affected tests first.
-   - Need more detail? `tracedecay_affected` (`files`) finds affected tests; `tracedecay_test_map` (`file` / `node_id`) shows direct coverage.
+   - Need more detail? `tracedecay_affected` (`files`) finds affected tests; `tracedecay_test_map` (`file` / `node_id`) shows direct coverage. Use this before guessing a cargo/nextest filter.
    - Use `tracedecay_test_risk` for high-risk, weakly-tested dependents.
 6. **Structural fragility (optional):** `tracedecay_coupling` / `tracedecay_dependency_depth` to see if the target is a high-fan-in hub.
 

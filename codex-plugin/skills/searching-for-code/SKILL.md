@@ -1,11 +1,11 @@
 ---
 name: searching-for-code
-description: 'Find code by concept, symbol, signature, or qualified name in this repo using the TraceDecay code graph. Use when searching the codebase, locating a function/struct/trait/class/method, exploring how a feature works, or before grep/file-search when a .tracedecay index exists.'
+description: 'Find code by concept, symbol, signature, exact name, or qualified name in this repo using the TraceDecay code graph. Use when searching the codebase, locating a function/struct/trait/class/method, exploring how a feature works, or before grep/file-search/read-file in an indexed project.'
 ---
 
 # Searching for code
 
-Use the TraceDecay code graph before Grep/Glob/file reads. Pick the cheapest tool that answers the question.
+Use the TraceDecay code graph before Grep/Glob/file reads. Pick the cheapest tool that answers the question. If the task says "trace", "find callers", "what calls X", "what depends on X", or "what does X call", switch to `tracedecay:tracing-functions` after resolving the symbol.
 
 For multi-step context gathering, use scoped read-only subagents when separate questions can run independently. Give each subagent one bounded target (symbol, path, feature, session, or branch), the TraceDecay tools it may use, and a strict "no writes / no edits / no memory mutations" instruction; the parent agent synthesizes findings and performs any follow-up actions.
 
