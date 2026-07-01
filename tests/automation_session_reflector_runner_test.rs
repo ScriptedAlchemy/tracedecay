@@ -114,6 +114,24 @@ async fn session_reflector_runner_validates_fact_proposals_without_applying() {
             {
                 "content": "",
                 "category": "project"
+            },
+            {
+                "content": "Bucket trust labels emitted by backends map onto calibrated numeric scores",
+                "category": "project",
+                "tags": ["automation"],
+                "entities": ["TraceDecay"],
+                "trust": "high",
+                "source_span": {"session_id": "session-reflect-1", "message_id": "session-reflect-1-message-001"},
+                "reason": "bucket trust labels should be accepted"
+            },
+            {
+                "content": "Unknown trust labels must not be accepted",
+                "category": "project",
+                "tags": ["automation"],
+                "entities": ["TraceDecay"],
+                "trust": "sky-high",
+                "source_span": {"session_id": "session-reflect-1", "message_id": "session-reflect-1-message-001"},
+                "reason": "unknown trust label should be rejected"
             }
         ]
     }));
@@ -152,8 +170,8 @@ async fn session_reflector_runner_validates_fact_proposals_without_applying() {
     assert_eq!(backend.calls(), 1);
     assert_eq!(run.ledger_record.task, AgentTaskKind::SessionReflector);
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
-    assert_eq!(run.ledger_record.accepted_count, 2);
-    assert_eq!(run.ledger_record.rejected_count, 7);
+    assert_eq!(run.ledger_record.accepted_count, 3);
+    assert_eq!(run.ledger_record.rejected_count, 8);
     assert_eq!(
         run.report["accepted_facts"][0]["add_fact_request"]["source"],
         json!("session_reflector")
@@ -189,10 +207,17 @@ async fn session_reflector_runner_validates_fact_proposals_without_applying() {
         "source_span must cite a bounded session reflection evidence hit"
     ));
     assert!(has_rejection_reason("trust is required"));
+    assert!(has_rejection_reason(
+        "trust must be a number between 0 and 1, or one of low, medium, high"
+    ));
     assert!(has_rejection_reason("reason is required"));
     assert!(has_rejection_reason(
         "confidence is not supported; use trust"
     ));
+    assert_eq!(
+        run.report["accepted_facts"][2]["add_fact_request"]["trust"],
+        json!(0.85)
+    );
     let proposals = list_fact_proposals(
         &cg.store_layout().dashboard_root,
         Some(FactProposalState::PendingApproval),
@@ -200,7 +225,7 @@ async fn session_reflector_runner_validates_fact_proposals_without_applying() {
     )
     .await
     .unwrap();
-    assert_eq!(proposals.len(), 2);
+    assert_eq!(proposals.len(), 3);
     assert_eq!(proposals[0].run_id, run.run_id);
     assert_eq!(
         proposals[0].add_fact_request.as_ref().unwrap().content,
@@ -249,7 +274,7 @@ async fn session_reflector_runner_validates_fact_proposals_without_applying() {
     );
     let eval_payload = read_artifact(&cg, &run.run_id, &run.ledger_record, "generated_evals").await;
     assert_eq!(eval_payload["task"], json!("session_reflector"));
-    assert_eq!(eval_payload["summary"]["eval_count"], json!(9));
+    assert_eq!(eval_payload["summary"]["eval_count"], json!(11));
     assert!(eval_payload["eval_definitions"]
         .as_array()
         .unwrap()
@@ -328,8 +353,8 @@ async fn session_reflector_runner_validates_fact_proposals_without_applying() {
         .unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].run_id, run.run_id);
-    assert_eq!(records[0].accepted_count, 2);
-    assert_eq!(records[0].rejected_count, 7);
+    assert_eq!(records[0].accepted_count, 3);
+    assert_eq!(records[0].rejected_count, 8);
     assert!(records[0].applied_ops.is_none());
 }
 

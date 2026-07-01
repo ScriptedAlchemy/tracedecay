@@ -191,8 +191,35 @@ pub(crate) async fn append_skipped_record(
         Some(reason.to_string()),
         started_at,
     );
+    // Scheduler ticks re-evaluate every task every few seconds, so a standing
+    // skip condition (interval not elapsed, task disabled, ...) would append
+    // thousands of identical records and drown real runs out of the ledger.
+    // Persist only the first record of each consecutive identical skip.
+    if trigger == AutomationTrigger::Scheduler
+        && is_repeat_scheduler_skip(dashboard_root, task, reason).await?
+    {
+        return Ok(record);
+    }
     append_run_record(dashboard_root, &record).await?;
     Ok(record)
+}
+
+/// True when the most recent ledger record for `task` is already a scheduler
+/// skip with the same reason.
+async fn is_repeat_scheduler_skip(
+    dashboard_root: &Path,
+    task: AgentTaskKind,
+    reason: &str,
+) -> Result<bool> {
+    let records = load_run_records(dashboard_root, 200).await?;
+    Ok(records
+        .iter()
+        .find(|record| record.task == task)
+        .is_some_and(|record| {
+            record.trigger == AutomationTrigger::Scheduler
+                && record.status == AutomationRunStatus::Skipped
+                && record.error.as_deref() == Some(reason)
+        }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -605,6 +632,7 @@ fn noop_output_for_task(task: AgentTaskKind) -> Value {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -614,5 +642,120 @@ mod tests {
         let second = generated_run_id("memory_curator");
 
         assert_ne!(first, second);
+    }
+
+    async fn append_skip(
+        dashboard_root: &Path,
+        run_id: &str,
+        trigger: AutomationTrigger,
+        task: AgentTaskKind,
+        reason: &str,
+    ) -> AutomationRunLedgerRecord {
+        let config = AutomationConfig::default();
+        append_skipped_record(
+            dashboard_root,
+            run_id,
+            trigger,
+            &config,
+            task,
+            None,
+            reason,
+            "1000",
+        )
+        .await
+        .expect("append skipped record")
+    }
+
+    #[tokio::test]
+    async fn consecutive_identical_scheduler_skips_persist_once() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let root = temp.path();
+        let task = AgentTaskKind::MemoryCurator;
+
+        append_skip(
+            root,
+            "run-1",
+            AutomationTrigger::Scheduler,
+            task,
+            "scheduler_interval_not_elapsed",
+        )
+        .await;
+        append_skip(
+            root,
+            "run-2",
+            AutomationTrigger::Scheduler,
+            task,
+            "scheduler_interval_not_elapsed",
+        )
+        .await;
+
+        let records = load_run_records(root, 50).await.expect("load records");
+        assert_eq!(
+            records.len(),
+            1,
+            "repeat scheduler skip must not append a second record"
+        );
+        assert_eq!(records[0].run_id, "run-1");
+    }
+
+    #[tokio::test]
+    async fn scheduler_skips_with_new_reason_or_task_still_persist() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let root = temp.path();
+
+        append_skip(
+            root,
+            "run-1",
+            AutomationTrigger::Scheduler,
+            AgentTaskKind::MemoryCurator,
+            "scheduler_interval_not_elapsed",
+        )
+        .await;
+        append_skip(
+            root,
+            "run-2",
+            AutomationTrigger::Scheduler,
+            AgentTaskKind::MemoryCurator,
+            "scheduler_cooldown_active",
+        )
+        .await;
+        append_skip(
+            root,
+            "run-3",
+            AutomationTrigger::Scheduler,
+            AgentTaskKind::SessionReflector,
+            "scheduler_interval_not_elapsed",
+        )
+        .await;
+
+        let records = load_run_records(root, 50).await.expect("load records");
+        assert_eq!(records.len(), 3, "distinct skip conditions must persist");
+    }
+
+    #[tokio::test]
+    async fn manual_trigger_skips_always_persist() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let root = temp.path();
+        let task = AgentTaskKind::SkillWriter;
+
+        append_skip(
+            root,
+            "run-1",
+            AutomationTrigger::ManualCli,
+            task,
+            "skill_writer_disabled",
+        )
+        .await;
+        append_skip(
+            root,
+            "run-2",
+            AutomationTrigger::ManualCli,
+            task,
+            "skill_writer_disabled",
+        )
+        .await;
+
+        let records = load_run_records(root, 50).await.expect("load records");
+        assert_eq!(records.len(), 2, "manual skips must always be recorded");
     }
 }

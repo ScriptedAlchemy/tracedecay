@@ -463,6 +463,28 @@ impl PrivateStoreIo {
         set_private_file_permissions(path)
     }
 
+    /// Appends one line via a single `O_APPEND` write so concurrent hook
+    /// processes never interleave partial lines or lose each other's entries
+    /// the way read-modify-rewrite appends do.
+    pub fn append_line(path: &Path, line: &str) -> io::Result<()> {
+        use io::Write;
+
+        if let Some(parent) = path.parent() {
+            Self::create_dir_all(parent)?;
+        }
+        reject_symlink_components(path, "private store file")?;
+        let mut payload = String::with_capacity(line.len() + 1);
+        payload.push_str(line);
+        payload.push('\n');
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        file.write_all(payload.as_bytes())?;
+        drop(file);
+        set_private_file_permissions(path)
+    }
+
     pub fn write_file_atomically(path: &Path, temp_path: &Path, contents: &[u8]) -> io::Result<()> {
         if path_parent(path) != path_parent(temp_path) {
             return Err(invalid_input(

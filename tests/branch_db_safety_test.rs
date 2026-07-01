@@ -1,13 +1,58 @@
+mod common;
+
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
+use common::TraceDecayStorageEnvGuard;
 use tempfile::TempDir;
 use tracedecay::branch::BranchAddOutcome;
 use tracedecay::branch_meta::load_branch_meta;
 use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::TraceDecay;
+
+/// Serializes the tests in this binary: storage isolation swaps process-wide
+/// env vars (`HOME`, `TRACEDECAY_DATA_DIR`, ...), so tests must not overlap.
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Keeps every test's project registration, store manifests, and
+/// branch-meta writes inside a throwaway home instead of the developer's
+/// real `~/.tracedecay` profile store.
+struct IsolatedEnv {
+    _env_lock: tokio::sync::MutexGuard<'static, ()>,
+    storage: TraceDecayStorageEnvGuard,
+    _dir: TempDir,
+}
+
+impl IsolatedEnv {
+    fn build(env_lock: tokio::sync::MutexGuard<'static, ()>) -> (Self, PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let storage = TraceDecayStorageEnvGuard::for_tempdir(&dir);
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        (
+            Self {
+                _env_lock: env_lock,
+                storage,
+                _dir: dir,
+            },
+            project,
+        )
+    }
+
+    async fn acquire() -> (Self, PathBuf) {
+        Self::build(ENV_LOCK.lock().await)
+    }
+
+    fn acquire_blocking() -> (Self, PathBuf) {
+        Self::build(ENV_LOCK.blocking_lock())
+    }
+
+    fn home(&self) -> &Path {
+        self.storage.home()
+    }
+}
 
 fn git(project: &Path, args: &[&str]) {
     let output = Command::new("git")
@@ -46,9 +91,8 @@ fn project_data_dir(project: &Path) -> PathBuf {
         .data_root
 }
 
-async fn open_untracked_project() -> (TempDir, PathBuf, TraceDecay) {
-    let dir = TempDir::new().unwrap();
-    let project = dir.path().to_path_buf();
+async fn open_untracked_project() -> (IsolatedEnv, PathBuf, TraceDecay) {
+    let (env, project) = IsolatedEnv::acquire().await;
 
     git(&project, &["init", "-b", "main"]);
     fs::create_dir_all(project.join("src")).unwrap();
@@ -71,12 +115,11 @@ async fn open_untracked_project() -> (TempDir, PathBuf, TraceDecay) {
     assert_eq!(feature.serving_branch(), Some("feature/untracked"));
     assert!(!feature.is_fallback());
 
-    (dir, project, feature)
+    (env, project, feature)
 }
 
-async fn open_detached_fallback_project() -> (TempDir, PathBuf, TraceDecay) {
-    let dir = TempDir::new().unwrap();
-    let project = dir.path().to_path_buf();
+async fn open_detached_fallback_project() -> (IsolatedEnv, PathBuf, TraceDecay) {
+    let (env, project) = IsolatedEnv::acquire().await;
 
     git(&project, &["init", "-b", "main"]);
     fs::create_dir_all(project.join("src")).unwrap();
@@ -107,7 +150,7 @@ async fn open_detached_fallback_project() -> (TempDir, PathBuf, TraceDecay) {
         "detached HEAD should explain the fallback branch"
     );
 
-    (dir, project, fallback)
+    (env, project, fallback)
 }
 
 async fn assert_main_db_missing_symbol(project: &Path, symbol: &str, message: &str) {
@@ -129,7 +172,7 @@ fn assert_fallback_write_refused(operation: &str, err: impl std::fmt::Display) {
 
 #[tokio::test]
 async fn open_auto_tracks_untracked_branch_and_syncs_its_db() {
-    let (_dir, project, feature) = open_untracked_project().await;
+    let (_env, project, feature) = open_untracked_project().await;
 
     assert!(
         !feature
@@ -158,7 +201,7 @@ async fn open_auto_tracks_untracked_branch_and_syncs_its_db() {
 
 #[tokio::test]
 async fn fallback_writes_are_refused_by_all_sync_entry_points() {
-    let (_dir, project, fallback) = open_detached_fallback_project().await;
+    let (_env, project, fallback) = open_detached_fallback_project().await;
 
     let err = fallback
         .sync()
@@ -196,8 +239,8 @@ async fn fallback_writes_are_refused_by_all_sync_entry_points() {
 
 #[tokio::test]
 async fn add_branch_tracking_copies_from_nearest_tracked_ancestor() {
-    let dir = TempDir::new().unwrap();
-    let project = dir.path();
+    let (_env, project) = IsolatedEnv::acquire().await;
+    let project = project.as_path();
 
     git(project, &["init", "-b", "main"]);
     fs::create_dir_all(project.join("src")).unwrap();
@@ -274,8 +317,8 @@ async fn add_branch_tracking_copies_from_nearest_tracked_ancestor() {
 
 #[tokio::test]
 async fn add_branch_tracking_refuses_corrupt_metadata_without_overwriting() {
-    let dir = TempDir::new().unwrap();
-    let project = dir.path();
+    let (_env, project) = IsolatedEnv::acquire().await;
+    let project = project.as_path();
 
     git(project, &["init", "-b", "main"]);
     fs::create_dir_all(project.join("src")).unwrap();
@@ -315,15 +358,17 @@ async fn add_branch_tracking_refuses_corrupt_metadata_without_overwriting() {
 
 #[test]
 fn cli_branch_add_refuses_corrupt_metadata_without_overwriting() {
-    let dir = TempDir::new().unwrap();
-    let project = dir.path();
+    let (env, project) = IsolatedEnv::acquire_blocking();
+    let project = project.as_path();
 
     git(project, &["init", "-b", "main"]);
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn main_only() {}\n").unwrap();
     commit_all(project, "initial commit");
 
-    let init = Command::new(env!("CARGO_BIN_EXE_tracedecay"))
+    let mut init_command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+    common::apply_tracedecay_home_env(&mut init_command, env.home());
+    let init = init_command
         .arg("init")
         .arg(project)
         .output()
@@ -347,7 +392,9 @@ fn cli_branch_add_refuses_corrupt_metadata_without_overwriting() {
     .unwrap();
     commit_all(project, "feature commit");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_tracedecay"))
+    let mut branch_add_command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+    common::apply_tracedecay_home_env(&mut branch_add_command, env.home());
+    let output = branch_add_command
         .args(["branch", "add", "feature/corrupt-meta", "--path"])
         .arg(project)
         .output()

@@ -650,7 +650,7 @@ async fn skipped_skill_writer_run(
 
 fn build_session_reflector_prompt(evidence: &Value) -> String {
     format!(
-        "Review these bounded TraceDecay session snippets and propose only durable memory facts. Return only JSON with a facts array. Each fact must include content, category, optional tags, optional entities, trust, source_span, and reason. Category must be one of general, user_pref, project, tool, decision, or code_area. Use trust, not confidence. source_span must cite one bounded evidence hit by session_id plus message_id for raw messages, by store_id for raw messages, or by node_id for summaries. Do not include secrets or ephemeral status.\n{}",
+        "Review these bounded TraceDecay session snippets and propose only durable memory facts. Return only JSON with a facts array. Each fact must include content, category, optional tags, optional entities, trust, source_span, and reason. Category must be one of general, user_pref, project, tool, decision, or code_area. Use trust, not confidence; trust must be a number between 0 and 1. source_span must cite one bounded evidence hit by session_id plus message_id for raw messages, by store_id for raw messages, or by node_id for summaries. Do not include secrets or ephemeral status.\n{}",
         serde_json::to_string_pretty(evidence).unwrap_or_else(|_| "{}".to_string())
     )
 }

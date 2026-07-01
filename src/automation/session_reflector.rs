@@ -130,9 +130,14 @@ async fn validate_fact_proposal(
         ));
     };
     let trust = match object.get("trust") {
-        Some(value) => match value.as_f64() {
-            Some(trust) if (0.0..=1.0).contains(&trust) => Some(trust),
-            _ => return Ok(rejected_fact(proposal, "trust must be between 0 and 1")),
+        Some(value) => match proposal_trust_value(value) {
+            Some(trust) => Some(trust),
+            None => {
+                return Ok(rejected_fact(
+                    proposal,
+                    "trust must be a number between 0 and 1, or one of low, medium, high",
+                ))
+            }
         },
         None => return Ok(rejected_fact(proposal, "trust is required")),
     };
@@ -227,6 +232,22 @@ async fn validate_fact_proposal(
             },
         },
     })))
+}
+
+/// Accepts numeric trust in `[0, 1]` plus the `low`/`medium`/`high` bucket
+/// labels models frequently emit despite the numeric prompt instruction.
+/// Buckets map to representative scores inside the matching
+/// [`crate::memory::trust::trust_bucket`] range.
+fn proposal_trust_value(value: &Value) -> Option<f64> {
+    if let Some(trust) = value.as_f64() {
+        return (0.0..=1.0).contains(&trust).then_some(trust);
+    }
+    match value.as_str()?.trim().to_ascii_lowercase().as_str() {
+        "low" => Some(0.15),
+        "medium" => Some(0.5),
+        "high" => Some(0.85),
+        _ => None,
+    }
 }
 
 fn value_as_i64(value: &Value) -> Option<i64> {
