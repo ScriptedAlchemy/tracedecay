@@ -13713,7 +13713,8 @@ async fn message_search_selects_registered_project_session_db_by_project_id() {
         let mut args = json!({
             "query": "dragonfruit",
             "provider": "cursor",
-            "limit": 5
+            "limit": 5,
+            "catch_up": false
         });
         args.as_object_mut()
             .unwrap()
