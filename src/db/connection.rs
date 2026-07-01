@@ -114,6 +114,7 @@ impl Database {
             operation: "initialize".to_string(),
         })?;
 
+        migrations::configure_fresh_auto_vacuum(&conn, "initialize").await?;
         Self::apply_pragmas(&conn, 0).await?;
         migrations::create_schema(&conn).await?;
 

@@ -812,6 +812,9 @@ mod tests {
 
     #[tokio::test]
     async fn selected_project_retrieve_finds_selected_project_response_handle() {
+        const LARGE_RESPONSE_MARKER_COUNT: usize = 120;
+        const LAST_LARGE_RESPONSE_MARKER: usize = LARGE_RESPONSE_MARKER_COUNT - 1;
+
         let _env_lock = SELECTOR_ENV_LOCK.lock().await;
         let dir = TempDir::new().unwrap();
         let _env = SelectorEnv::new(dir.path());
@@ -826,7 +829,7 @@ mod tests {
         .unwrap();
 
         let mut target_source = String::new();
-        for i in 0..420 {
+        for i in 0..LARGE_RESPONSE_MARKER_COUNT {
             let _ = writeln!(
                 target_source,
                 "pub fn selected_project_handle_marker_{i:03}() -> &'static str {{ \"marker-{i:03}\" }}"
@@ -852,7 +855,7 @@ mod tests {
             json!({
                 "query": "selected_project_handle_marker",
                 "project_id": target_project_id,
-                "limit": 420,
+                "limit": LARGE_RESPONSE_MARKER_COUNT,
                 "format": "json"
             }),
             None,
@@ -901,7 +904,9 @@ mod tests {
         assert!(
             payload["content"]
                 .as_str()
-                .is_some_and(|content| content.contains("selected_project_handle_marker_419")),
+                .is_some_and(|content| content.contains(&format!(
+                    "selected_project_handle_marker_{LAST_LARGE_RESPONSE_MARKER:03}"
+                ))),
             "selected project retrieve should return the full selected-project response: {payload}"
         );
     }

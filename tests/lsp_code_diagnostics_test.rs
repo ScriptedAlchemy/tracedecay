@@ -4,6 +4,7 @@ use tracedecay::diagnostics::lsp;
 
 const FAKE_LANGUAGE: &str = "fake";
 const FAKE_PATH: &str = "src/lib.fake";
+const FAKE_LSP_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(150);
 
 #[test]
 fn builtin_registry_advertises_phase_one_setup_contract() {
@@ -154,7 +155,7 @@ async fn broker_refresh_documents_populates_cached_diagnostics() {
         .refresh_documents(
             FAKE_LANGUAGE,
             vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
-            std::time::Duration::from_secs(3),
+            FAKE_LSP_TIMEOUT,
         )
         .await
         .unwrap();
@@ -209,7 +210,7 @@ async fn broker_keeps_diagnostics_for_multiple_languages_in_one_snapshot() {
         .refresh_documents(
             "alpha",
             vec![fake_document("alpha", "src/lib.alpha", "alpha nope")],
-            std::time::Duration::from_secs(3),
+            FAKE_LSP_TIMEOUT,
         )
         .await
         .unwrap();
@@ -217,7 +218,7 @@ async fn broker_keeps_diagnostics_for_multiple_languages_in_one_snapshot() {
         .refresh_documents(
             "beta",
             vec![fake_document("beta", "src/lib.beta", "beta nope")],
-            std::time::Duration::from_secs(3),
+            FAKE_LSP_TIMEOUT,
         )
         .await
         .unwrap();
@@ -339,15 +340,11 @@ async fn broker_reuses_warm_lsp_client_between_refreshes() {
     let document = fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope");
 
     broker
-        .refresh_documents(
-            "fake",
-            vec![document.clone()],
-            std::time::Duration::from_secs(3),
-        )
+        .refresh_documents("fake", vec![document.clone()], FAKE_LSP_TIMEOUT)
         .await
         .unwrap();
     broker
-        .refresh_documents("fake", vec![document], std::time::Duration::from_secs(3))
+        .refresh_documents("fake", vec![document], FAKE_LSP_TIMEOUT)
         .await
         .unwrap();
 
@@ -385,11 +382,11 @@ async fn broker_keys_warm_lsp_clients_by_workspace_root() {
     ];
 
     broker
-        .refresh_documents("fake", documents.clone(), std::time::Duration::from_secs(3))
+        .refresh_documents("fake", documents.clone(), FAKE_LSP_TIMEOUT)
         .await
         .unwrap();
     broker
-        .refresh_documents("fake", documents, std::time::Duration::from_secs(3))
+        .refresh_documents("fake", documents, FAKE_LSP_TIMEOUT)
         .await
         .unwrap();
 

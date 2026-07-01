@@ -107,10 +107,24 @@ async fn enable_incremental_auto_vacuum(
     Ok(())
 }
 
+/// Configures incremental auto-vacuum for a brand-new database before any
+/// schema-shaping pragmas or tables are created.
+pub(crate) async fn configure_fresh_auto_vacuum(conn: &Connection, operation: &str) -> Result<()> {
+    conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("{operation}: failed to configure fresh auto_vacuum: {e}"),
+            operation: operation.to_string(),
+        })?;
+    Ok(())
+}
+
 /// Creates the complete latest schema from scratch for a brand-new database.
 /// This avoids running v0→v1→…→v6 migrations sequentially.
 pub async fn create_schema(conn: &Connection) -> Result<()> {
-    enable_incremental_auto_vacuum(conn, "create_schema", true).await?;
+    // Fresh databases only need the pragma before tables are created. Existing
+    // databases still get rebuilt through migrate's vacuuming repair path.
+    enable_incremental_auto_vacuum(conn, "create_schema", false).await?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS nodes (
             id TEXT PRIMARY KEY,

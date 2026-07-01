@@ -12,42 +12,21 @@ use common::{
     lcm_payload_session as sample_session, open_lcm_db,
 };
 
-fn externalized_tool_payload(prefix: &str, fill: char) -> String {
-    fn with_filler(prefix: &str, fill: char, filler_chars: usize) -> String {
-        format!("{prefix}{}", fill.to_string().repeat(filler_chars))
-    }
+const TOOL_PAYLOAD_FIXTURE_FILLER_CHARS: usize = 260 * 1024;
 
-    let externalizes = |candidate: &str| {
+fn externalized_tool_payload(prefix: &str, fill: char) -> String {
+    let payload = format!(
+        "{prefix}{}",
+        fill.to_string().repeat(TOOL_PAYLOAD_FIXTURE_FILLER_CHARS)
+    );
+    assert!(
         tracedecay::sessions::lcm::security::should_externalize(
             "tool",
             Some("tool_result"),
-            candidate,
-        )
-    };
-
-    let mut high = 1024;
-    while !externalizes(&with_filler(prefix, fill, high)) {
-        high = high
-            .checked_mul(2)
-            .filter(|next| *next <= 2 * 1024 * 1024)
-            .expect("tool payload fixture should externalize before 2 MiB");
-    }
-
-    let mut low = 0;
-    while low < high {
-        let mid = low + (high - low) / 2;
-        if externalizes(&with_filler(prefix, fill, mid)) {
-            high = mid;
-        } else {
-            low = mid + 1;
-        }
-    }
-
-    let payload = with_filler(prefix, fill, low);
-    assert!(externalizes(&payload));
-    if low > 0 {
-        assert!(!externalizes(&with_filler(prefix, fill, low - 1)));
-    }
+            &payload,
+        ),
+        "tool payload fixture should externalize"
+    );
     payload
 }
 

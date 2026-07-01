@@ -2502,8 +2502,9 @@ async fn test_batch_incoming_call_counts() {
         .await
         .unwrap();
 
-    for (id, name) in [("fn:a", "alpha"), ("fn:b", "beta"), ("fn:c", "gamma")] {
-        db.insert_node(&Node {
+    let nodes = [("fn:a", "alpha"), ("fn:b", "beta"), ("fn:c", "gamma")]
+        .into_iter()
+        .map(|(id, name)| Node {
             id: id.to_string(),
             kind: NodeKind::Function,
             name: name.to_string(),
@@ -2528,21 +2529,20 @@ async fn test_batch_incoming_call_counts() {
             updated_at: 0,
             parent_id: None,
         })
-        .await
-        .unwrap();
-    }
+        .collect::<Vec<_>>();
+    db.insert_nodes(&nodes).await.unwrap();
 
     // alpha has 2 callers, beta has 1, gamma has 0
-    for (src, tgt) in [("fn:b", "fn:a"), ("fn:c", "fn:a"), ("fn:c", "fn:b")] {
-        db.insert_edge(&Edge {
+    let edges = [("fn:b", "fn:a"), ("fn:c", "fn:a"), ("fn:c", "fn:b")]
+        .into_iter()
+        .map(|(src, tgt)| Edge {
             source: src.to_string(),
             target: tgt.to_string(),
             kind: EdgeKind::Calls,
             line: None,
         })
-        .await
-        .unwrap();
-    }
+        .collect::<Vec<_>>();
+    db.insert_edges(&edges).await.unwrap();
 
     let counts = db
         .batch_incoming_call_counts(&["fn:a".to_string(), "fn:b".to_string(), "fn:c".to_string()])

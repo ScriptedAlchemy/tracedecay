@@ -222,6 +222,50 @@ struct Fixture {
     _daemon: Option<common::DaemonProcess>,
 }
 
+#[cfg(windows)]
+struct FixtureSnapshot {
+    _dir: TempDir,
+    profile_path: PathBuf,
+}
+
+#[cfg(windows)]
+impl FixtureSnapshot {
+    fn capture(fixture: &Fixture) -> Self {
+        let dir = TempDir::new().expect("fixture snapshot tempdir");
+        let profile_path = dir.path().join(".tracedecay");
+        std::fs::create_dir_all(&profile_path).unwrap_or_else(|e| {
+            panic!(
+                "failed to create fixture snapshot dir {}: {e}",
+                profile_path.display()
+            )
+        });
+        copy_dir_contents(&fixture.home_path.join(".tracedecay"), &profile_path);
+        Self {
+            _dir: dir,
+            profile_path,
+        }
+    }
+
+    fn restore_into(&self, fixture: &Fixture) {
+        let profile_path = fixture.home_path.join(".tracedecay");
+        if profile_path.exists() {
+            std::fs::remove_dir_all(&profile_path).unwrap_or_else(|e| {
+                panic!(
+                    "failed to remove fixture profile {}: {e}",
+                    profile_path.display()
+                )
+            });
+        }
+        std::fs::create_dir_all(&profile_path).unwrap_or_else(|e| {
+            panic!(
+                "failed to recreate fixture profile {}: {e}",
+                profile_path.display()
+            )
+        });
+        copy_dir_contents(&self.profile_path, &profile_path);
+    }
+}
+
 impl Fixture {
     fn db_path(&self) -> PathBuf {
         tracedecay::storage::resolve_layout(&self.project_path, &self.home_path.join(".tracedecay"))
@@ -416,6 +460,37 @@ fn canonical_test_dir(path: &Path) -> PathBuf {
         .unwrap_or_else(|e| panic!("failed to canonicalize test dir {}: {e}", path.display()))
 }
 
+#[cfg(windows)]
+fn copy_dir_contents(source: &Path, destination: &Path) {
+    for entry in std::fs::read_dir(source)
+        .unwrap_or_else(|e| panic!("failed to read fixture dir {}: {e}", source.display()))
+    {
+        let entry = entry.unwrap_or_else(|e| panic!("failed to read fixture entry: {e}"));
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .unwrap_or_else(|e| panic!("failed to inspect {}: {e}", source_path.display()));
+        if file_type.is_dir() {
+            std::fs::create_dir_all(&destination_path).unwrap_or_else(|e| {
+                panic!(
+                    "failed to create fixture dir {}: {e}",
+                    destination_path.display()
+                )
+            });
+            copy_dir_contents(&source_path, &destination_path);
+        } else if file_type.is_file() {
+            std::fs::copy(&source_path, &destination_path).unwrap_or_else(|e| {
+                panic!(
+                    "failed to copy fixture file {} to {}: {e}",
+                    source_path.display(),
+                    destination_path.display()
+                )
+            });
+        }
+    }
+}
+
 fn initialize_fixture_project(fixture: &Fixture) {
     let profile_root = fixture.home_path.join(".tracedecay");
     let open_options = TraceDecayOpenOptions {
@@ -426,9 +501,6 @@ fn initialize_fixture_project(fixture: &Fixture) {
         let cg = TraceDecay::init_with_options(&fixture.project_path, open_options)
             .await
             .unwrap_or_else(|e| panic!("initialize fixture project: {e}"));
-        cg.index_all_with_progress(|_, _, _| {})
-            .await
-            .unwrap_or_else(|e| panic!("index fixture project: {e}"));
         cg.checkpoint()
             .await
             .unwrap_or_else(|e| panic!("checkpoint fixture project: {e}"));
@@ -731,20 +803,31 @@ fn format_outcomes(outcomes: &[AssertionOutcome]) -> String {
 
 fn run_scenario(id: &str) {
     let scenario = load_scenario(id);
+    let well_behaved_steps = &scenario.deterministic.well_behaved;
 
     // Phase A: a well-behaved agent's tool sequence must leave a compliant
-    // end-state.
-    let fixture = build_fixture(&scenario.setup);
-    let seeded_sources = fact_ids_by_source(&fixture);
+    // end-state. Scenarios with no well-behaved steps can assert their
+    // baseline on the violation fixture before any violation writes.
+    let mut fixture = build_fixture(&scenario.setup);
+    let mut seeded_sources = fact_ids_by_source(&fixture);
     let mut dry_run_report = None;
-    for step in &scenario.deterministic.well_behaved {
-        let result = execute_step(&fixture, step, &mut dry_run_report);
-        assert!(
-            result.succeeded,
-            "[{id}] well-behaved step was refused; compliant writes must be accepted"
-        );
+    #[cfg(windows)]
+    let baseline_snapshot =
+        if !well_behaved_steps.is_empty() && scenario.deterministic.violation.is_some() {
+            Some(FixtureSnapshot::capture(&fixture))
+        } else {
+            None
+        };
+    if !well_behaved_steps.is_empty() {
+        for step in well_behaved_steps {
+            let result = execute_step(&fixture, step, &mut dry_run_report);
+            assert!(
+                result.succeeded,
+                "[{id}] well-behaved step was refused; compliant writes must be accepted"
+            );
+        }
     }
-    let outcomes = evaluate_assertions(
+    let well_behaved_outcomes = evaluate_assertions(
         &scenario,
         &fixture,
         Phase::WellBehaved,
@@ -752,20 +835,32 @@ fn run_scenario(id: &str) {
         &dry_run_report,
     );
     assert!(
-        outcomes.iter().all(|o| o.passed),
+        well_behaved_outcomes.iter().all(|o| o.passed),
         "[{id}] well-behaved phase failed:\n{}",
-        format_outcomes(&outcomes)
+        format_outcomes(&well_behaved_outcomes)
     );
-    println!("[{id}] well-behaved phase:\n{}", format_outcomes(&outcomes));
+    println!(
+        "[{id}] well-behaved phase:\n{}",
+        format_outcomes(&well_behaved_outcomes)
+    );
 
     // Phase B: a misbehaving sequence must be either defended against by the
     // write path or detected by the assertion set (instrument self-check).
     let Some(violation) = &scenario.deterministic.violation else {
         return;
     };
-    let fixture = build_fixture(&scenario.setup);
-    let seeded_sources = fact_ids_by_source(&fixture);
-    let mut dry_run_report = None;
+    if !well_behaved_steps.is_empty() {
+        #[cfg(windows)]
+        if let Some(snapshot) = &baseline_snapshot {
+            snapshot.restore_into(&fixture);
+        }
+        #[cfg(not(windows))]
+        {
+            fixture = build_fixture(&scenario.setup);
+        }
+        seeded_sources = fact_ids_by_source(&fixture);
+    }
+    dry_run_report = None;
     let mut any_step_succeeded = false;
     for step in &violation.steps {
         let result = execute_step(&fixture, step, &mut dry_run_report);

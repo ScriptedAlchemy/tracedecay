@@ -279,12 +279,79 @@ fn unresolved_project_selector_error(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use libsql::{params, Connection};
     use serde_json::json;
     use tempfile::TempDir;
 
     use crate::global_db::GlobalDb;
 
     use super::{require_node_id, string_array_values, unique_project_basename_context};
+
+    struct TestProjectSeed {
+        project_id: String,
+        project_root: PathBuf,
+    }
+
+    async fn seed_code_project_registry_rows(
+        db: &GlobalDb,
+        projects: &[TestProjectSeed],
+    ) -> std::result::Result<(), libsql::Error> {
+        let conn = db.dashboard_connection();
+        conn.execute("BEGIN IMMEDIATE", ()).await?;
+        if let Err(err) = seed_code_project_registry_rows_in_tx(&conn, projects).await {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            return Err(err);
+        }
+        if let Err(err) = conn.execute("COMMIT", ()).await {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    async fn seed_code_project_registry_rows_in_tx(
+        conn: &Connection,
+        projects: &[TestProjectSeed],
+    ) -> std::result::Result<(), libsql::Error> {
+        let now = crate::tracedecay::current_timestamp();
+        for project in projects {
+            let canonical_root = GlobalDb::canonical_project_key(&project.project_root);
+            let display_root = project.project_root.to_string_lossy().to_string();
+            conn.execute(
+                "INSERT INTO code_projects
+                 (project_id, canonical_root, display_root, git_common_dir, git_remote_url,
+                  default_branch, created_at, last_seen_at)
+                 VALUES (?1, ?2, ?3, NULL, NULL, ?4, ?5, ?5)
+                 ON CONFLICT(project_id) DO UPDATE SET
+                    canonical_root = excluded.canonical_root,
+                    display_root = excluded.display_root,
+                    git_common_dir = excluded.git_common_dir,
+                    git_remote_url = excluded.git_remote_url,
+                    default_branch = excluded.default_branch,
+                    last_seen_at = excluded.last_seen_at",
+                params![
+                    project.project_id.as_str(),
+                    canonical_root.as_str(),
+                    display_root.as_str(),
+                    "main",
+                    now,
+                ],
+            )
+            .await?;
+            conn.execute(
+                "INSERT INTO project_aliases (alias_path, project_id, last_seen_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(alias_path) DO UPDATE SET
+                    project_id = excluded.project_id,
+                    last_seen_at = excluded.last_seen_at",
+                params![canonical_root.as_str(), project.project_id.as_str(), now],
+            )
+            .await?;
+        }
+        Ok(())
+    }
 
     #[test]
     fn test_require_node_id_canonical() {
@@ -333,34 +400,25 @@ mod tests {
             .await
             .ok_or_else(|| std::io::Error::other("failed to open test global db"))?;
 
-        let first_exact = dir.path().join("first").join("target");
-        std::fs::create_dir_all(&first_exact)?;
-        db.upsert_code_project("z_exact_old", &first_exact, None, None, Some("main"))
-            .await
-            .ok_or_else(|| std::io::Error::other("failed to insert first exact project"))?;
-
+        let mut projects = Vec::with_capacity(102);
+        projects.push(TestProjectSeed {
+            project_id: "z_exact_old".to_string(),
+            project_root: dir.path().join("first").join("target"),
+        });
         for index in 0..100 {
-            let root = dir
-                .path()
-                .join("noise")
-                .join(format!("target-noise-{index:03}"));
-            std::fs::create_dir_all(&root)?;
-            db.upsert_code_project(
-                &format!("n_noise_{index:03}"),
-                &root,
-                None,
-                None,
-                Some("main"),
-            )
-            .await
-            .ok_or_else(|| std::io::Error::other("failed to insert noise project"))?;
+            projects.push(TestProjectSeed {
+                project_id: format!("n_noise_{index:03}"),
+                project_root: dir
+                    .path()
+                    .join("noise")
+                    .join(format!("target-noise-{index:03}")),
+            });
         }
-
-        let second_exact = dir.path().join("second").join("target");
-        std::fs::create_dir_all(&second_exact)?;
-        db.upsert_code_project("a_exact_new", &second_exact, None, None, Some("main"))
-            .await
-            .ok_or_else(|| std::io::Error::other("failed to insert second exact project"))?;
+        projects.push(TestProjectSeed {
+            project_id: "a_exact_new".to_string(),
+            project_root: dir.path().join("second").join("target"),
+        });
+        seed_code_project_registry_rows(&db, &projects).await?;
 
         assert!(
             unique_project_basename_context(&db, "target")

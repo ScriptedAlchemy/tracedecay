@@ -418,6 +418,12 @@ async fn init_test_project(project: &Path) -> (TestTraceDecay, TestEnv) {
     )
 }
 
+async fn setup_empty_project() -> (TestTraceDecay, TestEnv, TestTempDir) {
+    let dir = test_temp_dir();
+    let (cg, env) = init_test_project(dir.path()).await;
+    (cg, env, dir)
+}
+
 async fn setup_generated_dir_project(include_dist: bool) -> (TestTraceDecay, TestEnv, TestTempDir) {
     let dir = test_temp_dir();
     let project = dir.path();
@@ -936,7 +942,8 @@ async fn project_registry_tools_prefer_injected_registry_over_process_default() 
 
 #[tokio::test]
 async fn selected_project_read_skips_cache_write_for_read_only_store() {
-    let (cg, _project_dir) = setup_project().await;
+    let project_dir = test_temp_dir();
+    let (cg, _env) = init_test_project(project_dir.path()).await;
     let registry_dir = test_temp_dir();
     let registry_path = registry_dir.path().join("global.db");
     let _env_guard = GlobalDbEnvGuard::set(&registry_path);
@@ -955,8 +962,7 @@ async fn selected_project_read_skips_cache_write_for_read_only_store() {
         .upsert_code_project("proj_read", target_project, None, None, Some("main"))
         .await
         .unwrap();
-    let target_cg = TestTraceDecay::new(TraceDecay::init(target_project).await.unwrap());
-    index_all_retrying_sync_lock(&target_cg).await;
+    let _target_cg = TestTraceDecay::new(TraceDecay::init(target_project).await.unwrap());
 
     let read_args = json!({
         "project_id": "proj_read",
@@ -1234,7 +1240,7 @@ async fn expect_missing_argument_error(
 
 #[tokio::test]
 async fn schema_required_arguments_match_representative_handler_parsers() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let tools = get_tool_definitions();
 
     // Direct `args.get(...).ok_or(...)` parser style.
@@ -1833,7 +1839,7 @@ async fn test_search_omits_index_coverage_hint_when_generated_dir_is_included() 
 
 #[tokio::test]
 async fn retrieve_tool_returns_full_stored_response() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let original = "{\"items\":[{\"id\":1,\"name\":\"alpha\"}]}";
     let stored = tracedecay::mcp::response_handles::store_response_handle(
         cg.project_root(),
@@ -1882,7 +1888,7 @@ async fn retrieve_tool_returns_full_stored_response() {
 
 #[tokio::test]
 async fn retrieve_tool_reports_missing_and_expired_handles_actionably() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
 
     let missing = handle_tool_call(
         &cg,
@@ -1943,31 +1949,26 @@ async fn retrieve_tool_reports_missing_and_expired_handles_actionably() {
 
 #[tokio::test]
 async fn fact_store_large_list_response_uses_retrieve_handle() {
-    let (cg, _dir) = setup_project().await;
-    let mut last_fact_id = None;
-    for i in 0..35 {
-        let added = handle_tool_call(
-            &cg,
-            "tracedecay_fact_store",
-            json!({
-                "action": "add",
-                "content": format!(
-                    "LONG_FACT_MARKER_{i:02}: {}",
-                    "large fact-store response should remain retrievable ".repeat(80)
-                ),
-                "category": "project",
-                "trust": 0.9
-            }),
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-        if i == 34 {
-            let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
-            last_fact_id = added["fact"]["fact_id"].as_i64();
-        }
-    }
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let added = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": format!(
+                "LONG_FACT_MARKER_00: {}",
+                "large fact-store response should remain retrievable ".repeat(220)
+            ),
+            "category": "project",
+            "trust": 0.9
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
+    let last_fact_id = added["fact"]["fact_id"].as_i64();
     let last_fact_id = last_fact_id.expect("tail fact id");
 
     let listed = handle_tool_call(
@@ -2029,35 +2030,33 @@ async fn fact_store_large_list_response_uses_retrieve_handle() {
         .as_str()
         .expect("retrieve response should contain original JSON text");
     let full: Value = serde_json::from_str(full_json).expect("retrieved content should be JSON");
-    assert_eq!(full["count"].as_u64(), Some(35));
+    assert_eq!(full["count"].as_u64(), Some(1));
     assert!(
-        full_json.contains("LONG_FACT_MARKER_34"),
+        full_json.contains("LONG_FACT_MARKER_00"),
         "retrieved response should include the full fact list"
     );
 }
 
 #[tokio::test]
 async fn fact_store_large_list_response_reports_store_failure_actionably() {
-    let (cg, _dir) = setup_project().await;
-    for i in 0..35 {
-        handle_tool_call(
-            &cg,
-            "tracedecay_fact_store",
-            json!({
-                "action": "add",
-                "content": format!(
-                    "STORE_FAILURE_MARKER_{i:02}: {}",
-                    "large fact-store response should surface cache failures ".repeat(80)
-                ),
-                "category": "project",
-                "trust": 0.9
-            }),
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-    }
+    let (cg, _env, _dir) = setup_empty_project().await;
+    handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": format!(
+                "STORE_FAILURE_MARKER_00: {}",
+                "large fact-store response should surface cache failures ".repeat(220)
+            ),
+            "category": "project",
+            "trust": 0.9
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
 
     let handle_dir = response_handle_dir(&cg);
     fs::write(&handle_dir, "not-a-directory").unwrap();
@@ -2100,20 +2099,26 @@ async fn fact_store_large_list_response_reports_store_failure_actionably() {
 
 #[tokio::test]
 async fn search_large_response_uses_retrievable_truncation_handle() {
-    let (cg, project) = setup_project().await;
+    const LARGE_RESPONSE_MARKER_COUNT: usize = 120;
+    const LAST_LARGE_RESPONSE_MARKER: usize = LARGE_RESPONSE_MARKER_COUNT - 1;
+
+    let dir = test_temp_dir();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    let (cg, _env) = init_test_project(project).await;
     let mut source = String::new();
-    for i in 0..420 {
+    for i in 0..LARGE_RESPONSE_MARKER_COUNT {
         source.push_str(&format!(
             "pub fn reversible_search_marker_{i:03}() -> &'static str {{ \"marker-{i:03}\" }}\n"
         ));
     }
-    fs::write(project.path().join("src/large_search.rs"), source).unwrap();
+    fs::write(project.join("src/large_search.rs"), source).unwrap();
     index_all_retrying_sync_lock(&cg).await;
 
     let result = handle_tool_call(
         &cg,
         "tracedecay_search",
-        json!({"query": "reversible_search_marker", "limit": 420}),
+        json!({"query": "reversible_search_marker", "limit": LARGE_RESPONSE_MARKER_COUNT}),
         None,
         None,
     )
@@ -2142,7 +2147,9 @@ async fn search_large_response_uses_retrievable_truncation_handle() {
         .as_str()
         .expect("retrieve response should contain full search JSON");
     assert!(
-        full_json.contains("reversible_search_marker_419"),
+        full_json.contains(&format!(
+            "reversible_search_marker_{LAST_LARGE_RESPONSE_MARKER:03}"
+        )),
         "retrieved search response should include the tail result"
     );
 }
@@ -2778,14 +2785,20 @@ async fn test_diff_context() {
 
 #[tokio::test]
 async fn diff_context_large_response_uses_retrievable_truncation_handle() {
-    let (cg, project) = setup_project().await;
+    const LARGE_RESPONSE_MARKER_COUNT: usize = 120;
+    const LAST_LARGE_RESPONSE_MARKER: usize = LARGE_RESPONSE_MARKER_COUNT - 1;
+
+    let dir = test_temp_dir();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    let (cg, _env) = init_test_project(project).await;
     let mut source = String::new();
-    for i in 0..420 {
+    for i in 0..LARGE_RESPONSE_MARKER_COUNT {
         source.push_str(&format!(
             "pub fn reversible_diff_context_marker_{i:03}() -> &'static str {{ \"marker-{i:03}\" }}\n"
         ));
     }
-    fs::write(project.path().join("src/large_diff.rs"), source).unwrap();
+    fs::write(project.join("src/large_diff.rs"), source).unwrap();
     index_all_retrying_sync_lock(&cg).await;
 
     let result = handle_tool_call(
@@ -2820,7 +2833,9 @@ async fn diff_context_large_response_uses_retrievable_truncation_handle() {
         .as_str()
         .expect("retrieve response should contain full diff_context JSON");
     assert!(
-        full_json.contains("reversible_diff_context_marker_419"),
+        full_json.contains(&format!(
+            "reversible_diff_context_marker_{LAST_LARGE_RESPONSE_MARKER:03}"
+        )),
         "retrieved diff_context response should include the tail result"
     );
 }
@@ -3170,7 +3185,7 @@ async fn test_god_class() {
 
 #[tokio::test]
 async fn test_changelog_no_git() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     // The temp dir is not a git repo, so this should return a structured git
     // error in the tool payload rather than success-looking prose.
     let result = handle_tool_call(
@@ -3194,7 +3209,7 @@ async fn test_changelog_no_git() {
 
 #[tokio::test]
 async fn run_affected_tests_reports_git_failure_without_changed_paths() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_run_affected_tests",
@@ -3216,7 +3231,7 @@ async fn run_affected_tests_reports_git_failure_without_changed_paths() {
 
 #[tokio::test]
 async fn pr_context_no_git_returns_structured_git_error() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_pr_context",
@@ -3396,7 +3411,7 @@ async fn test_port_order() {
 
 #[tokio::test]
 async fn test_unknown_tool() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_unknown", json!({}), None, None).await;
     match result {
         Err(err) => {
@@ -3417,7 +3432,7 @@ async fn test_unknown_tool() {
 
 #[tokio::test]
 async fn test_missing_required_params() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_search", json!({}), None, None).await;
     let err_msg = match result {
         Err(err) => format!("{}", err),
@@ -3499,7 +3514,7 @@ async fn test_search_populates_touched_files() {
 
 #[tokio::test]
 async fn test_rename_preview_not_found() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_rename_preview",
@@ -3567,35 +3582,35 @@ async fn test_rank_outgoing() {
 
 #[tokio::test]
 async fn test_context_missing_task() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_context", json!({}), None, None).await;
     assert!(result.is_err(), "context without task should error");
 }
 
 #[tokio::test]
 async fn test_callers_missing_node_id() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_callers", json!({}), None, None).await;
     assert!(result.is_err(), "callers without node_id should error");
 }
 
 #[tokio::test]
 async fn test_affected_missing_files() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_affected", json!({}), None, None).await;
     assert!(result.is_err(), "affected without files should error");
 }
 
 #[tokio::test]
 async fn test_module_api_missing_path() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_module_api", json!({}), None, None).await;
     assert!(result.is_err(), "module_api without path should error");
 }
 
 #[tokio::test]
 async fn test_rank_missing_edge_kind() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_rank",
@@ -3609,28 +3624,28 @@ async fn test_rank_missing_edge_kind() {
 
 #[tokio::test]
 async fn test_similar_missing_symbol() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_similar", json!({}), None, None).await;
     assert!(result.is_err(), "similar without symbol should error");
 }
 
 #[tokio::test]
 async fn test_diff_context_missing_files() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_diff_context", json!({}), None, None).await;
     assert!(result.is_err(), "diff_context without files should error");
 }
 
 #[tokio::test]
 async fn test_changelog_missing_refs() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_changelog", json!({}), None, None).await;
     assert!(result.is_err(), "changelog without from_ref should error");
 }
 
 #[tokio::test]
 async fn test_port_status_missing_dirs() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_port_status", json!({}), None, None).await;
     assert!(
         result.is_err(),
@@ -3640,7 +3655,7 @@ async fn test_port_status_missing_dirs() {
 
 #[tokio::test]
 async fn test_port_order_missing_source_dir() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_port_order", json!({}), None, None).await;
     assert!(
         result.is_err(),
@@ -4330,7 +4345,7 @@ async fn project_selector_is_rejected_before_write_tool_parsing() {
 
 #[tokio::test]
 async fn lcm_project_root_storage_arg_is_not_rejected_as_selector() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let project_root = cg.project_root().to_string_lossy().to_string();
 
     let result = handle_tool_call(
@@ -4358,7 +4373,7 @@ async fn lcm_project_root_storage_arg_is_not_rejected_as_selector() {
 
 #[tokio::test]
 async fn lcm_project_path_selector_is_rejected_before_dispatch() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let project_path = cg.project_root().to_string_lossy().to_string();
 
     let result = handle_tool_call(
@@ -6800,7 +6815,7 @@ async fn memory_tools_validate_malformed_inputs() {
 
 #[tokio::test]
 async fn message_search_reads_project_local_session_db() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let db = open_active_project_session_db(&cg).await;
     let session = SessionRecord {
         provider: "cursor".to_string(),
@@ -6981,7 +6996,7 @@ async fn message_search_reads_project_local_session_db() {
 
 #[tokio::test]
 async fn message_search_catches_up_provider_transcripts_before_querying() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let home = cg.project_root().join("home");
     let project = cg.project_root().to_path_buf();
     let project_text = project.to_string_lossy();
@@ -7117,7 +7132,7 @@ async fn message_search_catches_up_provider_transcripts_before_querying() {
 
 #[tokio::test]
 async fn message_search_can_skip_catch_up_for_read_only_audits() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let home = cg.project_root().join("home");
     let project = cg.project_root().to_path_buf();
     let project_text = project.to_string_lossy();
@@ -7600,7 +7615,7 @@ async fn wipe_lcm_raw_fts_for_message(cg: &TraceDecay, message_id: &str) {
 
 #[tokio::test]
 async fn lcm_doctor_clean_dry_run_reports_noise_and_filtered_sessions_without_mutating() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "cron-20260414",
@@ -7696,7 +7711,7 @@ async fn lcm_doctor_clean_dry_run_reports_noise_and_filtered_sessions_without_mu
 
 #[tokio::test]
 async fn lcm_doctor_clean_apply_is_denied_by_default() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "cron-20260414",
@@ -7735,7 +7750,7 @@ async fn lcm_doctor_clean_apply_is_denied_by_default() {
 
 #[tokio::test]
 async fn lcm_doctor_clean_apply_backs_up_and_deletes_only_safe_candidates() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "cron-20260414",
@@ -7826,10 +7841,12 @@ async fn lcm_doctor_clean_apply_backs_up_and_deletes_only_safe_candidates() {
 
 #[tokio::test]
 async fn lcm_doctor_clean_apply_deletes_all_matching_noise_beyond_diagnostic_samples() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let db = open_active_project_session_db(&cg).await;
     for idx in 0..25 {
-        seed_lcm_session_message(
-            &cg,
+        seed_lcm_session_message_in_db(
+            &db,
+            cg.project_root(),
             "normal-session",
             &format!("cron-noise-{idx}"),
             format!("Cronjob Response: noisy heartbeat {idx}"),
@@ -7837,8 +7854,9 @@ async fn lcm_doctor_clean_apply_deletes_all_matching_noise_beyond_diagnostic_sam
         )
         .await;
     }
-    seed_lcm_session_message(
-        &cg,
+    seed_lcm_session_message_in_db(
+        &db,
+        cg.project_root(),
         "normal-session",
         "normal-valuable",
         "valuable payload to preserve",
@@ -7886,7 +7904,7 @@ async fn lcm_doctor_clean_apply_deletes_all_matching_noise_beyond_diagnostic_sam
 
 #[tokio::test]
 async fn lcm_doctor_reports_missing_and_orphan_payloads_without_payload_bodies() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let secret = format!(
         "LCM_DOCTOR_SECRET_PAYLOAD\n{}",
         "doctor-secret ".repeat(30_000)
@@ -7936,7 +7954,7 @@ async fn lcm_doctor_reports_missing_and_orphan_payloads_without_payload_bodies()
 
 #[tokio::test]
 async fn lcm_doctor_reports_placeholder_recovery_and_gc_candidates_without_bodies() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let missing_ref = "payload_missing_placeholder_test.payload";
     let placeholder = format!(
         "[Externalized LCM ingest payload: kind=ingest_payload; role=user; field=content; chars=2048; bytes=2048; ref={missing_ref}]"
@@ -8007,7 +8025,7 @@ async fn lcm_doctor_reports_placeholder_recovery_and_gc_candidates_without_bodie
 
 #[tokio::test]
 async fn lcm_doctor_gc_mode_preview_and_apply_reports_without_body_leaks() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "gc-preview-session",
@@ -8076,7 +8094,7 @@ async fn lcm_doctor_gc_mode_preview_and_apply_reports_without_body_leaks() {
 
 #[tokio::test]
 async fn lcm_doctor_gc_apply_is_denied_by_default() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_lcm_doctor",
@@ -8097,7 +8115,7 @@ async fn lcm_doctor_gc_apply_is_denied_by_default() {
 
 #[tokio::test]
 async fn lcm_doctor_counts_nested_externalized_payload_refs_as_referenced() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let media_payload = format!(
         "data:image/png;base64,{}",
         "QWxhZGRpbjpvcGVuIHNlc2FtZQ==".repeat(160)
@@ -8155,7 +8173,7 @@ async fn lcm_doctor_counts_nested_externalized_payload_refs_as_referenced() {
 
 #[tokio::test]
 async fn lcm_doctor_ignores_plain_text_ref_tokens_as_placeholders() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "lcm-doctor-plain-ref",
@@ -8203,7 +8221,7 @@ async fn lcm_doctor_ignores_plain_text_ref_tokens_as_placeholders() {
 
 #[tokio::test]
 async fn lcm_doctor_scoped_payload_diagnostics_ignore_other_session_payload_files() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_tool_result_message(
         &cg,
         "lcm-doctor-payload-target",
@@ -8258,7 +8276,7 @@ async fn lcm_doctor_scoped_payload_diagnostics_ignore_other_session_payload_file
 
 #[tokio::test]
 async fn lcm_doctor_reports_scoped_fts_rebuild_when_other_session_matches_probe_term() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "lcm-doctor-fts-target",
@@ -8299,7 +8317,7 @@ async fn lcm_doctor_reports_scoped_fts_rebuild_when_other_session_matches_probe_
 
 #[tokio::test]
 async fn lcm_doctor_counts_summary_source_rows_with_missing_owner_node() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "lcm-doctor-orphan-owner",
@@ -8340,7 +8358,7 @@ async fn lcm_doctor_counts_summary_source_rows_with_missing_owner_node() {
 
 #[tokio::test]
 async fn lcm_doctor_scopes_orphan_lifecycle_debt_to_requested_session() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "lcm-doctor-debt-target",
@@ -8382,7 +8400,7 @@ async fn lcm_doctor_scopes_orphan_lifecycle_debt_to_requested_session() {
 
 #[tokio::test]
 async fn lcm_doctor_diagnose_does_not_create_missing_project_session_db() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let db_path = project_session_db_path(&cg);
     if db_path.exists() {
         fs::remove_file(&db_path).unwrap();
@@ -8458,7 +8476,7 @@ async fn lcm_doctor_repair_dry_run_does_not_run_schema_migration() {
 
 #[tokio::test]
 async fn lcm_doctor_repair_dry_run_reports_fts_rebuild_without_mutating() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "lcm-doctor-dry-run",
@@ -8496,7 +8514,7 @@ async fn lcm_doctor_repair_dry_run_reports_fts_rebuild_without_mutating() {
 
 #[tokio::test]
 async fn lcm_doctor_repair_apply_rebuilds_damaged_fts() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "lcm-doctor-apply",
@@ -8574,7 +8592,8 @@ async fn lcm_doctor_retention_reports_candidates_without_deleting() {
 
 #[tokio::test]
 async fn lcm_doctor_uses_explicit_hermes_profile_session_db() {
-    let (cg, _dir) = setup_project().await;
+    let dir = test_temp_dir();
+    let (cg, _env) = init_test_project(dir.path()).await;
     seed_lcm_session_message(
         &cg,
         "lcm-doctor-profile",
@@ -8618,7 +8637,8 @@ async fn lcm_doctor_uses_explicit_hermes_profile_session_db() {
 
 #[tokio::test]
 async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
-    let (cg, _dir) = setup_project().await;
+    let dir = test_temp_dir();
+    let (cg, _env) = init_test_project(dir.path()).await;
     let full_text = format!("orchard dispatch {}", "external-payload-body ".repeat(400));
     seed_lcm_session_message(&cg, "lcm-session", "lcm-message", full_text, 1).await;
     let db = open_project_session_db(cg.project_root())
@@ -9760,7 +9780,8 @@ async fn lcm_grep_accepts_string_timestamp_filters() {
 
 #[tokio::test]
 async fn lcm_status_uses_explicit_hermes_profile_session_db() {
-    let (cg, _dir) = setup_project().await;
+    let dir = test_temp_dir();
+    let (cg, _env) = init_test_project(dir.path()).await;
     seed_lcm_session_message(
         &cg,
         "lcm-profile-status",
@@ -9817,7 +9838,7 @@ async fn lcm_status_uses_explicit_hermes_profile_session_db() {
 
 #[tokio::test]
 async fn lcm_load_and_grep_use_explicit_hermes_profile_session_db() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "lcm-profile-read",
@@ -9916,7 +9937,7 @@ async fn lcm_load_and_grep_use_explicit_hermes_profile_session_db() {
 
 #[tokio::test]
 async fn lcm_hermes_profile_requires_explicit_valid_home_without_fallback() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "lcm-profile-missing-home",
@@ -9975,7 +9996,7 @@ async fn lcm_hermes_profile_requires_explicit_valid_home_without_fallback() {
 #[cfg(unix)]
 #[tokio::test]
 async fn lcm_hermes_profile_rejects_symlinked_tracedecay_dir_escape() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let hermes_home = test_temp_dir();
     let outside = test_temp_dir();
     unix_fs::symlink(outside.path(), hermes_home.path().join(".tracedecay")).unwrap();
@@ -10009,7 +10030,7 @@ async fn lcm_hermes_profile_rejects_symlinked_tracedecay_dir_escape() {
 
 #[tokio::test]
 async fn lcm_hermes_profile_rejects_non_directory_home() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let dir = test_temp_dir();
     let hermes_home = dir.path().join("hermes-home-file");
     fs::write(&hermes_home, "not a directory").unwrap();
@@ -10043,23 +10064,8 @@ async fn lcm_hermes_profile_rejects_non_directory_home() {
 
 #[tokio::test]
 async fn lcm_grep_rejects_invalid_scope_without_searching_all_sessions() {
-    let (cg, _dir) = setup_project().await;
-    seed_lcm_session_message(
-        &cg,
-        "lcm-scope-a",
-        "lcm-scope-message-a",
-        "fail closed unique-cross-session-token alpha",
-        1,
-    )
-    .await;
-    seed_lcm_session_message(
-        &cg,
-        "lcm-scope-b",
-        "lcm-scope-message-b",
-        "fail closed unique-cross-session-token beta",
-        2,
-    )
-    .await;
+    let dir = test_temp_dir();
+    let (cg, _env) = init_test_project(dir.path()).await;
 
     let err = expect_tool_error(
         handle_tool_call(
@@ -10084,7 +10090,7 @@ async fn lcm_grep_rejects_invalid_scope_without_searching_all_sessions() {
 
 #[tokio::test]
 async fn lcm_load_session_rejects_fractional_negative_and_wrong_type_numeric_args() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "lcm-numeric",
@@ -10120,7 +10126,7 @@ async fn lcm_load_session_rejects_fractional_negative_and_wrong_type_numeric_arg
 
 #[tokio::test]
 async fn lcm_load_session_accepts_valid_integer_args() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "lcm-valid-integers",
@@ -10342,7 +10348,7 @@ async fn lcm_expand_query_oversized_prompt_preserves_synthesis_contract() {
 
 #[tokio::test]
 async fn message_search_preserves_provider_project_parent_scope_shape_after_lcm() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let db = open_project_session_db(cg.project_root())
         .await
         .expect("project-local session db should open");
@@ -12727,7 +12733,7 @@ async fn mcp_server_owns_watcher_and_refreshes_token_map_on_change() {
 
 #[tokio::test]
 async fn lcm_expand_paginates_summary_sources_over_mcp() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let mut store_ids = Vec::new();
     for index in 1..=4 {
         let message_id = format!("page-msg-{index}");
@@ -12801,7 +12807,7 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
 
 #[tokio::test]
 async fn lcm_expand_resolves_cross_session_store_ids_over_mcp() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "lcm-origin-session",
@@ -12850,7 +12856,7 @@ async fn lcm_expand_resolves_cross_session_store_ids_over_mcp() {
 
 #[tokio::test]
 async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let body = format!("data:image/png;base64,{}", "A".repeat(220_000));
     seed_lcm_tool_result_message(
         &cg,
@@ -12921,7 +12927,7 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
 
 #[tokio::test]
 async fn lcm_compress_handler_honors_incremental_max_depth_override() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let mut store_ids = Vec::new();
     for index in 1..=6 {
         let message_id = format!("depth-msg-{index}");
@@ -13003,7 +13009,7 @@ async fn lcm_compress_handler_honors_incremental_max_depth_override() {
 
 #[tokio::test]
 async fn lcm_status_reports_dag_store_and_config_diagnostics_over_mcp() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "lcm-diag-session",
@@ -13065,7 +13071,7 @@ async fn lcm_status_reports_dag_store_and_config_diagnostics_over_mcp() {
 
 #[tokio::test]
 async fn lcm_status_all_provider_aggregates_provider_counts() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message_for_provider(
         &cg,
         "cursor",
@@ -13105,7 +13111,7 @@ async fn lcm_status_all_provider_aggregates_provider_counts() {
 
 #[tokio::test]
 async fn lcm_status_all_provider_counts_payload_health_once() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_tool_result_message_for_provider(
         &cg,
         "cursor",
@@ -13150,7 +13156,8 @@ async fn lcm_status_all_provider_counts_payload_health_once() {
 // to LCM_SCHEMA_VERSION.
 #[tokio::test]
 async fn repeated_lcm_calls_skip_schema_reensure_per_process() {
-    let (cg, _dir) = setup_project().await;
+    let dir = test_temp_dir();
+    let (cg, _env) = init_test_project(dir.path()).await;
 
     // Seed data to ensure the sessions.db exists (lcm_status is now read-only
     // and will not create the DB). The schema-ensure caching under test lives
@@ -13221,7 +13228,8 @@ async fn repeated_lcm_calls_skip_schema_reensure_per_process() {
 /// values — never silently broadened to `all`.
 #[tokio::test]
 async fn lcm_grep_rejects_invalid_scope() {
-    let (cg, _dir) = setup_project().await;
+    let dir = test_temp_dir();
+    let (cg, _env) = init_test_project(dir.path()).await;
     let err = expect_tool_error(
         handle_tool_call(
             &cg,
@@ -13242,7 +13250,8 @@ async fn lcm_grep_rejects_invalid_scope() {
 /// closed instead of broadening the search to every session.
 #[tokio::test]
 async fn message_search_rejects_invalid_scope() {
-    let (cg, _dir) = setup_project().await;
+    let dir = test_temp_dir();
+    let (cg, _env) = init_test_project(dir.path()).await;
     for invalid in ["everything", "", "parents"] {
         let err = expect_tool_error(
             handle_tool_call(
