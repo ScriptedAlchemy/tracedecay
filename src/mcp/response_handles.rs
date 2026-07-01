@@ -222,6 +222,7 @@ pub struct ResponseHandleRecord {
     pub created_at: i64,
     pub expires_at: i64,
     pub content: String,
+    pub response_handle_root: PathBuf,
 }
 
 impl ResponseHandleRecord {
@@ -256,15 +257,16 @@ pub fn store_response_handle(
     telemetry.store_attempts.fetch_add(1, Ordering::Relaxed);
     let handle = response_handle_for(content);
     let result = (|| {
+        let dir = response_handle_dir(project_root)?;
         let record = ResponseHandleRecord {
             handle: handle.clone(),
             created_at: now,
             expires_at: now.saturating_add(RESPONSE_HANDLE_TTL_SECS),
             content: content.to_string(),
+            response_handle_root: dir.clone(),
         };
-        let dir = response_handle_dir(project_root)?;
         fs::create_dir_all(&dir)?;
-        let path = response_handle_path(project_root, &handle)?;
+        let path = response_handle_path_in_dir(&dir, &handle)?;
         let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
         let stored = StoredResponseHandleRecord {
             created_at: record.created_at,
@@ -308,40 +310,12 @@ pub fn retrieve_response_handle(
     handle: &str,
     now: i64,
 ) -> Result<ResponseHandleLookup> {
-    enum RetrieveOutcome {
-        Hit(ResponseHandleRecord),
-        Miss,
-        Expired {
-            created_at: i64,
-            expires_at: i64,
-            removed: bool,
-        },
-    }
-
     let started = Instant::now();
     let caller = std::panic::Location::caller();
     let telemetry = telemetry();
     let result = (|| -> Result<RetrieveOutcome> {
-        let path = response_handle_path(project_root, handle)?;
-        if !path.exists() {
-            return Ok(RetrieveOutcome::Miss);
-        }
-        let payload = fs::read_to_string(&path)?;
-        let record: StoredResponseHandleRecord = serde_json::from_str(&payload)?;
-        if record.expires_at <= now {
-            let removed = fs::remove_file(&path).is_ok();
-            return Ok(RetrieveOutcome::Expired {
-                created_at: record.created_at,
-                expires_at: record.expires_at,
-                removed,
-            });
-        }
-        Ok(RetrieveOutcome::Hit(ResponseHandleRecord {
-            handle: handle.to_string(),
-            created_at: record.created_at,
-            expires_at: record.expires_at,
-            content: record.content,
-        }))
+        let dir = response_handle_dir(project_root)?;
+        read_response_handle_from_root(&dir, handle, now)
     })();
     telemetry
         .retrieve_time_us_total
@@ -456,6 +430,65 @@ pub fn cleanup_expired_response_handles(project_root: &Path, now: i64) -> Result
     result
 }
 
+#[cfg(test)]
+pub(crate) fn retrieve_response_handle_from_root(
+    response_handle_root: &Path,
+    handle: &str,
+    now: i64,
+) -> Result<ResponseHandleLookup> {
+    let outcome = read_response_handle_from_root(response_handle_root, handle, now)?;
+    Ok(match outcome {
+        RetrieveOutcome::Hit(record) => ResponseHandleLookup::Found(record),
+        RetrieveOutcome::Miss => ResponseHandleLookup::Missing,
+        RetrieveOutcome::Expired {
+            created_at,
+            expires_at,
+            ..
+        } => ResponseHandleLookup::Expired {
+            created_at,
+            expires_at,
+        },
+    })
+}
+
+enum RetrieveOutcome {
+    Hit(ResponseHandleRecord),
+    Miss,
+    Expired {
+        created_at: i64,
+        expires_at: i64,
+        removed: bool,
+    },
+}
+
+fn read_response_handle_from_root(
+    response_handle_root: &Path,
+    handle: &str,
+    now: i64,
+) -> Result<RetrieveOutcome> {
+    let path = response_handle_path_in_dir(response_handle_root, handle)?;
+    if !path.exists() {
+        return Ok(RetrieveOutcome::Miss);
+    }
+    let payload = fs::read_to_string(&path)?;
+    let record: StoredResponseHandleRecord = serde_json::from_str(&payload)?;
+    if record.expires_at <= now {
+        let removed = fs::remove_file(&path).is_ok();
+        return Ok(RetrieveOutcome::Expired {
+            created_at: record.created_at,
+            expires_at: record.expires_at,
+            removed,
+        });
+    }
+    Ok(RetrieveOutcome::Hit(ResponseHandleRecord {
+        handle: handle.to_string(),
+        created_at: record.created_at,
+        expires_at: record.expires_at,
+        content: record.content,
+        response_handle_root: response_handle_root.to_path_buf(),
+    }))
+}
+
 fn response_handle_for(content: &str) -> String {
     let digest = Sha256::digest(content.as_bytes());
     let hex = hex::encode(&digest[..(HANDLE_HEX_CHARS / 2)]);
@@ -466,9 +499,9 @@ fn response_handle_dir(project_root: &Path) -> Result<PathBuf> {
     resolve_response_handle_root(project_root)
 }
 
-fn response_handle_path(project_root: &Path, handle: &str) -> Result<PathBuf> {
+fn response_handle_path_in_dir(response_handle_root: &Path, handle: &str) -> Result<PathBuf> {
     validate_handle(handle)?;
-    Ok(response_handle_dir(project_root)?.join(format!("{handle}.json")))
+    Ok(response_handle_root.join(format!("{handle}.json")))
 }
 
 fn validate_handle(handle: &str) -> Result<()> {

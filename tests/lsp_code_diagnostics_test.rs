@@ -497,6 +497,8 @@ fn fake_python_adapter(
 fn python_command() -> &'static str {
     if cfg!(windows) {
         "python"
+    } else if std::path::Path::new("/usr/bin/python3").is_file() {
+        "/usr/bin/python3"
     } else {
         "python3"
     }

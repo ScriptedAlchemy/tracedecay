@@ -1151,6 +1151,72 @@ async fn projects_context_resolves_project_id_and_path() {
 }
 
 #[tokio::test]
+async fn projects_context_resolves_linked_worktree_path_by_git_common_dir() {
+    let home = TempDir::new().unwrap();
+    let dir = TempDir::new().unwrap();
+    let main = canonical_temp_path(&dir.path().join("main"));
+    let linked = canonical_temp_path(&dir.path().join("linked"));
+    std::fs::create_dir_all(&main).unwrap();
+    git(&main, &["init", "-b", "main"]);
+    std::fs::write(main.join("README.md"), "linked worktree fixture\n").unwrap();
+    commit_all(&main, "initial commit");
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/worktree-context",
+            linked.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+
+    let db = GlobalDb::open_at(&profile_root(home.path()).join("global.db"))
+        .await
+        .unwrap();
+    db.upsert_code_project(
+        "proj_cli_worktree",
+        &main,
+        Some(&main.join(".git")),
+        None,
+        Some("main"),
+    )
+    .await
+    .expect("code project should upsert with git common-dir alias");
+    db.upsert_store_instance(StoreInstanceUpsert {
+        store_id: "store:proj_cli_worktree:profile_sharded".to_string(),
+        project_id: "proj_cli_worktree".to_string(),
+        store_kind: "code_project".to_string(),
+        storage_mode: "profile_sharded".to_string(),
+        store_relpath: "projects/proj_cli_worktree".to_string(),
+        manifest_relpath: Some(STORE_MANIFEST_FILENAME.to_string()),
+        last_verified_at: Some(1_800_000_000),
+        last_write_at: Some(1_800_000_000),
+    })
+    .await
+    .expect("store instance should upsert");
+    drop(db);
+
+    let mut command = tracedecay_command(home.path(), &linked);
+    command.args(["projects", "context", linked.to_str().unwrap(), "--json"]);
+    let output = run_with_timeout(command, cli_timeout());
+
+    assert!(
+        output.status.success(),
+        "projects context should resolve linked worktree path through git common dir\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(payload["project"]["project_id"], "proj_cli_worktree");
+    assert_eq!(
+        payload["stores"][0]["store"]["storage_mode"],
+        "profile_sharded"
+    );
+}
+
+#[tokio::test]
 async fn wipe_all_removes_profile_sharded_store_and_global_row() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();

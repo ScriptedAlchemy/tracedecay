@@ -326,6 +326,45 @@ async fn registry_resolves_store_by_repo_identity_aliases() {
 }
 
 #[tokio::test]
+async fn registry_context_resolves_linked_worktree_by_git_common_dir_identity() {
+    let _guard = GLOBAL_REGISTRY_TEST_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .unwrap();
+    let main_checkout = dir.path().join("main");
+    let linked_worktree = dir.path().join("linked");
+    let common_dir = dir.path().join("repo/.git");
+    std::fs::create_dir_all(&main_checkout).unwrap();
+    std::fs::create_dir_all(&linked_worktree).unwrap();
+    std::fs::create_dir_all(&common_dir).unwrap();
+
+    db.upsert_code_project(
+        "proj_worktree",
+        &main_checkout,
+        Some(&common_dir),
+        Some("git@github.com:ScriptedAlchemy/tracedecay.git"),
+        Some("main"),
+    )
+    .await
+    .unwrap();
+    upsert_test_store(&db, "proj_worktree", "store_worktree").await;
+
+    assert!(db
+        .project_registry_context_by_alias(&linked_worktree)
+        .await
+        .is_none());
+    let context = db
+        .project_registry_context_by_identity(&linked_worktree, Some(&common_dir))
+        .await
+        .unwrap();
+
+    assert_eq!(context.project.project_id, "proj_worktree");
+    assert_eq!(context.stores[0].store.store_id, "store_worktree");
+    close_global_db(db).await;
+}
+
+#[tokio::test]
 async fn registry_remote_resolution_is_conservative_when_ambiguous() {
     let _guard = GLOBAL_REGISTRY_TEST_LOCK.lock().await;
     let dir = TempDir::new().unwrap();

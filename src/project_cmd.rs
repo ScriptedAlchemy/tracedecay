@@ -61,7 +61,15 @@ async fn project_context(db: &GlobalDb, selector: &str) -> Option<ProjectRegistr
     if let Some(context) = db.project_registry_context_by_id(selector).await {
         return Some(context);
     }
-    db.project_registry_context_by_alias(Path::new(selector))
+    let selector_path = Path::new(selector);
+    if let Some(context) = db.project_registry_context_by_alias(selector_path).await {
+        return Some(context);
+    }
+    if !GlobalDb::is_explicit_project_path_selector(selector) {
+        return None;
+    }
+    let git_common_dir = tracedecay::worktree::git_common_dir(selector_path);
+    db.project_registry_context_by_identity(selector_path, git_common_dir.as_deref())
         .await
 }
 

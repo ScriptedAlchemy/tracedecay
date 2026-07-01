@@ -499,7 +499,7 @@ fn render_object(md: &mut Md, map: &serde_json::Map<String, Value>, depth: u8) {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::mcp::response_handles::{retrieve_response_handle, ResponseHandleLookup};
+    use crate::mcp::response_handles::{retrieve_response_handle_from_root, ResponseHandleLookup};
     use crate::tracedecay::current_timestamp;
     use serde_json::json;
 
@@ -576,7 +576,15 @@ mod tests {
         let handle = parsed["handle"].as_str().unwrap();
         assert!(handle.starts_with("rh_"));
 
-        let stored = retrieve_response_handle(dir.path(), handle, current_timestamp()).unwrap();
+        let prepared = prepare_truncated_response_handle(Some(dir.path()), &long);
+        let record = prepared.record.as_ref().unwrap();
+        assert_eq!(record.handle, handle);
+        let stored = retrieve_response_handle_from_root(
+            &record.response_handle_root,
+            handle,
+            current_timestamp(),
+        )
+        .unwrap();
         match stored {
             ResponseHandleLookup::Found(record) => assert_eq!(record.content, long),
             other => panic!("stored response should be retrievable, got {other:?}"),
@@ -607,7 +615,15 @@ mod tests {
         };
         assert!(handle.starts_with("rh_"));
 
-        let stored = retrieve_response_handle(dir.path(), handle, current_timestamp()).unwrap();
+        let prepared = prepare_truncated_response_handle(Some(dir.path()), &long);
+        let record = prepared.record.as_ref().unwrap();
+        assert_eq!(record.handle, handle);
+        let stored = retrieve_response_handle_from_root(
+            &record.response_handle_root,
+            handle,
+            current_timestamp(),
+        )
+        .unwrap();
         match stored {
             ResponseHandleLookup::Found(record) => assert_eq!(record.content, long),
             other => panic!("stored markdown response should be retrievable, got {other:?}"),
