@@ -1240,7 +1240,7 @@ async fn expect_missing_argument_error(
 
 #[tokio::test]
 async fn schema_required_arguments_match_representative_handler_parsers() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let tools = get_tool_definitions();
 
     // Direct `args.get(...).ok_or(...)` parser style.
@@ -3091,7 +3091,7 @@ async fn test_god_class() {
 
 #[tokio::test]
 async fn test_changelog_no_git() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     // The temp dir is not a git repo, so this should return a structured git
     // error in the tool payload rather than success-looking prose.
     let result = handle_tool_call(
@@ -3115,7 +3115,7 @@ async fn test_changelog_no_git() {
 
 #[tokio::test]
 async fn run_affected_tests_reports_git_failure_without_changed_paths() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_run_affected_tests",
@@ -3137,7 +3137,7 @@ async fn run_affected_tests_reports_git_failure_without_changed_paths() {
 
 #[tokio::test]
 async fn pr_context_no_git_returns_structured_git_error() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_pr_context",
@@ -3317,7 +3317,7 @@ async fn test_port_order() {
 
 #[tokio::test]
 async fn test_unknown_tool() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_unknown", json!({}), None, None).await;
     match result {
         Err(err) => {
@@ -3338,7 +3338,7 @@ async fn test_unknown_tool() {
 
 #[tokio::test]
 async fn test_missing_required_params() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_search", json!({}), None, None).await;
     let err_msg = match result {
         Err(err) => format!("{}", err),
@@ -3420,7 +3420,7 @@ async fn test_search_populates_touched_files() {
 
 #[tokio::test]
 async fn test_rename_preview_not_found() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_rename_preview",
@@ -3488,35 +3488,35 @@ async fn test_rank_outgoing() {
 
 #[tokio::test]
 async fn test_context_missing_task() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_context", json!({}), None, None).await;
     assert!(result.is_err(), "context without task should error");
 }
 
 #[tokio::test]
 async fn test_callers_missing_node_id() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_callers", json!({}), None, None).await;
     assert!(result.is_err(), "callers without node_id should error");
 }
 
 #[tokio::test]
 async fn test_affected_missing_files() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_affected", json!({}), None, None).await;
     assert!(result.is_err(), "affected without files should error");
 }
 
 #[tokio::test]
 async fn test_module_api_missing_path() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_module_api", json!({}), None, None).await;
     assert!(result.is_err(), "module_api without path should error");
 }
 
 #[tokio::test]
 async fn test_rank_missing_edge_kind() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_rank",
@@ -3530,28 +3530,28 @@ async fn test_rank_missing_edge_kind() {
 
 #[tokio::test]
 async fn test_similar_missing_symbol() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_similar", json!({}), None, None).await;
     assert!(result.is_err(), "similar without symbol should error");
 }
 
 #[tokio::test]
 async fn test_diff_context_missing_files() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_diff_context", json!({}), None, None).await;
     assert!(result.is_err(), "diff_context without files should error");
 }
 
 #[tokio::test]
 async fn test_changelog_missing_refs() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_changelog", json!({}), None, None).await;
     assert!(result.is_err(), "changelog without from_ref should error");
 }
 
 #[tokio::test]
 async fn test_port_status_missing_dirs() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_port_status", json!({}), None, None).await;
     assert!(
         result.is_err(),
@@ -3561,7 +3561,7 @@ async fn test_port_status_missing_dirs() {
 
 #[tokio::test]
 async fn test_port_order_missing_source_dir() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_port_order", json!({}), None, None).await;
     assert!(
         result.is_err(),
