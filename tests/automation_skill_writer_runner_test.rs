@@ -35,8 +35,12 @@ async fn skill_writer_runner_skips_when_task_is_disabled() {
     );
 }
 
+// Every test below that reaches evidence building holds `ENV_LOCK` and pins
+// `TRACEDECAY_GLOBAL_DB` at its own session store via `isolate_global_db`:
+// see that helper's docs for why (Windows CI global-DB contention).
 #[tokio::test]
 async fn skill_writer_default_provider_searches_all_providers() {
+    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
@@ -57,6 +61,7 @@ async fn skill_writer_default_provider_searches_all_providers() {
         },
     )
     .await;
+    let _global_db = isolate_global_db(&cg);
     let backend = SkillJsonBackend::new(json!({"skills": []}));
     let config = AutomationConfig {
         enabled: true,
@@ -91,10 +96,12 @@ async fn skill_writer_default_provider_searches_all_providers() {
 
 #[tokio::test]
 async fn skill_writer_runner_creates_pending_skill_drafts_for_approval() {
+    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
+    let _global_db = isolate_global_db(&cg);
     let backend = SkillJsonBackend::new(json!({
         "skills": [
             {
@@ -291,11 +298,10 @@ async fn skill_writer_evidence_imports_project_skill_usage_analytics_before_summ
     let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
-    let global_db_path = temp.path().join("global.db");
-    let _global_db = EnvVarGuard::set("TRACEDECAY_GLOBAL_DB", &global_db_path);
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
     seed_search_underuse_session_evidence(&cg).await;
+    let _global_db = isolate_global_db(&cg);
     create_managed_skill_draft(
         &profile_root,
         ManagedSkillDraft {
@@ -390,10 +396,12 @@ async fn skill_writer_evidence_imports_project_skill_usage_analytics_before_summ
 
 #[tokio::test]
 async fn skill_writer_evidence_includes_underused_tool_family_summary() {
+    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
     seed_search_underuse_session_evidence(&cg).await;
+    let _global_db = isolate_global_db(&cg);
     let backend = InspectSkillWriterUnderusedBackend;
     let config = AutomationConfig {
         enabled: true,
@@ -431,10 +439,12 @@ async fn skill_writer_evidence_includes_underused_tool_family_summary() {
 
 #[tokio::test]
 async fn skill_writer_runner_auto_enables_when_config_explicitly_allows() {
+    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
+    let _global_db = isolate_global_db(&cg);
     create_managed_skill_draft(
         &profile_root,
         ManagedSkillDraft {
@@ -565,10 +575,12 @@ async fn skill_writer_runner_auto_enables_when_config_explicitly_allows() {
 
 #[tokio::test]
 async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition() {
+    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
+    let _global_db = isolate_global_db(&cg);
     create_managed_skill_draft(
         &profile_root,
         ManagedSkillDraft {
@@ -764,10 +776,12 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
 
 #[tokio::test]
 async fn skill_writer_runner_ledgers_malformed_backend_output() {
+    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
+    let _global_db = isolate_global_db(&cg);
     let backend = SkillTextBackend::new("not json");
     let config = AutomationConfig {
         enabled: true,
@@ -832,10 +846,12 @@ async fn skill_writer_runner_ledgers_malformed_backend_output() {
 
 #[tokio::test]
 async fn skill_writer_runner_ledgers_missing_skills_array() {
+    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
+    let _global_db = isolate_global_db(&cg);
     let output = json!({"summary": "no skills"});
     let backend = SkillJsonBackend::new(output.clone());
     let config = AutomationConfig {
@@ -898,10 +914,12 @@ async fn skill_writer_runner_ledgers_missing_skills_array() {
 
 #[tokio::test]
 async fn skill_writer_runner_records_noop_fallback_when_backend_run_task_fails() {
+    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
+    let _global_db = isolate_global_db(&cg);
     let backend = FailingBackend::new(AgentTaskKind::SkillWriter);
     let config = AutomationConfig {
         enabled: true,
