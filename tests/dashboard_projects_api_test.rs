@@ -30,11 +30,10 @@ fn dashboard_projects_endpoint_lists_registered_projects_and_active_project() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_dashboard_fixture(false).await;
+        let fixture = start_dashboard_fixture_without_memory(false).await;
         let agent = http_agent();
 
         let (target_root, target_cg) = setup_target_project(&fixture).await;
-        seed_memory_fixture(&target_cg).await;
         drop(target_cg);
 
         let (status, projects) = get_json(&agent, &format!("{}/api/projects", fixture.base_url));
@@ -70,7 +69,7 @@ fn project_scoped_plugin_routes_read_selected_project_store() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_dashboard_fixture(false).await;
+        let fixture = start_dashboard_fixture_without_memory(false).await;
         let agent = http_agent_with_timeout(std::time::Duration::from_secs(20));
 
         let (_target_root, target_cg) = setup_target_project(&fixture).await;
@@ -223,7 +222,7 @@ fn project_scoped_mutations_are_rejected_for_non_active_projects() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_dashboard_fixture(false).await;
+        let fixture = start_dashboard_fixture_without_memory(false).await;
         let agent = http_agent_with_timeout(std::time::Duration::from_secs(20));
 
         let (_target_root, target_cg) = setup_target_project(&fixture).await;

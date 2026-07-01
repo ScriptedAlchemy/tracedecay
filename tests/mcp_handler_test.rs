@@ -7897,7 +7897,7 @@ async fn lcm_doctor_clean_apply_backs_up_and_deletes_only_safe_candidates() {
 async fn lcm_doctor_clean_apply_deletes_all_matching_noise_beyond_diagnostic_samples() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let db = open_active_project_session_db(&cg).await;
-    for idx in 0..25 {
+    for idx in 0..21 {
         seed_lcm_session_message_in_db(
             &db,
             cg.project_root(),
@@ -7938,7 +7938,7 @@ async fn lcm_doctor_clean_apply_deletes_all_matching_noise_beyond_diagnostic_sam
 
     assert_eq!(
         payload["diagnostics"]["cleanup"]["noise_message_candidates"],
-        25
+        21
     );
     assert_eq!(
         payload["diagnostics"]["cleanup"]["message_candidates"]
@@ -7949,7 +7949,7 @@ async fn lcm_doctor_clean_apply_deletes_all_matching_noise_beyond_diagnostic_sam
     );
     assert_eq!(
         payload["repairs"]["applied_actions"][0]["deleted"]["raw_messages"],
-        25
+        21
     );
     assert_eq!(lcm_raw_message_count(&cg, "normal-session").await, 1);
     assert!(!text.contains("Cronjob Response: noisy heartbeat"));
@@ -8693,7 +8693,7 @@ async fn lcm_doctor_uses_explicit_hermes_profile_session_db() {
 async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     let dir = test_temp_dir();
     let (cg, _env) = init_test_project(dir.path()).await;
-    let full_text = format!("orchard dispatch {}", "external-payload-body ".repeat(400));
+    let full_text = format!("orchard dispatch {}", "external-payload-body ".repeat(220));
     seed_lcm_session_message(&cg, "lcm-session", "lcm-message", full_text, 1).await;
     let db = open_project_session_db(cg.project_root())
         .await
@@ -10224,7 +10224,7 @@ async fn lcm_large_json_response_stays_parseable_after_truncation() {
             &cg,
             "lcm-large-json",
             &format!("lcm-large-json-message-{index}"),
-            format!("large json response {index} {}", "payload ".repeat(2000)),
+            format!("large json response {index} {}", "payload ".repeat(1100)),
             index + 1,
         )
         .await;

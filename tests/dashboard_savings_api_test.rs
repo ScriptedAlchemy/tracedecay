@@ -40,6 +40,7 @@ struct Fixture {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FixtureSeed {
     Base,
+    LedgerOnly,
     DailyLimitRegression,
 }
 
@@ -113,7 +114,7 @@ const TEXT_ASSISTANT: &str =
 const TEXT_UNKNOWN: &str = "This message was stored without any model id attached.";
 const TEXT_MIXED: &str = "Second message of the mixed session, no usage record here.";
 
-async fn seed_global_db(db_path: &Path, project: &Path, day_start: i64) {
+async fn seed_ledger_db(db_path: &Path, project: &Path, day_start: i64) {
     let gdb = GlobalDb::open_at(db_path).await.expect("open global db");
 
     // Lifetime counter (legacy `projects.tokens_saved`, what `tracedecay
@@ -134,6 +135,11 @@ async fn seed_global_db(db_path: &Path, project: &Path, day_start: i64) {
         day_start - 86_390,
     )
     .await;
+}
+
+async fn seed_global_db(db_path: &Path, project: &Path, day_start: i64) {
+    seed_ledger_db(db_path, project, day_start).await;
+    let gdb = GlobalDb::open_at(db_path).await.expect("open global db");
 
     // Claude Code accounting turn (cost computed from real usage at ingest).
     assert!(
@@ -427,16 +433,28 @@ async fn start_fixture(seed: FixtureSeed) -> Fixture {
 
     let now = now_unix();
     let day_start = now - (now % 86_400);
-    seed_global_db(&global_db_path, &project_root, day_start).await;
+    match seed {
+        FixtureSeed::Base => seed_global_db(&global_db_path, &project_root, day_start).await,
+        FixtureSeed::LedgerOnly => seed_ledger_db(&global_db_path, &project_root, day_start).await,
+        FixtureSeed::DailyLimitRegression => {}
+    }
 
     let cg = TraceDecay::init(&project_root)
         .await
         .expect("tracedecay init");
     let session_db_path = project_session_db_path(&project_root);
-    seed_global_db(&session_db_path, &project_root, day_start).await;
-    if seed == FixtureSeed::DailyLimitRegression {
-        seed_daily_limit_regression(&session_db_path, &global_db_path, &project_root, day_start)
+    match seed {
+        FixtureSeed::Base => seed_global_db(&session_db_path, &project_root, day_start).await,
+        FixtureSeed::LedgerOnly => {}
+        FixtureSeed::DailyLimitRegression => {
+            seed_daily_limit_regression(
+                &session_db_path,
+                &global_db_path,
+                &project_root,
+                day_start,
+            )
             .await;
+        }
     }
     let port = pick_free_port();
     let base_url = format!("http://127.0.0.1:{port}");
@@ -479,7 +497,7 @@ fn savings_ledger_endpoints_reflect_seeded_ledger() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_fixture(FixtureSeed::Base).await;
+        let fixture = start_fixture(FixtureSeed::LedgerOnly).await;
         let agent = http_agent();
 
         // Capability flag + tab registration.

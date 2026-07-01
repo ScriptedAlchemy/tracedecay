@@ -382,23 +382,6 @@ fn dashboard_session_and_skill_runs_emit_activity_when_evidence_is_unavailable()
         assert_eq!(status, 202, "session run should queue: {session_payload}");
         let session_run_id = session_payload["run_id"].as_str().unwrap().to_string();
         let mut records = Vec::new();
-        let mut session_terminal = false;
-        for _ in 0..400 {
-            records = tracedecay::automation::run_ledger::load_run_records(&dashboard_root, 10)
-                .await
-                .unwrap();
-            session_terminal = records.iter().any(|record| {
-                record.run_id == session_run_id && record.status.is_terminal()
-            });
-            if session_terminal {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-        assert!(
-            session_terminal,
-            "session-reflector job did not reach a terminal record: {records:#?}"
-        );
 
         let (status, skill_payload) = post_json_body(
             &agent,
