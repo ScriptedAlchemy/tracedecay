@@ -318,6 +318,18 @@ impl Drop for EnvVarGuard {
     }
 }
 
+/// Pins `TRACEDECAY_GLOBAL_DB` at the test project's already-created session
+/// store for the guard's lifetime. Skill-writer evidence building calls
+/// `GlobalDb::open()`, which would otherwise create (or contend on) the
+/// shared per-user global DB — a full schema creation that dominates these
+/// fixtures on Windows CI, where many test processes share one home. The
+/// session store uses the same schema and these tests never rely on
+/// pre-existing global-DB contents, so reusing it keeps the open cheap and
+/// fully isolated. Callers must hold [`ENV_LOCK`] while the guard is alive.
+pub(crate) fn isolate_global_db(cg: &TraceDecay) -> EnvVarGuard {
+    EnvVarGuard::set("TRACEDECAY_GLOBAL_DB", &cg.store_layout().sessions_db_path)
+}
+
 impl FailingBackend {
     pub(crate) fn new(task: AgentTaskKind) -> Self {
         Self {

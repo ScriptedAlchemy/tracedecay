@@ -82,11 +82,16 @@ async fn scheduler_memory_curator_respects_interval_gate() {
     );
 }
 
+// The scheduler gate tests below deliberately skip session-evidence seeding:
+// the runners evaluate the scheduler gate before opening any session store,
+// and each test pins the exact gate skip reason, so a regression that
+// reordered gating behind evidence gathering would fail with a different
+// error. Skipping the seed avoids paying a full session-DB schema creation
+// per test, which dominates these fixtures on Windows.
 #[tokio::test]
 async fn scheduler_session_reflector_respects_interval_gate() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
-    seed_session_evidence(&cg).await;
     let config = scheduler_config(Some(3600), None);
     append_run_record(
         &cg.store_layout().dashboard_root,
@@ -125,7 +130,6 @@ async fn scheduler_session_reflector_respects_interval_gate() {
 async fn scheduler_skill_writer_respects_interval_gate() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
-    seed_session_evidence(&cg).await;
     let config = scheduler_config(Some(3600), None);
     append_run_record(
         &cg.store_layout().dashboard_root,
@@ -164,7 +168,6 @@ async fn scheduler_skill_writer_respects_interval_gate() {
 async fn scheduler_skill_writer_respects_idle_window_after_manual_run() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
-    seed_session_evidence(&cg).await;
     let mut config = scheduler_config(Some(1), None);
     config.tasks.skill_writer.min_idle_secs = Some(3600);
     let mut record = scheduler_record_for(
@@ -355,77 +358,6 @@ async fn init_project(project_root: &Path) -> TraceDecay {
     fs::create_dir_all(project_root.join("src")).unwrap();
     fs::write(project_root.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
     TraceDecay::init(project_root).await.unwrap()
-}
-
-async fn seed_session_evidence(cg: &TraceDecay) {
-    let db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
-        .await
-        .expect("session db open");
-    seed_session_message_in_db(
-        &db,
-        cg.project_root(),
-        SeedSessionMessage {
-            provider: "cursor",
-            session_id: "session-reflect-1",
-            message_id: "session-reflect-1-message-001",
-            role: "user",
-            timestamp: 1_715_000_001,
-            text: "Remember durable session reflection facts must remain approval gated for automation workflows.",
-            source: None,
-        },
-    )
-    .await;
-}
-
-struct SeedSessionMessage<'a> {
-    provider: &'a str,
-    session_id: &'a str,
-    message_id: &'a str,
-    role: &'a str,
-    timestamp: i64,
-    text: &'a str,
-    source: Option<&'a str>,
-}
-
-async fn seed_session_message_in_db(
-    db: &GlobalDb,
-    project_root: &Path,
-    seed: SeedSessionMessage<'_>,
-) {
-    let session = SessionRecord {
-        provider: seed.provider.to_string(),
-        session_id: seed.session_id.to_string(),
-        project_key: project_root.display().to_string(),
-        project_path: project_root.display().to_string(),
-        title: Some("Session reflection fixture".to_string()),
-        started_at: Some(seed.timestamp.saturating_sub(1)),
-        ended_at: None,
-        transcript_path: None,
-        metadata_json: None,
-        parent_session_id: None,
-        is_subagent: false,
-        agent_id: None,
-        parent_tool_use_id: None,
-    };
-    assert!(db.upsert_session(&session).await);
-    let message = SessionMessageRecord {
-        provider: seed.provider.to_string(),
-        message_id: seed.message_id.to_string(),
-        session_id: seed.session_id.to_string(),
-        role: seed.role.to_string(),
-        timestamp: Some(seed.timestamp),
-        ordinal: 1,
-        text: seed.text.to_string(),
-        kind: Some("message".to_string()),
-        model: None,
-        tool_names: None,
-        source_path: None,
-        source_offset: None,
-        metadata_json: seed
-            .source
-            .map(|source| json!({ "source": source }).to_string()),
-    };
-    assert!(db.upsert_session_message(&message).await);
 }
 
 async fn seed_duplicate_facts(cg: &TraceDecay) {

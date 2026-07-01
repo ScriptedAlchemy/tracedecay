@@ -49,6 +49,22 @@ pub(crate) fn platform_safe_mmap_size(mmap: u64) -> u64 {
     }
 }
 
+/// Env var that, when set to `1`, switches every `TraceDecay` `SQLite`
+/// connection to `journal_mode=MEMORY` + `synchronous=OFF` on all platforms.
+///
+/// **For tests/CI only — must never be set in production.** It trades away
+/// crash durability entirely: a process or OS crash mid-transaction can
+/// corrupt the database. CI test runs don't care (every DB is a throwaway
+/// fixture), and on Windows this avoids the per-transaction rollback-journal
+/// file create/write/fsync/delete cost of the `DELETE`+`FULL` pairing. An
+/// in-memory journal also never enters WAL mode, so it sidesteps the Windows
+/// WAL close-time teardown crash the same way `DELETE` does.
+pub const SQLITE_UNSAFE_FAST_ENV: &str = "TRACEDECAY_SQLITE_UNSAFE_FAST";
+
+fn sqlite_unsafe_fast_enabled() -> bool {
+    std::env::var(SQLITE_UNSAFE_FAST_ENV).as_deref() == Ok("1")
+}
+
 /// Returns the `journal_mode` safe for the current platform.
 ///
 /// Windows libsql/SQLite local databases can intermittently fault while closing
@@ -56,8 +72,14 @@ pub(crate) fn platform_safe_mmap_size(mmap: u64) -> u64 {
 /// mmap removed one unsafe teardown path, but master CI still aborts in
 /// unrelated tests as different short-lived databases close. Use rollback
 /// journaling on Windows and keep WAL everywhere else.
+///
+/// When [`SQLITE_UNSAFE_FAST_ENV`] is `1` (tests/CI only — never set it in
+/// production) this returns `MEMORY` on every platform, skipping journal file
+/// I/O entirely at the cost of crash durability.
 pub(crate) fn platform_safe_journal_mode() -> &'static str {
-    if cfg!(windows) {
+    if sqlite_unsafe_fast_enabled() {
+        "MEMORY"
+    } else if cfg!(windows) {
         "DELETE"
     } else {
         "WAL"
@@ -70,8 +92,14 @@ pub(crate) fn platform_safe_journal_mode() -> &'static str {
 /// final fsync, but rollback journals need `FULL` to avoid corruption after an
 /// OS crash or power loss. Keep the faster WAL+NORMAL pairing on non-Windows
 /// and use DELETE+FULL on Windows.
+///
+/// When [`SQLITE_UNSAFE_FAST_ENV`] is `1` (tests/CI only — never set it in
+/// production) this returns `OFF` on every platform, skipping fsyncs entirely
+/// at the cost of crash durability.
 pub(crate) fn platform_safe_synchronous_mode() -> &'static str {
-    if cfg!(windows) {
+    if sqlite_unsafe_fast_enabled() {
+        "OFF"
+    } else if cfg!(windows) {
         "FULL"
     } else {
         "NORMAL"
@@ -413,6 +441,39 @@ mod tests {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * 1024;
 
+    /// Serializes tests that mutate [`SQLITE_UNSAFE_FAST_ENV`]; process env is
+    /// shared across threads under plain `cargo test`.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.take() {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
     #[test]
     fn adaptive_new_db_gets_minimum() {
         let (cache_kb, mmap) = adaptive_cache_sizes(0);
@@ -470,6 +531,10 @@ mod tests {
 
     #[test]
     fn journal_mode_uses_wal_except_on_windows() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        // Pin the CI-only escape hatch off: Windows CI exports it for the
+        // whole test run, and this test asserts the durable defaults.
+        let _env = EnvVarGuard::unset(SQLITE_UNSAFE_FAST_ENV);
         if cfg!(windows) {
             assert_eq!(platform_safe_journal_mode(), "DELETE");
         } else {
@@ -479,10 +544,28 @@ mod tests {
 
     #[test]
     fn synchronous_mode_matches_platform_journal_mode() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvVarGuard::unset(SQLITE_UNSAFE_FAST_ENV);
         if cfg!(windows) {
             assert_eq!(platform_safe_synchronous_mode(), "FULL");
         } else {
             assert_eq!(platform_safe_synchronous_mode(), "NORMAL");
         }
+    }
+
+    #[test]
+    fn unsafe_fast_env_overrides_journal_and_synchronous_modes() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvVarGuard::set(SQLITE_UNSAFE_FAST_ENV, "1");
+        assert_eq!(platform_safe_journal_mode(), "MEMORY");
+        assert_eq!(platform_safe_synchronous_mode(), "OFF");
+    }
+
+    #[test]
+    fn unsafe_fast_env_requires_exact_value_one() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvVarGuard::set(SQLITE_UNSAFE_FAST_ENV, "true");
+        assert_ne!(platform_safe_journal_mode(), "MEMORY");
+        assert_ne!(platform_safe_synchronous_mode(), "OFF");
     }
 }
