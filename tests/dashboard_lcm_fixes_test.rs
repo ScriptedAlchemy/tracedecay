@@ -401,7 +401,7 @@ async fn insert_undated_message(global_db_path: &Path) {
 }
 
 #[test]
-fn timeline_excludes_null_timestamps_and_reports_undated_count() {
+fn basic_lcm_dashboard_errors_and_timeline_contracts() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -457,47 +457,6 @@ fn timeline_excludes_null_timestamps_and_reports_undated_count() {
         assert_eq!(status, 200);
         assert_eq!(other["undated"]["count"], 0, "other-session: {other}");
         assert!(as_array(&other["buckets"], "other buckets").is_empty());
-    });
-}
-
-#[test]
-fn malformed_summary_metadata_surfaces_json_error_instead_of_empty_rows() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let runtime = create_runtime();
-    runtime.block_on(async {
-        let fixture = start_fixture(false).await;
-        corrupt_summary_node_metadata(&fixture.global_db_path, &fixture.linked_node_id).await;
-        let agent = http_agent();
-
-        let (status, overview) = get_json(
-            &agent,
-            &format!(
-                "{}/api/plugins/hermes-lcm/overview?limit=20",
-                fixture.base_url
-            ),
-        );
-        assert_eq!(status, 422);
-        assert!(
-            overview["detail"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("malformed metadata_json"),
-            "malformed summary metadata must surface a JSON error detail, got {overview}"
-        );
-    });
-}
-
-#[test]
-fn lcm_bad_params_and_missing_resources_return_json_errors() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let runtime = create_runtime();
-    runtime.block_on(async {
-        let fixture = start_fixture(false).await;
-        let agent = http_agent();
 
         let (status, bad_query) = get_json(
             &agent,
@@ -545,6 +504,35 @@ fn lcm_bad_params_and_missing_resources_return_json_errors() {
                 .unwrap_or_default()
                 .contains("missing-node"),
             "missing node body should carry the requested id"
+        );
+    });
+}
+
+#[test]
+fn malformed_summary_metadata_surfaces_json_error_instead_of_empty_rows() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_fixture(false).await;
+        corrupt_summary_node_metadata(&fixture.global_db_path, &fixture.linked_node_id).await;
+        let agent = http_agent();
+
+        let (status, overview) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/hermes-lcm/overview?limit=20",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 422);
+        assert!(
+            overview["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("malformed metadata_json"),
+            "malformed summary metadata must surface a JSON error detail, got {overview}"
         );
     });
 }

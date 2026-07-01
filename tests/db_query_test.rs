@@ -1,9 +1,12 @@
 use std::ops::Deref;
 
 use tempfile::TempDir;
+use tokio::sync::OnceCell;
 use tracedecay::db::{Database, StoredFingerprint};
 use tracedecay::redundancy::Fingerprint;
 use tracedecay::types::*;
+
+static EMPTY_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
 
 struct TestDb {
     db: Database,
@@ -21,10 +24,32 @@ impl Deref for TestDb {
 async fn setup_db() -> TestDb {
     let dir = TempDir::new().expect("failed to create temp dir");
     let db_path = dir.path().join("test.db");
-    let (db, _) = Database::initialize(&db_path)
+    std::fs::write(&db_path, empty_db_template().await).expect("failed to write template database");
+    let (db, migrated) = Database::open(&db_path)
         .await
-        .expect("failed to initialize database");
+        .expect("failed to open template database");
+    assert!(
+        !migrated,
+        "fresh test database should not require migration"
+    );
     TestDb { db, _dir: dir }
+}
+
+async fn empty_db_template() -> &'static [u8] {
+    EMPTY_DB_TEMPLATE
+        .get_or_init(|| async {
+            let dir = TempDir::new().expect("failed to create template temp dir");
+            let db_path = dir.path().join("template.db");
+            let (db, _) = Database::initialize(&db_path)
+                .await
+                .expect("failed to initialize template database");
+            db.checkpoint()
+                .await
+                .expect("failed to checkpoint template database");
+            db.close();
+            std::fs::read(&db_path).expect("failed to read template database")
+        })
+        .await
 }
 
 /// Helper: create a sample node with reasonable defaults.
