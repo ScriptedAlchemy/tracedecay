@@ -1609,7 +1609,11 @@ mod tests {
         //   workflow Codex intentionally does not ship. The Codex copy inlines
         //   that flow's guardrails (read-only research, dedupe, cited facts,
         //   secret/PII rejection) instead of pointing at a skill absent here.
-        const CODEX_SKILL_DIVERGENCES: &[&str] = &["curating-project-memory"];
+        // - `running-impacted-tests`: Cursor keeps `paths` frontmatter so its
+        //   host can path-scope the skill, while Codex must omit that key to
+        //   satisfy the Codex skill-creator quick_validate.py schema.
+        const CODEX_SKILL_DIVERGENCES: &[&str] =
+            &["curating-project-memory", "running-impacted-tests"];
         let root = repo_root();
         for &skill in crate::hooks::CURSOR_PLUGIN_SKILLS {
             let codex_path = root

@@ -1,6 +1,6 @@
 ---
 name: tracedecay-fix-build
-description: 'Fix build and type errors — run or parse compiler diagnostics, map each one to its enclosing symbol with callers, then fix.'
+description: 'Use to fix build and type errors by running or parsing diagnostics, mapping them to symbols with callers, then fixing.'
 disable-model-invocation: true
 ---
 
