@@ -222,6 +222,50 @@ struct Fixture {
     _daemon: Option<common::DaemonProcess>,
 }
 
+#[cfg(windows)]
+struct FixtureSnapshot {
+    _dir: TempDir,
+    profile_path: PathBuf,
+}
+
+#[cfg(windows)]
+impl FixtureSnapshot {
+    fn capture(fixture: &Fixture) -> Self {
+        let dir = TempDir::new().expect("fixture snapshot tempdir");
+        let profile_path = dir.path().join(".tracedecay");
+        std::fs::create_dir_all(&profile_path).unwrap_or_else(|e| {
+            panic!(
+                "failed to create fixture snapshot dir {}: {e}",
+                profile_path.display()
+            )
+        });
+        copy_dir_contents(&fixture.home_path.join(".tracedecay"), &profile_path);
+        Self {
+            _dir: dir,
+            profile_path,
+        }
+    }
+
+    fn restore_into(&self, fixture: &Fixture) {
+        let profile_path = fixture.home_path.join(".tracedecay");
+        if profile_path.exists() {
+            std::fs::remove_dir_all(&profile_path).unwrap_or_else(|e| {
+                panic!(
+                    "failed to remove fixture profile {}: {e}",
+                    profile_path.display()
+                )
+            });
+        }
+        std::fs::create_dir_all(&profile_path).unwrap_or_else(|e| {
+            panic!(
+                "failed to recreate fixture profile {}: {e}",
+                profile_path.display()
+            )
+        });
+        copy_dir_contents(&self.profile_path, &profile_path);
+    }
+}
+
 impl Fixture {
     fn db_path(&self) -> PathBuf {
         tracedecay::storage::resolve_layout(&self.project_path, &self.home_path.join(".tracedecay"))
@@ -414,6 +458,37 @@ fn canonical_test_dir(path: &Path) -> PathBuf {
         .unwrap_or_else(|e| panic!("failed to create test dir {}: {e}", path.display()));
     path.canonicalize()
         .unwrap_or_else(|e| panic!("failed to canonicalize test dir {}: {e}", path.display()))
+}
+
+#[cfg(windows)]
+fn copy_dir_contents(source: &Path, destination: &Path) {
+    for entry in std::fs::read_dir(source)
+        .unwrap_or_else(|e| panic!("failed to read fixture dir {}: {e}", source.display()))
+    {
+        let entry = entry.unwrap_or_else(|e| panic!("failed to read fixture entry: {e}"));
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .unwrap_or_else(|e| panic!("failed to inspect {}: {e}", source_path.display()));
+        if file_type.is_dir() {
+            std::fs::create_dir_all(&destination_path).unwrap_or_else(|e| {
+                panic!(
+                    "failed to create fixture dir {}: {e}",
+                    destination_path.display()
+                )
+            });
+            copy_dir_contents(&source_path, &destination_path);
+        } else if file_type.is_file() {
+            std::fs::copy(&source_path, &destination_path).unwrap_or_else(|e| {
+                panic!(
+                    "failed to copy fixture file {} to {}: {e}",
+                    source_path.display(),
+                    destination_path.display()
+                )
+            });
+        }
+    }
 }
 
 fn initialize_fixture_project(fixture: &Fixture) {
@@ -728,6 +803,7 @@ fn format_outcomes(outcomes: &[AssertionOutcome]) -> String {
 
 fn run_scenario(id: &str) {
     let scenario = load_scenario(id);
+    let well_behaved_steps = &scenario.deterministic.well_behaved;
 
     // Phase A: a well-behaved agent's tool sequence must leave a compliant
     // end-state. Scenarios with no well-behaved steps can assert their
@@ -735,7 +811,13 @@ fn run_scenario(id: &str) {
     let mut fixture = build_fixture(&scenario.setup);
     let mut seeded_sources = fact_ids_by_source(&fixture);
     let mut dry_run_report = None;
-    let well_behaved_steps = &scenario.deterministic.well_behaved;
+    #[cfg(windows)]
+    let baseline_snapshot =
+        if !well_behaved_steps.is_empty() && scenario.deterministic.violation.is_some() {
+            Some(FixtureSnapshot::capture(&fixture))
+        } else {
+            None
+        };
     if !well_behaved_steps.is_empty() {
         for step in well_behaved_steps {
             let result = execute_step(&fixture, step, &mut dry_run_report);
@@ -768,7 +850,14 @@ fn run_scenario(id: &str) {
         return;
     };
     if !well_behaved_steps.is_empty() {
-        fixture = build_fixture(&scenario.setup);
+        #[cfg(windows)]
+        if let Some(snapshot) = &baseline_snapshot {
+            snapshot.restore_into(&fixture);
+        }
+        #[cfg(not(windows))]
+        {
+            fixture = build_fixture(&scenario.setup);
+        }
         seeded_sources = fact_ids_by_source(&fixture);
     }
     dry_run_report = None;

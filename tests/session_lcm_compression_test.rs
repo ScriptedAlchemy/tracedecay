@@ -570,15 +570,23 @@ fn summary_draft_with_times(
 }
 
 #[tokio::test]
-async fn compress_in_transaction_baseline_decision_fixture_preserves_contract() {
-    for case in [
-        CompressBaselineCase::FrontierChanged,
-        CompressBaselineCase::BelowLeafThreshold,
-        CompressBaselineCase::AuxiliarySummaryRequest,
-        CompressBaselineCase::FakeSummaryWrite,
-    ] {
-        assert_compress_baseline_case(case).await;
-    }
+async fn compress_frontier_changed_baseline_decision_fixture_preserves_contract() {
+    assert_compress_baseline_case(CompressBaselineCase::FrontierChanged).await;
+}
+
+#[tokio::test]
+async fn compress_below_leaf_threshold_baseline_decision_fixture_preserves_contract() {
+    assert_compress_baseline_case(CompressBaselineCase::BelowLeafThreshold).await;
+}
+
+#[tokio::test]
+async fn compress_auxiliary_summary_request_baseline_decision_fixture_preserves_contract() {
+    assert_compress_baseline_case(CompressBaselineCase::AuxiliarySummaryRequest).await;
+}
+
+#[tokio::test]
+async fn compress_fake_summary_write_baseline_decision_fixture_preserves_contract() {
+    assert_compress_baseline_case(CompressBaselineCase::FakeSummaryWrite).await;
 }
 
 #[tokio::test]

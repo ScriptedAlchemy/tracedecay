@@ -4251,7 +4251,7 @@ async fn project_selector_is_rejected_before_write_tool_parsing() {
 
 #[tokio::test]
 async fn lcm_project_root_storage_arg_is_not_rejected_as_selector() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let project_root = cg.project_root().to_string_lossy().to_string();
 
     let result = handle_tool_call(
@@ -4279,7 +4279,7 @@ async fn lcm_project_root_storage_arg_is_not_rejected_as_selector() {
 
 #[tokio::test]
 async fn lcm_project_path_selector_is_rejected_before_dispatch() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let project_path = cg.project_root().to_string_lossy().to_string();
 
     let result = handle_tool_call(
@@ -6721,7 +6721,7 @@ async fn memory_tools_validate_malformed_inputs() {
 
 #[tokio::test]
 async fn message_search_reads_project_local_session_db() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let db = open_active_project_session_db(&cg).await;
     let session = SessionRecord {
         provider: "cursor".to_string(),
@@ -6902,7 +6902,7 @@ async fn message_search_reads_project_local_session_db() {
 
 #[tokio::test]
 async fn message_search_catches_up_provider_transcripts_before_querying() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let home = cg.project_root().join("home");
     let project = cg.project_root().to_path_buf();
     let project_text = project.to_string_lossy();
@@ -7038,7 +7038,7 @@ async fn message_search_catches_up_provider_transcripts_before_querying() {
 
 #[tokio::test]
 async fn message_search_can_skip_catch_up_for_read_only_audits() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let home = cg.project_root().join("home");
     let project = cg.project_root().to_path_buf();
     let project_text = project.to_string_lossy();
@@ -8000,7 +8000,7 @@ async fn lcm_doctor_gc_mode_preview_and_apply_reports_without_body_leaks() {
 
 #[tokio::test]
 async fn lcm_doctor_gc_apply_is_denied_by_default() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_lcm_doctor",
@@ -8306,7 +8306,7 @@ async fn lcm_doctor_scopes_orphan_lifecycle_debt_to_requested_session() {
 
 #[tokio::test]
 async fn lcm_doctor_diagnose_does_not_create_missing_project_session_db() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let db_path = project_session_db_path(&cg);
     if db_path.exists() {
         fs::remove_file(&db_path).unwrap();
@@ -9744,7 +9744,7 @@ async fn lcm_status_uses_explicit_hermes_profile_session_db() {
 
 #[tokio::test]
 async fn lcm_load_and_grep_use_explicit_hermes_profile_session_db() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "lcm-profile-read",
@@ -9843,7 +9843,7 @@ async fn lcm_load_and_grep_use_explicit_hermes_profile_session_db() {
 
 #[tokio::test]
 async fn lcm_hermes_profile_requires_explicit_valid_home_without_fallback() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "lcm-profile-missing-home",
@@ -9902,7 +9902,7 @@ async fn lcm_hermes_profile_requires_explicit_valid_home_without_fallback() {
 #[cfg(unix)]
 #[tokio::test]
 async fn lcm_hermes_profile_rejects_symlinked_tracedecay_dir_escape() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let hermes_home = test_temp_dir();
     let outside = test_temp_dir();
     unix_fs::symlink(outside.path(), hermes_home.path().join(".tracedecay")).unwrap();
@@ -9936,7 +9936,7 @@ async fn lcm_hermes_profile_rejects_symlinked_tracedecay_dir_escape() {
 
 #[tokio::test]
 async fn lcm_hermes_profile_rejects_non_directory_home() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let dir = test_temp_dir();
     let hermes_home = dir.path().join("hermes-home-file");
     fs::write(&hermes_home, "not a directory").unwrap();
@@ -9996,7 +9996,7 @@ async fn lcm_grep_rejects_invalid_scope_without_searching_all_sessions() {
 
 #[tokio::test]
 async fn lcm_load_session_rejects_fractional_negative_and_wrong_type_numeric_args() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "lcm-numeric",
@@ -10032,7 +10032,7 @@ async fn lcm_load_session_rejects_fractional_negative_and_wrong_type_numeric_arg
 
 #[tokio::test]
 async fn lcm_load_session_accepts_valid_integer_args() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "lcm-valid-integers",
@@ -10254,7 +10254,7 @@ async fn lcm_expand_query_oversized_prompt_preserves_synthesis_contract() {
 
 #[tokio::test]
 async fn message_search_preserves_provider_project_parent_scope_shape_after_lcm() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let db = open_project_session_db(cg.project_root())
         .await
         .expect("project-local session db should open");

@@ -34,6 +34,11 @@ struct DashboardFixture {
     linked_node_id: String,
 }
 
+#[derive(Clone, Copy, Default)]
+struct FixtureOptions {
+    external_payload: bool,
+}
+
 impl Drop for DashboardFixture {
     fn drop(&mut self) {
         self.server.abort();
@@ -111,13 +116,14 @@ fn summary_draft(
 }
 
 /// Seeds the session, four messages (two same-second messages inserted out of
-/// ordinal order, one with tool metadata, one externalized tool payload with
-/// `content = NULL`), and three summary nodes. Returns the node_id of the
-/// summary node that references msg-c.
+/// ordinal order, one with tool metadata, and one optional externalized tool
+/// payload with `content = NULL`), and three summary nodes. Returns the node_id
+/// of the summary node that references msg-c.
 async fn seed_lcm_fixture(
     global_db: &GlobalDb,
     storage_root: &Path,
     project_path: &Path,
+    external_payload: bool,
 ) -> String {
     let session = SessionRecord {
         provider: PROVIDER.to_string(),
@@ -170,28 +176,43 @@ async fn seed_lcm_fixture(
         }
     }
 
-    // Externalized tool payload: > 256k chars of tool output forces
-    // storage_kind = 'external' with content = NULL in lcm_raw_messages.
-    // The searchable needle is planted into snippet_text/index_text after
-    // ingest (see plant_external_needle), modeling the review scenario of a
-    // NULL-content row whose derived text is the only searchable surface.
-    let mut external_text = String::from("externalized tool payload head ");
-    external_text.push_str(&"x".repeat(300_000));
-    let mut external = message("msg-x", "tool", 4, 1_700_002_200, &external_text);
-    external.kind = Some("tool_result".to_string());
-    if let Err(err) = global_db
-        .lcm_store(storage_root)
-        .ingest_raw_message(&external)
-        .await
-    {
-        panic!("failed to ingest externalized message fixture: {err}");
-    }
-    match global_db.lcm_load_raw_message(PROVIDER, "msg-x").await {
-        Some(record) => assert!(
-            matches!(record.storage_kind, LcmStorageKind::External),
-            "fixture message msg-x must be externalized"
-        ),
-        None => panic!("missing seeded message msg-x"),
+    let msg_x = if external_payload {
+        let mut external_text = String::from("externalized tool payload head ");
+        external_text.push_str(&"x".repeat(300_000));
+        let mut external = message("msg-x", "tool", 4, 1_700_002_200, &external_text);
+        external.kind = Some("tool_result".to_string());
+        external
+    } else {
+        message(
+            "msg-x",
+            "assistant",
+            4,
+            1_700_002_200,
+            "delta lightweight fixture message",
+        )
+    };
+    if external_payload {
+        // Externalized tool payload: > 256k chars of tool output forces
+        // storage_kind = 'external' with content = NULL in lcm_raw_messages.
+        // The searchable needle is planted into snippet_text/index_text after
+        // ingest (see plant_external_needle), modeling the review scenario of a
+        // NULL-content row whose derived text is the only searchable surface.
+        if let Err(err) = global_db
+            .lcm_store(storage_root)
+            .ingest_raw_message(&msg_x)
+            .await
+        {
+            panic!("failed to ingest externalized message fixture: {err}");
+        }
+        match global_db.lcm_load_raw_message(PROVIDER, "msg-x").await {
+            Some(record) => assert!(
+                matches!(record.storage_kind, LcmStorageKind::External),
+                "fixture message msg-x must be externalized"
+            ),
+            None => panic!("missing seeded message msg-x"),
+        }
+    } else if !global_db.upsert_session_message(&msg_x).await {
+        panic!("failed to upsert message fixture {}", msg_x.message_id);
     }
 
     let store_a = store_id_of(global_db, "msg-a").await;
@@ -301,7 +322,7 @@ async fn corrupt_summary_node_metadata(global_db_path: &Path, node_id: &str) {
     }
 }
 
-async fn start_fixture(break_message_fts: bool) -> DashboardFixture {
+async fn start_fixture(options: FixtureOptions) -> DashboardFixture {
     let tmp = tempdir_or_panic();
     let project_root = tmp.path().join("project");
     let global_db_path = tmp.path().join("global").join("global.db");
@@ -323,14 +344,18 @@ async fn start_fixture(break_message_fts: bool) -> DashboardFixture {
     if let Err(err) = std::fs::create_dir_all(storage_root) {
         panic!("failed to create LCM storage root: {err}");
     }
-    let linked_node_id = seed_lcm_fixture(&global_db, storage_root, &project_root).await;
+    let linked_node_id = seed_lcm_fixture(
+        &global_db,
+        storage_root,
+        &project_root,
+        options.external_payload,
+    )
+    .await;
     drop(global_db);
 
-    plant_external_needle(&session_db_path).await;
-    if break_message_fts {
-        drop_raw_message_fts(&session_db_path).await;
+    if options.external_payload {
+        plant_external_needle(&session_db_path).await;
     }
-
     let port = pick_free_port();
     let base_url = format!("http://127.0.0.1:{port}");
     let server = tokio::spawn(async move {
@@ -392,7 +417,7 @@ fn timeline_excludes_null_timestamps_and_reports_undated_count() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_fixture(false).await;
+        let fixture = start_fixture(FixtureOptions::default()).await;
         insert_undated_message(&fixture.global_db_path).await;
         let agent = http_agent();
 
@@ -452,7 +477,7 @@ fn malformed_summary_metadata_surfaces_json_error_instead_of_empty_rows() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_fixture(false).await;
+        let fixture = start_fixture(FixtureOptions::default()).await;
         corrupt_summary_node_metadata(&fixture.global_db_path, &fixture.linked_node_id).await;
         let agent = http_agent();
 
@@ -481,7 +506,7 @@ fn lcm_bad_params_and_missing_resources_return_json_errors() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_fixture(false).await;
+        let fixture = start_fixture(FixtureOptions::default()).await;
         let agent = http_agent();
 
         let (status, bad_query) = get_json(
@@ -541,7 +566,10 @@ fn session_endpoint_orders_by_ordinal_paginates_nodes_and_enriches_messages() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_fixture(false).await;
+        let fixture = start_fixture(FixtureOptions {
+            external_payload: true,
+        })
+        .await;
         let agent = http_agent();
 
         let (status, session) = get_json(
@@ -663,7 +691,10 @@ fn search_matches_externalized_messages_and_qualifies_summary_fts() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_fixture(false).await;
+        let fixture = start_fixture(FixtureOptions {
+            external_payload: true,
+        })
+        .await;
         let agent = http_agent();
 
         // Fix 1 (FTS mode): the externalized message is indexed via
