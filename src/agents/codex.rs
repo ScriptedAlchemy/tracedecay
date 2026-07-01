@@ -1597,11 +1597,13 @@ mod tests {
     /// frontmatter for invocation and ignores extra keys, and the skill bodies
     /// reference host-neutral `tracedecay_*` MCP tools, so the same content is
     /// correct in both hosts. Intentional per-skill divergences must be listed
-    /// (with a reason) in `CODEX_SKILL_DIVERGENCES`.
+    /// (with a reason) in one of the divergence allowlists below. Per-host
+    /// frontmatter schemas (allowed keys per plugin) are enforced separately
+    /// by `tests/plugin_skill_contract_test.rs`.
     #[test]
     fn codex_skills_match_the_cursor_source_for_parity() {
         // Skills deliberately specialized for Codex (host-specific bodies that
-        // are not byte-compared against the Cursor source):
+        // are not compared against the Cursor source at all):
         //
         // - `curating-project-memory`: the Cursor source hands the "add a
         //   researched subject from scratch" flow off to the `memorizing-subject`
@@ -1609,7 +1611,14 @@ mod tests {
         //   workflow Codex intentionally does not ship. The Codex copy inlines
         //   that flow's guardrails (read-only research, dedupe, cited facts,
         //   secret/PII rejection) instead of pointing at a skill absent here.
-        const CODEX_SKILL_DIVERGENCES: &[&str] = &["curating-project-memory"];
+        const CODEX_SKILL_BODY_DIVERGENCES: &[&str] = &["curating-project-memory"];
+        // Skills whose frontmatter legitimately diverges while the bodies must
+        // still mirror byte-for-byte (compared after stripping frontmatter):
+        //
+        // - `running-impacted-tests`: Cursor keeps `paths` frontmatter so its
+        //   host can path-scope the skill, while Codex must omit that key to
+        //   satisfy the Codex skill-creator quick_validate.py schema.
+        const CODEX_SKILL_FRONTMATTER_DIVERGENCES: &[&str] = &["running-impacted-tests"];
         let root = repo_root();
         for &skill in crate::hooks::CURSOR_PLUGIN_SKILLS {
             let codex_path = root
@@ -1620,7 +1629,7 @@ mod tests {
                 codex_path.exists(),
                 "Codex plugin must ship the `{skill}` skill for parity with Cursor"
             );
-            if CODEX_SKILL_DIVERGENCES.contains(&skill) {
+            if CODEX_SKILL_BODY_DIVERGENCES.contains(&skill) {
                 continue;
             }
             let cursor_body = std::fs::read_to_string(
@@ -1631,12 +1640,39 @@ mod tests {
             .expect("cursor skill source should be readable");
             let codex_body = std::fs::read_to_string(&codex_path)
                 .expect("codex skill source should be readable");
+            if CODEX_SKILL_FRONTMATTER_DIVERGENCES.contains(&skill) {
+                assert_eq!(
+                    lines_after_frontmatter(&codex_body),
+                    lines_after_frontmatter(&cursor_body),
+                    "Codex `{skill}` skill body must mirror the Cursor source even though \
+                     its frontmatter intentionally diverges"
+                );
+                continue;
+            }
             assert_eq!(
                 codex_body, cursor_body,
                 "Codex `{skill}` skill must mirror the Cursor source (add it to \
-                 CODEX_SKILL_DIVERGENCES if a host-specific version is intended)"
+                 a CODEX_SKILL_*_DIVERGENCES list if a host-specific version is intended)"
             );
         }
+    }
+
+    /// Returns the lines following the closing `---` of the leading YAML
+    /// frontmatter. Line-based so CRLF checkouts compare like LF ones.
+    fn lines_after_frontmatter(contents: &str) -> Vec<&str> {
+        let mut lines = contents.lines();
+        assert_eq!(
+            lines.next(),
+            Some("---"),
+            "skill must open YAML frontmatter"
+        );
+        let mut lines = lines.skip_while(|line| line.trim() != "---");
+        assert_eq!(
+            lines.next().map(str::trim),
+            Some("---"),
+            "skill must close YAML frontmatter"
+        );
+        lines.collect()
     }
 
     /// Extracts the `<name>` from every `tracedecay:<name>` skill handoff in a

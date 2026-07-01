@@ -1,6 +1,6 @@
 ---
 name: tracedecay-map-architecture
-description: 'Map the architecture of the repo or a directory — layered module map, dependency hotspots, and structural risks.'
+description: 'Use to map repo or directory architecture, including layered modules, dependency hotspots, and structural risks.'
 disable-model-invocation: true
 ---
 

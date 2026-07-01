@@ -1,9 +1,6 @@
 ---
 name: running-impacted-tests
 description: 'Use when running only tests affected by changed Rust files, mapping failures back to source, verifying a change without a full suite, or handling cargo-backed impacted-test checks.'
-paths:
-  - "**/*.rs"
-  - "**/Cargo.toml"
 ---
 
 # Running impacted tests
