@@ -1,5 +1,5 @@
 use tempfile::TempDir;
-use tracedecay::global_db::GlobalDb;
+use tracedecay::global_db::{GlobalDb, ParseOffset};
 use tracedecay::sessions::lcm::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmError, LcmExpandQueryRequest,
     LcmExpandRequest, LcmExpandTarget, LcmGcConfig, LcmGrepRequest, LcmGrepSort,
@@ -85,14 +85,28 @@ async fn insert_raw_messages(
     session_id: &str,
     contents: &[String],
 ) -> Vec<i64> {
-    insert_session(db, provider, session_id).await;
-    let mut message_ids = Vec::new();
-    for (idx, content) in contents.iter().enumerate() {
-        let message_id = format!("{session_id}-message-{:03}", idx + 1);
-        let message = raw_message(provider, &message_id, session_id, (idx + 1) as i64, content);
-        assert!(db.upsert_session_message(&message).await);
-        message_ids.push(message_id);
-    }
+    let session = sample_session(provider, session_id);
+    let messages: Vec<_> = contents
+        .iter()
+        .enumerate()
+        .map(|(idx, content)| {
+            let message_id = format!("{session_id}-message-{:03}", idx + 1);
+            raw_message(provider, &message_id, session_id, (idx + 1) as i64, content)
+        })
+        .collect();
+    assert!(
+        db.upsert_transcript_batch(
+            &session,
+            &messages,
+            &format!("session-lcm-query-{provider}-{session_id}.jsonl"),
+            ParseOffset::default(),
+        )
+        .await
+    );
+    let message_ids: Vec<_> = messages
+        .iter()
+        .map(|message| message.message_id.clone())
+        .collect();
 
     if message_ids.is_empty() {
         return Vec::new();
