@@ -803,26 +803,24 @@ def dump(data, stream=None, default_flow_style=False, **kwargs):
     return None
 "##;
 
-pub fn python3_has_real_yaml() -> bool {
-    static HAS_YAML: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *HAS_YAML.get_or_init(|| {
-        std::process::Command::new("python3")
-            .args(["-c", "import yaml"])
-            .output()
-            .map(|out| out.status.success())
-            .unwrap_or(false)
-    })
-}
+/// Python prelude that falls back to the bundled PyYAML shim (argv[2]) only
+/// when the interpreter has no importable `yaml`, so config.yaml-dependent
+/// checks run on bare CI runners without a separate `python3 -c "import
+/// yaml"` probe process. Appending to sys.path keeps the precedence
+/// identical: a real PyYAML always wins.
+pub const PYYAML_FALLBACK_PRELUDE: &str = r#"
+import importlib.util as _yaml_probe_util
+import sys as _yaml_probe_sys
 
-/// Returns a PYTHONPATH entry providing the `yaml` shim when the system
-/// python3 has no real PyYAML, so config.yaml-dependent checks run on every
-/// OS instead of failing on bare CI runners.
-pub fn pyyaml_shim_pythonpath(scratch: &std::path::Path) -> Option<std::path::PathBuf> {
-    if python3_has_real_yaml() {
-        return None;
-    }
+if _yaml_probe_util.find_spec("yaml") is None:
+    _yaml_probe_sys.path.append(_yaml_probe_sys.argv[2])
+"#;
+
+/// Writes the PyYAML test shim next to the test home and returns its
+/// directory, for scripts using [`PYYAML_FALLBACK_PRELUDE`].
+pub fn write_pyyaml_shim(scratch: &Path) -> PathBuf {
     let shim_dir = scratch.join("pyyaml-shim");
     std::fs::create_dir_all(&shim_dir).unwrap();
     std::fs::write(shim_dir.join("yaml.py"), PYYAML_SHIM).unwrap();
-    Some(shim_dir)
+    shim_dir
 }

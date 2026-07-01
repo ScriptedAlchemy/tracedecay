@@ -3,7 +3,7 @@ mod common;
 use std::path::Path;
 use std::process::Command;
 
-use common::{pyyaml_shim_pythonpath, EnvVarGuard};
+use common::{write_pyyaml_shim, EnvVarGuard, PYYAML_FALLBACK_PRELUDE};
 use tempfile::TempDir;
 use tracedecay::agents::*;
 use tracedecay::automation::managed_skills::{
@@ -212,6 +212,30 @@ fn expected_tracedecay_bin() -> String {
         })
     });
     path_match.unwrap_or_else(|| env!("CARGO_BIN_EXE_tracedecay").replace('\\', "/"))
+}
+
+/// Python snippet that py_compiles the generated plugin sources inside the
+/// same interpreter that runs a test's check script, instead of the separate
+/// `python3 -m py_compile` process `assert_python_compiles` spawns. On
+/// Windows CI every python launch goes through a .cmd shim and costs ~1s, so
+/// folding the compile check into the check script halves those tests'
+/// interpreter launches while keeping compile failures attributable.
+/// `plugin_dir_expr` is a Python expression evaluating to the plugin dir.
+fn python_compile_check(plugin_dir_expr: &str) -> String {
+    format!(
+        r#"
+import pathlib as _compile_pathlib
+import py_compile as _py_compile
+import sys as _compile_sys
+
+for _name in ("tools.py", "schemas.py", "__init__.py"):
+    try:
+        _py_compile.compile(str(({plugin_dir_expr}) / _name), doraise=True)
+    except _py_compile.PyCompileError as _exc:
+        print(f"generated Python should compile: {{_name}}: {{_exc}}", file=_compile_sys.stderr)
+        _compile_sys.exit(1)
+"#
+    )
 }
 
 fn assert_python_compiles(paths: &[&Path]) {
@@ -1109,16 +1133,13 @@ fn test_hermes_generated_python_handles_quoted_unicode_tracedecay_path() {
     HermesIntegration.install(&ctx).unwrap();
 
     let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
-    assert_python_compiles(&[
-        &plugin_dir.join("tools.py"),
-        &plugin_dir.join("schemas.py"),
-        &plugin_dir.join("__init__.py"),
-    ]);
-
     let script = plugin_dir.join("check_tools.py");
     std::fs::write(
         &script,
-        r#"
+        format!(
+            "{}\n{}",
+            python_compile_check("_compile_pathlib.Path(_compile_sys.argv[1]).parent"),
+            r#"
 import importlib.util
 import json
 import os
@@ -1157,7 +1178,8 @@ assert payload["stdout"].startswith("stdout-")
 assert payload["stderr"].startswith("stderr-")
 assert payload["stdout"].endswith("...<truncated>")
 assert payload["stderr"].endswith("...<truncated>")
-"#,
+"#
+        ),
     )
     .unwrap();
 
@@ -1183,16 +1205,13 @@ fn test_hermes_generated_python_registers_memory_provider() {
         .unwrap();
 
     let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
-    assert_python_compiles(&[
-        &plugin_dir.join("tools.py"),
-        &plugin_dir.join("schemas.py"),
-        &plugin_dir.join("__init__.py"),
-    ]);
-
     let script = plugin_dir.join("check_memory_provider.py");
     std::fs::write(
         &script,
-        r#"
+        format!(
+            "{}\n{}",
+            python_compile_check("_compile_pathlib.Path(_compile_sys.argv[1])"),
+            r#"
 import importlib
 import importlib.machinery
 import importlib.util
@@ -1390,7 +1409,8 @@ collector = ProviderCollector()
 plugin.register(collector)
 assert collector.provider is not None
 assert collector.provider.name == "tracedecay"
-"#,
+"#
+        ),
     )
     .unwrap();
 
@@ -1419,7 +1439,9 @@ fn test_hermes_generated_memory_provider_is_discovered_from_active_home() {
     let script = plugin_dir.join("check_hermes_discovery.py");
     std::fs::write(
         &script,
-        r#"
+        format!(
+            "{PYYAML_FALLBACK_PRELUDE}\n{}",
+            r#"
 import abc
 import importlib.machinery
 import importlib.util
@@ -1548,15 +1570,16 @@ provider.initialize("doctor-session", hermes_home=str(hermes_home), platform="cl
 assert provider.hermes_home == str(hermes_home)
 assert "fact_store" in [schema["name"] for schema in provider.get_tool_schemas()]
 assert "memory_status" in [schema["name"] for schema in provider.get_tool_schemas()]
-"#,
+"#
+        ),
     )
     .unwrap();
 
     let mut check = Command::new("python3");
-    check.arg(&script).arg(hermes_home);
-    if let Some(shim_dir) = pyyaml_shim_pythonpath(home.path()) {
-        check.env("PYTHONPATH", shim_dir);
-    }
+    check
+        .arg(&script)
+        .arg(hermes_home)
+        .arg(write_pyyaml_shim(home.path()));
     let output = check
         .output()
         .expect("python3 should run Hermes memory provider discovery check");
@@ -5749,7 +5772,9 @@ fn test_hermes_generated_python_reads_plugins_tracedecay_config_block() {
     let script = plugin_dir.join("check_config_block.py");
     std::fs::write(
         &script,
-        r#"
+        format!(
+            "{PYYAML_FALLBACK_PRELUDE}\n{}",
+            r#"
 import importlib.machinery
 import importlib.util
 import json
@@ -5840,15 +5865,16 @@ assert plugin._configured_int(attr_engine.config, "fresh_tail_count") == 16
 # Engines bound to a different profile home do not inherit this block.
 other_engine = plugin.TraceDecayContextEngine(hermes_home="/tmp/definitely-missing-hermes-home")
 assert other_engine.project_root is None
-"#,
+"#
+        ),
     )
     .unwrap();
 
     let mut check = Command::new("python3");
-    check.arg(&script).arg(&plugin_dir);
-    if let Some(shim_dir) = pyyaml_shim_pythonpath(home.path()) {
-        check.env("PYTHONPATH", shim_dir);
-    }
+    check
+        .arg(&script)
+        .arg(&plugin_dir)
+        .arg(write_pyyaml_shim(home.path()));
     let output = check
         .output()
         .expect("python3 should run generated Hermes config block check");
