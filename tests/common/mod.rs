@@ -13,13 +13,10 @@ use std::time::Instant;
 
 use serde_json::Value;
 use tempfile::TempDir;
-use tokio::sync::OnceCell;
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::types::{Node, NodeKind, Visibility};
-
-static EMPTY_LCM_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
 
 /// Sets (or removes) an environment variable for its lifetime, restoring the
 /// previous value on drop.
@@ -400,51 +397,9 @@ pub fn isolated_global_db_path(tmp: &TempDir) -> std::path::PathBuf {
 }
 
 pub async fn open_lcm_db(tmp: &TempDir) -> GlobalDb {
-    let db_path = isolated_lcm_db_path(tmp);
-    if !db_path.exists() {
-        seed_lcm_db_from_template(&db_path).await;
-        return GlobalDb::open_at_assuming_schema(&db_path)
-            .await
-            .expect("session db open");
-    }
-    GlobalDb::open_at(&db_path).await.expect("session db open")
-}
-
-async fn seed_lcm_db_from_template(db_path: &Path) {
-    if let Some(parent) = db_path.parent() {
-        fs::create_dir_all(parent).unwrap_or_else(|err| {
-            panic!(
-                "failed to create LCM test DB directory '{}': {err}",
-                parent.display()
-            )
-        });
-    }
-    fs::write(db_path, empty_lcm_db_template().await).unwrap_or_else(|err| {
-        panic!(
-            "failed to write LCM test DB template '{}': {err}",
-            db_path.display()
-        )
-    });
-}
-
-async fn empty_lcm_db_template() -> &'static [u8] {
-    EMPTY_LCM_DB_TEMPLATE
-        .get_or_init(|| async {
-            let tmp = tempdir_or_panic();
-            let db_path = isolated_lcm_db_path(&tmp);
-            let db = GlobalDb::open_at(&db_path)
-                .await
-                .expect("template session db open");
-            db.checkpoint().await;
-            db.close();
-            fs::read(&db_path).unwrap_or_else(|err| {
-                panic!(
-                    "failed to read LCM test DB template '{}': {err}",
-                    db_path.display()
-                )
-            })
-        })
+    GlobalDb::open_at(&isolated_lcm_db_path(tmp))
         .await
+        .expect("session db open")
 }
 
 pub async fn open_global_db(tmp: &TempDir) -> GlobalDb {
