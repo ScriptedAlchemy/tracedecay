@@ -505,7 +505,6 @@ fn basic_lcm_dashboard_errors_and_timeline_contracts() {
                 .contains("missing-node"),
             "missing node body should carry the requested id"
         );
-
     });
 }
 
