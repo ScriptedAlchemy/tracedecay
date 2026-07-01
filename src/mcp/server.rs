@@ -6,6 +6,7 @@
 //! allowing AI assistants to query the code graph interactively.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -21,6 +22,7 @@ use crate::mcp::tool_analytics::{mcp_tool_analytics_event, McpToolAnalyticsEvent
 use crate::path_tree::format_compact_annotated_path_list;
 use crate::tracedecay::TraceDecay;
 
+use super::hook_events::{self, HookAgent, HookEventPlan};
 use super::tools::{
     explore_call_budget, get_tool_definitions_with_budget, handle_tool_call_with_registry,
 };
@@ -679,6 +681,33 @@ impl McpServer {
         snapshot
     }
 
+    async fn reopen_after_branch_tracking_added(&self) {
+        let reopened = {
+            let mut guard = self.cg.write().await;
+            match guard.reopen_for_current_branch().await {
+                Ok(fresh) => {
+                    eprintln!(
+                        "[tracedecay] branch tracking added for '{}' — reopened the index for it",
+                        fresh.active_branch().unwrap_or("<detached>")
+                    );
+                    *guard = Arc::new(fresh);
+                    true
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[tracedecay] hook branch tracking added but reopen failed: {e}; \
+                         continuing to serve branch '{}'",
+                        guard.serving_branch().unwrap_or("<none>")
+                    );
+                    false
+                }
+            }
+        };
+        if reopened {
+            self.refresh_file_token_map().await;
+        }
+    }
+
     /// Estimates the raw-file token cost ("before") for the given file
     /// paths from the cached file-token map (indexed file bytes / 4).
     /// Pure lookup — persists nothing.
@@ -1295,6 +1324,11 @@ impl McpServer {
         if let Ok(mut counts) = self.method_call_counts.lock() {
             *counts.entry(request.method.clone()).or_insert(0) += 1;
         }
+        if request.method == crate::daemon::HOOK_EVENT_METHOD {
+            self.handle_hook_event_notification(request.params.as_ref())
+                .await;
+            return None;
+        }
         let id = request.id.clone()?;
 
         let result = match request.method.as_str() {
@@ -1333,6 +1367,94 @@ impl McpServer {
         }
 
         result
+    }
+
+    async fn handle_hook_event_notification(&self, params: Option<&Value>) {
+        let Some(event) = hook_events::parse_hook_event(params) else {
+            return;
+        };
+        let cg = self.reopen_if_branch_drifted().await;
+        let root = cg.project_root().to_path_buf();
+        let current_branch = crate::branch::current_branch(&root);
+        let plan = hook_events::plan_hook_event(&event, &root, current_branch.as_deref());
+        self.run_hook_event_plan(cg, &root, plan).await;
+    }
+
+    async fn run_hook_event_plan(&self, cg: Arc<TraceDecay>, root: &Path, plan: HookEventPlan) {
+        match plan {
+            HookEventPlan::SyncFiles(rel_paths) => {
+                match cg.sync_if_stale_silent(&rel_paths).await {
+                    Ok(()) | Err(TraceDecayError::SyncLock { .. }) => {
+                        self.refresh_file_token_map().await;
+                    }
+                    Err(e) => eprintln!("[tracedecay] hook file sync failed: {e}"),
+                }
+            }
+            HookEventPlan::AddBranch(branch) => {
+                match self.add_hook_branch_tracking(root, &branch, &cg).await {
+                    Ok(crate::branch::BranchAddOutcome::Added) => {
+                        self.reopen_after_branch_tracking_added().await;
+                    }
+                    Ok(crate::branch::BranchAddOutcome::AlreadyTracked) => {
+                        self.refresh_file_token_map().await;
+                    }
+                    Ok(
+                        crate::branch::BranchAddOutcome::Deferred
+                        | crate::branch::BranchAddOutcome::NotIndexed,
+                    ) => {}
+                    Err(e) => eprintln!("[tracedecay] hook branch tracking failed: {e}"),
+                }
+            }
+            HookEventPlan::SyncCurrentBranch { branch, agent } => {
+                match self.add_hook_branch_tracking(root, &branch, &cg).await {
+                    Ok(crate::branch::BranchAddOutcome::Added) => {
+                        self.reopen_after_branch_tracking_added().await;
+                    }
+                    Ok(
+                        crate::branch::BranchAddOutcome::AlreadyTracked
+                        | crate::branch::BranchAddOutcome::Deferred,
+                    ) => self.run_hook_incremental_sync(cg, agent).await,
+                    Ok(crate::branch::BranchAddOutcome::NotIndexed) => {}
+                    Err(e) => {
+                        eprintln!("[tracedecay] hook current branch tracking failed: {e}");
+                        self.run_hook_incremental_sync(cg, agent).await;
+                    }
+                }
+            }
+            HookEventPlan::DebouncedIncrementalSync(agent) => {
+                self.run_hook_incremental_sync(cg, agent).await;
+            }
+            HookEventPlan::Noop => {}
+        }
+    }
+
+    async fn add_hook_branch_tracking(
+        &self,
+        root: &Path,
+        branch: &str,
+        cg: &TraceDecay,
+    ) -> Result<crate::branch::BranchAddOutcome> {
+        crate::tracedecay::TraceDecay::add_branch_tracking_with_options(
+            root,
+            branch,
+            cg.open_options(),
+        )
+        .await
+    }
+
+    async fn run_hook_incremental_sync(&self, cg: Arc<TraceDecay>, agent: HookAgent) {
+        let marker = hook_events::sync_marker_path(&cg.store_layout().data_root, agent);
+        let now = crate::tracedecay::current_timestamp();
+        if !hook_events::should_run_sync(&marker, now, 3) {
+            return;
+        }
+        match cg.sync().await {
+            Ok(_) | Err(TraceDecayError::SyncLock { .. }) => {
+                hook_events::write_sync_marker(&marker, now);
+                self.refresh_file_token_map().await;
+            }
+            Err(e) => eprintln!("[tracedecay] hook incremental sync failed: {e}"),
+        }
     }
 
     /// Handles the `initialize` method, returning server capabilities.

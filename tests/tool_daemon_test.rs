@@ -172,9 +172,6 @@ fn spawn_sentinel_daemon_with_notification(
             .set_nonblocking(false)
             .expect("set accepted stream blocking");
         stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("read timeout");
-        stream
             .set_write_timeout(Some(Duration::from_secs(2)))
             .expect("write timeout");
 
@@ -235,6 +232,221 @@ fn spawn_sentinel_daemon_with_notification(
         .recv_timeout(Duration::from_secs(2))
         .expect("fake daemon should become ready");
     request_rx
+}
+
+fn spawn_hook_event_daemon(socket_path: PathBuf) -> mpsc::Receiver<Value> {
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (request_tx, request_rx) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
+        listener
+            .set_nonblocking(true)
+            .expect("set listener nonblocking");
+        ready_tx.send(()).expect("notify fake daemon readiness");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let (stream, _) = loop {
+            match listener.accept() {
+                Ok(accepted) => break accepted,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        panic!("timed out waiting for hook to connect to fake daemon");
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("accept fake daemon client: {e}"),
+            }
+        };
+        let mut reader = BufReader::new(stream);
+        let mut handshake = String::new();
+        reader
+            .read_line(&mut handshake)
+            .expect("read daemon handshake");
+        let handshake: Value = serde_json::from_str(handshake.trim()).expect("handshake JSON");
+        assert!(
+            handshake["project_path"].is_string(),
+            "hook notifications must be scoped to a project"
+        );
+        assert!(
+            !handshake
+                .get("allow_init")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+            "hook notifications must not permit daemon-side init"
+        );
+
+        let mut request = String::new();
+        reader
+            .read_line(&mut request)
+            .expect("read hook JSON-RPC notification");
+        let request: Value = serde_json::from_str(request.trim()).expect("request JSON");
+        assert_eq!(request["method"], "tracedecay/hookEvent");
+        assert!(
+            request.get("id").is_none(),
+            "hook event must be a notification, not a request"
+        );
+        request_tx
+            .send(request)
+            .expect("send observed hook event notification");
+    });
+
+    ready_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("fake daemon should become ready");
+    request_rx
+}
+
+fn assert_hook_notification(
+    command_arg: &str,
+    fail_open_label: &str,
+    expected_agent: &str,
+    expected_event: &str,
+    build_event: impl FnOnce(&Path) -> Value,
+    assert_extra_params: impl FnOnce(&Value, &Path),
+) {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let socket_dir = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+
+    let socket_path = socket_dir.path().join("tracedecay.sock");
+    let observed_request = spawn_hook_event_daemon(socket_path.clone());
+    let event = build_event(&project_path).to_string();
+
+    let output = tracedecay_command_with_home(&home_path)
+        .current_dir(&project_path)
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+        .arg(command_arg)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child
+                .stdin
+                .as_mut()
+                .expect("stdin should be piped")
+                .write_all(event.as_bytes())?;
+            child.wait_with_output()
+        })
+        .expect("hook command should run");
+
+    assert!(
+        output.status.success(),
+        "{fail_open_label} hook should fail open\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let request = observed_request
+        .recv_timeout(Duration::from_secs(2))
+        .expect("fake daemon should receive hook event");
+    assert_eq!(request["params"]["agent"], expected_agent);
+    assert_eq!(request["params"]["event"], expected_event);
+    assert_extra_params(&request, &project_path);
+}
+
+#[test]
+fn cursor_after_file_edit_hook_notifies_daemon() {
+    assert_hook_notification(
+        "hook-cursor-after-file-edit",
+        "afterFileEdit",
+        "cursor",
+        "afterFileEdit",
+        |project_path| {
+            let edited = project_path.join("src/lib.rs");
+            std::fs::write(&edited, "pub fn answer() -> u32 { 43 }\n").unwrap();
+            json!({
+                "hook_event_name": "afterFileEdit",
+                "file_path": edited,
+                "workspace_roots": [project_path],
+            })
+        },
+        |request, _| {
+            assert_eq!(request["params"]["rel_paths"], json!(["src/lib.rs"]));
+        },
+    );
+}
+
+#[test]
+fn cursor_after_shell_hook_notifies_daemon() {
+    assert_hook_notification(
+        "hook-cursor-after-shell",
+        "afterShellExecution",
+        "cursor",
+        "afterShellExecution",
+        |project_path| {
+            json!({
+                "hook_event_name": "afterShellExecution",
+                "command": "git pull --rebase",
+                "cwd": project_path,
+                "workspace_roots": [project_path],
+            })
+        },
+        |request, project_path| {
+            assert_eq!(request["params"]["command"], "git pull --rebase");
+            assert_eq!(
+                request["params"]["cwd"],
+                project_path.to_string_lossy().to_string()
+            );
+        },
+    );
+}
+
+#[test]
+fn cursor_workspace_open_hook_notifies_daemon() {
+    assert_hook_notification(
+        "hook-cursor-workspace-open",
+        "workspaceOpen",
+        "cursor",
+        "workspaceOpen",
+        |project_path| {
+            json!({
+                "hook_event_name": "workspaceOpen",
+                "cwd": project_path,
+                "workspace_roots": [project_path],
+            })
+        },
+        |request, project_path| {
+            assert_eq!(
+                request["params"]["cwd"],
+                project_path.to_string_lossy().to_string()
+            );
+        },
+    );
+}
+
+#[test]
+fn kiro_post_tool_use_hook_notifies_daemon() {
+    assert_hook_notification(
+        "hook-kiro-post-tool-use",
+        "Kiro postToolUse",
+        "kiro",
+        "postToolUse",
+        |project_path| {
+            let edited = project_path.join("src/lib.rs");
+            std::fs::write(&edited, "pub fn answer() -> u32 { 44 }\n").unwrap();
+            json!({
+                "hook_event_name": "postToolUse",
+                "cwd": project_path,
+                "tool_name": "fs_write",
+                "tool_input": {
+                    "path": "src/lib.rs"
+                },
+            })
+        },
+        |request, project_path| {
+            assert_eq!(
+                request["params"]["cwd"],
+                project_path.to_string_lossy().to_string()
+            );
+            assert_eq!(request["params"]["rel_paths"], json!(["src/lib.rs"]));
+        },
+    );
 }
 
 #[test]

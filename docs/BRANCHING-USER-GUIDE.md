@@ -4,7 +4,7 @@
 
 TraceDecay maintains a code graph in the active project store. Without multi-branch indexing, that store has one SQLite database for the project. When you switch
 git branches, the files on disk change but the graph still reflects the old branch. The
-embedded MCP watcher eventually catches up by re-indexing changed files, but there are two costs:
+MCP staleness check or daemon/server hook event path eventually catches up by re-indexing changed files, but there are two costs:
 
 1. **Stale window.** Between the checkout and the next sync, every MCP query returns results
    from the old branch. A symbol search might surface a function that doesn't exist on the
@@ -15,13 +15,13 @@ embedded MCP watcher eventually catches up by re-indexing changed files, but the
    On large projects this adds up to minutes of wasted CPU and disk I/O per day.
 
 Multi-branch indexing solves both problems by keeping a separate database per branch. Each
-branch's graph is always accurate, switching is instant, and the watcher syncs only the branch
+branch's graph is always accurate, switching is instant, and sync work targets only the branch
 you're actually working on.
 
 ## How it works
 
 Multi-branch is fully opt-in. Without it, tracedecay behaves exactly as before: one database,
-one graph, the watcher re-indexes whatever is on disk.
+one graph, sync re-indexes whatever is on disk.
 
 When you opt in, tracedecay creates a `branch-meta.json` file inside the active project store that tracks
 which branches have their own database. In repo-local mode, the storage layout looks like this:
@@ -104,18 +104,17 @@ tracedecay branch gc
 This checks each tracked branch against `.git/refs/heads/` and `packed-refs`, and deletes
 databases for branches that are gone.
 
-## How the watcher handles branches
+## How branch-aware sync handles branches
 
-The embedded MCP watcher's behavior depends on whether multi-branch is active:
+MCP staleness checks and daemon/server hook events behave differently depending on whether multi-branch is active:
 
-**Without multi-branch (default):** The watcher monitors for file changes and syncs the single
-`tracedecay.db`. Switching branches triggers a sync of all changed files.
+**Without multi-branch (default):** Sync updates the single `tracedecay.db`. Switching branches triggers a sync of all changed files.
 
-**With multi-branch:** Before each sync, the watcher checks the current branch. If that branch
+**With multi-branch:** Before each sync, TraceDecay checks the current branch. If that branch
 is tracked, it syncs that branch's database. If it's not tracked, it syncs the default
 branch's database. After syncing, it updates the `last_synced_at` timestamp in the metadata.
 
-You don't need to restart the MCP server after adding a branch. The watcher picks up metadata
+You don't need to restart the MCP server after adding a branch. Sync picks up metadata
 changes on the next sync cycle.
 
 ## How the MCP server selects a database
@@ -227,7 +226,7 @@ Yes, using `tracedecay_branch_search` and `tracedecay_branch_diff`. These open t
 branch's database directly without requiring a checkout.
 
 **What happens on detached HEAD?**
-The MCP server falls back to the default branch's database with a warning. The watcher syncs
+The MCP server falls back to the default branch's database with a warning. Sync updates
 the default branch's database.
 
 **Does this work with worktrees?**

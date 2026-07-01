@@ -94,6 +94,15 @@ fn jsonrpc_notification(method: &str) -> String {
     .unwrap()
 }
 
+fn jsonrpc_notification_with_params(method: &str, params: Value) -> String {
+    serde_json::to_string(&json!({
+        "jsonrpc": "2.0",
+        "method": method,
+        "params": params
+    }))
+    .unwrap()
+}
+
 /// Parses a JSON-RPC response and returns it.
 fn parse_response(s: &str) -> Value {
     serde_json::from_str(s).unwrap()
@@ -2662,6 +2671,63 @@ async fn setup_branch_drift_fixture() -> (TempDir, PathBuf, Arc<McpServer>) {
     );
 
     (dir, project, server)
+}
+
+#[tokio::test]
+async fn hook_branch_add_reopens_server_from_single_db_mode() {
+    let _branch_lock = BRANCH_DRIFT_TEST_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().to_path_buf();
+
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub fn main_only() -> u32 { 1 }\n",
+    )
+    .unwrap();
+    fs::write(project.join(".gitignore"), ".tracedecay/\n").unwrap();
+    git(&project, &["init"]);
+    git(&project, &["config", "user.email", "test@test.com"]);
+    git(&project, &["config", "user.name", "Test"]);
+    git(&project, &["add", "."]);
+    git(&project, &["commit", "-m", "initial"]);
+    git(&project, &["branch", "-M", "main"]);
+
+    {
+        let cg = TraceDecay::init(&project).await.unwrap();
+        cg.index_all().await.unwrap();
+        cg.checkpoint().await.unwrap();
+    }
+
+    let cg = TraceDecay::open(&project).await.unwrap();
+    assert_eq!(cg.serving_branch(), Some("main"));
+    let server = McpServer::new(cg, None).await;
+    git(&project, &["checkout", "-b", "feature"]);
+
+    let responses = run_server_with_messages(
+        server.clone(),
+        vec![jsonrpc_notification_with_params(
+            tracedecay::daemon::HOOK_EVENT_METHOD,
+            json!({
+                "agent": "codex",
+                "event": "postToolUseShell",
+                "command": "git switch feature",
+                "cwd": project,
+            }),
+        )],
+    )
+    .await;
+    assert!(
+        responses.is_empty(),
+        "hook notification should not produce a JSON-RPC response"
+    );
+
+    let cg_now = server.cg().await;
+    assert_eq!(
+        cg_now.serving_branch(),
+        Some("feature"),
+        "adding branch tracking from a hook must swap the cached server"
+    );
 }
 
 #[tokio::test]

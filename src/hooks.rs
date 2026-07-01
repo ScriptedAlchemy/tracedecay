@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -569,18 +569,14 @@ async fn cursor_pre_compact_for_event_inner(
 
 /// Cursor `afterFileEdit` hook handler.
 ///
-/// Keeps the graph fresh after Cursor Agent writes files. This uses a
-/// **targeted** single-file sync (`sync_if_stale_silent`) scoped to the edited
-/// path(s) rather than a full-tree `sync()`. The agent can edit many files per
-/// turn, and a full-tree scan per edit scales with repo size, not edit size —
-/// prohibitively expensive on large codebases. The targeted path skips the
-/// scan, no-ops when not stale, and waits/gives up on the sync lock, so no
-/// time-based debounce is needed. Fail-open and silent.
+/// Keeps the graph fresh after Cursor Agent writes files by notifying the
+/// daemon about the edited path(s). The daemon owns targeted sync scheduling
+/// and the hook fails open when no daemon is available.
 pub async fn hook_cursor_after_file_edit() -> i32 {
     let event = read_hook_event!();
     let root = cursor_project_root_from_event(&event);
     record_hook_invoked(root.as_deref(), HintAgent::Cursor, "afterFileEdit", &event);
-    targeted_sync_for_cursor_after_file_edit(&event).await;
+    notify_cursor_after_file_edit(&event).await;
     0
 }
 
@@ -651,11 +647,8 @@ async fn codex_session_context_for_event(event_json: &str) -> (String, HookWorks
 
 /// Cursor `afterShellExecution` hook handler.
 ///
-/// When the executed command is a git state-changing command (checkout,
-/// switch, pull, merge, rebase, reset, cherry-pick, stash apply/pop), a
-/// broader change set is expected, so a full incremental `sync()` is
-/// acceptable. Back-to-back git commands are coalesced via a short marker-based
-/// guard (and the sync lock no-ops concurrent runs). Fail-open and silent.
+/// Notifies the daemon after Cursor shell execution. The daemon decides whether
+/// the command requires branch tracking or coalesced incremental sync.
 pub async fn hook_cursor_after_shell() -> i32 {
     let event = read_hook_event!();
     let root = cursor_project_root_from_event(&event);
@@ -665,20 +658,20 @@ pub async fn hook_cursor_after_shell() -> i32 {
         "afterShellExecution",
         &event,
     );
-    sync_after_cursor_shell_event(&event).await;
+    notify_cursor_after_shell_event(&event).await;
     0
 }
 
 /// Cursor `workspaceOpen` hook handler.
 ///
-/// Runs a one-shot catch-up incremental `sync()` when the workspace has a
-/// tracedecay index, picking up changes made while no agent was attached. We
-/// don't load plugins, so the output is an empty object. Fail-open.
+/// Notifies the daemon to run one-shot workspace catch-up when an indexed
+/// workspace opens. We don't load plugins, so the output is an empty object.
+/// Fail-open.
 pub async fn hook_cursor_workspace_open() -> i32 {
     let event = read_hook_event!();
     let root = cursor_project_root_from_event(&event);
     record_hook_invoked(root.as_deref(), HintAgent::Cursor, "workspaceOpen", &event);
-    workspace_open_for_cursor_event(&event).await;
+    notify_cursor_workspace_open(&event).await;
     println!("{}", serde_json::json!({}));
     0
 }
@@ -1259,10 +1252,9 @@ fn paths_same(a: &Path, b: &Path) -> bool {
 /// Extracts the repo-relative paths edited in a Cursor `afterFileEdit` event.
 ///
 /// Cursor sends an absolute `file_path` (plus an `edits` array). We strip the
-/// resolved `project_root` prefix and normalize to forward slashes so the set
-/// can be passed straight to [`TraceDecay::sync_if_stale_silent`], which does a
-/// targeted single-file sync instead of a full-tree scan. Paths outside the
-/// project root are skipped.
+/// resolved `project_root` prefix and normalize to forward slashes so the hook
+/// can notify the daemon about only the changed files. Paths outside the project
+/// root are skipped.
 pub fn cursor_after_file_edit_rel_paths(event_json: &str, project_root: &Path) -> Vec<String> {
     let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
         return Vec::new();
@@ -1303,6 +1295,14 @@ pub fn cursor_after_file_edit_rel_paths(event_json: &str, project_root: &Path) -
 fn rel_under_root(root: &Path, abs: &Path) -> Option<String> {
     let stripped = abs.strip_prefix(root).ok()?;
     if stripped.as_os_str().is_empty() {
+        return None;
+    }
+    if stripped.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
         return None;
     }
     Some(stripped.to_string_lossy().replace('\\', "/"))
@@ -1552,12 +1552,11 @@ async fn cursor_index_signals_for_root(root: &Path) -> (Option<String>, Option<u
     (staleness, tokens_saved)
 }
 
-/// Targeted, fail-open single-file sync for Cursor `afterFileEdit`.
+/// Best-effort daemon notification for Cursor `afterFileEdit`.
 ///
-/// Resolves the edited repo-relative paths and calls `sync_if_stale_silent`,
-/// which avoids the full-tree scan that `sync()` performs. No-ops when the
-/// workspace is uninitialized or no in-project paths were edited.
-async fn targeted_sync_for_cursor_after_file_edit(event_json: &str) {
+/// Resolves the edited repo-relative paths locally, then lets the daemon own
+/// scheduling and sync execution. No-ops when no in-project paths were edited.
+async fn notify_cursor_after_file_edit(event_json: &str) {
     let Some(root) = cursor_project_root_from_event(event_json) else {
         return;
     };
@@ -1568,20 +1567,15 @@ async fn targeted_sync_for_cursor_after_file_edit(event_json: &str) {
     if rels.is_empty() {
         return;
     }
-    if let Ok(cg) = crate::tracedecay::TraceDecay::open(&root).await {
-        let _ = cg.sync_if_stale_silent(&rels).await;
-    }
+    crate::daemon::notify_hook_event(
+        &root,
+        crate::daemon::DaemonHookEvent::cursor_after_file_edit(rels),
+    )
+    .await;
 }
 
-/// Branch-aware, fail-open handler for git state-changing shell commands.
-///
-/// Branch switches (`checkout`/`switch`/`worktree add`) bootstrap/maintain
-/// tracedecay branch tracking via [`crate::tracedecay::TraceDecay::add_branch_tracking`] —
-/// which is idempotent and supersedes a plain sync. Other state-changing
-/// commands (pull/merge/rebase/reset/cherry-pick/stash apply|pop) run a full
-/// incremental `sync()`, coalesced by a short marker-based guard so back-to-back
-/// git commands don't stack. Only acts when `.tracedecay/` already exists.
-async fn sync_after_cursor_shell_event(event_json: &str) {
+/// Best-effort daemon notification for Cursor `afterShellExecution`.
+async fn notify_cursor_after_shell_event(event_json: &str) {
     let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
         return;
     };
@@ -1592,96 +1586,30 @@ async fn sync_after_cursor_shell_event(event_json: &str) {
     let Some(root) = cursor_project_root_from_event(event_json) else {
         return;
     };
-    // Never bootstrap indexing in an unindexed repo.
     if !crate::tracedecay::TraceDecay::has_initialized_store(&root).await {
         return;
     }
     let cwd = cursor_event_cwd(&parsed).unwrap_or_else(|| root.clone());
-    if !cursor_shell_command_targets_project(command, &cwd, &root) {
-        return;
-    }
-    let current_branch = crate::branch::current_branch(&root);
-    let plan = cursor_shell_sync_plan_with_current_branch(command, current_branch.as_deref());
-    if matches!(plan, CursorShellSyncPlan::Noop) {
-        return;
-    }
-
-    match plan {
-        CursorShellSyncPlan::BranchAdd(branch) => {
-            // Idempotent + fail-open: already-tracked branches no-op.
-            let _ = crate::tracedecay::TraceDecay::add_branch_tracking(&root, &branch).await;
-        }
-        CursorShellSyncPlan::IncrementalSync => {
-            run_coalesced_incremental_sync(&root, ".cursor_shell_sync_at").await;
-        }
-        CursorShellSyncPlan::CurrentBranchSync(branch) => {
-            if !matches!(
-                crate::tracedecay::TraceDecay::add_branch_tracking(&root, &branch).await,
-                Ok(crate::branch::BranchAddOutcome::Added)
-            ) {
-                run_coalesced_incremental_sync(&root, ".cursor_shell_sync_at").await;
-            }
-        }
-        CursorShellSyncPlan::Noop => {}
-    }
+    crate::daemon::notify_hook_event(
+        &root,
+        crate::daemon::DaemonHookEvent::cursor_after_shell_execution(command.to_string(), cwd),
+    )
+    .await;
 }
 
-/// Runs a full incremental `sync()`, coalescing back-to-back invocations via a
-/// short marker-based debounce so a burst of git commands doesn't stack syncs.
-/// `marker_file` names the per-agent marker inside the `.tracedecay/` dir. The
-/// sync lock additionally no-ops genuinely concurrent runs. Fail-open.
-async fn run_coalesced_incremental_sync(root: &Path, marker_file: &str) {
-    let marker = crate::config::get_tracedecay_dir(root).join(marker_file);
-    let now = now_unix_secs();
-    if !cursor_should_run_sync(now, read_marker_secs(&marker), 3) {
-        return;
-    }
-    write_marker_secs(&marker, now);
-
-    if let Ok(cg) = crate::tracedecay::TraceDecay::open(root).await {
-        match cg.sync().await {
-            Ok(_) | Err(crate::errors::TraceDecayError::SyncLock { .. }) => {}
-            Err(e) => eprintln!("tracedecay sync failed: {e}"),
-        }
-    }
-}
-
-/// Branch-aware workspace catch-up for Cursor `workspaceOpen`.
-///
-/// When the workspace has a tracedecay index, ensures the current branch's DB
-/// exists (branch-add if missing — which also syncs) and otherwise runs a
-/// catch-up incremental `sync()`. Idempotent and fail-open.
-async fn workspace_open_for_cursor_event(event_json: &str) {
+/// Best-effort daemon notification for Cursor `workspaceOpen`.
+async fn notify_cursor_workspace_open(event_json: &str) {
     let Some(root) = cursor_project_root_from_event(event_json) else {
         return;
     };
     if !crate::tracedecay::TraceDecay::has_initialized_store(&root).await {
         return;
     }
-
-    // Ensure the current branch is tracked. When a branch is freshly added,
-    // `add_branch_tracking` already runs a sync, so we can skip the catch-up.
-    if let Some(branch) = crate::branch::current_branch(&root) {
-        if let Ok(crate::branch::BranchAddOutcome::Added) =
-            crate::tracedecay::TraceDecay::add_branch_tracking(&root, &branch).await
-        {
-            return;
-        }
-    }
-
-    let _ = sync_for_cursor_event(event_json).await;
-}
-
-fn read_marker_secs(path: &Path) -> Option<i64> {
-    std::fs::read_to_string(path)
-        .ok()?
-        .trim()
-        .parse::<i64>()
-        .ok()
-}
-
-fn write_marker_secs(path: &Path, secs: i64) {
-    let _ = std::fs::write(path, secs.to_string());
+    crate::daemon::notify_hook_event(
+        &root,
+        crate::daemon::DaemonHookEvent::cursor_workspace_open(root.clone()),
+    )
+    .await;
 }
 
 fn now_unix_secs() -> i64 {
@@ -1775,11 +1703,8 @@ pub fn hook_codex_subagent_start() -> i32 {
 
 /// Codex `PostToolUse` hook handler used to keep the graph fresh after writes.
 ///
-/// For `apply_patch` edits this runs a **targeted** single-file sync using the
-/// paths parsed from the patch envelope (never a full-tree scan). For `Bash`
-/// commands it reuses the shared git-command classifier: branch switches
-/// bootstrap branch tracking, other state-changing commands run a coalesced
-/// incremental sync. Fail-open and silent.
+/// For edit tools and shell commands this notifies the daemon, which owns
+/// targeted sync, branch tracking, and coalescing. Fail-open and silent.
 pub async fn hook_codex_post_tool_use() -> i32 {
     let event = read_hook_event!();
     let root = codex_project_root_from_event(&event);
@@ -2071,8 +1996,8 @@ fn project_marker_exists(dir: &Path) -> bool {
 /// or `*** Move to:` lines. Patch paths are relative to the session `cwd`
 /// (which may be a subdirectory of the discovered project root), so we resolve
 /// each against `cwd` and then make it relative to `project_root`. Absolute
-/// paths outside the root are skipped. The result feeds the targeted
-/// [`TraceDecay::sync_if_stale_silent`] single-file sync.
+/// paths outside the root are skipped. The result feeds the daemon's targeted
+/// single-file sync event.
 pub fn codex_apply_patch_rel_paths(command: &str, cwd: &Path, project_root: &Path) -> Vec<String> {
     const PREFIXES: [&str; 4] = [
         "*** Add File:",
@@ -2139,7 +2064,6 @@ async fn codex_post_tool_use(event_json: &str) {
     else {
         return;
     };
-    // Never bootstrap indexing in an unindexed repo.
     if !crate::tracedecay::TraceDecay::has_initialized_store(&root).await {
         return;
     }
@@ -2149,32 +2073,17 @@ async fn codex_post_tool_use(event_json: &str) {
         if rels.is_empty() {
             return;
         }
-        if let Ok(cg) = crate::tracedecay::TraceDecay::open(&root).await {
-            let _ = cg.sync_if_stale_silent(&rels).await;
-        }
+        crate::daemon::notify_hook_event(
+            &root,
+            crate::daemon::DaemonHookEvent::codex_post_tool_use_edit(rels, cwd),
+        )
+        .await;
     } else if is_codex_bash_tool(tool_name) {
-        if !cursor_shell_command_targets_project(command, &cwd, &root) {
-            return;
-        }
-        let current_branch = crate::branch::current_branch(&root);
-        match cursor_shell_sync_plan_with_current_branch(command, current_branch.as_deref()) {
-            CursorShellSyncPlan::BranchAdd(branch) => {
-                // Idempotent + fail-open: already-tracked branches no-op.
-                let _ = crate::tracedecay::TraceDecay::add_branch_tracking(&root, &branch).await;
-            }
-            CursorShellSyncPlan::IncrementalSync => {
-                run_coalesced_incremental_sync(&root, ".codex_shell_sync_at").await;
-            }
-            CursorShellSyncPlan::CurrentBranchSync(branch) => {
-                if !matches!(
-                    crate::tracedecay::TraceDecay::add_branch_tracking(&root, &branch).await,
-                    Ok(crate::branch::BranchAddOutcome::Added)
-                ) {
-                    run_coalesced_incremental_sync(&root, ".codex_shell_sync_at").await;
-                }
-            }
-            CursorShellSyncPlan::Noop => {}
-        }
+        crate::daemon::notify_hook_event(
+            &root,
+            crate::daemon::DaemonHookEvent::codex_post_tool_use_shell(command.to_string(), cwd),
+        )
+        .await;
     }
 }
 
@@ -2361,18 +2270,14 @@ pub async fn hook_kiro_prompt_submit() -> i32 {
 /// Kiro `postToolUse` hook handler used to keep the graph fresh after writes.
 ///
 /// The installed Kiro agent maps this to `fs_write`. The hook discovers the
-/// nearest initialized tracedecay project from Kiro's `cwd` field and runs a
-/// silent incremental sync. Missing indexes and concurrent syncs are no-ops.
+/// nearest tracedecay project from Kiro's `cwd` field and notifies the daemon,
+/// which owns silent incremental sync scheduling. Missing daemon/index state is
+/// fail-open.
 pub async fn hook_kiro_post_tool_use() -> i32 {
     let event = read_hook_event!();
     record_hook_invoked(None, HintAgent::Kiro, "postToolUse", &event);
-    match sync_for_kiro_event(&event).await {
-        Ok(()) => 0,
-        Err(e) => {
-            eprintln!("tracedecay sync failed: {e}");
-            1
-        }
-    }
+    notify_kiro_post_tool_use(&event).await;
+    0
 }
 
 async fn reset_counter_for_kiro_event(event_json: &str) {
@@ -2550,31 +2455,68 @@ async fn ingest_cursor_transcript_for_event(
     tokio::time::timeout(budget, work).await.unwrap_or(false)
 }
 
-async fn sync_for_kiro_event(event_json: &str) -> crate::errors::Result<()> {
+async fn notify_kiro_post_tool_use(event_json: &str) {
     let Some(project_root) = kiro_project_root(event_json) else {
-        return Ok(());
+        return;
     };
     if !crate::tracedecay::TraceDecay::has_initialized_store(&project_root).await {
-        return Ok(());
+        return;
     }
-    let cg = crate::tracedecay::TraceDecay::open(&project_root).await?;
-    match cg.sync().await {
-        Ok(_) | Err(crate::errors::TraceDecayError::SyncLock { .. }) => Ok(()),
-        Err(e) => Err(e),
-    }
+    let rel_paths = kiro_post_tool_use_rel_paths(event_json, &project_root);
+    crate::daemon::notify_hook_event(
+        &project_root,
+        crate::daemon::DaemonHookEvent::kiro_post_tool_use(rel_paths, event_cwd(event_json)),
+    )
+    .await;
 }
 
-async fn sync_for_cursor_event(event_json: &str) -> crate::errors::Result<()> {
-    let Some(project_root) = cursor_project_root_from_event(event_json) else {
-        return Ok(());
+pub fn kiro_post_tool_use_rel_paths(event_json: &str, project_root: &Path) -> Vec<String> {
+    let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
+        return Vec::new();
     };
-    if !crate::tracedecay::TraceDecay::has_initialized_store(&project_root).await {
-        return Ok(());
+    let cwd = event_cwd_from_parsed(&parsed).unwrap_or_else(|| project_root.to_path_buf());
+    let tool_input = parsed
+        .get("tool_input")
+        .or_else(|| parsed.get("toolInput"))
+        .or_else(|| parsed.get("input"))
+        .unwrap_or(&Value::Null);
+
+    let mut paths = Vec::new();
+    collect_event_path_fields(&parsed, &mut paths);
+    collect_event_path_fields(tool_input, &mut paths);
+
+    let mut rels = Vec::new();
+    for path in paths {
+        let path = Path::new(&path);
+        let abs = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            cwd.join(path)
+        };
+        if let Some(rel) = rel_under_root(project_root, &abs) {
+            if !rels.contains(&rel) {
+                rels.push(rel);
+            }
+        }
     }
-    let cg = crate::tracedecay::TraceDecay::open(&project_root).await?;
-    match cg.sync().await {
-        Ok(_) | Err(crate::errors::TraceDecayError::SyncLock { .. }) => Ok(()),
-        Err(e) => Err(e),
+    rels
+}
+
+fn collect_event_path_fields(value: &Value, out: &mut Vec<String>) {
+    for key in ["file_path", "filePath", "path", "target_file", "targetFile"] {
+        match value.get(key) {
+            Some(Value::String(path)) if !path.is_empty() => out.push(path.clone()),
+            Some(Value::Array(paths)) => {
+                out.extend(
+                    paths
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .filter(|path| !path.is_empty())
+                        .map(str::to_string),
+                );
+            }
+            _ => {}
+        }
     }
 }
 
