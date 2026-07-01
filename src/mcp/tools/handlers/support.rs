@@ -297,16 +297,16 @@ mod tests {
     async fn seed_code_project_registry_rows(
         db: &GlobalDb,
         projects: &[TestProjectSeed],
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> std::result::Result<(), libsql::Error> {
         let conn = db.dashboard_connection();
         conn.execute("BEGIN IMMEDIATE", ()).await?;
         if let Err(err) = seed_code_project_registry_rows_in_tx(&conn, projects).await {
             let _ = conn.execute("ROLLBACK", ()).await;
-            return Err(Box::new(err));
+            return Err(err);
         }
         if let Err(err) = conn.execute("COMMIT", ()).await {
             let _ = conn.execute("ROLLBACK", ()).await;
-            return Err(Box::new(err));
+            return Err(err);
         }
         Ok(())
     }

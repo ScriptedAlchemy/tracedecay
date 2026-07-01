@@ -34,11 +34,6 @@ struct DashboardFixture {
     linked_node_id: String,
 }
 
-#[derive(Clone, Copy, Default)]
-struct FixtureOptions {
-    external_payload: bool,
-}
-
 impl Drop for DashboardFixture {
     fn drop(&mut self) {
         self.server.abort();
@@ -322,7 +317,7 @@ async fn corrupt_summary_node_metadata(global_db_path: &Path, node_id: &str) {
     }
 }
 
-async fn start_fixture(options: FixtureOptions) -> DashboardFixture {
+async fn start_fixture(external_payload: bool) -> DashboardFixture {
     let tmp = tempdir_or_panic();
     let project_root = tmp.path().join("project");
     let global_db_path = tmp.path().join("global").join("global.db");
@@ -344,16 +339,11 @@ async fn start_fixture(options: FixtureOptions) -> DashboardFixture {
     if let Err(err) = std::fs::create_dir_all(storage_root) {
         panic!("failed to create LCM storage root: {err}");
     }
-    let linked_node_id = seed_lcm_fixture(
-        &global_db,
-        storage_root,
-        &project_root,
-        options.external_payload,
-    )
-    .await;
+    let linked_node_id =
+        seed_lcm_fixture(&global_db, storage_root, &project_root, external_payload).await;
     drop(global_db);
 
-    if options.external_payload {
+    if external_payload {
         plant_external_needle(&session_db_path).await;
     }
     let port = pick_free_port();
@@ -417,7 +407,7 @@ fn timeline_excludes_null_timestamps_and_reports_undated_count() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_fixture(FixtureOptions::default()).await;
+        let fixture = start_fixture(false).await;
         insert_undated_message(&fixture.global_db_path).await;
         let agent = http_agent();
 
@@ -477,7 +467,7 @@ fn malformed_summary_metadata_surfaces_json_error_instead_of_empty_rows() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_fixture(FixtureOptions::default()).await;
+        let fixture = start_fixture(false).await;
         corrupt_summary_node_metadata(&fixture.global_db_path, &fixture.linked_node_id).await;
         let agent = http_agent();
 
@@ -506,7 +496,7 @@ fn lcm_bad_params_and_missing_resources_return_json_errors() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_fixture(FixtureOptions::default()).await;
+        let fixture = start_fixture(false).await;
         let agent = http_agent();
 
         let (status, bad_query) = get_json(
@@ -566,10 +556,7 @@ fn session_endpoint_orders_by_ordinal_paginates_nodes_and_enriches_messages() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_fixture(FixtureOptions {
-            external_payload: true,
-        })
-        .await;
+        let fixture = start_fixture(true).await;
         let agent = http_agent();
 
         let (status, session) = get_json(
@@ -691,10 +678,7 @@ fn search_matches_externalized_messages_and_qualifies_summary_fts() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_fixture(FixtureOptions {
-            external_payload: true,
-        })
-        .await;
+        let fixture = start_fixture(true).await;
         let agent = http_agent();
 
         // Fix 1 (FTS mode): the externalized message is indexed via
