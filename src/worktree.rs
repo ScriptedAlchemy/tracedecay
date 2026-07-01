@@ -126,12 +126,30 @@ fn realpath(p: &Path) -> Option<PathBuf> {
     std::fs::canonicalize(p).ok()
 }
 
+#[cfg(test)]
+fn git_command() -> Command {
+    let mut command = Command::new("git");
+    let mut paths: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect())
+        .unwrap_or_default();
+    #[cfg(not(windows))]
+    {
+        paths.push(PathBuf::from("/usr/bin"));
+        paths.push(PathBuf::from("/bin"));
+    }
+    if let Ok(path) = std::env::join_paths(paths) {
+        command.env("PATH", path);
+    }
+    command
+}
+
+#[cfg(not(test))]
+fn git_command() -> Command {
+    Command::new("git")
+}
+
 fn git_output(dir: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .ok()?;
+    let output = git_command().args(args).current_dir(dir).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -145,11 +163,10 @@ fn git_output(dir: &Path, args: &[&str]) -> Option<String> {
 mod tests {
     use super::*;
     use std::fs;
-    use std::process::Command;
     use tempfile::tempdir;
 
     fn run_git(cwd: &Path, args: &[&str]) {
-        let status = Command::new("git")
+        let status = git_command()
             .args(args)
             .current_dir(cwd)
             .status()

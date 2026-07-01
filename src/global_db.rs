@@ -629,6 +629,13 @@ fn repo_identity_aliases(git_common_dir: Option<&Path>) -> Vec<String> {
     aliases
 }
 
+fn project_identity_aliases(project_root: &Path, git_common_dir: Option<&Path>) -> Vec<String> {
+    let mut aliases = Vec::with_capacity(2);
+    aliases.push(GlobalDb::canonical_project_key(project_root));
+    aliases.extend(repo_identity_aliases(git_common_dir));
+    aliases
+}
+
 fn normalize_git_remote_url(remote: &str) -> Option<String> {
     let remote = remote.trim();
     if remote.is_empty() {
@@ -1153,6 +1160,16 @@ impl GlobalDb {
             .to_string()
     }
 
+    pub fn is_explicit_project_path_selector(selector: &str) -> bool {
+        let selector = selector.trim();
+        !selector.is_empty()
+            && (Path::new(selector).is_absolute()
+                || selector == "."
+                || selector == ".."
+                || selector.contains('/')
+                || selector.contains('\\'))
+    }
+
     async fn migrate_project_rows_to_canonical_keys(&self) -> Option<()> {
         let mut rows = self
             .conn
@@ -1395,15 +1412,11 @@ impl GlobalDb {
         project_root: &Path,
         git_common_dir: Option<&Path>,
     ) -> Option<ProjectStoreResolution> {
-        let mut aliases = Vec::with_capacity(2);
-        aliases.push(Self::canonical_project_key(project_root));
-        aliases.extend(repo_identity_aliases(git_common_dir));
-        for alias in aliases {
-            if let Some(resolution) = self.resolve_project_store_by_alias_key(&alias).await {
-                return Some(resolution);
-            }
-        }
-        None
+        let project_id = self
+            .project_id_by_identity(project_root, git_common_dir)
+            .await?;
+        let project = self.get_code_project(&project_id).await?;
+        self.resolve_project_store_for_project(&project).await
     }
 
     pub async fn resolve_unique_project_store_by_git_remote(
@@ -1456,39 +1469,9 @@ impl GlobalDb {
         &self,
         alias: &str,
     ) -> Option<ProjectStoreResolution> {
-        let (project, store) = {
-            let mut rows = self
-                .conn
-                .query(
-                    "SELECT
-                        cp.project_id, cp.canonical_root, cp.display_root, cp.git_common_dir,
-                        cp.git_remote_url, cp.default_branch, cp.created_at, cp.last_seen_at,
-                        si.store_id, si.project_id, si.store_kind, si.storage_mode, si.store_relpath,
-                        si.manifest_relpath, si.created_at, si.last_verified_at, si.last_write_at
-                     FROM project_aliases pa
-                     JOIN code_projects cp ON cp.project_id = pa.project_id
-                     JOIN store_instances si ON si.project_id = cp.project_id
-                     WHERE pa.alias_path = ?1
-                     ORDER BY COALESCE(si.last_verified_at, si.created_at) DESC, si.store_id
-                     LIMIT 1",
-                    params![alias],
-                )
-                .await
-                .ok()?;
-            let row = rows.next().await.ok()??;
-            (
-                row_to_code_project(&row, 0)?,
-                row_to_store_instance(&row, 8)?,
-            )
-        };
-        let graph_scopes = self.list_graph_scopes_for_store(&store.store_id).await;
-        let artifacts = self.list_store_artifacts(&store.store_id).await;
-        Some(ProjectStoreResolution {
-            project,
-            store,
-            graph_scopes,
-            artifacts,
-        })
+        let project_id = self.project_id_by_alias_key(alias).await?;
+        let project = self.get_code_project(&project_id).await?;
+        self.resolve_project_store_for_project(&project).await
     }
 
     async fn resolve_project_store_for_project(
@@ -1624,18 +1607,51 @@ impl GlobalDb {
         alias_path: &Path,
     ) -> Option<ProjectRegistryContext> {
         let alias = Self::canonical_project_key(alias_path);
-        let project_id: String = {
-            let mut rows = self
-                .conn
-                .query(
-                    "SELECT project_id FROM project_aliases WHERE alias_path = ?1",
-                    params![alias],
-                )
-                .await
-                .ok()?;
-            rows.next().await.ok()??.get(0).ok()?
-        };
+        self.project_registry_context_by_alias_key(&alias).await
+    }
+
+    pub async fn project_registry_context_by_identity(
+        &self,
+        project_root: &Path,
+        git_common_dir: Option<&Path>,
+    ) -> Option<ProjectRegistryContext> {
+        let project_id = self
+            .project_id_by_identity(project_root, git_common_dir)
+            .await?;
         self.project_registry_context_by_id(&project_id).await
+    }
+
+    async fn project_registry_context_by_alias_key(
+        &self,
+        alias: &str,
+    ) -> Option<ProjectRegistryContext> {
+        let project_id = self.project_id_by_alias_key(alias).await?;
+        self.project_registry_context_by_id(&project_id).await
+    }
+
+    async fn project_id_by_identity(
+        &self,
+        project_root: &Path,
+        git_common_dir: Option<&Path>,
+    ) -> Option<String> {
+        for alias in project_identity_aliases(project_root, git_common_dir) {
+            if let Some(project_id) = self.project_id_by_alias_key(&alias).await {
+                return Some(project_id);
+            }
+        }
+        None
+    }
+
+    async fn project_id_by_alias_key(&self, alias: &str) -> Option<String> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT project_id FROM project_aliases WHERE alias_path = ?1",
+                params![alias],
+            )
+            .await
+            .ok()?;
+        rows.next().await.ok()??.get(0).ok()
     }
 
     pub async fn get_code_project(&self, project_id: &str) -> Option<CodeProjectRecord> {
@@ -3495,6 +3511,18 @@ mod tests {
         } else {
             assert_eq!(global_db_mmap_size_guard(), None);
         }
+    }
+
+    #[test]
+    fn explicit_project_path_selector_keeps_names_and_paths_separate() {
+        assert!(!GlobalDb::is_explicit_project_path_selector("target"));
+        assert!(!GlobalDb::is_explicit_project_path_selector(" proj_123 "));
+        assert!(GlobalDb::is_explicit_project_path_selector("."));
+        assert!(GlobalDb::is_explicit_project_path_selector(".."));
+        assert!(GlobalDb::is_explicit_project_path_selector("./target"));
+        assert!(GlobalDb::is_explicit_project_path_selector("../target"));
+        assert!(GlobalDb::is_explicit_project_path_selector("/tmp/target"));
+        assert!(GlobalDb::is_explicit_project_path_selector(r"..\target"));
     }
 
     #[tokio::test]

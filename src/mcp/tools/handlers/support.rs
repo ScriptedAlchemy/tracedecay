@@ -210,11 +210,18 @@ async fn resolve_project_registry_context(
         return db.project_registry_context_by_id(project_id).await;
     }
     let project_path = project_path?;
-    if let Some(context) = db
-        .project_registry_context_by_alias(Path::new(project_path))
-        .await
-    {
+    let selector_path = Path::new(project_path);
+    if let Some(context) = db.project_registry_context_by_alias(selector_path).await {
         return Some(context);
+    }
+    if GlobalDb::is_explicit_project_path_selector(project_path) {
+        let git_common_dir = crate::worktree::git_common_dir(selector_path);
+        if let Some(context) = db
+            .project_registry_context_by_identity(selector_path, git_common_dir.as_deref())
+            .await
+        {
+            return Some(context);
+        }
     }
     let basename = bare_project_name(project_path)?;
     unique_project_basename_context(db, basename).await
@@ -280,14 +287,35 @@ fn unresolved_project_selector_error(
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::process::Command;
 
     use libsql::{params, Connection};
     use serde_json::json;
     use tempfile::TempDir;
+    use tokio::sync::Mutex;
 
     use crate::global_db::GlobalDb;
 
-    use super::{require_node_id, string_array_values, unique_project_basename_context};
+    use super::{
+        require_node_id, resolve_project_registry_context, string_array_values,
+        unique_project_basename_context,
+    };
+
+    static CWD_TEST_LOCK: Mutex<()> = Mutex::const_new(());
+
+    struct CurrentDirGuard(PathBuf);
+
+    impl CurrentDirGuard {
+        fn capture() -> Result<Self, std::io::Error> {
+            std::env::current_dir().map(Self)
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.0);
+        }
+    }
 
     struct TestProjectSeed {
         project_id: String,
@@ -351,6 +379,33 @@ mod tests {
             .await?;
         }
         Ok(())
+    }
+
+    fn run_git(cwd: &std::path::Path, args: &[&str]) {
+        let mut paths: Vec<PathBuf> = std::env::var_os("PATH")
+            .map(|path| std::env::split_paths(&path).collect())
+            .unwrap_or_default();
+        #[cfg(not(windows))]
+        {
+            paths.push(PathBuf::from("/usr/bin"));
+            paths.push(PathBuf::from("/bin"));
+        }
+        let mut command = Command::new("git");
+        if let Ok(path) = std::env::join_paths(paths) {
+            command.env("PATH", path);
+        }
+        let output = command
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to run git {args:?}: {e}"));
+        assert!(
+            output.status.success(),
+            "git {args:?} failed in {}\nstdout:\n{}\nstderr:\n{}",
+            cwd.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
@@ -425,6 +480,49 @@ mod tests {
                 .await
                 .is_none(),
             "duplicate exact basenames must fail closed even when one match falls outside the first search page"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bare_project_path_selector_prefers_unique_basename_over_cwd_git_identity(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = CWD_TEST_LOCK.lock().await;
+        let _cwd_guard = CurrentDirGuard::capture()?;
+        let dir = TempDir::new()?;
+        let repo = dir.path().join("active-repo");
+        let active_root = repo.join("active");
+        let incidental_target_dir = repo.join("target");
+        let target_root = dir.path().join("registered").join("target");
+        std::fs::create_dir_all(&active_root)?;
+        std::fs::create_dir_all(&incidental_target_dir)?;
+        std::fs::create_dir_all(&target_root)?;
+        run_git(&repo, &["init", "--quiet"]);
+
+        let db = GlobalDb::open_at(&dir.path().join("global.db"))
+            .await
+            .ok_or_else(|| std::io::Error::other("failed to open test global db"))?;
+        db.upsert_code_project(
+            "proj_active",
+            &active_root,
+            Some(&repo.join(".git")),
+            None,
+            Some("main"),
+        )
+        .await
+        .ok_or_else(|| std::io::Error::other("failed to seed active project"))?;
+        db.upsert_code_project("proj_target", &target_root, None, None, Some("main"))
+            .await
+            .ok_or_else(|| std::io::Error::other("failed to seed target project"))?;
+
+        std::env::set_current_dir(&repo)?;
+        let context = resolve_project_registry_context(&db, None, Some("target"))
+            .await
+            .ok_or_else(|| std::io::Error::other("failed to resolve bare target selector"))?;
+
+        assert_eq!(
+            context.project.project_id, "proj_target",
+            "bare project_path selectors should keep basename semantics even when cwd has a git-tracked directory with the same name"
         );
         Ok(())
     }

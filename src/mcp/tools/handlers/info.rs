@@ -491,15 +491,17 @@ pub(super) async fn handle_project_search(
     ))
 }
 
-fn project_context_alias_path<'a>(cg: &'a TraceDecay, args: &'a Value) -> PathBuf {
+fn project_context_alias_path<'a>(cg: &'a TraceDecay, args: &'a Value) -> (PathBuf, bool) {
     let Some(path) = args.get("path").and_then(Value::as_str) else {
-        return cg.project_root().to_path_buf();
+        return (cg.project_root().to_path_buf(), true);
     };
     let path = Path::new(path);
+    let allow_git_identity =
+        GlobalDb::is_explicit_project_path_selector(path.to_string_lossy().as_ref());
     if path.is_absolute() {
-        path.to_path_buf()
+        (path.to_path_buf(), allow_git_identity)
     } else {
-        cg.project_root().join(path)
+        (cg.project_root().join(path), allow_git_identity)
     }
 }
 
@@ -522,8 +524,17 @@ pub(super) async fn handle_project_context(
     let context = if let Some(project_id) = args.get("project_id").and_then(Value::as_str) {
         db.db().project_registry_context_by_id(project_id).await
     } else {
-        let alias_path = project_context_alias_path(cg, &args);
-        db.db().project_registry_context_by_alias(&alias_path).await
+        let (alias_path, allow_git_identity) = project_context_alias_path(cg, &args);
+        if let Some(context) = db.db().project_registry_context_by_alias(&alias_path).await {
+            Some(context)
+        } else if allow_git_identity {
+            let git_common_dir = crate::worktree::git_common_dir(&alias_path);
+            db.db()
+                .project_registry_context_by_identity(&alias_path, git_common_dir.as_deref())
+                .await
+        } else {
+            None
+        }
     };
     let Some(context) = context else {
         return Ok(project_registry_result(

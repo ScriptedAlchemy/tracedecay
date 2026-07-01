@@ -498,8 +498,16 @@ async fn resolve_registered_project_root(
     let context = if let Some(project_id) = project_id.as_deref() {
         db.project_registry_context_by_id(project_id).await
     } else if let Some(project_path) = project_path.as_deref() {
-        db.project_registry_context_by_alias(Path::new(project_path))
-            .await
+        let project_path_arg = Path::new(project_path);
+        if let Some(context) = db.project_registry_context_by_alias(project_path_arg).await {
+            Some(context)
+        } else if tracedecay::global_db::GlobalDb::is_explicit_project_path_selector(project_path) {
+            let git_common_dir = tracedecay::worktree::git_common_dir(project_path_arg);
+            db.project_registry_context_by_identity(project_path_arg, git_common_dir.as_deref())
+                .await
+        } else {
+            None
+        }
     } else {
         return Ok(None);
     };
