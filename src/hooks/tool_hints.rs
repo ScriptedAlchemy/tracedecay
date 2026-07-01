@@ -31,6 +31,7 @@ pub enum HintCategory {
     Search,
     SemanticSearch,
     FileRead,
+    ToolDescriptorRead,
     BroadRead,
     CallGraph,
     Impact,
@@ -50,6 +51,7 @@ impl HintCategory {
             HintCategory::Search => "search",
             HintCategory::SemanticSearch => "semantic_search",
             HintCategory::FileRead => "file_read",
+            HintCategory::ToolDescriptorRead => "tool_descriptor_read",
             HintCategory::BroadRead => "broad_read",
             HintCategory::CallGraph => "call_graph",
             HintCategory::Impact => "impact",
@@ -69,6 +71,7 @@ impl HintCategory {
             "search" => Some(HintCategory::Search),
             "semantic_search" => Some(HintCategory::SemanticSearch),
             "file_read" => Some(HintCategory::FileRead),
+            "tool_descriptor_read" => Some(HintCategory::ToolDescriptorRead),
             "broad_read" => Some(HintCategory::BroadRead),
             "call_graph" => Some(HintCategory::CallGraph),
             "impact" => Some(HintCategory::Impact),
@@ -310,7 +313,7 @@ pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
 
     if is_tracedecay_tool_descriptor_read(input) {
         return Some(hint(
-            HintCategory::FileRead,
+            HintCategory::ToolDescriptorRead,
             "This looks like a TraceDecay MCP tool descriptor; use the tool surface instead of reading schema JSON.",
             "Call the named tracedecay_* MCP tool directly when available, or use tool discovery for its schema; for function tracing that usually means tracedecay_find_exact_symbol plus tracedecay_callers/tracedecay_callees.",
             true,
@@ -916,7 +919,7 @@ mod tests {
         );
         let hint = decide_hint(&input).unwrap();
 
-        assert_eq!(hint.category, HintCategory::FileRead);
+        assert_eq!(hint.category, HintCategory::ToolDescriptorRead);
         assert!(hint.message.contains("tool descriptor"));
         assert!(hint.context.contains("tracedecay_callers"));
         assert!(hint.context.contains("tracedecay_callees"));
@@ -933,7 +936,17 @@ mod tests {
         assert!(dedupe.should_emit("s1", HintCategory::Search));
         assert!(!dedupe.should_emit("s1", HintCategory::Search));
         assert!(dedupe.should_emit("s1", HintCategory::FileRead));
+        assert!(dedupe.should_emit("s1", HintCategory::ToolDescriptorRead));
         assert!(dedupe.should_emit("s2", HintCategory::Search));
+    }
+
+    #[test]
+    fn descriptor_reads_dedupe_separately_from_source_file_reads() {
+        let mut dedupe = ToolHintDedupe::default();
+        assert!(dedupe.should_emit("s1", HintCategory::FileRead));
+        assert!(dedupe.should_emit("s1", HintCategory::ToolDescriptorRead));
+        assert!(!dedupe.should_emit("s1", HintCategory::FileRead));
+        assert!(!dedupe.should_emit("s1", HintCategory::ToolDescriptorRead));
     }
 
     #[test]
