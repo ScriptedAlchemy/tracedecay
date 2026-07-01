@@ -7521,7 +7521,7 @@ async fn wipe_lcm_raw_fts_for_message(cg: &TraceDecay, message_id: &str) {
 
 #[tokio::test]
 async fn lcm_doctor_clean_dry_run_reports_noise_and_filtered_sessions_without_mutating() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "cron-20260414",
@@ -7617,7 +7617,7 @@ async fn lcm_doctor_clean_dry_run_reports_noise_and_filtered_sessions_without_mu
 
 #[tokio::test]
 async fn lcm_doctor_clean_apply_is_denied_by_default() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "cron-20260414",
@@ -7656,7 +7656,7 @@ async fn lcm_doctor_clean_apply_is_denied_by_default() {
 
 #[tokio::test]
 async fn lcm_doctor_clean_apply_backs_up_and_deletes_only_safe_candidates() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "cron-20260414",
@@ -7747,7 +7747,7 @@ async fn lcm_doctor_clean_apply_backs_up_and_deletes_only_safe_candidates() {
 
 #[tokio::test]
 async fn lcm_doctor_clean_apply_deletes_all_matching_noise_beyond_diagnostic_samples() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let db = open_active_project_session_db(&cg).await;
     for idx in 0..25 {
         seed_lcm_session_message_in_db(
@@ -7810,7 +7810,7 @@ async fn lcm_doctor_clean_apply_deletes_all_matching_noise_beyond_diagnostic_sam
 
 #[tokio::test]
 async fn lcm_doctor_reports_missing_and_orphan_payloads_without_payload_bodies() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let secret = format!(
         "LCM_DOCTOR_SECRET_PAYLOAD\n{}",
         "doctor-secret ".repeat(30_000)
@@ -7860,7 +7860,7 @@ async fn lcm_doctor_reports_missing_and_orphan_payloads_without_payload_bodies()
 
 #[tokio::test]
 async fn lcm_doctor_reports_placeholder_recovery_and_gc_candidates_without_bodies() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let missing_ref = "payload_missing_placeholder_test.payload";
     let placeholder = format!(
         "[Externalized LCM ingest payload: kind=ingest_payload; role=user; field=content; chars=2048; bytes=2048; ref={missing_ref}]"
@@ -7931,7 +7931,7 @@ async fn lcm_doctor_reports_placeholder_recovery_and_gc_candidates_without_bodie
 
 #[tokio::test]
 async fn lcm_doctor_gc_mode_preview_and_apply_reports_without_body_leaks() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "gc-preview-session",
@@ -8021,7 +8021,7 @@ async fn lcm_doctor_gc_apply_is_denied_by_default() {
 
 #[tokio::test]
 async fn lcm_doctor_counts_nested_externalized_payload_refs_as_referenced() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let media_payload = format!(
         "data:image/png;base64,{}",
         "QWxhZGRpbjpvcGVuIHNlc2FtZQ==".repeat(160)
@@ -8079,7 +8079,7 @@ async fn lcm_doctor_counts_nested_externalized_payload_refs_as_referenced() {
 
 #[tokio::test]
 async fn lcm_doctor_ignores_plain_text_ref_tokens_as_placeholders() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "lcm-doctor-plain-ref",
@@ -8127,7 +8127,7 @@ async fn lcm_doctor_ignores_plain_text_ref_tokens_as_placeholders() {
 
 #[tokio::test]
 async fn lcm_doctor_scoped_payload_diagnostics_ignore_other_session_payload_files() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_tool_result_message(
         &cg,
         "lcm-doctor-payload-target",
@@ -8182,7 +8182,7 @@ async fn lcm_doctor_scoped_payload_diagnostics_ignore_other_session_payload_file
 
 #[tokio::test]
 async fn lcm_doctor_reports_scoped_fts_rebuild_when_other_session_matches_probe_term() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "lcm-doctor-fts-target",
@@ -8223,7 +8223,7 @@ async fn lcm_doctor_reports_scoped_fts_rebuild_when_other_session_matches_probe_
 
 #[tokio::test]
 async fn lcm_doctor_counts_summary_source_rows_with_missing_owner_node() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "lcm-doctor-orphan-owner",
@@ -8264,7 +8264,7 @@ async fn lcm_doctor_counts_summary_source_rows_with_missing_owner_node() {
 
 #[tokio::test]
 async fn lcm_doctor_scopes_orphan_lifecycle_debt_to_requested_session() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "lcm-doctor-debt-target",
@@ -8382,7 +8382,7 @@ async fn lcm_doctor_repair_dry_run_does_not_run_schema_migration() {
 
 #[tokio::test]
 async fn lcm_doctor_repair_dry_run_reports_fts_rebuild_without_mutating() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "lcm-doctor-dry-run",
@@ -8420,7 +8420,7 @@ async fn lcm_doctor_repair_dry_run_reports_fts_rebuild_without_mutating() {
 
 #[tokio::test]
 async fn lcm_doctor_repair_apply_rebuilds_damaged_fts() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "lcm-doctor-apply",
@@ -12639,7 +12639,7 @@ async fn mcp_server_owns_watcher_and_refreshes_token_map_on_change() {
 
 #[tokio::test]
 async fn lcm_expand_paginates_summary_sources_over_mcp() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let mut store_ids = Vec::new();
     for index in 1..=4 {
         let message_id = format!("page-msg-{index}");
@@ -12713,7 +12713,7 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
 
 #[tokio::test]
 async fn lcm_expand_resolves_cross_session_store_ids_over_mcp() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "lcm-origin-session",
@@ -12762,7 +12762,7 @@ async fn lcm_expand_resolves_cross_session_store_ids_over_mcp() {
 
 #[tokio::test]
 async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let body = format!("data:image/png;base64,{}", "A".repeat(220_000));
     seed_lcm_tool_result_message(
         &cg,
@@ -12833,7 +12833,7 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
 
 #[tokio::test]
 async fn lcm_compress_handler_honors_incremental_max_depth_override() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let mut store_ids = Vec::new();
     for index in 1..=6 {
         let message_id = format!("depth-msg-{index}");
@@ -12915,7 +12915,7 @@ async fn lcm_compress_handler_honors_incremental_max_depth_override() {
 
 #[tokio::test]
 async fn lcm_status_reports_dag_store_and_config_diagnostics_over_mcp() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "lcm-diag-session",
@@ -12977,7 +12977,7 @@ async fn lcm_status_reports_dag_store_and_config_diagnostics_over_mcp() {
 
 #[tokio::test]
 async fn lcm_status_all_provider_aggregates_provider_counts() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message_for_provider(
         &cg,
         "cursor",
@@ -13017,7 +13017,7 @@ async fn lcm_status_all_provider_aggregates_provider_counts() {
 
 #[tokio::test]
 async fn lcm_status_all_provider_counts_payload_health_once() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_tool_result_message_for_provider(
         &cg,
         "cursor",
