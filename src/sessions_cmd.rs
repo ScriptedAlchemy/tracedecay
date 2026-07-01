@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use crate::{cli::SessionsAction, resolve_cli_project_root};
+use tracedecay::sessions::ProviderScope;
 
 pub(crate) async fn handle_sessions_action(
     action: SessionsAction,
@@ -20,7 +21,7 @@ pub(crate) async fn handle_sessions_action(
                         project_path.display()
                     ),
                 })?;
-            let _ = optional_session_provider_scope(provider.as_deref())?;
+            let _ = session_provider_scope(provider.as_deref())?;
             let stats = ingest_selected_session_sources(&db, &project_path).await;
             println!(
                 "ingested {} session(s), {} message(s)",
@@ -43,10 +44,15 @@ pub(crate) async fn handle_sessions_action(
                         project_path.display()
                     ),
                 })?;
-            let selected_provider = optional_session_provider_scope(provider.as_deref())?;
-            let _ = tracedecay::sessions::ingest_global_sources(&db, &project_path).await;
-            let results = if let Some(provider) = selected_provider {
-                db.search_session_messages(provider, None, &query, limit)
+            let provider_scope = session_provider_scope(provider.as_deref())?;
+            let _ = tracedecay::sessions::ingest_global_sources_for_provider(
+                &db,
+                &project_path,
+                provider_scope.provider(),
+            )
+            .await;
+            let results = if let Some(provider) = provider_scope.provider() {
+                db.search_session_messages(provider.id(), None, &query, limit)
                     .await
             } else {
                 db.search_session_messages_all_providers_filtered(
@@ -79,20 +85,7 @@ async fn ingest_selected_session_sources(
     tracedecay::sessions::ingest_global_sources(db, project_root).await
 }
 
-fn optional_session_provider_scope(
-    provider: Option<&str>,
-) -> tracedecay::errors::Result<Option<&str>> {
-    match provider.map(str::trim).filter(|provider| !provider.is_empty()) {
-        None | Some("all") => Ok(None),
-        Some(
-            provider @ ("cursor" | "claude" | "codex" | "vibe" | "cline" | "roo-code" | "kilo"
-            | "kiro" | "hermes"),
-        ) => Ok(Some(provider)),
-        other => Err(tracedecay::errors::TraceDecayError::Config {
-            message: format!(
-                "unknown session provider '{}' (expected all, cursor, claude, codex, vibe, cline, roo-code, kilo, kiro, or hermes)",
-                other.unwrap_or_default()
-            ),
-        }),
-    }
+fn session_provider_scope(provider: Option<&str>) -> tracedecay::errors::Result<ProviderScope> {
+    ProviderScope::parse_optional(provider)
+        .map_err(|message| tracedecay::errors::TraceDecayError::Config { message })
 }

@@ -2289,7 +2289,7 @@ fn def_message_search() -> ToolDefinition {
     def(
         "tracedecay_message_search",
         "Message Search",
-        "Search ingested transcript messages across all supported providers by default. Every search first catches up all supported provider adapters for the selected project unless catch_up is false; pass provider only when explicitly scoping results to one provider.",
+        "Search ingested transcript messages across all supported providers by default. Searches catch up the selected provider scope unless catch_up is false; pass provider only when intentionally scoping results to one provider.",
         json!({
             "type": "object",
             "properties": {
@@ -2299,8 +2299,8 @@ fn def_message_search() -> ToolDefinition {
                 },
                 "provider": {
                     "type": "string",
-                    "description": "Optional explicit result scope. Omit or use 'all' for unified cross-provider recall; even scoped searches still ingest all supported providers first. Use 'hermes' for Hermes agent conversation history ingested from per-profile state.db stores.",
-                    "enum": ["all", "cursor", "claude", "codex", "vibe", "cline", "roo-code", "kilo", "kiro", "hermes"]
+                    "description": "Optional explicit result scope. Omit or use 'all' for unified cross-provider recall; scoped searches catch up only that provider. Use 'hermes' for Hermes agent conversation history ingested from per-profile state.db stores.",
+                    "enum": crate::sessions::providers::MESSAGE_SEARCH_PROVIDER_IDS
                 },
                 "project_key": {
                     "type": "string",
