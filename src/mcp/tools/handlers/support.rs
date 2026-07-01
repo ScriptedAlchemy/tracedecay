@@ -334,7 +334,6 @@ mod tests {
             .ok_or_else(|| std::io::Error::other("failed to open test global db"))?;
 
         let first_exact = dir.path().join("first").join("target");
-        std::fs::create_dir_all(&first_exact)?;
         db.upsert_code_project("z_exact_old", &first_exact, None, None, Some("main"))
             .await
             .ok_or_else(|| std::io::Error::other("failed to insert first exact project"))?;
@@ -344,7 +343,6 @@ mod tests {
                 .path()
                 .join("noise")
                 .join(format!("target-noise-{index:03}"));
-            std::fs::create_dir_all(&root)?;
             db.upsert_code_project(
                 &format!("n_noise_{index:03}"),
                 &root,
@@ -357,7 +355,6 @@ mod tests {
         }
 
         let second_exact = dir.path().join("second").join("target");
-        std::fs::create_dir_all(&second_exact)?;
         db.upsert_code_project("a_exact_new", &second_exact, None, None, Some("main"))
             .await
             .ok_or_else(|| std::io::Error::other("failed to insert second exact project"))?;
