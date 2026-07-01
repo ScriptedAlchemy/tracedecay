@@ -1065,7 +1065,7 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
 /// every live project server sequentially; with many servers or large WALs
 /// that can exceed systemd's stop timeout, which then sends `SIGKILL` to the
 /// daemon. On timeout the task is aborted and we proceed to exit: the
-/// remaining persistence is best-effort and the SQLite WAL keeps state
+/// remaining persistence is best-effort and the database WAL keeps state
 /// crash-safe.
 #[cfg(unix)]
 async fn await_shutdown_within_deadline<F>(shutdown: F, deadline: Duration) -> bool
