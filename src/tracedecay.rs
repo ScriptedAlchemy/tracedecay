@@ -1247,7 +1247,7 @@ fn profile_store_id(project_id: &str) -> String {
 
 fn git_remote_url(project_root: &Path) -> Option<String> {
     // gix reads the same config `git config --get` would (repo-local +
-    // global) without a subprocess spawn (~100-300ms on Windows).
+    // global) without a subprocess spawn.
     if let Ok(repo) = gix::discover(project_root) {
         let url = repo
             .config_snapshot()

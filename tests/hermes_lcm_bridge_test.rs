@@ -3,7 +3,7 @@ mod common;
 use std::path::Path;
 use std::process::Command;
 
-use common::PYYAML_SHIM;
+use common::{write_pyyaml_shim, PYYAML_FALLBACK_PRELUDE};
 use tempfile::TempDir;
 use tracedecay::agents::{AgentIntegration, HermesIntegration, InstallContext};
 use tracedecay::sessions::lcm::{LcmCompressionRequest, LcmSummarizerMode};
@@ -28,27 +28,6 @@ for _name in ("tools.py", "schemas.py", "__init__.py"):
         print(f"generated Python should compile: {_name}: {_exc}", file=_compile_sys.stderr)
         _compile_sys.exit(1)
 "#;
-
-// Falls back to the bundled PyYAML shim (argv[2]) only when the interpreter
-// has no importable `yaml`, replacing the separate `python3 -c "import yaml"`
-// probe process that `pyyaml_shim_pythonpath` spawns. Appending to sys.path
-// keeps the precedence identical: a real PyYAML always wins.
-const PYYAML_FALLBACK_PRELUDE: &str = r#"
-import importlib.util as _yaml_probe_util
-import sys as _yaml_probe_sys
-
-if _yaml_probe_util.find_spec("yaml") is None:
-    _yaml_probe_sys.path.append(_yaml_probe_sys.argv[2])
-"#;
-
-/// Writes the PyYAML test shim next to the test home and returns its
-/// directory, for scripts using [`PYYAML_FALLBACK_PRELUDE`].
-fn write_pyyaml_shim(scratch: &Path) -> std::path::PathBuf {
-    let shim_dir = scratch.join("pyyaml-shim");
-    std::fs::create_dir_all(&shim_dir).unwrap();
-    std::fs::write(shim_dir.join("yaml.py"), PYYAML_SHIM).unwrap();
-    shim_dir
-}
 
 const PLUGIN_LOAD_PRELUDE: &str = r#"
 import importlib.machinery

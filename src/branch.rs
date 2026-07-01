@@ -33,7 +33,7 @@ pub fn local_branch_exists(project_root: &Path, branch: &str) -> bool {
     if let Ok(repo) = gix::open(project_root) {
         // gix reads loose and packed refs, the same sources `git show-ref`
         // consults; trust its answer instead of paying a subprocess spawn
-        // (~100-300ms on Windows) to re-ask git.
+        // to re-ask git.
         return repo.find_reference(&refname).is_ok();
     }
     if !crate::worktree::git_may_resolve_repo(project_root) {
@@ -111,7 +111,7 @@ fn git_rev_list_count(project_root: &Path, from_ref: &str, to_ref: &str) -> Opti
 
 /// In-process equivalent of `git rev-list --count hidden..tip`: commits
 /// reachable from `tip` but not from `hidden`. Saves a `git` subprocess
-/// spawn (~100-300ms on Windows) on every branch-add parent ranking.
+/// spawn on every branch-add parent ranking.
 fn gix_rev_distance(
     repo: &gix::Repository,
     tip: gix::ObjectId,

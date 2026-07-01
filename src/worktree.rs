@@ -40,8 +40,8 @@ pub struct WorktreeIndexMismatch {
 /// which is exactly the distinction this module relies on.
 pub fn git_worktree_root(dir: &Path) -> Option<PathBuf> {
     // gix discovery walks up the same way `git rev-parse` does but without
-    // a subprocess spawn (~100-300ms on Windows). A discovered bare repo
-    // (no workdir) matches `--show-toplevel` failing.
+    // a subprocess spawn. A discovered bare repo (no workdir) matches
+    // `--show-toplevel` failing.
     if let Ok(repo) = gix::discover(dir) {
         return realpath(repo.workdir()?);
     }
