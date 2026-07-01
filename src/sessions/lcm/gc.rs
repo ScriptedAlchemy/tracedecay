@@ -876,7 +876,6 @@ mod tests {
 
     use libsql::Connection;
 
-    use crate::global_db::GlobalDb;
     use crate::sessions::lcm::schema;
 
     use super::*;
@@ -897,9 +896,6 @@ mod tests {
         let temp = tempfile::tempdir().map_err(|err| format!("create tempdir: {err}"))?;
         let storage_root = temp.path().to_path_buf();
         let db_path = storage_root.join("sessions.db");
-        let _global = GlobalDb::open_at(&db_path)
-            .await
-            .ok_or_else(|| "test session database should open".to_string())?;
         let db = libsql::Builder::new_local(&db_path)
             .build()
             .await
@@ -909,14 +905,56 @@ mod tests {
             .map_err(|err| format!("connect to test database: {err}"))?;
         conn.busy_timeout(Duration::from_secs(5))
             .map_err(|err| format!("set test busy timeout: {err}"))?;
-        schema::ensure_lcm_schema(&conn)
-            .await
-            .map_err(|err| format!("ensure lcm schema: {err}"))?;
+        ensure_gc_test_schema(&conn).await?;
         Ok(TestStore {
             _temp: temp,
             storage_root,
             conn,
         })
+    }
+
+    async fn ensure_gc_test_schema(conn: &Connection) -> Result<(), String> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS sessions (
+                provider TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                project_key TEXT NOT NULL,
+                project_path TEXT NOT NULL,
+                title TEXT,
+                started_at INTEGER,
+                PRIMARY KEY(provider, session_id)
+            );
+            CREATE TABLE IF NOT EXISTS session_messages (
+                provider TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                timestamp INTEGER,
+                ordinal INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                metadata_json TEXT,
+                PRIMARY KEY(provider, message_id),
+                FOREIGN KEY(provider, session_id)
+                    REFERENCES sessions(provider, session_id) ON DELETE CASCADE
+            );",
+        )
+        .await
+        .map_err(|err| format!("create gc test sessions table: {err}"))?;
+        schema::ensure_lcm_schema(conn)
+            .await
+            .map_err(|err| format!("ensure lcm schema: {err}"))?;
+        Ok(())
+    }
+
+    async fn in_memory_conn() -> Result<Connection, String> {
+        let db = libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .map_err(|err| format!("build in-memory test database: {err}"))?;
+        let conn = db
+            .connect()
+            .map_err(|err| format!("connect to in-memory test database: {err}"))?;
+        Ok(conn)
     }
 
     async fn insert_session(
@@ -1299,7 +1337,8 @@ mod tests {
 
     #[tokio::test]
     async fn delete_external_payload_rejects_invalid_refs() -> Result<(), String> {
-        let store = test_store().await?;
+        let conn = in_memory_conn().await?;
+        let temp = tempfile::tempdir().map_err(|err| format!("create tempdir: {err}"))?;
         for invalid in [
             "",
             ".",
@@ -1309,8 +1348,8 @@ mod tests {
             "payload_../x.payload",
         ] {
             let Err(err) = payload::delete_external_payload(
-                &store.conn,
-                &store.storage_root,
+                &conn,
+                temp.path(),
                 invalid,
                 &payload::DeleteOpts::default(),
             )
