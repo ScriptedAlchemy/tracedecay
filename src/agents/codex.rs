@@ -446,6 +446,29 @@ fn sweep_legacy_project_codex_config(project_path: &Path) {
     uninstall_hooks(&codex_dir.join("hooks.json"));
 }
 
+/// Directory of the Codex-native scheduled automation that tracedecay
+/// v0.0.10 through v0.0.20 installed with `install --agent codex --automation`.
+const LEGACY_CODEX_NATIVE_AUTOMATION_ID: &str = "watch-tracedecay-memory";
+
+/// Removes the legacy Codex-native scheduled automation, returning whether one
+/// was present. The `TraceDecay` daemon scheduler replaced it; leaving the
+/// record in place would run both schedulers concurrently after an upgrade.
+pub fn remove_legacy_codex_native_automation(home: &Path) -> Result<bool> {
+    let automation_dir = home
+        .join(".codex/automations")
+        .join(LEGACY_CODEX_NATIVE_AUTOMATION_ID);
+    match std::fs::remove_dir_all(&automation_dir) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(TraceDecayError::Config {
+            message: format!(
+                "failed to remove legacy Codex automation {}: {e}",
+                automation_dir.display()
+            ),
+        }),
+    }
+}
+
 fn uninstall_tracedecay_mcp_if_present(config_path: &Path) {
     let Ok(contents) = std::fs::read_to_string(config_path) else {
         return;
@@ -1376,6 +1399,37 @@ mod tests {
 
     fn repo_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
+    }
+
+    #[test]
+    fn remove_legacy_codex_native_automation_deletes_stale_record() {
+        let home = tempfile::tempdir().expect("tempdir should create");
+        assert!(
+            !remove_legacy_codex_native_automation(home.path())
+                .expect("removal without a record should succeed"),
+            "no legacy record should report nothing removed"
+        );
+
+        let automation_dir = home
+            .path()
+            .join(".codex/automations")
+            .join(LEGACY_CODEX_NATIVE_AUTOMATION_ID);
+        std::fs::create_dir_all(&automation_dir).expect("legacy dir should create");
+        std::fs::write(
+            automation_dir.join("automation.toml"),
+            "status = \"ACTIVE\"\n",
+        )
+        .expect("legacy automation should write");
+
+        assert!(
+            remove_legacy_codex_native_automation(home.path())
+                .expect("removal of an existing record should succeed"),
+            "an existing legacy record should report removal"
+        );
+        assert!(
+            !automation_dir.exists(),
+            "the legacy automation directory should be gone"
+        );
     }
 
     fn relative_paths_under(root: &Path) -> Vec<String> {
