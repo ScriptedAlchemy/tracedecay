@@ -4,6 +4,11 @@ use tracedecay::diagnostics::lsp;
 
 const FAKE_LANGUAGE: &str = "fake";
 const FAKE_PATH: &str = "src/lib.fake";
+// The stdio client intentionally keeps listening until this deadline expires
+// (late publishes are part of the LSP contract), so every successful
+// collection pays the FULL timeout as wall time. Keep it small: it only has
+// to cover a didOpen -> publishDiagnostics round trip against an
+// already-initialized fake server.
 const FAKE_LSP_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(150);
 
 #[test]
@@ -106,7 +111,7 @@ async fn stdio_client_collects_publish_diagnostics() {
         &[script_path.display().to_string()],
         temp.path(),
         vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
-        std::time::Duration::from_secs(3),
+        FAKE_LSP_TIMEOUT,
     )
     .await
     .unwrap();
@@ -132,7 +137,7 @@ async fn stdio_client_keeps_listening_after_initial_empty_publish() {
         &[script_path.display().to_string()],
         temp.path(),
         vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
-        std::time::Duration::from_millis(500),
+        std::time::Duration::from_millis(250),
     )
     .await
     .unwrap();
@@ -412,9 +417,7 @@ async fn broker_ignores_refresh_completion_after_language_is_disabled() {
         .expect("enabled language should prepare a refresh");
 
     broker.set_language_enabled(FAKE_LANGUAGE, false);
-    let completed = prepared
-        .collect_diagnostics(std::time::Duration::from_secs(3))
-        .await;
+    let completed = prepared.collect_diagnostics(FAKE_LSP_TIMEOUT).await;
     broker.finish_refresh(completed).unwrap();
 
     let snapshot = broker.snapshot();

@@ -39,6 +39,15 @@ pub struct WorktreeIndexMismatch {
 /// checkout and each linked worktree report their own distinct directory,
 /// which is exactly the distinction this module relies on.
 pub fn git_worktree_root(dir: &Path) -> Option<PathBuf> {
+    // gix discovery walks up the same way `git rev-parse` does but without
+    // a subprocess spawn (~100-300ms on Windows). A discovered bare repo
+    // (no workdir) matches `--show-toplevel` failing.
+    if let Ok(repo) = gix::discover(dir) {
+        return realpath(repo.workdir()?);
+    }
+    if !git_may_resolve_repo(dir) {
+        return None;
+    }
     let trimmed = git_output(dir, &["rev-parse", "--show-toplevel"])?;
     realpath(Path::new(&trimmed))
 }
@@ -48,6 +57,18 @@ pub fn git_worktree_root(dir: &Path) -> Option<PathBuf> {
 /// For a linked worktree this is the main checkout's `.git` directory, which is
 /// the stable local identity all linked worktrees share.
 pub fn git_common_dir(dir: &Path) -> Option<PathBuf> {
+    if let Ok(repo) = gix::discover(dir) {
+        let common_dir = repo.common_dir().to_path_buf();
+        let resolved = if common_dir.is_absolute() {
+            common_dir
+        } else {
+            dir.join(common_dir)
+        };
+        return Some(resolved.canonicalize().unwrap_or(resolved));
+    }
+    if !git_may_resolve_repo(dir) {
+        return None;
+    }
     let raw = git_output(dir, &["rev-parse", "--git-common-dir"])?;
     let common_dir = PathBuf::from(raw);
     let resolved = if common_dir.is_absolute() {
@@ -56,6 +77,18 @@ pub fn git_common_dir(dir: &Path) -> Option<PathBuf> {
         dir.join(common_dir)
     };
     Some(resolved.canonicalize().unwrap_or(resolved))
+}
+
+/// Cheap pre-flight for the `git` subprocess fallbacks in this crate: `git`
+/// can only resolve a repository for `dir` when a `.git` entry exists
+/// somewhere in its ancestor chain or the caller overrides discovery via
+/// `GIT_DIR`. Spawning `git` costs ~100-300ms on Windows, so callers skip
+/// the spawn when it is guaranteed to fail anyway.
+pub(crate) fn git_may_resolve_repo(dir: &Path) -> bool {
+    if std::env::var_os("GIT_DIR").is_some() {
+        return true;
+    }
+    dir.ancestors().any(|p| p.join(".git").exists())
 }
 
 /// Detect when `start_path` lives in one git working tree but the resolved

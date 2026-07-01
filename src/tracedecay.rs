@@ -1246,6 +1246,19 @@ fn profile_store_id(project_id: &str) -> String {
 }
 
 fn git_remote_url(project_root: &Path) -> Option<String> {
+    // gix reads the same config `git config --get` would (repo-local +
+    // global) without a subprocess spawn (~100-300ms on Windows).
+    if let Ok(repo) = gix::discover(project_root) {
+        let url = repo
+            .config_snapshot()
+            .string("remote.origin.url")?
+            .to_string();
+        let url = url.trim();
+        return (!url.is_empty()).then(|| url.to_string());
+    }
+    if !crate::worktree::git_may_resolve_repo(project_root) {
+        return None;
+    }
     git_output(project_root, &["config", "--get", "remote.origin.url"])
 }
 

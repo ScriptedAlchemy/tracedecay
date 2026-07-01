@@ -261,6 +261,12 @@ impl Drop for ChildGuard {
 
 #[cfg(windows)]
 fn kill_child_process_tree(child: &mut Child) {
+    // `cmd /C` shims wait for their grandchildren, so a child that already
+    // exited has no live process tree left; skip the taskkill spawn
+    // (~100-300ms) that would fail anyway.
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
     let _ = Command::new("taskkill")
         .arg("/PID")
         .arg(child.id().to_string())

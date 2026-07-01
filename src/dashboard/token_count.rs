@@ -504,6 +504,9 @@ mod tests {
         assert!(!encoder_for_model("opus-large").exact);
     }
 
+    // The two vocabulary tests are split so each test process pays only one
+    // BPE model load (the dominant cost, especially on Windows) and nextest
+    // can run them in parallel.
     #[cfg(feature = "token-counting")]
     #[test]
     fn bpe_counts_diverge_from_chars4() {
@@ -513,8 +516,15 @@ mod tests {
         // Code-heavy text tokenizes denser than chars/4 predicts; the exact
         // value is vocabulary-dependent, so only sanity-bound it.
         assert!(bpe <= text.len() as i64);
+    }
+
+    #[cfg(feature = "token-counting")]
+    #[test]
+    fn bpe_counts_use_cl100k_for_legacy_models() {
+        let text = "fn main() { println!(\"hello tokenizer world\"); }";
         let cl = count_text_tokens(text, "gpt-4");
         assert!(cl > 0);
+        assert!(cl <= text.len() as i64);
     }
 
     #[tokio::test]
