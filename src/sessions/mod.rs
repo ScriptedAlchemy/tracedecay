@@ -23,6 +23,16 @@ pub mod vibe;
 
 pub use providers::{ProviderScope, SessionProvider};
 
+const FILE_TRANSCRIPT_PROVIDERS: &[SessionProvider] = &[
+    SessionProvider::Claude,
+    SessionProvider::Codex,
+    SessionProvider::Vibe,
+    SessionProvider::Cline,
+    SessionProvider::RooCode,
+    SessionProvider::Kilo,
+    SessionProvider::Kiro,
+];
+
 pub(crate) fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .filter(|value| !value.is_empty())
@@ -48,21 +58,13 @@ pub async fn ingest_global_sources_for_provider(
     provider: Option<SessionProvider>,
 ) -> TranscriptIngestStats {
     let mut sources: Vec<Box<dyn TranscriptSource>> = Vec::new();
-    for candidate in providers_for_ingest(provider) {
-        match candidate {
-            SessionProvider::Claude => push_source(&mut sources, claude::ClaudeSource::new()),
-            SessionProvider::Codex => push_source(&mut sources, codex::CodexSource::new()),
-            SessionProvider::Vibe => push_source(&mut sources, vibe::VibeSource::new()),
-            SessionProvider::Cline => {
-                push_source(&mut sources, cline_like::ClineLikeSource::cline())
+    match provider {
+        None => {
+            for provider in FILE_TRANSCRIPT_PROVIDERS {
+                push_file_source(&mut sources, *provider);
             }
-            SessionProvider::RooCode => {
-                push_source(&mut sources, cline_like::ClineLikeSource::roo_code());
-            }
-            SessionProvider::Kilo => push_source(&mut sources, cline_like::ClineLikeSource::kilo()),
-            SessionProvider::Kiro => push_source(&mut sources, kiro::KiroSource::new()),
-            SessionProvider::Cursor | SessionProvider::Hermes => {}
         }
+        Some(provider) => push_file_source(&mut sources, provider),
     }
     let stats = ingest_sources(db, project_root, &sources).await;
     let stats = if provider.is_none() || provider == Some(SessionProvider::Cursor) {
@@ -86,25 +88,16 @@ pub async fn ingest_global_sources_for_provider(
     }
 }
 
-fn providers_for_ingest(selected: Option<SessionProvider>) -> &'static [SessionProvider] {
-    match selected {
-        None => &[
-            SessionProvider::Claude,
-            SessionProvider::Codex,
-            SessionProvider::Vibe,
-            SessionProvider::Cline,
-            SessionProvider::RooCode,
-            SessionProvider::Kilo,
-            SessionProvider::Kiro,
-        ],
-        Some(SessionProvider::Claude) => &[SessionProvider::Claude],
-        Some(SessionProvider::Codex) => &[SessionProvider::Codex],
-        Some(SessionProvider::Vibe) => &[SessionProvider::Vibe],
-        Some(SessionProvider::Cline) => &[SessionProvider::Cline],
-        Some(SessionProvider::RooCode) => &[SessionProvider::RooCode],
-        Some(SessionProvider::Kilo) => &[SessionProvider::Kilo],
-        Some(SessionProvider::Kiro) => &[SessionProvider::Kiro],
-        Some(SessionProvider::Cursor | SessionProvider::Hermes) => &[],
+fn push_file_source(sources: &mut Vec<Box<dyn TranscriptSource>>, provider: SessionProvider) {
+    match provider {
+        SessionProvider::Claude => push_source(sources, claude::ClaudeSource::new()),
+        SessionProvider::Codex => push_source(sources, codex::CodexSource::new()),
+        SessionProvider::Vibe => push_source(sources, vibe::VibeSource::new()),
+        SessionProvider::Cline => push_source(sources, cline_like::ClineLikeSource::cline()),
+        SessionProvider::RooCode => push_source(sources, cline_like::ClineLikeSource::roo_code()),
+        SessionProvider::Kilo => push_source(sources, cline_like::ClineLikeSource::kilo()),
+        SessionProvider::Kiro => push_source(sources, kiro::KiroSource::new()),
+        SessionProvider::Cursor | SessionProvider::Hermes => {}
     }
 }
 

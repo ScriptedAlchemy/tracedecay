@@ -42,22 +42,6 @@ impl SessionProvider {
     }
 }
 
-pub const SESSION_PROVIDERS: &[SessionProvider] = &[
-    SessionProvider::Cursor,
-    SessionProvider::Claude,
-    SessionProvider::Codex,
-    SessionProvider::Vibe,
-    SessionProvider::Cline,
-    SessionProvider::RooCode,
-    SessionProvider::Kilo,
-    SessionProvider::Kiro,
-    SessionProvider::Hermes,
-];
-
-pub const SESSION_PROVIDER_IDS: &[&str] = &[
-    "cursor", "claude", "codex", "vibe", "cline", "roo-code", "kilo", "kiro", "hermes",
-];
-
 pub const MESSAGE_SEARCH_PROVIDER_IDS: &[&str] = &[
     "all", "cursor", "claude", "codex", "vibe", "cline", "roo-code", "kilo", "kiro", "hermes",
 ];
