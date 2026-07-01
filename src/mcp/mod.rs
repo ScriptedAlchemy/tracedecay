@@ -4,6 +4,7 @@
 //! query the code graph interactively. Exposes tools for searching, context
 //! building, call graph traversal, impact analysis, and more.
 
+pub(crate) mod hook_events;
 /// MCP server implementation.
 pub mod response_handles;
 pub mod server;

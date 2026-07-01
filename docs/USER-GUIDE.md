@@ -278,7 +278,8 @@ Kiro setup registers tracedecay in `~/.kiro/settings/mcp.json`, writes steering 
 that steering as a resource while keeping Kiro's default prompt. The managed
 agent exposes all configured tools and pre-approves Kiro built-ins plus the
 tracedecay MCP server, then adds hooks that block research delegation until
-tracedecay MCP tools have been tried and sync the index after Kiro writes files.
+tracedecay MCP tools have been tried and notify the daemon/server after Kiro
+writes files so the server can schedule the index sync.
 If you already have a different custom default agent or a user-managed
 `tracedecay` agent, tracedecay leaves it alone and prints a warning.
 
@@ -302,13 +303,13 @@ Cursor install is plugin-based:
 - `tracedecay install --local --agent cursor` installs the same user-local plugin without writing project Cursor config files.
 - The plugin MCP config runs `tracedecay serve --path ${workspaceFolder}`, so the server resolves the active workspace's project store instead of the plugin directory.
 - Cursor install no longer writes `.cursor/mcp.json`, `.cursor/hooks.json`, `.cursor/rules/tracedecay.mdc`, or `.cursor/permissions.json`; approvals are left to Cursor approval/run-mode behavior.
-- The plugin bundles Cursor-specific, fail-open hooks (each acts only when it finds an initialized TraceDecay project store):
+- The plugin bundles Cursor-specific, fail-open hooks. File and shell hooks notify the TraceDecay daemon; if no daemon is available they return success without indexing:
   - `sessionStart` injects context steering the Agent toward tracedecay MCP tools and reports index freshness (suggests `tracedecay init` when uninitialized).
   - `postToolUse` (unmatched) injects a nonblocking `additional_context` hint after broad search/read tools (Grep, Glob, Read, semantic search, shell `rg`) so Cursor can switch to `tracedecay_context`, `tracedecay_search`, `tracedecay_outline`, or `tracedecay_files`; each hint category fires at most once per session.
   - `beforeSubmitPrompt` resets the local token counter and ingests the current Cursor transcript into the active project session store when `transcript_path` is present.
-  - `afterFileEdit` (unmatched, so every Agent edit tool counts) runs a **targeted single-file** sync of only the edited path(s) — not a full-tree scan — so it stays cheap on large codebases even when the Agent edits many files per turn.
-  - `afterShellExecution` makes branch handling automatic: Agent-run `git checkout`/`switch`/`worktree add` bootstraps/maintains tracedecay branch tracking (`branch add`), while other state-changing git commands (pull/merge/rebase/reset/cherry-pick/stash apply|pop) trigger a coalesced incremental sync.
-  - `workspaceOpen` ensures the current branch's DB exists (branch add if missing) and runs a catch-up incremental sync.
+  - `afterFileEdit` (unmatched, so every Agent edit tool counts) sends the edited path(s) to the daemon, whose MCP server runs a **targeted single-file** sync — not a full-tree scan — so it stays cheap on large codebases even when the Agent edits many files per turn.
+  - `afterShellExecution` sends shell command effects to the daemon, whose MCP server makes branch handling automatic: Agent-run `git checkout`/`switch`/`worktree add` bootstraps/maintains tracedecay branch tracking (`branch add`), while other state-changing git commands (pull/merge/rebase/reset/cherry-pick/stash apply|pop) trigger a coalesced incremental sync.
+  - `workspaceOpen` notifies the daemon, whose MCP server ensures the current branch's DB exists (branch add if missing) and runs a catch-up incremental sync.
 
   Blind spot: Cursor hooks only observe the Cursor Agent's own actions and IDE lifecycle. Manual or external-terminal `git checkout` and in-place branch switches are not visible to these hooks (`workspaceOpen` does not fire for an in-place checkout). Use the git post-commit hook and the on-demand MCP staleness check to keep the index fresh for those cases. The Cursor `postToolUse` hint remains nonblocking to avoid noisy denials.
 
@@ -459,7 +460,7 @@ chmod +x .git/hooks/post-commit
 
 ## MCP Staleness Checks
 
-The MCP server does not run a background file watcher. Instead, MCP tool calls perform a lightweight staleness check and run an incremental sync when indexed files are stale. Multiple MCP servers on the same project coordinate via a per-project sync lock: only one sync runs at a time.
+The MCP server does not run a background file watcher. Instead, MCP tool calls perform a lightweight staleness check and run an incremental sync when indexed files are stale. Agent file/shell hooks notify the daemon about targeted edits and branch-affecting commands, and the daemon's MCP server schedules the resulting sync/branch work. Multiple MCP servers on the same project coordinate via a per-project sync lock: only one sync runs at a time.
 
 ### CLI-Only Workflows
 
@@ -852,7 +853,7 @@ The initial full index of a large project can take a few seconds. This is normal
 
 - Subsequent syncs are incremental and much faster
 - Use `tracedecay sync` (not `--force`) for day-to-day updates
-- The post-commit hook and the embedded MCP watcher run in the background so they never block you
+- The post-commit hook and daemon hook notifications are bounded and fail open so a slow or unavailable daemon does not hold up agent work for long
 
 ### Stale install warning
 

@@ -3851,6 +3851,10 @@ impl TraceDecay {
         &self.store_layout
     }
 
+    pub(crate) fn open_options(&self) -> TraceDecayOpenOptions {
+        self.open_options.clone()
+    }
+
     pub async fn open_project_store_db(&self) -> Result<Database> {
         if self.read_only {
             return Err(TraceDecayError::Config {

@@ -20,7 +20,7 @@ use tokio::net::{UnixListener, UnixStream};
 #[cfg(unix)]
 use tokio::task::JoinHandle;
 #[cfg(unix)]
-use tokio::time::Duration;
+use tokio::time::{timeout, Duration};
 
 use crate::client_identity::DaemonClientIdentity;
 use crate::errors::{Result, TraceDecayError};
@@ -29,6 +29,75 @@ use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, Stdio
 
 pub const SERVICE_NAME: &str = "tracedecay.service";
 pub const SOCKET_ENV: &str = "TRACEDECAY_DAEMON_SOCKET";
+pub const HOOK_EVENT_METHOD: &str = "tracedecay/hookEvent";
+#[cfg(unix)]
+const HOOK_EVENT_NOTIFY_TIMEOUT: Duration = Duration::from_millis(750);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonHookEvent {
+    pub agent: String,
+    pub event: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rel_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+}
+
+impl DaemonHookEvent {
+    fn new(
+        agent: &'static str,
+        event: &'static str,
+        rel_paths: Vec<String>,
+        command: Option<String>,
+        cwd: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            agent: agent.to_string(),
+            event: event.to_string(),
+            rel_paths,
+            command,
+            cwd,
+        }
+    }
+
+    pub fn cursor_after_file_edit(rel_paths: Vec<String>) -> Self {
+        Self::new("cursor", "afterFileEdit", rel_paths, None, None)
+    }
+
+    pub fn cursor_after_shell_execution(command: String, cwd: PathBuf) -> Self {
+        Self::new(
+            "cursor",
+            "afterShellExecution",
+            Vec::new(),
+            Some(command),
+            Some(cwd),
+        )
+    }
+
+    pub fn cursor_workspace_open(cwd: PathBuf) -> Self {
+        Self::new("cursor", "workspaceOpen", Vec::new(), None, Some(cwd))
+    }
+
+    pub fn codex_post_tool_use_edit(rel_paths: Vec<String>, cwd: PathBuf) -> Self {
+        Self::new("codex", "postToolUseEdit", rel_paths, None, Some(cwd))
+    }
+
+    pub fn codex_post_tool_use_shell(command: String, cwd: PathBuf) -> Self {
+        Self::new(
+            "codex",
+            "postToolUseShell",
+            Vec::new(),
+            Some(command),
+            Some(cwd),
+        )
+    }
+
+    pub fn kiro_post_tool_use(cwd: Option<PathBuf>) -> Self {
+        Self::new("kiro", "postToolUse", Vec::new(), None, cwd)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonServiceSpec {
@@ -187,6 +256,192 @@ pub fn service_spec(
         tracedecay_bin: tracedecay_bin.into(),
         socket_path: socket_path_or_default(socket)?,
     })
+}
+
+#[cfg(unix)]
+pub async fn notify_hook_event(project_path: &Path, event: DaemonHookEvent) {
+    let _ = timeout(
+        HOOK_EVENT_NOTIFY_TIMEOUT,
+        notify_hook_event_inner(project_path, event),
+    )
+    .await;
+}
+
+#[cfg(unix)]
+async fn notify_hook_event_inner(project_path: &Path, event: DaemonHookEvent) {
+    let Ok(socket_path) = default_socket_path() else {
+        return;
+    };
+    if !socket_path.exists() {
+        return;
+    }
+    let Ok(handshake) =
+        DaemonHandshake::for_current_client(Some(project_path.to_path_buf()), None, false, false)
+    else {
+        return;
+    };
+    let Ok(params) = serde_json::to_value(event) else {
+        return;
+    };
+    let request = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: None,
+        method: HOOK_EVENT_METHOD.to_string(),
+        params: Some(params),
+    };
+    let Ok(line) = serde_json::to_string(&request) else {
+        return;
+    };
+    let Ok(stream) = UnixStream::connect(socket_path).await else {
+        return;
+    };
+    let Ok(handshake_line) = handshake.to_line() else {
+        return;
+    };
+    let (_reader, mut writer) = stream.into_split();
+    if writer.write_all(handshake_line.as_bytes()).await.is_err() {
+        return;
+    }
+    if writer.write_all(b"\n").await.is_err() {
+        return;
+    }
+    if writer.write_all(line.as_bytes()).await.is_err() {
+        return;
+    }
+    if writer.write_all(b"\n").await.is_err() {
+        return;
+    }
+    let _ = writer.flush().await;
+    let _ = writer.shutdown().await;
+}
+
+#[cfg(not(unix))]
+pub async fn notify_hook_event(project_path: &Path, event: DaemonHookEvent) {
+    if !crate::tracedecay::TraceDecay::has_initialized_store(project_path).await {
+        return;
+    }
+    match event.event.as_str() {
+        "afterFileEdit" | "postToolUseEdit" => {
+            let rel_paths = safe_daemon_hook_rel_paths(&event.rel_paths);
+            if rel_paths.is_empty() {
+                return;
+            }
+            let Ok(cg) = crate::tracedecay::TraceDecay::open(project_path).await else {
+                return;
+            };
+            let _ = cg.sync_if_stale_silent(&rel_paths).await;
+        }
+        "afterShellExecution" | "postToolUseShell" => {
+            notify_shell_hook_event_without_daemon(project_path, event).await;
+        }
+        "workspaceOpen" => {
+            if let Some(branch) = crate::branch::current_branch(project_path) {
+                if matches!(
+                    crate::tracedecay::TraceDecay::add_branch_tracking(project_path, &branch).await,
+                    Ok(crate::branch::BranchAddOutcome::Added)
+                ) {
+                    return;
+                }
+            }
+            run_debounced_hook_sync_without_daemon(project_path, hook_marker_file(&event.agent))
+                .await;
+        }
+        "postToolUse" => {
+            run_debounced_hook_sync_without_daemon(project_path, hook_marker_file(&event.agent))
+                .await;
+        }
+        _ => {}
+    }
+}
+
+#[cfg(not(unix))]
+async fn notify_shell_hook_event_without_daemon(project_path: &Path, event: DaemonHookEvent) {
+    let Some(command) = event.command.as_deref() else {
+        return;
+    };
+    let cwd = event.cwd.as_deref().unwrap_or(project_path);
+    if !crate::hooks::cursor_shell_command_targets_project(command, cwd, project_path) {
+        return;
+    }
+    let current_branch = crate::branch::current_branch(project_path);
+    match crate::hooks::cursor_shell_sync_plan_with_current_branch(
+        command,
+        current_branch.as_deref(),
+    ) {
+        crate::hooks::CursorShellSyncPlan::BranchAdd(branch) => {
+            let _ = crate::tracedecay::TraceDecay::add_branch_tracking(project_path, &branch).await;
+        }
+        crate::hooks::CursorShellSyncPlan::CurrentBranchSync(branch) => {
+            if !matches!(
+                crate::tracedecay::TraceDecay::add_branch_tracking(project_path, &branch).await,
+                Ok(crate::branch::BranchAddOutcome::Added)
+            ) {
+                run_debounced_hook_sync_without_daemon(
+                    project_path,
+                    hook_marker_file(&event.agent),
+                )
+                .await;
+            }
+        }
+        crate::hooks::CursorShellSyncPlan::IncrementalSync => {
+            run_debounced_hook_sync_without_daemon(project_path, hook_marker_file(&event.agent))
+                .await;
+        }
+        crate::hooks::CursorShellSyncPlan::Noop => {}
+    }
+}
+
+#[cfg(not(unix))]
+async fn run_debounced_hook_sync_without_daemon(project_path: &Path, marker_file: &str) {
+    let Ok(cg) = crate::tracedecay::TraceDecay::open(project_path).await else {
+        return;
+    };
+    let marker = cg.store_layout().data_root.join(marker_file);
+    let now = crate::tracedecay::current_timestamp();
+    if !crate::hooks::cursor_should_run_sync(now, read_hook_marker_secs(&marker), 3) {
+        return;
+    }
+    match cg.sync().await {
+        Ok(_) | Err(TraceDecayError::SyncLock { .. }) => {
+            let _ = std::fs::write(marker, now.to_string());
+        }
+        Err(_) => {}
+    }
+}
+
+#[cfg(not(unix))]
+fn safe_daemon_hook_rel_paths(paths: &[String]) -> Vec<String> {
+    paths
+        .iter()
+        .filter(|path| {
+            let path_ref = Path::new(path.as_str());
+            !path.is_empty()
+                && !path_ref.is_absolute()
+                && path_ref
+                    .components()
+                    .all(|component| !matches!(component, std::path::Component::ParentDir))
+        })
+        .cloned()
+        .collect()
+}
+
+#[cfg(not(unix))]
+fn hook_marker_file(agent: &str) -> &'static str {
+    match agent {
+        "codex" => ".codex_shell_sync_at",
+        "cursor" => ".cursor_shell_sync_at",
+        "kiro" => ".kiro_post_tool_sync_at",
+        _ => ".daemon_hook_shell_sync_at",
+    }
+}
+
+#[cfg(not(unix))]
+fn read_hook_marker_secs(path: &Path) -> Option<i64> {
+    std::fs::read_to_string(path)
+        .ok()?
+        .trim()
+        .parse::<i64>()
+        .ok()
 }
 
 pub fn install_service(spec: &DaemonServiceSpec, start: bool) -> Result<PathBuf> {
@@ -1572,6 +1827,21 @@ mod tests {
         }
     }
 
+    fn run_git(cwd: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git should run");
+        assert!(
+            output.status.success(),
+            "git {:?} failed\nstdout:\n{}\nstderr:\n{}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[test]
     fn daemon_log_line_formats_stable_key_value_fields() {
         let line = super::format_daemon_log_line(
@@ -2133,6 +2403,77 @@ mod tests {
             .await
             .expect("server task")
             .expect("server result");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn socket_client_hook_event_adds_branch_tracking() {
+        let dir = TempDir::new().expect("temp dir");
+        let project = dir.path().canonicalize().expect("canonical temp dir");
+        let client_identity = test_client_identity_for(project.join("profile"));
+        std::fs::create_dir_all(project.join("src")).expect("src dir");
+        std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
+        let cg = crate::tracedecay::TraceDecay::init_with_options(
+            &project,
+            crate::tracedecay::TraceDecayOpenOptions {
+                profile_root: Some(client_identity.profile_root.clone()),
+                global_db_path: Some(client_identity.global_db_path.clone()),
+            },
+        )
+        .await
+        .expect("project init");
+        let data_root = cg.store_layout().data_root.clone();
+        run_git(&project, &["init", "-b", "main"]);
+        run_git(&project, &["switch", "-c", "feature/hook-daemon"]);
+
+        let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
+        let server_task = tokio::spawn(super::serve_socket_client(
+            server,
+            super::DaemonEngine::default(),
+        ));
+
+        let (_reader, mut writer) = client.into_split();
+        let handshake = DaemonHandshake {
+            project_path: Some(project.clone()),
+            scope_prefix: None,
+            timings: false,
+            allow_init: false,
+            client_identity,
+        };
+        writer
+            .write_all(handshake.to_line().expect("handshake").as_bytes())
+            .await
+            .expect("write handshake");
+        writer.write_all(b"\n").await.expect("newline");
+        writer
+            .write_all(
+                serde_json::to_string(&json!({
+                    "jsonrpc": "2.0",
+                    "method": "tracedecay/hookEvent",
+                    "params": {
+                        "agent": "cursor",
+                        "event": "afterShellExecution",
+                        "command": "git switch feature/hook-daemon",
+                        "cwd": project
+                    }
+                }))
+                .expect("hook event json")
+                .as_bytes(),
+            )
+            .await
+            .expect("write hook event");
+        writer.write_all(b"\n").await.expect("newline");
+        writer.shutdown().await.expect("shutdown writer");
+
+        server_task
+            .await
+            .expect("server task")
+            .expect("server result");
+
+        assert!(
+            data_root.join("branches/feature_hook-daemon.db").exists(),
+            "daemon hook events should add branch tracking in the active project store"
+        );
     }
 
     #[cfg(unix)]
