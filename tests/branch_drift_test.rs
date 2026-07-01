@@ -346,16 +346,23 @@ async fn open_repairs_missing_tracked_branch_db_before_diagnostics() {
     .unwrap();
     commit_all(project, "feature");
 
-    TraceDecay::add_branch_tracking(project, "feature/tracked")
-        .await
-        .unwrap();
-
+    // Track the branch by writing its metadata entry directly instead of
+    // going through TraceDecay::add_branch_tracking, which would build and
+    // sync a branch DB only for the test to delete it again. The repair
+    // under test keys purely off "tracked in metadata, DB file missing", so
+    // the state is identical and the fixture skips a whole DB build.
     let tracedecay_dir = project_data_dir(project);
-    let meta = tracedecay::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
+    let mut meta = tracedecay::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
+    let stem = tracedecay::branch::sanitize_branch_name("feature/tracked");
+    meta.add_branch("feature/tracked", &format!("branches/{stem}.db"), "main");
+    save_branch_meta(&tracedecay_dir, &meta).unwrap();
     let feature_db =
         tracedecay::branch::resolve_branch_db_path(&tracedecay_dir, "feature/tracked", &meta)
             .unwrap();
-    fs::remove_file(&feature_db).unwrap();
+    assert!(
+        !feature_db.exists(),
+        "tracked branch DB must be missing before the repair-on-open under test"
+    );
 
     let cg = TraceDecay::open(project).await.unwrap();
     let diagnostics = cg.branch_diagnostics();

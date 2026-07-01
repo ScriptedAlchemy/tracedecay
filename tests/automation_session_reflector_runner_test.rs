@@ -399,7 +399,10 @@ async fn session_fact_proposals_dedupe_repeated_pending_facts_across_runs() {
 async fn session_reflector_runner_reads_hermes_profile_lcm_with_filters() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
-    seed_session_evidence(&cg).await;
+    // No project session store is seeded (or created) on purpose: the
+    // hermes_profile storage scope must read only the hermes profile DB, so
+    // a regression that consulted the project store would find no store at
+    // all and skip with lcm_not_ingested instead of succeeding.
 
     let hermes_home = tempdir().unwrap();
     let profile_db_path = resolve_hermes_profile_session_db_path(hermes_home.path()).unwrap();

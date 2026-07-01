@@ -61,19 +61,28 @@ impl Deref for TestDbConnection {
 async fn open_test_db_connection(db_path: &Path) -> TestDbConnection {
     let db = libsql::Builder::new_local(db_path).build().await.unwrap();
     let conn = db.connect().unwrap();
-    let pragmas = if cfg!(windows) {
-        "PRAGMA mmap_size = 0;
-         PRAGMA journal_mode = DELETE;
-         PRAGMA busy_timeout = 5000;
-         PRAGMA synchronous = FULL;
-         PRAGMA foreign_keys = ON;"
+    // Mirror the pragma choices of src/db/connection.rs, including the
+    // CI-only TRACEDECAY_SQLITE_UNSAFE_FAST=1 escape hatch, so this helper
+    // never fights the journal mode the product code selected.
+    let unsafe_fast = std::env::var(tracedecay::db::SQLITE_UNSAFE_FAST_ENV).as_deref() == Ok("1");
+    let (journal_mode, synchronous) = if unsafe_fast {
+        ("MEMORY", "OFF")
+    } else if cfg!(windows) {
+        ("DELETE", "FULL")
     } else {
-        "PRAGMA journal_mode = WAL;
-         PRAGMA busy_timeout = 5000;
-         PRAGMA synchronous = NORMAL;
-         PRAGMA foreign_keys = ON;"
+        ("WAL", "NORMAL")
     };
-    conn.execute_batch(pragmas).await.unwrap();
+    if cfg!(windows) {
+        conn.execute_batch("PRAGMA mmap_size = 0;").await.unwrap();
+    }
+    conn.execute_batch(&format!(
+        "PRAGMA journal_mode = {journal_mode};
+         PRAGMA busy_timeout = 5000;
+         PRAGMA synchronous = {synchronous};
+         PRAGMA foreign_keys = ON;"
+    ))
+    .await
+    .unwrap();
     TestDbConnection { _db: db, conn }
 }
 

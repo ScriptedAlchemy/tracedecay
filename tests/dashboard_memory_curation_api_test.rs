@@ -837,8 +837,14 @@ fn curation_preview_persists_across_dashboard_restarts() {
         let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
         let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
 
+        // Pre-create both GlobalDb-schema stores from the cached empty
+        // template so each dashboard server start opens existing DBs instead
+        // of paying a full schema creation (slow on Windows, and this test
+        // starts the server twice).
+        write_empty_global_db_schema(&global_db_path).await;
         let cg = setup_project(&project_root).await;
         seed_memory_fixture(&cg).await;
+        write_empty_global_db_schema(&cg.store_layout().sessions_db_path).await;
         let agent = http_agent();
         let sidecar = cg
             .store_layout()

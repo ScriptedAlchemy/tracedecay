@@ -410,6 +410,15 @@ pub async fn open_lcm_db(tmp: &TempDir) -> GlobalDb {
     GlobalDb::open_at(&db_path).await.expect("session db open")
 }
 
+/// Writes an empty `GlobalDb`-schema store at `db_path` from the cached
+/// per-process template, so later opens (fixture seeding, dashboard server
+/// startup) find an existing DB and skip the full schema creation — a large
+/// fixed cost on Windows. The first call in a process pays one real schema
+/// creation to build the template; every further store is a file copy.
+pub async fn write_empty_global_db_schema(db_path: &Path) {
+    seed_lcm_db_from_template(db_path).await;
+}
+
 async fn seed_lcm_db_from_template(db_path: &Path) {
     if let Some(parent) = db_path.parent() {
         fs::create_dir_all(parent).unwrap_or_else(|err| {
