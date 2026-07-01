@@ -418,6 +418,12 @@ async fn init_test_project(project: &Path) -> (TestTraceDecay, TestEnv) {
     )
 }
 
+async fn setup_empty_project() -> (TestTraceDecay, TestEnv, TestTempDir) {
+    let dir = test_temp_dir();
+    let (cg, env) = init_test_project(dir.path()).await;
+    (cg, env, dir)
+}
+
 async fn setup_generated_dir_project(include_dist: bool) -> (TestTraceDecay, TestEnv, TestTempDir) {
     let dir = test_temp_dir();
     let project = dir.path();
@@ -1747,7 +1753,7 @@ async fn test_search_omits_index_coverage_hint_when_generated_dir_is_included() 
 
 #[tokio::test]
 async fn retrieve_tool_returns_full_stored_response() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let original = "{\"items\":[{\"id\":1,\"name\":\"alpha\"}]}";
     let stored = tracedecay::mcp::response_handles::store_response_handle(
         cg.project_root(),
@@ -1796,7 +1802,7 @@ async fn retrieve_tool_returns_full_stored_response() {
 
 #[tokio::test]
 async fn retrieve_tool_reports_missing_and_expired_handles_actionably() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
 
     let missing = handle_tool_call(
         &cg,
@@ -1857,7 +1863,7 @@ async fn retrieve_tool_reports_missing_and_expired_handles_actionably() {
 
 #[tokio::test]
 async fn fact_store_large_list_response_uses_retrieve_handle() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let added = handle_tool_call(
         &cg,
         "tracedecay_fact_store",
@@ -1947,7 +1953,7 @@ async fn fact_store_large_list_response_uses_retrieve_handle() {
 
 #[tokio::test]
 async fn fact_store_large_list_response_reports_store_failure_actionably() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     handle_tool_call(
         &cg,
         "tracedecay_fact_store",
@@ -2007,20 +2013,26 @@ async fn fact_store_large_list_response_reports_store_failure_actionably() {
 
 #[tokio::test]
 async fn search_large_response_uses_retrievable_truncation_handle() {
-    let (cg, project) = setup_project().await;
+    const LARGE_RESPONSE_MARKER_COUNT: usize = 120;
+    const LAST_LARGE_RESPONSE_MARKER: usize = LARGE_RESPONSE_MARKER_COUNT - 1;
+
+    let dir = test_temp_dir();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    let (cg, _env) = init_test_project(project).await;
     let mut source = String::new();
-    for i in 0..420 {
+    for i in 0..LARGE_RESPONSE_MARKER_COUNT {
         source.push_str(&format!(
             "pub fn reversible_search_marker_{i:03}() -> &'static str {{ \"marker-{i:03}\" }}\n"
         ));
     }
-    fs::write(project.path().join("src/large_search.rs"), source).unwrap();
+    fs::write(project.join("src/large_search.rs"), source).unwrap();
     index_all_retrying_sync_lock(&cg).await;
 
     let result = handle_tool_call(
         &cg,
         "tracedecay_search",
-        json!({"query": "reversible_search_marker", "limit": 420}),
+        json!({"query": "reversible_search_marker", "limit": LARGE_RESPONSE_MARKER_COUNT}),
         None,
         None,
     )
@@ -2049,7 +2061,9 @@ async fn search_large_response_uses_retrievable_truncation_handle() {
         .as_str()
         .expect("retrieve response should contain full search JSON");
     assert!(
-        full_json.contains("reversible_search_marker_419"),
+        full_json.contains(&format!(
+            "reversible_search_marker_{LAST_LARGE_RESPONSE_MARKER:03}"
+        )),
         "retrieved search response should include the tail result"
     );
 }
@@ -2677,14 +2691,20 @@ async fn test_diff_context() {
 
 #[tokio::test]
 async fn diff_context_large_response_uses_retrievable_truncation_handle() {
-    let (cg, project) = setup_project().await;
+    const LARGE_RESPONSE_MARKER_COUNT: usize = 120;
+    const LAST_LARGE_RESPONSE_MARKER: usize = LARGE_RESPONSE_MARKER_COUNT - 1;
+
+    let dir = test_temp_dir();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    let (cg, _env) = init_test_project(project).await;
     let mut source = String::new();
-    for i in 0..420 {
+    for i in 0..LARGE_RESPONSE_MARKER_COUNT {
         source.push_str(&format!(
             "pub fn reversible_diff_context_marker_{i:03}() -> &'static str {{ \"marker-{i:03}\" }}\n"
         ));
     }
-    fs::write(project.path().join("src/large_diff.rs"), source).unwrap();
+    fs::write(project.join("src/large_diff.rs"), source).unwrap();
     index_all_retrying_sync_lock(&cg).await;
 
     let result = handle_tool_call(
@@ -2719,7 +2739,9 @@ async fn diff_context_large_response_uses_retrievable_truncation_handle() {
         .as_str()
         .expect("retrieve response should contain full diff_context JSON");
     assert!(
-        full_json.contains("reversible_diff_context_marker_419"),
+        full_json.contains(&format!(
+            "reversible_diff_context_marker_{LAST_LARGE_RESPONSE_MARKER:03}"
+        )),
         "retrieved diff_context response should include the tail result"
     );
 }
