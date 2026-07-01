@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.20](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.19...v0.0.20) - 2026-07-01
+
+### Other
+
+- trim more Windows hotspot fixtures
+
 ## [0.0.19](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.18...v0.0.19) - 2026-07-01
 
 ### Fixed
