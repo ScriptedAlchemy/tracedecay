@@ -108,6 +108,10 @@ pub struct SkillWriterAutomationOptions {
     pub trigger: AutomationTrigger,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
+    #[serde(default = "default_lcm_storage_scope")]
+    pub storage_scope: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hermes_home: Option<PathBuf>,
     #[serde(default = "default_skill_writer_provider")]
     pub provider: String,
     #[serde(default = "default_skill_writer_query")]
@@ -123,6 +127,8 @@ impl Default for SkillWriterAutomationOptions {
         Self {
             trigger: AutomationTrigger::ManualCli,
             run_id: None,
+            storage_scope: default_lcm_storage_scope(),
+            hermes_home: None,
             provider: default_skill_writer_provider(),
             query: default_skill_writer_query(),
             evidence_limit: default_skill_writer_evidence_limit(),
@@ -154,7 +160,7 @@ enum SkillWriterEvidenceOutcome {
     },
 }
 
-enum SessionReflectorLcmStore {
+enum LcmAutomationStore {
     Available(PathBuf),
     NotIngested,
 }
@@ -190,9 +196,14 @@ pub async fn run_session_reflector_with_backend(
         }
     };
 
-    let sessions_db_path = match session_reflector_lcm_db_path(cg, &storage_scope, &options)? {
-        SessionReflectorLcmStore::Available(path) => path,
-        SessionReflectorLcmStore::NotIngested => {
+    let sessions_db_path = match automation_lcm_db_path(
+        cg,
+        &storage_scope,
+        options.hermes_home.as_ref(),
+        "session_reflector",
+    )? {
+        LcmAutomationStore::Available(path) => path,
+        LcmAutomationStore::NotIngested => {
             return skipped_session_reflector_run(&run, "lcm_not_ingested", None).await;
         }
     };
@@ -500,12 +511,27 @@ async fn build_skill_writer_evidence(
         Some(path) => path,
         None => crate::storage::default_profile_root()?,
     };
+    let storage_scope =
+        normalized_non_empty(&options.storage_scope).unwrap_or_else(default_lcm_storage_scope);
     let provider =
         normalized_non_empty(&options.provider).unwrap_or_else(default_skill_writer_provider);
     let query = normalized_non_empty(&options.query).unwrap_or_else(default_skill_writer_query);
     let evidence_limit = options.evidence_limit.clamp(1, 50);
 
-    let sessions_db_path = cg.store_layout().sessions_db_path.clone();
+    let sessions_db_path = match automation_lcm_db_path(
+        cg,
+        &storage_scope,
+        options.hermes_home.as_ref(),
+        "skill_writer",
+    )? {
+        LcmAutomationStore::Available(path) => path,
+        LcmAutomationStore::NotIngested => {
+            return Ok(SkillWriterEvidenceOutcome::Skipped {
+                reason: "lcm_not_ingested",
+                evidence_hash: None,
+            });
+        }
+    };
     if !sessions_db_path.is_file() {
         return Ok(SkillWriterEvidenceOutcome::Skipped {
             reason: "lcm_not_ingested",
@@ -569,6 +595,8 @@ async fn build_skill_writer_evidence(
         &underused_tool_families,
     );
     let evidence = json!({
+        "storage_scope": storage_scope,
+        "hermes_home": options.hermes_home.as_ref().map(|path| path.display().to_string()),
         "provider": provider,
         "query": query,
         "hits": hits,
@@ -650,7 +678,7 @@ async fn skipped_skill_writer_run(
 
 fn build_session_reflector_prompt(evidence: &Value) -> String {
     format!(
-        "Review these bounded TraceDecay session snippets and propose only durable memory facts. Return only JSON with a facts array. Each fact must include content, category, optional tags, optional entities, trust, source_span, and reason. Category must be one of general, user_pref, project, tool, decision, or code_area. Use trust, not confidence. source_span must cite one bounded evidence hit by session_id plus message_id for raw messages, by store_id for raw messages, or by node_id for summaries. Do not include secrets or ephemeral status.\n{}",
+        "Review these bounded TraceDecay session snippets and propose only durable memory facts. Return only JSON with a facts array. Each fact must include content, category, optional tags, optional entities, trust, source_span, and reason. Category must be one of general, user_pref, project, tool, decision, or code_area. Use trust, not confidence; trust must be a JSON number from 0.0 to 1.0. Do not use string labels like high, medium, or low. source_span must cite one bounded evidence hit by session_id plus message_id for raw messages, by store_id for raw messages, or by node_id for summaries. Do not include secrets or ephemeral status.\n{}",
         serde_json::to_string_pretty(evidence).unwrap_or_else(|_| "{}".to_string())
     )
 }
@@ -671,30 +699,46 @@ fn normalized_non_empty(value: &str) -> Option<String> {
     }
 }
 
-fn session_reflector_lcm_db_path(
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::build_session_reflector_prompt;
+
+    #[test]
+    fn session_reflector_prompt_requires_numeric_trust() {
+        let prompt = build_session_reflector_prompt(&json!({"hits": []}));
+
+        assert!(prompt.contains("trust must be a JSON number from 0.0 to 1.0"));
+        assert!(prompt.contains("Do not use string labels like high, medium, or low"));
+    }
+}
+
+fn automation_lcm_db_path(
     cg: &TraceDecay,
     storage_scope: &str,
-    options: &SessionReflectorAutomationOptions,
-) -> Result<SessionReflectorLcmStore> {
+    hermes_home: Option<&PathBuf>,
+    task_name: &str,
+) -> Result<LcmAutomationStore> {
     match storage_scope {
-        "project_local" => Ok(SessionReflectorLcmStore::Available(
+        "project_local" => Ok(LcmAutomationStore::Available(
             cg.store_layout().sessions_db_path.clone(),
         )),
         "hermes_profile" => {
-            let hermes_home = options.hermes_home.as_ref().ok_or_else(|| TraceDecayError::Config {
-                message: "session_reflector hermes_profile storage requires hermes_home".to_string(),
+            let hermes_home = hermes_home.ok_or_else(|| TraceDecayError::Config {
+                message: format!("{task_name} hermes_profile storage requires hermes_home"),
             })?;
             match resolve_hermes_profile_session_db_readonly(hermes_home) {
-                HermesProfileDbReadOnly::Exists(path) => Ok(SessionReflectorLcmStore::Available(path)),
-                HermesProfileDbReadOnly::NotIngested(_) => Ok(SessionReflectorLcmStore::NotIngested),
+                HermesProfileDbReadOnly::Exists(path) => Ok(LcmAutomationStore::Available(path)),
+                HermesProfileDbReadOnly::NotIngested(_) => Ok(LcmAutomationStore::NotIngested),
                 HermesProfileDbReadOnly::ConfigError(message) => Err(TraceDecayError::Config {
-                    message: format!("invalid session_reflector hermes_home: {message}"),
+                    message: format!("invalid {task_name} hermes_home: {message}"),
                 }),
             }
         }
         other => Err(TraceDecayError::Config {
             message: format!(
-                "unknown session_reflector storage_scope '{other}'; expected project_local or hermes_profile"
+                "unknown {task_name} storage_scope '{other}'; expected project_local or hermes_profile"
             ),
         }),
     }

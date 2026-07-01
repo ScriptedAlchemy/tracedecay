@@ -90,6 +90,68 @@ async fn skill_writer_default_provider_searches_all_providers() {
 }
 
 #[tokio::test]
+async fn skill_writer_runner_reads_hermes_profile_lcm() {
+    let temp = tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let cg = init_project(temp.path()).await;
+
+    let hermes_home = tempdir().unwrap();
+    let profile_db_path = resolve_hermes_profile_session_db_path(hermes_home.path()).unwrap();
+    let profile_db = GlobalDb::open_at(&profile_db_path)
+        .await
+        .expect("hermes profile session db open");
+    seed_session_message_in_db(
+        &profile_db,
+        hermes_home.path(),
+        SeedSessionMessage {
+            provider: "cursor",
+            session_id: "hermes-skill-writer-1",
+            message_id: "hermes-skill-writer-1-message-001",
+            role: "assistant",
+            timestamp: 1_715_100_005,
+            text: "Hermes profile-only skill writer evidence should draft reusable workflow guidance.",
+            source: Some("hermes_profile_lcm"),
+        },
+    )
+    .await;
+
+    let backend = SkillJsonBackend::new(json!({"skills": []}));
+    let config = AutomationConfig {
+        enabled: true,
+        backend: AutomationBackend::CodexAppServer,
+        host_mode: AutomationHostMode::Standalone,
+        tasks: AutomationTaskSet {
+            skill_writer: AutomationTaskConfig {
+                enabled: true,
+                schedule: Some("manual".to_string()),
+                ..AutomationTaskConfig::default()
+            },
+            ..AutomationTaskSet::default()
+        },
+        ..AutomationConfig::default()
+    };
+
+    let run = run_skill_writer_with_backend(
+        &cg,
+        &config,
+        &backend,
+        SkillWriterAutomationOptions {
+            storage_scope: "hermes_profile".to_string(),
+            hermes_home: Some(hermes_home.path().to_path_buf()),
+            provider: "cursor".to_string(),
+            query: "profile-only skill writer evidence".to_string(),
+            profile_root: Some(profile_root),
+            ..SkillWriterAutomationOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(backend.calls(), 1);
+    assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
+}
+
+#[tokio::test]
 async fn skill_writer_runner_creates_pending_skill_drafts_for_approval() {
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
@@ -155,6 +217,8 @@ async fn skill_writer_runner_creates_pending_skill_drafts_for_approval() {
             evidence_limit: 5,
             profile_root: Some(profile_root.clone()),
             run_id: None,
+            storage_scope: "project_local".to_string(),
+            hermes_home: None,
         },
     )
     .await
@@ -372,6 +436,8 @@ async fn skill_writer_evidence_imports_project_skill_usage_analytics_before_summ
             evidence_limit: 5,
             profile_root: Some(profile_root),
             run_id: None,
+            storage_scope: "project_local".to_string(),
+            hermes_home: None,
         },
     )
     .await
@@ -508,6 +574,8 @@ async fn skill_writer_runner_auto_enables_when_config_explicitly_allows() {
             evidence_limit: 5,
             profile_root: Some(profile_root.clone()),
             run_id: None,
+            storage_scope: "project_local".to_string(),
+            hermes_home: None,
         },
     )
     .await
@@ -660,6 +728,8 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
             evidence_limit: 5,
             profile_root: Some(profile_root.clone()),
             run_id: None,
+            storage_scope: "project_local".to_string(),
+            hermes_home: None,
         },
     )
     .await
@@ -795,6 +865,8 @@ async fn skill_writer_runner_ledgers_malformed_backend_output() {
             evidence_limit: 5,
             profile_root: Some(profile_root),
             run_id: None,
+            storage_scope: "project_local".to_string(),
+            hermes_home: None,
         },
     )
     .await
@@ -864,6 +936,8 @@ async fn skill_writer_runner_ledgers_missing_skills_array() {
             evidence_limit: 5,
             profile_root: Some(profile_root),
             run_id: None,
+            storage_scope: "project_local".to_string(),
+            hermes_home: None,
         },
     )
     .await
@@ -929,6 +1003,8 @@ async fn skill_writer_runner_records_noop_fallback_when_backend_run_task_fails()
             evidence_limit: 5,
             run_id: None,
             profile_root: Some(profile_root),
+            storage_scope: "project_local".to_string(),
+            hermes_home: None,
         },
     )
     .await

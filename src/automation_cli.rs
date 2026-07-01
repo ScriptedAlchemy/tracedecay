@@ -522,6 +522,8 @@ async fn handle_automation_run_command(
             provider,
             query,
             evidence_limit,
+            storage_scope,
+            hermes_home,
             path,
         } => {
             if !dry_run {
@@ -550,6 +552,8 @@ async fn handle_automation_run_command(
                 SkillWriterAutomationOptions {
                     trigger: tracedecay::automation::run_ledger::AutomationTrigger::ManualCli,
                     run_id: None,
+                    storage_scope,
+                    hermes_home: hermes_home.map(Into::into),
                     provider,
                     query,
                     evidence_limit,

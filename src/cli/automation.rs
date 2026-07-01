@@ -250,8 +250,8 @@ pub enum AutomationRunAction {
         /// Keep the run non-mutating. This is currently the only supported mode.
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         dry_run: bool,
-        /// LCM provider to inspect.
-        #[arg(long, default_value = "cursor")]
+        /// LCM provider to inspect. Use all for unified cross-provider evidence.
+        #[arg(long, default_value = "all")]
         provider: String,
         /// LCM grep query used to collect bounded evidence.
         #[arg(
@@ -262,6 +262,12 @@ pub enum AutomationRunAction {
         /// Maximum LCM evidence snippets included in the backend review request.
         #[arg(long, default_value_t = 20)]
         evidence_limit: usize,
+        /// LCM storage scope: project_local or hermes_profile.
+        #[arg(long, default_value = "project_local")]
+        storage_scope: String,
+        /// Absolute Hermes profile home directory when --storage-scope hermes_profile.
+        #[arg(long)]
+        hermes_home: Option<String>,
         /// Project path (default: current directory, with discovery).
         #[arg(short, long)]
         path: Option<String>,
