@@ -106,6 +106,8 @@ pub(crate) struct SkillWritingRunBody {
     provider: Option<String>,
     query: Option<String>,
     evidence_limit: Option<usize>,
+    storage_scope: Option<String>,
+    hermes_home: Option<PathBuf>,
 }
 
 impl From<SkillWritingRunBody> for SkillWritingRunRequest {
@@ -114,6 +116,8 @@ impl From<SkillWritingRunBody> for SkillWritingRunRequest {
             provider: body.provider,
             query: body.query,
             evidence_limit: body.evidence_limit,
+            storage_scope: body.storage_scope,
+            hermes_home: body.hermes_home,
         }
     }
 }
