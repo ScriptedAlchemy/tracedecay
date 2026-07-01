@@ -428,9 +428,15 @@ fn kiro_post_tool_use_hook_notifies_daemon() {
         "kiro",
         "postToolUse",
         |project_path| {
+            let edited = project_path.join("src/lib.rs");
+            std::fs::write(&edited, "pub fn answer() -> u32 { 44 }\n").unwrap();
             json!({
                 "hook_event_name": "postToolUse",
                 "cwd": project_path,
+                "tool_name": "fs_write",
+                "tool_input": {
+                    "path": "src/lib.rs"
+                },
             })
         },
         |request, project_path| {
@@ -438,6 +444,7 @@ fn kiro_post_tool_use_hook_notifies_daemon() {
                 request["params"]["cwd"],
                 project_path.to_string_lossy().to_string()
             );
+            assert_eq!(request["params"]["rel_paths"], json!(["src/lib.rs"]));
         },
     );
 }

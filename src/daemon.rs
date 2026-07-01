@@ -94,8 +94,8 @@ impl DaemonHookEvent {
         )
     }
 
-    pub fn kiro_post_tool_use(cwd: Option<PathBuf>) -> Self {
-        Self::new("kiro", "postToolUse", Vec::new(), None, cwd)
+    pub fn kiro_post_tool_use(rel_paths: Vec<String>, cwd: Option<PathBuf>) -> Self {
+        Self::new("kiro", "postToolUse", rel_paths, None, cwd)
     }
 }
 
@@ -347,6 +347,14 @@ pub async fn notify_hook_event(project_path: &Path, event: DaemonHookEvent) {
                 .await;
         }
         "postToolUse" => {
+            let rel_paths = safe_daemon_hook_rel_paths(&event.rel_paths);
+            if !rel_paths.is_empty() {
+                let Ok(cg) = crate::tracedecay::TraceDecay::open(project_path).await else {
+                    return;
+                };
+                let _ = cg.sync_if_stale_silent(&rel_paths).await;
+                return;
+            }
             run_debounced_hook_sync_without_daemon(project_path, hook_marker_file(&event.agent))
                 .await;
         }

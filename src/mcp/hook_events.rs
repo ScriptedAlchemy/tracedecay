@@ -102,6 +102,9 @@ pub(crate) fn plan_hook_event(
                 agent: event.agent,
             })
             .unwrap_or(HookEventPlan::DebouncedIncrementalSync(event.agent)),
+        HookEventKind::IncrementalSync if !event.rel_paths.is_empty() => {
+            HookEventPlan::SyncFiles(event.rel_paths.clone())
+        }
         HookEventKind::IncrementalSync => HookEventPlan::DebouncedIncrementalSync(event.agent),
     }
 }
@@ -251,6 +254,21 @@ mod tests {
         let params = json!({
             "agent": "cursor",
             "event": "afterFileEdit",
+            "rel_paths": ["src/lib.rs", "../outside.rs"]
+        });
+        let event = parse_or_panic(&params);
+
+        assert_eq!(
+            plan_hook_event(&event, Path::new("/tmp/project"), None),
+            HookEventPlan::SyncFiles(vec!["src/lib.rs".to_string()])
+        );
+    }
+
+    #[test]
+    fn plans_incremental_sync_with_paths_as_targeted_sync() {
+        let params = json!({
+            "agent": "kiro",
+            "event": "postToolUse",
             "rel_paths": ["src/lib.rs", "../outside.rs"]
         });
         let event = parse_or_panic(&params);

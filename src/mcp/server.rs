@@ -681,6 +681,33 @@ impl McpServer {
         snapshot
     }
 
+    async fn reopen_after_branch_tracking_added(&self) {
+        let reopened = {
+            let mut guard = self.cg.write().await;
+            match guard.reopen_for_current_branch().await {
+                Ok(fresh) => {
+                    eprintln!(
+                        "[tracedecay] branch tracking added for '{}' — reopened the index for it",
+                        fresh.active_branch().unwrap_or("<detached>")
+                    );
+                    *guard = Arc::new(fresh);
+                    true
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[tracedecay] hook branch tracking added but reopen failed: {e}; \
+                         continuing to serve branch '{}'",
+                        guard.serving_branch().unwrap_or("<none>")
+                    );
+                    false
+                }
+            }
+        };
+        if reopened {
+            self.refresh_file_token_map().await;
+        }
+    }
+
     /// Estimates the raw-file token cost ("before") for the given file
     /// paths from the cached file-token map (indexed file bytes / 4).
     /// Pure lookup — persists nothing.
@@ -1365,10 +1392,12 @@ impl McpServer {
             }
             HookEventPlan::AddBranch(branch) => {
                 match self.add_hook_branch_tracking(root, &branch, &cg).await {
-                    Ok(
-                        crate::branch::BranchAddOutcome::Added
-                        | crate::branch::BranchAddOutcome::AlreadyTracked,
-                    ) => self.refresh_file_token_map().await,
+                    Ok(crate::branch::BranchAddOutcome::Added) => {
+                        self.reopen_after_branch_tracking_added().await;
+                    }
+                    Ok(crate::branch::BranchAddOutcome::AlreadyTracked) => {
+                        self.refresh_file_token_map().await;
+                    }
                     Ok(
                         crate::branch::BranchAddOutcome::Deferred
                         | crate::branch::BranchAddOutcome::NotIndexed,
@@ -1379,7 +1408,7 @@ impl McpServer {
             HookEventPlan::SyncCurrentBranch { branch, agent } => {
                 match self.add_hook_branch_tracking(root, &branch, &cg).await {
                     Ok(crate::branch::BranchAddOutcome::Added) => {
-                        self.refresh_file_token_map().await;
+                        self.reopen_after_branch_tracking_added().await;
                     }
                     Ok(
                         crate::branch::BranchAddOutcome::AlreadyTracked

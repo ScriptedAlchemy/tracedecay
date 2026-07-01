@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -1293,6 +1293,14 @@ fn rel_under_root(root: &Path, abs: &Path) -> Option<String> {
     if stripped.as_os_str().is_empty() {
         return None;
     }
+    if stripped.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return None;
+    }
     Some(stripped.to_string_lossy().replace('\\', "/"))
 }
 
@@ -2450,11 +2458,62 @@ async fn notify_kiro_post_tool_use(event_json: &str) {
     if !crate::tracedecay::TraceDecay::has_initialized_store(&project_root).await {
         return;
     }
+    let rel_paths = kiro_post_tool_use_rel_paths(event_json, &project_root);
     crate::daemon::notify_hook_event(
         &project_root,
-        crate::daemon::DaemonHookEvent::kiro_post_tool_use(event_cwd(event_json)),
+        crate::daemon::DaemonHookEvent::kiro_post_tool_use(rel_paths, event_cwd(event_json)),
     )
     .await;
+}
+
+pub fn kiro_post_tool_use_rel_paths(event_json: &str, project_root: &Path) -> Vec<String> {
+    let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
+        return Vec::new();
+    };
+    let cwd = event_cwd_from_parsed(&parsed).unwrap_or_else(|| project_root.to_path_buf());
+    let tool_input = parsed
+        .get("tool_input")
+        .or_else(|| parsed.get("toolInput"))
+        .or_else(|| parsed.get("input"))
+        .unwrap_or(&Value::Null);
+
+    let mut paths = Vec::new();
+    collect_event_path_fields(&parsed, &mut paths);
+    collect_event_path_fields(tool_input, &mut paths);
+
+    let mut rels = Vec::new();
+    for path in paths {
+        let path = Path::new(&path);
+        let abs = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            cwd.join(path)
+        };
+        if let Some(rel) = rel_under_root(project_root, &abs) {
+            if !rels.contains(&rel) {
+                rels.push(rel);
+            }
+        }
+    }
+    rels
+}
+
+fn collect_event_path_fields(value: &Value, out: &mut Vec<String>) {
+    for key in ["file_path", "filePath", "path", "target_file", "targetFile"] {
+        match value.get(key) {
+            Some(Value::String(path)) if !path.is_empty() => out.push(path.clone()),
+            Some(Value::Array(paths)) => {
+                out.extend(
+                    paths
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .filter(|path| !path.is_empty())
+                        .map(str::to_string),
+                );
+            }
+            _ => {}
+        }
+    }
 }
 
 fn cursor_tool_hint_input(parsed: &Value) -> ToolHintInput {

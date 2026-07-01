@@ -12,7 +12,8 @@ use tracedecay::hooks::{
     cursor_shell_sync_plan_with_current_branch, cursor_should_run_sync, cursor_staleness_hint,
     evaluate_codex_subagent_start, evaluate_cursor_post_tool_use, evaluate_cursor_subagent_start,
     evaluate_hook_decision, evaluate_kiro_pre_tool_use, is_git_state_changing_command,
-    record_codex_subagent_start, CursorShellSyncPlan, HookWorkspaceStatus,
+    kiro_post_tool_use_rel_paths, record_codex_subagent_start, CursorShellSyncPlan,
+    HookWorkspaceStatus,
 };
 use tracedecay::storage::{
     resolve_layout_for_current_profile, write_enrollment_marker, EnrollmentMarker, StorageMode,
@@ -736,6 +737,46 @@ fn test_cursor_after_file_edit_rel_paths_skips_paths_outside_root() {
         rels.is_empty(),
         "paths outside the project root must be ignored, got {rels:?}"
     );
+}
+
+#[test]
+fn test_kiro_post_tool_use_rel_paths_targets_written_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let input = format!(
+        r#"{{
+            "hook_event_name": "postToolUse",
+            "tool_name": "fs_write",
+            "cwd": {},
+            "tool_input": {{
+                "path": "src/lib.rs"
+            }}
+        }}"#,
+        serde_json::to_string(root.to_str().unwrap()).unwrap()
+    );
+
+    let rels = kiro_post_tool_use_rel_paths(&input, &root);
+
+    assert_eq!(rels, ["src/lib.rs"]);
+}
+
+#[test]
+fn test_kiro_post_tool_use_rel_paths_skips_paths_outside_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let input = format!(
+        r#"{{
+            "hook_event_name": "postToolUse",
+            "tool_name": "fs_write",
+            "cwd": {},
+            "tool_input": {{
+                "path": "../outside.rs"
+            }}
+        }}"#,
+        serde_json::to_string(root.to_str().unwrap()).unwrap()
+    );
+
+    assert!(kiro_post_tool_use_rel_paths(&input, &root).is_empty());
 }
 
 #[test]
