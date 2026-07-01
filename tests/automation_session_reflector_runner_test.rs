@@ -334,6 +334,123 @@ async fn session_reflector_runner_validates_fact_proposals_without_applying() {
 }
 
 #[tokio::test]
+async fn session_reflector_runner_auto_applies_facts_when_memory_auto_apply_is_enabled() {
+    let temp = tempdir().unwrap();
+    let cg = init_project(temp.path()).await;
+    seed_session_evidence(&cg).await;
+    let backend = SessionJsonBackend::new(json!({
+        "facts": [
+            {
+                "content": "TraceDecay automation should make accepted session memories automatically",
+                "category": "project",
+                "tags": ["automation", "memory"],
+                "entities": ["TraceDecay"],
+                "trust": 0.76,
+                "source_span": {"session_id": "session-reflect-1", "message_id": "session-reflect-1-message-001"},
+                "reason": "Repeated session evidence supports automatic durable memory capture"
+            }
+        ]
+    }));
+    let config = AutomationConfig {
+        enabled: true,
+        backend: AutomationBackend::CodexAppServer,
+        host_mode: AutomationHostMode::Standalone,
+        model: Some("configured-model".to_string()),
+        require_dashboard_approval: false,
+        auto_apply_memory_ops: true,
+        tasks: AutomationTaskSet {
+            session_reflector: AutomationTaskConfig {
+                enabled: true,
+                schedule: Some("manual".to_string()),
+                ..AutomationTaskConfig::default()
+            },
+            ..AutomationTaskSet::default()
+        },
+        ..AutomationConfig::default()
+    };
+
+    let run = run_session_reflector_with_backend(
+        &cg,
+        &config,
+        &backend,
+        SessionReflectorAutomationOptions {
+            trigger: AutomationTrigger::ManualCli,
+            provider: "cursor".to_string(),
+            query: "durable session reflection".to_string(),
+            evidence_limit: 5,
+            run_id: None,
+            ..SessionReflectorAutomationOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(backend.calls(), 1);
+    assert_eq!(run.report["status"], json!("auto_applied"));
+    assert_eq!(run.report["dry_run"], json!(false));
+    assert_eq!(
+        run.report["session_fact_apply_policy"]["decision"],
+        json!("auto_apply_allowed")
+    );
+    assert_eq!(
+        run.report["session_fact_apply_policy"]["mutates_store"],
+        json!(true)
+    );
+    assert_eq!(
+        run.ledger_record
+            .applied_ops
+            .as_ref()
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        run.ledger_record.validation_report.as_ref().unwrap()["status"],
+        json!("auto_applied")
+    );
+
+    let pending = list_fact_proposals(
+        &cg.store_layout().dashboard_root,
+        Some(FactProposalState::PendingApproval),
+        10,
+    )
+    .await
+    .unwrap();
+    assert!(pending.is_empty());
+    let applied = list_fact_proposals(
+        &cg.store_layout().dashboard_root,
+        Some(FactProposalState::Applied),
+        10,
+    )
+    .await
+    .unwrap();
+    assert_eq!(applied.len(), 1);
+    assert_eq!(
+        applied[0].reviewer.as_deref(),
+        Some("session_reflector:auto_apply")
+    );
+
+    let facts = cg
+        .search_facts(tracedecay::memory::types::SearchFactsRequest {
+            query: "automatic durable memory capture".to_string(),
+            category: Some(tracedecay::memory::types::MemoryCategory::Project),
+            limit: Some(10),
+            min_trust: Some(0.1),
+            include_why: false,
+        })
+        .await
+        .unwrap();
+    assert!(
+        facts
+            .iter()
+            .any(|hit| hit.fact.source.as_deref() == Some("session_reflector")),
+        "auto-applied accepted session facts should be written to the fact store"
+    );
+}
+
+#[tokio::test]
 async fn session_fact_proposals_dedupe_repeated_pending_facts_across_runs() {
     let temp = tempdir().unwrap();
     let dashboard_root = temp.path().join("dashboard");
