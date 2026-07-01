@@ -2,6 +2,8 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 #[cfg(unix)]
+use std::future::Future;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream as StdUnixStream;
@@ -32,6 +34,12 @@ pub const SOCKET_ENV: &str = "TRACEDECAY_DAEMON_SOCKET";
 pub const HOOK_EVENT_METHOD: &str = "tracedecay/hookEvent";
 #[cfg(unix)]
 const HOOK_EVENT_NOTIFY_TIMEOUT: Duration = Duration::from_millis(750);
+/// Upper bound on graceful-shutdown persistence work (per-server token
+/// persistence and WAL checkpoints). Must stay comfortably below systemd's
+/// stop timeout (90s by default) so the daemon exits cleanly instead of
+/// being killed with `SIGKILL` mid-checkpoint.
+#[cfg(unix)]
+const DAEMON_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(45);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonHookEvent {
@@ -1029,9 +1037,48 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         "daemon_shutdown",
         &[("socket", socket_path.display().to_string())],
     );
-    engine.shutdown_all().await;
+    let completed = await_shutdown_within_deadline(
+        async move { engine.shutdown_all().await },
+        DAEMON_SHUTDOWN_DEADLINE,
+    )
+    .await;
+    if !completed {
+        log_daemon_event(
+            "daemon_shutdown",
+            &[
+                ("outcome", "timeout".to_string()),
+                (
+                    "deadline_secs",
+                    DAEMON_SHUTDOWN_DEADLINE.as_secs().to_string(),
+                ),
+            ],
+        );
+    }
     let _ = std::fs::remove_file(&socket_path);
     Ok(())
+}
+
+/// Runs the shutdown future on its own task and waits at most `deadline` for
+/// it to finish, returning `true` when it completed in time.
+///
+/// Graceful shutdown persists tokens-saved counters and checkpoints WALs for
+/// every live project server sequentially; with many servers or large WALs
+/// that can exceed systemd's stop timeout, which then sends `SIGKILL` to the
+/// daemon. On timeout the task is aborted and we proceed to exit: the
+/// remaining persistence is best-effort and the SQLite WAL keeps state
+/// crash-safe.
+#[cfg(unix)]
+async fn await_shutdown_within_deadline<F>(shutdown: F, deadline: Duration) -> bool
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let mut handle = tokio::spawn(shutdown);
+    if timeout(deadline, &mut handle).await.is_ok() {
+        true
+    } else {
+        handle.abort();
+        false
+    }
 }
 
 #[cfg(unix)]
@@ -2866,5 +2913,32 @@ mod tests {
             .await
             .expect("server B task")
             .expect("server B result");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_deadline_reports_completion_for_fast_shutdown() {
+        let completed = super::await_shutdown_within_deadline(
+            std::future::ready(()),
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        assert!(completed, "instant shutdown should finish within deadline");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_deadline_aborts_stalled_shutdown() {
+        let started = std::time::Instant::now();
+        let completed = super::await_shutdown_within_deadline(
+            std::future::pending(),
+            std::time::Duration::from_millis(50),
+        )
+        .await;
+        assert!(!completed, "stalled shutdown must report a timeout");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "timeout must return promptly instead of waiting on the stalled task"
+        );
     }
 }
