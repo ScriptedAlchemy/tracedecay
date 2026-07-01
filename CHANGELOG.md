@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.18](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.17...v0.0.18) - 2026-07-01
+
+### Added
+
+- add daemon dashboard project selector
+
+### Fixed
+
+- refresh selected project cache
+- harden dashboard project selection
+- reject scoped project mutations before state load
+- isolate selected dashboard project state
+
+### Other
+
+- Merge remote-tracking branch 'origin/master' into codex/tracedecay-followup-diagnostics
+- trim Windows fixture overhead
+- simplify selected project cache
+- speed up windows rust checks ([#148](https://github.com/ScriptedAlchemy/tracedecay/pull/148))
+
 ## [0.0.17](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.16...v0.0.17) - 2026-06-29
 
 ### Other
