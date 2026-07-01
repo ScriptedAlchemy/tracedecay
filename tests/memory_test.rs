@@ -271,6 +271,15 @@ fn core_memory_types_use_stable_json_strings() {
         "code_area".parse::<MemoryCategory>().unwrap(),
         MemoryCategory::CodeArea
     );
+    assert!("tool_guidance".parse::<MemoryCategory>().is_err());
+    assert_eq!(
+        MemoryCategory::from_proposal_label("tool_guidance").unwrap(),
+        MemoryCategory::Tool
+    );
+    assert_eq!(
+        MemoryCategory::from_proposal_label("workflow preference").unwrap(),
+        MemoryCategory::UserPref
+    );
 
     let fact = FactRecord {
         fact_id: 42,
