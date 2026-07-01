@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.19](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.18...v0.0.19) - 2026-07-01
+
+### Fixed
+
+- dedupe tool descriptor hints separately
+- strengthen TraceDecay tool discovery hints
+- handle daemon hook review followups
+- resolve worktree registry context by identity
+- prefer crates.io for cargo updates
+
+### Other
+
+- daemon-owned hook event notifications
+- [codex] Fix automation retry and fact curation policy ([#161](https://github.com/ScriptedAlchemy/tracedecay/pull/161))
+- Simplify session provider ingest selection
+- scope message search catch-up
+- speed up Windows shard fixtures
+
 ## [0.0.18](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.17...v0.0.18) - 2026-07-01
 
 ### Added
