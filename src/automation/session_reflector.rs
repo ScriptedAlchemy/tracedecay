@@ -116,7 +116,7 @@ async fn validate_fact_proposal(
     let Some(category) = object
         .get("category")
         .and_then(Value::as_str)
-        .and_then(|value| value.parse::<MemoryCategory>().ok())
+        .and_then(|value| MemoryCategory::from_proposal_label(value).ok())
     else {
         return Ok(rejected_fact(proposal, "valid category is required"));
     };

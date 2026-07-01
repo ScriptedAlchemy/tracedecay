@@ -8,9 +8,9 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use tracedecay::automation::backend::{
-    backend_availability, classify_agent_task_error_message, extract_json_object_prefix,
-    AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
-    CodexAppServerBackend,
+    agent_task_failure_disposition, backend_availability, classify_agent_task_error_message,
+    extract_json_object_prefix, AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind,
+    AgentTaskRequest, AgentTaskResponse, CodexAppServerBackend,
 };
 use tracedecay::automation::config::{AutomationBackend, AutomationConfig};
 use tracedecay::sessions::codex_app_server::{
@@ -152,6 +152,11 @@ fn classifies_backend_failures_for_retry_policy() {
             true,
         ),
         (
+            "config error: codex app-server closed stdout before completing",
+            AgentTaskFailureClass::Unavailable,
+            true,
+        ),
+        (
             "json error: expected value at line 1 column 1",
             AgentTaskFailureClass::MalformedOutput,
             false,
@@ -180,6 +185,22 @@ fn classifies_backend_failures_for_retry_policy() {
             "message: {message}"
         );
     }
+}
+
+#[test]
+fn failure_disposition_heals_stale_recorded_retryability() {
+    let disposition = agent_task_failure_disposition(
+        Some(AgentTaskFailureClass::Permanent),
+        Some(false),
+        Some("config error: codex app-server closed stdout before completing"),
+    );
+
+    assert_eq!(
+        disposition.classification,
+        Some(AgentTaskFailureClass::Unavailable)
+    );
+    assert_eq!(disposition.retryable, Some(true));
+    assert!(!disposition.is_non_retryable());
 }
 
 #[test]

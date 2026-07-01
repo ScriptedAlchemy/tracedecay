@@ -9063,7 +9063,7 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
 
 #[tokio::test]
 async fn lcm_compress_without_summarizer_requests_auxiliary_summary() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     for (index, content) in [
         "historical planning context alpha beta gamma",
         "historical tool result delta epsilon zeta",
@@ -9310,7 +9310,7 @@ async fn lcm_preflight_structured_replay_content_is_bounded_for_mcp() {
 
 #[tokio::test]
 async fn lcm_session_boundary_handler_records_cooldown_for_skipped_carry_over() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     for (index, content) in ["old-1 token", "old-2 token", "fresh-1", "fresh-2"]
         .iter()
         .enumerate()
@@ -9371,7 +9371,7 @@ async fn lcm_session_boundary_handler_records_cooldown_for_skipped_carry_over() 
 
 #[tokio::test]
 async fn lcm_status_response_is_valid_json_and_omits_payload_secrets() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let db = open_project_session_db(cg.project_root())
         .await
         .expect("project-local session db should open");
@@ -9658,7 +9658,7 @@ async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
 
 #[tokio::test]
 async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message_with_role_source_timestamp(
         &cg,
         "lcm-native-filters",
@@ -10204,7 +10204,7 @@ async fn lcm_load_session_accepts_valid_integer_args() {
 
 #[tokio::test]
 async fn lcm_large_json_response_stays_parseable_after_truncation() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     for index in 0..4 {
         seed_lcm_session_message(
             &cg,
@@ -10238,7 +10238,7 @@ async fn lcm_large_json_response_stays_parseable_after_truncation() {
 
 #[tokio::test]
 async fn lcm_expand_query_large_response_preserves_synthesis_contract() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "lcm-large-expand-query",
@@ -10302,7 +10302,7 @@ async fn lcm_expand_query_large_response_preserves_synthesis_contract() {
 
 #[tokio::test]
 async fn lcm_expand_query_oversized_prompt_preserves_synthesis_contract() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "lcm-huge-prompt-expand-query",
