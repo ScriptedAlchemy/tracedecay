@@ -17,7 +17,7 @@ use crate::sessions::lcm::{
     LcmGrepSort, LcmLoadSessionRequest, LcmPreflightRequest, LcmScope, LcmSessionBoundaryRequest,
     LcmSummarizerMode, LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT,
 };
-use crate::sessions::SessionSearchScope;
+use crate::sessions::{ProviderScope, SessionSearchScope};
 use crate::tracedecay::TraceDecay;
 
 const DEFAULT_LCM_CONTENT_LIMIT: usize = 4096;
@@ -1370,6 +1370,10 @@ fn parse_message_search_scope(args: &Value) -> Result<SessionSearchScope> {
     }
 }
 
+fn parse_message_search_provider_scope(args: &Value) -> Result<ProviderScope> {
+    ProviderScope::parse_optional(string_arg(args, "provider")).map_err(argument_error)
+}
+
 pub(super) async fn handle_message_search(
     cg: &TraceDecay,
     args: Value,
@@ -1384,7 +1388,8 @@ pub(super) async fn handle_message_search(
         .ok_or_else(|| TraceDecayError::Config {
             message: "missing required parameter: query".to_string(),
         })?;
-    let requested_provider = optional_search_provider_arg(&args);
+    let provider_scope = parse_message_search_provider_scope(&args)?;
+    let requested_provider = provider_scope.provider_id();
     let project_key = args
         .get("project_key")
         .and_then(Value::as_str)
@@ -1443,8 +1448,14 @@ pub(super) async fn handle_message_search(
             }),
         ));
     };
-    if catch_up {
-        let _ = crate::sessions::ingest_global_sources(&db, &target_root).await;
+    let catch_up_performed = catch_up;
+    if catch_up_performed {
+        let _ = crate::sessions::ingest_global_sources_for_provider(
+            &db,
+            &target_root,
+            provider_scope.provider(),
+        )
+        .await;
     }
     let results = if let Some(provider) = requested_provider {
         db.search_session_messages_filtered(
@@ -1478,6 +1489,8 @@ pub(super) async fn handle_message_search(
             "parent_session_id": parent_session_id,
             "include_subagents": include_subagents,
             "catch_up": catch_up,
+            "catch_up_performed": catch_up_performed,
+            "catch_up_provider": provider_scope.response_label(),
             "scope": match scope {
                 SessionSearchScope::All => "all",
                 SessionSearchScope::ParentsOnly => "parents_only",

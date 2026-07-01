@@ -15,10 +15,23 @@ pub mod cursor_agent;
 pub mod hermes;
 pub mod kiro;
 pub mod lcm;
+pub mod providers;
 pub mod shared;
 pub mod source;
 pub(crate) mod transcript_backfill;
 pub mod vibe;
+
+pub use providers::{ProviderScope, SessionProvider};
+
+const FILE_TRANSCRIPT_PROVIDERS: &[SessionProvider] = &[
+    SessionProvider::Claude,
+    SessionProvider::Codex,
+    SessionProvider::Vibe,
+    SessionProvider::Cline,
+    SessionProvider::RooCode,
+    SessionProvider::Kilo,
+    SessionProvider::Kiro,
+];
 
 pub(crate) fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
@@ -36,38 +49,65 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
 /// re-ingests the other's work. Fail-open and incremental (unchanged files
 /// are a no-op).
 pub async fn ingest_global_sources(db: &GlobalDb, project_root: &Path) -> TranscriptIngestStats {
+    ingest_global_sources_for_provider(db, project_root, None).await
+}
+
+pub async fn ingest_global_sources_for_provider(
+    db: &GlobalDb,
+    project_root: &Path,
+    provider: Option<SessionProvider>,
+) -> TranscriptIngestStats {
     let mut sources: Vec<Box<dyn TranscriptSource>> = Vec::new();
-    if let Some(source) = claude::ClaudeSource::new() {
-        sources.push(Box::new(source));
-    }
-    if let Some(source) = codex::CodexSource::new() {
-        sources.push(Box::new(source));
-    }
-    if let Some(source) = vibe::VibeSource::new() {
-        sources.push(Box::new(source));
-    }
-    if let Some(source) = cline_like::ClineLikeSource::cline() {
-        sources.push(Box::new(source));
-    }
-    if let Some(source) = cline_like::ClineLikeSource::roo_code() {
-        sources.push(Box::new(source));
-    }
-    if let Some(source) = cline_like::ClineLikeSource::kilo() {
-        sources.push(Box::new(source));
-    }
-    if let Some(source) = kiro::KiroSource::new() {
-        sources.push(Box::new(source));
-    }
-    // Cursor has live hook ingestion, but transcripts written before a project
-    // was indexed (or while hooks were absent) need this catch-up path; shared
-    // parse offsets make hook-ingested files no-ops here and vice versa.
-    if let Some(source) = cursor::CursorSweepSource::new() {
-        sources.push(Box::new(source));
+    match provider {
+        None => {
+            for provider in FILE_TRANSCRIPT_PROVIDERS {
+                push_file_source(&mut sources, *provider);
+            }
+        }
+        Some(provider) => push_file_source(&mut sources, provider),
     }
     let stats = ingest_sources(db, project_root, &sources).await;
-    // Hermes stores many sessions in one SQLite file per profile, so it plugs
-    // in beside the file-based sources rather than through `TranscriptSource`.
-    stats.merge(hermes::ingest_for_project(db, project_root).await)
+    let stats = if provider.is_none() || provider == Some(SessionProvider::Cursor) {
+        // Cursor has live hook ingestion, but transcripts written before a
+        // project was indexed (or while hooks were absent) need this catch-up
+        // path; shared parse offsets make hook-ingested files no-ops.
+        if let Some(source) = cursor::CursorSweepSource::new() {
+            stats.merge(ingest_source(db, &source, project_root, None).await)
+        } else {
+            stats
+        }
+    } else {
+        stats
+    };
+    if provider.is_none() || provider == Some(SessionProvider::Hermes) {
+        // Hermes stores many sessions in one SQLite file per profile, so it
+        // plugs in beside the file-based sources rather than `TranscriptSource`.
+        stats.merge(hermes::ingest_for_project(db, project_root).await)
+    } else {
+        stats
+    }
+}
+
+fn push_file_source(sources: &mut Vec<Box<dyn TranscriptSource>>, provider: SessionProvider) {
+    match provider {
+        SessionProvider::Claude => push_source(sources, claude::ClaudeSource::new()),
+        SessionProvider::Codex => push_source(sources, codex::CodexSource::new()),
+        SessionProvider::Vibe => push_source(sources, vibe::VibeSource::new()),
+        SessionProvider::Cline => push_source(sources, cline_like::ClineLikeSource::cline()),
+        SessionProvider::RooCode => push_source(sources, cline_like::ClineLikeSource::roo_code()),
+        SessionProvider::Kilo => push_source(sources, cline_like::ClineLikeSource::kilo()),
+        SessionProvider::Kiro => push_source(sources, kiro::KiroSource::new()),
+        SessionProvider::Cursor | SessionProvider::Hermes => {}
+    }
+}
+
+fn push_source<T>(sources: &mut Vec<Box<dyn TranscriptSource>>, source: Option<T>)
+where
+    T: TranscriptSource + 'static,
+{
+    if let Some(source) = source {
+        sources.push(Box::new(source));
+    }
 }
 
 /// Drive a set of sources against `db` for `project_root`. Separated from

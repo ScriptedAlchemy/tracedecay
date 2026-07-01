@@ -7003,8 +7003,9 @@ async fn message_search_catches_up_provider_transcripts_before_querying() {
 
     let codex_dir = home.join(".codex/sessions/2026/01/01");
     fs::create_dir_all(&codex_dir).unwrap();
+    let codex_transcript = codex_dir.join("rollout-2026-01-01T00-00-00-codex-catchup.jsonl");
     fs::write(
-        codex_dir.join("rollout-2026-01-01T00-00-00-codex-catchup.jsonl"),
+        &codex_transcript,
         format!(
             "{}\n{}\n",
             json!({
@@ -7055,6 +7056,45 @@ async fn message_search_catches_up_provider_transcripts_before_querying() {
     assert_eq!(codex["count"], 1);
     assert_eq!(codex["results"][0]["message"]["provider"], "codex");
 
+    use std::io::Write;
+    let mut codex_append = fs::OpenOptions::new()
+        .append(true)
+        .open(&codex_transcript)
+        .unwrap();
+    writeln!(
+        codex_append,
+        "{}",
+        json!({
+            "timestamp": "2026-01-01T00:00:02.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "user_message",
+                "message": "deterministic-provider-only-token appears in appended transcript evidence."
+            }
+        })
+    )
+    .unwrap();
+
+    let appended_codex_result = handle_tool_call(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "query": "deterministic-provider-only-token",
+            "provider": "codex",
+            "limit": 5
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let appended_codex = extract_json(&appended_codex_result.value);
+    assert_eq!(appended_codex["status"], "ok");
+    assert_eq!(appended_codex["catch_up"], true);
+    assert_eq!(appended_codex["catch_up_performed"], true);
+    assert_eq!(appended_codex["count"], 1);
+    assert_eq!(appended_codex["results"][0]["message"]["provider"], "codex");
+
     let requested_codex_unified_result = handle_tool_call(
         &cg,
         "tracedecay_message_search",
@@ -7086,8 +7126,8 @@ async fn message_search_catches_up_provider_transcripts_before_querying() {
         .await;
     assert_eq!(
         ingested_cursor.len(),
-        1,
-        "provider-scoped search should still ingest every supported provider"
+        0,
+        "provider-scoped search should only ingest the requested provider"
     );
 
     let cursor_result = handle_tool_call(
@@ -9023,7 +9063,7 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
 
 #[tokio::test]
 async fn lcm_compress_without_summarizer_requests_auxiliary_summary() {
-    let (cg, _env, _dir) = setup_empty_project().await;
+    let (cg, _dir) = setup_project().await;
     for (index, content) in [
         "historical planning context alpha beta gamma",
         "historical tool result delta epsilon zeta",
@@ -9270,7 +9310,7 @@ async fn lcm_preflight_structured_replay_content_is_bounded_for_mcp() {
 
 #[tokio::test]
 async fn lcm_session_boundary_handler_records_cooldown_for_skipped_carry_over() {
-    let (cg, _env, _dir) = setup_empty_project().await;
+    let (cg, _dir) = setup_project().await;
     for (index, content) in ["old-1 token", "old-2 token", "fresh-1", "fresh-2"]
         .iter()
         .enumerate()
@@ -9331,7 +9371,7 @@ async fn lcm_session_boundary_handler_records_cooldown_for_skipped_carry_over() 
 
 #[tokio::test]
 async fn lcm_status_response_is_valid_json_and_omits_payload_secrets() {
-    let (cg, _env, _dir) = setup_empty_project().await;
+    let (cg, _dir) = setup_project().await;
     let db = open_project_session_db(cg.project_root())
         .await
         .expect("project-local session db should open");
@@ -9618,7 +9658,7 @@ async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
 
 #[tokio::test]
 async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
-    let (cg, _env, _dir) = setup_empty_project().await;
+    let (cg, _dir) = setup_project().await;
     seed_lcm_session_message_with_role_source_timestamp(
         &cg,
         "lcm-native-filters",
@@ -10164,7 +10204,7 @@ async fn lcm_load_session_accepts_valid_integer_args() {
 
 #[tokio::test]
 async fn lcm_large_json_response_stays_parseable_after_truncation() {
-    let (cg, _env, _dir) = setup_empty_project().await;
+    let (cg, _dir) = setup_project().await;
     for index in 0..4 {
         seed_lcm_session_message(
             &cg,
@@ -10198,7 +10238,7 @@ async fn lcm_large_json_response_stays_parseable_after_truncation() {
 
 #[tokio::test]
 async fn lcm_expand_query_large_response_preserves_synthesis_contract() {
-    let (cg, _env, _dir) = setup_empty_project().await;
+    let (cg, _dir) = setup_project().await;
     seed_lcm_session_message(
         &cg,
         "lcm-large-expand-query",
@@ -10262,7 +10302,7 @@ async fn lcm_expand_query_large_response_preserves_synthesis_contract() {
 
 #[tokio::test]
 async fn lcm_expand_query_oversized_prompt_preserves_synthesis_contract() {
-    let (cg, _env, _dir) = setup_empty_project().await;
+    let (cg, _dir) = setup_project().await;
     seed_lcm_session_message(
         &cg,
         "lcm-huge-prompt-expand-query",
@@ -11192,10 +11232,7 @@ fn message_search_provider_schema_matches_ingested_providers() {
 
     assert_eq!(
         message_search.input_schema["properties"]["provider"]["enum"],
-        serde_json::json!([
-            "all", "cursor", "claude", "codex", "vibe", "cline", "roo-code", "kilo", "kiro",
-            "hermes"
-        ])
+        serde_json::json!(tracedecay::sessions::providers::MESSAGE_SEARCH_PROVIDER_IDS)
     );
     assert!(
         !message_search
@@ -13268,6 +13305,21 @@ async fn message_search_rejects_invalid_scope() {
             "unexpected error for scope {invalid:?}: {err}"
         );
     }
+
+    let err = expect_tool_error(
+        handle_tool_call(
+            &cg,
+            "tracedecay_message_search",
+            json!({"query": "anything", "provider": "unknown-agent"}),
+            None,
+            None,
+        )
+        .await,
+    );
+    assert!(
+        err.contains("unknown session provider 'unknown-agent'"),
+        "unexpected provider error: {err}"
+    );
 }
 
 // ---------------------------------------------------------------------------
