@@ -121,6 +121,74 @@ fn validate_codex_automation_project_path() -> tracedecay::errors::Result<PathBu
     })
 }
 
+async fn install_codex_daemon_automation(
+    project_path: &Path,
+) -> tracedecay::errors::Result<PathBuf> {
+    use tracedecay::automation::config::{
+        effective_config, load_project_config, merge_project_config, project_config_path,
+        save_project_config, AutomationBackend, AutomationConfigPatch, AutomationHostMode,
+        AutomationTaskPatch,
+    };
+
+    let cg = open_or_init_codex_daemon_automation_project(project_path).await?;
+    let dashboard_root = cg.store_layout().dashboard_root.clone();
+    let existing = load_project_config(&dashboard_root).await?;
+    let updated = merge_project_config(
+        existing,
+        AutomationConfigPatch {
+            enabled: Some(true),
+            backend: Some(AutomationBackend::CodexAppServer),
+            host_mode: Some(AutomationHostMode::Standalone),
+            model: Some(Some("gpt-5.5".to_string())),
+            require_dashboard_approval: Some(false),
+            auto_apply_memory_ops: Some(true),
+            auto_enable_skills: Some(false),
+            memory_curator: codex_daemon_interval_task(15 * 60),
+            session_reflector: codex_daemon_interval_task(15 * 60),
+            skill_writer: AutomationTaskPatch {
+                min_idle_secs: Some(Some(15 * 60)),
+                ..codex_daemon_interval_task(60 * 60)
+            },
+            ..AutomationConfigPatch::default()
+        },
+    );
+
+    let global = tracedecay::user_config::UserConfig::load().automation;
+    effective_config(&global, Some(&updated))?;
+    save_project_config(&dashboard_root, &updated).await?;
+    let path = project_config_path(&dashboard_root);
+    eprintln!(
+        "\x1b[32m✔\x1b[0m Enabled TraceDecay daemon automation loop at {}",
+        path.display()
+    );
+    eprintln!(
+        "  The daemon scheduler will run memory_curator, session_reflector, and skill_writer via the Codex app-server backend."
+    );
+    Ok(path)
+}
+
+async fn open_or_init_codex_daemon_automation_project(
+    project_path: &Path,
+) -> tracedecay::errors::Result<tracedecay::tracedecay::TraceDecay> {
+    if tracedecay::tracedecay::TraceDecay::has_initialized_store(project_path).await {
+        tracedecay::tracedecay::TraceDecay::open(project_path).await
+    } else {
+        tracedecay::tracedecay::TraceDecay::init(project_path).await
+    }
+}
+
+fn codex_daemon_interval_task(
+    interval_secs: u64,
+) -> tracedecay::automation::config::AutomationTaskPatch {
+    tracedecay::automation::config::AutomationTaskPatch {
+        enabled: Some(true),
+        schedule: Some(Some("interval".to_string())),
+        interval_secs: Some(Some(interval_secs)),
+        cooldown_secs: Some(Some(5 * 60)),
+        ..tracedecay::automation::config::AutomationTaskPatch::default()
+    }
+}
+
 pub(crate) fn hermes_selected_profile_targets(
     home: &Path,
     profile: &Option<String>,
@@ -188,10 +256,7 @@ pub(crate) async fn handle_install_command(
                 ag.post_install(Some(&project_path)).await;
                 if automation && id == "codex" {
                     let scoped_project_path = validate_codex_automation_project_path()?;
-                    tracedecay::agents::codex::install_codex_native_automation(
-                        &home,
-                        &scoped_project_path,
-                    )?;
+                    install_codex_daemon_automation(&scoped_project_path).await?;
                 }
             }
             installed_names.push(ag.name().to_string());
@@ -246,10 +311,7 @@ pub(crate) async fn handle_install_command(
             ag.post_install(project_path.as_deref()).await;
             if automation && id == "codex" {
                 let scoped_project_path = validate_codex_automation_project_path()?;
-                tracedecay::agents::codex::install_codex_native_automation(
-                    &home,
-                    &scoped_project_path,
-                )?;
+                install_codex_daemon_automation(&scoped_project_path).await?;
             }
         }
         if !user_cfg.installed_agents.contains(&id) {

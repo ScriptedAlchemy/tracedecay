@@ -65,6 +65,7 @@ pub(crate) struct HookEvent {
 pub(crate) enum HookEventPlan {
     SyncFiles(Vec<String>),
     AddBranch(String),
+    AddBranchAt { root: PathBuf, branch: String },
     SyncCurrentBranch { branch: String, agent: HookAgent },
     DebouncedIncrementalSync(HookAgent),
     Noop,
@@ -153,6 +154,13 @@ fn plan_shell_hook_event(
     }
     match crate::hooks::cursor_shell_sync_plan_with_current_branch(command, current_branch) {
         crate::hooks::CursorShellSyncPlan::BranchAdd(branch) => HookEventPlan::AddBranch(branch),
+        crate::hooks::CursorShellSyncPlan::WorktreeBranchAdd {
+            branch,
+            worktree_path,
+        } => HookEventPlan::AddBranchAt {
+            root: absolutize_hook_path(cwd, &worktree_path),
+            branch,
+        },
         crate::hooks::CursorShellSyncPlan::IncrementalSync => {
             HookEventPlan::DebouncedIncrementalSync(event.agent)
         }
@@ -164,6 +172,30 @@ fn plan_shell_hook_event(
         }
         crate::hooks::CursorShellSyncPlan::Noop => HookEventPlan::Noop,
     }
+}
+
+fn absolutize_hook_path(cwd: &Path, path: &str) -> PathBuf {
+    let path = Path::new(path);
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    normalize_lexically(&joined)
+}
+
+fn normalize_lexically(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
 }
 
 fn read_marker_secs(path: &Path) -> Option<i64> {
@@ -296,6 +328,25 @@ mod tests {
                 Some("feature/daemon-hooks")
             ),
             HookEventPlan::AddBranch("feature/daemon-hooks".to_string())
+        );
+    }
+
+    #[test]
+    fn plans_worktree_add_against_new_worktree_root() {
+        let params = json!({
+            "agent": "codex",
+            "event": "postToolUseShell",
+            "command": "git worktree add ../wt feature/daemon-hooks",
+            "cwd": "/tmp/project"
+        });
+        let event = parse_or_panic(&params);
+
+        assert_eq!(
+            plan_hook_event(&event, Path::new("/tmp/project"), Some("main")),
+            HookEventPlan::AddBranchAt {
+                root: Path::new("/tmp/wt").to_path_buf(),
+                branch: "feature/daemon-hooks".to_string(),
+            }
         );
     }
 

@@ -962,6 +962,11 @@ pub enum CursorShellSyncPlan {
     /// Bootstrap/maintain branch tracking for the given branch (supersedes a
     /// plain sync; the branch-add path copies the parent DB and syncs).
     BranchAdd(String),
+    /// Bootstrap/maintain branch tracking in a newly-created linked worktree.
+    WorktreeBranchAdd {
+        branch: String,
+        worktree_path: String,
+    },
     /// Run a full incremental sync (same-branch change set).
     IncrementalSync,
     /// Ensure the current branch is tracked, then sync it if it already was.
@@ -983,7 +988,14 @@ pub fn cursor_shell_sync_plan_with_current_branch(
     command: &str,
     current_branch: Option<&str>,
 ) -> CursorShellSyncPlan {
-    if let Some(branch) = cursor_branch_switch_target(command) {
+    let raw = shell_words(command);
+    if let Some((branch, worktree_path)) = cursor_worktree_add_branch_and_path(&raw) {
+        return CursorShellSyncPlan::WorktreeBranchAdd {
+            branch,
+            worktree_path,
+        };
+    }
+    if let Some(branch) = cursor_branch_switch_target_from_tokens(&raw) {
         return CursorShellSyncPlan::BranchAdd(branch);
     }
     if is_git_state_changing_command(command) {
@@ -1005,7 +1017,11 @@ pub fn cursor_shell_sync_plan_with_current_branch(
 /// `git` are considered.
 pub fn cursor_branch_switch_target(command: &str) -> Option<String> {
     let raw = shell_words(command);
-    let sub_pos = git_subcommand_pos(&raw)?;
+    cursor_branch_switch_target_from_tokens(&raw)
+}
+
+fn cursor_branch_switch_target_from_tokens(raw: &[String]) -> Option<String> {
+    let sub_pos = git_subcommand_pos(raw)?;
     let sub = raw[sub_pos].to_ascii_lowercase();
 
     match sub.as_str() {
@@ -1052,9 +1068,30 @@ pub fn cursor_branch_switch_target(command: &str) -> Option<String> {
 }
 
 fn cursor_worktree_add_target(after: &[String]) -> Option<String> {
+    cursor_worktree_add_parts(after).map(|parts| parts.branch)
+}
+
+fn cursor_worktree_add_branch_and_path(raw: &[String]) -> Option<(String, String)> {
+    let sub_pos = git_subcommand_pos(raw)?;
+    if raw.get(sub_pos)?.eq_ignore_ascii_case("worktree")
+        && raw.get(sub_pos + 1)?.eq_ignore_ascii_case("add")
+    {
+        let parts = cursor_worktree_add_parts(&raw[sub_pos + 2..])?;
+        return Some((parts.branch, parts.worktree_path));
+    }
+    None
+}
+
+struct WorktreeAddParts {
+    branch: String,
+    worktree_path: String,
+}
+
+fn cursor_worktree_add_parts(after: &[String]) -> Option<WorktreeAddParts> {
     let mut i = 0;
     let mut positional = Vec::new();
     let mut detached = false;
+    let mut new_branch = None;
     while i < after.len() {
         let tok = &after[i];
         if tok == "--" {
@@ -1062,7 +1099,9 @@ fn cursor_worktree_add_target(after: &[String]) -> Option<String> {
             break;
         }
         if matches!(tok.as_str(), "-b" | "-B") {
-            return after.get(i + 1).cloned();
+            new_branch = after.get(i + 1).cloned();
+            i += 2;
+            continue;
         }
         if tok == "-d" || tok == "--detach" {
             detached = true;
@@ -1083,7 +1122,12 @@ fn cursor_worktree_add_target(after: &[String]) -> Option<String> {
     if detached {
         return None;
     }
-    positional.get(1).cloned()
+    let worktree_path = positional.first()?.clone();
+    let branch = new_branch.or_else(|| positional.get(1).cloned())?;
+    Some(WorktreeAddParts {
+        branch,
+        worktree_path,
+    })
 }
 
 fn is_obvious_checkout_pathspec(token: &str) -> bool {

@@ -35,21 +35,6 @@ fn canonical_temp_path(path: &Path) -> PathBuf {
     }
 }
 
-fn comparable_existing_path(path: &Path) -> String {
-    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    #[cfg(windows)]
-    {
-        let path = path.to_string_lossy().into_owned();
-        path.strip_prefix(r"\\?\")
-            .unwrap_or(&path)
-            .to_ascii_lowercase()
-    }
-    #[cfg(not(windows))]
-    {
-        path.to_string_lossy().into_owned()
-    }
-}
-
 fn profile_root(home: &Path) -> PathBuf {
     canonical_temp_path(home).join(".tracedecay")
 }
@@ -373,10 +358,12 @@ fn init_skips_gitignore_prompt_when_stdin_not_a_terminal() {
 }
 
 #[test]
-fn install_codex_automation_writes_global_project_record_noninteractively() {
+fn install_codex_automation_enables_tracedecay_daemon_loop_noninteractively() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let project_root = canonical_temp_path(project.path());
+    std::fs::create_dir_all(project_root.join("src")).unwrap();
+    std::fs::write(project_root.join("src/lib.rs"), "pub fn marker() {}\n").unwrap();
 
     let mut install = tracedecay_command(home.path(), &project_root);
     let _shim = add_tracedecay_path_shim(&mut install, home.path());
@@ -395,28 +382,54 @@ fn install_codex_automation_writes_global_project_record_noninteractively() {
             .is_file(),
         "install --agent codex should still install the Codex plugin bundle"
     );
-    let automation_path = home
-        .path()
-        .join(".codex/automations/watch-tracedecay-memory/automation.toml");
-    let automation = std::fs::read_to_string(&automation_path)
-        .unwrap_or_else(|e| panic!("failed to read {}: {e}", automation_path.display()));
-    let parsed = automation
-        .parse::<toml::Table>()
-        .expect("automation.toml should be valid TOML");
-    let configured_cwd = parsed
-        .get("cwds")
-        .and_then(|value| value.as_array())
-        .and_then(|values| values.first())
-        .and_then(|value| value.as_str())
-        .expect("automation cwd should be written");
-    assert_eq!(
-        comparable_existing_path(Path::new(configured_cwd)),
-        comparable_existing_path(&project_root)
+    assert!(
+        !home
+            .path()
+            .join(".codex/automations/watch-tracedecay-memory/automation.toml")
+            .exists(),
+        "Codex automation install must not create native Codex scheduled chats"
     );
     assert!(
         !project_root.join(".codex/automations").exists(),
-        "codex automation install should write the automation under the user profile"
+        "Codex automation install must not create repo-local Codex automation files"
     );
+
+    let projects_dir = profile_root(home.path()).join("projects");
+    let sidecars = std::fs::read_dir(&projects_dir)
+        .unwrap()
+        .map(|entry| {
+            entry
+                .unwrap()
+                .path()
+                .join("dashboard/automation_config.json")
+        })
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        sidecars.len(),
+        1,
+        "codex automation install should write one TraceDecay project scheduler sidecar"
+    );
+
+    let sidecar: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&sidecars[0]).expect("automation sidecar should be readable"),
+    )
+    .expect("automation sidecar should be valid JSON");
+    assert_eq!(sidecar["enabled"], true);
+    assert_eq!(sidecar["backend"], "codex_app_server");
+    assert_eq!(sidecar["host_mode"], "standalone");
+    assert_eq!(sidecar["model"], "gpt-5.5");
+    assert_eq!(sidecar["require_dashboard_approval"], false);
+    assert_eq!(sidecar["auto_apply_memory_ops"], true);
+    assert_eq!(sidecar["auto_enable_skills"], false);
+    assert_eq!(sidecar["memory_curator"]["enabled"], true);
+    assert_eq!(sidecar["memory_curator"]["schedule"], "interval");
+    assert_eq!(sidecar["memory_curator"]["interval_secs"], 900);
+    assert_eq!(sidecar["session_reflector"]["enabled"], true);
+    assert_eq!(sidecar["session_reflector"]["interval_secs"], 900);
+    assert_eq!(sidecar["skill_writer"]["enabled"], true);
+    assert_eq!(sidecar["skill_writer"]["interval_secs"], 3600);
+    assert_eq!(sidecar["skill_writer"]["min_idle_secs"], 900);
 }
 
 #[test]
