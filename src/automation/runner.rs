@@ -369,7 +369,7 @@ pub async fn run_session_reflector_with_backend(
     record.rejected_ops = report.get("rejected_facts").cloned();
     record.validation_report = Some(json!({
         "status": report.get("status").cloned().unwrap_or_else(|| json!("needs_approval")),
-        "dry_run": report.get("dry_run").cloned().unwrap_or_else(|| json!(true)),
+        "dry_run": report.get("dry_run").cloned().unwrap_or(json!(true)),
         "accepted_count": accepted_count,
         "rejected_count": rejected_count,
         "session_fact_apply_policy": report.get("session_fact_apply_policy").cloned().unwrap_or_else(|| json!({})),
