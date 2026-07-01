@@ -6922,7 +6922,12 @@ async fn message_search_reads_project_local_session_db() {
     let result = handle_tool_call(
         &cg,
         "tracedecay_message_search",
-        json!({"query": "transcript search", "provider": "cursor", "limit": 5}),
+        json!({
+            "query": "transcript search",
+            "provider": "cursor",
+            "limit": 5,
+            "catch_up": false
+        }),
         None,
         None,
     )
@@ -6945,7 +6950,11 @@ async fn message_search_reads_project_local_session_db() {
     let all_provider_result = handle_tool_call(
         &cg,
         "tracedecay_message_search",
-        json!({"query": "transcript search", "limit": 5}),
+        json!({
+            "query": "transcript search",
+            "limit": 5,
+            "catch_up": false
+        }),
         None,
         None,
     )
@@ -6971,7 +6980,8 @@ async fn message_search_reads_project_local_session_db() {
             "query": "citrus evidence",
             "provider": "cursor",
             "parent_session_id": "cursor-session",
-            "scope": "subagents_only"
+            "scope": "subagents_only",
+            "catch_up": false
         }),
         None,
         None,
@@ -7320,7 +7330,12 @@ async fn message_search_reads_profile_sharded_session_db() {
     let result = handle_tool_call(
         &cg,
         "tracedecay_message_search",
-        json!({"query": "profile shard transcript", "provider": "cursor", "limit": 5}),
+        json!({
+            "query": "profile shard transcript",
+            "provider": "cursor",
+            "limit": 5,
+            "catch_up": false
+        }),
         None,
         None,
     )
@@ -8465,7 +8480,7 @@ async fn lcm_doctor_diagnose_does_not_create_missing_project_session_db() {
 
 #[tokio::test]
 async fn lcm_doctor_repair_dry_run_does_not_run_schema_migration() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
         &cg,
         "lcm-doctor-read-only-existing",
@@ -13518,7 +13533,8 @@ async fn simplify_scan_surfaces_store_failure_instead_of_no_findings() {
 
 #[tokio::test]
 async fn simplify_scan_markdown_visible_output_is_not_escaped_blob() {
-    let (cg, dir) = setup_project().await;
+    let (cg, _env, dir) = setup_empty_project().await;
+    fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::write(
         dir.path().join("src/dead.rs"),
         r#"
@@ -13713,7 +13729,8 @@ async fn message_search_selects_registered_project_session_db_by_project_id() {
         let mut args = json!({
             "query": "dragonfruit",
             "provider": "cursor",
-            "limit": 5
+            "limit": 5,
+            "catch_up": false
         });
         args.as_object_mut()
             .unwrap()
