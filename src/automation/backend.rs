@@ -130,6 +130,36 @@ impl AgentTaskFailureClass {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentTaskFailureDisposition {
+    pub classification: Option<AgentTaskFailureClass>,
+    pub retryable: Option<bool>,
+}
+
+impl AgentTaskFailureDisposition {
+    pub fn is_non_retryable(self) -> bool {
+        self.retryable == Some(false)
+    }
+}
+
+pub fn agent_task_failure_disposition(
+    recorded_classification: Option<AgentTaskFailureClass>,
+    recorded_retryable: Option<bool>,
+    error: Option<&str>,
+) -> AgentTaskFailureDisposition {
+    let classification = error
+        .map(classify_agent_task_error_message)
+        .or(recorded_classification);
+    let retryable = classification
+        .map(AgentTaskFailureClass::is_retryable)
+        .or(recorded_retryable);
+
+    AgentTaskFailureDisposition {
+        classification,
+        retryable,
+    }
+}
+
 pub fn classify_agent_task_error_message(message: &str) -> AgentTaskFailureClass {
     let normalized = message.to_ascii_lowercase();
     if normalized.contains("timed out") || normalized.contains("timeout") {
@@ -143,6 +173,7 @@ pub fn classify_agent_task_error_message(message: &str) -> AgentTaskFailureClass
         || normalized.contains("connection refused")
         || normalized.contains("connection reset")
         || normalized.contains("broken pipe")
+        || normalized.contains("closed stdout")
     {
         return AgentTaskFailureClass::Unavailable;
     }

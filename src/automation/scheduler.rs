@@ -3,7 +3,7 @@ use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
 
-use super::backend::{task_key, AgentTaskKind};
+use super::backend::{agent_task_failure_disposition, task_key, AgentTaskKind};
 use super::config::{
     AutomationBackend, AutomationConfig, AutomationHostMode, AutomationTaskConfig,
 };
@@ -214,7 +214,12 @@ pub fn schedule_decision(
     {
         let completed_at = record.completed_at.parse::<i64>().ok().unwrap_or(0);
         if record.status == AutomationRunStatus::Failed {
-            if record.error_retryable == Some(false) {
+            let failure = agent_task_failure_disposition(
+                record.error_classification,
+                record.error_retryable,
+                record.error.as_deref(),
+            );
+            if failure.is_non_retryable() {
                 return AutomationScheduleDecision::skipped("scheduler_non_retryable_failure");
             }
             let cooldown_secs = task_config

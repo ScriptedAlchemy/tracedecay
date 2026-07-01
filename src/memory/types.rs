@@ -26,6 +26,26 @@ impl MemoryCategory {
             Self::CodeArea => "code_area",
         }
     }
+
+    pub fn from_proposal_label(value: &str) -> Result<Self, ParseMemoryCategoryError> {
+        if let Ok(category) = value.parse::<Self>() {
+            return Ok(category);
+        }
+        let normalized = normalized_category_label(value);
+        match normalized.as_str() {
+            "tool_guidance" | "tool_use" | "tool_usage" | "tooling" => Ok(Self::Tool),
+            "workflow_preference" | "workflow_preferences" | "user_workflow_preference" => {
+                Ok(Self::UserPref)
+            }
+            "workflow_requirement" | "workflow_policy" | "project_requirement" => {
+                Ok(Self::Decision)
+            }
+            "workflow" | "process" | "procedure" | "guidance" => Ok(Self::General),
+            _ => Err(ParseMemoryCategoryError {
+                value: value.to_string(),
+            }),
+        }
+    }
 }
 
 impl fmt::Display for MemoryCategory {
@@ -51,7 +71,7 @@ impl FromStr for MemoryCategory {
     type Err = ParseMemoryCategoryError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let normalized = value.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+        let normalized = normalized_category_label(value);
         match normalized.as_str() {
             "general" => Ok(Self::General),
             "user_pref" | "user_preference" | "user_preferences" => Ok(Self::UserPref),
@@ -64,6 +84,10 @@ impl FromStr for MemoryCategory {
             }),
         }
     }
+}
+
+fn normalized_category_label(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace(['-', ' '], "_")
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

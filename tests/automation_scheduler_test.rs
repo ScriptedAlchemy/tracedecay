@@ -265,6 +265,28 @@ fn scheduler_does_not_retry_explicit_non_retryable_failures() {
 }
 
 #[test]
+fn scheduler_rechecks_stale_non_retryable_backend_transport_failures() {
+    let config = automation_config(Some("daily"), None);
+    let mut failed = record(
+        "run-1",
+        AgentTaskKind::MemoryCurator,
+        AutomationRunStatus::Failed,
+        1_000,
+    );
+    failed.error =
+        Some("config error: codex app-server closed stdout before completing".to_string());
+    failed.error_classification = Some(AgentTaskFailureClass::Permanent);
+    failed.error_retryable = Some(false);
+    let records = vec![failed];
+
+    assert_eq!(
+        schedule_decision(&config, AgentTaskKind::MemoryCurator, &records, 1_100).skip_reason(),
+        Some("scheduler_cooldown_active")
+    );
+    assert!(schedule_decision(&config, AgentTaskKind::MemoryCurator, &records, 1_400).is_due());
+}
+
+#[test]
 fn scheduler_retries_explicit_retryable_failures_after_cooldown() {
     let config = automation_config(Some("daily"), None);
     let mut failed = record(

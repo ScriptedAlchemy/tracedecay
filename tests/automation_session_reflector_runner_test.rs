@@ -51,6 +51,15 @@ async fn session_reflector_runner_validates_fact_proposals_without_applying() {
                 "reason": "Repeated session evidence describes the required approval gate"
             },
             {
+                "content": "Use the fact-store workflow only when the user explicitly asks to memorize or remember a subject",
+                "category": "tool_guidance",
+                "tags": ["memory", "workflow"],
+                "entities": ["TraceDecay"],
+                "trust": 0.74,
+                "source_span": {"session_id": "session-reflect-1", "message_id": "session-reflect-1-message-001"},
+                "reason": "Repeated assistant guidance describes durable fact-store tool use"
+            },
+            {
                 "content": "Cache invalidation policy must be explicit",
                 "category": "project",
                 "tags": ["cache"],
@@ -143,7 +152,7 @@ async fn session_reflector_runner_validates_fact_proposals_without_applying() {
     assert_eq!(backend.calls(), 1);
     assert_eq!(run.ledger_record.task, AgentTaskKind::SessionReflector);
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
-    assert_eq!(run.ledger_record.accepted_count, 1);
+    assert_eq!(run.ledger_record.accepted_count, 2);
     assert_eq!(run.ledger_record.rejected_count, 7);
     assert_eq!(
         run.report["accepted_facts"][0]["add_fact_request"]["source"],
@@ -160,6 +169,10 @@ async fn session_reflector_runner_validates_fact_proposals_without_applying() {
     assert_eq!(
         run.report["accepted_facts"][0]["add_fact_request"]["metadata"]["trust_reason"],
         json!("Repeated session evidence describes the required approval gate")
+    );
+    assert_eq!(
+        run.report["accepted_facts"][1]["add_fact_request"]["category"],
+        json!("tool")
     );
     let rejected = run.report["rejected_facts"].as_array().unwrap();
     assert!(rejected
@@ -187,11 +200,16 @@ async fn session_reflector_runner_validates_fact_proposals_without_applying() {
     )
     .await
     .unwrap();
-    assert_eq!(proposals.len(), 1);
+    assert_eq!(proposals.len(), 2);
     assert_eq!(proposals[0].run_id, run.run_id);
     assert_eq!(
         proposals[0].add_fact_request.as_ref().unwrap().content,
         "The project requires durable session reflection facts to stay approval gated"
+    );
+    assert_eq!(proposals[1].run_id, run.run_id);
+    assert_eq!(
+        proposals[1].add_fact_request.as_ref().unwrap().category,
+        tracedecay::memory::types::MemoryCategory::Tool
     );
     assert_eq!(
         proposals[0].validation.as_ref().unwrap()["dedupe"]["near_duplicate_threshold"],
@@ -231,7 +249,7 @@ async fn session_reflector_runner_validates_fact_proposals_without_applying() {
     );
     let eval_payload = read_artifact(&cg, &run.run_id, &run.ledger_record, "generated_evals").await;
     assert_eq!(eval_payload["task"], json!("session_reflector"));
-    assert_eq!(eval_payload["summary"]["eval_count"], json!(8));
+    assert_eq!(eval_payload["summary"]["eval_count"], json!(9));
     assert!(eval_payload["eval_definitions"]
         .as_array()
         .unwrap()
@@ -310,7 +328,7 @@ async fn session_reflector_runner_validates_fact_proposals_without_applying() {
         .unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].run_id, run.run_id);
-    assert_eq!(records[0].accepted_count, 1);
+    assert_eq!(records[0].accepted_count, 2);
     assert_eq!(records[0].rejected_count, 7);
     assert!(records[0].applied_ops.is_none());
 }
