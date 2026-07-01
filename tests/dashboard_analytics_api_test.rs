@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use common::{
     create_runtime, get_json, http_agent, message_record_at, pick_free_port, wait_for_dashboard,
-    EnvVarGuard,
+    write_empty_global_db_schema, EnvVarGuard,
 };
 use serde_json::Value;
 use tempfile::TempDir;
@@ -276,10 +276,15 @@ async fn start_fixture(seed_durable_events: bool) -> Fixture {
 
     let global_db_path = tmp.path().join("global").join("global.db");
     let env_guard = EnvVarGuard::set("TRACEDECAY_GLOBAL_DB", &global_db_path);
+    // Pre-create both GlobalDb-schema stores from the cached empty template
+    // so seeding and dashboard startup open existing DBs instead of paying a
+    // full schema creation each (slow on Windows).
+    write_empty_global_db_schema(&global_db_path).await;
     let cg = TraceDecay::init(&project_root)
         .await
         .expect("tracedecay init");
     let session_db_path = project_session_db_path(&project_root);
+    write_empty_global_db_schema(&session_db_path).await;
     seed_session_store(&session_db_path, &project_root).await;
     if seed_durable_events {
         seed_durable_analytics(&global_db_path, &project_root).await;

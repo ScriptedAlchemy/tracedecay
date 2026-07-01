@@ -157,3 +157,18 @@ criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 [[bench]]
 name = "large_repos"
 harness = false
+
+# Compile the SQLite stack with optimizations even in dev/test builds. The
+# bundled SQLite C sources in libsql-ffi are otherwise built at -O0 (cc honors
+# cargo's OPT_LEVEL), and nearly every test creates databases and runs many
+# queries — unoptimized SQLite dominates test runtime, worst on Windows CI.
+# The `test` profile inherits these dev package overrides. Deliberately
+# scoped to the libsql layers only; do not blanket-override "*".
+[profile.dev.package.libsql-ffi]
+opt-level = 2
+
+[profile.dev.package.libsql-sys]
+opt-level = 2
+
+[profile.dev.package.libsql-rusqlite]
+opt-level = 2
