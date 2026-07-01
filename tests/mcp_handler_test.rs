@@ -786,7 +786,7 @@ async fn seed_project_registry(db_path: &Path, project_root: &Path) {
 
 #[tokio::test]
 async fn project_registry_tools_are_bounded_read_only_and_contextual() {
-    let (cg, _project_dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let registry_dir = test_temp_dir();
     let registry_path = registry_dir.path().join("global.db");
     seed_project_registry(&registry_path, cg.project_root()).await;
@@ -859,7 +859,7 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
 
 #[tokio::test]
 async fn project_registry_tools_prefer_injected_registry_over_process_default() {
-    let (cg, _project_dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let process_registry_dir = test_temp_dir();
     let process_registry_path = process_registry_dir.path().join("global.db");
     let client_registry_dir = test_temp_dir();
@@ -1113,7 +1113,7 @@ fn active_project_and_storage_status_tools_are_advertised_readonly() {
 
 #[tokio::test]
 async fn active_project_tool_reports_resolved_store_metadata() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let project_root = cg.project_root().display().to_string();
     let graph_db_path = cg.db_path().display().to_string();
 
@@ -1151,7 +1151,7 @@ async fn active_project_tool_reports_resolved_store_metadata() {
 
 #[tokio::test]
 async fn storage_status_tool_summarizes_active_project_store_health() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let layout = cg.store_layout();
     let project_root = cg.project_root().display().to_string();
     let graph_db_path = cg.db_path().display().to_string();
@@ -2176,7 +2176,7 @@ async fn test_context() {
 
 #[tokio::test]
 async fn context_includes_matching_memory_facts() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let added = handle_tool_call(
         &cg,
         "tracedecay_fact_store",
@@ -2529,7 +2529,7 @@ async fn test_node_existing() {
 
 #[tokio::test]
 async fn test_node_not_found() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_node",
@@ -2553,7 +2553,7 @@ async fn test_node_not_found() {
 
 #[tokio::test]
 async fn test_status() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_status",
@@ -2995,7 +2995,7 @@ async fn test_rank() {
 
 #[tokio::test]
 async fn test_rank_invalid_direction() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_rank",
@@ -3470,7 +3470,7 @@ async fn test_node_id_alias() {
 
 #[tokio::test]
 async fn test_status_without_server_stats() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_status", json!({}), None, None)
         .await
         .unwrap();
@@ -4061,7 +4061,7 @@ async fn test_context_scope_prefix_filters() {
 
 #[tokio::test]
 async fn test_status_reports_scope_prefix() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_status", json!({}), None, Some("src/mcp"))
         .await
         .unwrap();
@@ -4079,7 +4079,7 @@ async fn test_status_reports_scope_prefix() {
 
 #[tokio::test]
 async fn test_status_no_scope_prefix() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_status", json!({}), None, None)
         .await
         .unwrap();
@@ -4325,7 +4325,7 @@ async fn path_containment_config_rejects_symlink_escape_before_serving_config() 
 
 #[tokio::test]
 async fn project_selector_is_rejected_before_write_tool_parsing() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
 
     let result = handle_tool_call(
         &cg,
@@ -4703,7 +4703,7 @@ async fn ast_grep_rewrite_uses_current_cli_update_flag() {
 /// callers can rely on consistent behaviour.
 #[tokio::test]
 async fn branch_diff_returns_empty_when_base_equals_head() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
 
     // branch_diff requires branch tracking metadata to be present.
     let tracedecay_dir = project_data_dir(&cg);
@@ -5140,7 +5140,7 @@ async fn test_dependency_depth() {
 
 #[tokio::test]
 async fn test_health_summary() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_health", json!({}), None, None)
         .await
         .unwrap();
@@ -5159,7 +5159,7 @@ async fn test_health_summary() {
 
 #[tokio::test]
 async fn test_health_detailed() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_health",
@@ -5600,7 +5600,7 @@ async fn test_test_risk_excludes_non_src_functions_from_denominator_and_risks() 
 
 #[tokio::test]
 async fn test_session_start() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_session_start", json!({}), None, None)
         .await
         .unwrap();
@@ -5614,7 +5614,7 @@ async fn test_session_start() {
 
 #[tokio::test]
 async fn test_session_end() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     handle_tool_call(&cg, "tracedecay_session_start", json!({}), None, None)
         .await
         .unwrap();
@@ -5635,7 +5635,7 @@ async fn test_session_end() {
 
 #[tokio::test]
 async fn test_session_end_no_baseline() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_session_end", json!({}), None, None)
         .await
         .unwrap();
@@ -5704,7 +5704,7 @@ async fn test_body_returns_full_function_source() {
 
 #[tokio::test]
 async fn test_body_unknown_symbol() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_body",
@@ -5723,7 +5723,7 @@ async fn test_body_unknown_symbol() {
 
 #[tokio::test]
 async fn test_body_missing_symbol_param() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_body", json!({}), None, None).await;
     assert!(result.is_err(), "should error when symbol is missing");
 }
@@ -5822,7 +5822,7 @@ fn main() {
 
 #[tokio::test]
 async fn test_todos_empty_when_clean() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_todos", json!({}), None, None)
         .await
         .unwrap();
@@ -5917,7 +5917,7 @@ async fn test_callers_for_respects_max_per_item() {
 
 #[tokio::test]
 async fn test_callers_for_rejects_empty_input() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_callers_for",
@@ -5934,12 +5934,11 @@ async fn test_callers_for_rejects_empty_input() {
 
 #[tokio::test]
 async fn test_callers_for_rejects_unknown_kind() {
-    let (cg, _dir) = setup_project().await;
-    let helper_id = find_node_id(&cg, "helper").await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_callers_for",
-        json!({"node_ids": [helper_id], "kind": "not_a_real_kind"}),
+        json!({"node_ids": ["function:0000000000000000000000000000ffff"], "kind": "not_a_real_kind"}),
         None,
         None,
     )
@@ -5986,7 +5985,7 @@ async fn test_by_qualified_name_finds_indexed_node() {
 
 #[tokio::test]
 async fn test_by_qualified_name_returns_empty_for_unknown() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_by_qualified_name",
@@ -6002,7 +6001,7 @@ async fn test_by_qualified_name_returns_empty_for_unknown() {
 
 #[tokio::test]
 async fn test_by_qualified_name_requires_param() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_by_qualified_name", json!({}), None, None).await;
     let Err(err) = result else {
         panic!("expected error when qualified_name is missing");
@@ -6434,7 +6433,7 @@ async fn memory_status_project_selector_reports_registered_project_memory() {
 
 #[tokio::test]
 async fn memory_fact_store_update_rejects_secret_like_content_with_diff_report() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let added = handle_tool_call(
         &cg,
         "tracedecay_fact_store",
@@ -6538,7 +6537,7 @@ async fn memory_recall_updates_retrieval_count() {
 
 #[tokio::test]
 async fn memory_fact_store_update_trust_delta_uses_direct_fact_lookup() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let first = handle_tool_call(
         &cg,
         "tracedecay_fact_store",
@@ -6597,7 +6596,7 @@ async fn memory_fact_store_update_trust_delta_uses_direct_fact_lookup() {
 
 #[tokio::test]
 async fn memory_feedback_and_status_include_trust_fields() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let added = handle_tool_call(
         &cg,
         "tracedecay_fact_store",
@@ -6776,7 +6775,7 @@ async fn memory_fact_store_uses_project_store_when_serving_branch_db() {
 
 #[tokio::test]
 async fn memory_tools_validate_malformed_inputs() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
 
     let missing_action =
         handle_tool_call(&cg, "tracedecay_fact_store", json!({}), None, None).await;
@@ -11256,7 +11255,7 @@ fn message_search_provider_schema_matches_ingested_providers() {
 
 #[tokio::test]
 async fn memory_status_repairs_dirty_banks_before_reporting() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let added = handle_tool_call(
         &cg,
         "tracedecay_fact_store",
@@ -13580,7 +13579,7 @@ async fn type_hierarchy_surfaces_store_failure_instead_of_empty_tree() {
 
 #[tokio::test]
 async fn message_search_selects_registered_project_session_db_by_project_id() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let profile_root = cg.project_root().join("home/.tracedecay");
     let target_project = cg.project_root().join("registered-target");
     let target_project_path = target_project.to_string_lossy().to_string();
