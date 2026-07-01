@@ -6,7 +6,9 @@ use serde_json::{json, Value};
 use super::artifacts::sha256_json;
 use super::backend::{AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse};
 use super::config::AutomationConfig;
-use super::fact_proposals::record_session_fact_proposals;
+use super::fact_proposals::{
+    apply_fact_proposal, record_session_fact_proposals, FactProposalRecord, FactProposalState,
+};
 use super::lifecycle::{
     failed_backend_fallback_report, AgentTaskRunContext, BackendTaskRun, SchedulerGate,
 };
@@ -291,7 +293,7 @@ pub async fn run_session_reflector_with_backend(
         validate_fact_proposals(cg, &proposals, &evidence).await?;
     let accepted_count = accepted_facts.len();
     let rejected_count = rejected_facts.len();
-    let proposal_records = record_session_fact_proposals(
+    let mut proposal_records = record_session_fact_proposals(
         &run.dashboard_root,
         &run.run_id,
         evidence_hash.as_deref(),
@@ -299,19 +301,59 @@ pub async fn run_session_reflector_with_backend(
         &rejected_facts,
     )
     .await?;
+    let auto_apply_facts = config.auto_apply_memory_ops && !config.require_dashboard_approval;
+    let applied_fact_proposals = if auto_apply_facts {
+        auto_apply_session_fact_proposals(
+            cg,
+            &run.dashboard_root,
+            std::mem::take(&mut proposal_records),
+        )
+        .await?
+    } else {
+        Vec::new()
+    };
+    if auto_apply_facts {
+        proposal_records = applied_fact_proposals.clone();
+    }
     let proposal_ids: Vec<String> = proposal_records
         .iter()
         .map(|record| record.proposal_id.clone())
         .collect();
+    let applied_proposal_ids: Vec<String> = applied_fact_proposals
+        .iter()
+        .filter(|record| record.state == FactProposalState::Applied)
+        .map(|record| record.proposal_id.clone())
+        .collect();
+    let applied_fact_ids: Vec<i64> = applied_fact_proposals
+        .iter()
+        .filter_map(|record| record.applied_fact_id)
+        .collect();
+    let session_fact_apply_policy = json!({
+        "decision": if auto_apply_facts && accepted_count > 0 {
+            "auto_apply_allowed"
+        } else if config.require_dashboard_approval && accepted_count > 0 {
+            "requires_dashboard_approval"
+        } else if accepted_count > 0 {
+            "proposal_only"
+        } else {
+            "no_valid_facts"
+        },
+        "auto_apply_memory_ops": config.auto_apply_memory_ops,
+        "require_dashboard_approval": config.require_dashboard_approval,
+        "mutates_store": !applied_proposal_ids.is_empty(),
+        "applied_proposal_ids": applied_proposal_ids,
+        "applied_fact_ids": applied_fact_ids,
+    });
     let report = json!({
-        "status": "needs_approval",
-        "dry_run": true,
+        "status": if auto_apply_facts && accepted_count > 0 { "auto_applied" } else { "needs_approval" },
+        "dry_run": !(auto_apply_facts && accepted_count > 0),
         "task": "session_reflector",
         "evidence_hash": evidence_hash,
         "accepted_facts": accepted_facts,
         "rejected_facts": rejected_facts,
         "proposal_ids": proposal_ids,
         "proposal_records": proposal_records,
+        "session_fact_apply_policy": session_fact_apply_policy,
     });
     let mut record = finalizer.success_record(
         &response,
@@ -328,13 +370,17 @@ pub async fn run_session_reflector_with_backend(
         accepted_count,
         rejected_count,
     );
-    record.applied_ops = None;
+    record.applied_ops = report
+        .pointer("/session_fact_apply_policy/applied_proposal_ids")
+        .filter(|value| value.as_array().is_some_and(|items| !items.is_empty()))
+        .cloned();
     record.rejected_ops = report.get("rejected_facts").cloned();
     record.validation_report = Some(json!({
         "status": report.get("status").cloned().unwrap_or_else(|| json!("needs_approval")),
-        "dry_run": true,
+        "dry_run": report.get("dry_run").cloned().unwrap_or(json!(true)),
         "accepted_count": accepted_count,
         "rejected_count": rejected_count,
+        "session_fact_apply_policy": report.get("session_fact_apply_policy").cloned().unwrap_or_else(|| json!({})),
         "pending_proposals": {
             "proposal_ids": report.get("proposal_ids").cloned().unwrap_or_else(|| json!([])),
             "accepted_facts": report.get("accepted_facts").cloned().unwrap_or_else(|| json!([])),
@@ -350,6 +396,31 @@ pub async fn run_session_reflector_with_backend(
         ledger_record: record,
         backend_response: Some(response),
     })
+}
+
+async fn auto_apply_session_fact_proposals(
+    cg: &TraceDecay,
+    dashboard_root: &std::path::Path,
+    proposal_records: Vec<FactProposalRecord>,
+) -> Result<Vec<FactProposalRecord>> {
+    let project_db = cg.open_project_store_db().await?;
+    let mut applied = Vec::with_capacity(proposal_records.len());
+    for record in proposal_records {
+        if record.state != FactProposalState::PendingApproval {
+            applied.push(record);
+            continue;
+        }
+        applied.push(
+            apply_fact_proposal(
+                dashboard_root,
+                project_db.conn(),
+                &record.proposal_id,
+                Some("session_reflector:auto_apply".to_string()),
+            )
+            .await?,
+        );
+    }
+    Ok(applied)
 }
 
 pub async fn run_skill_writer_with_backend(

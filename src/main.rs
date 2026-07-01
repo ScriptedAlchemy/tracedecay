@@ -605,6 +605,7 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
             project_root,
             no_dashboard,
             automation,
+            auto_apply,
         } => {
             agent_cmd::handle_install_command(
                 agent,
@@ -613,7 +614,7 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                 all_profiles,
                 project_root,
                 no_dashboard,
-                automation,
+                automation.then_some(agent_cmd::CodexAutomationInstall { auto_apply }),
             )
             .await?;
         }

@@ -571,8 +571,8 @@ async fn handle_automation_config_command(
     action: AutomationConfigAction,
 ) -> tracedecay::errors::Result<()> {
     use tracedecay::automation::config::{
-        effective_config, load_project_config, merge_project_config, save_project_config,
-        AutomationBackend, AutomationConfigPatch,
+        apply_project_config_patch, effective_config, load_project_config, AutomationBackend,
+        AutomationConfigPatch,
     };
 
     let path = match &action {
@@ -603,7 +603,7 @@ async fn handle_automation_config_command(
         None
     };
 
-    let updated = match action {
+    let patch = match action {
         AutomationConfigAction::Get { json, .. } => {
             let project = project_context
                 .as_ref()
@@ -620,25 +620,15 @@ async fn handle_automation_config_command(
             print_automation_config(&global, project, &effective, json, true)?;
             return Ok(());
         }
-        AutomationConfigAction::Enable { .. } => merge_project_config(
-            project_context
-                .as_ref()
-                .and_then(|(_, project)| project.clone()),
-            AutomationConfigPatch {
-                enabled: Some(true),
-                backend: Some(AutomationBackend::CodexAppServer),
-                ..AutomationConfigPatch::default()
-            },
-        ),
-        AutomationConfigAction::Disable { .. } => merge_project_config(
-            project_context
-                .as_ref()
-                .and_then(|(_, project)| project.clone()),
-            AutomationConfigPatch {
-                enabled: Some(false),
-                ..AutomationConfigPatch::default()
-            },
-        ),
+        AutomationConfigAction::Enable { .. } => AutomationConfigPatch {
+            enabled: Some(true),
+            backend: Some(AutomationBackend::CodexAppServer),
+            ..AutomationConfigPatch::default()
+        },
+        AutomationConfigAction::Disable { .. } => AutomationConfigPatch {
+            enabled: Some(false),
+            ..AutomationConfigPatch::default()
+        },
         AutomationConfigAction::Set {
             backend,
             host_mode,
@@ -669,61 +659,56 @@ async fn handle_automation_config_command(
             skill_writer_min_idle_secs,
             skill_writer_stale_lock_secs,
             ..
-        } => merge_project_config(
-            project_context
-                .as_ref()
-                .and_then(|(_, project)| project.clone()),
-            AutomationConfigPatch {
-                backend: backend
-                    .as_deref()
-                    .map(parse_automation_backend)
-                    .transpose()?,
-                host_mode: host_mode
-                    .as_deref()
-                    .map(parse_automation_host_mode)
-                    .transpose()?,
-                model: model.map(empty_string_or_none_clears),
-                timeout_secs,
-                scheduler_tick_secs,
-                max_tokens: parse_optional_u32(max_tokens, "max_tokens")?,
-                temperature: parse_optional_f32(temperature, "temperature")?,
-                require_dashboard_approval,
-                auto_apply_memory_ops,
-                auto_enable_skills,
-                memory_curator: automation_task_patch(
-                    memory_curator,
-                    memory_curator_schedule,
-                    memory_curator_interval_secs,
-                    memory_curator_cooldown_secs,
-                    memory_curator_min_idle_secs,
-                    memory_curator_stale_lock_secs,
-                    "memory_curator",
-                )?,
-                session_reflector: automation_task_patch(
-                    session_reflector,
-                    session_reflector_schedule,
-                    session_reflector_interval_secs,
-                    session_reflector_cooldown_secs,
-                    session_reflector_min_idle_secs,
-                    session_reflector_stale_lock_secs,
-                    "session_reflector",
-                )?,
-                skill_writer: automation_task_patch(
-                    skill_writer,
-                    skill_writer_schedule,
-                    skill_writer_interval_secs,
-                    skill_writer_cooldown_secs,
-                    skill_writer_min_idle_secs,
-                    skill_writer_stale_lock_secs,
-                    "skill_writer",
-                )?,
-                ..AutomationConfigPatch::default()
-            },
-        ),
+        } => AutomationConfigPatch {
+            backend: backend
+                .as_deref()
+                .map(parse_automation_backend)
+                .transpose()?,
+            host_mode: host_mode
+                .as_deref()
+                .map(parse_automation_host_mode)
+                .transpose()?,
+            model: model.map(empty_string_or_none_clears),
+            timeout_secs,
+            scheduler_tick_secs,
+            max_tokens: parse_optional_u32(max_tokens, "max_tokens")?,
+            temperature: parse_optional_f32(temperature, "temperature")?,
+            require_dashboard_approval,
+            auto_apply_memory_ops,
+            auto_enable_skills,
+            memory_curator: automation_task_patch(
+                memory_curator,
+                memory_curator_schedule,
+                memory_curator_interval_secs,
+                memory_curator_cooldown_secs,
+                memory_curator_min_idle_secs,
+                memory_curator_stale_lock_secs,
+                "memory_curator",
+            )?,
+            session_reflector: automation_task_patch(
+                session_reflector,
+                session_reflector_schedule,
+                session_reflector_interval_secs,
+                session_reflector_cooldown_secs,
+                session_reflector_min_idle_secs,
+                session_reflector_stale_lock_secs,
+                "session_reflector",
+            )?,
+            skill_writer: automation_task_patch(
+                skill_writer,
+                skill_writer_schedule,
+                skill_writer_interval_secs,
+                skill_writer_cooldown_secs,
+                skill_writer_min_idle_secs,
+                skill_writer_stale_lock_secs,
+                "skill_writer",
+            )?,
+            ..AutomationConfigPatch::default()
+        },
     };
 
     if scope == AutomationConfigScope::Global {
-        let effective = effective_config(&global, Some(&updated))?;
+        let effective = effective_config(&global, Some(&patch))?;
         user_config.automation = effective.clone();
         if !user_config.save() {
             return Err(tracedecay::errors::TraceDecayError::Config {
@@ -734,9 +719,8 @@ async fn handle_automation_config_command(
     }
 
     let (dashboard_root, _) = project_context.expect("project scope has project context");
-    let effective = effective_config(&global, Some(&updated))?;
-    save_project_config(&dashboard_root, &updated).await?;
-    print_automation_config(&global, Some(&updated), &effective, true, false)
+    let (project, effective) = apply_project_config_patch(&dashboard_root, &global, patch).await?;
+    print_automation_config(&global, Some(&project), &effective, true, false)
 }
 
 fn automation_task_patch(

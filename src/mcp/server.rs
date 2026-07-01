@@ -1405,6 +1405,20 @@ impl McpServer {
                     Err(e) => eprintln!("[tracedecay] hook branch tracking failed: {e}"),
                 }
             }
+            HookEventPlan::AddBranchAt { root, branch } => {
+                // The new worktree root is not this server's checkout, so no
+                // reopen or token-map refresh applies here (unlike AddBranch);
+                // branch tracking against the shared store is the whole job.
+                match self.add_hook_branch_tracking(&root, &branch, &cg).await {
+                    Ok(
+                        crate::branch::BranchAddOutcome::Added
+                        | crate::branch::BranchAddOutcome::AlreadyTracked
+                        | crate::branch::BranchAddOutcome::Deferred
+                        | crate::branch::BranchAddOutcome::NotIndexed,
+                    ) => {}
+                    Err(e) => eprintln!("[tracedecay] hook worktree branch tracking failed: {e}"),
+                }
+            }
             HookEventPlan::SyncCurrentBranch { branch, agent } => {
                 match self.add_hook_branch_tracking(root, &branch, &cg).await {
                     Ok(crate::branch::BranchAddOutcome::Added) => {

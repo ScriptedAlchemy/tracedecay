@@ -1073,17 +1073,42 @@ fn test_cursor_branch_switch_target_extracts_branch() {
         cursor_branch_switch_target("git switch -c feature/y"),
         Some("feature/y".to_string())
     );
+}
+
+#[test]
+fn test_cursor_shell_sync_plan_routes_worktree_add_to_worktree_branch_add() {
     assert_eq!(
-        cursor_branch_switch_target("git worktree add ../wt feature/z"),
-        Some("feature/z".to_string())
+        cursor_shell_sync_plan("git worktree add ../wt feature/z"),
+        CursorShellSyncPlan::WorktreeBranchAdd {
+            branch: "feature/z".to_string(),
+            worktree_path: "../wt".to_string(),
+        }
     );
     assert_eq!(
-        cursor_branch_switch_target("git worktree add -b newbranch ../wt"),
-        Some("newbranch".to_string())
+        cursor_shell_sync_plan("git worktree add -b newbranch ../wt"),
+        CursorShellSyncPlan::WorktreeBranchAdd {
+            branch: "newbranch".to_string(),
+            worktree_path: "../wt".to_string(),
+        }
     );
     assert_eq!(
-        cursor_branch_switch_target("git worktree add -b feature/new ../wt main"),
-        Some("feature/new".to_string())
+        cursor_shell_sync_plan("git worktree add -b feature/new ../wt main"),
+        CursorShellSyncPlan::WorktreeBranchAdd {
+            branch: "feature/new".to_string(),
+            worktree_path: "../wt".to_string(),
+        }
+    );
+}
+
+#[test]
+fn test_cursor_shell_sync_plan_ignores_branchless_and_detached_worktree_adds() {
+    assert_eq!(
+        cursor_shell_sync_plan("git worktree add ../wt"),
+        CursorShellSyncPlan::Noop
+    );
+    assert_eq!(
+        cursor_shell_sync_plan("git worktree add --detach ../wt main"),
+        CursorShellSyncPlan::Noop
     );
 }
 
@@ -1097,11 +1122,6 @@ fn test_cursor_branch_switch_target_ignores_path_checkouts_and_non_switches() {
     assert_eq!(cursor_branch_switch_target("git checkout README.md"), None);
     assert_eq!(cursor_branch_switch_target("git pull --rebase"), None);
     assert_eq!(cursor_branch_switch_target("git merge origin/main"), None);
-    assert_eq!(cursor_branch_switch_target("git worktree add ../wt"), None);
-    assert_eq!(
-        cursor_branch_switch_target("git worktree add --detach ../wt main"),
-        None
-    );
     assert_eq!(cursor_branch_switch_target("git status"), None);
     assert_eq!(cursor_branch_switch_target("echo git checkout main"), None);
 }
@@ -1115,14 +1135,6 @@ fn test_cursor_shell_sync_plan_routes_branch_switch_to_branch_add() {
     assert_eq!(
         cursor_shell_sync_plan("git switch -c feature/x"),
         CursorShellSyncPlan::BranchAdd("feature/x".to_string())
-    );
-    assert_eq!(
-        cursor_shell_sync_plan("git worktree add ../wt feature/z"),
-        CursorShellSyncPlan::BranchAdd("feature/z".to_string())
-    );
-    assert_eq!(
-        cursor_shell_sync_plan("git worktree add -b feature/new ../wt main"),
-        CursorShellSyncPlan::BranchAdd("feature/new".to_string())
     );
 }
 

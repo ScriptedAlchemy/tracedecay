@@ -65,6 +65,7 @@ pub(crate) struct HookEvent {
 pub(crate) enum HookEventPlan {
     SyncFiles(Vec<String>),
     AddBranch(String),
+    AddBranchAt { root: PathBuf, branch: String },
     SyncCurrentBranch { branch: String, agent: HookAgent },
     DebouncedIncrementalSync(HookAgent),
     Noop,
@@ -153,6 +154,13 @@ fn plan_shell_hook_event(
     }
     match crate::hooks::cursor_shell_sync_plan_with_current_branch(command, current_branch) {
         crate::hooks::CursorShellSyncPlan::BranchAdd(branch) => HookEventPlan::AddBranch(branch),
+        crate::hooks::CursorShellSyncPlan::WorktreeBranchAdd {
+            branch,
+            worktree_path,
+        } => HookEventPlan::AddBranchAt {
+            root: crate::hooks::resolve_worktree_add_root(command, cwd, &worktree_path),
+            branch,
+        },
         crate::hooks::CursorShellSyncPlan::IncrementalSync => {
             HookEventPlan::DebouncedIncrementalSync(event.agent)
         }
@@ -296,6 +304,58 @@ mod tests {
                 Some("feature/daemon-hooks")
             ),
             HookEventPlan::AddBranch("feature/daemon-hooks".to_string())
+        );
+    }
+
+    #[test]
+    fn plans_worktree_add_against_new_worktree_root() {
+        let params = json!({
+            "agent": "codex",
+            "event": "postToolUseShell",
+            "command": "git worktree add ../wt feature/daemon-hooks",
+            "cwd": "/tmp/project"
+        });
+        let event = parse_or_panic(&params);
+
+        assert_eq!(
+            plan_hook_event(&event, Path::new("/tmp/project"), Some("main")),
+            HookEventPlan::AddBranchAt {
+                root: Path::new("/tmp/wt").to_path_buf(),
+                branch: "feature/daemon-hooks".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn plans_worktree_add_resolving_path_against_git_dash_c_dir() {
+        // `git -C <dir>` makes git resolve the worktree path against <dir>,
+        // not the shell cwd: from <base>/project/src, `-C ..` targets the
+        // project root, so `../wt` lands beside the project at <base>/wt.
+        let base = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir should create: {e}"));
+        let base_root = base
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|e| panic!("tempdir should canonicalize: {e}"));
+        let project_root = base_root.join("project");
+        std::fs::create_dir_all(project_root.join("src"))
+            .unwrap_or_else(|e| panic!("project dirs should create: {e}"));
+        std::fs::create_dir_all(base_root.join("wt"))
+            .unwrap_or_else(|e| panic!("worktree dir should create: {e}"));
+
+        let params = json!({
+            "agent": "codex",
+            "event": "postToolUseShell",
+            "command": "git -C .. worktree add ../wt feature/daemon-hooks",
+            "cwd": project_root.join("src")
+        });
+        let event = parse_or_panic(&params);
+
+        assert_eq!(
+            plan_hook_event(&event, &project_root, Some("main")),
+            HookEventPlan::AddBranchAt {
+                root: base_root.join("wt"),
+                branch: "feature/daemon-hooks".to_string(),
+            }
         );
     }
 
