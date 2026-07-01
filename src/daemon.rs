@@ -379,6 +379,13 @@ async fn notify_shell_hook_event_without_daemon(project_path: &Path, event: Daem
         crate::hooks::CursorShellSyncPlan::BranchAdd(branch) => {
             let _ = crate::tracedecay::TraceDecay::add_branch_tracking(project_path, &branch).await;
         }
+        crate::hooks::CursorShellSyncPlan::WorktreeBranchAdd {
+            branch,
+            worktree_path,
+        } => {
+            let root = crate::hooks::resolve_worktree_add_root(command, cwd, &worktree_path);
+            let _ = crate::tracedecay::TraceDecay::add_branch_tracking(&root, &branch).await;
+        }
         crate::hooks::CursorShellSyncPlan::CurrentBranchSync(branch) => {
             if !matches!(
                 crate::tracedecay::TraceDecay::add_branch_tracking(project_path, &branch).await,
@@ -569,6 +576,21 @@ pub fn service_status(socket_path: &Path) -> String {
         socket_state,
         SERVICE_NAME
     )
+}
+
+/// Whether a daemon is accepting connections at the default socket path.
+///
+/// Installers use this to warn when a daemon-scheduled feature is enabled but
+/// no daemon service is running to execute it.
+#[cfg(unix)]
+pub fn daemon_reachable() -> bool {
+    default_socket_path().is_ok_and(|path| StdUnixStream::connect(path).is_ok())
+}
+
+/// The daemon (and its scheduler) is unix-only; see [`run_foreground`].
+#[cfg(not(unix))]
+pub fn daemon_reachable() -> bool {
+    false
 }
 
 #[cfg(unix)]

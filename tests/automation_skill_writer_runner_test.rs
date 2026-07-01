@@ -63,26 +63,62 @@ async fn skill_writer_default_provider_searches_all_providers() {
     .await;
     let _global_db = isolate_global_db(&cg);
     let backend = SkillJsonBackend::new(json!({"skills": []}));
-    let config = AutomationConfig {
-        enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            skill_writer: AutomationTaskConfig {
-                enabled: true,
-                schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
-            },
-            ..AutomationTaskSet::default()
-        },
-        ..AutomationConfig::default()
-    };
+    let config = enabled_skill_writer_config();
 
     let run = run_skill_writer_with_backend(
         &cg,
         &config,
         &backend,
         SkillWriterAutomationOptions {
+            profile_root: Some(profile_root),
+            ..SkillWriterAutomationOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(backend.calls(), 1);
+    assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
+}
+
+#[tokio::test]
+async fn skill_writer_runner_reads_hermes_profile_lcm() {
+    let temp = tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let cg = init_project(temp.path()).await;
+
+    let hermes_home = tempdir().unwrap();
+    let profile_db_path = resolve_hermes_profile_session_db_path(hermes_home.path()).unwrap();
+    let profile_db = GlobalDb::open_at(&profile_db_path)
+        .await
+        .expect("hermes profile session db open");
+    seed_session_message_in_db(
+        &profile_db,
+        hermes_home.path(),
+        SeedSessionMessage {
+            provider: "cursor",
+            session_id: "hermes-skill-writer-1",
+            message_id: "hermes-skill-writer-1-message-001",
+            role: "assistant",
+            timestamp: 1_715_100_005,
+            text: "Hermes profile-only skill writer evidence should draft reusable workflow guidance.",
+            source: Some("hermes_profile_lcm"),
+        },
+    )
+    .await;
+
+    let backend = SkillJsonBackend::new(json!({"skills": []}));
+    let config = enabled_skill_writer_config();
+
+    let run = run_skill_writer_with_backend(
+        &cg,
+        &config,
+        &backend,
+        SkillWriterAutomationOptions {
+            storage_scope: "hermes_profile".to_string(),
+            hermes_home: Some(hermes_home.path().to_path_buf()),
+            provider: "cursor".to_string(),
+            query: "profile-only skill writer evidence".to_string(),
             profile_root: Some(profile_root),
             ..SkillWriterAutomationOptions::default()
         },
@@ -136,33 +172,15 @@ async fn skill_writer_runner_creates_pending_skill_drafts_for_approval() {
         ]
     }));
     let config = AutomationConfig {
-        enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
         model: Some("configured-model".to_string()),
-        tasks: AutomationTaskSet {
-            skill_writer: AutomationTaskConfig {
-                enabled: true,
-                schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
-            },
-            ..AutomationTaskSet::default()
-        },
-        ..AutomationConfig::default()
+        ..enabled_skill_writer_config()
     };
 
     let run = run_skill_writer_with_backend(
         &cg,
         &config,
         &backend,
-        SkillWriterAutomationOptions {
-            trigger: AutomationTrigger::ManualCli,
-            provider: "cursor".to_string(),
-            query: "automation".to_string(),
-            evidence_limit: 5,
-            profile_root: Some(profile_root.clone()),
-            run_id: None,
-        },
+        manual_skill_writer_options(&profile_root),
     )
     .await
     .unwrap();
@@ -352,33 +370,13 @@ async fn skill_writer_evidence_imports_project_skill_usage_analytics_before_summ
         .await
         .unwrap();
     let backend = InspectSkillWriterUsageBackend;
-    let config = AutomationConfig {
-        enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            skill_writer: AutomationTaskConfig {
-                enabled: true,
-                schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
-            },
-            ..AutomationTaskSet::default()
-        },
-        ..AutomationConfig::default()
-    };
+    let config = enabled_skill_writer_config();
 
     let run = run_skill_writer_with_backend(
         &cg,
         &config,
         &backend,
-        SkillWriterAutomationOptions {
-            trigger: AutomationTrigger::ManualCli,
-            provider: "cursor".to_string(),
-            query: "automation".to_string(),
-            evidence_limit: 5,
-            profile_root: Some(profile_root),
-            run_id: None,
-        },
+        manual_skill_writer_options(&profile_root),
     )
     .await
     .unwrap();
@@ -403,20 +401,7 @@ async fn skill_writer_evidence_includes_underused_tool_family_summary() {
     seed_search_underuse_session_evidence(&cg).await;
     let _global_db = isolate_global_db(&cg);
     let backend = InspectSkillWriterUnderusedBackend;
-    let config = AutomationConfig {
-        enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            skill_writer: AutomationTaskConfig {
-                enabled: true,
-                schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
-            },
-            ..AutomationTaskSet::default()
-        },
-        ..AutomationConfig::default()
-    };
+    let config = enabled_skill_writer_config();
 
     let run = run_skill_writer_with_backend(
         &cg,
@@ -492,33 +477,15 @@ async fn skill_writer_runner_auto_enables_when_config_explicitly_allows() {
         "auto_enable_after_validation",
     );
     let config = AutomationConfig {
-        enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
         auto_enable_skills: true,
-        tasks: AutomationTaskSet {
-            skill_writer: AutomationTaskConfig {
-                enabled: true,
-                schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
-            },
-            ..AutomationTaskSet::default()
-        },
-        ..AutomationConfig::default()
+        ..enabled_skill_writer_config()
     };
 
     let run = run_skill_writer_with_backend(
         &cg,
         &config,
         &backend,
-        SkillWriterAutomationOptions {
-            trigger: AutomationTrigger::ManualCli,
-            provider: "cursor".to_string(),
-            query: "automation".to_string(),
-            evidence_limit: 5,
-            profile_root: Some(profile_root.clone()),
-            run_id: None,
-        },
+        manual_skill_writer_options(&profile_root),
     )
     .await
     .unwrap();
@@ -646,33 +613,13 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
             }
         ]
     }));
-    let config = AutomationConfig {
-        enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            skill_writer: AutomationTaskConfig {
-                enabled: true,
-                schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
-            },
-            ..AutomationTaskSet::default()
-        },
-        ..AutomationConfig::default()
-    };
+    let config = enabled_skill_writer_config();
 
     let run = run_skill_writer_with_backend(
         &cg,
         &config,
         &backend,
-        SkillWriterAutomationOptions {
-            trigger: AutomationTrigger::ManualCli,
-            provider: "cursor".to_string(),
-            query: "automation".to_string(),
-            evidence_limit: 5,
-            profile_root: Some(profile_root.clone()),
-            run_id: None,
-        },
+        manual_skill_writer_options(&profile_root),
     )
     .await
     .unwrap();
@@ -783,33 +730,13 @@ async fn skill_writer_runner_ledgers_malformed_backend_output() {
     seed_session_evidence(&cg).await;
     let _global_db = isolate_global_db(&cg);
     let backend = SkillTextBackend::new("not json");
-    let config = AutomationConfig {
-        enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            skill_writer: AutomationTaskConfig {
-                enabled: true,
-                schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
-            },
-            ..AutomationTaskSet::default()
-        },
-        ..AutomationConfig::default()
-    };
+    let config = enabled_skill_writer_config();
 
     let err = run_skill_writer_with_backend(
         &cg,
         &config,
         &backend,
-        SkillWriterAutomationOptions {
-            trigger: AutomationTrigger::ManualCli,
-            provider: "cursor".to_string(),
-            query: "automation".to_string(),
-            evidence_limit: 5,
-            profile_root: Some(profile_root),
-            run_id: None,
-        },
+        manual_skill_writer_options(&profile_root),
     )
     .await
     .unwrap_err();
@@ -854,33 +781,13 @@ async fn skill_writer_runner_ledgers_missing_skills_array() {
     let _global_db = isolate_global_db(&cg);
     let output = json!({"summary": "no skills"});
     let backend = SkillJsonBackend::new(output.clone());
-    let config = AutomationConfig {
-        enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            skill_writer: AutomationTaskConfig {
-                enabled: true,
-                schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
-            },
-            ..AutomationTaskSet::default()
-        },
-        ..AutomationConfig::default()
-    };
+    let config = enabled_skill_writer_config();
 
     let err = run_skill_writer_with_backend(
         &cg,
         &config,
         &backend,
-        SkillWriterAutomationOptions {
-            trigger: AutomationTrigger::ManualCli,
-            provider: "cursor".to_string(),
-            query: "automation".to_string(),
-            evidence_limit: 5,
-            profile_root: Some(profile_root),
-            run_id: None,
-        },
+        manual_skill_writer_options(&profile_root),
     )
     .await
     .unwrap_err();
@@ -921,33 +828,13 @@ async fn skill_writer_runner_records_noop_fallback_when_backend_run_task_fails()
     seed_session_evidence(&cg).await;
     let _global_db = isolate_global_db(&cg);
     let backend = FailingBackend::new(AgentTaskKind::SkillWriter);
-    let config = AutomationConfig {
-        enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            skill_writer: AutomationTaskConfig {
-                enabled: true,
-                schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
-            },
-            ..AutomationTaskSet::default()
-        },
-        ..AutomationConfig::default()
-    };
+    let config = enabled_skill_writer_config();
 
     let run = run_skill_writer_with_backend(
         &cg,
         &config,
         &backend,
-        SkillWriterAutomationOptions {
-            trigger: AutomationTrigger::ManualCli,
-            provider: "cursor".to_string(),
-            query: "automation".to_string(),
-            evidence_limit: 5,
-            run_id: None,
-            profile_root: Some(profile_root),
-        },
+        manual_skill_writer_options(&profile_root),
     )
     .await
     .unwrap();

@@ -1,6 +1,6 @@
 ---
 name: tracedecay-recall-memory
-description: 'Recall prior decisions, durable facts, and past session conversations for this project.'
+description: 'Use to recall prior decisions, durable facts, and past session conversations for this project.'
 disable-model-invocation: true
 ---
 

@@ -94,6 +94,15 @@ async fn session_reflector_runner_validates_fact_proposals_without_applying() {
                 "reason": "missing trust should be rejected"
             },
             {
+                "content": "Session reflection trust must be a numeric score",
+                "category": "project",
+                "tags": ["automation"],
+                "entities": ["TraceDecay"],
+                "trust": "high",
+                "source_span": {"session_id": "session-reflect-1", "message_id": "session-reflect-1-message-001"},
+                "reason": "string trust labels should be rejected"
+            },
+            {
                 "content": "Session reflection facts require a rationale",
                 "category": "project",
                 "tags": ["automation"],
@@ -153,7 +162,7 @@ async fn session_reflector_runner_validates_fact_proposals_without_applying() {
     assert_eq!(run.ledger_record.task, AgentTaskKind::SessionReflector);
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
     assert_eq!(run.ledger_record.accepted_count, 2);
-    assert_eq!(run.ledger_record.rejected_count, 7);
+    assert_eq!(run.ledger_record.rejected_count, 8);
     assert_eq!(
         run.report["accepted_facts"][0]["add_fact_request"]["source"],
         json!("session_reflector")
@@ -189,6 +198,7 @@ async fn session_reflector_runner_validates_fact_proposals_without_applying() {
         "source_span must cite a bounded session reflection evidence hit"
     ));
     assert!(has_rejection_reason("trust is required"));
+    assert!(has_rejection_reason("trust must be between 0 and 1"));
     assert!(has_rejection_reason("reason is required"));
     assert!(has_rejection_reason(
         "confidence is not supported; use trust"
@@ -249,7 +259,7 @@ async fn session_reflector_runner_validates_fact_proposals_without_applying() {
     );
     let eval_payload = read_artifact(&cg, &run.run_id, &run.ledger_record, "generated_evals").await;
     assert_eq!(eval_payload["task"], json!("session_reflector"));
-    assert_eq!(eval_payload["summary"]["eval_count"], json!(9));
+    assert_eq!(eval_payload["summary"]["eval_count"], json!(10));
     assert!(eval_payload["eval_definitions"]
         .as_array()
         .unwrap()
@@ -329,8 +339,125 @@ async fn session_reflector_runner_validates_fact_proposals_without_applying() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].run_id, run.run_id);
     assert_eq!(records[0].accepted_count, 2);
-    assert_eq!(records[0].rejected_count, 7);
+    assert_eq!(records[0].rejected_count, 8);
     assert!(records[0].applied_ops.is_none());
+}
+
+#[tokio::test]
+async fn session_reflector_runner_auto_applies_facts_when_memory_auto_apply_is_enabled() {
+    let temp = tempdir().unwrap();
+    let cg = init_project(temp.path()).await;
+    seed_session_evidence(&cg).await;
+    let backend = SessionJsonBackend::new(json!({
+        "facts": [
+            {
+                "content": "TraceDecay automation should make accepted session memories automatically",
+                "category": "project",
+                "tags": ["automation", "memory"],
+                "entities": ["TraceDecay"],
+                "trust": 0.76,
+                "source_span": {"session_id": "session-reflect-1", "message_id": "session-reflect-1-message-001"},
+                "reason": "Repeated session evidence supports automatic durable memory capture"
+            }
+        ]
+    }));
+    let config = AutomationConfig {
+        enabled: true,
+        backend: AutomationBackend::CodexAppServer,
+        host_mode: AutomationHostMode::Standalone,
+        model: Some("configured-model".to_string()),
+        require_dashboard_approval: false,
+        auto_apply_memory_ops: true,
+        tasks: AutomationTaskSet {
+            session_reflector: AutomationTaskConfig {
+                enabled: true,
+                schedule: Some("manual".to_string()),
+                ..AutomationTaskConfig::default()
+            },
+            ..AutomationTaskSet::default()
+        },
+        ..AutomationConfig::default()
+    };
+
+    let run = run_session_reflector_with_backend(
+        &cg,
+        &config,
+        &backend,
+        SessionReflectorAutomationOptions {
+            trigger: AutomationTrigger::ManualCli,
+            provider: "cursor".to_string(),
+            query: "durable session reflection".to_string(),
+            evidence_limit: 5,
+            run_id: None,
+            ..SessionReflectorAutomationOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(backend.calls(), 1);
+    assert_eq!(run.report["status"], json!("auto_applied"));
+    assert_eq!(run.report["dry_run"], json!(false));
+    assert_eq!(
+        run.report["session_fact_apply_policy"]["decision"],
+        json!("auto_apply_allowed")
+    );
+    assert_eq!(
+        run.report["session_fact_apply_policy"]["mutates_store"],
+        json!(true)
+    );
+    assert_eq!(
+        run.ledger_record
+            .applied_ops
+            .as_ref()
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        run.ledger_record.validation_report.as_ref().unwrap()["status"],
+        json!("auto_applied")
+    );
+
+    let pending = list_fact_proposals(
+        &cg.store_layout().dashboard_root,
+        Some(FactProposalState::PendingApproval),
+        10,
+    )
+    .await
+    .unwrap();
+    assert!(pending.is_empty());
+    let applied = list_fact_proposals(
+        &cg.store_layout().dashboard_root,
+        Some(FactProposalState::Applied),
+        10,
+    )
+    .await
+    .unwrap();
+    assert_eq!(applied.len(), 1);
+    assert_eq!(
+        applied[0].reviewer.as_deref(),
+        Some("session_reflector:auto_apply")
+    );
+
+    let facts = cg
+        .search_facts(tracedecay::memory::types::SearchFactsRequest {
+            query: "automatic durable memory capture".to_string(),
+            category: Some(tracedecay::memory::types::MemoryCategory::Project),
+            limit: Some(10),
+            min_trust: Some(0.1),
+            include_why: false,
+        })
+        .await
+        .unwrap();
+    assert!(
+        facts
+            .iter()
+            .any(|hit| hit.fact.source.as_deref() == Some("session_reflector")),
+        "auto-applied accepted session facts should be written to the fact store"
+    );
 }
 
 #[tokio::test]

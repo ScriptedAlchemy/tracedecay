@@ -1,6 +1,6 @@
 ---
 name: tracedecay-review-diff
-description: 'Review the current PR/diff for impact, risk, and quality via the TraceDecay code graph.'
+description: 'Use to review the current PR or diff for impact, risk, and quality via the TraceDecay code graph.'
 disable-model-invocation: true
 ---
 
