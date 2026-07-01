@@ -483,6 +483,17 @@ for line in sys.stdin:
 }
 
 pub(crate) async fn start_dashboard_fixture(seed_lcm: bool) -> DashboardFixture {
+    start_dashboard_fixture_with_options(seed_lcm, true).await
+}
+
+pub(crate) async fn start_dashboard_fixture_without_memory() -> DashboardFixture {
+    start_dashboard_fixture_with_options(false, false).await
+}
+
+async fn start_dashboard_fixture_with_options(
+    seed_lcm: bool,
+    seed_memory: bool,
+) -> DashboardFixture {
     let tmp = tempdir_or_panic();
     let tmp_root = tmp
         .path()
@@ -504,7 +515,9 @@ pub(crate) async fn start_dashboard_fixture(seed_lcm: bool) -> DashboardFixture 
     }
 
     let cg = setup_project(&project_root).await;
-    seed_memory_fixture(&cg).await;
+    if seed_memory {
+        seed_memory_fixture(&cg).await;
+    }
 
     let global_db = match GlobalDb::open_at(&global_db_path).await {
         Some(db) => db,

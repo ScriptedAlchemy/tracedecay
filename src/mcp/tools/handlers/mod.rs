@@ -737,18 +737,13 @@ mod tests {
         let active_project = dir.path().join("active");
         let first_target = dir.path().join("first").join("target");
         let second_target = dir.path().join("second").join("target");
-        fs::create_dir_all(active_project.join("src")).unwrap();
-        fs::create_dir_all(first_target.join("src")).unwrap();
-        fs::create_dir_all(second_target.join("src")).unwrap();
-        fs::write(active_project.join("src/active.rs"), "pub fn active() {}\n").unwrap();
-        fs::write(first_target.join("src/first.rs"), "pub fn first() {}\n").unwrap();
-        fs::write(second_target.join("src/second.rs"), "pub fn second() {}\n").unwrap();
+        fs::create_dir_all(&active_project).unwrap();
+        fs::create_dir_all(&first_target).unwrap();
+        fs::create_dir_all(&second_target).unwrap();
 
         let active = TraceDecay::init(&active_project).await.unwrap();
         let first = TraceDecay::init(&first_target).await.unwrap();
         let second = TraceDecay::init(&second_target).await.unwrap();
-        first.index_all().await.unwrap();
-        second.index_all().await.unwrap();
         let registry = GlobalDb::open().await.unwrap();
 
         let err = handle_tool_call_with_registry(
