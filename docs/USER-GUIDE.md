@@ -462,6 +462,21 @@ chmod +x .git/hooks/post-commit
 
 The MCP server does not run a background file watcher. Instead, MCP tool calls perform a lightweight staleness check and run an incremental sync when indexed files are stale. Agent file/shell hooks notify the daemon about targeted edits and branch-affecting commands, and the daemon's MCP server schedules the resulting sync/branch work. Multiple MCP servers on the same project coordinate via a per-project sync lock: only one sync runs at a time.
 
+### Optional daemon service
+
+If you want the daemon available across terminal sessions and after login, install the per-user service:
+
+```bash
+tracedecay daemon install-service
+tracedecay daemon status
+```
+
+On Linux this installs a systemd user service. On macOS this installs a LaunchAgent at `~/Library/LaunchAgents/com.tracedecay.daemon.plist`. Remove it with:
+
+```bash
+tracedecay daemon uninstall-service
+```
+
 ### CLI-Only Workflows
 
 If you don't keep an agent attached, use a git post-commit hook to refresh the index on commit:

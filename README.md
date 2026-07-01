@@ -701,17 +701,19 @@ chmod +x .git/hooks/post-commit
 
 ### Daemon Debugging
 
-The daemon is a long-running MCP server for clients that share one local socket. Its logs go to stderr; when installed as a Linux user service, systemd captures them in journald.
+The daemon is a long-running MCP server for clients that share one local socket. It is opt-in: `tracedecay daemon install-service` installs a per-user service on Linux systemd or a per-user LaunchAgent on macOS.
 
 ```bash
-tracedecay daemon install-service     # install/start Linux systemd user service
+tracedecay daemon install-service     # install/start per-user daemon service
 tracedecay daemon status              # service path, socket state, log command
 systemctl --user status tracedecay.service --no-pager
 journalctl --user -u tracedecay.service -f
+launchctl print "gui/$(id -u)/com.tracedecay.daemon"
+tail -f ~/.tracedecay/daemon.err.log
 tracedecay status --runtime --json    # process + DB/WAL/SHM telemetry snapshot
 ```
 
-Scheduler logs use stable `event=... key=value` fields such as `event=scheduler_tick`, `event=scheduler_task`, `task=memory_curator`, `outcome=skipped`, and `reason=not_configured`, so they can be filtered directly from journald.
+Scheduler logs use stable `event=... key=value` fields such as `event=scheduler_tick`, `event=scheduler_task`, `task=memory_curator`, `outcome=skipped`, and `reason=not_configured`, so they can be filtered directly from journald on Linux or the daemon log file on macOS.
 
 ### Upgrading from 5.x
 
@@ -760,7 +762,7 @@ tracedecay update-plugin            # Refresh generated plugin code/assets only;
 tracedecay uninstall [--agent NAME] [--profile NAME] # Remove agent integration
 tracedecay serve                    # Start MCP server
 tracedecay daemon status            # Show daemon service/socket/log hints
-tracedecay daemon install-service   # Install/start Linux systemd user service
+tracedecay daemon install-service   # Install/start per-user daemon service
 tracedecay monitor                  # Live TUI showing MCP calls across all projects
 tracedecay update                   # Refresh binary, generated plugins, and daemon
 tracedecay upgrade                  # Self-update to latest version
