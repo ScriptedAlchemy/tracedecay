@@ -41,7 +41,11 @@ const CODEX_SUBAGENT_START_CONTEXT: &str = "tracedecay subagent context: this lo
 new/no-history subagent or code-research subagent. Use tracedecay MCP tools and the relevant TraceDecay skill/tool \
 workflow before broad file reads: `tracedecay:searching-for-code` with `tracedecay_context` \
 for code exploration, `tracedecay:reading-code-cheaply` with `tracedecay_outline` or \
-`tracedecay_body` before whole-file reads, `tracedecay:recalling-project-memory` when \
+`tracedecay_body` before whole-file reads, `tracedecay:tracing-functions` with \
+`tracedecay_find_exact_symbol`, `tracedecay_callers`, and `tracedecay_callees` when \
+asked to trace functions, find callers, or inspect setup/helper/fixture dependencies, \
+`tracedecay:finding-impacted-areas` with `tracedecay_affected` and \
+`tracedecay_test_map` before guessing affected tests, `tracedecay:recalling-project-memory` when \
 project decisions/preferences matter, and `tracedecay:recalling-session-context` with \
 `tracedecay_message_search`, `tracedecay_lcm_expand_query`, and `tracedecay_lcm_describe` \
 when prior conversation context may be missing.";

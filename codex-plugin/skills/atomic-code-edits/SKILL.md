@@ -1,6 +1,6 @@
 ---
 name: atomic-code-edits
-description: 'Use when editing source with safe anchored primitives: unique string replacement, atomic multi-replace, anchored insert, whole-symbol rewrite, structural ast-grep rewrite, or mechanical edits that should re-index the graph.'
+description: 'Use when editing source with safe anchored primitives or mechanical rewrites: tracedecay_str_replace, tracedecay_multi_str_replace, tracedecay_insert_at, tracedecay_replace_symbol, tracedecay_ast_grep_rewrite, or edits that should re-index the graph.'
 ---
 
 # Atomic code edits

@@ -38,6 +38,8 @@ pub enum HintCategory {
     FileLookup,
     ProjectContext,
     SessionRecall,
+    AtomicEdit,
+    TypeOrientation,
     ExploreSubagent,
     SubagentStartContext,
 }
@@ -55,6 +57,8 @@ impl HintCategory {
             HintCategory::FileLookup => "file_lookup",
             HintCategory::ProjectContext => "project_context",
             HintCategory::SessionRecall => "session_recall",
+            HintCategory::AtomicEdit => "atomic_edit",
+            HintCategory::TypeOrientation => "type_orientation",
             HintCategory::ExploreSubagent => "explore_subagent",
             HintCategory::SubagentStartContext => "subagent_start_context",
         }
@@ -72,6 +76,8 @@ impl HintCategory {
             "file_lookup" => Some(HintCategory::FileLookup),
             "project_context" => Some(HintCategory::ProjectContext),
             "session_recall" => Some(HintCategory::SessionRecall),
+            "atomic_edit" => Some(HintCategory::AtomicEdit),
+            "type_orientation" => Some(HintCategory::TypeOrientation),
             "explore_subagent" => Some(HintCategory::ExploreSubagent),
             "subagent_start_context" => Some(HintCategory::SubagentStartContext),
             _ => None,
@@ -227,6 +233,42 @@ pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
         ));
     }
 
+    if asks_for_call_graph(&text) {
+        return Some(hint(
+            HintCategory::CallGraph,
+            "For function tracing, use the indexed call graph before grep/file reads.",
+            "Resolve the symbol with tracedecay_find_exact_symbol or tracedecay_search, then use tracedecay_callers for who depends on it and tracedecay_callees for what it calls; use tracedecay_impact for broader dependents before opening files.",
+            false,
+        ));
+    }
+
+    if asks_for_impact(&text) {
+        return Some(hint(
+            HintCategory::Impact,
+            "For impact, affected-test, or blast-radius questions, use TraceDecay's dependency tools.",
+            "Start with tracedecay_diff_context when you have changed files, tracedecay_impact for a resolved symbol, tracedecay_affected for affected tests, and tracedecay_test_map when you need direct test attribution.",
+            false,
+        ));
+    }
+
+    if asks_for_atomic_edit(&text) {
+        return Some(hint(
+            HintCategory::AtomicEdit,
+            "For safe mechanical edits, use TraceDecay's anchored edit tools.",
+            "Use tracedecay_multi_str_replace for all-or-nothing anchored replacements, tracedecay_ast_grep_rewrite for structural rewrites, and tracedecay_replace_symbol when replacing one resolved symbol.",
+            false,
+        ));
+    }
+
+    if asks_for_type_orientation(&text) {
+        return Some(hint(
+            HintCategory::TypeOrientation,
+            "For type, constructor, field, trait, or duplicate-logic questions, use TraceDecay's AST orientation tools.",
+            "Use tracedecay_constructors for struct literal sites, tracedecay_field_sites for reads/writes, tracedecay_impls or tracedecay_implementations for trait methods, and tracedecay_redundancy before adding similar helpers.",
+            false,
+        ));
+    }
+
     if input
         .command
         .as_deref()
@@ -266,34 +308,21 @@ pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
         ));
     }
 
+    if is_tracedecay_tool_descriptor_read(input) {
+        return Some(hint(
+            HintCategory::FileRead,
+            "This looks like a TraceDecay MCP tool descriptor; use the tool surface instead of reading schema JSON.",
+            "Call the named tracedecay_* MCP tool directly when available, or use tool discovery for its schema; for function tracing that usually means tracedecay_find_exact_symbol plus tracedecay_callers/tracedecay_callees.",
+            true,
+        ));
+    }
+
     if is_single_file_read(input) {
         return Some(hint(
             HintCategory::FileRead,
             "Before reading whole files, consider tracedecay_outline, tracedecay_body, or tracedecay_read.",
             "tracedecay_outline gives a file's table of contents, tracedecay_body returns one symbol's source, and tracedecay_read (mode: \"lines\") slices a range — usually far cheaper than a full-file read.",
             true,
-        ));
-    }
-
-    if text.is_empty() {
-        return None;
-    }
-
-    if asks_for_call_graph(&text) {
-        return Some(hint(
-            HintCategory::CallGraph,
-            "For caller or callee questions, consider using the indexed call graph.",
-            "tracedecay_callers answers who calls a symbol; tracedecay_callees answers what a symbol calls.",
-            false,
-        ));
-    }
-
-    if asks_for_impact(&text) {
-        return Some(hint(
-            HintCategory::Impact,
-            "For impact or change-risk questions, consider using tracedecay impact tools.",
-            "tracedecay_impact and tracedecay_affected can identify related code and likely affected files from the index.",
-            false,
         ));
     }
 
@@ -353,6 +382,20 @@ fn is_single_file_read(input: &ToolHintInput) -> bool {
             .as_deref()
             .unwrap_or_default()
             .is_empty()
+}
+
+fn is_tracedecay_tool_descriptor_read(input: &ToolHintInput) -> bool {
+    let is_read_tool = input
+        .tool_name
+        .as_deref()
+        .is_some_and(|name| matches_normalized(name, &["readfile", "read_file", "read"]));
+    is_read_tool
+        && input.file_path.as_deref().is_some_and(|path| {
+            (path.contains("/tools/tracedecay_") || path.contains("\\tools\\tracedecay_"))
+                && std::path::Path::new(path)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+        })
 }
 
 /// Matches Cursor's semantic/codebase-search tool names. Cursor's hooks docs do
@@ -459,7 +502,17 @@ fn asks_for_call_graph(text: &str) -> bool {
     contains_any(
         text,
         &[
+            "trace function",
+            "trace the function",
+            "trace functions",
+            "trace the functions",
+            "function trace",
+            "find callers",
+            "find caller",
+            "find callees",
+            "find callee",
             "who calls",
+            "what calls",
             "callers of",
             "caller of",
             "called by",
@@ -467,6 +520,10 @@ fn asks_for_call_graph(text: &str) -> bool {
             "call path",
             "call chain",
             "callees of",
+            "uses of",
+            "depend on",
+            "depends on",
+            "what depends",
         ],
     )
 }
@@ -476,11 +533,17 @@ fn asks_for_impact(text: &str) -> bool {
         text,
         &[
             "impact",
+            "blast radius",
             "change risk",
             "change-risk",
+            "affected tests",
             "affected files",
+            "test map",
+            "test_map",
             "what files are affected",
             "what code is affected",
+            "which tests",
+            "what tests",
         ],
     )
 }
@@ -592,6 +655,49 @@ fn asks_for_symbol_lookup(text: &str) -> bool {
     )
 }
 
+fn asks_for_atomic_edit(text: &str) -> bool {
+    contains_any(
+        text,
+        &[
+            "edit safely",
+            "safe edit",
+            "mechanical edit",
+            "mechanical rewrite",
+            "replace this everywhere",
+            "replace everywhere",
+            "rewrite structurally",
+            "structural rewrite",
+            "ast-grep",
+            "ast grep",
+            "multi_str_replace",
+            "ast_grep_rewrite",
+        ],
+    )
+}
+
+fn asks_for_type_orientation(text: &str) -> bool {
+    contains_any(
+        text,
+        &[
+            "constructor sites",
+            "constructors",
+            "struct literal",
+            "field use",
+            "field uses",
+            "field reads",
+            "field writes",
+            "trait impl",
+            "trait impls",
+            "trait implementations",
+            "implementors",
+            "impl blocks",
+            "duplicate logic",
+            "redundant",
+            "similar helper",
+        ],
+    )
+}
+
 fn asks_for_file_lookup(text: &str) -> bool {
     contains_any(
         text,
@@ -686,6 +792,96 @@ mod tests {
     }
 
     #[test]
+    fn trace_function_prompts_get_call_graph_ladder_before_generic_search() {
+        let hint = decide_hint(&ToolHintInput {
+            tool_name: Some("shell".to_string()),
+            command: Some("rg -n \"setup_project\" tests/mcp_handler_test.rs".to_string()),
+            prompt: Some(
+                "Use TraceDecay to trace the function and find callers of setup_project"
+                    .to_string(),
+            ),
+            session_id: Some("session-1".to_string()),
+            ..ToolHintInput::default()
+        })
+        .unwrap();
+
+        assert_eq!(hint.category.as_key(), "call_graph");
+        assert!(hint.context.contains("tracedecay_find_exact_symbol"));
+        assert!(hint.context.contains("tracedecay_callers"));
+        assert!(hint.context.contains("tracedecay_callees"));
+    }
+
+    #[test]
+    fn dependency_fixture_prompts_get_call_graph_ladder() {
+        let hint = decide_hint(&ToolHintInput {
+            prompt: Some(
+                "Which tests still depend on setup_project instead of setup_empty_project?"
+                    .to_string(),
+            ),
+            session_id: Some("session-1".to_string()),
+            ..ToolHintInput::default()
+        })
+        .unwrap();
+
+        assert_eq!(hint.category.as_key(), "call_graph");
+        assert!(hint.context.contains("tracedecay_callers"));
+        assert!(hint.context.contains("tracedecay_impact"));
+    }
+
+    #[test]
+    fn affected_test_prompts_get_test_mapping_ladder() {
+        let hint = decide_hint(&ToolHintInput {
+            prompt: Some(
+                "Find affected tests and blast radius for this refactor before running cargo"
+                    .to_string(),
+            ),
+            session_id: Some("session-1".to_string()),
+            ..ToolHintInput::default()
+        })
+        .unwrap();
+
+        assert_eq!(hint.category.as_key(), "impact");
+        assert!(hint.context.contains("tracedecay_diff_context"));
+        assert!(hint.context.contains("tracedecay_affected"));
+        assert!(hint.context.contains("tracedecay_test_map"));
+    }
+
+    #[test]
+    fn mechanical_edit_prompts_get_atomic_edit_ladder() {
+        let hint = decide_hint(&ToolHintInput {
+            prompt: Some(
+                "Use ast-grep for a mechanical rewrite and replace this everywhere safely"
+                    .to_string(),
+            ),
+            session_id: Some("session-1".to_string()),
+            ..ToolHintInput::default()
+        })
+        .unwrap();
+
+        assert_eq!(hint.category.as_key(), "atomic_edit");
+        assert!(hint.context.contains("tracedecay_multi_str_replace"));
+        assert!(hint.context.contains("tracedecay_ast_grep_rewrite"));
+    }
+
+    #[test]
+    fn type_orientation_prompts_get_ast_graph_ladder() {
+        let hint = decide_hint(&ToolHintInput {
+            prompt: Some(
+                "Find constructor sites, field writes, trait impls, and duplicate logic"
+                    .to_string(),
+            ),
+            session_id: Some("session-1".to_string()),
+            ..ToolHintInput::default()
+        })
+        .unwrap();
+
+        assert_eq!(hint.category.as_key(), "type_orientation");
+        assert!(hint.context.contains("tracedecay_constructors"));
+        assert!(hint.context.contains("tracedecay_field_sites"));
+        assert!(hint.context.contains("tracedecay_redundancy"));
+    }
+
+    #[test]
     fn prior_conversation_prompt_gets_session_recall_hint() {
         let hint = decide_hint(&ToolHintInput {
             prompt: Some(
@@ -709,6 +905,21 @@ mod tests {
         assert_eq!(hint.category, HintCategory::FileRead);
         assert!(hint.message.contains("tracedecay_outline"));
         assert!(hint.nonblocking, "read hints must stay soft");
+    }
+
+    #[test]
+    fn tracedecay_tool_schema_reads_get_direct_tool_hint() {
+        let mut input = input_for_tool("ReadFile");
+        input.file_path = Some(
+            "/home/zack/.cursor/projects/repo/mcps/plugin-tracedecay/tools/tracedecay_callers.json"
+                .to_string(),
+        );
+        let hint = decide_hint(&input).unwrap();
+
+        assert_eq!(hint.category, HintCategory::FileRead);
+        assert!(hint.message.contains("tool descriptor"));
+        assert!(hint.context.contains("tracedecay_callers"));
+        assert!(hint.context.contains("tracedecay_callees"));
     }
 
     #[test]
