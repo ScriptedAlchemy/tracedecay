@@ -527,6 +527,8 @@ fn mentions_external_project_scope(text: &str) -> bool {
             "project search",
             "cross-project",
             "cross project",
+            "orchestrator repo",
+            "orchestrator repository",
         ],
     )
 }

@@ -3862,6 +3862,11 @@ impl TraceDecay {
         Ok(db)
     }
 
+    pub async fn open_project_store_db_read_only(&self) -> Result<Database> {
+        let (db, _) = Database::open_read_only(&self.store_layout.graph_db_path).await?;
+        Ok(db)
+    }
+
     fn build_branch_diagnostics(
         project_root: &Path,
         data_root: &Path,

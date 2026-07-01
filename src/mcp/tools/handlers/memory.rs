@@ -32,10 +32,10 @@ struct TargetMemoryDb {
 }
 
 fn text_tool_result(text: &str) -> ToolResult {
-    ToolResult {
-        value: json!({ "content": [{ "type": "text", "text": text }] }),
-        touched_files: vec![],
-    }
+    ToolResult::new(
+        json!({ "content": [{ "type": "text", "text": text }] }),
+        vec![],
+    )
 }
 
 fn tool_json(project_root: Option<&Path>, value: &Value) -> ToolResult {

@@ -31,12 +31,12 @@ fn git_error_result(cg: &TraceDecay, operation: &str, message: &str) -> ToolResu
         }
     });
     let formatted = serde_json::to_string(&output).unwrap_or_default();
-    ToolResult {
-        value: json!({
+    ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
-        touched_files: vec![],
-    }
+        vec![],
+    )
 }
 
 fn require_string_array_arg(args: &Value, name: &str) -> Result<Vec<String>> {
@@ -141,12 +141,12 @@ pub(super) async fn handle_affected(cg: &TraceDecay, args: Value) -> Result<Tool
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render::generic_md(&output)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
-    })
+    ))
 }
 
 /// Handles `tracedecay_diff_context` tool calls.
@@ -251,12 +251,12 @@ pub(super) async fn handle_diff_context(cg: &TraceDecay, args: Value) -> Result<
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render::generic_md(&output)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
-    })
+    ))
 }
 
 /// Diff two git refs and return changed file paths with coarse status.
@@ -660,12 +660,12 @@ pub(super) async fn handle_changelog(cg: &TraceDecay, args: Value) -> Result<Too
     let text = render::finalize(Some(cg.project_root()), &args, &result, || {
         render::generic_md(&result)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
-    })
+    ))
 }
 
 /// Handles `tracedecay_commit_context` tool calls.
@@ -693,10 +693,10 @@ pub(super) async fn handle_commit_context(cg: &TraceDecay, args: Value) -> Resul
         let text = render::finalize(Some(cg.project_root()), &args, &output, || {
             render::generic_md(&output)
         });
-        return Ok(ToolResult {
-            value: json!({"content": [{"type": "text", "text": text}]}),
-            touched_files: vec![],
-        });
+        return Ok(ToolResult::new(
+            json!({"content": [{"type": "text", "text": text}]}),
+            vec![],
+        ));
     }
 
     // Pre-compute files with inline test modules.
@@ -755,10 +755,10 @@ pub(super) async fn handle_commit_context(cg: &TraceDecay, args: Value) -> Resul
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render::generic_md(&output)
     });
-    Ok(ToolResult {
-        value: json!({"content": [{"type": "text", "text": text}]}),
-        touched_files: changed_files,
-    })
+    Ok(ToolResult::new(
+        json!({"content": [{"type": "text", "text": text}]}),
+        changed_files,
+    ))
 }
 
 /// Handles `tracedecay_pr_context` tool calls.
@@ -892,10 +892,10 @@ pub(super) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<To
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render::generic_md(&output)
     });
-    Ok(ToolResult {
-        value: json!({"content": [{"type": "text", "text": text}]}),
-        touched_files: changed_files,
-    })
+    Ok(ToolResult::new(
+        json!({"content": [{"type": "text", "text": text}]}),
+        changed_files,
+    ))
 }
 
 // ── Cross-branch tools ─────────────────────────────────────────────────
@@ -912,12 +912,12 @@ pub(super) fn handle_branch_list(cg: &TraceDecay) -> ToolResult {
     }
 
     let output = serde_json::to_string(&result).unwrap_or_default();
-    ToolResult {
-        value: json!({
+    ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": project_response_text(cg, &output) }]
         }),
-        touched_files: vec![],
-    }
+        vec![],
+    )
 }
 
 /// Handles `tracedecay_branch_search` tool calls.
@@ -962,12 +962,12 @@ pub(super) async fn handle_branch_search(cg: &TraceDecay, args: Value) -> Result
     let text = render::finalize(Some(cg.project_root()), &args, &items, || {
         render::generic_md(&items)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
-        touched_files: vec![],
-    })
+        vec![],
+    ))
 }
 
 /// Handles `tracedecay_branch_diff` tool calls.
@@ -1014,12 +1014,12 @@ pub(super) async fn handle_branch_diff(cg: &TraceDecay, args: Value) -> Result<T
         let text = render::finalize(Some(cg.project_root()), &args, &result, || {
             render::generic_md(&result)
         });
-        return Ok(ToolResult {
-            value: json!({
+        return Ok(ToolResult::new(
+            json!({
                 "content": [{ "type": "text", "text": text }]
             }),
-            touched_files: vec![],
-        });
+            vec![],
+        ));
     }
 
     let file_filter = args.get("file").and_then(|v| v.as_str());
@@ -1148,12 +1148,12 @@ pub(super) async fn handle_branch_diff(cg: &TraceDecay, args: Value) -> Result<T
     let text = render::finalize(Some(cg.project_root()), &args, &result, || {
         render::generic_md(&result)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
-    })
+    ))
 }
 
 #[cfg(test)]

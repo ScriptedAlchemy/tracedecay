@@ -31,10 +31,10 @@ fn config_error(message: impl Into<String>) -> TraceDecayError {
 
 fn tool_json(value: &Value) -> ToolResult {
     let formatted = serde_json::to_string_pretty(value).unwrap_or_default();
-    ToolResult {
-        value: json!({ "content": [{ "type": "text", "text": formatted }] }),
-        touched_files: vec![],
-    }
+    ToolResult::new(
+        json!({ "content": [{ "type": "text", "text": formatted }] }),
+        vec![],
+    )
 }
 
 fn optional_bool(args: &Value, key: &str, default: bool) -> bool {

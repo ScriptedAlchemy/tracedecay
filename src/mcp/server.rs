@@ -1793,7 +1793,7 @@ impl McpServer {
                         timestamp: ts,
                         request_id: &request_id,
                         arguments: &analytics_arguments,
-                        response: Some(&result.value),
+                        internal_analytics: result.internal_analytics(),
                     });
                     self.spawn_observed_ledger_write(async move {
                         gdb.record_savings(
@@ -1975,7 +1975,7 @@ impl McpServer {
             timestamp: crate::tracedecay::current_timestamp(),
             request_id,
             arguments,
-            response: None,
+            internal_analytics: None,
         });
         self.spawn_observed_ledger_write(async move {
             if let Err(e) = gdb.append_analytics_event(&event).await {

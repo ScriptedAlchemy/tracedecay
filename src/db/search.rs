@@ -213,31 +213,56 @@ impl Database {
         &self,
         query: &str,
         limit: usize,
+        path_prefix: Option<&str>,
     ) -> Result<Vec<DependencyImportUse>> {
         let query = query.trim();
         if query.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
         let like_pattern = format!("%{query}%");
-        let mut rows = self
-            .conn()
-            .query(
-                "SELECT name, signature, file_path, start_line
-                 FROM nodes
-                 WHERE kind = 'use'
-                   AND signature LIKE ?1
-                   AND name NOT LIKE './%'
-                   AND name NOT LIKE '../%'
-                   AND name NOT LIKE '/%'
-                 ORDER BY file_path ASC, start_line ASC
-                LIMIT ?2",
-                params![like_pattern.as_str(), limit.saturating_mul(4) as i64],
-            )
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to query dependency import uses: {e}"),
-                operation: "dependency_import_uses".to_string(),
-            })?;
+        let limit = limit.saturating_mul(4) as i64;
+        let mut rows = if let Some(prefix) = path_prefix {
+            let with_slash = if prefix.ends_with('/') {
+                prefix.to_string()
+            } else {
+                format!("{prefix}/")
+            };
+            let prefix_like = format!("{with_slash}%");
+            self.conn()
+                .query(
+                    "SELECT name, signature, file_path, start_line
+                     FROM nodes
+                     WHERE kind = 'use'
+                       AND signature LIKE ?1
+                       AND name NOT LIKE './%'
+                       AND name NOT LIKE '../%'
+                       AND name NOT LIKE '/%'
+                       AND (file_path = ?2 OR file_path LIKE ?3)
+                     ORDER BY file_path ASC, start_line ASC
+                     LIMIT ?4",
+                    params![like_pattern.as_str(), prefix, prefix_like.as_str(), limit],
+                )
+                .await
+        } else {
+            self.conn()
+                .query(
+                    "SELECT name, signature, file_path, start_line
+                     FROM nodes
+                     WHERE kind = 'use'
+                       AND signature LIKE ?1
+                       AND name NOT LIKE './%'
+                       AND name NOT LIKE '../%'
+                       AND name NOT LIKE '/%'
+                     ORDER BY file_path ASC, start_line ASC
+                     LIMIT ?2",
+                    params![like_pattern.as_str(), limit],
+                )
+                .await
+        }
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("failed to query dependency import uses: {e}"),
+            operation: "dependency_import_uses".to_string(),
+        })?;
 
         let mut imports = Vec::new();
         while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {

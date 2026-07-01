@@ -211,12 +211,12 @@ pub(super) async fn handle_dead_code(
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render::generic_md(&output)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
-    })
+    ))
 }
 
 /// Handles `tracedecay_module_api` tool calls.
@@ -277,12 +277,12 @@ pub(super) async fn handle_module_api(
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render::generic_md(&output)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
-    })
+    ))
 }
 
 /// Handles `tracedecay_circular` tool calls.
@@ -299,12 +299,12 @@ pub(super) async fn handle_circular(cg: &TraceDecay, args: Value) -> Result<Tool
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render::generic_md(&output)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
-        touched_files: vec![],
-    })
+        vec![],
+    ))
 }
 
 /// Handles `tracedecay_hotspots` tool calls.
@@ -374,12 +374,12 @@ pub(super) async fn handle_hotspots(
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render::generic_md(&output)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
-    })
+    ))
 }
 
 /// Handles `tracedecay_unused_imports` tool calls.
@@ -481,12 +481,12 @@ pub(super) async fn handle_unused_imports(
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render::generic_md(&output)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
-    })
+    ))
 }
 
 /// Handles `tracedecay_rank` tool calls.
@@ -571,12 +571,12 @@ pub(super) async fn handle_rank(
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render::generic_md(&output)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
-    })
+    ))
 }
 
 /// Handles `tracedecay_largest` tool calls.
@@ -627,12 +627,12 @@ pub(super) async fn handle_largest(
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render::generic_md(&output)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
-    })
+    ))
 }
 
 /// Handles `tracedecay_coupling` tool calls.
@@ -684,12 +684,12 @@ pub(super) async fn handle_coupling(
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render::generic_md(&output)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
-        touched_files: vec![],
-    })
+        vec![],
+    ))
 }
 
 /// Handles `tracedecay_inheritance_depth` tool calls.
@@ -731,12 +731,12 @@ pub(super) async fn handle_inheritance_depth(
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render::generic_md(&output)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
-    })
+    ))
 }
 
 /// Handles `tracedecay_distribution` tool calls.
@@ -807,12 +807,12 @@ pub(super) async fn handle_distribution(
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render::generic_md(&output)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
-        touched_files: vec![],
-    })
+        vec![],
+    ))
 }
 
 /// Handles `tracedecay_recursion` tool calls.
@@ -908,12 +908,12 @@ pub(super) async fn handle_recursion(
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render::generic_md(&output)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
-    })
+    ))
 }
 
 async fn cached_node(
@@ -1187,12 +1187,12 @@ pub(super) async fn handle_complexity(
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render::generic_md(&output)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
-    })
+    ))
 }
 
 /// Handles `tracedecay_doc_coverage` tool calls.
@@ -1251,12 +1251,12 @@ pub(super) async fn handle_doc_coverage(
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render::generic_md(&output)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
-    })
+    ))
 }
 
 /// Handles `tracedecay_god_class` tool calls.
@@ -1300,12 +1300,12 @@ pub(super) async fn handle_god_class(
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render::generic_md(&output)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
-    })
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1483,12 +1483,12 @@ pub(super) async fn handle_unsafe_patterns(
     let text = render::finalize(Some(cg.project_root()), &args, &payload, || {
         render::generic_md(&payload)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
-        touched_files: touched,
-    })
+        touched,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1599,12 +1599,12 @@ pub(super) async fn handle_diagnostics(cg: &TraceDecay, args: Value) -> Result<T
     let text = render::finalize(Some(cg.project_root()), &args, &payload, || {
         render::generic_md(&payload)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
-        touched_files: unique_file_paths(diagnostics.iter().map(|d| d.file.as_str())),
-    })
+        unique_file_paths(diagnostics.iter().map(|d| d.file.as_str())),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1642,12 +1642,12 @@ pub(super) async fn handle_constructors(
         .collect();
 
     if struct_nodes.is_empty() {
-        return Ok(ToolResult {
-            value: json!({
+        return Ok(ToolResult::new(
+            json!({
                 "content": [{ "type": "text", "text": format!("No struct, class, or case-class named '{struct_name}' found.") }]
             }),
-            touched_files: vec![],
-        });
+            vec![],
+        ));
     }
 
     let mut expected_fields: HashSet<String> = HashSet::new();
@@ -1712,12 +1712,12 @@ pub(super) async fn handle_constructors(
     let text = render::finalize(Some(cg.project_root()), &args, &payload, || {
         render::generic_md(&payload)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
-        touched_files: touched,
-    })
+        touched,
+    ))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2091,12 +2091,12 @@ pub(super) async fn handle_field_sites(
     let text = render::finalize(Some(cg.project_root()), &args, &payload, || {
         render::generic_md(&payload)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
-        touched_files: touched,
-    })
+        touched,
+    ))
 }
 
 #[derive(Debug, Clone, Copy)]

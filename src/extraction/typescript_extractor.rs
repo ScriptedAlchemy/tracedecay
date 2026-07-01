@@ -1080,7 +1080,7 @@ impl TypeScriptExtractor {
 
         // Unresolved Uses reference.
         state.unresolved_refs.push(UnresolvedRef {
-            from_node_id: id,
+            from_node_id: id.clone(),
             reference_name: name,
             reference_kind: EdgeKind::Uses,
             line: start_line,

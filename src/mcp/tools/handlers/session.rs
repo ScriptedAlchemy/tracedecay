@@ -38,10 +38,10 @@ fn tool_json(project_root: Option<&Path>, value: &Value) -> ToolResult {
     } else {
         truncated_json_envelope_with_handle(project_root, &formatted)
     };
-    ToolResult {
-        value: json!({ "content": [{ "type": "text", "text": text }] }),
-        touched_files: Vec::new(),
-    }
+    ToolResult::new(
+        json!({ "content": [{ "type": "text", "text": text }] }),
+        Vec::new(),
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -144,10 +144,10 @@ fn lcm_preflight_tool_json(value: &Value) -> ToolResult {
             }
         }
     };
-    ToolResult {
-        value: json!({ "content": [{ "type": "text", "text": text }] }),
-        touched_files: Vec::new(),
-    }
+    ToolResult::new(
+        json!({ "content": [{ "type": "text", "text": text }] }),
+        Vec::new(),
+    )
 }
 
 fn compact_lcm_preflight_payload(
@@ -305,10 +305,10 @@ fn lcm_expand_query_tool_json(project_root: Option<&Path>, value: &Value) -> Too
     } else {
         truncated_json_envelope_with_handle(project_root, &text)
     };
-    ToolResult {
-        value: json!({ "content": [{ "type": "text", "text": text }] }),
-        touched_files: Vec::new(),
-    }
+    ToolResult::new(
+        json!({ "content": [{ "type": "text", "text": text }] }),
+        Vec::new(),
+    )
 }
 
 #[derive(Copy, Clone)]

@@ -1106,6 +1106,42 @@ impl GlobalDb {
         health
     }
 
+    /// Returns tracked transcript paths that still contain an unresolved
+    /// workspace placeholder. Cursor should expand `${workspaceFolder}` before
+    /// a transcript path is persisted; if it reaches the session DB literally,
+    /// catch-up and recall will look at a non-existent path.
+    pub async fn literal_workspace_placeholder_transcript_paths(
+        &self,
+        limit: usize,
+    ) -> Vec<String> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let Ok(mut rows) = self
+            .conn
+            .query(
+                "SELECT DISTINCT transcript_path FROM sessions
+                 WHERE transcript_path IS NOT NULL
+                   AND transcript_path != ''
+                   AND (transcript_path LIKE '%${workspaceFolder}%'
+                        OR transcript_path LIKE '%$workspaceFolder%')
+                 ORDER BY transcript_path
+                 LIMIT ?1",
+                params![i64::try_from(limit).unwrap_or(i64::MAX)],
+            )
+            .await
+        else {
+            return Vec::new();
+        };
+        let mut paths = Vec::new();
+        while let Ok(Some(row)) = rows.next().await {
+            if let Ok(path) = row.get::<String>(0) {
+                paths.push(path);
+            }
+        }
+        paths
+    }
+
     /// Canonical registry key for a project path. Falls back to the lossy path
     /// string when canonicalization fails (e.g. the path no longer exists) so
     /// upserts and lookups always agree on a single key per project, instead of

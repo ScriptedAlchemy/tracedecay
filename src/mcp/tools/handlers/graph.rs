@@ -17,6 +17,7 @@ use crate::types::{BuildContextOptions, EdgeKind, Node, NodeKind, TaskContext, V
 const CONTEXT_MEMORY_MATCH_LIMIT: usize = 3;
 const CONTEXT_MEMORY_MATCH_LIMIT_MAX: usize = 10;
 const CONTEXT_MEMORY_SNIPPET_CHARS: usize = 240;
+const CONTEXT_MEMORY_ANALYTICS_KEY: &str = "context_memory_analytics";
 
 use super::super::render::{self, Md};
 use super::super::ToolResult;
@@ -39,17 +40,38 @@ fn rendered_tool_result<F>(
 where
     F: FnOnce() -> String,
 {
+    let internal_analytics = value.get(CONTEXT_MEMORY_ANALYTICS_KEY).cloned();
+    let public_value;
+    let value = if internal_analytics.is_some() {
+        public_value = strip_internal_context_memory_analytics(value);
+        &public_value
+    } else {
+        value
+    };
     let text = render::finalize(Some(cg.project_root()), args, value, md);
-    text_tool_result(&text, touched_files)
+    let result = text_tool_result(&text, touched_files);
+    if let Some(internal_analytics) = internal_analytics {
+        result.with_internal_analytics(internal_analytics)
+    } else {
+        result
+    }
+}
+
+fn strip_internal_context_memory_analytics(value: &Value) -> Value {
+    let mut value = value.clone();
+    if let Some(object) = value.as_object_mut() {
+        object.remove(CONTEXT_MEMORY_ANALYTICS_KEY);
+    }
+    value
 }
 
 fn text_tool_result(text: &str, touched_files: Vec<String>) -> ToolResult {
-    ToolResult {
-        value: json!({
+    ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
-    }
+    )
 }
 
 /// Handles `tracedecay_search` tool calls.
@@ -73,14 +95,12 @@ pub(super) async fn handle_search(
     let results = cg.search(query, limit).await?;
     let results = filter_by_scope(results, scope_prefix, |r| &r.node.file_path);
     let coverage_hint = cg.index_coverage_hint(results.len());
-    let has_symbol_result = results
-        .iter()
-        .any(|result| result.node.kind != NodeKind::Use);
-    let ignored_dependency_hint = if has_symbol_result {
-        None
-    } else {
-        dependency_hints::ignored_dependency_hint(cg, query, limit).await?
-    };
+    let ignored_dependency_hint =
+        if dependency_hints::should_check_ignored_dependency_hint(results.len(), limit) {
+            dependency_hints::ignored_dependency_hint(cg, query, limit, scope_prefix).await?
+        } else {
+            None
+        };
 
     let touched_files = unique_file_paths(results.iter().map(|r| r.node.file_path.as_str()));
 
@@ -252,6 +272,16 @@ pub(super) async fn handle_context(
             "memory_matches".to_string(),
             serde_json::to_value(&memory_matches).unwrap_or_else(|_| json!([])),
         );
+        object.insert(
+            CONTEXT_MEMORY_ANALYTICS_KEY.to_string(),
+            json!({
+                "context_memory": context_memory_analytics_value(
+                    &memory_options,
+                    &memory_matches,
+                    memory_matches_error.as_deref()
+                ),
+            }),
+        );
         if let Some(err) = memory_matches_error {
             object.insert("memory_matches_error".to_string(), json!(err));
         }
@@ -291,6 +321,25 @@ fn context_memory_options(args: &Value) -> ContextMemoryOptions {
         limit,
         min_trust,
     }
+}
+
+fn context_memory_analytics_value(
+    options: &ContextMemoryOptions,
+    memory_matches: &[FactSearchResult],
+    memory_matches_error: Option<&str>,
+) -> Value {
+    let fact_ids: Vec<Value> = memory_matches
+        .iter()
+        .map(|hit| Value::from(hit.fact.fact_id))
+        .collect();
+    json!({
+        "include_memory": options.include_memory,
+        "limit": options.limit,
+        "min_trust": options.min_trust,
+        "match_count": fact_ids.len(),
+        "fact_ids": fact_ids,
+        "error": memory_matches_error,
+    })
 }
 
 async fn context_memory_matches(

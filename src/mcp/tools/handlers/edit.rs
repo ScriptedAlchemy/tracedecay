@@ -29,12 +29,12 @@ fn required_array<'a>(args: &'a Value, name: &str) -> Result<&'a [Value]> {
 }
 
 fn text_tool_result<T: Serialize>(result: &T, touched_files: Vec<String>) -> ToolResult {
-    ToolResult {
-        value: json!({
+    ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": serde_json::to_string(result).unwrap_or_default() }]
         }),
         touched_files,
-    }
+    )
 }
 
 pub(super) async fn handle_str_replace(cg: &TraceDecay, args: Value) -> Result<ToolResult> {

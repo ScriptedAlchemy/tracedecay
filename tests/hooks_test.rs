@@ -781,8 +781,14 @@ fn test_build_codex_session_context_carries_full_steering() {
     assert!(context.contains("tracedecay_context"));
     assert!(context.contains("tracedecay_callers"));
     assert!(context.contains("last indexed 2m ago"));
+    assert!(context.contains("tracedecay_project_search"));
+    assert!(context.contains("tracedecay_message_search"));
+    assert!(context.contains("tracedecay_fact_store"));
+    assert!(context.contains("before asking the user to repeat"));
     let uninit = tracedecay::hooks::build_codex_session_context(false, None);
     assert!(uninit.contains("tracedecay init"));
+    assert!(uninit.contains("tracedecay_project_search"));
+    assert!(uninit.contains("tracedecay_message_search"));
 }
 
 #[test]
@@ -794,6 +800,9 @@ fn test_build_codex_session_context_for_unindexed_project_suggests_init() {
 
     assert!(context.contains("tracedecay_context"));
     assert!(context.contains("tracedecay init"));
+    assert!(context.contains("tracedecay_project_list"));
+    assert!(context.contains("tracedecay_project_search"));
+    assert!(context.contains("tracedecay_message_search"));
 }
 
 #[test]
@@ -806,6 +815,9 @@ fn test_build_codex_session_context_for_generic_workspace_uses_session_guidance(
     assert!(context.contains("TraceDecay session context"));
     assert!(context.contains("tracedecay_lcm_expand_query"));
     assert!(context.contains("tracedecay_message_search"));
+    assert!(context.contains("tracedecay_fact_store"));
+    assert!(context.contains("before asking the user to repeat"));
+    assert!(context.contains("Do not store task progress"));
     assert!(
         !context.contains("tracedecay init"),
         "non-project chats should not be told to initialize a code graph: {context}"

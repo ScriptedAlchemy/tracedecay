@@ -334,12 +334,12 @@ pub(super) async fn handle_gini(
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render::generic_md(&output)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
-        touched_files: vec![],
-    })
+        vec![],
+    ))
 }
 
 /// Handles `tracedecay_dependency_depth` tool calls.
@@ -383,12 +383,12 @@ pub(super) async fn handle_dependency_depth(
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render::generic_md(&output)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
-        touched_files: vec![],
-    })
+        vec![],
+    ))
 }
 
 /// Handles `tracedecay_health` tool calls.
@@ -461,12 +461,12 @@ pub(super) async fn handle_health(
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render::generic_md(&output)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
-        touched_files: vec![],
-    })
+        vec![],
+    ))
 }
 
 /// Handles `tracedecay_runtime` tool calls.
@@ -480,12 +480,12 @@ pub(super) async fn handle_runtime(cg: &TraceDecay, args: Value) -> Result<ToolR
     let text = render::finalize(Some(cg.project_root()), &args, &value, || {
         render::generic_md(&value)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
-        touched_files: vec![],
-    })
+        vec![],
+    ))
 }
 
 /// Handles `tracedecay_dsm` tool calls.
@@ -625,12 +625,12 @@ pub(super) async fn handle_dsm(
     // shaping, so it stays compact JSON rather than routing through the
     // markdown/json `render::finalize` selector.
     let formatted = serde_json::to_string(&output).unwrap_or_default();
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": truncated_json_envelope_with_handle(Some(cg.project_root()), &formatted) }]
         }),
-        touched_files: vec![],
-    })
+        vec![],
+    ))
 }
 
 struct RiskEntry {
@@ -979,12 +979,12 @@ pub(super) async fn handle_test_risk(
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render::generic_md(&output)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
-        touched_files: vec![],
-    })
+        vec![],
+    ))
 }
 
 /// Handles `tracedecay_test_map` tool calls.
@@ -1068,10 +1068,10 @@ pub(super) async fn handle_test_map(
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render::generic_md(&output)
     });
-    Ok(ToolResult {
-        value: json!({"content": [{"type": "text", "text": text}]}),
+    Ok(ToolResult::new(
+        json!({"content": [{"type": "text", "text": text}]}),
         touched_files,
-    })
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1141,12 +1141,12 @@ fn session_tool_result(cg: &TraceDecay, args: &Value, output: &Value) -> ToolRes
     let text = render::finalize(Some(cg.project_root()), args, output, || {
         render::generic_md(output)
     });
-    ToolResult {
-        value: json!({
+    ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
-        touched_files: vec![],
-    }
+        vec![],
+    )
 }
 
 /// Handles `tracedecay_session_start` tool calls.

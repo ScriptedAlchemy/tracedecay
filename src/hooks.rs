@@ -1426,6 +1426,7 @@ pub fn build_codex_session_context_for_workspace(
                  or shell search for codebase exploration, symbol lookup, call graphs, and \
                  impact analysis. Fall back to file reads only when tracedecay cannot answer.\n",
             );
+            append_codex_recall_and_registry_guidance(&mut s);
             match status {
                 HookWorkspaceStatus::Initialized => match staleness_hint {
                     Some(hint) => {
@@ -1446,13 +1447,31 @@ pub fn build_codex_session_context_for_workspace(
             s.push_str(
                 "TraceDecay session context is available via MCP. For prior conversation \
                  recovery, use tracedecay_lcm_expand_query, tracedecay_message_search, and \
-                 tracedecay_lcm_describe; use project memory tools only when durable \
-                 preferences or decisions matter.\n",
+                 tracedecay_lcm_describe before asking the user to repeat themselves. Use \
+                 tracedecay_fact_store only for durable preferences, environment details, \
+                 tool quirks, or decisions that will still matter later. Do not store task \
+                 progress, temporary TODOs, or soon-stale session outcomes; recover those \
+                 from transcripts instead.\n",
             );
             s.push_str("Workspace status: no active project workspace; no setup guidance needed for this prompt.\n");
         }
     }
     s
+}
+
+fn append_codex_recall_and_registry_guidance(s: &mut String) {
+    s.push_str(
+        "For other registered projects or sibling workspaces, check \
+         tracedecay_project_list or tracedecay_project_search first; use \
+         tracedecay_project_context to confirm the target and pass project_id or \
+         project_path to tracedecay_context/search for cross-project code context before \
+         scanning parent directories. When the user references prior conversation or \
+         missing context, use tracedecay_message_search or tracedecay_lcm_expand_query \
+         before asking the user to repeat themselves. Use tracedecay_fact_store only for \
+         durable preferences, environment details, tool quirks, or decisions that will \
+         still matter later. Do not store task progress, temporary TODOs, or soon-stale \
+         session outcomes; recover those from transcripts instead.\n",
+    );
 }
 
 fn append_context_recovery_hint(context: &mut String) {

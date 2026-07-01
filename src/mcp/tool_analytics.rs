@@ -13,7 +13,7 @@ pub(super) struct McpToolAnalyticsEvent<'a> {
     pub(super) timestamp: i64,
     pub(super) request_id: &'a Value,
     pub(super) arguments: &'a Value,
-    pub(super) response: Option<&'a Value>,
+    pub(super) internal_analytics: Option<&'a Value>,
 }
 
 pub(super) fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> AnalyticsEventInsert {
@@ -39,7 +39,7 @@ pub(super) fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> Anal
     append_tool_response_analytics(
         input.tool_name,
         input.arguments,
-        input.response,
+        input.internal_analytics,
         &mut metadata,
     );
     AnalyticsEventInsert {
@@ -62,7 +62,7 @@ pub(super) fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> Anal
 fn append_tool_response_analytics(
     tool_name: &str,
     arguments: &Value,
-    response: Option<&Value>,
+    internal_analytics: Option<&Value>,
     metadata: &mut Value,
 ) {
     if tool_name != "tracedecay_context" {
@@ -82,41 +82,16 @@ fn append_tool_response_analytics(
         .and_then(Value::as_f64)
         .unwrap_or(0.5)
         .clamp(0.0, 1.0);
-    let payload = response.and_then(tool_result_json_payload);
-    let memory_matches = payload
-        .as_ref()
-        .and_then(|payload| payload.get("memory_matches"))
-        .and_then(Value::as_array);
-    let fact_ids: Vec<Value> = memory_matches
-        .into_iter()
-        .flatten()
-        .filter_map(|hit| {
-            hit.get("fact")
-                .and_then(|fact| fact.get("fact_id"))
-                .and_then(Value::as_i64)
-        })
-        .map(Value::from)
-        .collect();
-    let match_count = fact_ids.len();
-    let memory_error = payload
-        .as_ref()
-        .and_then(|payload| payload.get("memory_matches_error"))
-        .and_then(Value::as_str);
+    if let Some(context_memory) = internal_analytics.and_then(|value| value.get("context_memory")) {
+        metadata["context_memory"] = context_memory.clone();
+        return;
+    }
     metadata["context_memory"] = json!({
         "include_memory": include_memory,
         "limit": limit,
         "min_trust": min_trust,
-        "match_count": match_count,
-        "fact_ids": fact_ids,
-        "error": memory_error,
+        "match_count": 0,
+        "fact_ids": [],
+        "error": null,
     });
-}
-
-fn tool_result_json_payload(response: &Value) -> Option<Value> {
-    response
-        .get("content")
-        .and_then(Value::as_array)?
-        .iter()
-        .filter_map(|item| item.get("text").and_then(Value::as_str))
-        .find_map(|text| serde_json::from_str::<Value>(text).ok())
 }

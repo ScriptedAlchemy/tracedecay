@@ -141,12 +141,12 @@ pub(super) async fn handle_status(
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render_status_md(&output)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
-        touched_files: vec![],
-    })
+        vec![],
+    ))
 }
 
 fn render_status_md(value: &Value) -> String {
@@ -260,12 +260,12 @@ pub(super) fn handle_active_project(
     let branch = cg.branch_diagnostics();
     let output = active_project_context(cg, &branch, server_stats, scope_prefix);
     let formatted = serde_json::to_string(&output).unwrap_or_default();
-    ToolResult {
-        value: json!({
+    ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
         }),
-        touched_files: vec![],
-    }
+        vec![],
+    )
 }
 
 /// Handles `tracedecay_storage_status` tool calls.
@@ -326,12 +326,12 @@ pub(super) async fn handle_storage_status(
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render::generic_md(&output)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
-        touched_files: vec![],
-    })
+        vec![],
+    ))
 }
 
 fn bounded_limit(args: &Value, default: usize, max: usize) -> usize {
@@ -397,12 +397,12 @@ fn registry_result(args: &Value, payload: &Value) -> ToolResult {
 
 fn render_registry_result(root: Option<&Path>, args: &Value, payload: &Value) -> ToolResult {
     let text = render::finalize(root, args, payload, || render::generic_md(payload));
-    ToolResult {
-        value: json!({
+    ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
-        touched_files: vec![],
-    }
+        vec![],
+    )
 }
 
 fn registry_missing_payload() -> Value {
@@ -620,12 +620,12 @@ pub(super) async fn handle_files(
         lines.join("\n")
     };
 
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": truncate_response(&output) }]
         }),
         touched_files,
-    })
+    ))
 }
 
 /// Default node kinds for port comparisons.
@@ -747,12 +747,12 @@ pub(super) async fn handle_port_status(cg: &TraceDecay, args: Value) -> Result<T
         .collect();
 
     if kinds.is_empty() {
-        return Ok(ToolResult {
-            value: json!({
+        return Ok(ToolResult::new(
+            json!({
                 "content": [{ "type": "text", "text": "No valid node kinds specified." }]
             }),
-            touched_files: vec![],
-        });
+            vec![],
+        ));
     }
 
     let source_nodes = cg.get_nodes_by_dir(source_dir, &kinds).await?;
@@ -851,12 +851,12 @@ pub(super) async fn handle_port_status(cg: &TraceDecay, args: Value) -> Result<T
     let text = render::finalize(Some(cg.project_root()), &args, &result, || {
         render::generic_md(&result)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
-    })
+    ))
 }
 
 /// Handles `tracedecay_port_order` tool calls.
@@ -898,12 +898,12 @@ pub(super) async fn handle_port_order(cg: &TraceDecay, args: Value) -> Result<To
         .collect();
 
     if kinds.is_empty() {
-        return Ok(ToolResult {
-            value: json!({
+        return Ok(ToolResult::new(
+            json!({
                 "content": [{ "type": "text", "text": "No valid node kinds specified." }]
             }),
-            touched_files: vec![],
-        });
+            vec![],
+        ));
     }
 
     let nodes = cg.get_nodes_by_dir(source_dir, &kinds).await?;
@@ -920,12 +920,12 @@ pub(super) async fn handle_port_order(cg: &TraceDecay, args: Value) -> Result<To
         let text = render::finalize(Some(cg.project_root()), &args, &result, || {
             render::generic_md(&result)
         });
-        return Ok(ToolResult {
-            value: json!({
+        return Ok(ToolResult::new(
+            json!({
                 "content": [{ "type": "text", "text": text }]
             }),
-            touched_files: vec![],
-        });
+            vec![],
+        ));
     }
 
     // Build node ID lookup
@@ -1227,12 +1227,12 @@ pub(super) async fn handle_port_order(cg: &TraceDecay, args: Value) -> Result<To
     let text = render::finalize(Some(cg.project_root()), &args, &result, || {
         render::generic_md(&result)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
         touched_files,
-    })
+    ))
 }
 
 /// Handles `tracedecay_simplify_scan` tool calls.
@@ -1352,10 +1352,10 @@ pub(super) async fn handle_simplify_scan(
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render_simplify_scan_markdown(&output)
     });
-    Ok(ToolResult {
-        value: json!({"content": [{"type": "text", "text": text}]}),
-        touched_files: files,
-    })
+    Ok(ToolResult::new(
+        json!({"content": [{"type": "text", "text": text}]}),
+        files,
+    ))
 }
 
 fn render_simplify_scan_markdown(output: &Value) -> String {
@@ -1524,10 +1524,10 @@ pub(super) async fn handle_type_hierarchy(cg: &TraceDecay, args: Value) -> Resul
     build_type_tree(cg, &root.id, max_depth, 0, &mut output, &mut all_files).await?;
 
     let touched_files = unique_file_paths(all_files.iter().map(std::string::String::as_str));
-    Ok(ToolResult {
-        value: json!({"content": [{"type": "text", "text": truncate_response(&output)}]}),
+    Ok(ToolResult::new(
+        json!({"content": [{"type": "text", "text": truncate_response(&output)}]}),
         touched_files,
-    })
+    ))
 }
 
 /// Recursively appends type hierarchy lines to the output string.
@@ -1608,12 +1608,12 @@ pub(super) async fn handle_body(
     let chosen = body_candidates(cg, symbol, limit, scope_prefix).await?;
 
     if chosen.is_empty() {
-        return Ok(ToolResult {
-            value: json!({
+        return Ok(ToolResult::new(
+            json!({
                 "content": [{ "type": "text", "text": format!("No symbol named '{symbol}' found.") }]
             }),
-            touched_files: vec![],
-        });
+            vec![],
+        ));
     }
 
     let project_root = cg.project_root();
@@ -1649,12 +1649,12 @@ pub(super) async fn handle_body(
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render::generic_md(&output)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
-        touched_files: touched,
-    })
+        touched,
+    ))
 }
 
 async fn body_candidates(
@@ -1884,12 +1884,12 @@ pub(super) async fn handle_todos(
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render::generic_md(&output)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
-        touched_files: touched,
-    })
+        touched,
+    ))
 }
 
 fn relative_source_key(path: &Path) -> Result<Option<String>> {
@@ -2056,12 +2056,12 @@ pub(super) async fn handle_read(cg: &TraceDecay, args: Value) -> Result<ToolResu
             "digest": cached.digest,
             "token_count": cached.token_count,
         });
-        return Ok(ToolResult {
-            value: json!({
+        return Ok(ToolResult::new(
+            json!({
                 "content": [{ "type": "text", "text": serde_json::to_string(&stub).unwrap_or_default() }]
             }),
-            touched_files: vec![display_file],
-        });
+            vec![display_file],
+        ));
     }
 
     let body_text = match mode {
@@ -2122,12 +2122,12 @@ pub(super) async fn handle_read(cg: &TraceDecay, args: Value) -> Result<ToolResu
     let text = render::finalize(Some(cg.project_root()), &args, &payload, || {
         render_read_md(&payload)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
-        touched_files: vec![display_file],
-    })
+        vec![display_file],
+    ))
 }
 
 fn render_read_md(value: &Value) -> String {
@@ -2180,12 +2180,12 @@ pub(super) async fn handle_outline(cg: &TraceDecay, args: Value) -> Result<ToolR
         render_outline_md(&value)
     });
 
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
-        touched_files: vec![display_file],
-    })
+        vec![display_file],
+    ))
 }
 
 fn ast_grep_outline(abs_path: &Path) -> Result<Value> {
@@ -2354,12 +2354,12 @@ pub(super) fn handle_config(cg: &TraceDecay, args: &Value) -> Result<ToolResult>
     let text = render::finalize(Some(cg.project_root()), args, &payload, || {
         render::generic_md(&payload)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
-        touched_files: touched,
-    })
+        touched,
+    ))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2558,12 +2558,12 @@ pub(super) async fn handle_signature_search(
     let text = render::finalize(Some(cg.project_root()), &args, &payload, || {
         render::generic_md(&payload)
     });
-    Ok(ToolResult {
-        value: json!({
+    Ok(ToolResult::new(
+        json!({
             "content": [{ "type": "text", "text": text }]
         }),
-        touched_files: touched,
-    })
+        touched,
+    ))
 }
 
 fn returns_substring(signature: &str) -> &str {

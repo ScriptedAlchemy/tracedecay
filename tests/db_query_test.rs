@@ -104,7 +104,7 @@ async fn test_dependency_import_uses_query_use_nodes_without_unresolved_refs() {
         .expect("insert_nodes failed");
 
     let imports = db
-        .dependency_import_uses("Foo", 5)
+        .dependency_import_uses("Foo", 5, None)
         .await
         .expect("dependency_import_uses failed");
 
@@ -116,6 +116,38 @@ async fn test_dependency_import_uses_query_use_nodes_without_unresolved_refs() {
     );
     assert_eq!(imports[0].file_path, "src/app.ts");
     assert_eq!(imports[0].line, 4);
+}
+
+#[tokio::test]
+async fn test_dependency_import_uses_applies_scope_before_limit() {
+    let db = setup_db().await;
+    let mut nodes = Vec::new();
+    for index in 0..8 {
+        let mut import_node = sample_node(
+            &format!("dep-import-{index}"),
+            "pkg",
+            &format!("src/{index}.ts"),
+        );
+        import_node.kind = NodeKind::Use;
+        import_node.start_line = index;
+        import_node.signature = Some("import type { Foo } from \"pkg\";".to_string());
+        nodes.push(import_node);
+    }
+    let mut scoped_import = sample_node("dep-import-scoped", "pkg", "tests/app.ts");
+    scoped_import.kind = NodeKind::Use;
+    scoped_import.start_line = 9;
+    scoped_import.signature = Some("import type { Foo } from \"pkg\";".to_string());
+    nodes.push(scoped_import);
+
+    db.insert_nodes(&nodes).await.expect("insert_nodes failed");
+
+    let imports = db
+        .dependency_import_uses("Foo", 1, Some("tests"))
+        .await
+        .expect("dependency_import_uses failed");
+
+    assert_eq!(imports.len(), 1);
+    assert_eq!(imports[0].file_path, "tests/app.ts");
 }
 
 // -------------------------------------------------------------------------

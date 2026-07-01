@@ -1700,6 +1700,92 @@ export const value = 1;
 }
 
 #[tokio::test]
+async fn test_search_ignored_dependency_hint_respects_scope_prefix() {
+    let dir = test_temp_dir();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::create_dir_all(project.join("tests")).unwrap();
+    fs::create_dir_all(project.join("node_modules/pkg")).unwrap();
+    fs::write(
+        project.join("src/app.ts"),
+        r#"import type { Foo } from "pkg";
+export const value = 1;
+"#,
+    )
+    .unwrap();
+    fs::write(
+        project.join("tests/app.ts"),
+        r#"import type { Foo } from "pkg";
+export const value = 1;
+"#,
+    )
+    .unwrap();
+    fs::write(
+        project.join("node_modules/pkg/index.d.ts"),
+        "export interface Foo { value: string }\n",
+    )
+    .unwrap();
+
+    let (cg, _env) = init_test_project(project).await;
+    cg.index_all().await.unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_search",
+        json!({"query": "Foo", "limit": 5, "format": "json"}),
+        None,
+        Some("tests"),
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    let candidates = payload["ignored_dependency_hint"]["candidates"]
+        .as_array()
+        .expect("scoped ignored dependency candidates");
+    assert!(!candidates.is_empty());
+    assert!(candidates.iter().all(|candidate| candidate["import_file"]
+        .as_str()
+        .is_some_and(|path| path.starts_with("tests/"))));
+}
+
+#[tokio::test]
+async fn test_search_skips_ignored_dependency_hint_when_results_fill_limit() {
+    let dir = test_temp_dir();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::create_dir_all(project.join("node_modules/pkg")).unwrap();
+    fs::write(
+        project.join("src/app.ts"),
+        r#"export function Foo() {
+  return "local";
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        project.join("node_modules/pkg/index.d.ts"),
+        "export interface Foo { value: string }\n",
+    )
+    .unwrap();
+
+    let (cg, _env) = init_test_project(project).await;
+    cg.index_all().await.unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_search",
+        json!({"query": "Foo", "limit": 1, "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    assert_eq!(payload.as_array().map(Vec::len), Some(1));
+    assert_eq!(payload[0]["name"].as_str(), Some("Foo"));
+}
+
+#[tokio::test]
 async fn test_context_appends_index_coverage_hint_for_skipped_generated_dirs() {
     let (cg, _env, _dir) = setup_generated_dir_project(false).await;
 
@@ -2129,6 +2215,14 @@ async fn context_includes_matching_memory_facts() {
     .await
     .unwrap();
     let payload: Value = serde_json::from_str(extract_text(&json_result.value)).unwrap();
+    assert!(
+        payload.get("context_memory_analytics").is_none(),
+        "internal context analytics must not be serialized in direct tool payloads"
+    );
+    assert!(
+        json_result.internal_analytics().is_some(),
+        "direct tool results should carry context analytics on the internal side channel"
+    );
     assert!(payload["memory_matches"]
         .as_array()
         .is_some_and(|matches| matches
