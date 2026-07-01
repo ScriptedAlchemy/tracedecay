@@ -253,6 +253,21 @@ pub fn merge_project_config(
     merged
 }
 
+/// Canonical load -> merge -> validate -> save pipeline for the project
+/// automation sidecar. Returns the merged project patch and the validated
+/// effective config; nothing is saved when validation fails.
+pub async fn apply_project_config_patch(
+    dashboard_root: &Path,
+    global: &AutomationConfig,
+    patch: AutomationConfigPatch,
+) -> Result<(AutomationConfigPatch, AutomationConfig)> {
+    let current = load_project_config(dashboard_root).await?;
+    let project = merge_project_config(current, patch);
+    let effective = effective_config(global, Some(&project))?;
+    save_project_config(dashboard_root, &project).await?;
+    Ok((project, effective))
+}
+
 pub fn validate_config(config: &AutomationConfig) -> Result<()> {
     if config.timeout_secs == 0 {
         return config_error("automation timeout_secs must be greater than zero");

@@ -32,9 +32,9 @@ const HOOK_EVENT_NOTIFY_TIMEOUT: Duration = Duration::from_millis(750);
 
 mod service;
 pub use service::{
-    default_socket_path, install_service, installed_service_socket_path, refresh_installed_service,
-    refresh_service, service_spec, service_status, socket_path_or_default, uninstall_service,
-    DaemonServiceSpec,
+    daemon_reachable, default_socket_path, install_service, installed_service_socket_path,
+    refresh_installed_service, refresh_service, service_spec, service_status,
+    socket_path_or_default, uninstall_service, DaemonServiceSpec,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -269,6 +269,13 @@ async fn notify_shell_hook_event_without_daemon(project_path: &Path, event: Daem
     ) {
         crate::hooks::CursorShellSyncPlan::BranchAdd(branch) => {
             let _ = crate::tracedecay::TraceDecay::add_branch_tracking(project_path, &branch).await;
+        }
+        crate::hooks::CursorShellSyncPlan::WorktreeBranchAdd {
+            branch,
+            worktree_path,
+        } => {
+            let root = crate::hooks::resolve_worktree_add_root(command, cwd, &worktree_path);
+            let _ = crate::tracedecay::TraceDecay::add_branch_tracking(&root, &branch).await;
         }
         crate::hooks::CursorShellSyncPlan::CurrentBranchSync(branch) => {
             if !matches!(

@@ -1,6 +1,6 @@
 ---
 name: memorize-subject
-description: 'Research a subject with parallel read-only agents, then store durable facts in TraceDecay memory.'
+description: 'Use to research a subject with parallel read-only agents, then store durable facts in TraceDecay memory.'
 disable-model-invocation: true
 ---
 

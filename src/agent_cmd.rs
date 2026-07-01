@@ -1,6 +1,11 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use tracedecay::automation::config::{
+    apply_project_config_patch, project_config_path, AutomationBackend, AutomationConfigPatch,
+    AutomationHostMode, AutomationTaskPatch,
+};
+
 pub(crate) fn hermes_profile_targets(
     home: &Path,
 ) -> tracedecay::errors::Result<Vec<Option<String>>> {
@@ -93,11 +98,19 @@ pub(crate) fn validate_hermes_project_root_flag(
     Ok(Some(path))
 }
 
+/// How `install --agent codex --automation` should configure the daemon loop.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CodexAutomationInstall {
+    /// Apply accepted memory-curation ops without dashboard approval
+    /// (`--auto-apply`).
+    pub(crate) auto_apply: bool,
+}
+
 fn validate_codex_automation_flags(
     agent: Option<&str>,
-    automation: bool,
+    automation: Option<CodexAutomationInstall>,
 ) -> tracedecay::errors::Result<()> {
-    if !automation {
+    if automation.is_none() {
         return Ok(());
     }
     if agent != Some("codex") {
@@ -121,6 +134,87 @@ fn validate_codex_automation_project_path() -> tracedecay::errors::Result<PathBu
     })
 }
 
+async fn install_codex_daemon_automation(
+    project_path: &Path,
+    home: &Path,
+    options: CodexAutomationInstall,
+) -> tracedecay::errors::Result<PathBuf> {
+    let auto_apply = options.auto_apply;
+    if tracedecay::agents::codex::remove_legacy_codex_native_automation(home)? {
+        eprintln!(
+            "\x1b[32m✔\x1b[0m Removed the legacy Codex-native scheduled automation; the TraceDecay daemon loop replaces it."
+        );
+    }
+
+    let cg = open_or_init_codex_daemon_automation_project(project_path).await?;
+    let dashboard_root = cg.store_layout().dashboard_root.clone();
+    let patch = AutomationConfigPatch {
+        enabled: Some(true),
+        backend: Some(AutomationBackend::CodexAppServer),
+        host_mode: Some(AutomationHostMode::Standalone),
+        model: Some(Some("gpt-5.5".to_string())),
+        // Unattended memory-op apply is opt-in: without --auto-apply these
+        // stay unset so AutomationConfig::default() keeps dashboard approval
+        // required, and re-running the installer never weakens stricter
+        // settings a user already chose.
+        require_dashboard_approval: auto_apply.then_some(false),
+        auto_apply_memory_ops: auto_apply.then_some(true),
+        memory_curator: codex_daemon_interval_task(15 * 60),
+        session_reflector: codex_daemon_interval_task(15 * 60),
+        skill_writer: AutomationTaskPatch {
+            min_idle_secs: Some(Some(15 * 60)),
+            ..codex_daemon_interval_task(60 * 60)
+        },
+        ..AutomationConfigPatch::default()
+    };
+
+    let global = tracedecay::user_config::UserConfig::load().automation;
+    apply_project_config_patch(&dashboard_root, &global, patch).await?;
+    let path = project_config_path(&dashboard_root);
+    eprintln!(
+        "\x1b[32m✔\x1b[0m Enabled TraceDecay daemon automation loop at {}",
+        path.display()
+    );
+    eprintln!(
+        "  The daemon scheduler will run memory_curator, session_reflector, and skill_writer via the Codex app-server backend."
+    );
+    if auto_apply {
+        eprintln!(
+            "\x1b[33m⚠\x1b[0m --auto-apply: accepted memory-curation ops (deletes and merges) will be applied without dashboard approval. There is no archive; removals are permanent."
+        );
+    }
+    if !tracedecay::daemon::daemon_reachable() {
+        eprintln!(
+            "\x1b[33m⚠\x1b[0m The TraceDecay daemon is not running, so the automation loop will stay idle. Enable it with `tracedecay daemon install-service`."
+        );
+    }
+    Ok(path)
+}
+
+async fn open_or_init_codex_daemon_automation_project(
+    project_path: &Path,
+) -> tracedecay::errors::Result<tracedecay::tracedecay::TraceDecay> {
+    if tracedecay::tracedecay::TraceDecay::has_initialized_store(project_path).await {
+        tracedecay::tracedecay::TraceDecay::open(project_path).await
+    } else {
+        eprintln!(
+            "No TraceDecay store found for {}; initializing one (equivalent to `tracedecay init`).",
+            project_path.display()
+        );
+        tracedecay::tracedecay::TraceDecay::init(project_path).await
+    }
+}
+
+fn codex_daemon_interval_task(interval_secs: u64) -> AutomationTaskPatch {
+    AutomationTaskPatch {
+        enabled: Some(true),
+        schedule: Some(Some("interval".to_string())),
+        interval_secs: Some(Some(interval_secs)),
+        cooldown_secs: Some(Some(5 * 60)),
+        ..AutomationTaskPatch::default()
+    }
+}
+
 pub(crate) fn hermes_selected_profile_targets(
     home: &Path,
     profile: &Option<String>,
@@ -140,7 +234,7 @@ pub(crate) async fn handle_install_command(
     all_profiles: bool,
     project_root: Option<String>,
     no_dashboard: bool,
-    automation: bool,
+    automation: Option<CodexAutomationInstall>,
 ) -> tracedecay::errors::Result<()> {
     validate_hermes_profile_flags(agent.as_deref(), &profile, all_profiles)?;
     let pinned_project_root = validate_hermes_project_root_flag(agent.as_deref(), &project_root)?;
@@ -186,12 +280,9 @@ pub(crate) async fn handle_install_command(
                 };
                 ag.install_local(&ctx, &project_path)?;
                 ag.post_install(Some(&project_path)).await;
-                if automation && id == "codex" {
+                if let Some(options) = automation.filter(|_| id == "codex") {
                     let scoped_project_path = validate_codex_automation_project_path()?;
-                    tracedecay::agents::codex::install_codex_native_automation(
-                        &home,
-                        &scoped_project_path,
-                    )?;
+                    install_codex_daemon_automation(&scoped_project_path, &home, options).await?;
                 }
             }
             installed_names.push(ag.name().to_string());
@@ -244,12 +335,9 @@ pub(crate) async fn handle_install_command(
             };
             ag.install(&ctx)?;
             ag.post_install(project_path.as_deref()).await;
-            if automation && id == "codex" {
+            if let Some(options) = automation.filter(|_| id == "codex") {
                 let scoped_project_path = validate_codex_automation_project_path()?;
-                tracedecay::agents::codex::install_codex_native_automation(
-                    &home,
-                    &scoped_project_path,
-                )?;
+                install_codex_daemon_automation(&scoped_project_path, &home, options).await?;
             }
         }
         if !user_cfg.installed_agents.contains(&id) {

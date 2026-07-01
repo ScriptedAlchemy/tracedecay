@@ -27,6 +27,7 @@ fn explicit_agent_config_commands_skip_startup_maintenance() {
         project_root: None,
         no_dashboard: false,
         automation: false,
+        auto_apply: false,
     }));
     assert!(should_skip_startup_maintenance(&Commands::Reinstall));
     assert!(should_skip_startup_maintenance(&Commands::UpdatePlugin));
@@ -69,6 +70,7 @@ fn agent_install_maintenance_is_selective() {
         project_root: None,
         no_dashboard: false,
         automation: false,
+        auto_apply: false,
     }));
     assert!(should_skip_agent_install_maintenance(&Commands::Reinstall));
     // `update-plugin` promises byte-identical configs; the implicit
@@ -198,6 +200,7 @@ fn local_install_detection_tracks_dispatch_preamble_behavior() {
         project_root: None,
         no_dashboard: false,
         automation: false,
+        auto_apply: false,
     };
     let global = Commands::Install {
         agent: Some("hermes".to_string()),
@@ -207,6 +210,7 @@ fn local_install_detection_tracks_dispatch_preamble_behavior() {
         project_root: None,
         no_dashboard: false,
         automation: false,
+        auto_apply: false,
     };
 
     assert!(is_local_install_command(&local));

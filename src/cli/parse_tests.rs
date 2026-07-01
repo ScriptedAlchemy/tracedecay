@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use super::{
     AutomationAction, AutomationConfigAction, AutomationConfigScope, AutomationRunAction,
     AutomationRunsAction, AutomationSkillsAction, AutomationSkillsInstallTarget, BranchAction, Cli,
@@ -695,7 +697,7 @@ fn automation_run_session_reflection_parses_manual_dry_run_flags() {
             && query == "remember decisions"
             && evidence_limit == 12
             && storage_scope == "hermes_profile"
-            && hermes_home.as_deref() == Some("/tmp/hermes-profile")
+            && hermes_home.as_deref() == Some(Path::new("/tmp/hermes-profile"))
             && scope == "session"
             && session_id.as_deref() == Some("session-123")
             && !include_summaries
@@ -739,6 +741,8 @@ fn automation_run_skill_writing_parses_manual_dry_run_flags() {
                             provider,
                             query,
                             evidence_limit,
+                            storage_scope,
+                            hermes_home,
                             path,
                         }
                 }
@@ -746,7 +750,31 @@ fn automation_run_skill_writing_parses_manual_dry_run_flags() {
             && provider == "cursor"
             && query == "workflow corrections"
             && evidence_limit == 9
+            && storage_scope == "project_local"
+            && hermes_home.is_none()
             && path.as_deref() == Some("/tmp/project")
+    ));
+}
+
+#[test]
+fn automation_run_skill_writing_defaults_to_all_providers() {
+    let cli = Cli::try_parse_from(["tracedecay", "automation", "run", "skill-writing"])
+        .expect("automation skill-writing run should parse with defaults");
+
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Automation {
+            action:
+                AutomationAction::Run {
+                    action:
+                        AutomationRunAction::SkillWriting {
+                            provider,
+                            storage_scope,
+                            hermes_home,
+                            ..
+                        }
+                }
+        }) if provider == "all" && storage_scope == "project_local" && hermes_home.is_none()
     ));
 }
 

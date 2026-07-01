@@ -8,6 +8,7 @@ use serde_json::Value;
 use crate::errors::{Result, TraceDecayError};
 
 use super::hermes_config_projection::{load_hermes_yaml_projection, yaml_bool};
+use super::skill_frontmatter::{parse_skill_frontmatter, SkillFrontmatterValue};
 
 const SKILL_MD: &str = "SKILL.md";
 pub(crate) const USAGE_FILE: &str = ".usage.json";
@@ -354,29 +355,24 @@ pub(crate) fn count_archive_entries(archive_dir: &Path) -> Result<usize> {
     Ok(entries.filter_map(std::result::Result::ok).count())
 }
 
+/// Lenient view over [`parse_skill_frontmatter`]: hub skills without (or with
+/// malformed) frontmatter degrade to an empty map so inventory listing never
+/// fails, and only scalar values matter here (`name`/`id`/`description`/
+/// `summary` are all scalars).
 fn parse_frontmatter(contents: &str) -> BTreeMap<String, String> {
-    let mut lines = contents.lines();
-    if lines.next() != Some("---") {
-        return BTreeMap::new();
-    }
-    let mut values = BTreeMap::new();
-    for line in lines {
-        if line.trim() == "---" {
-            break;
-        }
-        let Some((key, value)) = line.split_once(':') else {
-            continue;
-        };
-        values.insert(
-            key.trim().to_ascii_lowercase(),
-            value
-                .trim()
-                .trim_matches('"')
-                .trim_matches('\'')
-                .to_string(),
-        );
-    }
-    values
+    parse_skill_frontmatter(contents)
+        .map(|fields| {
+            fields
+                .into_iter()
+                .filter_map(|(key, value)| match value {
+                    SkillFrontmatterValue::Scalar(scalar) => {
+                        Some((key.to_ascii_lowercase(), scalar))
+                    }
+                    SkillFrontmatterValue::Block(_) => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn truncate_chars(value: &str, max_chars: usize) -> String {
