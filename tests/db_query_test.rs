@@ -1,5 +1,11 @@
-use std::ops::Deref;
+use std::{
+    fs,
+    fs::OpenOptions,
+    ops::Deref,
+    path::{Path, PathBuf},
+};
 
+use fs2::FileExt;
 use tempfile::TempDir;
 use tokio::sync::OnceCell;
 use tracedecay::db::{Database, StoredFingerprint};
@@ -38,18 +44,83 @@ async fn setup_db() -> TestDb {
 async fn empty_db_template() -> &'static [u8] {
     EMPTY_DB_TEMPLATE
         .get_or_init(|| async {
-            let dir = TempDir::new().expect("failed to create template temp dir");
-            let db_path = dir.path().join("template.db");
-            let (db, _) = Database::initialize(&db_path)
-                .await
-                .expect("failed to initialize template database");
-            db.checkpoint()
-                .await
-                .expect("failed to checkpoint template database");
-            db.close();
-            std::fs::read(&db_path).expect("failed to read template database")
+            let db_path = ensure_empty_db_template().await;
+            fs::read(&db_path).expect("failed to read template database")
         })
         .await
+}
+
+async fn ensure_empty_db_template() -> PathBuf {
+    let template_path = empty_db_template_path();
+    if template_cache_exists(&template_path) {
+        return template_path;
+    }
+
+    let cache_dir = template_path
+        .parent()
+        .expect("template path should have parent directory");
+    fs::create_dir_all(cache_dir).expect("failed to create template cache directory");
+    let lock_path = cache_dir.join("db-query-empty-template.lock");
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .expect("failed to open template cache lock");
+    lock_file
+        .lock_exclusive()
+        .expect("failed to lock template cache");
+
+    if template_cache_exists(&template_path) {
+        return template_path;
+    }
+
+    let dir = TempDir::new_in(cache_dir).expect("failed to create template temp dir");
+    let db_path = dir.path().join("template.db");
+    let (db, _) = Database::initialize(&db_path)
+        .await
+        .expect("failed to initialize template database");
+    db.checkpoint()
+        .await
+        .expect("failed to checkpoint template database");
+    db.close();
+
+    let tmp_path = cache_dir.join(format!(
+        "db-query-empty-template-{}.tmp",
+        std::process::id()
+    ));
+    fs::copy(&db_path, &tmp_path).expect("failed to stage template database");
+    if template_path.exists() {
+        fs::remove_file(&template_path).expect("failed to remove stale template database");
+    }
+    fs::rename(&tmp_path, &template_path).expect("failed to publish template database");
+    template_path
+}
+
+fn empty_db_template_path() -> PathBuf {
+    std::env::temp_dir()
+        .join("tracedecay-test-fixtures")
+        .join(format!(
+            "db-query-empty-template-{:016x}.db",
+            empty_db_template_hash()
+        ))
+}
+
+fn empty_db_template_hash() -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in include_bytes!("../src/db/migrations.rs")
+        .iter()
+        .chain(include_bytes!("../src/db/connection.rs"))
+    {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn template_cache_exists(path: &Path) -> bool {
+    path.metadata().is_ok_and(|metadata| metadata.len() > 0)
 }
 
 /// Helper: create a sample node with reasonable defaults.
@@ -110,6 +181,28 @@ async fn assert_can_start_new_transaction(db: &Database) {
         .execute("ROLLBACK", ())
         .await
         .expect("test transaction rollback should succeed");
+}
+
+#[tokio::test]
+async fn test_empty_db_template_cache_seeds_without_migration() {
+    let template_path = empty_db_template_path();
+    let template = empty_db_template().await;
+    assert!(template_path.exists(), "template should be cached on disk");
+    assert!(
+        !template.is_empty(),
+        "template database should not be empty"
+    );
+
+    let dir = TempDir::new().expect("failed to create temp dir");
+    let db_path = dir.path().join("test.db");
+    std::fs::write(&db_path, template).expect("failed to write template database");
+    let (_db, migrated) = Database::open(&db_path)
+        .await
+        .expect("failed to open template database");
+    assert!(
+        !migrated,
+        "cached test database should not require migration"
+    );
 }
 
 #[tokio::test]
