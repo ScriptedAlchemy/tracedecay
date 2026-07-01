@@ -8,6 +8,8 @@
 //! - The dirty sentinel lifecycle works correctly
 //! - The full crash→detect→repair cycle works end-to-end
 
+mod common;
+
 use std::io::{Seek, Write};
 use tempfile::TempDir;
 use tracedecay::db::Database;
@@ -192,7 +194,14 @@ async fn search_nodes_falls_back_to_like_when_fts_empty() {
 // ─── begin_bulk_load no longer downgrades synchronous ────────────────────
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn bulk_load_preserves_platform_synchronous_mode() {
+    // Pin the CI-only unsafe-fast escape hatch off for this test: it asserts
+    // the *durable* platform synchronous mode, which
+    // TRACEDECAY_SQLITE_UNSAFE_FAST=1 (exported for the whole Windows CI test
+    // run) would relax to OFF.
+    let _env_lock = common::GLOBAL_DB_ENV_LOCK.lock().unwrap();
+    let _unsafe_fast_off = common::EnvVarGuard::unset(tracedecay::db::SQLITE_UNSAFE_FAST_ENV);
     let (db, _dir, _path) = setup_db().await;
 
     db.begin_bulk_load().await.unwrap();

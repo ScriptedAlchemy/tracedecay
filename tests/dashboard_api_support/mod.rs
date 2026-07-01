@@ -8,7 +8,8 @@ pub(crate) use std::thread;
 pub(crate) use crate::common::{
     create_runtime, fake_codex_bin, get_json, http_agent, http_agent_with_timeout,
     install_fake_codex_launcher, pick_free_port, response_to_json, tempdir_or_panic,
-    wait_for_dashboard, EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK,
+    wait_for_dashboard, write_empty_global_db_schema, EnvVarGuard, GLOBAL_DB_ENV,
+    GLOBAL_DB_ENV_LOCK,
 };
 pub(crate) use serde_json::Value;
 pub(crate) use tempfile::TempDir;
@@ -514,19 +515,18 @@ async fn start_dashboard_fixture_with_options(
         panic!("failed to enroll dashboard fixture in profile storage: {err}");
     }
 
+    // Pre-create both GlobalDb-schema stores from the cached empty template:
+    // the init-time registry write, LCM seeding, and the dashboard server's
+    // startup LCM resolve + catch-up ingest then all open existing DBs
+    // instead of each paying a full schema creation (slow on Windows).
+    write_empty_global_db_schema(&global_db_path).await;
+
     let cg = setup_project(&project_root).await;
     if seed_memory {
         seed_memory_fixture(&cg).await;
     }
 
-    let global_db = match GlobalDb::open_at(&global_db_path).await {
-        Some(db) => db,
-        None => panic!(
-            "failed to open temporary global DB at {}",
-            global_db_path.display()
-        ),
-    };
-    drop(global_db);
+    write_empty_global_db_schema(&cg.store_layout().sessions_db_path).await;
     if seed_lcm {
         let session_store = open_project_session_store(&project_root).await;
         seed_lcm_fixture(&session_store, &project_root).await;
