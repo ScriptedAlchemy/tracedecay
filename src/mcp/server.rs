@@ -1406,6 +1406,9 @@ impl McpServer {
                 }
             }
             HookEventPlan::AddBranchAt { root, branch } => {
+                // The new worktree root is not this server's checkout, so no
+                // reopen or token-map refresh applies here (unlike AddBranch);
+                // branch tracking against the shared store is the whole job.
                 match self.add_hook_branch_tracking(&root, &branch, &cg).await {
                     Ok(
                         crate::branch::BranchAddOutcome::Added

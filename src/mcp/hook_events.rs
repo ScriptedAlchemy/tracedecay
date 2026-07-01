@@ -158,7 +158,7 @@ fn plan_shell_hook_event(
             branch,
             worktree_path,
         } => HookEventPlan::AddBranchAt {
-            root: absolutize_hook_path(cwd, &worktree_path),
+            root: crate::hooks::resolve_worktree_add_root(command, cwd, &worktree_path),
             branch,
         },
         crate::hooks::CursorShellSyncPlan::IncrementalSync => {
@@ -172,30 +172,6 @@ fn plan_shell_hook_event(
         }
         crate::hooks::CursorShellSyncPlan::Noop => HookEventPlan::Noop,
     }
-}
-
-fn absolutize_hook_path(cwd: &Path, path: &str) -> PathBuf {
-    let path = Path::new(path);
-    let joined = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        cwd.join(path)
-    };
-    normalize_lexically(&joined)
-}
-
-fn normalize_lexically(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            other => normalized.push(other.as_os_str()),
-        }
-    }
-    normalized
 }
 
 fn read_marker_secs(path: &Path) -> Option<i64> {
@@ -345,6 +321,39 @@ mod tests {
             plan_hook_event(&event, Path::new("/tmp/project"), Some("main")),
             HookEventPlan::AddBranchAt {
                 root: Path::new("/tmp/wt").to_path_buf(),
+                branch: "feature/daemon-hooks".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn plans_worktree_add_resolving_path_against_git_dash_c_dir() {
+        // `git -C <dir>` makes git resolve the worktree path against <dir>,
+        // not the shell cwd: from <base>/project/src, `-C ..` targets the
+        // project root, so `../wt` lands beside the project at <base>/wt.
+        let base = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir should create: {e}"));
+        let base_root = base
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|e| panic!("tempdir should canonicalize: {e}"));
+        let project_root = base_root.join("project");
+        std::fs::create_dir_all(project_root.join("src"))
+            .unwrap_or_else(|e| panic!("project dirs should create: {e}"));
+        std::fs::create_dir_all(base_root.join("wt"))
+            .unwrap_or_else(|e| panic!("worktree dir should create: {e}"));
+
+        let params = json!({
+            "agent": "codex",
+            "event": "postToolUseShell",
+            "command": "git -C .. worktree add ../wt feature/daemon-hooks",
+            "cwd": project_root.join("src")
+        });
+        let event = parse_or_panic(&params);
+
+        assert_eq!(
+            plan_hook_event(&event, &project_root, Some("main")),
+            HookEventPlan::AddBranchAt {
+                root: base_root.join("wt"),
                 branch: "feature/daemon-hooks".to_string(),
             }
         );
