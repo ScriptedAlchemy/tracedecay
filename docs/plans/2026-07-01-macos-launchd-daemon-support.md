@@ -165,9 +165,9 @@ separate option.
 
 | Operation | Linux systemd | macOS launchd |
 |---|---|---|
-| install with start | `daemon-reload`; `enable --now tracedecay.service` | write plist; `bootstrap gui/<uid> <plist>`; `enable gui/<uid>/com.tracedecay.daemon`; `kickstart -k gui/<uid>/com.tracedecay.daemon` |
-| install with `--no-start` | write unit only | write plist only |
-| refresh | write unit; `daemon-reload`; `enable`; `restart` | write plist; if loaded, `bootout gui/<uid>/com.tracedecay.daemon`; `bootstrap gui/<uid> <plist>`; `enable ...`; `kickstart -k ...` |
+| install with start | `daemon-reload`; `enable --now tracedecay.service` | write plist; `bootout gui/<uid>/com.tracedecay.daemon` (tolerating not-loaded, for idempotent re-install); `enable ...`; `bootstrap gui/<uid> <plist>`; `kickstart -k ...` |
+| install with `--no-start` | write unit only | write plist; `disable gui/<uid>/com.tracedecay.daemon` so launchd does not autostart the agent at the next login |
+| refresh | write unit; `daemon-reload`; `enable`; `restart` | write plist; `bootout gui/<uid>/com.tracedecay.daemon` (tolerating not-loaded); `enable ...`; `bootstrap gui/<uid> <plist>`; `kickstart -k ...` |
 | uninstall with stop | `disable --now`; remove unit; `daemon-reload` | `bootout gui/<uid>/com.tracedecay.daemon` if loaded; `disable gui/<uid>/com.tracedecay.daemon`; remove plist |
 | uninstall with `--no-stop` | remove unit only | remove plist only |
 | status | unit path + socket + journald hint | plist path + socket + `launchctl print` / log hints |
@@ -179,7 +179,8 @@ Implementation details:
 - After install/refresh with start, verify either the socket becomes connectable
   briefly or `launchctl print <service-target>` succeeds. This catches command
   failures that otherwise appear only in logs.
-- Do not call `enable` or `kickstart` for `--no-start`.
+- Do not call `bootstrap` or `kickstart` for `--no-start`; persist a `disable`
+  instead so the plist in `~/Library/LaunchAgents` stays inert at login.
 
 ## 6. Plist Rendering
 
@@ -403,10 +404,11 @@ tests mechanically without changing expected Linux output.
 
 Add tests around command planning/fake command runner, not real `launchctl`:
 
-- install with start plans `bootstrap`, `enable`, `kickstart`;
-- install with `--no-start` writes plist only;
-- refresh preserves existing socket path and plans `bootout`, `bootstrap`,
-  `enable`, `kickstart`;
+- install with start plans `bootout` (tolerated), `enable`, `bootstrap`,
+  `kickstart`;
+- install with `--no-start` writes the plist and disables the agent;
+- refresh preserves existing socket path and plans `bootout` (tolerated),
+  `enable`, `bootstrap`, `kickstart`;
 - uninstall with stop plans `bootout`, `disable`, remove plist;
 - uninstall with `--no-stop` removes plist only.
 
