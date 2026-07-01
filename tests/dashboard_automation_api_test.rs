@@ -104,7 +104,8 @@ fn curation_agent_plan_skips_when_automation_is_disabled_and_records_history() {
                 "dry_run": true,
                 "provider": "cursor",
                 "query": "workflow corrections",
-                "evidence_limit": 7
+                "evidence_limit": 7,
+                "storage_scope": "project_local"
             }),
         );
         assert_eq!(status, 202);
@@ -125,7 +126,7 @@ fn curation_agent_plan_skips_when_automation_is_disabled_and_records_history() {
             .post(&format!("{base_url}/api/automation/run/skill-writing"))
             .send_json(serde_json::json!({
                 "dry_run": true,
-                "storage_scope": "project_local"
+                "unsupported_field": true
             }))
             .expect("skill-writing request with unsupported field should receive response");
         let rejected_skill_status = rejected_skill_shape.status().as_u16();
@@ -135,7 +136,7 @@ fn curation_agent_plan_skips_when_automation_is_disabled_and_records_history() {
             .expect("skill-writing rejection body should be readable");
         assert_eq!(rejected_skill_status, 422);
         assert!(
-            rejected_skill_body.contains("storage_scope"),
+            rejected_skill_body.contains("unsupported_field"),
             "rejection should name the unsupported field: {rejected_skill_body}"
         );
 

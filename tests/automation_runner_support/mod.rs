@@ -740,6 +740,37 @@ pub(crate) async fn read_artifact(
         .unwrap()
 }
 
+/// Standalone automation config with only the skill writer task enabled on a
+/// manual schedule; override fields with struct update syntax where needed.
+pub(crate) fn enabled_skill_writer_config() -> AutomationConfig {
+    AutomationConfig {
+        enabled: true,
+        backend: AutomationBackend::CodexAppServer,
+        host_mode: AutomationHostMode::Standalone,
+        tasks: AutomationTaskSet {
+            skill_writer: AutomationTaskConfig {
+                enabled: true,
+                schedule: Some("manual".to_string()),
+                ..AutomationTaskConfig::default()
+            },
+            ..AutomationTaskSet::default()
+        },
+        ..AutomationConfig::default()
+    }
+}
+
+/// Manual-trigger skill writer options matching the seeded "automation" fixture
+/// evidence, rooted at the given managed-skill profile directory.
+pub(crate) fn manual_skill_writer_options(profile_root: &Path) -> SkillWriterAutomationOptions {
+    SkillWriterAutomationOptions {
+        provider: "cursor".to_string(),
+        query: "automation".to_string(),
+        evidence_limit: 5,
+        profile_root: Some(profile_root.to_path_buf()),
+        ..SkillWriterAutomationOptions::default()
+    }
+}
+
 pub(crate) fn scheduler_config(
     interval_secs: Option<u64>,
     cooldown_secs: Option<u64>,

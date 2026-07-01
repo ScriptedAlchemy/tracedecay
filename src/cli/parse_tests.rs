@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use super::{
     AutomationAction, AutomationConfigAction, AutomationConfigScope, AutomationRunAction,
     AutomationRunsAction, AutomationSkillsAction, AutomationSkillsInstallTarget, BranchAction, Cli,
@@ -695,7 +697,7 @@ fn automation_run_session_reflection_parses_manual_dry_run_flags() {
             && query == "remember decisions"
             && evidence_limit == 12
             && storage_scope == "hermes_profile"
-            && hermes_home.as_deref() == Some("/tmp/hermes-profile")
+            && hermes_home.as_deref() == Some(Path::new("/tmp/hermes-profile"))
             && scope == "session"
             && session_id.as_deref() == Some("session-123")
             && !include_summaries

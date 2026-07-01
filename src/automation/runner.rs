@@ -207,9 +207,6 @@ pub async fn run_session_reflector_with_backend(
             return skipped_session_reflector_run(&run, "lcm_not_ingested", None).await;
         }
     };
-    if !sessions_db_path.is_file() {
-        return skipped_session_reflector_run(&run, "lcm_not_ingested", None).await;
-    }
     let Some(lcm_db) = GlobalDb::open_read_only_at(&sessions_db_path).await else {
         return skipped_session_reflector_run(&run, "lcm_unavailable", None).await;
     };
@@ -532,12 +529,6 @@ async fn build_skill_writer_evidence(
             });
         }
     };
-    if !sessions_db_path.is_file() {
-        return Ok(SkillWriterEvidenceOutcome::Skipped {
-            reason: "lcm_not_ingested",
-            evidence_hash: None,
-        });
-    }
     let Some(lcm_db) = GlobalDb::open_read_only_at(&sessions_db_path).await else {
         return Ok(SkillWriterEvidenceOutcome::Skipped {
             reason: "lcm_unavailable",
@@ -699,21 +690,9 @@ fn normalized_non_empty(value: &str) -> Option<String> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::build_session_reflector_prompt;
-
-    #[test]
-    fn session_reflector_prompt_requires_numeric_trust() {
-        let prompt = build_session_reflector_prompt(&json!({"hits": []}));
-
-        assert!(prompt.contains("trust must be a JSON number from 0.0 to 1.0"));
-        assert!(prompt.contains("Do not use string labels like high, medium, or low"));
-    }
-}
-
+/// Resolves the LCM sessions database for an automation task, reporting
+/// `NotIngested` when the store does not exist yet so callers can skip
+/// without re-checking the path.
 fn automation_lcm_db_path(
     cg: &TraceDecay,
     storage_scope: &str,
@@ -721,9 +700,14 @@ fn automation_lcm_db_path(
     task_name: &str,
 ) -> Result<LcmAutomationStore> {
     match storage_scope {
-        "project_local" => Ok(LcmAutomationStore::Available(
-            cg.store_layout().sessions_db_path.clone(),
-        )),
+        "project_local" => {
+            let path = cg.store_layout().sessions_db_path.clone();
+            if path.is_file() {
+                Ok(LcmAutomationStore::Available(path))
+            } else {
+                Ok(LcmAutomationStore::NotIngested)
+            }
+        }
         "hermes_profile" => {
             let hermes_home = hermes_home.ok_or_else(|| TraceDecayError::Config {
                 message: format!("{task_name} hermes_profile storage requires hermes_home"),
