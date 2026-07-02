@@ -55,9 +55,8 @@ and the specific scans the user asked for — don't run every tool by reflex.
 ## Project & index status
 
 1. **Active project → `tracedecay_active_project`** (no args): resolved
-   project root, scope prefix, branch identity, and the resolved active
-   project store backing this session. Use this before describing where data
-   lives.
+   project root, scope prefix, branch identity, and the resolved active project store
+   backing this session. Use this before describing where data lives.
 2. **Storage status → `tracedecay_storage_status`** (no args): resolved
    active project store health, graph DB path, writability, branch-fallback
    warnings — instead of probing `.tracedecay` or direct SQLite checks.

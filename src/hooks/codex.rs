@@ -24,9 +24,9 @@ use super::{
     record_workspace_status_analytics, rel_under_root, text_field,
 };
 
-const CODEX_SUBAGENT_START_CONTEXT: &str = "tracedecay subagent context: this looks like a \
-new/no-history subagent or code-research subagent. Use `tracedecay:using-tracedecay` and the \
-matching TraceDecay workflow before broad file reads: `tracedecay:exploring-code` with \
+const CODEX_SUBAGENT_START_CONTEXT: &str = "tracedecay MCP tools subagent context: this looks \
+like a new/no-history subagent or code-research subagent. Use `tracedecay:using-tracedecay` \
+and the matching TraceDecay workflow before broad file reads: `tracedecay:exploring-code` with \
 `tracedecay_context` for code exploration, `tracedecay_outline` or `tracedecay_body` before \
 whole-file reads, `tracedecay:tracing-functions` with `tracedecay_find_exact_symbol`, \
 `tracedecay_callers`, and `tracedecay_callees` when asked to trace functions, find callers, \

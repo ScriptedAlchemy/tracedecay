@@ -16,7 +16,7 @@ If the workspace is indexed, TraceDecay is the first stop for codebase questions
 - **Architecture, health, status, config, TODOs, runtime:** use `tracedecay:code-health`.
 - **Prior decisions or past conversations:** use `tracedecay:recalling-project-memory` / `tracedecay:recalling-session-context`; mutate facts only through `tracedecay:curating-project-memory`.
 - **Durable memory:** when a durable decision, user preference, correction, or pitfall surfaces, store it proactively with `tracedecay_fact_store` (action "add") with calibrated trust. Do not store secrets/credentials, transient errors, environment-specific failures, one-off narratives, or task progress.
-- **Active project/store questions:** use `tracedecay_active_project` or `tracedecay_storage_status` instead of inferring from marker files or direct DB paths.
+- **Active project/store questions:** use `tracedecay_active_project` or `tracedecay_storage_status` for resolved active project routing instead of inferring from marker files or direct DB paths.
 - **Truncated MCP responses:** if a response has `truncated: true` plus `handle`, narrow the query first; call `tracedecay_retrieve` only when omitted details are needed.
 - **MCP errors/timeouts:** use the CLI fallback (`tracedecay tool <name> --key value`; see `tracedecay:using-the-cli`) instead of querying `.tracedecay` databases directly or abandoning tracedecay.
 - Fall back to plain file reads, search, or shell only for non-indexed content or after tracedecay has pinpointed the exact files.
