@@ -10,6 +10,9 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
+use crate::extraction::basic_common::{
+    derive_function_name, find_subroutine_ranges, for_each_top_level_line, BasicLine,
+};
 use crate::extraction::traversal::find_direct_child_by_kind;
 use crate::types::{
     generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
@@ -69,18 +72,6 @@ impl ExtractionState {
             .unwrap_or("<invalid utf8>")
             .to_string()
     }
-}
-
-/// Represents a collected line from the BASIC program for subroutine synthesis.
-struct BasicLine<'a> {
-    /// The `line` AST node.
-    node: TsNode<'a>,
-    /// The line number (e.g. 10, 20, 100).
-    line_number: u32,
-    /// The kind of the first statement on this line.
-    statement_kind: String,
-    /// The text of the REM comment, if this line is a REM.
-    comment_text: Option<String>,
 }
 
 impl MsBasic2Extractor {
@@ -225,7 +216,7 @@ impl MsBasic2Extractor {
     /// In MS BASIC 2.0, lines like `30 LET MR = 3` serve as variable initialization.
     /// We treat only top-level LET assignments (those not inside subroutines) as constants.
     fn extract_top_level_lets(state: &mut ExtractionState, lines: &[BasicLine<'_>]) {
-        let subroutine_ranges = Self::find_subroutine_ranges(lines);
+        let subroutine_ranges = find_subroutine_ranges(lines);
         for (idx, basic_line) in lines.iter().enumerate() {
             // Skip lines that are inside subroutines.
             if subroutine_ranges
@@ -354,7 +345,7 @@ impl MsBasic2Extractor {
 
                 if has_return && body_start < body_end {
                     // Derive a function name from the first REM comment.
-                    let fn_name = Self::derive_function_name(&rem_comments);
+                    let fn_name = derive_function_name(&rem_comments);
                     let docstring = if rem_comments.is_empty() {
                         None
                     } else {
@@ -460,59 +451,14 @@ impl MsBasic2Extractor {
 
     /// Extract GOSUB/GOTO references from top-level lines (those not part of subroutines).
     fn extract_top_level_calls(state: &mut ExtractionState, lines: &[BasicLine<'_>]) {
-        // Determine which lines are part of subroutines (between first REM and RETURN).
-        let subroutine_ranges = Self::find_subroutine_ranges(lines);
-
         let file_node_id = state
             .node_stack
             .last()
             .map(|(_, id)| id.clone())
             .unwrap_or_default();
-
-        for (idx, line) in lines.iter().enumerate() {
-            // Skip lines that are inside subroutines.
-            if subroutine_ranges
-                .iter()
-                .any(|(start, end)| idx >= *start && idx < *end)
-            {
-                continue;
-            }
+        for_each_top_level_line(lines, |line| {
             Self::extract_calls_from_line(state, line, &file_node_id);
-        }
-    }
-
-    /// Find ranges of lines that belong to subroutines (REM ... RETURN blocks).
-    fn find_subroutine_ranges(lines: &[BasicLine<'_>]) -> Vec<(usize, usize)> {
-        let mut ranges = Vec::new();
-        let mut i = 0;
-        while i < lines.len() {
-            if lines[i].statement_kind == "comment" {
-                let rem_start = i;
-                while i < lines.len() && lines[i].statement_kind == "comment" {
-                    i += 1;
-                }
-                let mut body_end = i;
-                let mut has_return = false;
-                while body_end < lines.len() {
-                    if lines[body_end].statement_kind == "return_statement" {
-                        has_return = true;
-                        body_end += 1;
-                        break;
-                    }
-                    if lines[body_end].statement_kind == "comment" {
-                        break;
-                    }
-                    body_end += 1;
-                }
-                if has_return {
-                    ranges.push((rem_start, body_end));
-                }
-                i = body_end;
-            } else {
-                i += 1;
-            }
-        }
-        ranges
+        });
     }
 
     /// Extract GOSUB/GOTO call references from a single line.
@@ -554,48 +500,6 @@ impl MsBasic2Extractor {
                     break;
                 }
             }
-        }
-    }
-
-    /// Derive a function name from REM comment text.
-    ///
-    /// Takes the first REM line text and converts it into a snake_case-like
-    /// identifier. For example, "LOG A MESSAGE" becomes "`LOG_A_MESSAGE`".
-    fn derive_function_name(rem_comments: &[String]) -> String {
-        if rem_comments.is_empty() {
-            return "UNNAMED_SUB".to_string();
-        }
-        let first = &rem_comments[0];
-        // Replace spaces with underscores and keep alphanumeric + underscore.
-        let name: String = first
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        // Collapse multiple underscores and trim.
-        let mut collapsed = String::new();
-        let mut prev_underscore = false;
-        for c in name.chars() {
-            if c == '_' {
-                if !prev_underscore && !collapsed.is_empty() {
-                    collapsed.push('_');
-                }
-                prev_underscore = true;
-            } else {
-                collapsed.push(c);
-                prev_underscore = false;
-            }
-        }
-        let trimmed = collapsed.trim_end_matches('_').to_string();
-        if trimmed.is_empty() {
-            "UNNAMED_SUB".to_string()
-        } else {
-            trimmed
         }
     }
 
