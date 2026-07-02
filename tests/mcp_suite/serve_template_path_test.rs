@@ -6,15 +6,14 @@
 use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
-use std::process::Stdio;
 
 use serde_json::json;
 use tempfile::TempDir;
 
-use crate::common::{canonical_existing_path, tracedecay_command_with_home};
+use crate::common::canonical_existing_path;
 use crate::serve_harness::{
-    canonical_path_string, init_project_under, init_project_with_file, register_global_project,
-    run_serve_runtime, runtime_project_root,
+    canonical_path_string, degraded_tool_error_text, init_project_under, init_project_with_file,
+    json_rpc_response, register_global_project, run_serve_runtime, runtime_project_root,
 };
 
 const UNEXPANDED_TEMPLATE_WARNING: &str = "unexpanded template variable";
@@ -147,29 +146,39 @@ async fn explicit_path_with_dollar_sign_directory_is_not_treated_as_template() {
 
 /// A genuinely wrong explicit path (no template syntax) must keep failing
 /// loudly — the template tolerance must not swallow real misconfiguration.
+/// It does NOT exit though (a dead process permanently kills the MCP scope):
+/// it serves degraded, reporting the missing path from every tool call and
+/// never falling back to discovery.
 #[tokio::test]
-async fn explicit_nonexistent_path_still_fails_instead_of_discovery() {
+async fn explicit_nonexistent_path_reports_degraded_error_instead_of_discovery() {
     let home = TempDir::new().unwrap();
     let active = init_project_with_file(home.path(), "pub fn active_project_marker() {}\n").await;
     register_global_project(home.path(), active.path()).await;
     let scratch = TempDir::new().unwrap();
     let missing = scratch.path().join("does-not-exist");
+    let cwd = TempDir::new().unwrap();
 
-    let output = tracedecay_command_with_home(home.path())
-        .arg("serve")
-        .arg("--path")
-        .arg(&missing)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .expect("tracedecay serve should run");
+    let output = run_serve_runtime(
+        home.path(),
+        cwd.path(),
+        Some(missing.as_os_str()),
+        json!({}),
+    );
 
     assert!(
-        !output.status.success(),
-        "a nonexistent explicit --path must stay fatal instead of falling back to discovery\nstdout:\n{}\nstderr:\n{}",
+        output.status.success(),
+        "a nonexistent explicit --path serves degraded instead of exiting\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+    let text = degraded_tool_error_text(&json_rpc_response(&output.stdout, 2));
+    assert!(
+        text.contains(&missing.display().to_string()),
+        "the degraded error should name the missing explicit path\n{text}"
+    );
+    assert!(
+        !text.contains(&active.path().display().to_string()),
+        "an explicit path must never fall back to the registered discovery project\n{text}"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -216,10 +225,15 @@ async fn literal_workspace_folder_with_multiple_projects_reports_ambiguity() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        !output.status.success(),
-        "ambiguous discovery must not silently pick a project\nstdout:\n{}\nstderr:\n{}",
+        output.status.success(),
+        "ambiguity serves degraded (Cursor never retries a dead scope) instead of exiting\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         stderr
+    );
+    let text = degraded_tool_error_text(&json_rpc_response(&output.stdout, 2));
+    assert!(
+        text.contains("Multiple tracedecay projects found"),
+        "ambiguous discovery must not silently pick a project\n{text}"
     );
     assert!(
         stderr.contains(UNEXPANDED_TEMPLATE_WARNING),
@@ -277,14 +291,20 @@ async fn literal_template_with_different_depth_projects_is_stricter_than_no_path
     );
 
     // The discarded-template fallback must be stricter: same registry, same
-    // cwd, but no unique match — so it errors instead of guessing.
+    // cwd, but no unique match — so it reports the ambiguity (from degraded
+    // mode) instead of guessing.
     let templated = run_serve_runtime_with_path_arg(home.path(), &home_cwd, "${workspaceFolder}");
     let stderr = String::from_utf8_lossy(&templated.stderr);
     assert!(
-        !templated.status.success(),
-        "the template fallback must not silently depth-rank projects\nstdout:\n{}\nstderr:\n{}",
+        templated.status.success(),
+        "the template fallback serves degraded instead of exiting\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&templated.stdout),
         stderr
+    );
+    let text = degraded_tool_error_text(&json_rpc_response(&templated.stdout, 2));
+    assert!(
+        text.contains("Multiple tracedecay projects found"),
+        "the template fallback must not silently depth-rank projects\n{text}"
     );
     assert!(
         stderr.contains("Multiple tracedecay projects found"),

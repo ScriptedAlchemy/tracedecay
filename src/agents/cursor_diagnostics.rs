@@ -1,4 +1,5 @@
-//! Best-effort scan of Cursor's MCP logs for tracedecay spawn failures.
+//! Doctor diagnostics for the Cursor MCP integration: log scanning and
+//! plugin-bundle staleness.
 //!
 //! Cursor never retries an MCP server whose spawn failed: one bad startup
 //! (literal `${workspaceFolder}` path, uninitialized project, …) turns every
@@ -13,6 +14,8 @@
 //! failing the doctor run.
 
 use std::path::{Path, PathBuf};
+
+use crate::serve::DEGRADED_SERVE_STDERR_MARKER;
 
 use super::DoctorCounters;
 
@@ -92,7 +95,7 @@ pub(crate) fn scan_cursor_mcp_logs(logs_root: &Path) -> CursorMcpLogFindings {
                     findings.connection_failures += 1;
                     affected = true;
                 }
-                if line.contains("staying alive in degraded MCP mode") {
+                if line.contains(DEGRADED_SERVE_STDERR_MARKER) {
                     findings.degraded_mode_notices += 1;
                     affected = true;
                 }
@@ -157,6 +160,24 @@ pub(crate) fn report_cursor_mcp_log_findings(dc: &mut DoctorCounters, home: &Pat
     }
 }
 
+/// A warning when the installed plugin bundle was rendered by a different
+/// tracedecay version than the running binary. A stale bundle keeps steering
+/// agents at old tool surfaces (and old MCP/hook commands) until
+/// `tracedecay update-plugin` re-renders it.
+pub(crate) fn plugin_version_staleness(
+    manifest: &serde_json::Value,
+    binary_version: &str,
+) -> Option<String> {
+    let plugin_version = manifest.get("version").and_then(|v| v.as_str())?;
+    if plugin_version == binary_version {
+        return None;
+    }
+    Some(format!(
+        "Cursor plugin bundle was rendered by tracedecay {plugin_version} but this binary is \
+         {binary_version} — run `tracedecay update-plugin`, then reload Cursor"
+    ))
+}
+
 /// The newest `limit` session directories under a Cursor logs root. Session
 /// directory names are `YYYYMMDDTHHMMSS` timestamps, so a lexicographic sort
 /// is a chronological sort.
@@ -214,7 +235,7 @@ fn read_log_tail(path: &Path) -> Option<String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
@@ -253,6 +274,8 @@ mod tests {
         assert!(findings.has_findings());
     }
 
+    /// The scanner must match the exact marker `serve` emits — shared via
+    /// [`DEGRADED_SERVE_STDERR_MARKER`] so the two cannot drift.
     #[test]
     fn scan_detects_degraded_mode_notice() {
         let logs = TempDir::new().unwrap();
@@ -260,8 +283,10 @@ mod tests {
             logs.path(),
             "20260702T030000",
             "mcp-server-plugin-tracedecay-tracedecay.log",
-            "2026-07-02 03:00:00.000 [warning] [tracedecay] serve: staying alive in degraded \
-             MCP mode — MCP handshake will complete\n",
+            &format!(
+                "2026-07-02 03:00:00.000 [warning] {DEGRADED_SERVE_STDERR_MARKER} — MCP \
+                 handshake will complete\n"
+            ),
         );
 
         let findings = scan_cursor_mcp_logs(logs.path());
@@ -336,5 +361,25 @@ mod tests {
         assert!(roots.contains(&home.join(".config/Cursor/logs")));
         assert!(roots.contains(&home.join("Library/Application Support/Cursor/logs")));
         assert!(roots.contains(&home.join("AppData/Roaming/Cursor/logs")));
+    }
+
+    #[test]
+    fn plugin_version_staleness_flags_mismatch_only() {
+        let stale = serde_json::json!({ "name": "tracedecay", "version": "0.1.0" });
+        let message = plugin_version_staleness(&stale, "0.2.0")
+            .expect("mismatched versions should produce a warning");
+        assert!(message.contains("0.1.0"), "{message}");
+        assert!(message.contains("0.2.0"), "{message}");
+        assert!(message.contains("update-plugin"), "{message}");
+
+        let current = serde_json::json!({ "name": "tracedecay", "version": "0.2.0" });
+        assert_eq!(plugin_version_staleness(&current, "0.2.0"), None);
+
+        // A manifest without a version (or a non-string one) is not a
+        // staleness signal — the manifest-completeness check owns that.
+        assert_eq!(
+            plugin_version_staleness(&serde_json::json!({ "name": "tracedecay" }), "0.2.0"),
+            None
+        );
     }
 }
