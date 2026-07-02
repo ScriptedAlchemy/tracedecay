@@ -271,18 +271,17 @@ fn hook_route_metadata_from_parsed(
 }
 
 fn hook_route_session_id(parsed: &Value) -> Option<String> {
-    [
-        "session_id",
-        "sessionId",
-        "conversation_id",
-        "conversationId",
-        "chat_id",
-        "chatId",
-    ]
-    .iter()
-    .find_map(|key| parsed.get(*key).and_then(Value::as_str))
-    .filter(|id| !id.is_empty())
-    .map(str::to_string)
+    text_field(
+        parsed,
+        &[
+            "session_id",
+            "sessionId",
+            "conversation_id",
+            "conversationId",
+            "chat_id",
+            "chatId",
+        ],
+    )
 }
 
 fn deduped_project_hint(
