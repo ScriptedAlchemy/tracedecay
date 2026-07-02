@@ -470,13 +470,20 @@ pub(crate) async fn fact_proposal_apply(
     )
     .await
     {
-        Ok(proposal) => (
-            StatusCode::OK,
-            Json(json!({
-                "proposal": proposal,
-                "error": "",
-            })),
-        ),
+        Ok(proposal) => {
+            crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
+                &state.mem_conn,
+                &state.project_root,
+            )
+            .await;
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "proposal": proposal,
+                    "error": "",
+                })),
+            )
+        }
         Err(err) => fact_proposal_error(&err),
     }
 }
@@ -615,10 +622,13 @@ pub(crate) async fn curate_apply(
         );
     };
 
-    (
-        StatusCode::OK,
-        Json(memory_service::curate_apply_payload(&state, &body.ops).await),
+    let payload = memory_service::curate_apply_payload(&state, &body.ops).await;
+    crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
+        &state.mem_conn,
+        &state.project_root,
     )
+    .await;
+    (StatusCode::OK, Json(payload))
 }
 
 /// `GET /api/plugins/holographic/oplog` — recent memory operations, newest

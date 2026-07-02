@@ -207,6 +207,12 @@ pub enum Commands {
     /// Stop hook handler (prints session token savings)
     #[command(name = "hook-stop", hide = true)]
     HookStop,
+    /// Claude Code SessionStart hook handler (called by Claude Code, not by users directly)
+    #[command(name = "hook-claude-session-start", hide = true)]
+    HookClaudeSessionStart,
+    /// Claude Code PostToolUse hook handler for incremental sync (called by Claude Code)
+    #[command(name = "hook-claude-post-tool-use", hide = true)]
+    HookClaudePostToolUse,
     /// Kiro PreToolUse hook handler (called by Kiro, not by users directly)
     #[command(name = "hook-kiro-pre-tool-use", hide = true)]
     HookKiroPreToolUse,

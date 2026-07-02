@@ -409,6 +409,16 @@ async fn auto_apply_session_fact_proposals(
             .await?,
         );
     }
+    if applied
+        .iter()
+        .any(|record| record.state == FactProposalState::Applied)
+    {
+        crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
+            project_db.conn(),
+            &cg.store_layout().project_root,
+        )
+        .await;
+    }
     Ok(applied)
 }
 
