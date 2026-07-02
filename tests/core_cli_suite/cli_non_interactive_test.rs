@@ -720,6 +720,8 @@ fn automation_config_set_writes_complete_project_sidecar_noninteractively() {
         "true",
         "--auto-enable-skills",
         "true",
+        "--export-memory-digest",
+        "false",
         "--memory-curator",
         "true",
         "--memory-curator-schedule",
@@ -761,6 +763,8 @@ fn automation_config_set_writes_complete_project_sidecar_noninteractively() {
     );
     assert_eq!(payload["project"]["auto_apply_memory_ops"], true);
     assert_eq!(payload["project"]["auto_enable_skills"], true);
+    assert_eq!(payload["project"]["export_memory_digest"], false);
+    assert_eq!(payload["effective"]["export_memory_digest"], false);
     assert_eq!(
         payload["project"]["session_reflector"]["interval_secs"],
         1800

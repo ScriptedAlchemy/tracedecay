@@ -201,7 +201,8 @@ fn automation_config_is_dashboard_controllable_and_persistent() {
             &config_url,
             &serde_json::json!({
                 "require_dashboard_approval": false,
-                "auto_apply_memory_ops": true
+                "auto_apply_memory_ops": true,
+                "export_memory_digest": false
             }),
         );
         assert_eq!(
@@ -213,6 +214,7 @@ fn automation_config_is_dashboard_controllable_and_persistent() {
             false
         );
         assert_eq!(saved_auto_apply["effective"]["auto_apply_memory_ops"], true);
+        assert_eq!(saved_auto_apply["effective"]["export_memory_digest"], false);
 
         let (status, rejected) = patch_json_body(
             &agent,

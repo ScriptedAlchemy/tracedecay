@@ -365,7 +365,12 @@ fn install_kiro_managed_skill_index<'a>(
 ) -> Result<Option<&'a Path>> {
     let profile_root = profile_root_for_agent_home(home);
     let summary = install_managed_skills(&profile_root, SkillInstallTarget::Kiro, index_path)?;
-    Ok((summary.exported_count > 0).then_some(index_path))
+    let digest_exported = crate::automation::memory_digest::sync_memory_digest_export(
+        &profile_root,
+        SkillInstallTarget::Kiro,
+        index_path,
+    )?;
+    Ok((summary.exported_count > 0 || digest_exported).then_some(index_path))
 }
 
 fn remove_kiro_managed_skill_index(index_path: &Path) {

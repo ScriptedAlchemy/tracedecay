@@ -183,6 +183,13 @@ pub async fn run_memory_curator_with_backend(
             }
         };
         annotate_memory_curation_report(&mut applied_report, apply_policy.clone());
+        if let Ok(project_db) = cg.open_project_store_db().await {
+            crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
+                project_db.conn(),
+                &cg.store_layout().project_root,
+            )
+            .await;
+        }
         applied_report
     } else {
         let mut report = dry_run_report;

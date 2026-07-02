@@ -842,10 +842,12 @@ fn codex_plugin_dir_has_only_managed_files(install_dir: &Path) -> bool {
 }
 
 fn codex_plugin_managed_paths(install_dir: &Path) -> Vec<PathBuf> {
-    CODEX_EMBEDDED_PLUGIN_FILES
+    let mut paths: Vec<PathBuf> = CODEX_EMBEDDED_PLUGIN_FILES
         .iter()
         .map(|&(relative, _)| install_dir.join(relative))
-        .collect()
+        .collect();
+    paths.push(install_dir.join("skills/agent-managed-memory/SKILL.md"));
+    paths
 }
 
 fn collect_regular_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {

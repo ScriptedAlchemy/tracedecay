@@ -557,6 +557,8 @@ fn automation_config_commands_parse_project_sidecar_flags() {
         "false",
         "--auto-enable-skills",
         "false",
+        "--export-memory-digest",
+        "false",
         "--memory-curator",
         "true",
         "--memory-curator-schedule",
@@ -607,6 +609,7 @@ fn automation_config_commands_parse_project_sidecar_flags() {
                         require_dashboard_approval,
                         auto_apply_memory_ops,
                         auto_enable_skills,
+                        export_memory_digest,
                         memory_curator,
                         memory_curator_schedule,
                         memory_curator_interval_secs,
@@ -643,6 +646,7 @@ fn automation_config_commands_parse_project_sidecar_flags() {
     assert_eq!(require_dashboard_approval, Some(true));
     assert_eq!(auto_apply_memory_ops, Some(false));
     assert_eq!(auto_enable_skills, Some(false));
+    assert_eq!(export_memory_digest, Some(false));
     assert_eq!(memory_curator, Some(true));
     assert_eq!(memory_curator_schedule.as_deref(), Some("manual"));
     assert_eq!(memory_curator_interval_secs.as_deref(), Some("900"));
