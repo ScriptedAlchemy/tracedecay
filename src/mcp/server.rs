@@ -804,7 +804,6 @@ impl McpServer {
     }
 
     fn apply_hook_project_route(
-        &self,
         tool_name: &str,
         mut arguments: Value,
         connection: &ConnectionContext,
@@ -2002,7 +2001,8 @@ impl McpServer {
         } else {
             None
         };
-        let mut handler_arguments = self.apply_hook_project_route(tool_name, arguments, connection);
+        let mut handler_arguments =
+            Self::apply_hook_project_route(tool_name, arguments, connection);
         if crate::analytics::is_skill_view_tool(tool_name) {
             if let Some(request_id) = json_rpc_request_id_string(&id) {
                 if let Some(map) = handler_arguments.as_object_mut() {
