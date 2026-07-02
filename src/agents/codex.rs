@@ -447,7 +447,14 @@ fn install_codex_plugin_bundle(
     profile_home: &Path,
 ) -> Result<()> {
     write_codex_plugin_bundle_base(install_dir, tracedecay_bin, scope)?;
-    install_codex_managed_skill_overlay(profile_home, install_dir).map(|_| ())
+    install_codex_managed_skill_overlay(profile_home, install_dir)?;
+    let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(profile_home);
+    crate::automation::memory_digest::sync_memory_digest_export(
+        &profile_root,
+        crate::automation::skill_targets::SkillInstallTarget::Codex,
+        install_dir,
+    )?;
+    Ok(())
 }
 
 /// Export a complete shareable Codex plugin bundle with active managed skills.
@@ -863,10 +870,12 @@ fn codex_plugin_dir_has_only_managed_files(install_dir: &Path) -> bool {
 }
 
 fn codex_plugin_managed_paths(install_dir: &Path) -> Vec<PathBuf> {
-    CODEX_EMBEDDED_PLUGIN_FILES
+    let mut paths: Vec<PathBuf> = CODEX_EMBEDDED_PLUGIN_FILES
         .iter()
         .map(|&(relative, _)| install_dir.join(relative))
-        .collect()
+        .collect();
+    paths.push(install_dir.join("skills/agent-managed-memory/SKILL.md"));
+    paths
 }
 
 fn collect_regular_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {

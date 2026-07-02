@@ -67,7 +67,8 @@ export function projectScopedUrl(url, init) {
   if (
     !isScopedApiUrl(url, "/api/plugins") &&
     !isScopedApiUrl(url, "/api/automation") &&
-    !isScopedApiUrl(url, "/api/capabilities")
+    !isScopedApiUrl(url, "/api/capabilities") &&
+    !isScopedApiUrl(url, "/api/settings")
   ) {
     return url;
   }

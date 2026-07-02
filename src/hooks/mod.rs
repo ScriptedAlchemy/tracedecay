@@ -236,6 +236,54 @@ fn record_hint_emitted(
     record_hint_analytics(root, "hint_emitted", agent, session_id, hint);
 }
 
+fn hook_route_metadata_from_event(
+    event_json: &str,
+    project_root: &Path,
+) -> Option<crate::daemon::HookRouteMetadata> {
+    let parsed = serde_json::from_str::<Value>(event_json).ok()?;
+    Some(hook_route_metadata_from_parsed(&parsed, project_root))
+}
+
+fn hook_route_metadata_from_parsed(
+    parsed: &Value,
+    project_root: &Path,
+) -> crate::daemon::HookRouteMetadata {
+    let cwd = event_cwd_from_parsed(parsed);
+    let route_root = cwd.as_deref().unwrap_or(project_root);
+    let worktree = crate::worktree::git_worktree_root(route_root)
+        .unwrap_or_else(|| project_root.to_path_buf());
+    let branch = crate::branch::current_branch(&worktree);
+    crate::daemon::HookRouteMetadata {
+        session_id: hook_route_session_id(parsed),
+        thread_id: text_field(
+            parsed,
+            &[
+                "thread_id",
+                "threadId",
+                "conversation_thread_id",
+                "conversationThreadId",
+            ],
+        ),
+        cwd,
+        worktree: Some(worktree),
+        branch,
+    }
+}
+
+fn hook_route_session_id(parsed: &Value) -> Option<String> {
+    text_field(
+        parsed,
+        &[
+            "session_id",
+            "sessionId",
+            "conversation_id",
+            "conversationId",
+            "chat_id",
+            "chatId",
+        ],
+    )
+}
+
 fn deduped_project_hint(
     root: Option<PathBuf>,
     agent: HintAgent,
@@ -433,4 +481,41 @@ pub(crate) fn read_stdin_to_string() -> std::io::Result<String> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
     Ok(input)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hook_route_metadata_from_event;
+
+    #[test]
+    fn hook_route_metadata_preserves_camel_case_session_ids() {
+        let event = serde_json::json!({
+            "sessionId": "session-camel",
+            "conversationId": "conversation-camel",
+            "cwd": "/tmp/project"
+        })
+        .to_string();
+
+        let Some(route) =
+            hook_route_metadata_from_event(&event, std::path::Path::new("/tmp/project"))
+        else {
+            panic!("route metadata should parse");
+        };
+
+        assert_eq!(route.session_id.as_deref(), Some("session-camel"));
+
+        let event = serde_json::json!({
+            "conversationId": "conversation-camel",
+            "cwd": "/tmp/project"
+        })
+        .to_string();
+
+        let Some(route) =
+            hook_route_metadata_from_event(&event, std::path::Path::new("/tmp/project"))
+        else {
+            panic!("route metadata should parse");
+        };
+
+        assert_eq!(route.session_id.as_deref(), Some("conversation-camel"));
+    }
 }

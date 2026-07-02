@@ -361,6 +361,11 @@ fn install_cursor_managed_skill_overlay(home: &Path, install_dir: &Path) -> Resu
         crate::automation::skill_targets::SkillInstallTarget::Cursor,
         install_dir,
     )?;
+    crate::automation::memory_digest::sync_memory_digest_export(
+        &profile_root,
+        crate::automation::skill_targets::SkillInstallTarget::Cursor,
+        install_dir,
+    )?;
     Ok(())
 }
 
@@ -527,10 +532,12 @@ fn cursor_plugin_dir_has_only_managed_files(install_dir: &Path) -> bool {
 }
 
 fn cursor_plugin_managed_paths(install_dir: &Path) -> Vec<PathBuf> {
-    EMBEDDED_PLUGIN_FILES
+    let mut paths: Vec<PathBuf> = EMBEDDED_PLUGIN_FILES
         .iter()
         .map(|&(relative, _)| install_dir.join(relative))
-        .collect()
+        .collect();
+    paths.push(install_dir.join("rules/tracedecay-memory-digest.mdc"));
+    paths
 }
 
 fn collect_regular_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {

@@ -118,6 +118,9 @@ pub enum AutomationConfigAction {
         /// Allow generated skills to become active automatically when policy permits.
         #[arg(long)]
         auto_enable_skills: Option<bool>,
+        /// Export the durable-facts memory digest into host prompts.
+        #[arg(long)]
+        export_memory_digest: Option<bool>,
         /// Enable or disable the memory curator task.
         #[arg(long)]
         memory_curator: Option<bool>,
