@@ -163,7 +163,7 @@ harness = false
 # cargo's OPT_LEVEL), and nearly every test creates databases and runs many
 # queries — unoptimized SQLite dominates test runtime, worst on Windows CI.
 # The `test` profile inherits these dev package overrides. Deliberately
-# scoped to the libsql layers only; do not blanket-override "*".
+# scoped to the libsql and tokenizer layers only; do not blanket-override "*".
 [profile.dev.package.libsql-ffi]
 opt-level = 2
 
@@ -171,4 +171,26 @@ opt-level = 2
 opt-level = 2
 
 [profile.dev.package.libsql-rusqlite]
+opt-level = 2
+
+# The first token count pays a one-time BPE model load (embedded-vocabulary
+# base64 decode + BPE regex compile) that costs seconds in unoptimized
+# builds; the dashboard token-count warm task and its tests hit it on every
+# test-process start.
+[profile.dev.package.tiktoken-rs]
+opt-level = 2
+
+[profile.dev.package.base64]
+opt-level = 2
+
+[profile.dev.package.fancy-regex]
+opt-level = 2
+
+[profile.dev.package.regex]
+opt-level = 2
+
+[profile.dev.package.regex-automata]
+opt-level = 2
+
+[profile.dev.package.regex-syntax]
 opt-level = 2

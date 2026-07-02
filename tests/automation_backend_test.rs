@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+#[cfg(target_os = "linux")]
 use std::thread;
 use std::time::Duration;
 
@@ -355,17 +356,21 @@ fn codex_app_server_backend_falls_back_to_configured_model_when_server_omits_mod
 
 #[test]
 fn codex_app_server_backend_from_automation_config_forwards_runtime_limits() {
-    let _env_lock = ENV_LOCK.lock().unwrap();
     let fake = FakeCodexAppServer::new_with_behavior("json");
-    let _codex_bin = EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &fake.bin);
-    let backend = CodexAppServerBackend::from_automation_config(&AutomationConfig {
-        backend: AutomationBackend::CodexAppServer,
-        model: Some("automation-model".to_string()),
-        timeout_secs: fake_codex_response_timeout_secs(),
-        max_tokens: Some(1024),
-        temperature: Some(0.4),
-        ..AutomationConfig::default()
-    });
+    // Env vars are only read while the backend is constructed, so hold the
+    // env lock just for that window instead of across the subprocess run.
+    let backend = {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let _codex_bin = EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &fake.bin);
+        CodexAppServerBackend::from_automation_config(&AutomationConfig {
+            backend: AutomationBackend::CodexAppServer,
+            model: Some("automation-model".to_string()),
+            timeout_secs: fake_codex_response_timeout_secs(),
+            max_tokens: Some(1024),
+            temperature: Some(0.4),
+            ..AutomationConfig::default()
+        })
+    };
     let request = AgentTaskRequest::new(
         "run_runtime_options".to_string(),
         AgentTaskKind::SessionReflector,
@@ -392,19 +397,23 @@ fn codex_app_server_backend_from_automation_config_forwards_runtime_limits() {
 
 #[test]
 fn codex_app_server_backend_uses_env_runtime_limits_when_config_omits_them() {
-    let _env_lock = ENV_LOCK.lock().unwrap();
     let fake = FakeCodexAppServer::new_with_behavior("json");
-    let _codex_bin = EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &fake.bin);
-    let _max_tokens = EnvVarGuard::set("TRACEDECAY_CODEX_SUMMARY_MAX_TOKENS", "2048");
-    let _temperature = EnvVarGuard::set("TRACEDECAY_CODEX_SUMMARY_TEMPERATURE", "0.25");
-    let backend = CodexAppServerBackend::from_automation_config(&AutomationConfig {
-        backend: AutomationBackend::CodexAppServer,
-        model: Some("automation-model".to_string()),
-        timeout_secs: fake_codex_response_timeout_secs(),
-        max_tokens: None,
-        temperature: None,
-        ..AutomationConfig::default()
-    });
+    // Env vars are only read while the backend is constructed, so hold the
+    // env lock just for that window instead of across the subprocess run.
+    let backend = {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let _codex_bin = EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &fake.bin);
+        let _max_tokens = EnvVarGuard::set("TRACEDECAY_CODEX_SUMMARY_MAX_TOKENS", "2048");
+        let _temperature = EnvVarGuard::set("TRACEDECAY_CODEX_SUMMARY_TEMPERATURE", "0.25");
+        CodexAppServerBackend::from_automation_config(&AutomationConfig {
+            backend: AutomationBackend::CodexAppServer,
+            model: Some("automation-model".to_string()),
+            timeout_secs: fake_codex_response_timeout_secs(),
+            max_tokens: None,
+            temperature: None,
+            ..AutomationConfig::default()
+        })
+    };
     let request = AgentTaskRequest::new(
         "run_env_runtime_options".to_string(),
         AgentTaskKind::SkillWriter,
@@ -429,7 +438,9 @@ fn codex_app_server_backend_uses_env_runtime_limits_when_config_omits_them() {
 
 #[test]
 fn codex_app_server_backend_propagates_timeout_errors_and_reaps_child() {
-    let (err, pid) = backend_error_for_behavior("timeout", Duration::from_millis(500));
+    // Short but not tight: the fake must have time to start and write its pid
+    // file on Linux before the client gives up and reaps it.
+    let (err, pid) = backend_error_for_behavior("timeout", Duration::from_millis(300));
 
     assert!(
         err.contains("timed out waiting for codex app-server"),
@@ -549,7 +560,7 @@ fn fake_codex_app_server_times_out_and_reaps_child() {
     let config = CodexAppServerSummaryConfig {
         codex_bin: fake.bin.display().to_string(),
         model: None,
-        timeout: Duration::from_millis(500),
+        timeout: Duration::from_millis(300),
         max_tokens: None,
         temperature: None,
     };
@@ -629,7 +640,6 @@ impl FakeCodexAppServer {
         let script = fake_codex_script(&log, &pid, behavior);
         fs::write(&script_path, script).unwrap();
         install_fake_codex_launcher(&script_path, &bin);
-        thread::sleep(Duration::from_millis(10));
         Self {
             _temp: temp,
             bin,

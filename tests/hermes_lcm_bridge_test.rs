@@ -3,10 +3,31 @@ mod common;
 use std::path::Path;
 use std::process::Command;
 
-use common::pyyaml_shim_pythonpath;
+use common::{write_pyyaml_shim, PYYAML_FALLBACK_PRELUDE};
 use tempfile::TempDir;
 use tracedecay::agents::{AgentIntegration, HermesIntegration, InstallContext};
 use tracedecay::sessions::lcm::{LcmCompressionRequest, LcmSummarizerMode};
+
+// Compiles the generated plugin sources inside the same interpreter that runs
+// the per-test check script (argv[1] is the plugin dir). This replaces the
+// separate `python3 -m py_compile` process each test used to spawn: on
+// Windows CI every python launch goes through a .cmd shim and costs ~1s, so
+// one interpreter per test instead of two roughly halves these tests' wall
+// time while keeping compile failures attributable.
+const PYTHON_COMPILE_CHECK: &str = r#"
+import pathlib as _compile_pathlib
+import py_compile as _py_compile
+import sys as _compile_sys
+
+for _name in ("tools.py", "schemas.py", "__init__.py"):
+    try:
+        _py_compile.compile(
+            str(_compile_pathlib.Path(_compile_sys.argv[1]) / _name), doraise=True
+        )
+    except _py_compile.PyCompileError as _exc:
+        print(f"generated Python should compile: {_name}: {_exc}", file=_compile_sys.stderr)
+        _compile_sys.exit(1)
+"#;
 
 const PLUGIN_LOAD_PRELUDE: &str = r#"
 import importlib.machinery
@@ -48,21 +69,6 @@ fn make_install_ctx(home: &Path) -> InstallContext {
     }
 }
 
-fn assert_python_compiles(paths: &[&Path]) {
-    let output = Command::new("python3")
-        .arg("-m")
-        .arg("py_compile")
-        .args(paths)
-        .output()
-        .expect("python3 should be available for Hermes generated Python syntax checks");
-    assert!(
-        output.status.success(),
-        "generated Python should compile\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
 fn run_generated_plugin_script(script_name: &str, script: &str, failure_message: &str) {
     let home = TempDir::new().unwrap();
     HermesIntegration
@@ -70,14 +76,8 @@ fn run_generated_plugin_script(script_name: &str, script: &str, failure_message:
         .unwrap();
 
     let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
-    assert_python_compiles(&[
-        &plugin_dir.join("tools.py"),
-        &plugin_dir.join("schemas.py"),
-        &plugin_dir.join("__init__.py"),
-    ]);
-
     let script_path = plugin_dir.join(script_name);
-    let script = format!("{PLUGIN_LOAD_PRELUDE}\n{script}");
+    let script = format!("{PYTHON_COMPILE_CHECK}\n{PLUGIN_LOAD_PRELUDE}\n{script}");
     std::fs::write(&script_path, script).unwrap();
 
     let mut command = Command::new("python3");
@@ -932,16 +932,12 @@ fn generated_context_engine_registers_when_supported() {
         .unwrap();
 
     let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
-    assert_python_compiles(&[
-        &plugin_dir.join("tools.py"),
-        &plugin_dir.join("schemas.py"),
-        &plugin_dir.join("__init__.py"),
-    ]);
-
     let script = plugin_dir.join("check_context_engine.py");
     std::fs::write(
         &script,
-        r#"
+        format!(
+            "{PYTHON_COMPILE_CHECK}\n{}",
+            r#"
 import importlib.machinery
 import importlib.util
 import os
@@ -1086,7 +1082,8 @@ class LegacyCtx:
 
 legacy = LegacyCtx()
 plugin.register(legacy)
-"#,
+"#
+        ),
     )
     .unwrap();
 
@@ -1114,16 +1111,12 @@ fn context_engine_preflight_uses_tracedecay_tool_json_args() {
         .unwrap();
 
     let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
-    assert_python_compiles(&[
-        &plugin_dir.join("tools.py"),
-        &plugin_dir.join("schemas.py"),
-        &plugin_dir.join("__init__.py"),
-    ]);
-
     let script = plugin_dir.join("check_preflight_bridge.py");
     std::fs::write(
         &script,
-        r#"
+        format!(
+            "{PYTHON_COMPILE_CHECK}\n{}",
+            r#"
 import importlib.machinery
 import importlib.util
 import json
@@ -1211,7 +1204,8 @@ assert args == {
     "messages": [{"role": "user", "content": "hello"}],
     "current_tokens": 987,
 }
-"#,
+"#
+        ),
     )
     .unwrap();
 
@@ -1239,16 +1233,12 @@ fn context_engine_session_start_reports_compression_boundary() {
         .unwrap();
 
     let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
-    assert_python_compiles(&[
-        &plugin_dir.join("tools.py"),
-        &plugin_dir.join("schemas.py"),
-        &plugin_dir.join("__init__.py"),
-    ]);
-
     let script = plugin_dir.join("check_session_boundary_bridge.py");
     std::fs::write(
         &script,
-        r#"
+        format!(
+            "{PYTHON_COMPILE_CHECK}\n{}",
+            r#"
 import importlib.machinery
 import importlib.util
 import json
@@ -1323,7 +1313,8 @@ assert engine.active_session_id == "session-b"
 # A non-compression boundary must not call the tool.
 engine.on_session_start(session_id="session-d", old_session_id="session-b", boundary_reason="manual")
 assert len(calls) == 1
-"#,
+"#
+        ),
     )
     .unwrap();
 
@@ -1351,16 +1342,12 @@ fn context_engine_compress_uses_tracedecay_tool_json_args() {
         .unwrap();
 
     let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
-    assert_python_compiles(&[
-        &plugin_dir.join("tools.py"),
-        &plugin_dir.join("schemas.py"),
-        &plugin_dir.join("__init__.py"),
-    ]);
-
     let script = plugin_dir.join("check_compress_bridge.py");
     std::fs::write(
         &script,
-        r#"
+        format!(
+            "{PYTHON_COMPILE_CHECK}\n{}",
+            r#"
 import importlib.machinery
 import importlib.util
 import json
@@ -1461,7 +1448,8 @@ assert args == {
     "focus_topic": "handoff",
     "summarizer": {"mode": "hermes_auxiliary"},
 }
-"#,
+"#
+        ),
     )
     .unwrap();
 
@@ -1489,16 +1477,12 @@ fn context_engine_projects_config_defaults_into_preflight_and_compress_args() {
         .unwrap();
 
     let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
-    assert_python_compiles(&[
-        &plugin_dir.join("tools.py"),
-        &plugin_dir.join("schemas.py"),
-        &plugin_dir.join("__init__.py"),
-    ]);
-
     let script = plugin_dir.join("check_context_engine_config_defaults.py");
     std::fs::write(
         &script,
-        r#"
+        format!(
+            "{PYTHON_COMPILE_CHECK}\n{}",
+            r#"
 import importlib.machinery
 import importlib.util
 import json
@@ -1586,7 +1570,8 @@ assert preflight_args["session_id"] == "session-1"
 assert preflight_args["current_tokens"] == 800
 assert preflight_args["messages"] == [{"role": "user", "content": "hello"}]
 assert compress_args["summarizer"] == {"mode": "hermes_auxiliary"}
-"#,
+"#
+        ),
     )
     .unwrap();
 
@@ -1611,16 +1596,12 @@ fn context_engine_expand_query_and_profile_storage_project_flags() {
         .unwrap();
 
     let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
-    assert_python_compiles(&[
-        &plugin_dir.join("tools.py"),
-        &plugin_dir.join("schemas.py"),
-        &plugin_dir.join("__init__.py"),
-    ]);
-
     let script = plugin_dir.join("check_project_flag_bridge.py");
     std::fs::write(
         &script,
-        r#"
+        format!(
+            "{PYTHON_COMPILE_CHECK}\n{}",
+            r#"
 import importlib.machinery
 import importlib.util
 import json
@@ -1705,7 +1686,8 @@ explicit = plugin.tools.call_tracedecay_tool(
 assert json.loads(explicit)["content"]
 explicit_argv = calls.pop()
 assert explicit_argv[1:6] == ["tool", "--project", "/tmp/project", "tracedecay_lcm_status", "--json"]
-"#,
+"#
+        ),
     )
     .unwrap();
 
@@ -1733,16 +1715,12 @@ fn auxiliary_summary_strips_reasoning_tags() {
         .unwrap();
 
     let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
-    assert_python_compiles(&[
-        &plugin_dir.join("tools.py"),
-        &plugin_dir.join("schemas.py"),
-        &plugin_dir.join("__init__.py"),
-    ]);
-
     let script = plugin_dir.join("check_auxiliary_summary.py");
     std::fs::write(
         &script,
-        r#"
+        format!(
+            "{PYTHON_COMPILE_CHECK}\n{}",
+            r#"
 import importlib.machinery
 import importlib.util
 import pathlib
@@ -1798,7 +1776,8 @@ assert agent.auxiliary_client.calls[0]["messages"] == [
     {"role": "user", "content": "Summarize"},
 ]
 assert agent.auxiliary_client.calls[0]["temperature"] == 0.3
-"#,
+"#
+        ),
     )
     .unwrap();
 
@@ -1823,16 +1802,12 @@ fn context_engine_expand_query_synthesizes_and_degrades() {
         .unwrap();
 
     let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
-    assert_python_compiles(&[
-        &plugin_dir.join("tools.py"),
-        &plugin_dir.join("schemas.py"),
-        &plugin_dir.join("__init__.py"),
-    ]);
-
     let script = plugin_dir.join("check_expand_query_synthesis.py");
     std::fs::write(
         &script,
-        r#"
+        format!(
+            "{PYTHON_COMPILE_CHECK}\n{}",
+            r#"
 import importlib.machinery
 import importlib.util
 import json
@@ -1951,7 +1926,8 @@ assert failed_payload["degraded"] is True
 assert "schema bug" in failed_payload["error"]
 assert failed_payload["needs_synthesis"] is False
 assert failed_payload["matches"], "retrieval must survive synthesis failures"
-"#,
+"#
+        ),
     )
     .unwrap();
 
@@ -1976,16 +1952,12 @@ fn context_engine_compress_provides_auxiliary_summary_after_needs_summary() {
         .unwrap();
 
     let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
-    assert_python_compiles(&[
-        &plugin_dir.join("tools.py"),
-        &plugin_dir.join("schemas.py"),
-        &plugin_dir.join("__init__.py"),
-    ]);
-
     let script = plugin_dir.join("check_auxiliary_compress_flow.py");
     std::fs::write(
         &script,
-        r#"
+        format!(
+            "{PYTHON_COMPILE_CHECK}\n{}",
+            r#"
 import importlib.machinery
 import importlib.util
 import json
@@ -2101,7 +2073,8 @@ assert f"[USER]: {old_one}" in prompt
 assert f"[ASSISTANT]: {old_two}" in prompt
 assert agent.auxiliary_client.calls[0]["temperature"] == 0.3
 assert agent.auxiliary_client.calls[0]["max_tokens"] == 4000
-"#,
+"#
+        ),
     )
     .unwrap();
 
@@ -2449,16 +2422,12 @@ fn context_engine_compress_rejects_oversized_auxiliary_summary() {
         .unwrap();
 
     let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
-    assert_python_compiles(&[
-        &plugin_dir.join("tools.py"),
-        &plugin_dir.join("schemas.py"),
-        &plugin_dir.join("__init__.py"),
-    ]);
-
     let script = plugin_dir.join("check_auxiliary_oversized_fallback.py");
     std::fs::write(
         &script,
-        r#"
+        format!(
+            "{PYTHON_COMPILE_CHECK}\n{}",
+            r#"
 import importlib.machinery
 import importlib.util
 import json
@@ -2566,7 +2535,8 @@ assert l2_prompt.startswith("Compress this into bullet points. Maximum 1000 toke
 assert "Keep only: decisions made, files changed, errors hit, current state." in l2_prompt
 assert agent.auxiliary_client.calls[0]["max_tokens"] == 4000
 assert agent.auxiliary_client.calls[1]["max_tokens"] == 2000
-"#,
+"#
+        ),
     )
     .unwrap();
 
@@ -2883,16 +2853,12 @@ fn auxiliary_summary_falls_back_and_tracks_route_cooldown() {
         .unwrap();
 
     let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
-    assert_python_compiles(&[
-        &plugin_dir.join("tools.py"),
-        &plugin_dir.join("schemas.py"),
-        &plugin_dir.join("__init__.py"),
-    ]);
-
     let script = plugin_dir.join("check_auxiliary_fallbacks.py");
     std::fs::write(
         &script,
-        r#"
+        format!(
+            "{PYTHON_COMPILE_CHECK}\n{}",
+            r#"
 import importlib.machinery
 import importlib.util
 import pathlib
@@ -2990,7 +2956,8 @@ assert tuned_engine._route_failures["default"] == 1
 assert tuned_engine._cooldown_until["default"] > 0
 del os.environ["LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD"]
 del os.environ["LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS"]
-"#,
+"#
+        ),
     )
     .unwrap();
 
@@ -4464,7 +4431,9 @@ fn generated_context_engine_satisfies_abstract_update_from_response() {
     let script = plugin_dir.join("check_update_from_response.py");
     std::fs::write(
         &script,
-        r#"
+        format!(
+            "{PYTHON_COMPILE_CHECK}\n{}",
+            r#"
 import abc
 import importlib.machinery
 import importlib.util
@@ -4535,7 +4504,8 @@ engine.update_from_response(None)
 assert engine.last_prompt_tokens == 0
 assert engine.last_completion_tokens == 0
 assert engine.last_total_tokens == 0
-"#,
+"#
+        ),
     )
     .unwrap();
 
@@ -4638,16 +4608,12 @@ fn generated_plugin_honors_install_time_project_root_pin() {
     HermesIntegration.install(&ctx).unwrap();
 
     let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
-    assert_python_compiles(&[
-        &plugin_dir.join("tools.py"),
-        &plugin_dir.join("schemas.py"),
-        &plugin_dir.join("__init__.py"),
-    ]);
-
     let script = plugin_dir.join("check_project_root_pin.py");
     std::fs::write(
         &script,
-        r#"
+        format!(
+            "{PYTHON_COMPILE_CHECK}\n{PYYAML_FALLBACK_PRELUDE}\n{}",
+            r#"
 import importlib.machinery
 import importlib.util
 import json
@@ -4734,7 +4700,8 @@ assert configured.project_root == "/from/config", configured.project_root
 explicit = plugin.TraceDecayContextEngine(config={})
 explicit.on_session_start(session_id="s2", project_root="/explicit/root")
 assert explicit.project_root == "/explicit/root", explicit.project_root
-"#,
+"#
+        ),
     )
     .unwrap();
 
@@ -4742,14 +4709,13 @@ assert explicit.project_root == "/explicit/root", explicit.project_root
     check
         .arg(&script)
         .arg(&plugin_dir)
+        // Reading the config-block pin requires a yaml module; the script
+        // falls back to this shim only when the real PyYAML is missing.
+        .arg(write_pyyaml_shim(home.path()))
         // expanduser reads HOME on POSIX and USERPROFILE on Windows.
         .env("HOME", home.path())
         .env("USERPROFILE", home.path())
         .env_remove("HERMES_HOME");
-    // Reading the config-block pin requires a yaml module.
-    if let Some(shim_dir) = pyyaml_shim_pythonpath(home.path()) {
-        check.env("PYTHONPATH", shim_dir);
-    }
     let output = check
         .output()
         .expect("python3 should run generated Hermes plugin check");

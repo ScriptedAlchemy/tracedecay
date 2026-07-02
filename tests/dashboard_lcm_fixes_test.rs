@@ -9,7 +9,8 @@ use std::path::Path;
 
 use common::{
     create_runtime, get_json, http_agent, message_record_at, pick_free_port, tempdir_or_panic,
-    wait_for_dashboard, EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK,
+    wait_for_dashboard, write_empty_global_db_schema, EnvVarGuard, GLOBAL_DB_ENV,
+    GLOBAL_DB_ENV_LOCK,
 };
 use serde_json::Value;
 use tempfile::TempDir;
@@ -322,9 +323,14 @@ async fn start_fixture(external_payload: bool) -> DashboardFixture {
     let project_root = tmp.path().join("project");
     let global_db_path = tmp.path().join("global").join("global.db");
     let env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
+    // Pre-create both GlobalDb-schema stores from the cached empty template
+    // so seeding and dashboard startup open existing DBs instead of paying a
+    // full schema creation each (slow on Windows).
+    write_empty_global_db_schema(&global_db_path).await;
 
     let cg = setup_project(&project_root).await;
     let session_db_path = project_session_db_path(&project_root);
+    write_empty_global_db_schema(&session_db_path).await;
 
     let global_db = match GlobalDb::open_at(&session_db_path).await {
         Some(db) => db,
