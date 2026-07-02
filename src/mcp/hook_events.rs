@@ -287,12 +287,13 @@ mod tests {
         run_git(&project_root, &["config", "user.name", "Test"]);
         run_git(&project_root, &["add", "."]);
         run_git(&project_root, &["commit", "-m", "initial"]);
+        let worktree_arg = worktree_root.to_string_lossy();
         run_git(
             &project_root,
             &[
                 "worktree",
                 "add",
-                worktree_root.to_str().unwrap(),
+                worktree_arg.as_ref(),
                 "-b",
                 "feature/session",
             ],
