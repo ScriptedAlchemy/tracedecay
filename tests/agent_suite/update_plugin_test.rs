@@ -14,7 +14,7 @@ use serde_json::json;
 use tempfile::TempDir;
 use tracedecay::agents::{get_integration, InstallContext, UpdatePluginOutcome};
 
-use crate::common::{EnvVarGuard, PROCESS_ENV_LOCK};
+use crate::common::{assert_schema_valid, compile_schema, EnvVarGuard, PROCESS_ENV_LOCK};
 
 const OLD_BIN: &str = "/old/bin/tracedecay";
 const NEW_BIN: &str = "/new/bin/tracedecay";
@@ -273,16 +273,10 @@ fn cursor_update_plugin_refreshes_bundle_and_preserves_user_config() {
     // Generated bundle re-baked: plugin-owned mcp.json command, hook command
     // paths, and the manifest version stamp.
     assert!(text(&plugin_dir.join("mcp.json")).contains(NEW_BIN));
-    // Template decision pin: the rebaked MCP config must keep the
-    // workspace-scoped `--path ${workspaceFolder}` args. Normal Cursor windows
-    // expand the variable; hosts that pass it literally (headless
-    // agent-session scopes) are handled by serve's unexpanded-template
-    // fallback, not by dropping the argument from the template.
-    let rebaked_mcp = read_json(&plugin_dir.join("mcp.json"));
-    assert_eq!(
-        rebaked_mcp["mcpServers"]["tracedecay"]["args"],
-        serde_json::json!(["serve", "--path", "${workspaceFolder}"])
-    );
+    // The `--path ${workspaceFolder}` args pin is asserted by
+    // `assert_cursor_rendered_bundle_valid`, which
+    // `cursor_update_plugin_rerenders_structurally_valid_bundle` runs against
+    // this same update flow.
     assert!(text(&plugin_dir.join("hooks/hooks.json")).contains(NEW_BIN));
     assert!(
         text(&plugin_dir.join(".cursor-plugin/plugin.json")).contains(env!("CARGO_PKG_VERSION"))
@@ -676,48 +670,6 @@ fn load_vendored_schema(file_name: &str) -> serde_json::Value {
     read_json(&path)
 }
 
-/// Lightweight structural validation of `instance` against a vendored
-/// draft-07 object schema: the instance must be an object, carry every
-/// `required` key, and — because the vendored schemas declare
-/// `additionalProperties: false` — use only top-level keys the schema's
-/// `properties` map declares. A full JSON Schema validator would need a new
-/// dev-dependency; this check covers the drift the fixtures exist to catch
-/// (missing, renamed, or unknown manifest keys in rendered output).
-fn assert_top_level_schema_shape(
-    instance: &serde_json::Value,
-    schema: &serde_json::Value,
-    what: &str,
-) {
-    assert_eq!(
-        schema["type"], "object",
-        "{what}: schema must be an object schema"
-    );
-    let object = instance
-        .as_object()
-        .unwrap_or_else(|| panic!("{what}: rendered value must be a JSON object"));
-    if let Some(required) = schema["required"].as_array() {
-        for key in required {
-            let key = key.as_str().expect("schema required keys are strings");
-            assert!(
-                object.contains_key(key),
-                "{what}: missing required key {key:?}"
-            );
-        }
-    }
-    if schema["additionalProperties"] == json!(false) {
-        let properties = schema["properties"]
-            .as_object()
-            .expect("schema with additionalProperties:false must declare properties");
-        for key in object.keys() {
-            assert!(
-                properties.contains_key(key),
-                "{what}: key {key:?} is not declared in the vendored schema \
-                 (additionalProperties is false)"
-            );
-        }
-    }
-}
-
 /// The exact shell-quoted form the renderer bakes into hook commands:
 /// single-quoted on POSIX, double-quoted on Windows (matching
 /// `agents::hook_command`, which the test binary's platform selects).
@@ -818,8 +770,11 @@ fn assert_source_bundle_fully_rendered(source_dir: &Path, install_dir: &Path) {
 /// Full structural validation of a rendered Cursor plugin bundle.
 fn assert_cursor_rendered_bundle_valid(plugin_dir: &Path, bin: &str) {
     // Rendered mcp.json: absolute command, and the args pin — `serve --path
-    // ${workspaceFolder}` is the one placeholder that must survive rendering
-    // because Cursor's MCP runner expands it at session start.
+    // ${workspaceFolder}` is the one placeholder that must survive rendering.
+    // Normal Cursor windows expand the variable at session start; hosts that
+    // pass it through literally (headless agent-session scopes) are handled
+    // by serve's unexpanded-template fallback, not by dropping the argument
+    // from the template.
     let mcp = read_json(&plugin_dir.join("mcp.json"));
     let server = &mcp["mcpServers"]["tracedecay"];
     assert_eq!(server["type"], "stdio");
@@ -834,14 +789,12 @@ fn assert_cursor_rendered_bundle_valid(plugin_dir: &Path, bin: &str) {
         "rendered mcp.json args must keep the workspaceFolder placeholder pin"
     );
 
-    // Rendered manifest: still shaped like the vendored plugin schema, with
-    // the version stamped to this binary's package version.
-    let manifest = read_json(&plugin_dir.join(".cursor-plugin/plugin.json"));
-    assert_top_level_schema_shape(
-        &manifest,
-        &load_vendored_schema("plugin.schema.json"),
-        "rendered .cursor-plugin/plugin.json",
-    );
+    // Rendered manifest: still valid against the vendored official plugin
+    // schema, with the version stamped to this binary's package version.
+    let manifest_path = plugin_dir.join(".cursor-plugin/plugin.json");
+    let manifest = read_json(&manifest_path);
+    let plugin_schema = compile_schema(&load_vendored_schema("plugin.schema.json"));
+    assert_schema_valid(&plugin_schema, &manifest, &manifest_path);
     assert_eq!(manifest["name"], "tracedecay");
     assert_eq!(
         manifest["version"],

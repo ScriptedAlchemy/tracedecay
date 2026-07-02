@@ -35,17 +35,17 @@ JSON artifacts in the bundles are validated against vendored JSON Schemas in
 
 | Artifact | Schema | Test |
 |---|---|---|
-| `cursor-plugin/.cursor-plugin/plugin.json` | `plugin.schema.json` | `tests/plugin_manifest_schema_test.rs` |
-| `codex-plugin/.codex-plugin/plugin.json` | `plugin.schema.json` + `interface` extension | `tests/plugin_manifest_schema_test.rs` |
+| `cursor-plugin/.cursor-plugin/plugin.json` | `plugin.schema.json` | `tests/agent_suite/plugin_manifest_schema_test.rs` |
+| `codex-plugin/.codex-plugin/plugin.json` | `plugin.schema.json` + `interface` extension | `tests/agent_suite/plugin_manifest_schema_test.rs` |
 | Marketplace index | `marketplace.schema.json` | vendored for refresh parity; this repo ships no marketplace index today |
-| `cursor-plugin/mcp.json` | `mcp.schema.json` | `tests/plugin_config_schema_test.rs` |
-| `cursor-plugin/hooks/hooks.json` and `codex-plugin/hooks/hooks.json` | `hooks.schema.json` | `tests/plugin_config_schema_test.rs` |
+| `cursor-plugin/mcp.json` | `mcp.schema.json` | `tests/agent_suite/plugin_config_schema_test.rs` |
+| `cursor-plugin/hooks/hooks.json` and `codex-plugin/hooks/hooks.json` | `hooks.schema.json` | `tests/agent_suite/plugin_config_schema_test.rs` |
 
 The tests use the `jsonschema` crate (dev-dependency only, no network
 resolvers — the schemas are self-contained draft-07, and the shipped binary
 never validates schemas at runtime).
 
-Beyond schema shape, `tests/plugin_manifest_schema_test.rs` also asserts that
+Beyond schema shape, `tests/agent_suite/plugin_manifest_schema_test.rs` also asserts that
 every component path a manifest declares (`skills/`, `hooks/hooks.json`,
 `rules/*.mdc`, …) resolves to a real file or directory in the bundle, and
 that both bundles share the same plugin `name`. The config-schema tests
@@ -82,7 +82,7 @@ contract over every `SKILL.md` in both bundles:
   tree — this catches install-time mutation and missing `include_str!`
   registrations (see [Adding a skill](#adding-a-skill-correctly)).
 
-On top of the shared contract, `tests/skill_lint_cursor_test.rs` lints the
+On top of the shared contract, `tests/agent_suite/skill_lint_cursor_test.rs` lints the
 Cursor bundle with rules adapted from community SKILL.md linters (skillmark,
 skilldoctor, skillkit) and Cursor's skills docs:
 
@@ -117,7 +117,7 @@ host-specific wording — currently the `curating-project-memory` body and the
 Practical consequence: **never edit a `codex-plugin/skills/*/SKILL.md` by
 hand.** Edit the Cursor source and propagate, or the parity test fails.
 
-On top of the skill-level parity, `tests/plugin_bundle_sync_test.rs` enforces
+On top of the skill-level parity, `tests/agent_suite/plugin_bundle_sync_test.rs` enforces
 disk-level cross-bundle sync through three declarative tables: the bundle
 list, a top-level manifest assigning every bundle entry a policy
 (`SyncedSkills`, `HostSpecific { reason }`, or `OnlyIn { bundles, reason }`),
@@ -155,8 +155,8 @@ command. Rendered-output validation in
 `tests/agent_suite/update_plugin_test.rs`
 (`cursor_install_renders_structurally_valid_bundle` and friends) installs
 into a temp home and checks the rendered artifacts: the rendered manifest is
-structurally checked against the vendored plugin schema (required keys plus
-top-level key whitelist), every source file appears in the rendered install,
+validated against the vendored plugin schema (full draft-07 validation, same
+`jsonschema` crate as layer 1), every source file appears in the rendered install,
 no unresolved `${...}` placeholders survive in rendered JSON (except the
 intentional `${workspaceFolder}` MCP arg), and hook/MCP commands reference
 the shell-quoted absolute binary path. This complements the byte-copy skill
@@ -164,7 +164,7 @@ parity in layer 2.
 
 ### 5. Claude Code portability (cargo test)
 
-`tests/skill_lint_claude_test.rs` lints every skill in both bundles against
+`tests/agent_suite/skill_lint_claude_test.rs` lints every skill in both bundles against
 Claude Code / Agent Skills portability rules, so a future `claude-plugin/`
 bundle would be a re-packaging exercise rather than a rewrite. The rules
 (sources cited in the test's module docs) include: frontmatter keys limited
@@ -189,17 +189,18 @@ be a `#[test]` needs no new YAML. CI-only additions are limited to what cargo
 can't do:
 
 - **Schema-validation workflow**
-  (`.github/workflows/plugin-validation.yml`). Mirrors the official
-  `cursor/plugins` marketplace validation: `ajv` compiles both vendored
-  schemas (so a broken schema edit fails even when no manifest changed),
-  validates the Cursor manifest against `plugin.schema.json`, and
+  (`.github/workflows/plugin-validation.yml`, `manifest-schema` job). Mirrors
+  the official `cursor/plugins` marketplace validation: `ajv` compiles all
+  four vendored schemas (so a broken schema edit fails even when no manifest
+  changed), validates the Cursor manifest against `plugin.schema.json`, and
   parse-checks every `*.json` in both bundles. The Codex manifest is only
   parse-checked here (its layout differs from Cursor's); its semantics are
   covered by the Rust tests. The workflow is path-filtered to bundle, schema,
   and plugin-test paths, so it shows as *skipped* on unrelated PRs — account
   for that before making it a required check.
-- **MCP conformance smoke** (`scripts/mcp-conformance-smoke.sh`). Drives a
-  real `tracedecay serve` process through the official MCP Inspector CLI
+- **MCP conformance smoke** (`scripts/mcp-conformance-smoke.sh`, run in CI by
+  the `mcp-conformance-smoke` job of the same workflow). Drives a real
+  `tracedecay serve` process through the official MCP Inspector CLI
   (pinned version, warm-cache offline), which embeds the official TypeScript
   SDK client. This adds what the Rust `tests/mcp_suite/` cannot: a
   protocol-version-negotiation handshake with a newer client, SDK-side (Zod)
@@ -207,13 +208,10 @@ can't do:
   real client lifecycle ordering. Seven checks run against a hermetic
   throwaway fixture project (redirected HOME, ~6 s warm). It needs a built
   binary and npx, which is why it isn't a plain `#[test]`. Run it directly,
-  or with `TRACEDECAY_BIN=target/debug/tracedecay` to pin the binary. CI
-  wiring is a commented-out `mcp-conformance` placeholder in
-  `plugin-validation.yml` (the job needs a cargo build, so it doesn't fit the
-  schema-only workflow's budget). The official
-  `@modelcontextprotocol/conformance` suite was evaluated and rejected for
-  now — it only connects over streamable HTTP and `tracedecay serve` is
-  stdio-only; revisit if an HTTP transport lands.
+  or with `TRACEDECAY_BIN=target/debug/tracedecay` to pin the binary. The
+  official `@modelcontextprotocol/conformance` suite was evaluated and
+  rejected for now — it only connects over streamable HTTP and
+  `tracedecay serve` is stdio-only; revisit if an HTTP transport lands.
 
 ---
 
@@ -275,7 +273,7 @@ official schema rejects.)
 5. **Run the checks:**
 
    ```bash
-   cargo nextest run -E 'binary(=agent_suite) or binary(~plugin_) or binary(~skill_)'
+   cargo nextest run -E 'binary(=agent_suite)'
    cargo nextest run codex_skills_match_the_cursor_source_for_parity
    ```
 
@@ -307,7 +305,7 @@ To ship a bundle for another agent host (the way `codex-plugin/` mirrors
    against them, following the same offline-vendoring rules as the Cursor
    schemas.
 6. **Wire it into the sync/CI layers:** add a `Bundle` row (plus any
-   divergence exceptions) in `tests/plugin_bundle_sync_test.rs`, and extend
+   divergence exceptions) in `tests/agent_suite/plugin_bundle_sync_test.rs`, and extend
    the CI schema-validation workflow's path filters if the new bundle lives
    outside the existing globs.
 
@@ -317,14 +315,14 @@ To ship a bundle for another agent host (the way `codex-plugin/` mirrors
 
 | Check | Location | Runs in |
 |---|---|---|
-| Plugin manifest schema + component paths | `tests/plugin_manifest_schema_test.rs` + `tests/fixtures/cursor-schemas/` | `cargo test` (and thereby CI) |
-| mcp.json / hooks.json schema validation | `tests/plugin_config_schema_test.rs` | `cargo test` |
+| Plugin manifest schema + component paths | `tests/agent_suite/plugin_manifest_schema_test.rs` + `tests/fixtures/cursor-schemas/` | `cargo test` (and thereby CI) |
+| mcp.json / hooks.json schema validation | `tests/agent_suite/plugin_config_schema_test.rs` | `cargo test` |
 | Skill frontmatter contract + size budgets | `tests/agent_suite/plugin_skill_contract_test.rs` | `cargo test` |
 | Install byte-copy parity | `tests/agent_suite/plugin_skill_contract_test.rs` | `cargo test` |
 | Cursor→Codex skill parity | `src/agents/codex.rs` unit tests | `cargo test` |
-| Cross-bundle disk-level sync | `tests/plugin_bundle_sync_test.rs` | `cargo test` |
+| Cross-bundle disk-level sync | `tests/agent_suite/plugin_bundle_sync_test.rs` | `cargo test` |
 | Manifest path + rendered output | `tests/agent_suite/agent_test.rs`, `tests/agent_suite/update_plugin_test.rs` | `cargo test` |
-| Cursor skill lint rules | `tests/skill_lint_cursor_test.rs` | `cargo test` |
-| Claude Code portability rules | `tests/skill_lint_claude_test.rs` | `cargo test` |
+| Cursor skill lint rules | `tests/agent_suite/skill_lint_cursor_test.rs` | `cargo test` |
+| Claude Code portability rules | `tests/agent_suite/skill_lint_claude_test.rs` | `cargo test` |
 | Schema-validation workflow (ajv) | `.github/workflows/plugin-validation.yml` | CI only |
-| MCP conformance smoke | `scripts/mcp-conformance-smoke.sh` | manual / CI (wiring pending) |
+| MCP conformance smoke | `scripts/mcp-conformance-smoke.sh` | manual + CI (`plugin-validation.yml`) |

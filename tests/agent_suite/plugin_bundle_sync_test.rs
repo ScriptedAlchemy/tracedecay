@@ -26,9 +26,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use tracedecay::hooks::CURSOR_PLUGIN_SKILLS;
+
+use crate::common::{relative_files_under, repo_path};
 
 /// One shipped plugin source bundle, rooted at the repo top level.
 struct Bundle {
@@ -219,8 +221,8 @@ fn bundle_top_level_entries_match_the_sync_manifest() {
         assert_eq!(
             actual, expected,
             "{}/ top-level entries drifted from TOP_LEVEL_MANIFEST in \
-             tests/plugin_bundle_sync_test.rs; declare new content units with a sync \
-             policy (or remove stale manifest rows)",
+             tests/agent_suite/plugin_bundle_sync_test.rs; declare new content units \
+             with a sync policy (or remove stale manifest rows)",
             bundle.root
         );
     }
@@ -316,10 +318,6 @@ fn every_sync_exception_documents_a_reason() {
             "SKILL_SYNC_EXCEPTIONS entry {skills:?} needs a written reason"
         );
     }
-}
-
-fn repo_path(relative: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
 }
 
 fn policy_applies_to(policy: &TopLevelPolicy, bundle: &str) -> bool {
@@ -529,27 +527,4 @@ fn split_frontmatter<'doc>(path: &Path, contents: &'doc str) -> (Vec<&'doc str>,
         frontmatter.push(line);
     }
     panic!("{} never closes its YAML frontmatter", path.display());
-}
-
-fn relative_files_under(root: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir)
-            .unwrap_or_else(|err| panic!("failed to read {}: {err}", dir.display()))
-        {
-            let path = entry.expect("read skill tree entry").path();
-            if path.is_dir() {
-                stack.push(path);
-            } else {
-                files.push(
-                    path.strip_prefix(root)
-                        .expect("collected paths live under root")
-                        .to_path_buf(),
-                );
-            }
-        }
-    }
-    files.sort();
-    files
 }

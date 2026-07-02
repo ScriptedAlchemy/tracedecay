@@ -8,13 +8,14 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::common::{EnvVarGuard, PROCESS_ENV_LOCK};
+use crate::common::{
+    is_kebab_case_skill_name, load_skill_docs, relative_files_under, repo_path, EnvVarGuard,
+    SkillDoc, PROCESS_ENV_LOCK,
+};
 use tempfile::TempDir;
 use tracedecay::agents::{expected_tool_perms, get_integration, InstallContext};
-use tracedecay::automation::skill_frontmatter::{parse_skill_frontmatter, SkillFrontmatterValue};
 use tracedecay::config::USER_DATA_DIR_ENV;
 
 const CODEX_SKILL_ROOT: &str = "codex-plugin/skills";
@@ -46,13 +47,6 @@ const CURSOR_ALLOWED_FRONTMATTER: &[&str] = &[
     "name",
     "paths",
 ];
-
-#[derive(Debug)]
-struct SkillDoc {
-    path: PathBuf,
-    body: String,
-    frontmatter: BTreeMap<String, SkillFrontmatterValue>,
-}
 
 #[test]
 fn codex_plugin_skills_match_codex_skill_creator_quick_validate_rules() {
@@ -142,14 +136,14 @@ fn produced_plugin_skills_follow_skill_creator_design_advice() {
             skill.path.display()
         );
 
-        let line_count = skill.body.lines().count();
+        let line_count = skill.raw.lines().count();
         assert!(
             line_count <= MAX_SKILL_MD_LINES,
             "{} has {line_count} lines; split details into direct references before exceeding {MAX_SKILL_MD_LINES}",
             skill.path.display()
         );
         assert!(
-            !skill.body.to_ascii_lowercase().contains("\n## when to use"),
+            !skill.raw.to_ascii_lowercase().contains("\n## when to use"),
             "{} must keep trigger guidance in description metadata, not a body-only When to Use section",
             skill.path.display()
         );
@@ -161,38 +155,7 @@ fn produced_plugin_skills_follow_skill_creator_design_advice() {
 }
 
 fn skills_source_root(root: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(root)
-}
-
-fn load_skill_docs(root: &str) -> Vec<SkillDoc> {
-    let skills_root = skills_source_root(root);
-    let mut paths = std::fs::read_dir(&skills_root)
-        .unwrap_or_else(|err| {
-            panic!(
-                "failed to read bundled skills at {}: {err}",
-                skills_root.display()
-            )
-        })
-        .map(|entry| entry.expect("read skill dir entry").path())
-        .filter(|path| path.is_dir())
-        .map(|path| path.join("SKILL.md"))
-        .collect::<Vec<_>>();
-    paths.sort();
-
-    paths
-        .into_iter()
-        .map(|path| {
-            let body = std::fs::read_to_string(&path)
-                .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-            let frontmatter = parse_skill_frontmatter(&body)
-                .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
-            SkillDoc {
-                path,
-                body,
-                frontmatter,
-            }
-        })
-        .collect()
+    repo_path(root)
 }
 
 /// Serializes the generated-bundle tests, which mutate process-wide env vars.
@@ -262,29 +225,6 @@ fn assert_skill_trees_byte_identical(source_root: &Path, installed_root: &Path) 
     }
 }
 
-fn relative_files_under(root: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir)
-            .unwrap_or_else(|err| panic!("failed to read {}: {err}", dir.display()))
-        {
-            let path = entry.expect("read skill tree entry").path();
-            if path.is_dir() {
-                stack.push(path);
-            } else {
-                files.push(
-                    path.strip_prefix(root)
-                        .expect("collected paths live under root")
-                        .to_path_buf(),
-                );
-            }
-        }
-    }
-    files.sort();
-    files
-}
-
 fn assert_codex_quick_validate_equivalent(skill: &SkillDoc) {
     assert_allowed_frontmatter(skill, CODEX_QUICK_VALIDATE_ALLOWED_FRONTMATTER);
     assert_required_skill_creator_frontmatter(skill);
@@ -341,7 +281,7 @@ fn assert_required_skill_creator_frontmatter(skill: &SkillDoc) {
         skill.path.display()
     );
     assert!(
-        is_skill_creator_name(name),
+        is_kebab_case_skill_name(name),
         "{} skill name must be hyphen-case lowercase letters, digits, and hyphens, \
          without leading/trailing/consecutive hyphens",
         skill.path.display()
@@ -411,16 +351,6 @@ fn assert_scalar(field: &str, value: &str, path: &Path) {
         "{} frontmatter {field} cannot have leading or trailing whitespace",
         path.display()
     );
-}
-
-fn is_skill_creator_name(name: &str) -> bool {
-    !name.is_empty()
-        && !name.starts_with('-')
-        && !name.ends_with('-')
-        && !name.contains("--")
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
 /// Agents choose skills from metadata alone, so each description must carry

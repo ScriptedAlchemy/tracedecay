@@ -27,11 +27,12 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
 
 use regex::Regex;
-use tracedecay::automation::skill_frontmatter::{parse_skill_frontmatter, SkillFrontmatterValue};
+use tracedecay::automation::skill_frontmatter::SkillFrontmatterValue;
 use tracedecay::mcp::get_tool_definitions;
+
+use crate::common::{load_skill_docs, SkillDoc};
 
 const CURSOR_SKILL_ROOT: &str = "cursor-plugin/skills";
 
@@ -50,14 +51,6 @@ const PLACEHOLDER_FRAGMENTS: &[&str] = &["{{", "}}", "tktk", "lorem ipsum", "<pl
 /// `tracedecay_*` identifiers that are documented output artifacts, not MCP
 /// tools (skills tell agents to report the `tracedecay_metrics:` line).
 const NON_TOOL_IDENTIFIERS: &[&str] = &["tracedecay_metrics"];
-
-struct SkillDoc {
-    name: String,
-    path: PathBuf,
-    raw: String,
-    body: String,
-    frontmatter: BTreeMap<String, SkillFrontmatterValue>,
-}
 
 #[test]
 fn cursor_skill_files_are_hygienic() {
@@ -211,8 +204,7 @@ fn cursor_skill_names_and_descriptions_meet_lint_quality_bar() {
         }
         // Duplicate descriptions make model routing between skills ambiguous
         // (the agent picks skills from metadata alone).
-        if let Some(other) = descriptions_seen.insert(description.to_string(), skill.name.clone())
-        {
+        if let Some(other) = descriptions_seen.insert(description.to_string(), skill.name.clone()) {
             violations.push(format!(
                 "{at}: description duplicates skill {other:?} exactly"
             ));
@@ -230,7 +222,8 @@ fn cursor_skill_references_resolve() {
     let mut violations = Vec::new();
 
     let link_re = Regex::new(r"\[[^\]]*\]\(([^)]+)\)").unwrap();
-    let resource_re = Regex::new(r"\b(?:agents|scripts|references|assets)/[A-Za-z0-9][A-Za-z0-9._/-]*").unwrap();
+    let resource_re =
+        Regex::new(r"\b(?:agents|scripts|references|assets)/[A-Za-z0-9][A-Za-z0-9._/-]*").unwrap();
     let skill_ref_re = Regex::new(r"tracedecay:([a-z0-9][a-z0-9-]*)").unwrap();
     let slash_ref_re = Regex::new(r"`/([a-z0-9][a-z0-9-]*)`").unwrap();
     let tool_ref_re = Regex::new(r"tracedecay_[a-z_]+").unwrap();
@@ -308,7 +301,9 @@ fn cursor_skill_references_resolve() {
         // Cursor docs scope `paths` globs to workspace-relative matching;
         // absolute paths and parent escapes can never match.
         if let Some(SkillFrontmatterValue::Block(_)) = skill.frontmatter.get("paths") {
-            let globs = skill.frontmatter["paths"].as_list_items().unwrap_or_default();
+            let globs = skill.frontmatter["paths"]
+                .as_list_items()
+                .unwrap_or_default();
             for glob in &globs {
                 if glob.starts_with('/') || glob.contains('\\') || glob.contains("..") {
                     violations.push(format!(
@@ -331,53 +326,13 @@ fn cursor_skill_references_resolve() {
 }
 
 fn load_skills() -> Vec<SkillDoc> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(CURSOR_SKILL_ROOT);
-    let mut dirs = std::fs::read_dir(&root)
-        .unwrap_or_else(|err| panic!("failed to read {}: {err}", root.display()))
-        .map(|entry| entry.expect("read skill dir entry").path())
-        .filter(|path| path.is_dir())
-        .collect::<Vec<_>>();
-    dirs.sort();
-    assert!(!dirs.is_empty(), "expected bundled Cursor skills");
-
-    dirs.into_iter()
-        .map(|dir| {
-            let name = dir
-                .file_name()
-                .and_then(|name| name.to_str())
-                .expect("skill dir name is utf-8")
-                .to_string();
-            let path = dir.join("SKILL.md");
-            let raw = std::fs::read_to_string(&path)
-                .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-            let frontmatter = parse_skill_frontmatter(&raw)
-                .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
-            let body = body_after_frontmatter(&raw).to_string();
-            SkillDoc {
-                name,
-                path,
-                raw,
-                body,
-                frontmatter,
-            }
-        })
-        .collect()
-}
-
-/// Returns the markdown body following the closing `---` frontmatter fence.
-fn body_after_frontmatter(raw: &str) -> &str {
-    let mut offset = 0usize;
-    for (index, line) in raw.split_inclusive('\n').enumerate() {
-        offset += line.len();
-        if index > 0 && line.trim() == "---" {
-            return &raw[offset..];
-        }
-    }
-    ""
+    load_skill_docs(CURSOR_SKILL_ROOT)
 }
 
 fn first_content_line(body: &str) -> Option<&str> {
-    body.lines().map(str::trim_end).find(|line| !line.is_empty())
+    body.lines()
+        .map(str::trim_end)
+        .find(|line| !line.is_empty())
 }
 
 /// ATX headings outside code fences, as (level, text-after-hashes).

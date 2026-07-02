@@ -19,44 +19,17 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::path::{Path, PathBuf};
-
 use jsonschema::Validator;
 use serde_json::{json, Value};
 
-const MCP_SCHEMA: &str = include_str!("fixtures/cursor-schemas/mcp.schema.json");
-const HOOKS_SCHEMA: &str = include_str!("fixtures/cursor-schemas/hooks.schema.json");
+use crate::common::{assert_schema_valid, compile_schema, read_json_file, repo_path};
 
-fn repo_path(relative: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
-}
-
-fn read_json(path: &Path) -> Value {
-    let body = std::fs::read_to_string(path)
-        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-    serde_json::from_str(&body)
-        .unwrap_or_else(|err| panic!("failed to parse JSON {}: {err}", path.display()))
-}
+const MCP_SCHEMA: &str = include_str!("../fixtures/cursor-schemas/mcp.schema.json");
+const HOOKS_SCHEMA: &str = include_str!("../fixtures/cursor-schemas/hooks.schema.json");
 
 fn compile(schema_body: &str) -> Validator {
     let schema: Value = serde_json::from_str(schema_body).expect("vendored schema parses");
-    jsonschema::options()
-        .should_validate_formats(true)
-        .build(&schema)
-        .expect("vendored schema should compile")
-}
-
-fn assert_valid(validator: &Validator, config: &Value, config_path: &Path) {
-    let errors = validator
-        .iter_errors(config)
-        .map(|err| format!("  {}: {err}", err.instance_path()))
-        .collect::<Vec<_>>();
-    assert!(
-        errors.is_empty(),
-        "{} violates the vendored Cursor config schema:\n{}",
-        config_path.display(),
-        errors.join("\n")
-    );
+    compile_schema(&schema)
 }
 
 /// Validates the config at `relative` if it exists. Returns whether it did.
@@ -68,7 +41,7 @@ fn validate_if_present(validator: &Validator, relative: &str) -> bool {
     if !path.exists() {
         return false;
     }
-    assert_valid(validator, &read_json(&path), &path);
+    assert_schema_valid(validator, &read_json_file(&path), &path);
     true
 }
 

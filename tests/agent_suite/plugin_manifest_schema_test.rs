@@ -13,50 +13,27 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use jsonschema::Validator;
 use serde_json::{json, Value};
 
-const PLUGIN_SCHEMA: &str = include_str!("fixtures/cursor-schemas/plugin.schema.json");
+use crate::common::{assert_schema_valid, compile_schema, read_json_file, repo_path};
 
-fn repo_path(relative: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
-}
-
-fn read_json(path: &Path) -> Value {
-    let body = std::fs::read_to_string(path)
-        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-    serde_json::from_str(&body)
-        .unwrap_or_else(|err| panic!("failed to parse JSON {}: {err}", path.display()))
-}
-
-fn compile(schema: &Value) -> Validator {
-    jsonschema::options()
-        .should_validate_formats(true)
-        .build(schema)
-        .expect("vendored Cursor plugin schema should compile")
-}
-
-fn assert_valid(validator: &Validator, manifest: &Value, manifest_path: &Path) {
-    let errors = validator
-        .iter_errors(manifest)
-        .map(|err| format!("  {}: {err}", err.instance_path()))
-        .collect::<Vec<_>>();
-    assert!(
-        errors.is_empty(),
-        "{} violates the official Cursor plugin schema:\n{}",
-        manifest_path.display(),
-        errors.join("\n")
-    );
-}
+const PLUGIN_SCHEMA: &str = include_str!("../fixtures/cursor-schemas/plugin.schema.json");
 
 /// Component paths declared in a manifest, with the manifest fields that
 /// declared them. Only string and string-array fields are path references;
 /// inline objects (`hooks`, `mcpServers`) carry their config in place.
 fn declared_component_paths(manifest: &Value) -> Vec<(String, String)> {
     let mut paths = Vec::new();
-    for field in ["rules", "agents", "skills", "commands", "hooks", "mcpServers"] {
+    for field in [
+        "rules",
+        "agents",
+        "skills",
+        "commands",
+        "hooks",
+        "mcpServers",
+    ] {
         match manifest.get(field) {
             None => {}
             Some(Value::String(path)) => paths.push((field.to_string(), path.clone())),
@@ -94,11 +71,11 @@ fn assert_component_paths_resolve(manifest: &Value, bundle_root: &Path, manifest
 #[test]
 fn cursor_bundle_manifest_matches_the_official_cursor_plugin_schema() {
     let schema: Value = serde_json::from_str(PLUGIN_SCHEMA).expect("schema fixture parses");
-    let validator = compile(&schema);
+    let validator = compile_schema(&schema);
 
     let manifest_path = repo_path("cursor-plugin/.cursor-plugin/plugin.json");
-    let manifest = read_json(&manifest_path);
-    assert_valid(&validator, &manifest, &manifest_path);
+    let manifest = read_json_file(&manifest_path);
+    assert_schema_valid(&validator, &manifest, &manifest_path);
     assert_component_paths_resolve(&manifest, &repo_path("cursor-plugin"), &manifest_path);
 }
 
@@ -109,11 +86,11 @@ fn codex_bundle_manifest_matches_the_cursor_schema_plus_interface_extension() {
     // Cursor's schema does not define; with `additionalProperties: false`
     // the stock schema would reject it, so allow exactly that one extra key.
     schema["properties"]["interface"] = json!({ "type": "object" });
-    let validator = compile(&schema);
+    let validator = compile_schema(&schema);
 
     let manifest_path = repo_path("codex-plugin/.codex-plugin/plugin.json");
-    let manifest = read_json(&manifest_path);
-    assert_valid(&validator, &manifest, &manifest_path);
+    let manifest = read_json_file(&manifest_path);
+    assert_schema_valid(&validator, &manifest, &manifest_path);
     assert_component_paths_resolve(&manifest, &repo_path("codex-plugin"), &manifest_path);
 }
 
@@ -122,8 +99,8 @@ fn codex_bundle_manifest_matches_the_cursor_schema_plus_interface_extension() {
 /// tooling (marketplace entries, cache paths) can key on one identifier.
 #[test]
 fn bundle_manifests_share_the_plugin_name() {
-    let cursor = read_json(&repo_path("cursor-plugin/.cursor-plugin/plugin.json"));
-    let codex = read_json(&repo_path("codex-plugin/.codex-plugin/plugin.json"));
+    let cursor = read_json_file(&repo_path("cursor-plugin/.cursor-plugin/plugin.json"));
+    let codex = read_json_file(&repo_path("codex-plugin/.codex-plugin/plugin.json"));
     assert_eq!(cursor["name"], "tracedecay");
     assert_eq!(codex["name"], "tracedecay");
 }

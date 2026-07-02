@@ -26,15 +26,14 @@
 //! for path-scoped activation. Claude Code supports both fields natively, but
 //! the strict Agent Skills open spec (and Anthropic's `quick_validate.py`
 //! packaging validator) rejects them. See
-//! [`CROSS_ECOSYSTEM_CONFLICT_FIELDS`] and `.agents-notes/E-claude-rules.md`
-//! for the compatibility matrix.
+//! [`CROSS_ECOSYSTEM_CONFLICT_FIELDS`] and the compatibility matrix in
+//! `docs/PLUGIN-VALIDATION.md` (layer 5).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use tracedecay::automation::skill_frontmatter::SkillFrontmatterValue;
 
-use tracedecay::automation::skill_frontmatter::{parse_skill_frontmatter, SkillFrontmatterValue};
+use crate::common::{is_kebab_case_skill_name, load_skill_docs, SkillDoc};
 
 const SKILL_ROOTS: &[&str] = &["cursor-plugin/skills", "codex-plugin/skills"];
 
@@ -102,12 +101,6 @@ const CLAUDE_MAX_NAME_CHARS: usize = 64;
 /// 1,536 characters in the skill listing; staying under means no data loss.
 const CLAUDE_CODE_LISTING_CAP_CHARS: usize = 1536;
 
-#[derive(Debug)]
-struct SkillDoc {
-    path: PathBuf,
-    frontmatter: BTreeMap<String, SkillFrontmatterValue>,
-}
-
 #[test]
 fn bundled_skills_use_only_frontmatter_claude_code_recognizes() {
     for skill in load_all_skill_docs() {
@@ -128,14 +121,13 @@ fn bundled_skills_use_only_frontmatter_claude_code_recognizes() {
 #[test]
 fn bundled_skill_names_satisfy_claude_naming_rules() {
     for skill in load_all_skill_docs() {
-        let dir_name = skill_dir_name(&skill);
         let name = required_scalar(&skill, "name");
 
         // Claude Code derives the /command from the directory name and the
         // open spec requires `name` to match it, so both must conform.
         assert_eq!(
             name,
-            dir_name,
+            skill.name,
             "{} frontmatter name must match its directory so the Claude Code \
              command name and the spec-required name agree",
             skill.path.display()
@@ -147,7 +139,7 @@ fn bundled_skill_names_satisfy_claude_naming_rules() {
             name.len()
         );
         assert!(
-            is_spec_kebab_case(name),
+            is_kebab_case_skill_name(name),
             "{} name must be lowercase letters, digits, and hyphens without \
              leading/trailing/consecutive hyphens",
             skill.path.display()
@@ -242,7 +234,7 @@ fn open_spec_conflicts_are_limited_to_documented_cursor_requirements() {
                 "{} uses spec-nonconformant frontmatter {undocumented:?} that is \
                  not a documented cross-ecosystem conflict; either drop the field \
                  or document it in CROSS_ECOSYSTEM_CONFLICT_FIELDS and \
-                 .agents-notes/E-claude-rules.md",
+                 docs/PLUGIN-VALIDATION.md",
                 skill.path.display()
             );
         }
@@ -261,7 +253,7 @@ fn documented_conflict_fields_are_actually_used_by_the_cursor_bundle() {
                 .any(|skill| skill.frontmatter.contains_key(*field)),
             "documented conflict field {field:?} is no longer used by any Cursor \
              skill; remove it from CROSS_ECOSYSTEM_CONFLICT_FIELDS and update \
-             .agents-notes/E-claude-rules.md"
+             docs/PLUGIN-VALIDATION.md"
         );
     }
 }
@@ -302,49 +294,7 @@ fn load_all_skill_docs() -> Vec<SkillDoc> {
     for root in SKILL_ROOTS {
         skills.extend(load_skill_docs(root));
     }
-    assert!(!skills.is_empty(), "expected bundled skills to lint");
     skills
-}
-
-fn load_skill_docs(root: &str) -> Vec<SkillDoc> {
-    let skills_root = Path::new(env!("CARGO_MANIFEST_DIR")).join(root);
-    let mut paths = std::fs::read_dir(&skills_root)
-        .unwrap_or_else(|err| {
-            panic!(
-                "failed to read bundled skills at {}: {err}",
-                skills_root.display()
-            )
-        })
-        .map(|entry| entry.expect("read skill dir entry").path())
-        .filter(|path| path.is_dir())
-        .map(|path| path.join("SKILL.md"))
-        .collect::<Vec<_>>();
-    paths.sort();
-    assert!(
-        !paths.is_empty(),
-        "expected skill directories under {}",
-        skills_root.display()
-    );
-
-    paths
-        .into_iter()
-        .map(|path| {
-            let body = std::fs::read_to_string(&path)
-                .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-            let frontmatter = parse_skill_frontmatter(&body)
-                .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
-            SkillDoc { path, frontmatter }
-        })
-        .collect()
-}
-
-fn skill_dir_name(skill: &SkillDoc) -> &str {
-    skill
-        .path
-        .parent()
-        .and_then(Path::file_name)
-        .and_then(|name| name.to_str())
-        .expect("skill directory name should be utf-8")
 }
 
 fn required_scalar<'a>(skill: &'a SkillDoc, field: &str) -> &'a str {
@@ -358,16 +308,4 @@ fn required_scalar<'a>(skill: &'a SkillDoc, field: &str) -> &'a str {
                 skill.path.display()
             )
         })
-}
-
-/// Agent Skills spec name rule: lowercase alphanumerics and hyphens, no
-/// leading/trailing hyphen, no consecutive hyphens.
-fn is_spec_kebab_case(name: &str) -> bool {
-    !name.is_empty()
-        && !name.starts_with('-')
-        && !name.ends_with('-')
-        && !name.contains("--")
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }

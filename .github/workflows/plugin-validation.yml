@@ -5,7 +5,8 @@
 # are vendored in tests/fixtures/cursor-schemas/).
 #
 # The Rust contract tests for the bundles already run in ci.yml — do not add
-# cargo jobs here.
+# plain cargo test jobs here. The MCP conformance smoke below is the one
+# exception: it needs a built binary plus npx, which cargo test can't provide.
 name: Plugin Validation
 
 on:
@@ -14,12 +15,11 @@ on:
       - "cursor-plugin/**"
       - "codex-plugin/**"
       - "tests/fixtures/cursor-schemas/**"
-      # Plugin-related test files (e.g. tests/plugin_manifest_schema_test.rs,
-      # tests/agent_suite/plugin_skill_contract_test.rs, skill lint tests).
-      - "tests/*plugin*"
-      - "tests/*skill*"
+      # Plugin/skill test modules (e.g. plugin_manifest_schema_test.rs,
+      # plugin_skill_contract_test.rs, the skill lint tests).
       - "tests/agent_suite/*plugin*"
       - "tests/agent_suite/*skill*"
+      - "scripts/mcp-conformance-smoke.sh"
       - ".github/workflows/plugin-validation.yml"
 
 permissions:
@@ -49,7 +49,9 @@ jobs:
         run: |
           npx --no-install ajv compile --spec=draft7 -c ajv-formats \
             -s tests/fixtures/cursor-schemas/plugin.schema.json \
-            -s tests/fixtures/cursor-schemas/marketplace.schema.json
+            -s tests/fixtures/cursor-schemas/marketplace.schema.json \
+            -s tests/fixtures/cursor-schemas/mcp.schema.json \
+            -s tests/fixtures/cursor-schemas/hooks.schema.json
 
       - name: Validate Cursor plugin manifest
         run: |
@@ -70,7 +72,29 @@ jobs:
               echo "ok: $f"
             done
 
-  # mcp-conformance:
-  #   Placeholder — workstream H owns the MCP conformance smoke evaluation.
-  #   See .agents-notes/H-mcp-conformance.md for their verdict on whether a
-  #   cheap conformance job belongs here before adding anything.
+  # Drives a real `tracedecay serve` stdio server through the MCP Inspector
+  # CLI (pinned version), which embeds the official TypeScript MCP SDK client
+  # — covering protocol-version negotiation and SDK-side schema validation
+  # that the in-repo Rust MCP tests cannot. See scripts/mcp-conformance-smoke.sh.
+  mcp-conformance-smoke:
+    name: MCP conformance smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build tracedecay
+        run: cargo build --bin tracedecay --locked
+
+      - name: Run MCP conformance smoke
+        run: scripts/mcp-conformance-smoke.sh
+        env:
+          TRACEDECAY_BIN: target/debug/tracedecay
