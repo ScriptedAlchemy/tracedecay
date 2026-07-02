@@ -6,7 +6,7 @@
 //! allowing AI assistants to query the code graph interactively.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -26,8 +26,9 @@ use crate::tracedecay::TraceDecay;
 
 use super::hook_events::{self, HookAgent, HookEventPlan};
 use super::tools::{
-    explore_call_budget, get_tool_definitions_with_budget, handle_tool_call_with_registry,
-    tool_dispatches_registered_project_reader,
+    explore_call_budget, get_tool_definitions_with_budget,
+    handle_tool_call_with_registry_and_implicit_project, tool_dispatches_registered_project_reader,
+    ToolCallRegistryOptions,
 };
 use super::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
 
@@ -174,6 +175,73 @@ impl ServerStats {
             errors: AtomicU64::new(0),
         }
     }
+}
+
+#[derive(Default)]
+struct ConnectionRouteState {
+    implicit_project_path: Option<PathBuf>,
+}
+
+impl ConnectionRouteState {
+    async fn observe_initialize(&mut self, params: Option<&Value>, registry_db: Option<&GlobalDb>) {
+        self.implicit_project_path =
+            resolve_initialize_roots_project_path(params, registry_db).await;
+    }
+
+    fn implicit_project_path(&self) -> Option<&Path> {
+        self.implicit_project_path.as_deref()
+    }
+}
+
+pub(crate) async fn resolve_initialize_roots_project_path(
+    params: Option<&Value>,
+    registry_db: Option<&GlobalDb>,
+) -> Option<PathBuf> {
+    let roots = initialize_root_paths(params);
+    if roots.is_empty() {
+        return None;
+    }
+    let registry_db = registry_db?;
+    let projects = registry_db.search_code_projects("", usize::MAX).await;
+    for root in roots {
+        if let Some(project_path) = match_initialize_root_to_registered_project(&root, &projects) {
+            return Some(project_path);
+        }
+    }
+    None
+}
+
+fn initialize_root_paths(params: Option<&Value>) -> Vec<PathBuf> {
+    params
+        .and_then(|p| p.get("roots"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|root| {
+            let uri = root.get("uri").and_then(Value::as_str)?;
+            crate::serve::local_path_from_mcp_root_uri(uri)
+        })
+        .collect()
+}
+
+fn match_initialize_root_to_registered_project(
+    root: &Path,
+    projects: &[crate::global_db::CodeProjectRecord],
+) -> Option<PathBuf> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut matches: Vec<_> = projects
+        .iter()
+        .filter_map(|project| {
+            let project_path = PathBuf::from(&project.canonical_root);
+            let project_path = project_path
+                .canonicalize()
+                .unwrap_or_else(|_| project_path.clone());
+            (root == project_path || root.starts_with(&project_path))
+                .then(|| (project_path.components().count(), project_path))
+        })
+        .collect();
+    matches.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    matches.into_iter().map(|(_, path)| path).next()
 }
 
 /// Cache duration for version checks (15 minutes).
@@ -1341,6 +1409,8 @@ impl McpServer {
                 .expect("failed to register SIGTERM handler")
         });
 
+        let mut connection_route = ConnectionRouteState::default();
+
         loop {
             let line: String = {
                 #[cfg(unix)]
@@ -1410,10 +1480,19 @@ impl McpServer {
 
             let response = match parsed {
                 Ok(request) => {
-                    self.handle_request_with_timings(
+                    if matches!(classify_mcp_method(&request.method), McpMethod::Initialize) {
+                        connection_route
+                            .observe_initialize(
+                                request.params.as_ref(),
+                                self.registry_db.as_deref(),
+                            )
+                            .await;
+                    }
+                    self.handle_request_with_timings_and_implicit_project(
                         &request,
                         timings_override.unwrap_or_else(|| self.timings_enabled()),
                         &mut connection_context,
+                        connection_route.implicit_project_path(),
                     )
                     .await
                 }
@@ -1547,6 +1626,22 @@ impl McpServer {
         timings_enabled: bool,
         connection: &mut ConnectionContext,
     ) -> Option<JsonRpcResponse> {
+        self.handle_request_with_timings_and_implicit_project(
+            request,
+            timings_enabled,
+            connection,
+            None,
+        )
+        .await
+    }
+
+    async fn handle_request_with_timings_and_implicit_project(
+        &self,
+        request: &JsonRpcRequest,
+        timings_enabled: bool,
+        connection: &mut ConnectionContext,
+        implicit_project_path: Option<&Path>,
+    ) -> Option<JsonRpcResponse> {
         debug_assert!(
             !request.method.is_empty(),
             "handle_request called with empty method"
@@ -1571,8 +1666,14 @@ impl McpServer {
             McpMethod::InitializedAck | McpMethod::HookEvent => None,
             McpMethod::ToolsList => Some(self.handle_tools_list(id).await),
             McpMethod::ToolsCall => Some(
-                self.handle_tools_call(id, request.params.as_ref(), timings_enabled, connection)
-                    .await,
+                self.handle_tools_call(
+                    id,
+                    request.params.as_ref(),
+                    timings_enabled,
+                    connection,
+                    implicit_project_path,
+                )
+                .await,
             ),
             McpMethod::ResourcesList => Some(Self::handle_resources_list(id)),
             McpMethod::ResourcesRead => Some(
@@ -1952,6 +2053,7 @@ impl McpServer {
         params: Option<&Value>,
         timings_enabled: bool,
         connection: &ConnectionContext,
+        implicit_project_path: Option<&Path>,
     ) -> JsonRpcResponse {
         let Some(params) = params else {
             return JsonRpcResponse::error(
@@ -2014,14 +2116,17 @@ impl McpServer {
             }
         }
 
-        let dispatch_outcome = handle_tool_call_with_registry(
+        let dispatch_outcome = handle_tool_call_with_registry_and_implicit_project(
             &cg,
             tool_name,
             handler_arguments,
             server_stats,
             self.scope_prefix(),
-            self.registry_db.as_deref(),
-            self.allow_default_registry_fallback,
+            ToolCallRegistryOptions {
+                global_db: self.registry_db.as_deref(),
+                allow_default_registry_fallback: self.allow_default_registry_fallback,
+                implicit_project_path,
+            },
         )
         .await;
         let handler_elapsed_us = handler_start.map(|t| t.elapsed().as_micros() as u64);
