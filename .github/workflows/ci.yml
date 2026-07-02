@@ -97,15 +97,81 @@ jobs:
       - name: Run tests
         run: cargo nextest run --workspace --profile ci --locked
 
-  windows-test-shard:
-    name: Test Windows shard ${{ matrix.partition }}/10
+  windows-build:
+    name: Build Windows tests
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on: windows-latest
     timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tune Windows runner for build I/O
+        shell: pwsh
+        run: |
+          # Defender real-time scanning taxes the compiler's many short-lived
+          # object/incremental files; hosted runners are elevated, so turn it
+          # off and exclude the hot paths as a fallback.
+          Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
+          $exclusions = @(
+            $env:GITHUB_WORKSPACE,
+            $env:RUNNER_TEMP,
+            [System.IO.Path]::GetTempPath(),
+            $env:CARGO_HOME,
+            $env:RUSTUP_HOME,
+            "$env:USERPROFILE\.cargo",
+            "$env:USERPROFILE\.rustup"
+          ) | Where-Object { $_ } | Select-Object -Unique
+          foreach ($path in $exclusions) {
+            Add-MpPreference -ExclusionPath $path -ErrorAction SilentlyContinue
+          }
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Use lld-link linker
+        shell: pwsh
+        run: |
+          where.exe lld-link.exe
+          lld-link.exe --version
+          "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=lld-link.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      # Node is only needed so build.rs can produce the embedded dashboard
+      # dist assets (npm ci + npm run build) once, instead of once per shard.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Cache Windows Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-test-full-windows-msvc-lld
+          cache-on-failure: true
+
+      - name: Build nextest archive
+        shell: pwsh
+        run: cargo nextest archive --workspace --locked --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
+
+      - name: Upload nextest archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-nextest-archive
+          path: ${{ runner.temp }}/nextest-archive.tar.zst
+          retention-days: 1
+          compression-level: 0
+
+  windows-test-shard:
+    name: Test Windows shard ${{ matrix.partition }}/5
+    needs: windows-build
+    runs-on: windows-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        partition: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        partition: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@v7
 
@@ -136,15 +202,6 @@ jobs:
           "TMP=$fastTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "TEMP=$fastTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Use lld-link linker
-        shell: pwsh
-        run: |
-          where.exe lld-link.exe
-          lld-link.exe --version
-          "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=lld-link.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -162,16 +219,26 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
-      - name: Cache Windows Rust build outputs
-        uses: Swatinem/rust-cache@v2
+      - name: Download nextest archive
+        uses: actions/download-artifact@v4
         with:
-          shared-key: ci-test-full-windows-msvc-lld
-          cache-on-failure: true
+          name: windows-nextest-archive
+          path: ${{ runner.temp }}
 
       - name: Run Windows tests
         env:
           TRACEDECAY_SQLITE_UNSAFE_FAST: "1"
-        run: cargo nextest run --workspace --profile ci --locked --partition slice:${{ matrix.partition }}/10 --test-threads num-cpus --status-level slow
+        shell: pwsh
+        # --extract-to must be the workspace so target/ lands at the same
+        # absolute path as on the build job: integration tests bake
+        # env!("CARGO_BIN_EXE_tracedecay") into the binaries at compile time.
+        run: >-
+          cargo-nextest nextest run --profile ci
+          --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
+          --extract-to "$env:GITHUB_WORKSPACE"
+          --workspace-remap "$env:GITHUB_WORKSPACE"
+          --partition slice:${{ matrix.partition }}/5
+          --test-threads num-cpus --status-level slow
 
       - name: Clean abandoned Windows test children
         if: always()
