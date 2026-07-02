@@ -510,8 +510,9 @@ fn prompt_rules_text() -> String {
     )
 }
 
-fn prompt_rules_text_without_end_marker() -> &'static str {
-    "## Prefer tracedecay MCP tools\n\n\
+fn prompt_rules_text_without_end_marker() -> String {
+    format!(
+        "## Prefer tracedecay MCP tools\n\n\
 Before reading source files or scanning the codebase, use the tracedecay MCP tools \
 (`tracedecay_context`, `tracedecay_search`, `tracedecay_callers`, `tracedecay_callees`, \
 `tracedecay_impact`, `tracedecay_node`, `tracedecay_files`, `tracedecay_affected`). \
@@ -533,10 +534,13 @@ For durable project/user facts, prefer `tracedecay_fact_store`, \
 `tracedecay_message_search` for active-project transcript recall when prior \
 conversation context matters. Do not store secrets, credentials, or unnecessary PII \
 in persistent facts.\n\n\
+{cli_fallback}\n\n\
 If you discover a gap where an extractor, schema, or tracedecay tool could answer a \
 question natively, propose opening an issue at \
 https://github.com/ScriptedAlchemy/tracedecay. Remind the user to strip sensitive \
-or proprietary code from the bug description before submitting."
+or proprietary code from the bug description before submitting.",
+        cli_fallback = super::CLI_FALLBACK_PROMPT_RULES,
+    )
 }
 
 // ---------------------------------------------------------------------------

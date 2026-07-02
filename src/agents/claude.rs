@@ -394,6 +394,7 @@ fn install_claude_md_rules(claude_md_path: &Path) -> Result<()> {
         Use `tracedecay_message_search` for active-project transcript recall when \
         prior conversation context matters. Do not store secrets, credentials, or \
         unnecessary PII in persistent facts.\n\
+        - {cli_fallback}\n\
         - If you discover a gap where an extractor, schema, or tracedecay tool could be \
         improved to answer a question natively, propose to the user that they open an issue \
         at https://github.com/ScriptedAlchemy/tracedecay describing the limitation. \
@@ -407,7 +408,8 @@ fn install_claude_md_rules(claude_md_path: &Path) -> Result<()> {
         question in plain English. Do not call Read, glob, grep, or \
         list_directory — the source sections returned by tracedecay_context ARE \
         the relevant code. Follow the call budget in the tool description. \
-        Pass `seen_node_ids` from each response to the next call's `exclude_node_ids`.\n"
+        Pass `seen_node_ids` from each response to the next call's `exclude_node_ids`.\n",
+        cli_fallback = super::CLI_FALLBACK_PROMPT_RULES,
     )
     .map_err(|e| TraceDecayError::Config {
         message: format!(

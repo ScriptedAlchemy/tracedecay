@@ -428,9 +428,11 @@ fn install_prompt_rules(instructions_path: &Path) -> Result<()> {
         Use `tracedecay_message_search` for active-project transcript recall when \
         prior conversation context matters. Do not store secrets, credentials, or \
         unnecessary PII in persistent facts.\n\n\
+        {cli_fallback}\n\n\
         If you find a gap where tracedecay could answer a question natively, propose opening \
         an issue at https://github.com/ScriptedAlchemy/tracedecay. Remind the user to strip \
-        sensitive or proprietary code from any issue text before submitting.\n"
+        sensitive or proprietary code from any issue text before submitting.\n",
+        cli_fallback = super::CLI_FALLBACK_PROMPT_RULES,
     )
     .map_err(|e| crate::errors::TraceDecayError::Config {
         message: format!("failed to write {}: {e}", instructions_path.display()),

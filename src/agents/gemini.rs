@@ -169,11 +169,13 @@ fn install_prompt_rules(gemini_md: &Path) -> Result<()> {
         Use `tracedecay_message_search` for active-project transcript recall when \
         prior conversation context matters. Do not store secrets, credentials, or \
         unnecessary PII in persistent facts.\n\n\
+        {cli_fallback}\n\n\
         If you discover a gap where an extractor, schema, or tracedecay tool could be \
         improved to answer a question natively, propose to the user that they open an issue \
         at https://github.com/ScriptedAlchemy/tracedecay describing the limitation. \
         **Remind the user to strip any sensitive or proprietary code from the bug description \
-        before submitting.**\n"
+        before submitting.**\n",
+        cli_fallback = super::CLI_FALLBACK_PROMPT_RULES,
     )
     .ok();
     eprintln!(
