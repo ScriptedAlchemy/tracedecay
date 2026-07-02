@@ -53,11 +53,6 @@ fn visible_subcommands_accept_clap_help() {
     }
 }
 
-/// Rich-help contract: the CLI is the MCP-parity surface for agents that
-/// only have shell access, so every visible top-level subcommand must ship
-/// a when-to-use paragraph (`long_about`) and an `Examples:` trailer with
-/// real invocations (`after_help`). Constants live in `cli::help`; this
-/// test keeps future subcommands from shipping bare help.
 #[test]
 fn every_visible_top_level_subcommand_ships_rich_help() {
     let command = Cli::command();
@@ -96,9 +91,6 @@ fn every_visible_top_level_subcommand_ships_rich_help() {
     }
 }
 
-/// Nested subcommands (e.g. `daemon run`, `memory curate`) must at least
-/// carry a purpose line so `--help` on any path never prints a bare usage
-/// string.
 #[test]
 fn every_visible_nested_subcommand_has_a_purpose_line() {
     let command = Cli::command();

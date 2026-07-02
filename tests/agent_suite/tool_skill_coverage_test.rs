@@ -1,14 +1,4 @@
-//! Reverse coverage contract for the MCP tool surface.
-//!
-//! The MCP server may one day be optional (or expose only a subset of
-//! tools), so the CLI must stay a fully self-sufficient interface. The
-//! forward direction — every skill-referenced tool resolving to a real MCP
-//! definition — is covered elsewhere; these tests pin the reverse:
-//!
-//! 1. every advertised MCP tool is invocable via `tracedecay tool <name>`
-//!    (end-to-end through the shipped binary), and
-//! 2. every advertised MCP tool is taught by at least one bundled skill in
-//!    each plugin bundle, so agents can discover when and how to use it.
+//! Coverage checks for the shell MCP-tool surface and bundled skill guidance.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -19,12 +9,8 @@ use crate::common::tracedecay_command_with_home;
 use tempfile::TempDir;
 use tracedecay::mcp::tools::get_tool_definitions;
 
-/// Tools intentionally exempt from the skill-coverage requirement.
-///
-/// Reserve this for genuinely internal tools (host-lifecycle plumbing an
-/// agent should never choose from a skill). Every entry needs a comment
-/// explaining why no skill should teach it. Currently every advertised tool
-/// is agent-facing and covered.
+/// MCP tools intentionally exempt from bundled-skill coverage.
+/// Keep empty unless a tool is truly internal.
 const SKILL_COVERAGE_EXCEPTIONS: &[&str] = &[];
 
 fn isolated_tracedecay_command(home: &TempDir) -> Command {

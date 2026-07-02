@@ -1,13 +1,6 @@
-//! Long help (`long_about`) and example trailers (`after_help`) for every
-//! visible CLI subcommand.
-//!
-//! The CLI is the MCP-parity surface: agents that have shell access but no
-//! MCP client must be able to discover and drive every workflow from
-//! `--help` output alone. Each subcommand therefore ships a purpose
-//! paragraph (what it does and when to reach for it) plus an `Examples:`
-//! trailer with real flag combinations and related-command pointers.
-//! `cli::parse_tests::every_visible_top_level_subcommand_ships_rich_help`
-//! pins this contract so new subcommands cannot ship bare help.
+//! Long help (`long_about`) and example trailers (`after_help`) for visible
+//! CLI subcommands. The shell CLI is the fallback surface when MCP is
+//! unavailable, so command help needs real examples and related commands.
 
 pub(crate) const TOP_LEVEL_AFTER_HELP: &str = "\
 Quick start:
