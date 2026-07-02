@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 # /tracedecay-check-health
 
-Apply the `tracedecay:code-health-report` skill.
+Apply the `tracedecay:code-health` skill.
 
 - **Scope:** the whole repo, or the directory named after the command if one was given.
 - Follow that skill's read-only workflow and guardrails; lead with `tracedecay_health` and drill only into weak dimensions. Don't restate the tool ladder here.

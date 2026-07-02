@@ -163,9 +163,7 @@ async fn codex_plugin_artifact_exports_shareable_bundle_with_managed_skills() {
     assert!(plugin_root.join(".codex-plugin/plugin.json").is_file());
     assert!(plugin_root.join(".mcp.json").is_file());
     assert!(plugin_root.join("hooks/hooks.json").is_file());
-    assert!(plugin_root
-        .join("skills/architecture-overview/SKILL.md")
-        .is_file());
+    assert!(plugin_root.join("skills/code-health/SKILL.md").is_file());
     assert!(plugin_root
         .join("skills/agent-managed/codex-only/SKILL.md")
         .is_file());
