@@ -141,6 +141,11 @@ async fn track_branch_after_install(project_path: Option<&Path>) {
     let Some(project_path) = project_path else {
         return;
     };
+    // Materialize the always-applied memory rule from this project's fact
+    // store so install/update-plugin leaves fresh memory in place instead of
+    // waiting for the first sessionStart hook. Fail-open, no-op when the
+    // project has no initialized store.
+    crate::hooks::memory_inject::regenerate_cursor_memory_rule(project_path).await;
     let Some(branch_name) = crate::branch::current_branch(project_path) else {
         return;
     };
@@ -188,6 +193,10 @@ const EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
     (
         "rules/tracedecay.mdc",
         include_str!("../../cursor-plugin/rules/tracedecay.mdc"),
+    ),
+    (
+        "rules/tracedecay-memory.mdc",
+        include_str!("../../cursor-plugin/rules/tracedecay-memory.mdc"),
     ),
     (
         "skills/architecture-overview/SKILL.md",
@@ -377,6 +386,14 @@ fn cursor_plugin_install_dir(home: &Path) -> PathBuf {
 
 fn cursor_plugin_manifest_path(home: &Path) -> PathBuf {
     cursor_plugin_install_dir(home).join(".cursor-plugin/plugin.json")
+}
+
+/// Path of the materialized always-applied memory rule rendered from the
+/// project fact store (see `hooks::memory_inject::regenerate_cursor_memory_rule`).
+/// The install path writes the embedded placeholder; hooks rewrite it in
+/// place with rendered facts.
+pub fn cursor_memory_rule_path(home: &Path) -> PathBuf {
+    cursor_plugin_install_dir(home).join("rules/tracedecay-memory.mdc")
 }
 
 fn install_cursor_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {

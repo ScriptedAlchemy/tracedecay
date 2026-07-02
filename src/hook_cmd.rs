@@ -57,7 +57,7 @@ pub(crate) async fn handle_hook_command(command: Commands) -> tracedecay::errors
             exit_if_nonzero(tracedecay::hooks::hook_codex_user_prompt_submit().await);
         }
         Commands::HookCodexSubagentStart => {
-            exit_if_nonzero(tracedecay::hooks::hook_codex_subagent_start());
+            exit_if_nonzero(tracedecay::hooks::hook_codex_subagent_start().await);
         }
         Commands::HookCodexPostToolUse => {
             exit_if_nonzero(tracedecay::hooks::hook_codex_post_tool_use().await);

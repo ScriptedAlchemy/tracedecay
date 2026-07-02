@@ -394,6 +394,12 @@ pub(crate) struct AgentRunFinalizer<'a> {
     task: AgentTaskKind,
     started_at: &'a str,
     input_hash: Option<String>,
+    /// When set, this finalizer records one half of a combined
+    /// reflector+skill run: ledger records keep their per-task `task` and
+    /// `task_key` (so per-task last-run bookkeeping still works) but carry
+    /// the combined contract's `prompt_version`/`response_schema` plus a
+    /// `combined_run_id` correlation in `report_ref`.
+    combined_run_id: Option<String>,
 }
 
 impl<'a> AgentRunFinalizer<'a> {
@@ -414,7 +420,14 @@ impl<'a> AgentRunFinalizer<'a> {
             task,
             started_at,
             input_hash,
+            combined_run_id: None,
         }
+    }
+
+    #[must_use]
+    pub(crate) fn for_combined_run(mut self, combined_run_id: String) -> Self {
+        self.combined_run_id = Some(combined_run_id);
+        self
     }
 
     pub(crate) async fn append_backend_fallback_record(
@@ -422,7 +435,7 @@ impl<'a> AgentRunFinalizer<'a> {
         evidence_hash: Option<String>,
         error: String,
     ) -> Result<AutomationRunLedgerRecord> {
-        let record = failed_backend_fallback_record(
+        let mut record = failed_backend_fallback_record(
             self.run_id,
             self.trigger,
             self.config,
@@ -432,6 +445,7 @@ impl<'a> AgentRunFinalizer<'a> {
             error,
             self.started_at,
         );
+        self.annotate_combined_run(&mut record);
         append_run_record(self.dashboard_root, &record).await?;
         Ok(record)
     }
@@ -576,6 +590,23 @@ impl<'a> AgentRunFinalizer<'a> {
     fn finish_record(&self, record: &mut AutomationRunLedgerRecord) {
         record.input_hash.clone_from(&self.input_hash);
         record.output_hash = record.proposed_ops.as_ref().map(sha256_json);
+        self.annotate_combined_run(record);
+    }
+
+    fn annotate_combined_run(&self, record: &mut AutomationRunLedgerRecord) {
+        let Some(combined_run_id) = &self.combined_run_id else {
+            return;
+        };
+        let contract = agent_task_contract(AgentTaskKind::CombinedReview);
+        record.prompt_version = Some(contract.prompt_version);
+        record.response_schema = Some(contract.response_schema);
+        if let Some(report_ref) = record.report_ref.as_mut().and_then(Value::as_object_mut) {
+            report_ref.insert("combined_run_id".to_string(), json!(combined_run_id));
+            report_ref.insert(
+                "combined_task_key".to_string(),
+                json!(task_key(AgentTaskKind::CombinedReview)),
+            );
+        }
     }
 }
 
@@ -584,6 +615,9 @@ fn task_disabled(config: &AutomationConfig, task: AgentTaskKind) -> bool {
         AgentTaskKind::MemoryCurator => !config.tasks.memory_curator.enabled,
         AgentTaskKind::SessionReflector => !config.tasks.session_reflector.enabled,
         AgentTaskKind::SkillWriter => !config.tasks.skill_writer.enabled,
+        AgentTaskKind::CombinedReview => {
+            !config.tasks.session_reflector.enabled || !config.tasks.skill_writer.enabled
+        }
     }
 }
 
@@ -592,6 +626,7 @@ fn task_disabled_reason(task: AgentTaskKind) -> &'static str {
         AgentTaskKind::MemoryCurator => "memory_curator_disabled",
         AgentTaskKind::SessionReflector => "session_reflector_disabled",
         AgentTaskKind::SkillWriter => "skill_writer_disabled",
+        AgentTaskKind::CombinedReview => "combined_review_disabled",
     }
 }
 
@@ -605,7 +640,7 @@ fn scheduler_skip_reason(
     }
 }
 
-fn generated_run_id(prefix: &str) -> String {
+pub(crate) fn generated_run_id(prefix: &str) -> String {
     let mut random = [0u8; 8];
     let entropy = match getrandom::getrandom(&mut random) {
         Ok(()) => hex::encode(random),
@@ -681,6 +716,7 @@ fn noop_output_for_task(task: AgentTaskKind) -> Value {
         AgentTaskKind::MemoryCurator => json!({ "ops": [] }),
         AgentTaskKind::SessionReflector => json!({ "facts": [] }),
         AgentTaskKind::SkillWriter => json!({ "skills": [] }),
+        AgentTaskKind::CombinedReview => json!({ "facts": [], "skills": [] }),
     }
 }
 
