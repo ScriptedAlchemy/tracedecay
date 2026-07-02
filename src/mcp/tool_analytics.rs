@@ -159,11 +159,16 @@ mod tests {
             }),
         };
 
-        let record = hook_route_analytics_event(Path::new("/repo"), &event, Some("main"), 12345)
-            .expect("route metadata should create analytics record");
+        let Some(record) =
+            hook_route_analytics_event(Path::new("/repo"), &event, Some("main"), 12345)
+        else {
+            panic!("route metadata should create analytics record");
+        };
         let metadata: serde_json::Value =
-            serde_json::from_str(record.metadata_json.as_deref().unwrap_or("{}"))
-                .expect("metadata should parse");
+            match serde_json::from_str(record.metadata_json.as_deref().unwrap_or("{}")) {
+                Ok(metadata) => metadata,
+                Err(err) => panic!("metadata should parse: {err}"),
+            };
 
         assert_eq!(record.provider, "daemon_hook");
         assert_eq!(record.session_id.as_deref(), Some("session-123"));

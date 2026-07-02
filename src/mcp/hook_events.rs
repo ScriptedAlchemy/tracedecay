@@ -243,7 +243,9 @@ mod tests {
 
         let event = parse_or_panic(&params);
 
-        let route = event.route.as_ref().expect("route metadata should parse");
+        let Some(route) = event.route.as_ref() else {
+            panic!("route metadata should parse");
+        };
         assert_eq!(route.session_id.as_deref(), Some("session-123"));
         assert_eq!(route.thread_id.as_deref(), Some("thread-456"));
         assert_eq!(route.cwd.as_deref(), Some(Path::new("/tmp/project")));

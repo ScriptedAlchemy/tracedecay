@@ -132,6 +132,7 @@ impl DaemonHookEvent {
         }
     }
 
+    #[must_use]
     pub fn with_route(mut self, route: Option<HookRouteMetadata>) -> Self {
         self.route = route;
         self

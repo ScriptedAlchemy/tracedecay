@@ -241,19 +241,19 @@ fn hook_route_metadata_from_event(
     project_root: &Path,
 ) -> Option<crate::daemon::HookRouteMetadata> {
     let parsed = serde_json::from_str::<Value>(event_json).ok()?;
-    hook_route_metadata_from_parsed(&parsed, project_root)
+    Some(hook_route_metadata_from_parsed(&parsed, project_root))
 }
 
 fn hook_route_metadata_from_parsed(
     parsed: &Value,
     project_root: &Path,
-) -> Option<crate::daemon::HookRouteMetadata> {
+) -> crate::daemon::HookRouteMetadata {
     let cwd = event_cwd_from_parsed(parsed);
     let route_root = cwd.as_deref().unwrap_or(project_root);
     let worktree = crate::worktree::git_worktree_root(route_root)
         .unwrap_or_else(|| project_root.to_path_buf());
     let branch = crate::branch::current_branch(&worktree);
-    Some(crate::daemon::HookRouteMetadata {
+    crate::daemon::HookRouteMetadata {
         session_id: hook_route_session_id(parsed),
         thread_id: text_field(
             parsed,
@@ -267,7 +267,7 @@ fn hook_route_metadata_from_parsed(
         cwd,
         worktree: Some(worktree),
         branch,
-    })
+    }
 }
 
 fn hook_route_session_id(parsed: &Value) -> Option<String> {
@@ -497,8 +497,11 @@ mod tests {
         })
         .to_string();
 
-        let route = hook_route_metadata_from_event(&event, std::path::Path::new("/tmp/project"))
-            .expect("route metadata should parse");
+        let Some(route) =
+            hook_route_metadata_from_event(&event, std::path::Path::new("/tmp/project"))
+        else {
+            panic!("route metadata should parse");
+        };
 
         assert_eq!(route.session_id.as_deref(), Some("session-camel"));
 
@@ -508,8 +511,11 @@ mod tests {
         })
         .to_string();
 
-        let route = hook_route_metadata_from_event(&event, std::path::Path::new("/tmp/project"))
-            .expect("route metadata should parse");
+        let Some(route) =
+            hook_route_metadata_from_event(&event, std::path::Path::new("/tmp/project"))
+        else {
+            panic!("route metadata should parse");
+        };
 
         assert_eq!(route.session_id.as_deref(), Some("conversation-camel"));
     }
