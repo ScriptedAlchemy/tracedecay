@@ -109,6 +109,7 @@ impl AgentIntegration for CursorIntegration {
             );
         }
         doctor_check_session_ingest(dc, &ctx.project_path);
+        super::cursor_logs::report_cursor_mcp_log_findings(dc, &ctx.home);
     }
 
     fn is_detected(&self, home: &Path) -> bool {
@@ -828,9 +829,27 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
             manifest_path.display()
         ));
     }
+    if let Some(message) = plugin_version_staleness(&manifest, env!("CARGO_PKG_VERSION")) {
+        dc.warn(&message);
+    }
     doctor_check_plugin_mcp(dc, &plugin_dir.join("mcp.json"));
     doctor_check_plugin_hooks(dc, &plugin_dir.join("hooks/hooks.json"));
     doctor_check_plugin_rule(dc, &plugin_dir.join("rules/tracedecay.mdc"));
+}
+
+/// A warning when the installed plugin bundle was rendered by a different
+/// tracedecay version than the running binary. A stale bundle keeps steering
+/// agents at old tool surfaces (and old MCP/hook commands) until
+/// `tracedecay update-plugin` re-renders it.
+fn plugin_version_staleness(manifest: &serde_json::Value, binary_version: &str) -> Option<String> {
+    let plugin_version = manifest.get("version").and_then(|v| v.as_str())?;
+    if plugin_version == binary_version {
+        return None;
+    }
+    Some(format!(
+        "Cursor plugin bundle was rendered by tracedecay {plugin_version} but this binary is \
+         {binary_version} — run `tracedecay update-plugin`, then reload Cursor"
+    ))
 }
 
 fn doctor_check_plugin_mcp(dc: &mut DoctorCounters, mcp_path: &Path) {
@@ -1462,5 +1481,25 @@ mod tests {
     #[tokio::test]
     async fn post_install_handles_missing_project_path() {
         CursorIntegration.post_install(None).await;
+    }
+
+    #[test]
+    fn plugin_version_staleness_flags_mismatch_only() {
+        let stale = json!({ "name": "tracedecay", "version": "0.1.0" });
+        let message = plugin_version_staleness(&stale, "0.2.0")
+            .expect("mismatched versions should produce a warning");
+        assert!(message.contains("0.1.0"), "{message}");
+        assert!(message.contains("0.2.0"), "{message}");
+        assert!(message.contains("update-plugin"), "{message}");
+
+        let current = json!({ "name": "tracedecay", "version": "0.2.0" });
+        assert_eq!(plugin_version_staleness(&current, "0.2.0"), None);
+
+        // A manifest without a version (or a non-string one) is not a
+        // staleness signal — the manifest-completeness check owns that.
+        assert_eq!(
+            plugin_version_staleness(&json!({ "name": "tracedecay" }), "0.2.0"),
+            None
+        );
     }
 }
