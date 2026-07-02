@@ -1419,16 +1419,8 @@ pub fn build_cursor_session_context(
     staleness_hint: Option<&str>,
     tokens_saved: Option<u64>,
 ) -> String {
-    let mut s = String::new();
+    let mut s = index_status_line(initialized, staleness_hint);
     if initialized {
-        match staleness_hint {
-            Some(hint) => {
-                s.push_str("tracedecay index status: ");
-                s.push_str(hint);
-                s.push_str(".\n");
-            }
-            None => s.push_str("tracedecay index status: initialized.\n"),
-        }
         s.push_str("Workflow skills: tracedecay:");
         s.push_str(&CURSOR_PLUGIN_SKILLS.join(", "));
         s.push_str(" — each maps a common workflow to the right tracedecay tools.\n");
@@ -1437,13 +1429,25 @@ pub fn build_cursor_session_context(
             s.push_str(&saved.to_string());
             s.push_str(".\n");
         }
-    } else {
-        s.push_str(
-            "tracedecay index status: no project index found in this workspace — \
-             run `tracedecay init` to enable tracedecay MCP tools.\n",
-        );
     }
     s
+}
+
+/// One-line index freshness signal shared by the Cursor and Claude session
+/// contexts. Both hosts carry the tool-routing steering in an always-applied
+/// rule (Cursor plugin rule, CLAUDE.md), so their session hooks report only
+/// session-specific signals.
+fn index_status_line(initialized: bool, staleness_hint: Option<&str>) -> String {
+    if initialized {
+        match staleness_hint {
+            Some(hint) => format!("tracedecay index status: {hint}.\n"),
+            None => "tracedecay index status: initialized.\n".to_string(),
+        }
+    } else {
+        "tracedecay index status: no project index found in this workspace — \
+         run `tracedecay init` to enable tracedecay MCP tools.\n"
+            .to_string()
+    }
 }
 
 /// Builds the Codex session/prompt steering context. Codex has no
@@ -1544,7 +1548,7 @@ fn append_codex_recall_and_registry_guidance(s: &mut String) {
 }
 
 fn append_context_recovery_hint(context: &mut String) {
-    if !context.ends_with('\n') {
+    if !context.is_empty() && !context.ends_with('\n') {
         context.push('\n');
     }
     context.push_str(COMPACTION_CONTEXT_RECOVERY_HINT);
@@ -1681,6 +1685,164 @@ fn now_unix_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)
+}
+
+// ---------------------------------------------------------------------------
+// Claude Code lifecycle hook handlers (SessionStart / PostToolUse)
+//
+// Claude Code sends ONE JSON object on stdin with the same shared fields as
+// Codex (session_id, transcript_path, cwd, hook_event_name, plus
+// event-specific fields) and reads `hookSpecificOutput` JSON from stdout —
+// Codex adopted Claude's hook schema, so these handlers share the Codex
+// event/output helpers. The older Claude handlers (`hook_pre_tool_use`,
+// `hook_prompt_submit`, `hook_stop`) predate that schema and keep their own
+// input shapes.
+// ---------------------------------------------------------------------------
+
+/// Claude Code `SessionStart` hook handler (fail-open).
+///
+/// The CLAUDE.md prompt rules already carry the tool-routing steering, so
+/// this emits only session-specific signals via
+/// `hookSpecificOutput.additionalContext`: index freshness (or a
+/// `tracedecay init` nudge in an unindexed project) plus the LCM
+/// context-recovery hint when the session (re)starts from compaction.
+pub async fn hook_claude_session_start() -> i32 {
+    let event = read_hook_event!();
+    let root = codex_project_root_from_event(&event);
+    record_hook_invoked(root.as_deref(), HintAgent::Claude, "SessionStart", &event);
+    let mut context = claude_session_context_for_event(&event).await;
+    if session_start_from_compaction(&event) {
+        append_context_recovery_hint(&mut context);
+    }
+    if context.is_empty() {
+        println!("{}", serde_json::json!({}));
+    } else {
+        println!(
+            "{}",
+            codex_additional_context_json("SessionStart", &context)
+        );
+    }
+    0
+}
+
+/// Builds the lean Claude `SessionStart` context: the index-status line for
+/// the session's project, an init nudge for unindexed project-like
+/// workspaces, and nothing at all outside code workspaces.
+async fn claude_session_context_for_event(event_json: &str) -> String {
+    let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
+    // `discover_project_root` only resolves initialized tracedecay projects.
+    match codex_project_root_from_parsed_event(&parsed) {
+        Some(root) => {
+            let (staleness, _) = cursor_index_signals_for_root(&root).await;
+            index_status_line(true, staleness.as_deref())
+        }
+        None if event_cwd_from_parsed(&parsed)
+            .as_deref()
+            .is_some_and(is_project_like_workspace) =>
+        {
+            index_status_line(false, None)
+        }
+        None => String::new(),
+    }
+}
+
+/// Claude Code `PostToolUse` hook handler used to keep the graph fresh after
+/// writes.
+///
+/// For edit tools and shell commands this notifies the daemon, which owns
+/// targeted sync, branch tracking, and coalescing. Fail-open and silent.
+pub async fn hook_claude_post_tool_use() -> i32 {
+    let event = read_hook_event!();
+    let root = codex_project_root_from_event(&event);
+    record_hook_invoked(root.as_deref(), HintAgent::Claude, "PostToolUse", &event);
+    claude_post_tool_use(&event).await;
+    0
+}
+
+async fn claude_post_tool_use(event_json: &str) {
+    let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
+        return;
+    };
+    let tool_name = parsed
+        .get("tool_name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let Some(cwd) = event_cwd_from_parsed(&parsed) else {
+        return;
+    };
+    let Some(root) = crate::config::discover_project_root(&cwd)
+        .or_else(|| crate::worktree::git_worktree_root(&cwd))
+    else {
+        return;
+    };
+    if !crate::tracedecay::TraceDecay::has_initialized_store(&root).await {
+        return;
+    }
+
+    if is_claude_edit_tool(tool_name) {
+        let rels = claude_edit_rel_paths(&parsed, &cwd, &root);
+        if rels.is_empty() {
+            return;
+        }
+        crate::daemon::notify_hook_event(
+            &root,
+            crate::daemon::DaemonHookEvent::claude_post_tool_use_edit(rels, cwd),
+        )
+        .await;
+    } else if is_claude_bash_tool(tool_name) {
+        let command = parsed
+            .get("tool_input")
+            .and_then(|ti| ti.get("command"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if command.is_empty() {
+            return;
+        }
+        crate::daemon::notify_hook_event(
+            &root,
+            crate::daemon::DaemonHookEvent::claude_post_tool_use_shell(command.to_string(), cwd),
+        )
+        .await;
+    }
+}
+
+fn is_claude_edit_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name.to_ascii_lowercase().as_str(),
+        "edit" | "write" | "multiedit" | "notebookedit"
+    )
+}
+
+fn is_claude_bash_tool(tool_name: &str) -> bool {
+    tool_name.eq_ignore_ascii_case("bash")
+}
+
+/// Extracts the project-relative path edited by a Claude edit tool.
+///
+/// Claude's `Edit`/`Write`/`MultiEdit` put the target in
+/// `tool_input.file_path`; `NotebookEdit` uses `tool_input.notebook_path`.
+/// Paths are usually absolute but are resolved against the session `cwd`
+/// when relative. Paths outside `project_root` are skipped.
+fn claude_edit_rel_paths(parsed: &Value, cwd: &Path, project_root: &Path) -> Vec<String> {
+    ["file_path", "notebook_path"]
+        .iter()
+        .filter_map(|key| {
+            parsed
+                .get("tool_input")
+                .and_then(|ti| ti.get(*key))
+                .and_then(Value::as_str)
+        })
+        .filter(|raw| !raw.is_empty())
+        .filter_map(|raw| {
+            let candidate = Path::new(raw);
+            let abs = if candidate.is_absolute() {
+                candidate.to_path_buf()
+            } else {
+                cwd.join(candidate)
+            };
+            rel_under_root(project_root, &abs)
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -2868,5 +3030,70 @@ mod tests {
     fn non_compact_session_start_events_do_not_get_recovery_hint() {
         let event = serde_json::json!({ "source": "resume" }).to_string();
         assert!(!session_start_from_compaction(&event));
+    }
+
+    #[test]
+    fn claude_edit_tools_are_recognized_case_insensitively() {
+        for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit", "write"] {
+            assert!(is_claude_edit_tool(tool), "{tool} should count as an edit");
+        }
+        assert!(!is_claude_edit_tool("Bash"));
+        assert!(!is_claude_edit_tool("Read"));
+        assert!(is_claude_bash_tool("Bash"));
+        assert!(!is_claude_bash_tool("Edit"));
+    }
+
+    #[test]
+    fn claude_edit_rel_paths_resolves_file_path_against_project_root() {
+        let root = Path::new("/repo");
+        let cwd = Path::new("/repo/sub");
+        let event = serde_json::json!({
+            "tool_name": "Edit",
+            "tool_input": { "file_path": "/repo/src/lib.rs" }
+        });
+        assert_eq!(
+            claude_edit_rel_paths(&event, cwd, root),
+            vec!["src/lib.rs".to_string()]
+        );
+
+        // Relative paths resolve against the session cwd.
+        let event = serde_json::json!({
+            "tool_name": "Write",
+            "tool_input": { "file_path": "module.rs" }
+        });
+        assert_eq!(
+            claude_edit_rel_paths(&event, cwd, root),
+            vec!["sub/module.rs".to_string()]
+        );
+
+        // NotebookEdit uses notebook_path.
+        let event = serde_json::json!({
+            "tool_name": "NotebookEdit",
+            "tool_input": { "notebook_path": "/repo/analysis.ipynb" }
+        });
+        assert_eq!(
+            claude_edit_rel_paths(&event, cwd, root),
+            vec!["analysis.ipynb".to_string()]
+        );
+
+        // Paths outside the project root are skipped.
+        let event = serde_json::json!({
+            "tool_name": "Edit",
+            "tool_input": { "file_path": "/elsewhere/other.rs" }
+        });
+        assert!(claude_edit_rel_paths(&event, cwd, root).is_empty());
+    }
+
+    #[test]
+    fn index_status_line_formats_freshness_and_init_nudge() {
+        assert_eq!(
+            index_status_line(true, Some("last indexed 5m ago")),
+            "tracedecay index status: last indexed 5m ago.\n"
+        );
+        assert_eq!(
+            index_status_line(true, None),
+            "tracedecay index status: initialized.\n"
+        );
+        assert!(index_status_line(false, None).contains("run `tracedecay init`"));
     }
 }

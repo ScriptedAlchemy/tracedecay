@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Claude Code installs now register `SessionStart` and `PostToolUse` lifecycle hooks, matching the freshness/steering coverage Cursor, Codex, and Kiro already had: `SessionStart` reports index freshness and injects the LCM context-recovery hint after compaction; `PostToolUse` notifies the daemon for targeted incremental sync after edits and shell commands. Existing installs pick the hooks up via the post-upgrade backfill or `tracedecay doctor`.
+- The CLI-fallback steering ("if MCP fails, use `tracedecay tool ...`") now reaches every host with a prompt-rules surface — Claude Code, Copilot/VS Code, Gemini, OpenCode, Kimi, Vibe, and Kiro — instead of only the Cursor rule and Codex session hook.
+
 ## [0.0.23](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.22...v0.0.23) - 2026-07-02
 
 ### Other

@@ -3,7 +3,8 @@
 //!
 //! Handles registration of the tracedecay MCP server in Claude Code's config
 //! files (`~/.claude.json`, `~/.claude/settings.json`), tool permissions,
-//! the `PreToolUse` hook, CLAUDE.md prompt rules, and health checks.
+//! lifecycle hooks (`PreToolUse`, `UserPromptSubmit`, `Stop`, `SessionStart`,
+//! `PostToolUse`), CLAUDE.md prompt rules, and health checks.
 
 use std::io::Write;
 use std::path::Path;
@@ -199,24 +200,38 @@ fn install_hook_quiet(settings: &mut serde_json::Value, tracedecay_bin: &str) {
     install_hook_inner(settings, tracedecay_bin, true);
 }
 
+/// Every managed hook event with its subcommand. The single source of truth
+/// for install, uninstall, doctor checks, and doctor auto-repair.
+const MANAGED_HOOKS: &[(&str, &str)] = &[
+    ("PreToolUse", "hook-pre-tool-use"),
+    ("UserPromptSubmit", "hook-prompt-submit"),
+    ("Stop", "hook-stop"),
+    ("SessionStart", "hook-claude-session-start"),
+    ("PostToolUse", "hook-claude-post-tool-use"),
+];
+
+/// Matcher registered for a managed hook event, if any.
+fn managed_hook_matcher(event: &str) -> Option<&'static str> {
+    match event {
+        // Only Agent tool calls are screened for explore-agent redirection.
+        "PreToolUse" => Some("Agent"),
+        // Only edit tools and shell commands can invalidate the graph.
+        "PostToolUse" => Some("Edit|MultiEdit|Write|NotebookEdit|Bash"),
+        _ => None,
+    }
+}
+
 fn install_hook_inner(settings: &mut serde_json::Value, tracedecay_bin: &str, quiet: bool) {
-    install_single_hook(
-        settings,
-        "PreToolUse",
-        tracedecay_bin,
-        "hook-pre-tool-use",
-        Some("Agent"),
-        quiet,
-    );
-    install_single_hook(
-        settings,
-        "UserPromptSubmit",
-        tracedecay_bin,
-        "hook-prompt-submit",
-        None,
-        quiet,
-    );
-    install_single_hook(settings, "Stop", tracedecay_bin, "hook-stop", None, quiet);
+    for &(event, subcommand) in MANAGED_HOOKS {
+        install_single_hook(
+            settings,
+            event,
+            tracedecay_bin,
+            subcommand,
+            managed_hook_matcher(event),
+            quiet,
+        );
+    }
 }
 
 /// Install a single hook entry under `settings.hooks.<event>` (idempotent).
@@ -609,7 +624,7 @@ fn uninstall_stale_mcp(settings: &mut serde_json::Value) -> bool {
 /// Remove all tracedecay hooks. Returns true if modified.
 fn uninstall_hook(settings: &mut serde_json::Value) -> bool {
     let mut modified = false;
-    for event in &["PreToolUse", "UserPromptSubmit", "Stop"] {
+    for &(event, _) in MANAGED_HOOKS {
         modified |= uninstall_single_hook(settings, event);
     }
     modified
@@ -876,17 +891,15 @@ fn doctor_check_settings_json(dc: &mut DoctorCounters, home: &Path) {
 
 /// Expected subcommand for each supported hook event.
 fn expected_hook_subcommand(event: &str) -> Option<&'static str> {
-    match event {
-        "PreToolUse" => Some("hook-pre-tool-use"),
-        "UserPromptSubmit" => Some("hook-prompt-submit"),
-        "Stop" => Some("hook-stop"),
-        _ => None,
-    }
+    MANAGED_HOOKS
+        .iter()
+        .find(|(managed_event, _)| *managed_event == event)
+        .map(|&(_, subcommand)| subcommand)
 }
 
 /// Check all tracedecay hooks in settings.
 fn doctor_check_hook(dc: &mut DoctorCounters, settings: &serde_json::Value) {
-    for event in &["PreToolUse", "UserPromptSubmit", "Stop"] {
+    for &(event, _) in MANAGED_HOOKS {
         doctor_check_single_hook(dc, settings, event);
     }
 }
@@ -945,14 +958,7 @@ fn doctor_fix_hooks(dc: &mut DoctorCounters, settings_path: &Path, settings: &se
     let mut settings = settings.clone();
     let mut repaired = false;
 
-    for event in &["PreToolUse", "UserPromptSubmit", "Stop"] {
-        let Some(expected_sub) = expected_hook_subcommand(event) else {
-            dc.fail(&format!(
-                "Unsupported Claude hook event during repair: {event}"
-            ));
-            continue;
-        };
-
+    for &(event, expected_sub) in MANAGED_HOOKS {
         let current = find_tracedecay_hook(&settings, event);
         let correct = current
             .as_ref()
@@ -974,12 +980,14 @@ fn doctor_fix_hooks(dc: &mut DoctorCounters, settings_path: &Path, settings: &se
         if current.is_some() {
             uninstall_single_hook(&mut settings, event);
         }
-        let matcher = if *event == "PreToolUse" {
-            Some("Agent")
-        } else {
-            None
-        };
-        install_single_hook(&mut settings, event, &bin, expected_sub, matcher, true);
+        install_single_hook(
+            &mut settings,
+            event,
+            &bin,
+            expected_sub,
+            managed_hook_matcher(event),
+            true,
+        );
         repaired = true;
     }
 
@@ -1355,26 +1363,24 @@ mod tests {
         }
     }
 
-    /// Build a settings value with the three tracedecay hooks installed
+    /// Build a settings value with every managed tracedecay hook installed
     /// (modern `{command, args}` shape).
     fn settings_with_all_hooks(bin: &str) -> serde_json::Value {
-        json!({
-            "hooks": {
-                "PreToolUse": [{
-                    "matcher": "Agent",
-                    "hooks": [{ "type": "command", "command": bin, "args": ["hook-pre-tool-use"] }]
-                }],
-                "UserPromptSubmit": [{
-                    "hooks": [{ "type": "command", "command": bin, "args": ["hook-prompt-submit"] }]
-                }],
-                "Stop": [{
-                    "hooks": [{ "type": "command", "command": bin, "args": ["hook-stop"] }]
-                }]
-            },
+        let mut settings = json!({
             "permissions": {
                 "allow": ["mcp__tracedecay__search", "mcp__tracedecay__lookup"]
             }
-        })
+        });
+        for &(event, subcommand) in MANAGED_HOOKS {
+            let mut entry = json!({
+                "hooks": [{ "type": "command", "command": bin, "args": [subcommand] }]
+            });
+            if let Some(matcher) = managed_hook_matcher(event) {
+                entry["matcher"] = json!(matcher);
+            }
+            settings["hooks"][event] = json!([entry]);
+        }
+        settings
     }
 
     /// Build a settings value with the legacy single-string command shape
@@ -1401,11 +1407,11 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn uninstall_hook_removes_all_three_events() {
+    fn uninstall_hook_removes_all_managed_events() {
         let mut settings = settings_with_all_hooks("/usr/bin/tracedecay");
         let modified = uninstall_hook(&mut settings);
         assert!(modified);
-        // All three hook events should be gone.
+        // Every managed hook event should be gone.
         assert!(
             settings.get("hooks").is_none() || settings["hooks"].as_object().unwrap().is_empty()
         );
@@ -1492,12 +1498,15 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn install_adds_all_three_hooks() {
+    fn install_adds_all_managed_hooks() {
         let mut settings = json!({});
         install_hook(&mut settings, "/usr/bin/tracedecay");
-        assert!(settings["hooks"]["PreToolUse"].is_array());
-        assert!(settings["hooks"]["UserPromptSubmit"].is_array());
-        assert!(settings["hooks"]["Stop"].is_array());
+        for &(event, _) in MANAGED_HOOKS {
+            assert!(
+                settings["hooks"][event].is_array(),
+                "{event} hook should be installed"
+            );
+        }
     }
 
     #[test]
@@ -1532,11 +1541,7 @@ mod tests {
         let mut settings = json!({});
         install_hook(&mut settings, bin);
 
-        for (event, expected_sub) in [
-            ("PreToolUse", "hook-pre-tool-use"),
-            ("UserPromptSubmit", "hook-prompt-submit"),
-            ("Stop", "hook-stop"),
-        ] {
+        for &(event, expected_sub) in MANAGED_HOOKS {
             let inner = &settings["hooks"][event][0]["hooks"][0];
             assert_eq!(
                 inner["command"].as_str().unwrap(),
@@ -1553,12 +1558,24 @@ mod tests {
 
     #[test]
     fn install_is_idempotent_for_legacy_shape() {
-        // A legacy single-string install must not get a second entry added —
-        // the doctor is what rewrites it, not a re-run of install.
+        // A legacy single-string install must not get a second entry added
+        // for its events — the doctor is what rewrites it, not a re-run of
+        // install. Events the legacy install never had are still backfilled.
         let mut settings = settings_with_legacy_hooks("/usr/bin/tracedecay");
         let before = settings.clone();
         install_hook(&mut settings, "/usr/bin/tracedecay");
-        assert_eq!(settings, before);
+        for event in ["PreToolUse", "UserPromptSubmit", "Stop"] {
+            assert_eq!(
+                settings["hooks"][event], before["hooks"][event],
+                "{event}: existing legacy entry must not be duplicated"
+            );
+        }
+        for event in ["SessionStart", "PostToolUse"] {
+            assert!(
+                settings["hooks"][event].is_array(),
+                "{event}: missing event must be backfilled"
+            );
+        }
     }
 
     #[test]
@@ -1581,16 +1598,16 @@ mod tests {
     #[test]
     fn doctor_check_single_hook_reports_unknown_event_instead_of_panicking() {
         let mut settings = settings_with_all_hooks("/usr/bin/tracedecay");
-        settings["hooks"]["PostToolUse"] = json!([{
+        settings["hooks"]["SessionEnd"] = json!([{
             "hooks": [{
                 "type": "command",
                 "command": "/usr/bin/tracedecay",
-                "args": ["hook-post-tool-use"]
+                "args": ["hook-session-end"]
             }]
         }]);
         let mut dc = DoctorCounters::new();
 
-        doctor_check_single_hook(&mut dc, &settings, "PostToolUse");
+        doctor_check_single_hook(&mut dc, &settings, "SessionEnd");
 
         assert_eq!(dc.issues, 1);
         assert_eq!(dc.warnings, 0);
@@ -1634,11 +1651,7 @@ mod tests {
             .to_str()
             .unwrap()
             .to_string();
-        for (event, expected_sub) in [
-            ("PreToolUse", "hook-pre-tool-use"),
-            ("UserPromptSubmit", "hook-prompt-submit"),
-            ("Stop", "hook-stop"),
-        ] {
+        for &(event, expected_sub) in MANAGED_HOOKS {
             let inner = &after["hooks"][event][0]["hooks"][0];
             assert_eq!(
                 inner["command"].as_str().unwrap(),
@@ -1794,9 +1807,13 @@ mod tests {
                 .unwrap(),
             "C:/Users/u/tracedecay.exe hook-stop"
         );
-        // All three events should now be present (backfill).
-        assert!(parsed["hooks"]["PreToolUse"].is_array());
-        assert!(parsed["hooks"]["UserPromptSubmit"].is_array());
+        // Every managed event should now be present (backfill).
+        for &(event, _) in MANAGED_HOOKS {
+            assert!(
+                parsed["hooks"][event].is_array(),
+                "{event} hook should be backfilled"
+            );
+        }
     }
 
     #[test]
@@ -1931,12 +1948,15 @@ mod tests {
         let mut dc = DoctorCounters::new();
         doctor_fix_hooks(&mut dc, &settings_path, &settings);
 
-        // Re-read and verify all three hooks are present.
+        // Re-read and verify every managed hook is present.
         let fixed: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
-        assert!(fixed["hooks"]["PreToolUse"].is_array());
-        assert!(fixed["hooks"]["UserPromptSubmit"].is_array());
-        assert!(fixed["hooks"]["Stop"].is_array());
+        for &(event, _) in MANAGED_HOOKS {
+            assert!(
+                fixed["hooks"][event].is_array(),
+                "{event} hook should be repaired in"
+            );
+        }
     }
 
     #[test]

@@ -184,7 +184,13 @@ TraceDecay works as an MCP (Model Context Protocol) server. AI coding agents con
 tracedecay install
 ```
 
-This is the default. It registers the MCP server in `~/.claude/settings.json`, grants tool permissions so Claude doesn't have to ask you every time, installs a `PreToolUse` hook that redirects Claude away from spawning expensive Explore agents, and adds prompt rules to `~/.claude/CLAUDE.md` that tell Claude to prefer tracedecay tools.
+This is the default. It registers the MCP server in `~/.claude/settings.json`, grants tool permissions so Claude doesn't have to ask you every time, installs lifecycle hooks, and adds prompt rules to `~/.claude/CLAUDE.md` that tell Claude to prefer tracedecay tools (including the CLI fallback for MCP transport failures). The hooks:
+
+- `PreToolUse` redirects Claude away from spawning expensive Explore agents.
+- `UserPromptSubmit` resets the per-turn token-savings counter.
+- `Stop` ingests new session transcript data and prints a cost receipt.
+- `SessionStart` reports index freshness (or a `tracedecay init` nudge) and, when the session restarts from compaction, injects the LCM context-recovery hint.
+- `PostToolUse` (matcher `Edit|MultiEdit|Write|NotebookEdit|Bash`) notifies the daemon so edits and shell commands trigger targeted incremental sync.
 
 ### Other agents
 

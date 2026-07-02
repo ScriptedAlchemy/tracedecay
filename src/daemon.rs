@@ -94,6 +94,20 @@ impl DaemonHookEvent {
         Self::new("codex", "postToolUseEdit", rel_paths, None, Some(cwd))
     }
 
+    pub fn claude_post_tool_use_edit(rel_paths: Vec<String>, cwd: PathBuf) -> Self {
+        Self::new("claude", "postToolUseEdit", rel_paths, None, Some(cwd))
+    }
+
+    pub fn claude_post_tool_use_shell(command: String, cwd: PathBuf) -> Self {
+        Self::new(
+            "claude",
+            "postToolUseShell",
+            Vec::new(),
+            Some(command),
+            Some(cwd),
+        )
+    }
+
     pub fn codex_post_tool_use_shell(command: String, cwd: PathBuf) -> Self {
         Self::new(
             "codex",
