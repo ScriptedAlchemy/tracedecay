@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.22](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.21...v0.0.22) - 2026-07-02
+
+### Other
+
+- *(test)* cut hidden per-test costs in lib and bin unit suites
+
 ## [0.0.21](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.20...v0.0.21) - 2026-07-02
 
 ### Fixed
