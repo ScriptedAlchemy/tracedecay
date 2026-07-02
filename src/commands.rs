@@ -1306,9 +1306,13 @@ pub(crate) async fn init_and_index(
 /// Convert raw tokens-saved into a USD estimate using Sonnet input pricing.
 /// Sonnet is the default agent target; output-token savings are not relevant
 /// for retrieval savings.
+///
+/// Pure table lookup: callers that want up-to-date prices must run
+/// `pricing::refresh_if_stale()` once beforehand (see [`handle_gain`]).
+/// Keeping the refresh out of this function avoids a network fetch per call
+/// (it used to fire for every history row and for every unit test process).
 pub(crate) fn estimate_dollars_saved(saved_tokens: u64) -> f64 {
     use tracedecay::accounting::pricing;
-    pricing::refresh_if_stale();
     let price = pricing::lookup("claude-sonnet-4")
         .map(|p| p.input_per_mtok)
         .unwrap_or(3.0);
@@ -1321,6 +1325,7 @@ pub async fn handle_gain(
     range: &str,
     json_output: bool,
 ) -> tracedecay::errors::Result<()> {
+    tracedecay::accounting::pricing::refresh_if_stale();
     let gdb = match tracedecay::global_db::GlobalDb::open().await {
         Some(db) => db,
         None => {
