@@ -46,6 +46,7 @@ const CURSOR_ALLOWED_FRONTMATTER: &[&str] = &[
     "name",
     "paths",
 ];
+const CODEX_GENERATED_MEMORY_SKILL: &str = "agent-managed-memory";
 
 #[derive(Debug)]
 struct SkillDoc {
@@ -76,12 +77,23 @@ fn generated_codex_plugin_skills_are_byte_copies_of_the_source_bundle() {
 
     let source_root = skills_source_root(CODEX_SKILL_ROOT);
     let installed_root = home.path().join("plugins/tracedecay/skills");
-    assert_eq!(
-        skill_dir_names(&installed_root),
-        skill_dir_names(&source_root),
-        "generated Codex plugin bundle must ship the same skills as the source bundle"
+    assert!(
+        installed_root
+            .join(CODEX_GENERATED_MEMORY_SKILL)
+            .join("SKILL.md")
+            .exists(),
+        "generated Codex plugin install must export the active memory digest skill"
     );
-    assert_skill_trees_byte_identical(&source_root, &installed_root);
+    assert_eq!(
+        skill_dir_names_except(&installed_root, &[CODEX_GENERATED_MEMORY_SKILL]),
+        skill_dir_names(&source_root),
+        "generated Codex plugin bundle must ship the same bundled skills as the source bundle"
+    );
+    assert_skill_trees_byte_identical_except(
+        &source_root,
+        &installed_root,
+        &[CODEX_GENERATED_MEMORY_SKILL],
+    );
 }
 
 #[test]
@@ -219,6 +231,10 @@ fn install_ctx(home: &Path) -> InstallContext {
 }
 
 fn skill_dir_names(skills_root: &Path) -> Vec<String> {
+    skill_dir_names_except(skills_root, &[])
+}
+
+fn skill_dir_names_except(skills_root: &Path, excluded: &[&str]) -> Vec<String> {
     let mut names = std::fs::read_dir(skills_root)
         .unwrap_or_else(|err| panic!("failed to read skills at {}: {err}", skills_root.display()))
         .map(|entry| entry.expect("read skill dir entry").path())
@@ -229,6 +245,7 @@ fn skill_dir_names(skills_root: &Path) -> Vec<String> {
                 .expect("skill directory name should be utf-8")
                 .to_string()
         })
+        .filter(|name| !excluded.contains(&name.as_str()))
         .collect::<Vec<_>>();
     names.sort();
     names
@@ -239,8 +256,28 @@ fn skill_dir_names(skills_root: &Path) -> Vec<String> {
 /// file), so byte-parity subsumes re-running the per-skill contract over the
 /// installed copies and additionally catches any install-time mutation.
 fn assert_skill_trees_byte_identical(source_root: &Path, installed_root: &Path) {
+    assert_skill_trees_byte_identical_except(source_root, installed_root, &[]);
+}
+
+fn assert_skill_trees_byte_identical_except(
+    source_root: &Path,
+    installed_root: &Path,
+    excluded: &[&str],
+) {
     let source_files = relative_files_under(source_root);
-    let installed_files = relative_files_under(installed_root);
+    let installed_files = relative_files_under(installed_root)
+        .into_iter()
+        .filter(|relative| {
+            relative
+                .components()
+                .next()
+                .and_then(|component| match component {
+                    std::path::Component::Normal(name) => name.to_str(),
+                    _ => None,
+                })
+                .is_none_or(|name| !excluded.contains(&name))
+        })
+        .collect::<Vec<_>>();
     assert_eq!(
         installed_files,
         source_files,

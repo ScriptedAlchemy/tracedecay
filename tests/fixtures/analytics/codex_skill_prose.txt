@@ -1,1 +1,1 @@
-Using `superpowers:using-superpowers` before the repo scan. Also using `tracedecay:reading-code-cheaply` for cheap code context.
+Using `superpowers:using-superpowers` before the repo scan. Also using `tracedecay:exploring-code` for cheap code context.

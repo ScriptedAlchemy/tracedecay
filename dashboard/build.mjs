@@ -9,6 +9,7 @@
  *   graph/dist/index.js               Code graph explorer plugin bundle.
  *   code-diagnostics/dist/index.js    LSP code diagnostics plugin bundle.
  *   savings/dist/index.js             Savings plugin bundle.
+ *   settings/dist/index.js            Settings plugin bundle.
  *   lcm/dist/index.js + style.css     Copied from lcm/src.
  *   hermes-wrapper/dist/*             Combined Hermes dashboard plugin.
  *
@@ -35,6 +36,7 @@ async function main() {
     buildPlugin("graph", "code graph", { primitives: true }),
     buildPlugin("code-diagnostics", "code diagnostics", { primitives: true }),
     buildPlugin("savings", "savings & cost", { primitives: true }),
+    buildPlugin("settings", "settings", { primitives: true }),
     buildPlugin("lcm", "LCM", { primitives: true }),
   ]);
   await buildHermesWrapper();

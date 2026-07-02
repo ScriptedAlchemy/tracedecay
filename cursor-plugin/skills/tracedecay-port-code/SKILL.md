@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 # /tracedecay-port-code
 
-Apply the `tracedecay:porting-code` skill.
+Apply the `tracedecay:editing-safely` skill.
 
 - **Args:** interpret the text after the command as "<source_dir> <target_dir>"; if absent, ask for the source and target directories.
 - Follow that skill's dependency-safe workflow and guardrails (port leaves first; respect Cursor approval/run-mode for edits and toolchain runs).

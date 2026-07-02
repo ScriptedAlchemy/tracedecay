@@ -365,6 +365,7 @@ fn task_outcomes(
         AgentTaskKind::SessionReflector | AgentTaskKind::MemoryCurator => {
             (Vec::new(), snapshot.facts.iter().collect())
         }
+        AgentTaskKind::UserJob => (Vec::new(), Vec::new()),
     }
 }
 

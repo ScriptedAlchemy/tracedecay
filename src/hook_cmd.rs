@@ -11,6 +11,12 @@ pub(crate) async fn handle_hook_command(command: Commands) -> tracedecay::errors
         Commands::HookStop => {
             tracedecay::hooks::hook_stop().await;
         }
+        Commands::HookClaudeSessionStart => {
+            exit_if_nonzero(tracedecay::hooks::hook_claude_session_start().await);
+        }
+        Commands::HookClaudePostToolUse => {
+            exit_if_nonzero(tracedecay::hooks::hook_claude_post_tool_use().await);
+        }
         Commands::HookKiroPreToolUse => {
             exit_if_nonzero(tracedecay::hooks::hook_kiro_pre_tool_use());
         }
