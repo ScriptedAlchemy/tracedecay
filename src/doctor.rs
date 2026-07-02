@@ -32,14 +32,14 @@ pub async fn run_doctor(agent_filter: Option<&str>) {
     match resolve_current_project_store(&project_path, &TraceDecayOpenOptions::default()).await {
         CurrentProjectStore::Resolved(layout) => {
             dc.pass(&describe_resolved_store(&layout));
-            check_database(&mut dc, &project_path, &layout.graph_db_path).await;
+            check_database(&mut dc, &project_path).await;
         }
-        CurrentProjectStore::LegacyRepoLocal { db_path } => {
+        CurrentProjectStore::LegacyRepoLocal => {
             dc.pass(&format!(
                 "Index found: {}/ (legacy repo-local store)",
                 crate::config::get_tracedecay_dir(&project_path).display()
             ));
-            check_database(&mut dc, &project_path, &db_path).await;
+            check_database(&mut dc, &project_path).await;
         }
         CurrentProjectStore::Uninitialized => {
             dc.warn(&format!(
@@ -88,7 +88,7 @@ enum CurrentProjectStore {
     /// use (enrollment marker, git-common-dir alias, profile shard, …).
     Resolved(Box<StoreLayout>),
     /// No resolvable store, but an old repo-local `.tracedecay/` database exists.
-    LegacyRepoLocal { db_path: PathBuf },
+    LegacyRepoLocal,
     /// Resolution genuinely found nothing — `tracedecay init` is warranted.
     Uninitialized,
 }
@@ -102,9 +102,8 @@ async fn resolve_current_project_store(
     {
         return CurrentProjectStore::Resolved(Box::new(layout));
     }
-    let db_path = crate::config::get_project_db_path(project_path);
-    if db_path.is_file() {
-        return CurrentProjectStore::LegacyRepoLocal { db_path };
+    if crate::config::has_project_database(project_path) {
+        return CurrentProjectStore::LegacyRepoLocal;
     }
     CurrentProjectStore::Uninitialized
 }
@@ -126,9 +125,10 @@ fn describe_resolved_store(layout: &StoreLayout) -> String {
 }
 
 /// Check database health: report size and run VACUUM to reclaim space.
-async fn check_database(dc: &mut DoctorCounters, project_path: &Path, db_path: &Path) {
-    let size_before = std::fs::metadata(db_path).map_or(0, |m| m.len());
-
+///
+/// The DB path is taken from the opened instance so the size measured is the
+/// same file (possibly a branch-specific DB) that VACUUM actually compacts.
+async fn check_database(dc: &mut DoctorCounters, project_path: &Path) {
     let ts = match TraceDecay::open(project_path).await {
         Ok(ts) => ts,
         Err(e) => {
@@ -136,13 +136,15 @@ async fn check_database(dc: &mut DoctorCounters, project_path: &Path, db_path: &
             return;
         }
     };
+    let db_path = ts.db_path();
+    let size_before = std::fs::metadata(&db_path).map_or(0, |m| m.len());
 
     dc.pass(&format!("DB size: {}", format_bytes(size_before)));
 
     eprintln!("    Compacting database (VACUUM)…");
     match ts.optimize().await {
         Ok(()) => {
-            let size_after = std::fs::metadata(db_path).map_or(size_before, |m| m.len());
+            let size_after = std::fs::metadata(&db_path).map_or(size_before, |m| m.len());
             if size_before > size_after {
                 let reclaimed = size_before - size_after;
                 dc.pass(&format!(
