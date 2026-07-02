@@ -8,15 +8,7 @@ use tracedecay::sessions::lcm::{
 };
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 
-use crate::common;
-
-fn isolated_db_path(tmp: &TempDir) -> std::path::PathBuf {
-    common::isolated_lcm_db_path(tmp)
-}
-
-async fn open_lcm_db(tmp: &TempDir) -> GlobalDb {
-    common::open_lcm_db(tmp).await
-}
+use crate::common::{self, isolated_lcm_db_path as isolated_db_path, open_lcm_db};
 
 fn sample_session(provider: &str, session_id: &str) -> SessionRecord {
     common::session_record(

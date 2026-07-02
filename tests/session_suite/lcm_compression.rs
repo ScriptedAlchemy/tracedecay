@@ -16,15 +16,7 @@ use tracedecay::sessions::lcm::{
 };
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 
-use crate::common;
-
-fn isolated_db_path(tmp: &TempDir) -> std::path::PathBuf {
-    common::isolated_lcm_db_path(tmp)
-}
-
-async fn open_lcm_db(tmp: &TempDir) -> GlobalDb {
-    common::open_lcm_db(tmp).await
-}
+use crate::common::{self, isolated_lcm_db_path as isolated_db_path, open_lcm_db};
 
 async fn open_lcm_conn(tmp: &TempDir) -> libsql::Connection {
     let db = libsql::Builder::new_local(isolated_db_path(tmp))

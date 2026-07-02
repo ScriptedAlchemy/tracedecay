@@ -520,12 +520,6 @@ async fn empty_lcm_db_template() -> &'static [u8] {
         .await
 }
 
-pub async fn open_global_db(tmp: &TempDir) -> GlobalDb {
-    GlobalDb::open_at(&isolated_global_db_path(tmp))
-        .await
-        .expect("global db open")
-}
-
 pub fn session_record(
     provider: &str,
     session_id: &str,
