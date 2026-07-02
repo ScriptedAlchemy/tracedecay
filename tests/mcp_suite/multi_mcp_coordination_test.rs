@@ -10,7 +10,9 @@ async fn two_mcps_on_same_project_coordinate_via_sync_lock() {
     std::fs::write(project.join("a.rs"), "fn a() {}").unwrap();
 
     // Initial sync so both MCPs start with the same DB state.
-    let cg_init = TraceDecay::init(&project).await.unwrap();
+    let cg_init = crate::fixture::init_project_from_template(&project)
+        .await
+        .unwrap();
     cg_init.sync().await.unwrap();
     drop(cg_init);
 

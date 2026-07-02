@@ -1,11 +1,11 @@
-mod common;
+use crate::common;
 
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 
-use common::{canonical_existing_path, tracedecay_command_with_home};
+use crate::common::{canonical_existing_path, tracedecay_command_with_home};
 use libsql::Builder;
 use serde_json::{json, Value};
 #[cfg(unix)]
@@ -55,7 +55,7 @@ async fn init_project_direct(home: &Path, project: &Path) {
         profile_root: Some(profile_root.clone()),
         global_db_path: Some(profile_root.join("global.db")),
     };
-    TraceDecay::init_with_options(project, open_options)
+    crate::fixture::init_project_from_template_with_options(project, open_options)
         .await
         .expect("tracedecay project should initialize");
 }

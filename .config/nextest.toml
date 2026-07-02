@@ -31,7 +31,7 @@ platform = { host = 'cfg(windows)' }
 test-group = 'windows-dashboard-server'
 
 [[profile.ci.overrides]]
-filter = 'binary(=agent_suite) | (binary(=storage_suite) & test(/^branch_db_safety_test::/)) | (binary(=core_cli_suite) & test(/^cli_non_interactive_test::/)) | binary(=mcp_cli_serve_test)'
+filter = 'binary(=agent_suite) | (binary(=storage_suite) & test(/^branch_db_safety_test::/)) | (binary(=core_cli_suite) & test(/^cli_non_interactive_test::/)) | (binary(=mcp_suite) & test(/^mcp_cli_serve_test::/))'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-tracedecay-init'
 
@@ -46,12 +46,12 @@ platform = { host = 'cfg(windows)' }
 test-group = 'windows-profile-storage'
 
 [[profile.ci.overrides]]
-filter = 'binary(=session_suite) | (binary(=transcript_ingest_suite) & (test(~codex::) | test(~hermes::) | test(~cline_like::))) | (binary(=storage_suite) & (test(/^corruption_test::/) | test(/^db_query_test::/))) | binary(=mcp_handler_test) | binary(=mcp_server_test) | binary(=memory_test) | binary(=multi_mcp_coordination_test)'
+filter = 'binary(=session_suite) | (binary(=transcript_ingest_suite) & (test(~codex::) | test(~hermes::) | test(~cline_like::))) | (binary(=storage_suite) & (test(/^corruption_test::/) | test(/^db_query_test::/))) | binary(=memory_test) | (binary(=mcp_suite) & (test(/^mcp_handler_test::/) | test(/^mcp_server_test::/) | test(/^multi_mcp_coordination_test::/)))'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-session-sqlite'
 
 [[profile.ci.overrides]]
-filter = '(binary(=core_cli_suite) & test(/^tool_first_touch_test::/)) | binary(=mcp_dashboard_tool_test) | (binary(=hooks_lsp_suite) & (test(/^lsp_code_diagnostics_test::/) | test(/^extract_worker_test::/)))'
+filter = '(binary(=core_cli_suite) & test(/^tool_first_touch_test::/)) | (binary(=mcp_suite) & test(/^mcp_dashboard_tool_test::/)) | (binary(=hooks_lsp_suite) & (test(/^lsp_code_diagnostics_test::/) | test(/^extract_worker_test::/)))'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-process-heavy'
 
