@@ -80,6 +80,20 @@ fn canonical_temp_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+fn normalize_test_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .trim_start_matches("//?/")
+        .to_string()
+}
+
+fn assert_path_eq(actual: impl AsRef<Path>, expected: impl AsRef<Path>) {
+    assert_eq!(
+        normalize_test_path(actual.as_ref()),
+        normalize_test_path(expected.as_ref())
+    );
+}
+
 fn test_home(dir: &TempDir) -> PathBuf {
     let home = dir.path().join("home");
     fs::create_dir_all(&home).unwrap();
@@ -359,7 +373,7 @@ async fn config_path_uses_profile_shard_when_enrolled() {
     )
     .unwrap();
 
-    assert_eq!(get_config_path(&project), shard_root.join("config.json"));
+    assert_path_eq(get_config_path(&project), shard_root.join("config.json"));
     assert_eq!(
         load_config(&project).unwrap().root_dir,
         "profile-shard-config"
@@ -377,9 +391,9 @@ async fn config_path_defaults_to_profile_shard_without_enrollment() {
     let _home_guard = HomeGuard::set(&home);
     let project_id = default_profile_project_id(&project);
 
-    assert_eq!(
+    assert_path_eq(
         get_config_path(&project),
-        profile_root.join(format!("projects/{project_id}/config.json"))
+        profile_root.join(format!("projects/{project_id}/config.json")),
     );
 }
 
@@ -555,21 +569,21 @@ async fn resolved_project_store_helpers_route_profile_sharded_session_artifacts(
     let _home_guard = HomeGuard::set(&home);
     write_enrollment(&project);
 
-    assert_eq!(
+    assert_path_eq(
         resolve_project_session_db_path(&project).unwrap(),
-        profile_root.join("projects/proj_123/sessions.db")
+        profile_root.join("projects/proj_123/sessions.db"),
     );
-    assert_eq!(
+    assert_path_eq(
         resolve_response_handle_root(&project).unwrap(),
-        profile_root.join("projects/proj_123/response-handles")
+        profile_root.join("projects/proj_123/response-handles"),
     );
-    assert_eq!(
+    assert_path_eq(
         resolve_lcm_payload_root(&project).unwrap(),
-        profile_root.join("projects/proj_123/lcm-payloads")
+        profile_root.join("projects/proj_123/lcm-payloads"),
     );
-    assert_eq!(
+    assert_path_eq(
         project_session_db_path(&project),
-        profile_root.join("projects/proj_123/sessions.db")
+        profile_root.join("projects/proj_123/sessions.db"),
     );
 }
 
@@ -584,13 +598,13 @@ async fn resolved_project_store_helpers_default_to_profile_sharded_artifact_path
     let _home_guard = HomeGuard::set(&home);
     let project_id = default_profile_project_id(&project);
 
-    assert_eq!(
+    assert_path_eq(
         resolve_project_session_db_path(&project).unwrap(),
-        profile_root.join(format!("projects/{project_id}/sessions.db"))
+        profile_root.join(format!("projects/{project_id}/sessions.db")),
     );
-    assert_eq!(
+    assert_path_eq(
         project_session_db_path(&project),
-        profile_root.join(format!("projects/{project_id}/sessions.db"))
+        profile_root.join(format!("projects/{project_id}/sessions.db")),
     );
 }
 
@@ -636,8 +650,8 @@ async fn trace_decay_init_defaults_to_profile_shard_without_repo_marker() {
     let cg = TraceDecay::init(&project).await.unwrap();
 
     assert_eq!(cg.store_layout().storage_mode, StorageMode::ProfileSharded);
-    assert_eq!(cg.store_layout().data_root, shard_root);
-    assert_eq!(cg.db_path(), shard_root.join("tracedecay.db"));
+    assert_path_eq(&cg.store_layout().data_root, &shard_root);
+    assert_path_eq(cg.db_path(), shard_root.join("tracedecay.db"));
     assert_eq!(discover_project_root(&child), Some(project.clone()));
     assert!(!project.join(".tracedecay").exists());
     assert!(shard_root.join("config.json").exists());
@@ -867,7 +881,7 @@ async fn trace_decay_open_uses_profile_shard_paths_from_enrollment_marker() {
 
     let opened = TraceDecay::open(&project).await.unwrap();
 
-    assert_eq!(opened.db_path(), shard_root.join("tracedecay.db"));
+    assert_path_eq(opened.db_path(), shard_root.join("tracedecay.db"));
     assert_eq!(opened.get_config().root_dir, project.to_string_lossy());
     assert_eq!(opened.serving_branch(), Some("main"));
 }
