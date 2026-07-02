@@ -45,7 +45,7 @@ For each future extractor migration:
 
 1. Compare the local helper body against `src/extraction/traversal.rs`, not just the helper name.
 2. Add or identify tests that cover each shared helper path used by the extractor. At minimum, cover direct-child lookup and nested descendant lookup when both are used.
-3. Run the focused extractor test file before and after migration. If behavior changes, either revert the migration or document and test the intended behavior change.
+3. Run the focused extractor test module (its `tests/extraction_suite/<lang>.rs` module in the consolidated `extraction_suite` binary) before and after migration. If behavior changes, either revert the migration or document and test the intended behavior change.
 4. Run the shared traversal unit tests and `cargo check --lib` with the same feature profile used by the extractor tests.
 5. Leave language-specific traversal helpers local until their semantics are proven identical.
 
@@ -54,8 +54,8 @@ Validation commands used for the C/C++ pilot:
 ```sh
 export CARGO_TARGET_DIR="$PWD/.tracedecay/target/<task-or-lane>"
 cargo nextest run --lib --no-default-features extraction::traversal::tests
-cargo nextest run --test c_extraction_test --no-default-features
-cargo nextest run --test cpp_extraction_test --no-default-features
+cargo nextest run --no-default-features -E 'binary(=extraction_suite) and test(/^c::/)'
+cargo nextest run --no-default-features -E 'binary(=extraction_suite) and test(/^cpp::/)'
 cargo check --lib --no-default-features
 ```
 

@@ -101,7 +101,7 @@ fn test_astro_template_markup_does_not_produce_symbols() {
 
 #[test]
 fn test_astro_fixture() {
-    let source = include_str!("fixtures/sample.astro");
+    let source = include_str!("../fixtures/sample.astro");
     let result = AstroExtractor.extract("sample.astro", source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let names: Vec<_> = result.nodes.iter().map(|n| n.name.as_str()).collect();
