@@ -167,9 +167,13 @@ fn injection_regexes() -> &'static Vec<(Regex, &'static str)> {
             (r"<!--|-->", "html comment markers"),
         ]
         .iter()
-        // Patterns are compile-time literals; a failed compile would only
-        // drop that rule (and is covered by the unit tests).
-        .filter_map(|(pattern, reason)| Regex::new(pattern).ok().map(|regex| (regex, *reason)))
+        .map(|(pattern, reason)| {
+            let regex = match Regex::new(pattern) {
+                Ok(regex) => regex,
+                Err(err) => panic!("memory digest injection regex must compile: {err}"),
+            };
+            (regex, *reason)
+        })
         .collect()
     })
 }
