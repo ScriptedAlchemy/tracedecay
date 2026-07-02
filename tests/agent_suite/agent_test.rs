@@ -4752,7 +4752,10 @@ async fn test_cursor_healthcheck_warns_on_literal_workspace_folder_transcript_pa
     // like every other TraceDecay::init test in this suite.
     let _env_lock = AGENT_ENV_LOCK.lock().await;
     let home = TempDir::new().unwrap();
-    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, home.path().join(".tracedecay"));
+    let data_dir = home.path().join(".tracedecay");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let data_dir = data_dir.canonicalize().unwrap();
+    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, data_dir);
     let project = TempDir::new().unwrap();
     CursorIntegration
         .install(&make_install_ctx(home.path()))
