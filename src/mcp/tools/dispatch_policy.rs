@@ -36,6 +36,6 @@ pub(super) fn tool_accepts_registered_project_selector(tool_name: &str) -> bool 
         || REGISTERED_PROJECT_SELECTOR_ONLY_TOOL_NAMES.contains(&tool_name)
 }
 
-pub(super) fn tool_dispatches_registered_project_reader(tool_name: &str) -> bool {
+pub(crate) fn tool_dispatches_registered_project_reader(tool_name: &str) -> bool {
     REGISTERED_PROJECT_READER_TOOL_NAMES.contains(&tool_name)
 }

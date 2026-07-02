@@ -25,6 +25,7 @@ use crate::tracedecay::TraceDecay;
 use super::hook_events::{self, HookAgent, HookEventPlan};
 use super::tools::{
     explore_call_budget, get_tool_definitions_with_budget, handle_tool_call_with_registry,
+    tool_dispatches_registered_project_reader,
 };
 use super::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
 
@@ -62,6 +63,13 @@ pub(crate) fn classify_mcp_method(method: &str) -> McpMethod {
         "ping" | "logging/setLevel" => McpMethod::TrivialAck,
         _ => McpMethod::Unknown,
     }
+}
+
+fn arguments_have_project_selector(arguments: &Value) -> bool {
+    arguments.get("project_selector").is_some()
+        || arguments.get("project_id").is_some()
+        || arguments.get("project_path").is_some()
+        || arguments.get("project_root").is_some()
 }
 
 /// The steering instructions advertised from the `initialize` handshake of a
@@ -626,6 +634,10 @@ pub struct McpServer {
     ledger_writes_started: Arc<AtomicU64>,
     ledger_writes_finished: Arc<AtomicU64>,
     ledger_write_notify: Arc<tokio::sync::Notify>,
+    /// Last project resolved from a daemon hook `cwd`. This is a connection-local
+    /// default for read-only graph tools when the caller did not pass an
+    /// explicit project selector.
+    hook_project_path: tokio::sync::RwLock<Option<String>>,
 }
 
 impl McpServer {
@@ -717,6 +729,7 @@ impl McpServer {
             ledger_writes_started: Arc::new(AtomicU64::new(0)),
             ledger_writes_finished: Arc::new(AtomicU64::new(0)),
             ledger_write_notify: Arc::new(tokio::sync::Notify::new()),
+            hook_project_path: tokio::sync::RwLock::new(None),
         });
 
         tokio::task::spawn_blocking(move || {
@@ -764,6 +777,45 @@ impl McpServer {
     /// held only for the clone, never across an await on the instance.
     async fn cg_snapshot(&self) -> Arc<TraceDecay> {
         self.cg.read().await.clone()
+    }
+
+    async fn update_hook_workspace_route(&self, event: &hook_events::HookEvent) {
+        let route = match event.cwd.as_deref() {
+            Some(cwd) => self.registered_project_containing_path(cwd).await,
+            None => None,
+        };
+        *self.hook_project_path.write().await = route;
+    }
+
+    async fn registered_project_containing_path(&self, cwd: &Path) -> Option<String> {
+        let registry = self.registry_db.as_deref()?;
+        let mut candidate = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+        loop {
+            if let Some(context) = registry.project_registry_context_by_alias(&candidate).await {
+                return Some(context.project.canonical_root);
+            }
+            if !candidate.pop() {
+                return None;
+            }
+        }
+    }
+
+    async fn apply_hook_project_route(&self, tool_name: &str, mut arguments: Value) -> Value {
+        if !tool_dispatches_registered_project_reader(tool_name)
+            || arguments_have_project_selector(&arguments)
+        {
+            return arguments;
+        }
+        let Some(project_path) = self.hook_project_path.read().await.clone() else {
+            return arguments;
+        };
+        if let Some(map) = arguments.as_object_mut() {
+            map.insert(
+                "project_selector".to_string(),
+                json!({ "path": project_path }),
+            );
+        }
+        arguments
     }
 
     /// Detects mid-session branch drift and reopens the served instance
@@ -1537,6 +1589,7 @@ impl McpServer {
         };
         let cg = self.reopen_if_branch_drifted().await;
         let root = cg.project_root().to_path_buf();
+        self.update_hook_workspace_route(&event).await;
         let current_branch = crate::branch::current_branch(&root);
         let plan = hook_events::plan_hook_event(&event, &root, current_branch.as_deref());
         self.run_hook_event_plan(cg, &root, plan).await;
@@ -1931,7 +1984,7 @@ impl McpServer {
         } else {
             None
         };
-        let mut handler_arguments = arguments;
+        let mut handler_arguments = self.apply_hook_project_route(tool_name, arguments).await;
         if crate::analytics::is_skill_view_tool(tool_name) {
             if let Some(request_id) = json_rpc_request_id_string(&id) {
                 if let Some(map) = handler_arguments.as_object_mut() {

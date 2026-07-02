@@ -18,7 +18,7 @@ use tracedecay::mcp::response_handles::{
 use tracedecay::mcp::transport::{ChannelTransport, McpTransport};
 use tracedecay::mcp::McpServer;
 use tracedecay::storage::{resolve_layout_for_current_profile, resolve_response_handle_root};
-use tracedecay::tracedecay::{current_timestamp, TraceDecay};
+use tracedecay::tracedecay::{current_timestamp, TraceDecay, TraceDecayOpenOptions};
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -2019,6 +2019,91 @@ async fn call_tool(server: Arc<McpServer>, id: i64, tool_name: &str, arguments: 
     )
     .await;
     response_for_id(&responses, id)
+}
+
+#[tokio::test]
+async fn hook_event_workspace_context_routes_followup_graph_reads() {
+    let home = TempDir::new().unwrap();
+    let profile_root = home.path().join(".tracedecay");
+    let global_db_path = profile_root.join("global.db");
+    let options = TraceDecayOpenOptions {
+        profile_root: Some(profile_root.clone()),
+        global_db_path: Some(global_db_path.clone()),
+    };
+
+    let active_dir = TempDir::new().unwrap();
+    let active_project = active_dir.path();
+    fs::create_dir_all(active_project.join("src")).unwrap();
+    fs::write(
+        active_project.join("src/active_only.rs"),
+        "fn active_only() -> i32 { 1 }\n",
+    )
+    .unwrap();
+    let active_cg = TraceDecay::init_with_options(active_project, options.clone())
+        .await
+        .unwrap();
+    active_cg.index_all().await.unwrap();
+
+    let target_dir = TempDir::new().unwrap();
+    let target_project = target_dir.path();
+    fs::create_dir_all(target_project.join("src")).unwrap();
+    fs::write(
+        target_project.join("src/target_only.rs"),
+        "fn target_only() -> i32 { 2 }\n",
+    )
+    .unwrap();
+    let target_cg = TraceDecay::init_with_options(target_project, options)
+        .await
+        .unwrap();
+    target_cg.index_all().await.unwrap();
+
+    let registry_db = tracedecay::global_db::GlobalDb::open_at(&global_db_path)
+        .await
+        .expect("registry opens");
+    registry_db
+        .upsert_code_project("proj_hook_active", active_project, None, None, Some("main"))
+        .await
+        .expect("active project registers");
+    registry_db
+        .upsert_code_project("proj_hook_target", target_project, None, None, Some("main"))
+        .await
+        .expect("target project registers");
+    let server =
+        McpServer::new_with_dbs(active_cg, None, None, Some(Arc::new(registry_db)), false).await;
+
+    let responses = run_server_with_messages(
+        server,
+        vec![
+            jsonrpc_notification_with_params(
+                "tracedecay/hookEvent",
+                json!({
+                    "agent": "codex",
+                    "event": "workspaceOpen",
+                    "cwd": target_project.join("src").to_string_lossy()
+                }),
+            ),
+            jsonrpc_request(
+                json!(1),
+                "tools/call",
+                json!({
+                    "name": "tracedecay_files",
+                    "arguments": {}
+                }),
+            ),
+        ],
+    )
+    .await;
+
+    let response = response_with_id(&responses, json!(1));
+    let text = extract_tool_text(&response["result"]);
+    assert!(
+        text.contains("target_only.rs"),
+        "hook workspace context should route graph reads to target project, got: {text}"
+    );
+    assert!(
+        !text.contains("active_only.rs"),
+        "ambient hook route should not fall back to active project when the hook cwd resolves"
+    );
 }
 
 fn analytics_metadata(event: &tracedecay::global_db::AnalyticsEventRecord) -> Value {
