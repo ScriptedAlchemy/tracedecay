@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 
 use crate::diagnostics::lsp::activity::adapter_workspace_root;
 use crate::diagnostics::lsp::adapters::{LspAdapterDefinition, LspInstallOption};
-use crate::diagnostics::lsp::client::{LspDocument, StdioLspClient};
+use crate::diagnostics::lsp::client::{LspDocument, LspRefreshTimeouts, StdioLspClient};
 use crate::diagnostics::lsp::settings::CodeDiagnosticsSettings;
 use crate::errors::{Result, TraceDecayError};
 
@@ -107,12 +107,14 @@ pub struct PreparedRefresh {
     project_root: PathBuf,
     command: String,
     args: Vec<String>,
+    epoch: u64,
     batches: Vec<RefreshBatch>,
 }
 
 pub struct CompletedRefresh {
     language: String,
     command: String,
+    epoch: u64,
     result: std::result::Result<Vec<CodeDiagnostic>, RefreshFailure>,
 }
 
@@ -123,40 +125,47 @@ impl CompletedRefresh {
 }
 
 impl PreparedRefresh {
-    pub async fn collect_diagnostics(self, diagnostics_timeout: Duration) -> CompletedRefresh {
+    pub async fn collect_diagnostics(
+        self,
+        diagnostics_quiet_timeout: Duration,
+    ) -> CompletedRefresh {
         let language = self.language.clone();
         let command = self.command.clone();
-        let result = self.collect(diagnostics_timeout).await;
+        let epoch = self.epoch;
+        let result = self.collect(diagnostics_quiet_timeout).await;
         CompletedRefresh {
             language,
             command,
+            epoch,
             result,
         }
     }
 
     async fn collect(
         self,
-        diagnostics_timeout: Duration,
+        diagnostics_quiet_timeout: Duration,
     ) -> std::result::Result<Vec<CodeDiagnostic>, RefreshFailure> {
         let mut diagnostics = Vec::new();
+        let timeouts = LspRefreshTimeouts::from_diagnostics_quiet_window(diagnostics_quiet_timeout);
         for batch in self.batches {
             let mut client_slot = batch.client.lock().await;
             let client = match client_slot.as_mut() {
                 Some(client) => client,
                 None => client_slot.insert(
-                    StdioLspClient::start(&self.command, &self.args, &batch.workspace_root)
-                        .await
-                        .map_err(|err| RefreshFailure::crashed(&err))?,
+                    StdioLspClient::start_with_timeouts(
+                        &self.command,
+                        &self.args,
+                        &batch.workspace_root,
+                        timeouts,
+                    )
+                    .await
+                    .map_err(|err| RefreshFailure::crashed(&err))?,
                 ),
             };
-            let result = client
-                .collect_document_diagnostics(
-                    &self.project_root,
-                    batch.documents,
-                    diagnostics_timeout,
-                )
-                .await;
-            match result {
+            match client
+                .collect_document_diagnostics(&self.project_root, batch.documents, timeouts)
+                .await
+            {
                 Ok(mut batch_diagnostics) => diagnostics.append(&mut batch_diagnostics),
                 Err(err) => {
                     *client_slot = None;
@@ -192,6 +201,7 @@ pub struct DiagnosticBroker {
     clients: BTreeMap<LspSessionKey, Arc<Mutex<Option<StdioLspClient>>>>,
     engine_overrides: BTreeMap<String, EngineState>,
     engine_errors: BTreeMap<String, String>,
+    refresh_epochs: BTreeMap<String, u64>,
     project_languages: BTreeSet<String>,
     backfill: BTreeMap<String, BackfillProgress>,
 }
@@ -210,6 +220,7 @@ impl DiagnosticBroker {
             clients: BTreeMap::new(),
             engine_overrides: BTreeMap::new(),
             engine_errors: BTreeMap::new(),
+            refresh_epochs: BTreeMap::new(),
             project_languages: BTreeSet::new(),
             backfill: BTreeMap::new(),
         }
@@ -327,6 +338,7 @@ impl DiagnosticBroker {
 
         self.engine_overrides
             .insert(language.to_string(), EngineState::Refreshing);
+        let epoch = self.next_refresh_epoch(language);
         let project_root = self.project_root.clone();
         let mut documents_by_root: BTreeMap<PathBuf, Vec<LspDocument>> = BTreeMap::new();
         for document in documents {
@@ -348,7 +360,7 @@ impl DiagnosticBroker {
                 };
                 let client = self
                     .clients
-                    .entry(session_key.clone())
+                    .entry(session_key)
                     .or_insert_with(|| Arc::new(Mutex::new(None)))
                     .clone();
                 RefreshBatch {
@@ -363,6 +375,7 @@ impl DiagnosticBroker {
             project_root,
             command,
             args: adapter.args,
+            epoch,
             batches,
         }))
     }
@@ -371,17 +384,26 @@ impl DiagnosticBroker {
         &mut self,
         language: &str,
         documents: Vec<LspDocument>,
-        diagnostics_timeout: Duration,
+        diagnostics_quiet_timeout: Duration,
     ) -> Result<()> {
         let Some(prepared) = self.prepare_refresh(language, documents)? else {
             return Ok(());
         };
-        let result = prepared.collect_diagnostics(diagnostics_timeout).await;
+        let result = prepared
+            .collect_diagnostics(diagnostics_quiet_timeout)
+            .await;
         self.finish_refresh(result)
     }
 
     pub fn finish_refresh(&mut self, completed: CompletedRefresh) -> Result<()> {
         let language = completed.language;
+        if self
+            .refresh_epochs
+            .get(&language)
+            .is_some_and(|current| completed.epoch < *current)
+        {
+            return Ok(());
+        }
         if !self.settings.language_enabled(&language) {
             self.engine_overrides
                 .insert(language.clone(), EngineState::Disabled);
@@ -466,6 +488,17 @@ impl DiagnosticBroker {
     fn remove_language_clients(&mut self, language: &str) {
         self.clients
             .retain(|key, _| key.language.as_str() != language);
+    }
+
+    fn next_refresh_epoch(&mut self, language: &str) -> u64 {
+        let next = self
+            .refresh_epochs
+            .get(language)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(1);
+        self.refresh_epochs.insert(language.to_string(), next);
+        next
     }
 
     fn command_matches_current_settings(&self, language: &str, command: &str) -> bool {
