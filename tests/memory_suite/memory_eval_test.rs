@@ -14,7 +14,7 @@
 //! The harness still understands `pending-sibling` for future branch-split work,
 //! but shipped hygiene contracts should be marked stable.
 
-mod common;
+use crate::common;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
