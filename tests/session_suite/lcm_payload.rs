@@ -6,8 +6,7 @@ use tempfile::TempDir;
 use tracedecay::sessions::lcm::payload::{delete_external_payload, DeleteOpts};
 use tracedecay::sessions::lcm::{LcmError, LcmStorageKind, LCM_SCHEMA_VERSION};
 
-mod common;
-use common::{
+use crate::common::{
     isolated_lcm_db_path as isolated_db_path, lcm_payload_message as raw_message,
     lcm_payload_session as sample_session, open_lcm_db,
 };

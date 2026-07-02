@@ -8,7 +8,7 @@ use tracedecay::sessions::lcm::{
 };
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 
-mod common;
+use crate::common;
 
 fn isolated_db_path(tmp: &TempDir) -> std::path::PathBuf {
     common::isolated_lcm_db_path(tmp)

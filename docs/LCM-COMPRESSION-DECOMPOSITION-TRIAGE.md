@@ -125,12 +125,12 @@ depth, backlog/auxiliary skips).
   grepped and read, not just defined in isolation).
 - `rustfmt --edition 2021 --check` clean on `compression.rs`,
   `compression_decision.rs`, `summarizer.rs`, `mod.rs`,
-  `tests/session_lcm_compression_test.rs`.
-- Regression target `session_lcm_compression_test` plus lib unit tests
+  `tests/session_suite/lcm_compression.rs`.
+- Regression target `session_suite::lcm_compression` plus lib unit tests
   `compression_decision::tests` and `summarizer::tests` re-run in an isolated
   cargo target dir (`.tracedecay/target/t_bc5b8cbc`) per the cargo-contention
   policy. Results: `compression_decision::tests` **9/9**, `summarizer::tests`
-  **4/4**, `session_lcm_compression_test` **70/70** (0 failed, 0 ignored).
+  **4/4**, `session_suite::lcm_compression` **70/70** (0 failed, 0 ignored).
   Isolated target dir reclaimed after the run.
 
 ## Non-blocking follow-ups

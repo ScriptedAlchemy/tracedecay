@@ -72,7 +72,7 @@ Decision paths, in order:
 
 Primary reusable fixture:
 
-- `tests/session_lcm_compression_test.rs::compress_in_transaction_baseline_decision_fixture_preserves_contract` uses the `CompressBaselineCase` fixture to cover the main seam contracts in one place: stale frontier no-op, below-leaf-threshold guard, auxiliary summary request contract, and fake-summary DB writes/frontier/replay.
+- `tests/session_suite/lcm_compression.rs::compress_in_transaction_baseline_decision_fixture_preserves_contract` uses the `CompressBaselineCase` fixture to cover the main seam contracts in one place: stale frontier no-op, below-leaf-threshold guard, auxiliary summary request contract, and fake-summary DB writes/frontier/replay.
 
 Existing focused tests also cover:
 
@@ -81,4 +81,4 @@ Existing focused tests also cover:
 - exact leaf threshold, zero leaf/fresh-tail knobs, dynamic chunking, forced overflow catch-up/budget states, no-backlog overflow recovery, and preserved objective scaffolds.
 - condensation readiness, ordering, default/non-default max depth, and replay after condensation.
 
-Follow-on seam extractions should run the baseline fixture first, then the full `session_lcm_compression_test` target before changing behavior intentionally.
+Follow-on seam extractions should run the baseline fixture first, then the full `lcm_compression` module of the `session_suite` binary before changing behavior intentionally.

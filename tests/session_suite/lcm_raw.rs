@@ -8,8 +8,7 @@ use tracedecay::sessions::source::{
 };
 use tracedecay::sessions::SessionMessageRecord;
 
-mod common;
-use common::{
+use crate::common::{
     lcm_raw_message as sample_message, lcm_raw_session as sample_session,
     open_lcm_db as open_isolated_db,
 };

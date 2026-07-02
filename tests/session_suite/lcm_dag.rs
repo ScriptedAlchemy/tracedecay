@@ -4,8 +4,7 @@ use tracedecay::sessions::lcm::{
     LcmError, LcmSessionBoundaryRequest, LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft,
 };
 
-mod common;
-use common::{
+use crate::common::{
     isolated_lcm_db_path as isolated_db_path, lcm_dag_message as raw_message,
     lcm_dag_session as sample_session, open_lcm_db,
 };

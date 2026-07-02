@@ -46,7 +46,7 @@ platform = { host = 'cfg(windows)' }
 test-group = 'windows-profile-storage'
 
 [[profile.ci.overrides]]
-filter = 'binary(=session_lcm_compression_test) | binary(=session_lcm_query_test) | binary(=session_lcm_payload_test) | binary(=session_global_db_test) | binary(=session_transcript_backfill_test) | binary(=codex_transcript_ingest_test) | binary(=hermes_transcript_ingest_test) | binary(=cline_like_transcript_ingest_test) | binary(=corruption_test) | binary(=db_query_test) | binary(=mcp_handler_test) | binary(=mcp_server_test) | binary(=memory_test) | binary(=multi_mcp_coordination_test)'
+filter = 'binary(=session_suite) | binary(=codex_transcript_ingest_test) | binary(=hermes_transcript_ingest_test) | binary(=cline_like_transcript_ingest_test) | binary(=corruption_test) | binary(=db_query_test) | binary(=mcp_handler_test) | binary(=mcp_server_test) | binary(=memory_test) | binary(=multi_mcp_coordination_test)'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-session-sqlite'
 
