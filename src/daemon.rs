@@ -1062,6 +1062,27 @@ impl DaemonEngine {
         logged.insert(skew.clone()).then_some(skew)
     }
 
+    /// Logs a `daemon_version_skew` event when this handshake's client runs a
+    /// different binary version, deduped per distinct client version.
+    async fn log_client_version_skew(&self, handshake: &DaemonHandshake) {
+        let Some(client_version) = self.client_version_skew_to_log(handshake).await else {
+            return;
+        };
+        log_daemon_event(
+            "daemon_version_skew",
+            &[
+                ("daemon_version", binary_version().to_string()),
+                ("client_version", client_version),
+                (
+                    "hint",
+                    "daemon binary differs from the connecting client; \
+                     run `tracedecay daemon restart` to reload it"
+                        .to_string(),
+                ),
+            ],
+        );
+    }
+
     async fn project_server(
         &self,
         handshake: &DaemonHandshake,
@@ -1421,21 +1442,7 @@ async fn serve_socket_client(stream: tokio::net::UnixStream, engine: DaemonEngin
         return Ok(());
     };
     let handshake = DaemonHandshake::from_line(&line)?;
-    if let Some(client_version) = engine.client_version_skew_to_log(&handshake).await {
-        log_daemon_event(
-            "daemon_version_skew",
-            &[
-                ("daemon_version", binary_version().to_string()),
-                ("client_version", client_version),
-                (
-                    "hint",
-                    "daemon binary differs from the connecting client; \
-                     run `tracedecay daemon restart` to reload it"
-                        .to_string(),
-                ),
-            ],
-        );
-    }
+    engine.log_client_version_skew(&handshake).await;
     if handshake.project_path.is_some() {
         let server = match Box::pin(engine.project_server(&handshake)).await {
             Ok(server) => server,
