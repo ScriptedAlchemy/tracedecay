@@ -60,6 +60,7 @@ struct CodexMeta {
     cwd: PathBuf,
     session_id: String,
     model: Option<String>,
+    git: Option<Value>,
     parent_session_id: Option<String>,
     is_subagent: bool,
     agent_id: Option<String>,
@@ -129,6 +130,8 @@ impl TranscriptSource for CodexSource {
         // Real session_meta lines carry no model; track the active model from
         // `turn_context` lines instead (it can change mid-session).
         let mut current_model = meta.model.clone();
+        let mut current_cwd = Some(meta.cwd.clone());
+        let mut current_git = meta.git.clone();
         let replayed_from_start =
             prev.position > 0 && new.lines.first().is_some_and(|line| line.offset == 0);
         let mut compaction_depth = if replayed_from_start {
@@ -140,21 +143,43 @@ impl TranscriptSource for CodexSource {
             if turn_usage.observe(&line.value) {
                 continue;
             }
-            if let Some(model) = turn_context_model(&line.value) {
-                current_model = Some(model);
+            if let Some(updated) = session_meta_from_record(&line.value, path) {
+                if updated.session_id == meta.session_id {
+                    current_cwd = Some(updated.cwd);
+                    if updated.git.is_some() {
+                        current_git = updated.git;
+                    }
+                    if updated.model.is_some() {
+                        current_model = updated.model;
+                    }
+                }
                 continue;
             }
-            if let Some(message) = response_item_goal_context_from_line(
+            if let Some(context) = turn_context_from_record(&line.value) {
+                if context.model.is_some() {
+                    current_model = context.model;
+                }
+                if context.cwd.is_some() {
+                    current_cwd = context.cwd;
+                }
+                continue;
+            }
+            if let Some(mut message) = response_item_goal_context_from_line(
                 &line.value,
                 &meta,
                 current_model.as_deref(),
                 path,
                 line.offset,
             ) {
+                annotate_message_context(
+                    &mut message,
+                    current_cwd.as_deref(),
+                    current_git.as_ref(),
+                );
                 messages.push(message);
                 continue;
             }
-            if let Some(message) = compacted_summary_from_line(
+            if let Some(mut message) = compacted_summary_from_line(
                 &line.value,
                 &meta,
                 current_model.as_deref(),
@@ -164,20 +189,30 @@ impl TranscriptSource for CodexSource {
             ) {
                 flush_turn_usage(&mut messages, &mut turn_usage);
                 compaction_depth += 1;
+                annotate_message_context(
+                    &mut message,
+                    current_cwd.as_deref(),
+                    current_git.as_ref(),
+                );
                 messages.push(message);
                 continue;
             }
-            if let Some(message) = goal_context_from_line(
+            if let Some(mut message) = goal_context_from_line(
                 &line.value,
                 &meta,
                 current_model.as_deref(),
                 path,
                 line.offset,
             ) {
+                annotate_message_context(
+                    &mut message,
+                    current_cwd.as_deref(),
+                    current_git.as_ref(),
+                );
                 messages.push(message);
                 continue;
             }
-            if let Some(message) = message_from_line(
+            if let Some(mut message) = message_from_line(
                 &line.value,
                 &meta,
                 current_model.as_deref(),
@@ -189,6 +224,11 @@ impl TranscriptSource for CodexSource {
                 if message.role == "user" {
                     flush_turn_usage(&mut messages, &mut turn_usage);
                 }
+                annotate_message_context(
+                    &mut message,
+                    current_cwd.as_deref(),
+                    current_git.as_ref(),
+                );
                 messages.push(message);
             }
         }
@@ -229,62 +269,68 @@ fn session_meta(path: &Path) -> Option<CodexMeta> {
         let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
             continue;
         };
-        if value.get("type").and_then(Value::as_str) != Some("session_meta") {
-            continue;
+        if let Some(meta) = session_meta_from_record(&value, path) {
+            return Some(meta);
         }
-        let payload = value.get("payload").unwrap_or(&value);
-        let cwd = payload
-            .get("cwd")
-            .and_then(Value::as_str)
-            .filter(|cwd| !cwd.is_empty())
-            .map(PathBuf::from)?;
-        let session_id = payload
-            .get("id")
-            .or_else(|| payload.get("session_id"))
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-            .map_or_else(
-                || {
-                    path.file_stem()
-                        .and_then(|stem| stem.to_str())
-                        .unwrap_or("unknown")
-                        .to_string()
-                },
-                ToString::to_string,
-            );
-        // Note: real rollouts have no `model` in session_meta — only
-        // `model_provider` (e.g. "openai"), which is *not* a model and must
-        // not be stored as one; `turn_context` lines carry the actual model.
-        let model = payload
-            .get("model")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let parent_session_id = string_field(payload, "forked_from_id").or_else(|| {
-            nested_string_field(payload, "/source/subagent/thread_spawn/parent_thread_id")
-        });
-        let thread_source = string_field(payload, "thread_source");
-        let agent_nickname = string_field(payload, "agent_nickname").or_else(|| {
-            nested_string_field(payload, "/source/subagent/thread_spawn/agent_nickname")
-        });
-        let agent_role = string_field(payload, "agent_role")
-            .or_else(|| nested_string_field(payload, "/source/subagent/thread_spawn/agent_role"));
-        let is_subagent = thread_source.as_deref() == Some("subagent")
-            || parent_session_id.is_some()
-            || payload.pointer("/source/subagent").is_some();
-        let agent_id = is_subagent.then(|| session_id.clone());
-        return Some(CodexMeta {
-            cwd,
-            session_id,
-            model,
-            parent_session_id,
-            is_subagent,
-            agent_id,
-            agent_nickname,
-            agent_role,
-            thread_source,
-        });
     }
     None
+}
+
+fn session_meta_from_record(record: &Value, path: &Path) -> Option<CodexMeta> {
+    if record.get("type").and_then(Value::as_str) != Some("session_meta") {
+        return None;
+    }
+    let payload = record.get("payload").unwrap_or(record);
+    let cwd = payload
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|cwd| !cwd.is_empty())
+        .map(PathBuf::from)?;
+    let session_id = payload
+        .get("id")
+        .or_else(|| payload.get("session_id"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map_or_else(
+            || {
+                path.file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or("unknown")
+                    .to_string()
+            },
+            ToString::to_string,
+        );
+    // Note: real rollouts have no `model` in session_meta — only
+    // `model_provider` (e.g. "openai"), which is *not* a model and must
+    // not be stored as one; `turn_context` lines carry the actual model.
+    let model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let git = payload.get("git").filter(|git| git.is_object()).cloned();
+    let parent_session_id = string_field(payload, "forked_from_id")
+        .or_else(|| nested_string_field(payload, "/source/subagent/thread_spawn/parent_thread_id"));
+    let thread_source = string_field(payload, "thread_source");
+    let agent_nickname = string_field(payload, "agent_nickname")
+        .or_else(|| nested_string_field(payload, "/source/subagent/thread_spawn/agent_nickname"));
+    let agent_role = string_field(payload, "agent_role")
+        .or_else(|| nested_string_field(payload, "/source/subagent/thread_spawn/agent_role"));
+    let is_subagent = thread_source.as_deref() == Some("subagent")
+        || parent_session_id.is_some()
+        || payload.pointer("/source/subagent").is_some();
+    let agent_id = is_subagent.then(|| session_id.clone());
+    Some(CodexMeta {
+        cwd,
+        session_id,
+        model,
+        git,
+        parent_session_id,
+        is_subagent,
+        agent_id,
+        agent_nickname,
+        agent_role,
+        thread_source,
+    })
 }
 
 fn string_field(payload: &Value, key: &str) -> Option<String> {
@@ -360,20 +406,37 @@ fn codex_metadata_json(meta: &CodexMeta) -> Option<String> {
             Value::String(agent_nickname.clone()),
         );
     }
+    metadata.insert(
+        "codex_session_cwd".to_string(),
+        Value::String(meta.cwd.to_string_lossy().to_string()),
+    );
+    insert_git_metadata(&mut metadata, meta.git.as_ref());
     serde_json::to_string(&Value::Object(metadata)).ok()
 }
 
-/// Model recorded on a `turn_context` line, the only place rollouts store the
-/// active model (`session_meta` only has `model_provider`).
-fn turn_context_model(record: &Value) -> Option<String> {
+struct CodexTurnContext {
+    model: Option<String>,
+    cwd: Option<PathBuf>,
+}
+
+/// Context recorded on a `turn_context` line. Real rollouts use this for the
+/// active model and current cwd; both can change mid-session.
+fn turn_context_from_record(record: &Value) -> Option<CodexTurnContext> {
     if record.get("type").and_then(Value::as_str) != Some("turn_context") {
         return None;
     }
-    record
-        .pointer("/payload/model")
+    let payload = record.get("payload").unwrap_or(record);
+    let model = payload
+        .get("model")
         .and_then(Value::as_str)
         .filter(|model| !model.is_empty())
-        .map(str::to_string)
+        .map(str::to_string);
+    let cwd = payload
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|cwd| !cwd.is_empty())
+        .map(PathBuf::from);
+    Some(CodexTurnContext { model, cwd })
 }
 
 /// Map one rollout line to a provider-neutral message, or `None` for non-message
@@ -800,6 +863,61 @@ fn is_goal_context_text(text: &str) -> bool {
             lower.starts_with("remaining token budget:") || lower.starts_with("token budget:");
     }
     has_objective && has_budget
+}
+
+fn annotate_message_context(
+    message: &mut SessionMessageRecord,
+    cwd: Option<&Path>,
+    git: Option<&Value>,
+) {
+    let mut metadata = message
+        .metadata_json
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<Value>(json).ok())
+        .and_then(|value| match value {
+            Value::Object(map) => Some(map),
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    if let Some(cwd) = cwd {
+        metadata.insert(
+            "codex_turn_cwd".to_string(),
+            Value::String(cwd.to_string_lossy().to_string()),
+        );
+        if let Some(worktree) = crate::worktree::git_worktree_root(cwd) {
+            metadata.insert(
+                "codex_turn_worktree".to_string(),
+                Value::String(worktree.to_string_lossy().to_string()),
+            );
+        }
+    }
+    insert_git_metadata(&mut metadata, git);
+    message.metadata_json = serde_json::to_string(&Value::Object(metadata)).ok();
+}
+
+fn insert_git_metadata(metadata: &mut serde_json::Map<String, Value>, git: Option<&Value>) {
+    let Some(git) = git.and_then(Value::as_object) else {
+        return;
+    };
+    if let Some(branch) = git.get("branch").and_then(Value::as_str) {
+        metadata.insert(
+            "codex_git_branch".to_string(),
+            Value::String(branch.to_string()),
+        );
+    }
+    if let Some(commit) = git.get("commit_hash").and_then(Value::as_str) {
+        metadata.insert(
+            "codex_git_commit_hash".to_string(),
+            Value::String(commit.to_string()),
+        );
+    }
+    if let Some(remote) = git.get("repository_url").and_then(Value::as_str) {
+        metadata.insert(
+            "codex_git_repository_url".to_string(),
+            Value::String(remote.to_string()),
+        );
+    }
 }
 
 fn message_metadata(payload: &Value, goal_context: Option<&CodexGoalContext>) -> Value {

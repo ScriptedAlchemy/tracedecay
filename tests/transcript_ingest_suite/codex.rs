@@ -1332,6 +1332,107 @@ async fn codex_model_tracks_turn_context_not_model_provider() {
 }
 
 #[tokio::test]
+async fn codex_messages_keep_turn_cwd_and_session_git_updates() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let linked_worktree = tmp.path().join("linked-worktree");
+    std::fs::create_dir_all(&linked_worktree).unwrap();
+    let dir = home.join(".codex/sessions/2026/01/01");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("rollout-2026-01-01T00-00-00-branch-sess.jsonl");
+    let main_cwd = project.to_string_lossy();
+    let linked_cwd = linked_worktree.to_string_lossy();
+    write_jsonl(
+        &path,
+        &[
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:00.000Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "branch-sess",
+                    "cwd": main_cwd,
+                    "model_provider": "openai",
+                    "git": {
+                        "branch": "main",
+                        "commit_hash": "1111111111111111111111111111111111111111",
+                        "repository_url": "git@example.com:repo/project.git"
+                    }
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:00.500Z",
+                "type": "turn_context",
+                "payload": {"turn_id": "t1", "cwd": main_cwd, "model": "gpt-5.3-codex"}
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:01.000Z",
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "First branch attribution marker"}
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:02.000Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "branch-sess",
+                    "cwd": main_cwd,
+                    "model_provider": "openai",
+                    "git": {
+                        "branch": "feature/worktree",
+                        "commit_hash": "2222222222222222222222222222222222222222",
+                        "repository_url": "git@example.com:repo/project.git"
+                    }
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:02.500Z",
+                "type": "turn_context",
+                "payload": {"turn_id": "t2", "cwd": linked_cwd, "model": "gpt-5.5"}
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:03.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "agent_message",
+                    "message": "Second branch attribution marker"
+                }
+            }),
+        ],
+    );
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = CodexSource::with_home(&home);
+    ingest_source(&db, &source, &project, None).await;
+
+    let hits = db
+        .search_session_messages("codex", None, "attribution", 10)
+        .await;
+    assert_eq!(hits.len(), 2);
+    let metadata_of = |needle: &str| -> serde_json::Value {
+        let hit = hits
+            .iter()
+            .find(|hit| hit.message.text.contains(needle))
+            .unwrap_or_else(|| panic!("message containing {needle:?} should exist"));
+        serde_json::from_str(hit.message.metadata_json.as_deref().unwrap()).unwrap()
+    };
+
+    let first = metadata_of("First branch");
+    assert_eq!(first["codex_turn_cwd"], main_cwd.as_ref());
+    assert_eq!(first["codex_git_branch"], "main");
+    assert_eq!(
+        first["codex_git_commit_hash"],
+        "1111111111111111111111111111111111111111"
+    );
+
+    let second = metadata_of("Second branch");
+    assert_eq!(second["codex_turn_cwd"], linked_cwd.as_ref());
+    assert_eq!(second["codex_git_branch"], "feature/worktree");
+    assert_eq!(
+        second["codex_git_commit_hash"],
+        "2222222222222222222222222222222222222222"
+    );
+}
+
+#[tokio::test]
 async fn codex_subagent_rollout_uses_parent_link_from_session_meta() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
