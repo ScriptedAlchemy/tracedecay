@@ -1,27 +1,35 @@
 //! Post-update health pass: safe, automatic repairs plus a concise summary
 //! of the doctor findings that still need a human decision.
 //!
-//! Runs at the end of `tracedecay update` / `tracedecay post-update` (skip
-//! with `--no-heal`). Every step is failure-tolerant: a failing check prints
-//! a warning but never fails the update itself. Only remedies that are safe
-//! to automate are applied:
+//! Runs at the end of `tracedecay update` / `tracedecay post-update`. Running
+//! by default (opt-out via `--no-heal`) is intentional product policy: the
+//! hidden `post-update` subcommand fires from the self-update re-exec path,
+//! so every successful `tracedecay update` heals the store unless the user
+//! explicitly skips it. Every step is failure-tolerant: a failing check
+//! prints a warning but never fails the update itself. Only remedies that
+//! are safe to automate are applied:
 //!
-//! - corrupt `branch-meta.json` files are quarantined (renamed to
-//!   `branch-meta.json.corrupt-<timestamp>`), which preserves evidence while
-//!   restoring the silent single-DB fallback,
+//! - corrupt `branch-meta.json` files (anything [`crate::branch_meta::parse`]
+//!   rejects) are quarantined — renamed to
+//!   `branch-meta.json.corrupt-<timestamp>`, never deleted — preserving the
+//!   evidence while restoring the silent single-DB fallback,
 //! - registry rows whose project root no longer exists AND lives under the
 //!   system temp directory are purged (the automated equivalent of
-//!   `tracedecay migrate registry-gc --prefix <tmp> --apply`).
+//!   `tracedecay migrate registry-gc --prefix <tmp> --apply`), and only when
+//!   BOTH the canonical and display roots are gone.
+//!
+//! Those auto-applied remedies are safe precisely because quarantine renames
+//! instead of deleting and the GC removes only temp-rooted registry metadata
+//! whose every known root has vanished — no user data is ever destroyed.
 //!
 //! Everything else (orphan store manifests, stale rows outside the temp
 //! directory, registry/manifest identity drift) is only reported.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::global_db::GlobalDb;
-use crate::migrate::registry::stale_code_projects;
-use crate::storage::BRANCH_META_FILENAME;
+use crate::global_db::{CodeProjectRecord, GlobalDb};
+use crate::migrate::registry::{code_project_root_exists, stale_code_projects, StaleRootScope};
+use crate::storage::{BRANCH_META_FILENAME, BRANCH_META_QUARANTINE_PREFIX};
 
 /// A corrupt `branch-meta.json` that was renamed out of the way.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,7 +42,8 @@ pub struct BranchMetaQuarantine {
 #[derive(Debug, Default)]
 pub struct HealthPassReport {
     pub quarantined_branch_meta: Vec<BranchMetaQuarantine>,
-    pub purged_temp_registry_rows: usize,
+    /// `None` when the global DB could not be opened, so the GC never ran.
+    pub purged_temp_registry_rows: Option<usize>,
     pub remaining_findings: Vec<String>,
     pub warnings: Vec<String>,
 }
@@ -44,18 +53,55 @@ pub struct HealthPassReport {
 /// Never fails: every error is collected as a warning so a broken store can
 /// never abort `tracedecay update`.
 pub async fn run_post_update_health_pass() -> HealthPassReport {
-    let mut report = HealthPassReport::default();
     eprintln!("\n\x1b[1mPost-update health pass\x1b[0m (skip with --no-heal)");
 
     let Some(profile_root) = crate::config::user_data_dir() else {
-        report
-            .warnings
-            .push("could not determine the profile data directory".to_string());
-        print_warnings(&report.warnings);
+        let report = HealthPassReport {
+            warnings: vec!["could not determine the profile data directory".to_string()],
+            ..HealthPassReport::default()
+        };
+        render_warnings(&report.warnings);
         return report;
     };
 
-    quarantine_corrupt_branch_meta(&profile_root, &mut report);
+    let report = compute_health_pass_report(&profile_root).await;
+    render_health_pass_report(&report);
+    report
+}
+
+/// Applies the safe remedies and gathers everything the pass has to say into
+/// a [`HealthPassReport`], without printing anything.
+async fn compute_health_pass_report(profile_root: &Path) -> HealthPassReport {
+    let mut report = HealthPassReport::default();
+
+    let (quarantined, warnings) = quarantine_corrupt_branch_meta(profile_root);
+    report.quarantined_branch_meta = quarantined;
+    report.warnings.extend(warnings);
+
+    // Opening the global DB applies its idempotent schema migrations — the
+    // same lazy upgrade every normal open path performs.
+    let Some(global_db) = GlobalDb::open().await else {
+        report
+            .warnings
+            .push("could not open the global DB for the health pass".to_string());
+        return report;
+    };
+
+    // One registry snapshot for the whole pass: the GC and the remaining
+    // findings below both work from this list.
+    let projects = global_db.list_code_projects(usize::MAX).await;
+    let (purged, purged_ids) = gc_stale_temp_registry_rows(&global_db, &projects).await;
+    report.purged_temp_registry_rows = Some(purged);
+
+    let (findings, warnings) =
+        collect_remaining_findings(&global_db, profile_root, &projects, &purged_ids).await;
+    report.remaining_findings = findings;
+    report.warnings.extend(warnings);
+    report
+}
+
+/// Prints the doctor-style summary for a computed report.
+fn render_health_pass_report(report: &HealthPassReport) {
     if report.quarantined_branch_meta.is_empty() {
         eprintln!("  \x1b[32m✔\x1b[0m No corrupt branch metadata files");
     } else {
@@ -68,26 +114,12 @@ pub async fn run_post_update_health_pass() -> HealthPassReport {
         }
     }
 
-    // Opening the global DB applies its idempotent schema migrations — the
-    // same lazy upgrade every normal open path performs.
-    match GlobalDb::open().await {
-        Some(global_db) => {
-            gc_stale_temp_registry_rows(&global_db, &mut report).await;
-            if report.purged_temp_registry_rows > 0 {
-                eprintln!(
-                    "  \x1b[32m✔\x1b[0m Purged {} stale temp-root registry row(s)",
-                    report.purged_temp_registry_rows
-                );
-            } else {
-                eprintln!("  \x1b[32m✔\x1b[0m No stale temp-root registry rows");
-            }
-            collect_remaining_findings(&global_db, &profile_root, &mut report).await;
+    match report.purged_temp_registry_rows {
+        Some(0) => eprintln!("  \x1b[32m✔\x1b[0m No stale temp-root registry rows"),
+        Some(purged) => {
+            eprintln!("  \x1b[32m✔\x1b[0m Purged {purged} stale temp-root registry row(s)");
         }
-        None => {
-            report
-                .warnings
-                .push("could not open the global DB for the health pass".to_string());
-        }
+        None => {}
     }
 
     if report.remaining_findings.is_empty() {
@@ -98,23 +130,28 @@ pub async fn run_post_update_health_pass() -> HealthPassReport {
             eprintln!("      • {finding}");
         }
     }
-    print_warnings(&report.warnings);
-    report
+    render_warnings(&report.warnings);
 }
 
-fn print_warnings(warnings: &[String]) {
+fn render_warnings(warnings: &[String]) {
     for warning in warnings {
         eprintln!("  \x1b[33mwarning:\x1b[0m health pass: {warning}");
     }
 }
 
-/// Renames every `branch-meta.json` under `<profile_root>/projects/*` that is
-/// not valid JSON to `branch-meta.json.corrupt-<timestamp>`, preserving the
-/// corrupt content as evidence while restoring the single-DB fallback.
-fn quarantine_corrupt_branch_meta(profile_root: &Path, report: &mut HealthPassReport) {
+/// Renames every `branch-meta.json` under `<profile_root>/projects/*` that
+/// [`crate::branch_meta::parse`] rejects — the runtime's own definition of
+/// corrupt, covering both invalid JSON and schema mismatches — to
+/// `branch-meta.json.corrupt-<timestamp>`, preserving the corrupt content as
+/// evidence while restoring the single-DB fallback.
+///
+/// Returns the performed quarantines and any warnings.
+fn quarantine_corrupt_branch_meta(profile_root: &Path) -> (Vec<BranchMetaQuarantine>, Vec<String>) {
+    let mut quarantines = Vec::new();
+    let mut warnings = Vec::new();
     let projects_root = profile_root.join("projects");
     let Ok(entries) = std::fs::read_dir(&projects_root) else {
-        return;
+        return (quarantines, warnings);
     };
     let mut meta_paths: Vec<PathBuf> = entries
         .flatten()
@@ -128,52 +165,52 @@ fn quarantine_corrupt_branch_meta(profile_root: &Path, report: &mut HealthPassRe
         let content = match std::fs::read_to_string(&path) {
             Ok(content) => content,
             Err(err) => {
-                report
-                    .warnings
-                    .push(format!("could not read '{}': {err}", path.display()));
+                warnings.push(format!("could not read '{}': {err}", path.display()));
                 continue;
             }
         };
-        if serde_json::from_str::<serde_json::Value>(&content).is_ok() {
+        if crate::branch_meta::parse(&content).is_ok() {
             continue;
         }
-        let quarantined = path.with_file_name(format!("{BRANCH_META_FILENAME}.corrupt-{now}"));
+        let quarantined = path.with_file_name(format!("{BRANCH_META_QUARANTINE_PREFIX}{now}"));
         match std::fs::rename(&path, &quarantined) {
-            Ok(()) => report.quarantined_branch_meta.push(BranchMetaQuarantine {
+            Ok(()) => quarantines.push(BranchMetaQuarantine {
                 original: path,
                 quarantined,
             }),
-            Err(err) => report.warnings.push(format!(
+            Err(err) => warnings.push(format!(
                 "could not quarantine corrupt '{}': {err}",
                 path.display()
             )),
         }
     }
+    (quarantines, warnings)
 }
 
-/// Purges registry rows whose canonical project root is gone AND lives under
-/// the system temp directory. This is the only registry GC scope that is safe
-/// to run without review.
-async fn gc_stale_temp_registry_rows(global_db: &GlobalDb, report: &mut HealthPassReport) {
-    let projects = global_db.list_code_projects(usize::MAX).await;
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut stale_ids: Vec<String> = Vec::new();
-    for prefix in temp_dir_prefixes() {
-        for project in stale_code_projects(projects.clone(), Some(&prefix)) {
-            // Extra safety over the manual `migrate registry-gc`: also
-            // require the display root to be gone before auto-deleting.
-            if super::code_project_root_exists(&project) {
-                continue;
-            }
-            if seen.insert(project.project_id.clone()) {
-                stale_ids.push(project.project_id);
-            }
-        }
-    }
+/// Purges registry rows in the auto-GC scope: canonical root under the
+/// system temp directory AND every known root gone
+/// ([`StaleRootScope::AllRootsMissing`]) — the only registry GC scope that is
+/// safe to run without review.
+///
+/// Returns the purged row count plus the candidate ids, so the remaining
+/// findings can exclude them from the shared pre-purge registry snapshot.
+async fn gc_stale_temp_registry_rows(
+    global_db: &GlobalDb,
+    projects: &[CodeProjectRecord],
+) -> (usize, Vec<String>) {
+    let stale_ids: Vec<String> = stale_code_projects(
+        projects,
+        &temp_dir_prefixes(),
+        StaleRootScope::AllRootsMissing,
+    )
+    .into_iter()
+    .map(|project| project.project_id.clone())
+    .collect();
     if stale_ids.is_empty() {
-        return;
+        return (0, stale_ids);
     }
-    report.purged_temp_registry_rows = global_db.delete_code_projects(&stale_ids).await;
+    let purged = global_db.delete_code_projects(&stale_ids).await;
+    (purged, stale_ids)
 }
 
 /// The system temp directory in both its literal and canonicalized spellings,
@@ -190,40 +227,45 @@ fn temp_dir_prefixes() -> Vec<PathBuf> {
 }
 
 /// Summarizes the doctor findings that are NOT safe to auto-apply so the user
-/// sees them at the end of `tracedecay update` output.
+/// sees them at the end of `tracedecay update` output. `projects` is the
+/// pre-purge registry snapshot; rows in `purged_ids` are skipped.
+///
+/// Returns the findings and any warnings.
 async fn collect_remaining_findings(
     global_db: &GlobalDb,
     profile_root: &Path,
-    report: &mut HealthPassReport,
-) {
+    projects: &[CodeProjectRecord],
+    purged_ids: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let mut findings = Vec::new();
     let project_paths = global_db.list_project_paths().await;
-    let (orphan_count, issues) = super::orphan_store_manifest_report(profile_root, &project_paths);
-    report.warnings.extend(issues);
+    let (orphan_count, warnings) =
+        super::orphan_store_manifest_report(profile_root, &project_paths);
     if orphan_count > 0 {
-        report.remaining_findings.push(format!(
+        findings.push(format!(
             "{orphan_count} orphan profile store manifest(s) can reconstruct registry rows"
         ));
     }
 
-    let stale_rows = global_db
-        .list_code_projects(usize::MAX)
-        .await
-        .into_iter()
-        .filter(|project| !super::code_project_root_exists(project))
+    let stale_rows = projects
+        .iter()
+        .filter(|project| !purged_ids.contains(&project.project_id))
+        .filter(|project| !code_project_root_exists(project))
         .count();
     if stale_rows > 0 {
-        report.remaining_findings.push(format!(
+        findings.push(format!(
             "{stale_rows} stale code project registry row(s) outside the temp directory"
         ));
     }
 
     let drift = super::registry_drift::registry_drift_findings(global_db, profile_root).await;
     if !drift.is_empty() {
-        report.remaining_findings.push(format!(
+        findings.push(format!(
             "{} registry/store manifest identity drift finding(s)",
             drift.len()
         ));
     }
+    (findings, warnings)
 }
 
 #[cfg(test)]
@@ -250,12 +292,11 @@ mod tests {
             r#"{"default_branch":"main","branches":{}}"#,
         );
 
-        let mut report = HealthPassReport::default();
-        quarantine_corrupt_branch_meta(dir.path(), &mut report);
+        let (quarantines, warnings) = quarantine_corrupt_branch_meta(dir.path());
 
-        assert_eq!(report.quarantined_branch_meta.len(), 1);
-        assert!(report.warnings.is_empty());
-        let quarantine = &report.quarantined_branch_meta[0];
+        assert_eq!(quarantines.len(), 1);
+        assert!(warnings.is_empty());
+        let quarantine = &quarantines[0];
         assert_eq!(quarantine.original, corrupt);
         assert!(!corrupt.exists(), "corrupt file should be renamed away");
         assert_eq!(
@@ -269,18 +310,43 @@ mod tests {
                 .file_name()
                 .unwrap()
                 .to_string_lossy()
-                .starts_with("branch-meta.json.corrupt-"),
+                .starts_with(BRANCH_META_QUARANTINE_PREFIX),
             "quarantine name should be branch-meta.json.corrupt-<timestamp>: {quarantine:?}"
         );
         assert!(valid.exists(), "valid branch-meta must be left untouched");
     }
 
     #[test]
+    fn quarantine_treats_schema_mismatch_as_corrupt() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let projects_root = dir.path().join("projects");
+        // Valid JSON, but not a valid BranchMeta — the runtime warns
+        // "corrupt" on every open, so the health pass must agree.
+        let schema_corrupt =
+            write_branch_meta(&projects_root, "proj_schema", r#"{"default_branch": 5}"#);
+
+        let (quarantines, warnings) = quarantine_corrupt_branch_meta(dir.path());
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            quarantines.len(),
+            1,
+            "schema-corrupt branch-meta must be quarantined: {quarantines:?}"
+        );
+        assert_eq!(quarantines[0].original, schema_corrupt);
+        assert!(!schema_corrupt.exists());
+        assert_eq!(
+            std::fs::read_to_string(&quarantines[0].quarantined).unwrap(),
+            r#"{"default_branch": 5}"#,
+            "quarantined file must preserve the corrupt content as evidence"
+        );
+    }
+
+    #[test]
     fn quarantine_is_a_no_op_without_a_projects_dir() {
         let dir = tempfile::TempDir::new().unwrap();
-        let mut report = HealthPassReport::default();
-        quarantine_corrupt_branch_meta(dir.path(), &mut report);
-        assert!(report.quarantined_branch_meta.is_empty());
-        assert!(report.warnings.is_empty());
+        let (quarantines, warnings) = quarantine_corrupt_branch_meta(dir.path());
+        assert!(quarantines.is_empty());
+        assert!(warnings.is_empty());
     }
 }

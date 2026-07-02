@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-const BRANCH_META_FILENAME: &str = "branch-meta.json";
+use crate::storage::BRANCH_META_FILENAME;
 
 /// Metadata for a single tracked branch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,6 +115,17 @@ impl BranchMeta {
     }
 }
 
+/// Parses `branch-meta.json` content into [`BranchMeta`].
+///
+/// This is the canonical definition of "corrupt branch metadata": anything
+/// this rejects — invalid JSON *or* valid JSON with the wrong schema — makes
+/// the runtime fall back to single-DB mode. Every consumer (loading at
+/// runtime, quarantining in the post-update health pass) must go through this
+/// one predicate so they agree on what corrupt means.
+pub fn parse(content: &str) -> serde_json::Result<BranchMeta> {
+    serde_json::from_str(content)
+}
+
 /// Loads branch metadata from `branch-meta.json` in the project data dir.
 ///
 /// Returns `None` if the file doesn't exist (single-DB mode / pre-branch projects).
@@ -122,7 +133,7 @@ impl BranchMeta {
 pub fn load_branch_meta(data_dir: &Path) -> Option<BranchMeta> {
     let path = data_dir.join(BRANCH_META_FILENAME);
     let content = std::fs::read_to_string(&path).ok()?;
-    match serde_json::from_str(&content) {
+    match parse(&content) {
         Ok(meta) => Some(meta),
         Err(e) => {
             eprintln!(
@@ -213,6 +224,14 @@ mod tests {
     fn cannot_remove_default_branch() {
         let mut meta = BranchMeta::new("main");
         assert!(meta.remove_branch("main").is_none());
+    }
+
+    #[test]
+    fn parse_rejects_schema_mismatch_as_corrupt() {
+        assert!(parse(r#"{"default_branch":"main","branches":{}}"#).is_ok());
+        assert!(parse("{not valid json").is_err());
+        assert!(parse(r#"{"default_branch": 5}"#).is_err());
+        assert!(parse("[]").is_err());
     }
 
     #[test]

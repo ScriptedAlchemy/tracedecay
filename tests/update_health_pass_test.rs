@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use common::apply_tracedecay_home_env;
 use tempfile::TempDir;
 use tracedecay::global_db::GlobalDb;
+use tracedecay::storage::BRANCH_META_QUARANTINE_PREFIX;
 
 fn canonical_temp_path(path: &Path) -> PathBuf {
     #[cfg(windows)]
@@ -128,7 +129,7 @@ fn quarantined_branch_meta_files(shard: &Path) -> Vec<PathBuf> {
         .filter(|path| {
             path.file_name().is_some_and(|name| {
                 name.to_string_lossy()
-                    .starts_with("branch-meta.json.corrupt-")
+                    .starts_with(BRANCH_META_QUARANTINE_PREFIX)
             })
         })
         .collect()
@@ -170,6 +171,43 @@ fn post_update_quarantines_corrupt_branch_meta() {
         std::fs::read_to_string(&valid).unwrap(),
         r#"{"default_branch":"main","branches":{}}"#,
         "valid branch-meta.json must be left untouched"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Quarantined 1 corrupt branch metadata file(s)"),
+        "stderr should report the quarantine\nstderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn post_update_quarantines_schema_corrupt_branch_meta() {
+    let home = TempDir::new().unwrap();
+    let home_root = canonical_temp_path(home.path());
+    let profile_root = home_root.join(".tracedecay");
+    // Valid JSON, but not a valid BranchMeta — the runtime treats any schema
+    // mismatch as corrupt, so the health pass must quarantine it too.
+    let schema_corrupt =
+        write_branch_meta(&profile_root, "proj_schema", r#"{"default_branch": 5}"#);
+
+    let mut command = post_update_command(&home_root);
+    command.arg("post-update");
+    let output = run_with_timeout(command, cli_timeout());
+
+    assert_success(&output, "post-update");
+    assert!(
+        !schema_corrupt.exists(),
+        "schema-corrupt branch-meta.json should be quarantined away"
+    );
+    let quarantined = quarantined_branch_meta_files(schema_corrupt.parent().unwrap());
+    assert_eq!(
+        quarantined.len(),
+        1,
+        "exactly one quarantine file expected, got {quarantined:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&quarantined[0]).unwrap(),
+        r#"{"default_branch": 5}"#,
+        "quarantine must preserve the corrupt content as evidence"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(

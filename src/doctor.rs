@@ -7,6 +7,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::agents::{self, DoctorCounters, HealthcheckContext};
 use crate::display::{format_bytes, format_token_count};
+use crate::migrate::registry::code_project_root_exists;
 use crate::tracedecay::TraceDecay;
 
 pub mod heal;
@@ -309,10 +310,6 @@ async fn check_stale_code_projects(dc: &mut DoctorCounters, gdb: &crate::global_
     dc.pass(&format!(
         "Purged {purged} stale code project registry row(s)"
     ));
-}
-
-fn code_project_root_exists(project: &crate::global_db::CodeProjectRecord) -> bool {
-    Path::new(&project.canonical_root).exists() || Path::new(&project.display_root).exists()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
