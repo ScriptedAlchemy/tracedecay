@@ -5,54 +5,11 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
-use common::TraceDecayStorageEnvGuard;
-use tempfile::TempDir;
+use common::IsolatedEnv;
 use tracedecay::branch::BranchAddOutcome;
 use tracedecay::branch_meta::load_branch_meta;
 use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::TraceDecay;
-
-/// Serializes the tests in this binary: storage isolation swaps process-wide
-/// env vars (`HOME`, `TRACEDECAY_DATA_DIR`, ...), so tests must not overlap.
-static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-/// Keeps every test's project registration, store manifests, and
-/// branch-meta writes inside a throwaway home instead of the developer's
-/// real `~/.tracedecay` profile store.
-struct IsolatedEnv {
-    _env_lock: tokio::sync::MutexGuard<'static, ()>,
-    storage: TraceDecayStorageEnvGuard,
-    _dir: TempDir,
-}
-
-impl IsolatedEnv {
-    fn build(env_lock: tokio::sync::MutexGuard<'static, ()>) -> (Self, PathBuf) {
-        let dir = TempDir::new().unwrap();
-        let storage = TraceDecayStorageEnvGuard::for_tempdir(&dir);
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        (
-            Self {
-                _env_lock: env_lock,
-                storage,
-                _dir: dir,
-            },
-            project,
-        )
-    }
-
-    async fn acquire() -> (Self, PathBuf) {
-        Self::build(ENV_LOCK.lock().await)
-    }
-
-    fn acquire_blocking() -> (Self, PathBuf) {
-        Self::build(ENV_LOCK.blocking_lock())
-    }
-
-    fn home(&self) -> &Path {
-        self.storage.home()
-    }
-}
 
 fn git(project: &Path, args: &[&str]) {
     let output = Command::new("git")

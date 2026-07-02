@@ -3,8 +3,10 @@ use super::{
         hermes_profile_targets, hermes_selected_profile_targets, validate_hermes_profile_flags,
         validate_hermes_project_root_flag,
     },
-    is_local_install_command, run_update_steps, should_skip_agent_install_maintenance,
-    should_skip_startup_maintenance, Commands,
+    is_local_install_command, should_skip_agent_install_maintenance,
+    should_skip_startup_maintenance,
+    update_cmd::run_update_steps,
+    Commands,
 };
 use std::cell::RefCell;
 use tempfile::TempDir;

@@ -1,5 +1,6 @@
 use crate::cli::*;
-use crate::{parse_lcm_scope_arg, resolve_cli_project_root, tracedecay_bin_on_path};
+use crate::update_cmd::tracedecay_bin_on_path;
+use crate::{parse_lcm_scope_arg, resolve_cli_project_root};
 
 pub(crate) async fn handle_automation_command(
     action: AutomationAction,
