@@ -4,8 +4,8 @@ use serde_json::Value;
 
 use crate::global_db::GlobalDb;
 use crate::sessions::shared::{
-    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools, paths_equal,
-    title_from_messages, StoredCursor,
+    append_location_metadata, append_tool_calls_metadata, append_usage_metadata,
+    content_storage_text_and_tools, paths_equal, title_from_messages, StoredCursor,
 };
 use crate::sessions::source::{
     collect_files_with_ext, ingest_source, stream_new_jsonl, ParsedTranscript, SessionDraft,
@@ -252,6 +252,8 @@ fn parse_cursor_jsonl(
     let subagent_model = subagent.as_ref().and_then(|(_, agent_id)| {
         parent_dispatch_model_for_subagent(path, parent_session_id, agent_id)
     });
+    let event_cwd = event_cwd(event);
+    let event_location_provenance = event_location_provenance(event);
     let mut carry = TimestampCarry::new(i64::try_from(new.new_cursor.mtime).ok());
     let mut messages = Vec::new();
     for line in &new.lines {
@@ -261,6 +263,8 @@ fn parse_cursor_jsonl(
             source_offset: line.offset,
             derived_timestamp,
             model_fallback: subagent_model.as_deref(),
+            event_cwd: event_cwd.as_deref(),
+            event_location_provenance,
         };
         // The byte offset doubles as the message ordinal and source_offset,
         // matching the original Cursor ingestion.
@@ -302,7 +306,12 @@ fn parse_cursor_jsonl(
             project_key,
             project_path,
             title: title_from_messages(&messages),
-            metadata_json: serde_json::to_string(&session_metadata(event)).ok(),
+            metadata_json: serde_json::to_string(&session_metadata(
+                event,
+                event_cwd.as_deref(),
+                event_location_provenance,
+            ))
+            .ok(),
             parent_session_id: draft_parent_session_id,
             is_subagent,
             agent_id,
@@ -482,6 +491,7 @@ impl TranscriptSource for CursorSweepSource {
         let event = serde_json::json!({
             "session_id": parent_session_id,
             "cwd": project_root.to_string_lossy(),
+            "tracedecay_location_provenance": "sweep_project_root",
         });
         parse_cursor_jsonl(&event, &parent_session_id, path, prev, max_new_bytes)
     }
@@ -743,6 +753,8 @@ struct CursorMessageContext<'a> {
     source_offset: i64,
     derived_timestamp: Option<i64>,
     model_fallback: Option<&'a str>,
+    event_cwd: Option<&'a Path>,
+    event_location_provenance: &'a str,
 }
 
 fn event_message(
@@ -799,7 +811,13 @@ fn event_message(
         tool_names: (!tool_names.is_empty()).then(|| tool_names.join(",")),
         source_path: Some(context.transcript_path.to_string_lossy().to_string()),
         source_offset: Some(context.source_offset),
-        metadata_json: serde_json::to_string(&message_metadata(record, message)).ok(),
+        metadata_json: serde_json::to_string(&message_metadata(
+            record,
+            message,
+            context.event_cwd,
+            context.event_location_provenance,
+        ))
+        .ok(),
     })
 }
 
@@ -864,11 +882,12 @@ fn event_dispatch_messages(
             tool_names: Some(name.to_string()),
             source_path: Some(context.transcript_path.to_string_lossy().to_string()),
             source_offset: Some(context.source_offset),
-            metadata_json: serde_json::to_string(&serde_json::json!({
-                "source": "cursor_transcript",
-                "raw_type": record.get("type").cloned(),
-                "tool_use_id": tool_use_id,
-            }))
+            metadata_json: serde_json::to_string(&dispatch_message_metadata(
+                record,
+                tool_use_id,
+                context.event_cwd,
+                context.event_location_provenance,
+            ))
             .ok(),
         });
     }
@@ -975,12 +994,7 @@ fn event_session_id(event: &Value, transcript_path: &Path) -> String {
 }
 
 fn event_project(event: &Value) -> (String, String) {
-    let cwd_root = event
-        .get("cwd")
-        .and_then(Value::as_str)
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
-        .and_then(|cwd| crate::config::discover_project_root(&cwd));
+    let cwd_root = event_cwd(event).and_then(|cwd| crate::config::discover_project_root(&cwd));
     let candidates = event_project_candidates(event);
     let resolved = candidates
         .iter()
@@ -994,6 +1008,14 @@ fn event_project(event: &Value) -> (String, String) {
     };
     let project = project_path.to_string_lossy().to_string();
     (project.clone(), project)
+}
+
+fn event_cwd(event: &Value) -> Option<PathBuf> {
+    event
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
 }
 
 fn event_project_candidates(event: &Value) -> Vec<PathBuf> {
@@ -1047,16 +1069,52 @@ fn record_timestamp(value: &Value) -> Option<i64> {
         })
 }
 
-fn session_metadata(event: &Value) -> Value {
-    serde_json::json!({
-        "source": "cursor_transcript",
-        "conversation_id": event.get("conversation_id").cloned(),
-        "hook_event_name": event.get("hook_event_name").cloned(),
-        "cursor_version": event.get("cursor_version").cloned(),
-    })
+fn event_location_provenance(event: &Value) -> &str {
+    event
+        .get("tracedecay_location_provenance")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("hook_event")
 }
 
-fn message_metadata(record: &Value, message: &Value) -> Value {
+fn session_metadata(event: &Value, event_cwd: Option<&Path>, location_provenance: &str) -> Value {
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        "source".to_string(),
+        Value::String("cursor_transcript".to_string()),
+    );
+    metadata.insert(
+        "conversation_id".to_string(),
+        event.get("conversation_id").cloned().unwrap_or(Value::Null),
+    );
+    metadata.insert(
+        "hook_event_name".to_string(),
+        event.get("hook_event_name").cloned().unwrap_or(Value::Null),
+    );
+    metadata.insert(
+        "cursor_version".to_string(),
+        event.get("cursor_version").cloned().unwrap_or(Value::Null),
+    );
+    if let Some(roots) = event.get("workspace_roots") {
+        metadata.insert("workspace_roots".to_string(), roots.clone());
+    }
+    append_location_metadata(
+        &mut metadata,
+        "cursor_event_cwd",
+        "cursor_event_worktree",
+        "cursor_event_location_provenance",
+        event_cwd,
+        location_provenance,
+    );
+    Value::Object(metadata)
+}
+
+fn message_metadata(
+    record: &Value,
+    message: &Value,
+    event_cwd: Option<&Path>,
+    location_provenance: &str,
+) -> Value {
     let mut metadata = serde_json::Map::new();
     metadata.insert(
         "source".to_string(),
@@ -1066,9 +1124,47 @@ fn message_metadata(record: &Value, message: &Value) -> Value {
         "raw_type".to_string(),
         record.get("type").cloned().unwrap_or(Value::Null),
     );
+    append_location_metadata(
+        &mut metadata,
+        "cursor_event_cwd",
+        "cursor_event_worktree",
+        "cursor_event_location_provenance",
+        event_cwd,
+        location_provenance,
+    );
     append_tool_calls_metadata(&mut metadata, message);
     // Cursor transcripts carry no token counters today (verified across
     // 100k+ real lines); this probe is future-proofing for when they do.
     append_usage_metadata(&mut metadata, &[record, message]);
+    Value::Object(metadata)
+}
+
+fn dispatch_message_metadata(
+    record: &Value,
+    tool_use_id: Option<&str>,
+    event_cwd: Option<&Path>,
+    location_provenance: &str,
+) -> Value {
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        "source".to_string(),
+        Value::String("cursor_transcript".to_string()),
+    );
+    metadata.insert(
+        "raw_type".to_string(),
+        record.get("type").cloned().unwrap_or(Value::Null),
+    );
+    metadata.insert(
+        "tool_use_id".to_string(),
+        tool_use_id.map_or(Value::Null, |id| Value::String(id.to_string())),
+    );
+    append_location_metadata(
+        &mut metadata,
+        "cursor_event_cwd",
+        "cursor_event_worktree",
+        "cursor_event_location_provenance",
+        event_cwd,
+        location_provenance,
+    );
     Value::Object(metadata)
 }

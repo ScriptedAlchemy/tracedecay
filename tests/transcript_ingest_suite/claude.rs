@@ -5,7 +5,7 @@ use tracedecay::sessions::claude::ClaudeSource;
 use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::sessions::source::ingest_source;
 
-use crate::support::setup;
+use crate::support::{init_git_repo, setup};
 
 /// Writes a Claude Code transcript (one JSON object per line) for `session` whose
 /// recorded `cwd` is `project`.
@@ -93,6 +93,7 @@ fn write_claude_subagent_transcript(
 async fn claude_transcript_populates_searchable_messages() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
+    init_git_repo(&project);
     write_claude_transcript(&home, &project, "claude-sess");
 
     let db = open_project_session_db(&project).await.unwrap();
@@ -133,6 +134,19 @@ async fn claude_transcript_populates_searchable_messages() {
         .expect("assistant message should be searchable");
     let metadata: serde_json::Value =
         serde_json::from_str(assistant.message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        metadata["claude_message_cwd"].as_str(),
+        Some(project.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        metadata["claude_message_worktree"].as_str(),
+        Some(project.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        metadata["claude_message_location_provenance"].as_str(),
+        Some("transcript_record")
+    );
+    assert!(metadata.get("claude_git_branch").is_none());
     assert_eq!(metadata["usage"]["input_tokens"], 1200);
     assert_eq!(metadata["usage"]["output_tokens"], 340);
     assert_eq!(metadata["usage"]["cache_creation_input_tokens"], 500);
@@ -144,7 +158,33 @@ async fn claude_transcript_populates_searchable_messages() {
         .expect("user message should be searchable");
     let user_metadata: serde_json::Value =
         serde_json::from_str(user.message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        user_metadata["claude_message_cwd"].as_str(),
+        Some(project.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        user_metadata["claude_message_worktree"].as_str(),
+        Some(project.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        user_metadata["claude_message_location_provenance"].as_str(),
+        Some("transcript_record")
+    );
     assert!(user_metadata.get("usage").is_none());
+    let session_metadata: serde_json::Value =
+        serde_json::from_str(results[0].session.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        session_metadata["claude_session_cwd"].as_str(),
+        Some(project.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        session_metadata["claude_session_worktree"].as_str(),
+        Some(project.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        session_metadata["claude_session_location_provenance"].as_str(),
+        Some("transcript_session")
+    );
 
     let expected_content = serde_json::json!([
         {"type": "text", "text": "The billing pipeline regression is fixed."},

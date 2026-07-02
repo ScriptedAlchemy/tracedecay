@@ -16,6 +16,20 @@ pub fn init_project_at(project: &Path) {
     std::fs::write(project.join(".tracedecay/tracedecay.db"), "").unwrap();
 }
 
+pub fn init_git_repo(project: &Path) {
+    let output = std::process::Command::new("git")
+        .arg("init")
+        .current_dir(project)
+        .output()
+        .expect("git init should run");
+    assert!(
+        output.status.success(),
+        "git init should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// Builds an initialized project dir under `tmp` and returns it.
 pub fn init_project(tmp: &TempDir) -> PathBuf {
     let project = tmp.path().join("project");

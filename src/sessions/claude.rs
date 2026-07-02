@@ -17,8 +17,8 @@ use serde_json::Value;
 
 use crate::accounting::parser::parse_timestamp;
 use crate::sessions::shared::{
-    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools, paths_equal,
-    title_from_messages, StoredCursor,
+    append_location_metadata, append_tool_calls_metadata, append_usage_metadata,
+    content_storage_text_and_tools, paths_equal, title_from_messages, StoredCursor,
 };
 use crate::sessions::source::{
     collect_files_with_ext, stream_new_jsonl, ParsedTranscript, SessionDraft, TranscriptSource,
@@ -76,12 +76,13 @@ impl TranscriptSource for ClaudeSource {
         // Cheap project scoping: a transcript belongs to exactly one cwd. Claude
         // subagent files in the verified nested layout may omit cwd, so fall
         // back to the parent transcript's cwd when the path proves parentage.
-        match transcript_cwd(path).or_else(|| {
+        let session_cwd = transcript_cwd(path).or_else(|| {
             subagent
                 .as_ref()
                 .and_then(|info| transcript_cwd(&info.parent_transcript_path))
-        }) {
-            Some(cwd) if paths_equal(&cwd, project_root) => {}
+        });
+        match session_cwd.as_ref() {
+            Some(cwd) if paths_equal(cwd, project_root) => {}
             _ => return None,
         }
 
@@ -98,7 +99,13 @@ impl TranscriptSource for ClaudeSource {
 
         let mut messages = Vec::new();
         for line in &new.lines {
-            if let Some(message) = message_from_line(&line.value, &session_id, path, line.offset) {
+            if let Some(message) = message_from_line(
+                &line.value,
+                &session_id,
+                path,
+                line.offset,
+                session_cwd.as_deref(),
+            ) {
                 messages.push(message);
             }
         }
@@ -109,10 +116,7 @@ impl TranscriptSource for ClaudeSource {
             project_key: project.clone(),
             project_path: project,
             title: title_from_messages(&messages),
-            metadata_json: serde_json::to_string(&serde_json::json!({
-                "source": "claude_transcript",
-            }))
-            .ok(),
+            metadata_json: serde_json::to_string(&session_metadata(session_cwd.as_deref())).ok(),
             parent_session_id: subagent.as_ref().map(|info| info.parent_session_id.clone()),
             is_subagent: subagent.is_some(),
             agent_id: subagent.as_ref().map(|info| info.agent_id.clone()),
@@ -181,6 +185,7 @@ fn message_from_line(
     session_id: &str,
     path: &Path,
     offset: i64,
+    session_cwd: Option<&Path>,
 ) -> Option<SessionMessageRecord> {
     let kind = record.get("type").and_then(Value::as_str)?;
     if kind != "user" && kind != "assistant" {
@@ -233,17 +238,58 @@ fn message_from_line(
         tool_names: (!tool_names.is_empty()).then(|| tool_names.join(",")),
         source_path: Some(path.to_string_lossy().to_string()),
         source_offset: Some(offset),
-        metadata_json: serde_json::to_string(&message_metadata(kind, message)).ok(),
+        metadata_json: serde_json::to_string(&message_metadata(kind, record, message, session_cwd))
+            .ok(),
     })
 }
 
-fn message_metadata(kind: &str, message: &Value) -> Value {
+fn session_metadata(session_cwd: Option<&Path>) -> Value {
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        "source".to_string(),
+        Value::String("claude_transcript".to_string()),
+    );
+    append_location_metadata(
+        &mut metadata,
+        "claude_session_cwd",
+        "claude_session_worktree",
+        "claude_session_location_provenance",
+        session_cwd,
+        "transcript_session",
+    );
+    Value::Object(metadata)
+}
+
+fn message_metadata(
+    kind: &str,
+    record: &Value,
+    message: &Value,
+    session_cwd: Option<&Path>,
+) -> Value {
     let mut metadata = serde_json::Map::new();
     metadata.insert(
         "source".to_string(),
         Value::String("claude_transcript".to_string()),
     );
     metadata.insert("raw_type".to_string(), Value::String(kind.to_string()));
+    let record_cwd = record
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|cwd| !cwd.is_empty())
+        .map(PathBuf::from);
+    let (location_cwd, location_provenance) = if record_cwd.is_some() {
+        (record_cwd.as_deref(), "transcript_record")
+    } else {
+        (session_cwd, "transcript_session")
+    };
+    append_location_metadata(
+        &mut metadata,
+        "claude_message_cwd",
+        "claude_message_worktree",
+        "claude_message_location_provenance",
+        location_cwd,
+        location_provenance,
+    );
     append_tool_calls_metadata(&mut metadata, message);
     // Anthropic-style per-message counters: `message.usage.{input_tokens,
     // output_tokens, cache_creation_input_tokens, cache_read_input_tokens}`.

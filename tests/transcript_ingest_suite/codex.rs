@@ -7,7 +7,7 @@ use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::sessions::lcm::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmExpandRequest, LcmExpandTarget,
 };
-use tracedecay::sessions::source::ingest_source;
+use tracedecay::sessions::source::{ingest_source, StoredCursor, TranscriptSource};
 
 use crate::support::setup;
 
@@ -1417,6 +1417,10 @@ async fn codex_messages_keep_turn_cwd_and_session_git_updates() {
 
     let first = metadata_of("First branch");
     assert_eq!(first["codex_turn_cwd"], main_cwd.as_ref());
+    assert_eq!(
+        first["codex_turn_location_provenance"].as_str(),
+        Some("codex_context")
+    );
     assert_eq!(first["codex_git_branch"], "main");
     assert_eq!(
         first["codex_git_commit_hash"],
@@ -1425,9 +1429,108 @@ async fn codex_messages_keep_turn_cwd_and_session_git_updates() {
 
     let second = metadata_of("Second branch");
     assert_eq!(second["codex_turn_cwd"], linked_cwd.as_ref());
+    assert_eq!(
+        second["codex_turn_location_provenance"].as_str(),
+        Some("codex_context")
+    );
     assert_eq!(second["codex_git_branch"], "feature/worktree");
     assert_eq!(
         second["codex_git_commit_hash"],
+        "2222222222222222222222222222222222222222"
+    );
+}
+
+#[tokio::test]
+async fn codex_incremental_ingest_reconstructs_prior_turn_cwd_and_git() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let linked_worktree = tmp.path().join("linked-worktree");
+    std::fs::create_dir_all(&linked_worktree).unwrap();
+    let dir = home.join(".codex/sessions/2026/01/01");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("rollout-2026-01-01T00-00-00-branch-incremental.jsonl");
+    let main_cwd = project.to_string_lossy();
+    let linked_cwd = linked_worktree.to_string_lossy();
+    let prior_lines = [
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:00.000Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "branch-incremental",
+                "cwd": main_cwd,
+                "model_provider": "openai",
+                "git": {
+                    "branch": "main",
+                    "commit_hash": "1111111111111111111111111111111111111111"
+                }
+            }
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:01.000Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "First incremental branch marker"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:02.000Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "branch-incremental",
+                "cwd": main_cwd,
+                "model_provider": "openai",
+                "git": {
+                    "branch": "feature/worktree",
+                    "commit_hash": "2222222222222222222222222222222222222222"
+                }
+            }
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:02.500Z",
+            "type": "turn_context",
+            "payload": {"turn_id": "t2", "cwd": linked_cwd, "model": "gpt-5.5"}
+        }),
+    ];
+    let prior = prior_lines
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let resumed_line = serde_json::json!({
+        "timestamp": "2026-01-01T00:00:03.000Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "agent_message",
+            "message": "Second incremental branch marker"
+        }
+    })
+    .to_string()
+        + "\n";
+    std::fs::write(&path, format!("{prior}{resumed_line}")).unwrap();
+
+    let source = CodexSource::with_home(&home);
+    let parsed = source
+        .parse_new(
+            &path,
+            StoredCursor {
+                position: prior.len() as u64,
+                mtime: 0,
+                file_id: 0,
+            },
+            &project,
+            None,
+        )
+        .expect("resumed parse should produce the appended message");
+    assert_eq!(parsed.messages.len(), 1);
+    let metadata: serde_json::Value =
+        serde_json::from_str(parsed.messages[0].metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["codex_turn_cwd"], linked_cwd.as_ref());
+    assert_eq!(
+        metadata["codex_turn_location_provenance"].as_str(),
+        Some("codex_context")
+    );
+    assert_eq!(metadata["codex_git_branch"], "feature/worktree");
+    assert_eq!(
+        metadata["codex_git_commit_hash"],
         "2222222222222222222222222222222222222222"
     );
 }

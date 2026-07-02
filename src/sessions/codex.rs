@@ -36,6 +36,8 @@
 //! `response_item` form. This append-only JSONL is read with the shared
 //! byte-offset machinery and scoped to the current project by `session_meta.cwd`.
 
+mod context;
+
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
@@ -50,6 +52,7 @@ use crate::sessions::source::{
     collect_files_with_ext, stream_new_jsonl, ParsedTranscript, SessionDraft, TranscriptSource,
 };
 use crate::sessions::SessionMessageRecord;
+use context::CodexContextState;
 
 const PROVIDER: &str = "codex";
 /// `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` → date dirs add depth.
@@ -127,54 +130,31 @@ impl TranscriptSource for CodexSource {
         let new = stream_new_jsonl(path, prev, max_new_bytes)?;
         let mut messages = Vec::new();
         let mut turn_usage = CodexTurnUsage::default();
-        // Real session_meta lines carry no model; track the active model from
-        // `turn_context` lines instead (it can change mid-session).
-        let mut current_model = meta.model.clone();
-        let mut current_cwd = Some(meta.cwd.clone());
-        let mut current_git = meta.git.clone();
         let replayed_from_start =
             prev.position > 0 && new.lines.first().is_some_and(|line| line.offset == 0);
-        let mut compaction_depth = if replayed_from_start {
-            0
+        let mut context_state = if prev.position > 0 && !replayed_from_start {
+            CodexContextState::scan_prior(path, prev.position, &meta)
         } else {
-            prior_compaction_depth(path, prev.position)
+            CodexContextState::from_meta(&meta)
         };
         for line in &new.lines {
             if turn_usage.observe(&line.value) {
                 continue;
             }
-            if let Some(updated) = session_meta_from_record(&line.value, path) {
-                if updated.session_id == meta.session_id {
-                    current_cwd = Some(updated.cwd);
-                    if updated.git.is_some() {
-                        current_git = updated.git;
-                    }
-                    if updated.model.is_some() {
-                        current_model = updated.model;
-                    }
-                }
-                continue;
-            }
-            if let Some(context) = turn_context_from_record(&line.value) {
-                if context.model.is_some() {
-                    current_model = context.model;
-                }
-                if context.cwd.is_some() {
-                    current_cwd = context.cwd;
-                }
+            if context_state.observe_context_record(&line.value, path, &meta) {
                 continue;
             }
             if let Some(mut message) = response_item_goal_context_from_line(
                 &line.value,
                 &meta,
-                current_model.as_deref(),
+                context_state.model.as_deref(),
                 path,
                 line.offset,
             ) {
-                annotate_message_context(
+                context::annotate_message(
                     &mut message,
-                    current_cwd.as_deref(),
-                    current_git.as_ref(),
+                    context_state.cwd.as_deref(),
+                    context_state.git.as_ref(),
                 );
                 messages.push(message);
                 continue;
@@ -182,17 +162,17 @@ impl TranscriptSource for CodexSource {
             if let Some(mut message) = compacted_summary_from_line(
                 &line.value,
                 &meta,
-                current_model.as_deref(),
+                context_state.model.as_deref(),
                 path,
                 line.offset,
-                compaction_depth + 1,
+                context_state.compaction_depth + 1,
             ) {
                 flush_turn_usage(&mut messages, &mut turn_usage);
-                compaction_depth += 1;
-                annotate_message_context(
+                context_state.compaction_depth += 1;
+                context::annotate_message(
                     &mut message,
-                    current_cwd.as_deref(),
-                    current_git.as_ref(),
+                    context_state.cwd.as_deref(),
+                    context_state.git.as_ref(),
                 );
                 messages.push(message);
                 continue;
@@ -200,14 +180,14 @@ impl TranscriptSource for CodexSource {
             if let Some(mut message) = goal_context_from_line(
                 &line.value,
                 &meta,
-                current_model.as_deref(),
+                context_state.model.as_deref(),
                 path,
                 line.offset,
             ) {
-                annotate_message_context(
+                context::annotate_message(
                     &mut message,
-                    current_cwd.as_deref(),
-                    current_git.as_ref(),
+                    context_state.cwd.as_deref(),
+                    context_state.git.as_ref(),
                 );
                 messages.push(message);
                 continue;
@@ -215,7 +195,7 @@ impl TranscriptSource for CodexSource {
             if let Some(mut message) = message_from_line(
                 &line.value,
                 &meta,
-                current_model.as_deref(),
+                context_state.model.as_deref(),
                 path,
                 line.offset,
             ) {
@@ -224,10 +204,10 @@ impl TranscriptSource for CodexSource {
                 if message.role == "user" {
                     flush_turn_usage(&mut messages, &mut turn_usage);
                 }
-                annotate_message_context(
+                context::annotate_message(
                     &mut message,
-                    current_cwd.as_deref(),
-                    current_git.as_ref(),
+                    context_state.cwd.as_deref(),
+                    context_state.git.as_ref(),
                 );
                 messages.push(message);
             }
@@ -242,7 +222,7 @@ impl TranscriptSource for CodexSource {
             project_key: project.clone(),
             project_path: project,
             title: title_from_messages(&messages),
-            metadata_json: codex_metadata_json(&meta),
+            metadata_json: context::session_metadata_json(&meta),
             parent_session_id: meta.parent_session_id.clone(),
             is_subagent: meta.is_subagent,
             agent_id: meta.agent_id.clone(),
@@ -341,77 +321,12 @@ fn string_field(payload: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn prior_compaction_depth(path: &Path, before_offset: u64) -> i64 {
-    use std::io::BufRead;
-
-    if before_offset == 0 {
-        return 0;
-    }
-    let Ok(file) = std::fs::File::open(path) else {
-        return 0;
-    };
-    let mut reader = std::io::BufReader::new(file);
-    let mut line = String::new();
-    let mut offset = 0_u64;
-    let mut depth = 0_i64;
-    loop {
-        line.clear();
-        let Ok(n) = reader.read_line(&mut line) else {
-            break;
-        };
-        if n == 0 || offset >= before_offset {
-            break;
-        }
-        let line_offset = offset;
-        offset = offset.saturating_add(n as u64);
-        if line_offset >= before_offset {
-            break;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
-            continue;
-        };
-        if value.get("type").and_then(Value::as_str) == Some("compacted") {
-            depth += 1;
-        }
-    }
-    depth
-}
-
 fn nested_string_field(payload: &Value, pointer: &str) -> Option<String> {
     payload
         .pointer(pointer)
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-}
-
-fn codex_metadata_json(meta: &CodexMeta) -> Option<String> {
-    let mut metadata = serde_json::Map::new();
-    metadata.insert(
-        "source".to_string(),
-        Value::String("codex_rollout".to_string()),
-    );
-    if let Some(thread_source) = &meta.thread_source {
-        metadata.insert(
-            "thread_source".to_string(),
-            Value::String(thread_source.clone()),
-        );
-    }
-    if let Some(agent_role) = &meta.agent_role {
-        metadata.insert("agent_role".to_string(), Value::String(agent_role.clone()));
-    }
-    if let Some(agent_nickname) = &meta.agent_nickname {
-        metadata.insert(
-            "agent_nickname".to_string(),
-            Value::String(agent_nickname.clone()),
-        );
-    }
-    metadata.insert(
-        "codex_session_cwd".to_string(),
-        Value::String(meta.cwd.to_string_lossy().to_string()),
-    );
-    insert_git_metadata(&mut metadata, meta.git.as_ref());
-    serde_json::to_string(&Value::Object(metadata)).ok()
 }
 
 struct CodexTurnContext {
@@ -863,61 +778,6 @@ fn is_goal_context_text(text: &str) -> bool {
             lower.starts_with("remaining token budget:") || lower.starts_with("token budget:");
     }
     has_objective && has_budget
-}
-
-fn annotate_message_context(
-    message: &mut SessionMessageRecord,
-    cwd: Option<&Path>,
-    git: Option<&Value>,
-) {
-    let mut metadata = message
-        .metadata_json
-        .as_deref()
-        .and_then(|json| serde_json::from_str::<Value>(json).ok())
-        .and_then(|value| match value {
-            Value::Object(map) => Some(map),
-            _ => None,
-        })
-        .unwrap_or_default();
-
-    if let Some(cwd) = cwd {
-        metadata.insert(
-            "codex_turn_cwd".to_string(),
-            Value::String(cwd.to_string_lossy().to_string()),
-        );
-        if let Some(worktree) = crate::worktree::git_worktree_root(cwd) {
-            metadata.insert(
-                "codex_turn_worktree".to_string(),
-                Value::String(worktree.to_string_lossy().to_string()),
-            );
-        }
-    }
-    insert_git_metadata(&mut metadata, git);
-    message.metadata_json = serde_json::to_string(&Value::Object(metadata)).ok();
-}
-
-fn insert_git_metadata(metadata: &mut serde_json::Map<String, Value>, git: Option<&Value>) {
-    let Some(git) = git.and_then(Value::as_object) else {
-        return;
-    };
-    if let Some(branch) = git.get("branch").and_then(Value::as_str) {
-        metadata.insert(
-            "codex_git_branch".to_string(),
-            Value::String(branch.to_string()),
-        );
-    }
-    if let Some(commit) = git.get("commit_hash").and_then(Value::as_str) {
-        metadata.insert(
-            "codex_git_commit_hash".to_string(),
-            Value::String(commit.to_string()),
-        );
-    }
-    if let Some(remote) = git.get("repository_url").and_then(Value::as_str) {
-        metadata.insert(
-            "codex_git_repository_url".to_string(),
-            Value::String(remote.to_string()),
-        );
-    }
 }
 
 fn message_metadata(payload: &Value, goal_context: Option<&CodexGoalContext>) -> Value {

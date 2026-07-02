@@ -188,6 +188,45 @@ pub(crate) fn append_tool_calls_metadata(
     }
 }
 
+pub(crate) fn append_cwd_metadata(
+    map: &mut serde_json::Map<String, Value>,
+    cwd_key: &str,
+    worktree_key: &str,
+    cwd: Option<&Path>,
+) {
+    let Some(cwd) = cwd else {
+        return;
+    };
+    map.insert(
+        cwd_key.to_string(),
+        Value::String(cwd.to_string_lossy().to_string()),
+    );
+    if let Some(worktree) = crate::worktree::git_worktree_root(cwd) {
+        map.insert(
+            worktree_key.to_string(),
+            Value::String(worktree.to_string_lossy().to_string()),
+        );
+    }
+}
+
+pub(crate) fn append_location_metadata(
+    map: &mut serde_json::Map<String, Value>,
+    cwd_key: &str,
+    worktree_key: &str,
+    provenance_key: &str,
+    cwd: Option<&Path>,
+    provenance: &str,
+) {
+    let had_cwd = cwd.is_some();
+    append_cwd_metadata(map, cwd_key, worktree_key, cwd);
+    if had_cwd {
+        map.insert(
+            provenance_key.to_string(),
+            Value::String(provenance.to_string()),
+        );
+    }
+}
+
 /// Token-usage counter keys recognized by the savings dashboard
 /// (`dashboard/savings_api.rs` `MESSAGE_TOKENS_CTE`): both the Anthropic
 /// (`input_tokens`/`output_tokens`/`cache_*`) and `OpenAI`
