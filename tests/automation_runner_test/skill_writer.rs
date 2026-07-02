@@ -80,6 +80,98 @@ async fn skill_writer_default_provider_searches_all_providers() {
 }
 
 #[tokio::test]
+async fn skill_writer_replays_recent_sessions_without_keyword_matches() {
+    let _env_lock = ENV_LOCK.lock().await;
+    let temp = tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let cg = init_project(temp.path()).await;
+    let db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
+        .await
+        .expect("session db open");
+    // Deliberately avoids every keyword in the default skill writer query so
+    // the grep channel returns nothing and only session replay surfaces it.
+    seed_session_message_in_db(
+        &db,
+        cg.project_root(),
+        SeedSessionMessage {
+            provider: "cursor",
+            session_id: "skill-writer-replay-1",
+            message_id: "skill-writer-replay-1-message-001",
+            role: "assistant",
+            timestamp: 1_715_000_070,
+            text: "Ran the dashboard build twice before every release cut.",
+            source: None,
+        },
+    )
+    .await;
+    let _global_db = isolate_global_db(&cg);
+    let backend = SkillWriterReplayEvidenceBackend::new("skill-writer-replay-1");
+    let config = enabled_skill_writer_config();
+
+    let run = run_skill_writer_with_backend(
+        &cg,
+        &config,
+        &backend,
+        SkillWriterAutomationOptions {
+            profile_root: Some(profile_root),
+            ..SkillWriterAutomationOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
+}
+
+#[tokio::test]
+async fn skill_writer_skips_when_replay_disabled_and_no_grep_hits() {
+    let _env_lock = ENV_LOCK.lock().await;
+    let temp = tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let cg = init_project(temp.path()).await;
+    let db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
+        .await
+        .expect("session db open");
+    seed_session_message_in_db(
+        &db,
+        cg.project_root(),
+        SeedSessionMessage {
+            provider: "cursor",
+            session_id: "skill-writer-replay-2",
+            message_id: "skill-writer-replay-2-message-001",
+            role: "assistant",
+            timestamp: 1_715_000_080,
+            text: "Ran the dashboard build twice before every release cut.",
+            source: None,
+        },
+    )
+    .await;
+    let _global_db = isolate_global_db(&cg);
+    let backend = SkillJsonBackend::new(json!({"skills": []}));
+    let config = enabled_skill_writer_config();
+
+    let run = run_skill_writer_with_backend(
+        &cg,
+        &config,
+        &backend,
+        SkillWriterAutomationOptions {
+            include_recent_sessions: false,
+            profile_root: Some(profile_root),
+            ..SkillWriterAutomationOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(backend.calls(), 0);
+    assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
+    assert_eq!(
+        run.ledger_record.error.as_deref(),
+        Some("no_skill_writer_evidence")
+    );
+}
+
+#[tokio::test]
 async fn skill_writer_runner_reads_hermes_profile_lcm() {
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");

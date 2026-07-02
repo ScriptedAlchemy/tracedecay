@@ -2714,6 +2714,35 @@ impl GlobalDb {
         crate::sessions::lcm::query::load_session(&self.conn, request).await
     }
 
+    /// Lists sessions in the raw LCM store ordered by most recent activity.
+    ///
+    /// `provider = None` spans all providers. Used to select "recently
+    /// active" sessions for automation session-replay evidence.
+    pub async fn lcm_recent_sessions(
+        &self,
+        provider: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<crate::sessions::lcm::LcmRecentSession>, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::query::recent_sessions(&self.conn, provider, limit).await
+    }
+
+    /// Lists providers that have raw LCM messages for an explicit session id.
+    pub async fn lcm_session_providers(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<String>, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::query::session_providers(&self.conn, session_id).await
+    }
+
+    /// Loads a bounded turn-ordered replay slice (head/tail turns plus top
+    /// summary-DAG nodes) for one session.
+    pub async fn lcm_session_replay_slice(
+        &self,
+        request: &crate::sessions::lcm::LcmSessionReplayRequest,
+    ) -> Result<crate::sessions::lcm::LcmSessionReplaySlice, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::query::session_replay_slice(&self.conn, request).await
+    }
+
     /// Searches bounded LCM raw snippets and, optionally, summary node text.
     pub async fn lcm_grep(
         &self,
