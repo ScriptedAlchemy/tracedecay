@@ -595,9 +595,11 @@ impl JobRunContext<'_> {
         error: Option<String>,
     ) -> AutomationRunLedgerRecord {
         let completed_at = current_timestamp().to_string();
-        let error_classification = (status == AutomationRunStatus::Failed)
-            .then(|| error.as_deref().map(classify_agent_task_error_message))
-            .flatten();
+        let error_classification = if status == AutomationRunStatus::Failed {
+            error.as_deref().map(classify_agent_task_error_message)
+        } else {
+            None
+        };
         AutomationRunLedgerRecord {
             schema_version: 2,
             run_id: self.run_id.to_string(),
@@ -624,9 +626,11 @@ impl JobRunContext<'_> {
             accepted_count: 0,
             rejected_count: 0,
             skipped_count: usize::from(status == AutomationRunStatus::Skipped),
-            fallback_status: (status == AutomationRunStatus::Skipped)
-                .then(|| error.clone())
-                .flatten(),
+            fallback_status: if status == AutomationRunStatus::Skipped {
+                error.clone()
+            } else {
+                None
+            },
             error,
             error_classification,
             error_retryable: error_classification
