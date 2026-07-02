@@ -106,14 +106,15 @@ section so the contributor command and blocking/advisory split still match CI.
 1. Add a tree-sitter grammar dependency (or vendor it under `vendor/`).
 2. Create `src/extraction/{lang}_extractor.rs` implementing the `Extractor` trait.
 3. Register it in the `LanguageRegistry` with a feature flag (e.g., `lang-{name}`).
-4. Add a fixture file `tests/fixtures/sample.{ext}` and a test file `tests/{lang}_extraction_test.rs`.
+4. Add a fixture file `tests/fixtures/sample.{ext}` and a test module `tests/extraction_suite/{lang}.rs`, then register it with a `mod {lang};` declaration in `tests/extraction_suite/main.rs`.
 5. Update the feature flag tables in `Cargo.toml` and this document.
 
 ## Running Specific Tests
 
 ```bash
-# All tests for a specific language
-cargo nextest run --test rust_extraction_test
+# All extractor tests for a specific language (module inside the
+# consolidated extraction_suite binary)
+cargo nextest run -E 'binary(=extraction_suite) and test(/^rust::/)'
 
 # A single test by name
 cargo nextest run test_find_stale_files
