@@ -93,6 +93,12 @@ pub struct UserConfig {
     /// dashboard sidecars may override these values.
     #[serde(default, skip_serializing_if = "AutomationConfig::is_default")]
     pub automation: AutomationConfig,
+
+    /// Whether lifecycle hooks inject fact-store memory into agent context
+    /// (session digests, prompt-gated recall, the Cursor memory rule).
+    /// The `TRACEDECAY_MEMORY_INJECTION` env var overrides this at runtime.
+    #[serde(default = "default_true")]
+    pub memory_injection_enabled: bool,
 }
 
 fn default_true() -> bool {
@@ -128,6 +134,7 @@ impl Default for UserConfig {
             previous_version: String::new(),
             extraction_timeout_secs: default_extraction_timeout_secs(),
             automation: AutomationConfig::default(),
+            memory_injection_enabled: true,
         }
     }
 }

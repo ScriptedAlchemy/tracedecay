@@ -240,6 +240,7 @@ mod tests {
                 checksum: String::new(),
                 created_at: 1,
                 updated_at: 1,
+                approved_at: None,
                 provenance: ManagedSkillProvenance {
                     source: ManagedSkillSource::AutomationRun,
                     actor: "test".to_string(),

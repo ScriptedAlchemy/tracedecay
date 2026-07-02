@@ -162,6 +162,7 @@ impl AgentIntegration for CodexIntegration {
         } else {
             doctor_check_plugin(dc, &ctx.home);
         }
+        doctor_suggest_native_memories_off(dc, &ctx.home);
     }
 
     fn is_detected(&self, home: &Path) -> bool {
@@ -1386,6 +1387,51 @@ fn doctor_check_hooks(dc: &mut DoctorCounters, hooks_path: &Path) {
     }
 }
 
+/// Suggests turning off Codex's native memories *injection* when tracedecay's
+/// fact-store injection is active, so the model does not receive two parallel
+/// memory systems built from the same sessions. This is advisory only: the
+/// user's `config.toml` is never edited, and tracedecay never writes into
+/// `~/.codex/memories/` — the holographic fact store stays the single source
+/// of truth and delivery is rendered prompt context only.
+fn doctor_suggest_native_memories_off(dc: &mut DoctorCounters, home: &Path) {
+    if !crate::hooks::memory_inject::memory_injection_enabled() {
+        return;
+    }
+    let config_path = home.join(".codex/config.toml");
+    let Ok(config) = load_toml_file(&config_path) else {
+        return;
+    };
+    if codex_native_memories_injection_enabled(&config) {
+        dc.info(
+            "Codex native memories injection is enabled alongside tracedecay's \
+             fact-store injection; consider setting `memories.use_memories = false` \
+             in ~/.codex/config.toml so per-project memory comes from the tracedecay \
+             fact store only (tracedecay never edits this setting itself)",
+        );
+    }
+}
+
+/// True when Codex's experimental memories feature is on and session-start
+/// memory injection (`memories.use_memories`, default true) is not disabled.
+fn codex_native_memories_injection_enabled(config: &toml::Value) -> bool {
+    let memories_feature_on = config
+        .get("features")
+        .and_then(|features| features.get("memories"))
+        .is_some_and(|memories| {
+            // `memories = true` (bool) or the nested `[features.memories]` table
+            // form both mean the feature is enabled.
+            memories.as_bool().unwrap_or(memories.is_table())
+        });
+    if !memories_feature_on {
+        return false;
+    }
+    config
+        .get("memories")
+        .and_then(|memories| memories.get("use_memories"))
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(true)
+}
+
 fn codex_hook_present(hooks: &serde_json::Value, event: &str, command: &str) -> bool {
     hooks["hooks"][event].as_array().is_some_and(|groups| {
         groups.iter().any(|group| {
@@ -1407,6 +1453,28 @@ mod tests {
 
     fn repo_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
+    }
+
+    #[test]
+    fn native_memories_injection_detection_covers_config_shapes() {
+        let parse = |raw: &str| toml::from_str::<toml::Value>(raw).unwrap();
+        // Feature on (bool form), use_memories defaulting to true.
+        assert!(codex_native_memories_injection_enabled(&parse(
+            "[features]\nmemories = true\n"
+        )));
+        // Feature on (nested table form).
+        assert!(codex_native_memories_injection_enabled(&parse(
+            "[features.memories]\ncustom_tools = true\n"
+        )));
+        // Injection explicitly disabled.
+        assert!(!codex_native_memories_injection_enabled(&parse(
+            "[features]\nmemories = true\n[memories]\nuse_memories = false\n"
+        )));
+        // Feature off or absent.
+        assert!(!codex_native_memories_injection_enabled(&parse(
+            "[features]\nmemories = false\n"
+        )));
+        assert!(!codex_native_memories_injection_enabled(&parse("")));
     }
 
     #[test]
