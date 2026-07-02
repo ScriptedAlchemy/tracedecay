@@ -159,6 +159,7 @@ criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 # tests (daemon restart-grace windows) run on virtual time instead of real
 # sleeps.
 tokio = { version = "1", features = ["full", "test-util"] }
+jsonschema = { version = "0.46.8", default-features = false }
 
 [[bench]]
 name = "large_repos"
