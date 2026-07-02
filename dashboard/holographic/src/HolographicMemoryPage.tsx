@@ -39,6 +39,7 @@ import SemanticMap, { type SemanticMapFocus } from "./SemanticMap";
 import SimilarityPanel from "./SimilarityPanel";
 import AssociationGraph from "./AssociationGraph";
 import CurationPanel from "./CurationPanel";
+import { usePendingAutomationCounts } from "./curation/usePendingAutomationCounts";
 import { NUM_BADGE } from "./ui";
 import { MiniBar } from "./MiniBar";
 import { Stat } from "../../lib/primitives";
@@ -901,6 +902,10 @@ function HolographicView({
     window.history.replaceState(null, "", url);
   }, []);
 
+  // Pending automation output (skill drafts + fact proposals awaiting
+  // review) surfaces as a count badge on the Curation tab (parity R5).
+  const pendingAutomationCount = usePendingAutomationCounts(api);
+
   // Cross-view navigation: a similarity pair jumps to the Semantic Map with
   // both facts selected and the first one pinned.
   const [mapFocus, setMapFocus] = useState<SemanticMapFocus | null>(null);
@@ -939,6 +944,15 @@ function HolographicView({
             >
               {tab.icon}
               {tab.label}
+              {tab.key === "curation" && pendingAutomationCount > 0 && (
+                <Badge
+                  tone="secondary"
+                  className={NUM_BADGE}
+                  aria-label={`${pendingAutomationCount} automation items awaiting review`}
+                >
+                  {pendingAutomationCount}
+                </Badge>
+              )}
             </Button>
           ))}
         </div>

@@ -596,6 +596,12 @@ pub struct McpServer {
     /// [`maybe_sync_if_stale`](Self::maybe_sync_if_stale) so concurrent
     /// tool calls don't pile on the same walk.
     last_staleness_check_at: AtomicI64,
+    /// UNIX timestamp (secs) of the most recent staged-automation notice
+    /// check. Same `compare_exchange` cooldown pattern as
+    /// [`last_staleness_check_at`](Self::last_staleness_check_at) so the
+    /// pending-review stores are re-read at most once per window no matter
+    /// how many tool calls fire.
+    last_automation_notice_check_at: AtomicI64,
     /// Cached worktree-vs-index mismatch detection for this session. `None`
     /// when no mismatch exists (the common case) or detection was skipped
     /// (not a git repo / git missing). Computed once at startup so we
@@ -704,6 +710,7 @@ impl McpServer {
             shutdown_done: AtomicBool::new(false),
             timings_enabled: AtomicBool::new(false),
             last_staleness_check_at: AtomicI64::new(0),
+            last_automation_notice_check_at: AtomicI64::new(0),
             worktree_mismatch,
             startup_catch_up_done: AtomicBool::new(true),
             transcript_ingest_done: Arc::new(AtomicBool::new(true)),
@@ -1055,6 +1062,40 @@ impl McpServer {
         // between our cooldown windows, in which case `stale` is empty
         // here but our in-memory `file_token_map` is still pre-sync.
         self.refresh_file_token_map().await;
+    }
+
+    /// Returns a compact one-line notice when automation runs have staged
+    /// output awaiting review (skill drafts, fact proposals) that the user
+    /// hasn't been told about yet — `TraceDecay`'s equivalent of Hermes's
+    /// inline "💾 Self-improvement review" moment (parity R5).
+    ///
+    /// Cheap by construction: a 60 s `compare_exchange` cooldown gates the
+    /// check, and the underlying dedupe state
+    /// ([`crate::automation::staged_notice`]) fires at most once per new
+    /// batch (latest run id or pending-count change), so dropping this into
+    /// every `tools/call` response is safe.
+    async fn maybe_automation_staged_notice(&self, cg: &TraceDecay) -> Option<String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let previous = self.last_automation_notice_check_at.load(Ordering::Acquire);
+        if now.saturating_sub(previous) < 60 {
+            return None;
+        }
+        if self
+            .last_automation_notice_check_at
+            .compare_exchange(previous, now, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return None;
+        }
+        let profile_root = crate::storage::default_profile_root().ok()?;
+        crate::automation::staged_notice::maybe_automation_staged_notice(
+            &cg.store_layout().dashboard_root,
+            &profile_root,
+        )
+        .await
     }
 
     /// Internal: snapshot of the current `file_token_map`. Exposed for
@@ -2026,6 +2067,20 @@ impl McpServer {
                                 "data": warning
                             }
                         }));
+                    }
+                }
+
+                // Staged-automation nudge (Hermes parity R5): when automation
+                // runs have queued skill drafts / fact proposals for review,
+                // append a one-line notice so the approval queue doesn't grow
+                // silently. Deduped per batch and cooldown-gated inside.
+                if let Some(notice) = self.maybe_automation_staged_notice(&cg).await {
+                    if let Some(content) = result
+                        .value
+                        .get_mut("content")
+                        .and_then(|c| c.as_array_mut())
+                    {
+                        content.push(json!({"type": "text", "text": format!("\n{notice}")}));
                     }
                 }
 
