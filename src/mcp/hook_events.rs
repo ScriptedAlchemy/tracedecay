@@ -269,13 +269,21 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    fn git_test_root(path: &Path) -> std::path::PathBuf {
+        path.to_path_buf()
+    }
+
+    #[cfg(not(windows))]
+    fn git_test_root(path: &Path) -> std::path::PathBuf {
+        path.canonicalize()
+            .unwrap_or_else(|e| panic!("tempdir should canonicalize: {e}"))
+    }
+
     fn setup_linked_session_worktree() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf)
     {
         let base = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir should create: {e}"));
-        let base_root = base
-            .path()
-            .canonicalize()
-            .unwrap_or_else(|e| panic!("tempdir should canonicalize: {e}"));
+        let base_root = git_test_root(base.path());
         let project_root = base_root.join("project");
         let worktree_root = base_root.join("session-worktree");
         std::fs::create_dir_all(project_root.join("src"))
