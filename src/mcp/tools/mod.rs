@@ -19,7 +19,7 @@ pub use definitions::{
 };
 pub use handlers::{
     handle_profile_scoped_lcm_tool_call, handle_tool_call, handle_tool_call_with_registry,
-    handle_tool_call_with_registry_and_implicit_project,
+    handle_tool_call_with_registry_and_implicit_project, ToolCallRegistryOptions,
 };
 
 /// Maximum character length for a tool response before truncation.

@@ -25,7 +25,7 @@ use crate::tracedecay::TraceDecay;
 use super::hook_events::{self, HookAgent, HookEventPlan};
 use super::tools::{
     explore_call_budget, get_tool_definitions_with_budget,
-    handle_tool_call_with_registry_and_implicit_project,
+    handle_tool_call_with_registry_and_implicit_project, ToolCallRegistryOptions,
 };
 use super::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
 
@@ -2041,9 +2041,11 @@ impl McpServer {
             handler_arguments,
             server_stats,
             self.scope_prefix(),
-            self.registry_db.as_deref(),
-            self.allow_default_registry_fallback,
-            implicit_project_path,
+            ToolCallRegistryOptions {
+                global_db: self.registry_db.as_deref(),
+                allow_default_registry_fallback: self.allow_default_registry_fallback,
+                implicit_project_path,
+            },
         )
         .await;
         let handler_elapsed_us = handler_start.map(|t| t.elapsed().as_micros() as u64);

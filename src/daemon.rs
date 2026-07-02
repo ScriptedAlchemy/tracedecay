@@ -2209,14 +2209,15 @@ mod tests {
     #[tokio::test]
     async fn proxy_transport_carries_initialize_root_into_followup_handshake() {
         let dir = TempDir::new().expect("temp dir");
-        let active_root = dir.path().join("active");
-        let target_root = dir.path().join("target");
+        let temp_root = dir.path().canonicalize().expect("canonical temp dir");
+        let active_root = temp_root.join("active");
+        let target_root = temp_root.join("target");
         std::fs::create_dir_all(active_root.join("src")).expect("active src");
         std::fs::create_dir_all(target_root.join("src")).expect("target src");
         let active = active_root.canonicalize().expect("active root");
         let target = target_root.canonicalize().expect("target root");
-        let socket = dir.path().join("daemon.sock");
-        let client_identity = test_client_identity_for(dir.path().join("profile"));
+        let socket = temp_root.join("daemon.sock");
+        let client_identity = test_client_identity_for(temp_root.join("profile"));
         let open_options = crate::tracedecay::TraceDecayOpenOptions {
             profile_root: Some(client_identity.profile_root.clone()),
             global_db_path: Some(client_identity.global_db_path.clone()),
