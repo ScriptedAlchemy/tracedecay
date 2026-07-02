@@ -152,7 +152,7 @@ impl AgentTaskBackend for SkillJsonBackend {
     ) -> tracedecay::errors::Result<AgentTaskResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.task, AgentTaskKind::SkillWriter);
-        assert_request_contract(request, "skill_writer", "skill_writer:v1", "skills");
+        assert_request_contract(request, "skill_writer", "skill_writer:v2", "skills");
         assert!(request.prompt.contains("managed skill creates or updates"));
         assert_eq!(request.context["apply"], json!(false));
         assert_eq!(
@@ -221,7 +221,7 @@ impl AgentTaskBackend for InspectSkillWriterUsageBackend {
         request: &AgentTaskRequest,
     ) -> tracedecay::errors::Result<AgentTaskResponse> {
         assert_eq!(request.task, AgentTaskKind::SkillWriter);
-        assert_request_contract(request, "skill_writer", "skill_writer:v1", "skills");
+        assert_request_contract(request, "skill_writer", "skill_writer:v2", "skills");
         let summaries = request.context["skill_writer_evidence"]["skill_usage_summaries"]
             .as_array()
             .expect("skill usage summaries should be present");
@@ -262,7 +262,7 @@ impl AgentTaskBackend for InspectSkillWriterUnderusedBackend {
         request: &AgentTaskRequest,
     ) -> tracedecay::errors::Result<AgentTaskResponse> {
         assert_eq!(request.task, AgentTaskKind::SkillWriter);
-        assert_request_contract(request, "skill_writer", "skill_writer:v1", "skills");
+        assert_request_contract(request, "skill_writer", "skill_writer:v2", "skills");
         let families = request.context["skill_writer_evidence"]["underused_tool_families"]
             .as_array()
             .expect("underused tool family evidence should be present");
@@ -400,9 +400,9 @@ impl AgentTaskBackend for MalformedTextBackend {
         let (task_key, prompt_version, required_property) = match self.task {
             AgentTaskKind::MemoryCurator => ("memory_curator", "memory_curator:v1", "ops"),
             AgentTaskKind::SessionReflector => {
-                ("session_reflector", "session_reflector:v1", "facts")
+                ("session_reflector", "session_reflector:v2", "facts")
             }
-            AgentTaskKind::SkillWriter => ("skill_writer", "skill_writer:v1", "skills"),
+            AgentTaskKind::SkillWriter => ("skill_writer", "skill_writer:v2", "skills"),
         };
         assert_request_contract(request, task_key, prompt_version, required_property);
         Ok(AgentTaskResponse {
@@ -440,7 +440,7 @@ impl AgentTaskBackend for SessionJsonBackend {
         assert_request_contract(
             request,
             "session_reflector",
-            "session_reflector:v1",
+            "session_reflector:v2",
             "facts",
         );
         assert!(request.prompt.contains("durable memory facts"));
@@ -471,7 +471,7 @@ impl AgentTaskBackend for InspectSessionEvidenceBackend {
         assert_request_contract(
             request,
             "session_reflector",
-            "session_reflector:v1",
+            "session_reflector:v2",
             "facts",
         );
         let evidence = &request.context["session_reflection_evidence"];
@@ -878,7 +878,7 @@ pub(crate) fn test_task_key(task: AgentTaskKind) -> &'static str {
 pub(crate) fn test_prompt_version(task: AgentTaskKind) -> &'static str {
     match task {
         AgentTaskKind::MemoryCurator => "memory_curator:v1",
-        AgentTaskKind::SessionReflector => "session_reflector:v1",
-        AgentTaskKind::SkillWriter => "skill_writer:v1",
+        AgentTaskKind::SessionReflector => "session_reflector:v2",
+        AgentTaskKind::SkillWriter => "skill_writer:v2",
     }
 }

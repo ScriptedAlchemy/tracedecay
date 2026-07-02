@@ -285,7 +285,7 @@ fn codex_app_server_backend_run_task_uses_injected_config() {
     assert_eq!(backend_request["contract"]["task_key"], "skill_writer");
     assert_eq!(
         backend_request["contract"]["prompt_version"],
-        "skill_writer:v1"
+        "skill_writer:v2"
     );
     assert_eq!(backend_request["evidence_hash"], "sha256:evidence");
     assert_eq!(backend_request["prompt"], r#"{"skills":[]}"#);
