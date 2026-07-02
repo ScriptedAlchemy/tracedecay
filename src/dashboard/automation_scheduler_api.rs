@@ -14,6 +14,7 @@ use crate::automation::scheduler::{
     load_scheduler_control, save_scheduler_control, schedule_decision, scheduler_control_path,
     AutomationSchedulerControl,
 };
+use crate::automation::staged_notice::{count_pending_automation_output, AutomationPendingCounts};
 use crate::tracedecay::current_timestamp;
 use crate::user_config::UserConfig;
 
@@ -58,10 +59,21 @@ async fn scheduler_status_payload(state: &DashboardState) -> ApiResult {
     let records = load_run_records(&state.dashboard_root, 200)
         .await
         .map_err(|err| internal_error(&err))?;
+    // Pending-review badge counts (additive; Hermes parity R5). Best-effort
+    // zero when the profile root is unavailable, mirroring the count helper's
+    // treatment of missing stores.
+    let pending = match crate::storage::default_profile_root() {
+        Ok(profile_root) => {
+            count_pending_automation_output(&state.dashboard_root, &profile_root).await
+        }
+        Err(_) => AutomationPendingCounts::default(),
+    };
     let now = current_timestamp();
     Ok(Json(json!({
         "status": scheduler_status_label(&effective, control.paused),
         "paused": control.paused,
+        "pending_fact_proposals": pending.pending_fact_proposals,
+        "pending_skills": pending.pending_skills,
         "enabled": effective.enabled,
         "scheduler_tick_secs": effective.scheduler_tick_secs,
         "now": now,

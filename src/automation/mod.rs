@@ -26,4 +26,5 @@ pub mod skill_frontmatter;
 pub mod skill_targets;
 pub mod skill_usage;
 pub mod skill_writer;
+pub mod staged_notice;
 pub mod text;
