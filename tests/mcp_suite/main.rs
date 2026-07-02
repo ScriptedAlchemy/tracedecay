@@ -18,3 +18,5 @@ mod mcp_handler_test;
 mod mcp_server_test;
 mod mcp_test;
 mod multi_mcp_coordination_test;
+mod serve_harness;
+mod serve_template_path_test;

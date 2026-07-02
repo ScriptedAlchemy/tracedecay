@@ -272,6 +272,16 @@ fn cursor_update_plugin_refreshes_bundle_and_preserves_user_config() {
     // Generated bundle re-baked: plugin-owned mcp.json command, hook command
     // paths, and the manifest version stamp.
     assert!(text(&plugin_dir.join("mcp.json")).contains(NEW_BIN));
+    // Template decision pin: the rebaked MCP config must keep the
+    // workspace-scoped `--path ${workspaceFolder}` args. Normal Cursor windows
+    // expand the variable; hosts that pass it literally (headless
+    // agent-session scopes) are handled by serve's unexpanded-template
+    // fallback, not by dropping the argument from the template.
+    let rebaked_mcp = read_json(&plugin_dir.join("mcp.json"));
+    assert_eq!(
+        rebaked_mcp["mcpServers"]["tracedecay"]["args"],
+        serde_json::json!(["serve", "--path", "${workspaceFolder}"])
+    );
     assert!(text(&plugin_dir.join("hooks/hooks.json")).contains(NEW_BIN));
     assert!(
         text(&plugin_dir.join(".cursor-plugin/plugin.json")).contains(env!("CARGO_PKG_VERSION"))

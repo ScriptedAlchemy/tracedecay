@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`serve` now tolerates a literal unexpanded `--path ${workspaceFolder}`** — Cursor's headless agent-session MCP scopes spawn the plugin's serve command without expanding the template variable and never retry the failed scope, which surfaced as "Timed out waiting for connection" on every tool call. `serve` now discards an unexpanded `${...}` template value with a stderr warning and falls back to project discovery where possible, requiring a unique registered project when discovery reaches the global registry in this mode. Rationale and details in `cursor-plugin/README.md`.
+
 ## [0.0.23](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.22...v0.0.23) - 2026-07-02
 
 ### Other
