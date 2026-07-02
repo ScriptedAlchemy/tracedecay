@@ -6,7 +6,9 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
-use crate::extraction::common::{clean_c_comment, docstring_from_preceding_comments};
+use crate::extraction::common::{
+    clean_c_comment, docstring_from_preceding_comments, extract_call_expression_sites,
+};
 use crate::extraction::complexity::{count_complexity, C_COMPLEXITY};
 use crate::types::{
     generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
@@ -621,31 +623,13 @@ impl GlslExtractor {
     // -------------------------------------------------------
 
     fn extract_call_sites(state: &mut ExtractionState, node: TsNode<'_>, fn_node_id: &str) {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == "call_expression" {
-                    if let Some(callee) = child.named_child(0) {
-                        let callee_name = state.node_text(callee);
-                        state.unresolved_refs.push(UnresolvedRef {
-                            from_node_id: fn_node_id.to_string(),
-                            reference_name: callee_name,
-                            reference_kind: EdgeKind::Calls,
-                            line: child.start_position().row as u32,
-                            column: child.start_position().column as u32,
-                            file_path: state.file_path.clone(),
-                        });
-                    }
-                    Self::extract_call_sites(state, child, fn_node_id);
-                } else {
-                    Self::extract_call_sites(state, child, fn_node_id);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
+        extract_call_expression_sites(
+            &state.source,
+            &state.file_path,
+            &mut state.unresolved_refs,
+            node,
+            fn_node_id,
+        );
     }
 
     // -------------------------------------------------------
