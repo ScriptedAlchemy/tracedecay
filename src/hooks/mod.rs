@@ -254,7 +254,7 @@ fn hook_route_metadata_from_parsed(
         .unwrap_or_else(|| project_root.to_path_buf());
     let branch = crate::branch::current_branch(&worktree);
     Some(crate::daemon::HookRouteMetadata {
-        session_id: event_session_id(parsed),
+        session_id: hook_route_session_id(parsed),
         thread_id: text_field(
             parsed,
             &[
@@ -268,6 +268,21 @@ fn hook_route_metadata_from_parsed(
         worktree: Some(worktree),
         branch,
     })
+}
+
+fn hook_route_session_id(parsed: &Value) -> Option<String> {
+    [
+        "session_id",
+        "sessionId",
+        "conversation_id",
+        "conversationId",
+        "chat_id",
+        "chatId",
+    ]
+    .iter()
+    .find_map(|key| parsed.get(*key).and_then(Value::as_str))
+    .filter(|id| !id.is_empty())
+    .map(str::to_string)
 }
 
 fn deduped_project_hint(
@@ -467,4 +482,35 @@ pub(crate) fn read_stdin_to_string() -> std::io::Result<String> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
     Ok(input)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hook_route_metadata_from_event;
+
+    #[test]
+    fn hook_route_metadata_preserves_camel_case_session_ids() {
+        let event = serde_json::json!({
+            "sessionId": "session-camel",
+            "conversationId": "conversation-camel",
+            "cwd": "/tmp/project"
+        })
+        .to_string();
+
+        let route = hook_route_metadata_from_event(&event, std::path::Path::new("/tmp/project"))
+            .expect("route metadata should parse");
+
+        assert_eq!(route.session_id.as_deref(), Some("session-camel"));
+
+        let event = serde_json::json!({
+            "conversationId": "conversation-camel",
+            "cwd": "/tmp/project"
+        })
+        .to_string();
+
+        let route = hook_route_metadata_from_event(&event, std::path::Path::new("/tmp/project"))
+            .expect("route metadata should parse");
+
+        assert_eq!(route.session_id.as_deref(), Some("conversation-camel"));
+    }
 }
