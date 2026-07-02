@@ -15,6 +15,8 @@
 use std::path::Path;
 use std::process::Command;
 
+use crate::common::tracedecay_command_with_home;
+use tempfile::TempDir;
 use tracedecay::mcp::tools::get_tool_definitions;
 
 /// Tools intentionally exempt from the skill-coverage requirement.
@@ -25,8 +27,10 @@ use tracedecay::mcp::tools::get_tool_definitions;
 /// is agent-facing and covered.
 const SKILL_COVERAGE_EXCEPTIONS: &[&str] = &[];
 
-fn tracedecay_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_tracedecay")
+fn isolated_tracedecay_command(home: &TempDir) -> Command {
+    let mut command = tracedecay_command_with_home(home.path());
+    command.current_dir(home.path());
+    command
 }
 
 fn short_name(full: &str) -> &str {
@@ -35,9 +39,9 @@ fn short_name(full: &str) -> &str {
 
 #[test]
 fn every_mcp_tool_is_listed_by_the_cli_discovery_command() {
-    let output = Command::new(tracedecay_bin())
+    let home = TempDir::new().expect("create isolated TraceDecay home");
+    let output = isolated_tracedecay_command(&home)
         .arg("tool")
-        .current_dir(std::env::temp_dir())
         .output()
         .expect("run `tracedecay tool`");
     assert!(
@@ -58,11 +62,11 @@ fn every_mcp_tool_is_listed_by_the_cli_discovery_command() {
 
 #[test]
 fn every_mcp_tool_is_invocable_via_the_cli() {
+    let home = TempDir::new().expect("create isolated TraceDecay home");
     for def in get_tool_definitions() {
         let short = short_name(&def.name);
-        let output = Command::new(tracedecay_bin())
+        let output = isolated_tracedecay_command(&home)
             .args(["tool", short, "--help"])
-            .current_dir(std::env::temp_dir())
             .output()
             .unwrap_or_else(|e| panic!("run `tracedecay tool {short} --help`: {e}"));
         let stdout = String::from_utf8_lossy(&output.stdout);
