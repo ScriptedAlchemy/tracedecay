@@ -164,6 +164,10 @@ pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
 // ---------------------------------------------------------------------------
 
 fn sample_process() -> ProcessSnapshot {
+    sample_process_with_window(CPU_SAMPLE_WINDOW)
+}
+
+fn sample_process_with_window(cpu_sample_window: Duration) -> ProcessSnapshot {
     let pid = Pid::from_u32(std::process::id());
 
     // Refresh only *our own* process. The previous implementation passed
@@ -185,7 +189,7 @@ fn sample_process() -> ProcessSnapshot {
     // Two reads bracketing a sleep are required: sysinfo reports
     // `cpu_usage()` as the delta between successive refreshes.
     sys.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[pid]), true, refresh);
-    std::thread::sleep(CPU_SAMPLE_WINDOW);
+    std::thread::sleep(cpu_sample_window);
     sys.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[pid]), true, refresh);
 
     let proc = sys.process(pid);
@@ -376,9 +380,11 @@ mod tests {
     /// inside a stack far smaller than Windows' 1 MiB main-thread default.
     #[test]
     fn sample_process_fits_in_a_small_stack() {
+        // Zero CPU sample window: the stack-footprint guard cares about the
+        // sysinfo refresh path, not the CPU delta, so skip the 200 ms sleep.
         let handle = std::thread::Builder::new()
             .stack_size(512 * 1024)
-            .spawn(sample_process)
+            .spawn(|| sample_process_with_window(Duration::ZERO))
             .expect("spawn small-stack thread");
         let snap = handle
             .join()

@@ -1845,8 +1845,11 @@ mod tests {
         ));
     }
 
+    // start_paused: these restart-window tests only wait on tokio timers
+    // (sleep/poll intervals); paused time auto-advances them so each test
+    // finishes in milliseconds instead of real 200-300 ms waits.
     #[cfg(unix)]
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn connect_with_restart_grace_reconnects_once_daemon_rebinds() {
         let dir = TempDir::new().expect("temp dir");
         let socket = dir.path().join("daemon.sock");
@@ -1870,7 +1873,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn connect_with_restart_grace_gives_up_with_restart_hint() {
         let dir = TempDir::new().expect("temp dir");
         let socket = dir.path().join("daemon.sock");
@@ -1950,7 +1953,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn serve_waits_out_restart_window_when_service_owns_socket() {
         let dir = TempDir::new().expect("temp dir");
         let socket = dir.path().join("daemon.sock");
@@ -1978,7 +1981,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn serve_falls_back_when_installed_service_never_rebinds() {
         let dir = TempDir::new().expect("temp dir");
         let socket = dir.path().join("daemon.sock");
@@ -1996,7 +1999,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn proxied_request_survives_daemon_restart_window() {
         let dir = TempDir::new().expect("temp dir");
         let socket = dir.path().join("daemon.sock");

@@ -895,14 +895,12 @@ mod tests {
     async fn test_store() -> Result<TestStore, String> {
         let temp = tempfile::tempdir().map_err(|err| format!("create tempdir: {err}"))?;
         let storage_root = temp.path().to_path_buf();
-        let db_path = storage_root.join("sessions.db");
-        let db = libsql::Builder::new_local(&db_path)
-            .build()
-            .await
-            .map_err(|err| format!("build test database: {err}"))?;
-        let conn = db
-            .connect()
-            .map_err(|err| format!("connect to test database: {err}"))?;
+        // In-memory DB: every test here disables backup_before_reap, so
+        // nothing reads the sessions.db file itself — only the payload files
+        // under storage_root. Skipping the on-disk DB (and its FTS5-heavy
+        // schema I/O) keeps each test's setup cheap, which matters on the
+        // Windows CI runners where per-test sqlite file churn dominated.
+        let conn = in_memory_conn().await?;
         conn.busy_timeout(Duration::from_secs(5))
             .map_err(|err| format!("set test busy timeout: {err}"))?;
         ensure_gc_test_schema(&conn).await?;

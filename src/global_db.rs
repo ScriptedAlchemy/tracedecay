@@ -3527,9 +3527,9 @@ mod tests {
 
     #[tokio::test]
     async fn session_column_migration_tolerates_duplicate_column_race() {
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("sessions.db");
-        let db = Builder::new_local(&db_path).build().await.unwrap();
+        // In-memory DB: the duplicate-column race only needs one connection,
+        // so the on-disk sqlite file adds nothing but I/O.
+        let db = Builder::new_local(":memory:").build().await.unwrap();
         let conn = db.connect().unwrap();
         conn.execute_batch(
             "CREATE TABLE sessions (

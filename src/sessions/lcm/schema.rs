@@ -446,16 +446,15 @@ async fn carry_forward_legacy_messages_in_transaction(conn: &Connection) -> Resu
 #[cfg(test)]
 mod tests {
     use libsql::Builder;
-    use tempfile::TempDir;
 
     use super::*;
 
     #[tokio::test]
     async fn ensure_lcm_schema_errors_and_rolls_back_failed_legacy_carry_forward(
     ) -> Result<(), String> {
-        let tmp = TempDir::new().map_err(|err| err.to_string())?;
-        let db_path = tmp.path().join("sessions.db");
-        let db = Builder::new_local(&db_path)
+        // In-memory DB: the rollback behavior under test is purely
+        // transactional, so skip the on-disk sqlite file churn.
+        let db = Builder::new_local(":memory:")
             .build()
             .await
             .map_err(|err| err.to_string())?;
