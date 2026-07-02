@@ -642,8 +642,8 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                 print!("{}", tracedecay::daemon::service_status(&socket_path));
             }
         },
-        Commands::Upgrade => {
-            tracedecay::upgrade::run_upgrade()?;
+        Commands::Upgrade { no_heal } => {
+            update_cmd::run_upgrade_command(no_heal)?;
         }
         Commands::Update { no_heal } => {
             update_cmd::run_update_command(no_heal)?;
@@ -782,6 +782,7 @@ fn should_skip_startup_maintenance(command: &Commands) -> bool {
         Commands::Install { .. }
             | Commands::Reinstall
             | Commands::UpdatePlugin
+            | Commands::Upgrade { .. }
             | Commands::Update { .. }
             | Commands::PostUpdate { .. }
             | Commands::Uninstall { .. }
@@ -831,9 +832,11 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
     //     can blow that budget, so it must stay off `serve`.
     //   - `Install` / `Reinstall`: already perform installation — don't
     //     double-install as an implicit prelude to the explicit command.
-    //   - `UpdatePlugin` / `Update`: explicit maintenance paths that manage
-    //     plugin refresh themselves; an implicit silent reinstall beforehand
-    //     would rewrite configs and break the update-plugin contract.
+    //   - `UpdatePlugin` / `Upgrade` / `Update`: explicit maintenance paths
+    //     that manage plugin refresh themselves (upgrade/update re-exec the
+    //     new binary's `post-update`); an implicit silent reinstall beforehand
+    //     would rewrite configs with the OLD binary and break the
+    //     update-plugin contract.
     //   - `Uninstall`: about to remove agent configs — don't reinstall them
     //     first (per the original #84 intent).
     //   - `Doctor` / `Migrate`: read-only diagnostics — must not mutate agent
@@ -847,6 +850,7 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
             | Commands::Install { .. }
             | Commands::Reinstall
             | Commands::UpdatePlugin
+            | Commands::Upgrade { .. }
             | Commands::Update { .. }
             | Commands::PostUpdate { .. }
             | Commands::Uninstall { .. }

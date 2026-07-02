@@ -267,8 +267,13 @@ pub enum Commands {
         #[command(subcommand)]
         action: DaemonAction,
     },
-    /// Download and install the latest version from GitHub
-    Upgrade,
+    /// Download and install the latest version, then refresh generated
+    /// plugins, the daemon service, and run the post-update health pass
+    Upgrade {
+        /// Skip the post-update health pass (safe repairs + doctor summary)
+        #[arg(long)]
+        no_heal: bool,
+    },
     /// Refresh the tracedecay binary, generated plugins, and daemon
     Update {
         /// Skip the post-update health pass (safe repairs + doctor summary)

@@ -138,7 +138,10 @@ fn update_upgrade_and_update_plugin_parse_to_distinct_commands() {
         update.command,
         Some(Commands::Update { no_heal: false })
     ));
-    assert!(matches!(upgrade.command, Some(Commands::Upgrade)));
+    assert!(matches!(
+        upgrade.command,
+        Some(Commands::Upgrade { no_heal: false })
+    ));
     assert!(matches!(
         update_plugin.command,
         Some(Commands::UpdatePlugin)
@@ -169,11 +172,36 @@ fn update_and_post_update_parse_no_heal_flag() {
 }
 
 #[test]
+fn upgrade_parses_no_heal_flag() {
+    let upgrade = Cli::try_parse_from(["tracedecay", "upgrade", "--no-heal"])
+        .expect("upgrade --no-heal should parse");
+    let upgrade_default =
+        Cli::try_parse_from(["tracedecay", "upgrade"]).expect("upgrade should parse");
+
+    assert!(matches!(
+        upgrade.command,
+        Some(Commands::Upgrade { no_heal: true })
+    ));
+    assert!(matches!(
+        upgrade_default.command,
+        Some(Commands::Upgrade { no_heal: false })
+    ));
+}
+
+#[test]
 fn update_help_describes_refresh_scope() {
     let help = Cli::command().render_long_help().to_string();
 
     assert!(help.contains("update"));
     assert!(help.contains("Refresh the tracedecay binary, generated plugins, and daemon"));
+}
+
+#[test]
+fn upgrade_help_describes_post_install_refresh() {
+    let help = Cli::command().render_long_help().to_string();
+
+    assert!(help.contains("upgrade"));
+    assert!(help.contains("Download and install the latest version, then refresh generated"));
 }
 
 #[test]

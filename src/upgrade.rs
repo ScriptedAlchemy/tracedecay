@@ -236,6 +236,16 @@ fn replace_default(new_exe: &Path) -> Result<()> {
     })
 }
 
+/// Outcome of an upgrade attempt that completed without error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpgradeOutcome {
+    /// A new binary was installed (or a delegated package manager reported a
+    /// successful upgrade). Post-install refresh work is warranted.
+    Installed,
+    /// Already on the latest version — the binary was not replaced.
+    AlreadyUpToDate,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UpgradeStatus<'a> {
     AlreadyCurrent,
@@ -344,13 +354,13 @@ fn run_versioned_upgrade(
     is_beta: bool,
     method: &InstallMethod,
     source: UpgradeSource,
-) -> Result<String> {
+) -> Result<UpgradeOutcome> {
     eprintln!("Checking {}...", source.check_label());
     let latest = latest_upgrade_version(source, is_beta)?;
     let latest = match classify_upgrade(current, &latest) {
         UpgradeStatus::AlreadyCurrent => {
             eprintln!("\x1b[32m✔\x1b[0m Already up to date (v{current}).");
-            return Ok(current.to_string());
+            return Ok(UpgradeOutcome::AlreadyUpToDate);
         }
         UpgradeStatus::UpgradeAvailable(latest) => latest,
     };
@@ -362,7 +372,7 @@ fn run_versioned_upgrade(
     install_upgrade_version(source, latest, is_beta, method)?;
     record_previous_version();
     eprintln!("\x1b[32m✔\x1b[0m Successfully upgraded to v{latest}!");
-    Ok(latest.to_string())
+    Ok(UpgradeOutcome::Installed)
 }
 
 /// Atomically replace a binary at `target` by copying `src` to a temp file
@@ -690,7 +700,7 @@ fn brew_upgrade_command() -> (&'static str, [&'static str; 2]) {
     ("brew", ["upgrade", "tracedecay"])
 }
 
-fn run_brew_upgrade(current: &str) -> Result<String> {
+fn run_brew_upgrade() -> Result<UpgradeOutcome> {
     eprintln!("Updating Homebrew formula cache...");
     let update_ok = std::process::Command::new("brew")
         .args(["update", "--quiet"])
@@ -713,7 +723,10 @@ fn run_brew_upgrade(current: &str) -> Result<String> {
 
     if status.success() {
         record_previous_version();
-        Ok(current.to_string())
+        // Homebrew doesn't tell us whether it actually installed a new
+        // version; treat a successful delegation as an install so the
+        // post-upgrade refresh chain keeps generated plugins in sync.
+        Ok(UpgradeOutcome::Installed)
     } else {
         Err(TraceDecayError::Config {
             message: format!("Homebrew upgrade failed with status: {status}"),
@@ -723,8 +736,8 @@ fn run_brew_upgrade(current: &str) -> Result<String> {
 
 /// Check for a newer version and perform the upgrade if one is available.
 ///
-/// Returns the new version string on success.
-pub fn run_upgrade() -> Result<String> {
+/// Returns whether a new binary was actually installed.
+pub fn run_upgrade() -> Result<UpgradeOutcome> {
     let current = env!("CARGO_PKG_VERSION");
     let is_beta = cloud::is_beta();
     let channel = if is_beta { "beta" } else { "stable" };
@@ -739,7 +752,7 @@ pub fn run_upgrade() -> Result<String> {
     eprintln!("Current version: v{current} ({channel} channel{method_suffix})");
 
     if matches!(method, InstallMethod::Brew) {
-        return run_brew_upgrade(current);
+        return run_brew_upgrade();
     }
 
     match upgrade_source_for(&method) {

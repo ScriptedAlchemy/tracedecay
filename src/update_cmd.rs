@@ -1,8 +1,10 @@
-//! The `update` / `post-update` / `update-plugin` flow: binary upgrade via
-//! subprocess re-exec, generated-plugin refresh, daemon service refresh, and
-//! the post-update health pass.
+//! The `upgrade` / `update` / `post-update` / `update-plugin` flow: binary
+//! upgrade via subprocess re-exec, generated-plugin refresh, daemon service
+//! refresh, and the post-update health pass.
 
 use std::path::PathBuf;
+
+use tracedecay::upgrade::UpgradeOutcome;
 
 pub(crate) fn refresh_generated_plugins() -> tracedecay::errors::Result<()> {
     let home = tracedecay_home_dir()?;
@@ -145,6 +147,48 @@ pub(crate) fn run_update_command(no_heal: bool) -> tracedecay::errors::Result<()
         || tracedecay::upgrade::run_upgrade().map(|_| ()),
         || run_post_update_subcommand(no_heal),
     )
+}
+
+/// The `upgrade` flow: install the new binary, then — only when something was
+/// actually installed — re-exec the NEW binary's `post-update` subcommand so
+/// the plugin refresh, daemon refresh, and health pass run on the new version.
+///
+/// Unlike `update`, a refresh failure only warns: the binary upgrade itself
+/// succeeded, so the command must not report failure (mirroring how the
+/// health pass inside `post-update` is best-effort).
+pub(crate) fn run_upgrade_steps<U, P>(
+    mut upgrade: U,
+    mut post_update: P,
+) -> tracedecay::errors::Result<()>
+where
+    U: FnMut() -> tracedecay::errors::Result<UpgradeOutcome>,
+    P: FnMut() -> tracedecay::errors::Result<()>,
+{
+    match upgrade()? {
+        UpgradeOutcome::Installed => {
+            if let Err(error) = post_update() {
+                eprintln!(
+                    "  \x1b[33mwarning:\x1b[0m post-upgrade refresh failed: {error}\n  \
+                     The new binary is installed; run `tracedecay update` to retry the \
+                     plugin refresh and health pass."
+                );
+            }
+            Ok(())
+        }
+        UpgradeOutcome::AlreadyUpToDate => {
+            eprintln!(
+                "Nothing was installed, so plugins were left untouched — \
+                 run `tracedecay update` to refresh generated plugins anyway."
+            );
+            Ok(())
+        }
+    }
+}
+
+pub(crate) fn run_upgrade_command(no_heal: bool) -> tracedecay::errors::Result<()> {
+    run_upgrade_steps(tracedecay::upgrade::run_upgrade, || {
+        run_post_update_subcommand(no_heal)
+    })
 }
 
 fn run_post_update_subcommand(no_heal: bool) -> tracedecay::errors::Result<()> {

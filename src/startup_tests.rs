@@ -5,11 +5,12 @@ use super::{
     },
     is_local_install_command, should_skip_agent_install_maintenance,
     should_skip_startup_maintenance,
-    update_cmd::run_update_steps,
+    update_cmd::{run_update_steps, run_upgrade_steps},
     Commands,
 };
 use std::cell::RefCell;
 use tempfile::TempDir;
+use tracedecay::upgrade::UpgradeOutcome;
 
 #[test]
 fn doctor_skips_startup_maintenance() {
@@ -33,6 +34,9 @@ fn explicit_agent_config_commands_skip_startup_maintenance() {
     }));
     assert!(should_skip_startup_maintenance(&Commands::Reinstall));
     assert!(should_skip_startup_maintenance(&Commands::UpdatePlugin));
+    assert!(should_skip_startup_maintenance(&Commands::Upgrade {
+        no_heal: false
+    }));
     assert!(should_skip_startup_maintenance(&Commands::Update {
         no_heal: false
     }));
@@ -84,6 +88,9 @@ fn agent_install_maintenance_is_selective() {
     assert!(should_skip_agent_install_maintenance(
         &Commands::UpdatePlugin
     ));
+    assert!(should_skip_agent_install_maintenance(&Commands::Upgrade {
+        no_heal: false
+    }));
     assert!(should_skip_agent_install_maintenance(&Commands::Update {
         no_heal: false
     }));
@@ -151,6 +158,87 @@ fn update_steps_stop_after_upgrade_failure() {
     let calls = RefCell::new(Vec::new());
 
     let result = run_update_steps(
+        || {
+            calls.borrow_mut().push("upgrade");
+            Err(tracedecay::errors::TraceDecayError::Config {
+                message: "upgrade failed".to_string(),
+            })
+        },
+        || {
+            calls.borrow_mut().push("post-update");
+            Ok(())
+        },
+    );
+
+    assert!(result.is_err());
+    assert_eq!(calls.into_inner(), vec!["upgrade"]);
+}
+
+#[test]
+fn upgrade_steps_run_post_update_after_install() {
+    let calls = RefCell::new(Vec::new());
+
+    run_upgrade_steps(
+        || {
+            calls.borrow_mut().push("upgrade");
+            Ok(UpgradeOutcome::Installed)
+        },
+        || {
+            calls.borrow_mut().push("post-update");
+            Ok(())
+        },
+    )
+    .expect("upgrade steps should succeed");
+
+    assert_eq!(calls.into_inner(), vec!["upgrade", "post-update"]);
+}
+
+#[test]
+fn upgrade_steps_skip_post_update_when_already_up_to_date() {
+    let calls = RefCell::new(Vec::new());
+
+    run_upgrade_steps(
+        || {
+            calls.borrow_mut().push("upgrade");
+            Ok(UpgradeOutcome::AlreadyUpToDate)
+        },
+        || {
+            calls.borrow_mut().push("post-update");
+            Ok(())
+        },
+    )
+    .expect("an up-to-date upgrade should stay a successful no-op");
+
+    assert_eq!(calls.into_inner(), vec!["upgrade"]);
+}
+
+#[test]
+fn upgrade_steps_tolerate_post_update_failure() {
+    let calls = RefCell::new(Vec::new());
+
+    let result = run_upgrade_steps(
+        || {
+            calls.borrow_mut().push("upgrade");
+            Ok(UpgradeOutcome::Installed)
+        },
+        || {
+            calls.borrow_mut().push("post-update");
+            Err(tracedecay::errors::TraceDecayError::Config {
+                message: "plugin refresh failed".to_string(),
+            })
+        },
+    );
+
+    // The binary upgrade itself succeeded — a refresh failure only warns.
+    assert!(result.is_ok());
+    assert_eq!(calls.into_inner(), vec!["upgrade", "post-update"]);
+}
+
+#[test]
+fn upgrade_steps_stop_after_upgrade_failure() {
+    let calls = RefCell::new(Vec::new());
+
+    let result = run_upgrade_steps(
         || {
             calls.borrow_mut().push("upgrade");
             Err(tracedecay::errors::TraceDecayError::Config {
