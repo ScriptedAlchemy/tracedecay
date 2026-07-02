@@ -162,6 +162,34 @@ Notes:
 - Entries from per-user and per-repo files are concatenated; allowlists are a
   convenience, not a security boundary.
 
+## Troubleshooting a dead MCP scope
+
+Cursor spawns MCP servers with the user home directory as the working
+directory, and it **never retries a failed MCP server**: if the `tracedecay
+serve` process exits at startup (for example when a headless agent scope
+passes a literal, unexpanded `${workspaceFolder}`), every later tool call in
+that session reports "Timed out waiting for connection" until you toggle the
+server or reload the window.
+
+Two layers of defense ship with this plugin:
+
+- `tracedecay serve` does not exit when project resolution fails at startup.
+  It completes the MCP handshake and answers tool calls with an actionable
+  error naming the failure and the fix; it rechecks the project on every tool
+  call and recovers automatically once `tracedecay init` (or a corrected
+  `--path`) makes resolution succeed.
+- `tracedecay doctor --agent cursor` scans Cursor's recent MCP logs
+  (`~/.config/Cursor/logs` on Linux, `~/Library/Application Support/Cursor/logs`
+  on macOS, `%APPDATA%\Cursor\logs` on Windows) for tracedecay spawn failures —
+  literal `${workspaceFolder}` errors, `Connection failed: MCP error -32000`,
+  degraded-mode notices — and checks that the installed plugin bundle version
+  matches the binary.
+
+If a scope has already failed: fix the cause (usually `tracedecay init` in the
+project, or upgrading a stale plugin with `tracedecay update-plugin`), then
+toggle the tracedecay MCP server in Cursor Settings → MCP or reload the Cursor
+window.
+
 ## Known limitations
 
 - **Cloud agents:** plugin `sessionStart`, `sessionEnd`, `beforeSubmitPrompt`,
