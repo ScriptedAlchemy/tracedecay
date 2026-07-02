@@ -1,7 +1,3 @@
-#![cfg(unix)]
-
-mod common;
-
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -10,7 +6,10 @@ use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use common::{canonical_existing_path, spawn_tracedecay_daemon, tracedecay_command_with_home};
+use crate::common;
+use crate::common::{
+    canonical_existing_path, spawn_tracedecay_daemon, tracedecay_command_with_home,
+};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tracedecay::storage::{

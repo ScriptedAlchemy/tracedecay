@@ -7,11 +7,11 @@
 //! no-first-touch behaviour, as does any store tool invoked without an
 //! explicit `--project`.
 
-mod common;
-
 use std::path::Path;
 
-use common::{canonical_existing_path, tracedecay_command_with_home};
+#[cfg(unix)]
+use crate::common;
+use crate::common::{canonical_existing_path, tracedecay_command_with_home};
 use tempfile::TempDir;
 
 fn canonical_temp_path(path: &Path) -> std::path::PathBuf {

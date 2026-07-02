@@ -2,9 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
 
-mod common;
-
-use common::{create_runtime, sample_node};
+use crate::common::{create_runtime, sample_node};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
@@ -23,6 +21,7 @@ use tracedecay::storage::{
     read_enrollment_marker, write_enrollment_marker, EnrollmentMarker, StorageMode, StoreKind,
     StoreManifest, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION,
 };
+use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 fn canonical_temp_path(path: &Path) -> PathBuf {
     #[cfg(windows)]
@@ -96,6 +95,31 @@ fn add_tracedecay_path_shim(command: &mut Command, home: &Path) -> PathBuf {
         std::env::join_paths(std::iter::once(bin_dir).chain(std::env::split_paths(&path))).unwrap();
     command.env("PATH", joined);
     shim
+}
+
+/// Initializes the profile-sharded project store in-process, producing the
+/// same artifacts as a `tracedecay init` subprocess (config, graph DB, store
+/// manifest, branch meta, registry row) without paying a process spawn plus
+/// schema-creation subprocess per test. Only for tests where init is setup,
+/// not the behaviour under test.
+fn init_project_in_process(home: &Path, project: &Path) {
+    let profile_root = profile_root(home);
+    let project = canonical_temp_path(project);
+    create_runtime().block_on(async {
+        let cg = TraceDecay::init_with_options(
+            &project,
+            TraceDecayOpenOptions {
+                profile_root: Some(profile_root.clone()),
+                global_db_path: Some(profile_root.join("global.db")),
+            },
+        )
+        .await
+        .expect("in-process init should succeed");
+        cg.index_all()
+            .await
+            .expect("in-process index should succeed");
+        cg.db().checkpoint().await.expect("graph DB checkpoint");
+    });
 }
 
 fn git(project: &Path, args: &[&str]) {
@@ -499,15 +523,7 @@ fn automation_config_enable_writes_project_sidecar_noninteractively() {
     std::fs::create_dir_all(project.path().join("src")).unwrap();
     std::fs::write(project.path().join("src/lib.rs"), "pub fn marker() {}\n").unwrap();
 
-    let mut init = tracedecay_command(home.path(), project.path());
-    init.arg("init");
-    let init_output = run_with_timeout(init, cli_timeout());
-    assert!(
-        init_output.status.success(),
-        "init should succeed before automation config\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&init_output.stdout),
-        String::from_utf8_lossy(&init_output.stderr)
-    );
+    init_project_in_process(home.path(), project.path());
 
     let mut enable = tracedecay_command(home.path(), project.path());
     enable.args(["automation", "config", "enable"]);
@@ -679,15 +695,7 @@ fn automation_config_set_writes_complete_project_sidecar_noninteractively() {
     std::fs::create_dir_all(project.path().join("src")).unwrap();
     std::fs::write(project.path().join("src/lib.rs"), "pub fn marker() {}\n").unwrap();
 
-    let mut init = tracedecay_command(home.path(), project.path());
-    init.arg("init");
-    let init_output = run_with_timeout(init, cli_timeout());
-    assert!(
-        init_output.status.success(),
-        "init should succeed before automation config set\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&init_output.stdout),
-        String::from_utf8_lossy(&init_output.stderr)
-    );
+    init_project_in_process(home.path(), project.path());
 
     let mut set = tracedecay_command(home.path(), project.path());
     set.args([
@@ -796,15 +804,7 @@ fn automation_run_memory_curation_skips_without_backend_when_disabled() {
     std::fs::create_dir_all(project.path().join("src")).unwrap();
     std::fs::write(project.path().join("src/lib.rs"), "pub fn marker() {}\n").unwrap();
 
-    let mut init = tracedecay_command(home.path(), project.path());
-    init.arg("init");
-    let init_output = run_with_timeout(init, cli_timeout());
-    assert!(
-        init_output.status.success(),
-        "init should succeed before automation run\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&init_output.stdout),
-        String::from_utf8_lossy(&init_output.stderr)
-    );
+    init_project_in_process(home.path(), project.path());
 
     let mut run = tracedecay_command(home.path(), project.path());
     run.args(["automation", "run", "memory-curation"]);
@@ -937,15 +937,7 @@ fn automation_run_session_reflection_skips_without_backend_when_disabled() {
     std::fs::create_dir_all(project.path().join("src")).unwrap();
     std::fs::write(project.path().join("src/lib.rs"), "pub fn marker() {}\n").unwrap();
 
-    let mut init = tracedecay_command(home.path(), project.path());
-    init.arg("init");
-    let init_output = run_with_timeout(init, cli_timeout());
-    assert!(
-        init_output.status.success(),
-        "init should succeed before automation run\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&init_output.stdout),
-        String::from_utf8_lossy(&init_output.stderr)
-    );
+    init_project_in_process(home.path(), project.path());
 
     let mut run = tracedecay_command(home.path(), project.path());
     run.args(["automation", "run", "session-reflection"]);
@@ -973,15 +965,7 @@ fn automation_run_skill_writing_skips_without_backend_when_disabled() {
     std::fs::create_dir_all(project.path().join("src")).unwrap();
     std::fs::write(project.path().join("src/lib.rs"), "pub fn marker() {}\n").unwrap();
 
-    let mut init = tracedecay_command(home.path(), project.path());
-    init.arg("init");
-    let init_output = run_with_timeout(init, cli_timeout());
-    assert!(
-        init_output.status.success(),
-        "init should succeed before automation run\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&init_output.stdout),
-        String::from_utf8_lossy(&init_output.stderr)
-    );
+    init_project_in_process(home.path(), project.path());
 
     let mut run = tracedecay_command(home.path(), project.path());
     run.args(["automation", "run", "skill-writing"]);
