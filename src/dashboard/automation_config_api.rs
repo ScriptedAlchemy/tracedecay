@@ -128,6 +128,7 @@ fn validation_field(message: &str) -> String {
     for field in [
         "auto_apply_memory_ops",
         "auto_enable_skills",
+        "export_memory_digest",
         "require_dashboard_approval",
         "backend",
         "host_mode",
