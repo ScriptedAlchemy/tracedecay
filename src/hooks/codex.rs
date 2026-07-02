@@ -10,9 +10,10 @@ use std::time::Duration;
 use serde_json::Value;
 
 use super::claude::is_code_research_prompt;
+use super::memory_inject;
 use super::post_tool_use::{notify_post_tool_use, CODEX_POST_TOOL_USE_SPEC};
 use super::steering::{
-    append_context_recovery_hint, build_codex_session_context_for_workspace,
+    append_context_block, append_context_recovery_hint, build_codex_session_context_for_workspace,
     cursor_index_signals_for_root, session_start_from_compaction, HookWorkspaceStatus,
 };
 use super::tool_hints::{decide_hint, HintAgent, HintCategory, ToolHint, ToolHintInput};
@@ -46,6 +47,17 @@ pub async fn hook_codex_session_start() -> i32 {
     let root = codex_project_root_from_event(&event);
     record_hook_invoked(root.as_deref(), HintAgent::Codex, "SessionStart", &event);
     let (mut context, _) = codex_session_context_for_event(&event).await;
+    if let Some(root) = root.as_deref() {
+        let session_id = serde_json::from_str::<Value>(&event)
+            .ok()
+            .as_ref()
+            .and_then(event_session_id);
+        if let Some(digest) =
+            memory_inject::session_memory_digest(root, session_id.as_deref()).await
+        {
+            append_context_block(&mut context, &digest);
+        }
+    }
     if session_start_from_compaction(&event) {
         append_context_recovery_hint(&mut context);
     }
@@ -84,8 +96,19 @@ pub async fn codex_user_prompt_submit_context_for_event(event: &str) -> String {
         if let Some(hint) = codex_prompt_hint(event) {
             append_tool_hint(&mut context, &hint);
         }
+        if let Some(recall) = codex_prompt_memory_recall(event).await {
+            append_context_block(&mut context, &recall);
+        }
     }
     context
+}
+
+async fn codex_prompt_memory_recall(event_json: &str) -> Option<String> {
+    let parsed = serde_json::from_str::<Value>(event_json).ok()?;
+    let root = codex_project_root_from_parsed_event(&parsed)?;
+    let prompt = prompt_like_text(&parsed)?;
+    let session_id = event_session_id(&parsed);
+    memory_inject::prompt_memory_recall(&root, session_id.as_deref(), &prompt).await
 }
 
 /// Builds Codex session/prompt context. Unlike Cursor, Codex has no
@@ -115,12 +138,17 @@ async fn codex_session_context_for_event(event_json: &str) -> (String, HookWorks
 /// Steers research/explore subagents toward tracedecay MCP tools. Codex cannot
 /// hard-stop a subagent at start (`continue: false` is ignored for this event),
 /// so this injects `additionalContext` instead of denying.
-pub fn hook_codex_subagent_start() -> i32 {
+pub async fn hook_codex_subagent_start() -> i32 {
     let event = read_hook_event!();
     let root = codex_project_root_from_event(&event);
     record_hook_invoked(root.as_deref(), HintAgent::Codex, "SubagentStart", &event);
     let count = record_codex_subagent_start(&event);
     let output = evaluate_codex_subagent_start(&event);
+    let digest = match root.as_deref() {
+        Some(root) => memory_inject::session_memory_digest(root, None).await,
+        None => None,
+    };
+    let output = merge_codex_subagent_output(output, digest);
     eprintln!(
         "{}",
         codex_subagent_start_log_line(&event, count, output.is_some())
@@ -129,6 +157,28 @@ pub fn hook_codex_subagent_start() -> i32 {
         println!("{output}");
     }
     0
+}
+
+fn merge_codex_subagent_output(output: Option<String>, digest: Option<String>) -> Option<String> {
+    let Some(digest) = digest else {
+        return output;
+    };
+    let Some(output) = output else {
+        return Some(codex_additional_context_json("SubagentStart", &digest));
+    };
+    let Ok(mut parsed) = serde_json::from_str::<Value>(&output) else {
+        return Some(output);
+    };
+    let Some(context) = parsed
+        .pointer_mut("/hookSpecificOutput/additionalContext")
+        .and_then(|value| value.as_str().map(str::to_string))
+    else {
+        return Some(output);
+    };
+    let mut merged = context;
+    append_context_block(&mut merged, &digest);
+    parsed["hookSpecificOutput"]["additionalContext"] = Value::String(merged);
+    Some(parsed.to_string())
 }
 
 /// Codex `PostToolUse` hook handler used to keep the graph fresh after writes.
@@ -537,6 +587,38 @@ mod tests {
     use super::*;
     use crate::config::USER_DATA_DIR_ENV;
     use std::sync::{Mutex, OnceLock};
+
+    #[test]
+    fn codex_subagent_output_merges_memory_digest_into_additional_context() {
+        let steering = codex_additional_context_json("SubagentStart", "steering text");
+        let digest = "Durable project memory:\n- [decision #1 trust 0.90] fact".to_string();
+
+        let merged =
+            merge_codex_subagent_output(Some(steering.clone()), Some(digest.clone())).unwrap();
+        let parsed: Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(
+            parsed["hookSpecificOutput"]["hookEventName"],
+            "SubagentStart"
+        );
+        let context = parsed["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(context.starts_with("steering text"));
+        assert!(context.contains("Durable project memory"));
+
+        let digest_only = merge_codex_subagent_output(None, Some(digest)).unwrap();
+        let parsed: Value = serde_json::from_str(&digest_only).unwrap();
+        assert_eq!(
+            parsed["hookSpecificOutput"]["hookEventName"],
+            "SubagentStart"
+        );
+
+        assert_eq!(
+            merge_codex_subagent_output(Some(steering.clone()), None),
+            Some(steering)
+        );
+        assert_eq!(merge_codex_subagent_output(None, None), None);
+    }
 
     struct EnvGuard {
         key: &'static str,

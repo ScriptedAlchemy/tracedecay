@@ -13,9 +13,10 @@ use super::cursor_compact::{
     cursor_pre_compact_for_event_with_config, CURSOR_PRE_COMPACT_SUMMARY_BUDGET,
 };
 use super::cursor_shell::paths_same;
+use super::memory_inject;
 use super::steering::{
-    append_context_recovery_hint, build_cursor_session_context, cursor_index_signals_for_root,
-    session_start_from_compaction,
+    append_context_block, append_context_recovery_hint, build_cursor_session_context,
+    cursor_index_signals_for_root, session_start_from_compaction,
 };
 use super::tool_hints::{decide_hint, HintAgent, ToolHint, ToolHintInput};
 use super::{
@@ -196,6 +197,18 @@ pub async fn hook_cursor_session_start() -> i32 {
     )
     .await;
     let mut context = cursor_session_context_for_root(root.as_deref()).await;
+    if let Some(root) = root.as_deref() {
+        let session_id = serde_json::from_str::<Value>(&event)
+            .ok()
+            .as_ref()
+            .and_then(event_session_id);
+        if let Some(digest) =
+            memory_inject::session_memory_digest(root, session_id.as_deref()).await
+        {
+            append_context_block(&mut context, &digest);
+        }
+        memory_inject::regenerate_cursor_memory_rule(root).await;
+    }
     if session_start_from_compaction(&event) {
         append_context_recovery_hint(&mut context);
     }
@@ -243,6 +256,9 @@ pub async fn hook_cursor_workspace_open() -> i32 {
     let root = cursor_project_root_from_event(&event);
     record_hook_invoked(root.as_deref(), HintAgent::Cursor, "workspaceOpen", &event);
     notify_cursor_workspace_open(&event).await;
+    if let Some(root) = root.as_deref() {
+        memory_inject::regenerate_cursor_memory_rule(root).await;
+    }
     println!("{}", serde_json::json!({}));
     0
 }

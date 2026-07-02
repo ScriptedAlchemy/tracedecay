@@ -16,11 +16,12 @@ Recall memory **before** reaching for external or web search — prior sessions 
 2. **Durable facts → `tracedecay_fact_store`** with `action: "search"` (or `"probe"` / `"reason"`), plus `query` and `min_trust`.
 3. **If the user asks to inspect or repair memory health → `tracedecay_memory_status`** (repairs derived vectors/banks; returns fact/entity counts + trust distribution).
 4. **If the user rates a recalled fact → `tracedecay_fact_feedback`** (`helpful` / `unhelpful`) to tune its trust score.
-5. **Persist a new durable decision → `tracedecay_fact_store`** `action: "add"` (`content`, `category`, `tags`, `trust`) only when the user asks to remember it.
+5. **Persist a new durable decision → `tracedecay_fact_store`** `action: "add"` (`content`, `category`, `tags`, `trust`) proactively whenever a durable decision, user preference, correction, or pitfall surfaces — do not wait for the user to ask. The add path already rejects secrets and reports near-duplicates/conflicts.
 
 ## Guardrails
 
-- `tracedecay_message_search` and `fact_store` searches are read-only. `fact_store` adds, `fact_feedback`, and `memory_status` mutate memory state; use them only for explicit user requests or ratings.
+- `tracedecay_message_search` and `fact_store` searches are read-only. `fact_feedback` and `memory_status` mutate memory state; use them for explicit user ratings or health checks.
+- Do NOT capture: secrets/credentials, transient errors, environment-specific failures, one-off narratives, task progress, or soon-stale session outcomes — recover those from transcripts instead.
 
 ## Handoff
 

@@ -27,6 +27,7 @@ mod cursor;
 mod cursor_compact;
 mod cursor_shell;
 mod kiro;
+pub(crate) mod memory_inject;
 mod post_tool_use;
 mod steering;
 pub mod tool_hints;

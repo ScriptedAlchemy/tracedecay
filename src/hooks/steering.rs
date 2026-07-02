@@ -155,11 +155,12 @@ pub fn build_codex_session_context_for_workspace(
             s.push_str(
                 "TraceDecay session context is available via MCP. For prior conversation \
                  recovery, use tracedecay_lcm_expand_query, tracedecay_message_search, and \
-                 tracedecay_lcm_describe before asking the user to repeat themselves. Use \
-                 tracedecay_fact_store only for durable preferences, environment details, \
-                 tool quirks, or decisions that will still matter later. Do not store task \
-                 progress, temporary TODOs, or soon-stale session outcomes; recover those \
-                 from transcripts instead.\n",
+                 tracedecay_lcm_describe before asking the user to repeat themselves. When \
+                 a durable preference, decision, correction, or pitfall surfaces, store it \
+                 proactively with tracedecay_fact_store (action \"add\"). Do NOT store \
+                 secrets or credentials, transient errors, environment-specific failures, \
+                 one-off narratives, task progress, or soon-stale session outcomes; \
+                 recover those from transcripts instead.\n",
             );
             s.push_str("Workspace status: no active project workspace; no setup guidance needed for this prompt.\n");
         }
@@ -175,11 +176,23 @@ fn append_codex_recall_and_registry_guidance(s: &mut String) {
          project_path to tracedecay_context/search for cross-project code context before \
          scanning parent directories. When the user references prior conversation or \
          missing context, use tracedecay_message_search or tracedecay_lcm_expand_query \
-         before asking the user to repeat themselves. Use tracedecay_fact_store only for \
-         durable preferences, environment details, tool quirks, or decisions that will \
-         still matter later. Do not store task progress, temporary TODOs, or soon-stale \
-         session outcomes; recover those from transcripts instead.\n",
+         before asking the user to repeat themselves. When a durable decision, user \
+         preference, correction, or pitfall surfaces, store it proactively with \
+         tracedecay_fact_store (action \"add\") with calibrated trust — do not wait \
+         to be asked. Do NOT store secrets or credentials, transient errors, \
+         environment-specific failures, one-off narratives, task progress, or \
+         soon-stale session outcomes; recover those from transcripts instead.\n",
     );
+}
+
+pub(super) fn append_context_block(context: &mut String, block: &str) {
+    if !context.is_empty() && !context.ends_with('\n') {
+        context.push('\n');
+    }
+    context.push_str(block);
+    if !block.ends_with('\n') {
+        context.push('\n');
+    }
 }
 
 pub(super) fn append_context_recovery_hint(context: &mut String) {
