@@ -1,6 +1,7 @@
 //! The `upgrade` / `update` / `post-update` / `update-plugin` flow: binary
 //! upgrade via subprocess re-exec, generated-plugin refresh, daemon service
-//! refresh, and the post-update health pass.
+//! refresh, the post-update health pass, and the full tracked-agent
+//! reinstall that keeps config-managed integrations in sync.
 
 use std::path::{Path, PathBuf};
 
@@ -146,7 +147,7 @@ pub(crate) enum RefreshPolicy {
 /// binary path, when known — so the plugin refresh, daemon refresh, and
 /// health pass run on the new version. `policy` decides whether the refresh
 /// runs on a no-op upgrade and whether a refresh failure is fatal.
-pub(crate) fn run_update_steps<U, P>(
+pub(crate) fn run_install_then_refresh<U, P>(
     policy: RefreshPolicy,
     upgrade: U,
     post_update: P,
@@ -193,7 +194,7 @@ where
 }
 
 pub(crate) fn run_update_command(no_heal: bool) -> tracedecay::errors::Result<()> {
-    run_update_steps(
+    run_install_then_refresh(
         RefreshPolicy::Always,
         tracedecay::upgrade::run_upgrade,
         |binary| run_post_update_subcommand(no_heal, binary),
@@ -201,7 +202,7 @@ pub(crate) fn run_update_command(no_heal: bool) -> tracedecay::errors::Result<()
 }
 
 pub(crate) fn run_upgrade_command(no_heal: bool) -> tracedecay::errors::Result<()> {
-    run_update_steps(
+    run_install_then_refresh(
         RefreshPolicy::AfterInstall,
         tracedecay::upgrade::run_upgrade,
         |binary| run_post_update_subcommand(no_heal, binary),
@@ -242,17 +243,35 @@ fn run_post_update_subcommand(
     })
 }
 
-/// Marks `running` as fully installed in the version markers, returning
-/// whether anything changed. Run at the end of a successful `post-update` so
-/// the next ordinary command's startup maintenance does not re-run the
-/// plugin refresh (silent reinstall) that `post-update` just performed.
-pub(crate) fn mark_running_version_installed(config: &mut UserConfig, running: &str) -> bool {
-    if config.previous_version == running && config.last_installed_version == running {
+/// Re-runs full `install()` for every tracked agent so tool permissions,
+/// hooks, and MCP config stay in sync with the running binary — a superset
+/// of `refresh_generated_plugins`, which rewrites generated artifacts only
+/// and deliberately leaves config-managed integrations untouched. Returns
+/// whether every install succeeded (an empty tracked list is a success).
+pub(crate) fn reinstall_tracked_agents(user_config: &UserConfig) -> bool {
+    let (Some(home), Some(bin)) = (
+        tracedecay::agents::home_dir(),
+        tracedecay::agents::which_tracedecay(),
+    ) else {
         return false;
+    };
+    let mut all_ok = true;
+    for id in &user_config.installed_agents {
+        if let Ok(ag) = tracedecay::agents::get_integration(id) {
+            let ctx = tracedecay::agents::InstallContext {
+                home: home.clone(),
+                tracedecay_bin: bin.clone(),
+                tool_permissions: tracedecay::agents::expected_tool_perms(),
+                profile: None,
+                project_root: None,
+                dashboard: true,
+            };
+            if ag.install(&ctx).is_err() {
+                all_ok = false;
+            }
+        }
     }
-    config.previous_version = running.to_string();
-    config.last_installed_version = running.to_string();
-    true
+    all_ok
 }
 
 pub(crate) async fn run_post_update_tasks(no_heal: bool) -> tracedecay::errors::Result<()> {
@@ -266,9 +285,29 @@ pub(crate) async fn run_post_update_tasks(no_heal: bool) -> tracedecay::errors::
         tracedecay::doctor::heal::run_post_update_health_pass().await;
     }
 
+    // The generated-artifact refresh above skips config-managed integrations
+    // (claude, copilot, …), but a version bump can change their tool
+    // permissions, hooks, or MCP config too. Run the same full tracked-agent
+    // install pass the startup silent reinstall would, then advance the
+    // version markers so that startup pass does not repeat it. On failure the
+    // markers stay put, so the next ordinary command retries via the silent
+    // reinstall.
     let mut config = UserConfig::load();
-    if mark_running_version_installed(&mut config, env!("CARGO_PKG_VERSION")) {
-        config.save();
+    if !config.installed_agents.is_empty() {
+        eprintln!(
+            "Re-running agent install for: {}",
+            config.installed_agents.join(", ")
+        );
+    }
+    if reinstall_tracked_agents(&config) {
+        if config.mark_version_installed(env!("CARGO_PKG_VERSION")) {
+            config.save();
+        }
+    } else {
+        eprintln!(
+            "  \x1b[33mwarning:\x1b[0m agent install failed for at least one integration; \
+             it will be retried on the next tracedecay command."
+        );
     }
     Ok(())
 }
@@ -278,7 +317,7 @@ mod tests {
     use std::cell::RefCell;
     use std::path::{Path, PathBuf};
 
-    use super::{post_update_binary, run_update_steps, RefreshPolicy};
+    use super::{post_update_binary, run_install_then_refresh, RefreshPolicy};
     use tracedecay::upgrade::UpgradeOutcome;
 
     fn config_err(message: &str) -> tracedecay::errors::TraceDecayError {
@@ -319,7 +358,7 @@ mod tests {
         let calls = RefCell::new(Vec::new());
         let seen_binary = RefCell::new(None);
 
-        run_update_steps(
+        run_install_then_refresh(
             RefreshPolicy::Always,
             record_upgrade(&calls, "upgrade", Ok(UpgradeOutcome::AlreadyCurrent)),
             record_post_update(&calls, "post-update", &seen_binary, Ok(())),
@@ -336,7 +375,7 @@ mod tests {
         let calls = RefCell::new(Vec::new());
         let seen_binary = RefCell::new(None);
 
-        let result = run_update_steps(
+        let result = run_install_then_refresh(
             RefreshPolicy::Always,
             record_upgrade(&calls, "upgrade", Err(config_err("upgrade failed"))),
             record_post_update(&calls, "post-update", &seen_binary, Ok(())),
@@ -351,7 +390,7 @@ mod tests {
         let calls = RefCell::new(Vec::new());
         let seen_binary = RefCell::new(None);
 
-        let result = run_update_steps(
+        let result = run_install_then_refresh(
             RefreshPolicy::Always,
             record_upgrade(&calls, "upgrade", Ok(UpgradeOutcome::AlreadyCurrent)),
             record_post_update(
@@ -372,7 +411,7 @@ mod tests {
         let seen_binary = RefCell::new(None);
         let installed = PathBuf::from("/opt/homebrew/bin/tracedecay");
 
-        run_update_steps(
+        run_install_then_refresh(
             RefreshPolicy::AfterInstall,
             record_upgrade(
                 &calls,
@@ -396,7 +435,7 @@ mod tests {
         let calls = RefCell::new(Vec::new());
         let seen_binary = RefCell::new(None);
 
-        run_update_steps(
+        run_install_then_refresh(
             RefreshPolicy::AfterInstall,
             record_upgrade(&calls, "upgrade", Ok(UpgradeOutcome::AlreadyCurrent)),
             record_post_update(&calls, "post-update", &seen_binary, Ok(())),
@@ -412,7 +451,7 @@ mod tests {
         let calls = RefCell::new(Vec::new());
         let seen_binary = RefCell::new(None);
 
-        let result = run_update_steps(
+        let result = run_install_then_refresh(
             RefreshPolicy::AfterInstall,
             record_upgrade(
                 &calls,
@@ -437,7 +476,7 @@ mod tests {
         let calls = RefCell::new(Vec::new());
         let seen_binary = RefCell::new(None);
 
-        let result = run_update_steps(
+        let result = run_install_then_refresh(
             RefreshPolicy::AfterInstall,
             record_upgrade(&calls, "upgrade", Err(config_err("upgrade failed"))),
             record_post_update(&calls, "post-update", &seen_binary, Ok(())),
@@ -464,11 +503,15 @@ mod tests {
         let missing = temp.path().join("does-not-exist/tracedecay");
 
         // A dangling path (e.g. brew cleaned the keg) must fall back to the
-        // normal resolution instead of re-execing a nonexistent file.
-        let resolved = post_update_binary(Some(&missing));
-
-        if let Ok(resolved) = resolved {
-            assert_ne!(resolved, missing.to_string_lossy());
+        // normal resolution instead of re-execing a nonexistent file. Either
+        // branch proves the dangling path was rejected — which one runs
+        // depends on whether the test environment has tracedecay on PATH.
+        match post_update_binary(Some(&missing)) {
+            Ok(resolved) => assert_ne!(resolved, missing.to_string_lossy()),
+            Err(error) => assert!(
+                error.to_string().contains("not found on PATH"),
+                "unexpected fallback error: {error}"
+            ),
         }
     }
 }

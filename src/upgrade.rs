@@ -6,7 +6,10 @@
 //! Beta and stable are separate channels — a beta build only sees beta
 //! releases and vice versa.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 use crate::cloud::{self, InstallMethod};
 use crate::errors::{Result, TraceDecayError};
@@ -763,17 +766,35 @@ fn parse_version_output(output: &str) -> Option<String> {
     Some(version.trim_start_matches('v').to_string())
 }
 
-/// Asks the binary at `path` for its version. `None` when it cannot be run
-/// or its output is unrecognizable.
+/// Asks the binary at `path` for its version, killing it after a short
+/// deadline so a wedged binary cannot hang the upgrade. `None` when it
+/// cannot be run, times out, or its output is unrecognizable.
 fn installed_binary_version(path: &Path) -> Option<String> {
-    let output = std::process::Command::new(path)
+    let mut child = std::process::Command::new(path)
         .arg("--version")
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .ok()?;
-    if !output.status.success() {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(_) => return None,
+        }
+    };
+    if !status.success() {
         return None;
     }
-    parse_version_output(&String::from_utf8_lossy(&output.stdout))
+    let mut output = String::new();
+    child.stdout.take()?.read_to_string(&mut output).ok()?;
+    parse_version_output(&output)
 }
 
 /// Whether a delegated `brew upgrade` was a no-op: the linked binary still

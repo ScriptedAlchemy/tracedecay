@@ -4,8 +4,7 @@ use super::{
         validate_hermes_project_root_flag,
     },
     is_local_install_command, should_skip_agent_install_maintenance,
-    should_skip_startup_maintenance, silent_reinstall_action, update_cmd, Commands,
-    SilentReinstallAction,
+    should_skip_startup_maintenance, silent_reinstall_action, Commands, SilentReinstallAction,
 };
 use tempfile::TempDir;
 use tracedecay::user_config::UserConfig;
@@ -149,9 +148,13 @@ fn silent_reinstall_runs_after_minor_bump_without_post_update() {
 }
 
 #[test]
-fn post_update_marker_advancement_prevents_duplicate_silent_reinstall() {
-    // `post-update` refreshed the plugins and advanced the markers; the next
-    // ordinary command must not repeat that work via silent reinstall.
+fn post_update_full_reinstall_marker_advancement_suppresses_startup_reinstall() {
+    // `post-update` ran the full tracked-agent install pass (see
+    // `update_cmd::run_post_update_tasks`) and recorded it by advancing both
+    // markers; the next ordinary command must not repeat that work via the
+    // startup silent reinstall. The markers may only be advanced *after* the
+    // full install pass — advancing them for a plugin-artifact-only refresh
+    // would silently skip config-managed agents on minor/major bumps.
     let running = "6.1.0";
     let mut config = UserConfig {
         installed_agents: vec!["cursor".to_string()],
@@ -159,10 +162,7 @@ fn post_update_marker_advancement_prevents_duplicate_silent_reinstall() {
         ..UserConfig::default()
     };
 
-    assert!(update_cmd::mark_running_version_installed(
-        &mut config,
-        running
-    ));
+    assert!(config.mark_version_installed(running));
     assert_eq!(config.previous_version, running);
     assert_eq!(config.last_installed_version, running);
     assert_eq!(
@@ -170,10 +170,7 @@ fn post_update_marker_advancement_prevents_duplicate_silent_reinstall() {
         SilentReinstallAction::Nothing
     );
     // Idempotent: a second post-update run has nothing left to record.
-    assert!(!update_cmd::mark_running_version_installed(
-        &mut config,
-        running
-    ));
+    assert!(!config.mark_version_installed(running));
 }
 
 #[test]

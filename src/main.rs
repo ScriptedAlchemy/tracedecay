@@ -315,9 +315,10 @@ fn silent_reinstall_action(
     //   (b) Fallback for external upgrades (`brew upgrade`, `cargo install`):
     //       the running version is newer than `last_installed_version`.
     //
-    // A successful `post-update` advances both markers (see
-    // `update_cmd::mark_running_version_installed`), so the next ordinary
-    // command does not repeat the plugin refresh it just performed.
+    // A successful `post-update` performs the same full tracked-agent
+    // install pass and then advances both markers (see
+    // `UserConfig::mark_version_installed`), so the next ordinary command
+    // does not repeat the reinstall it just performed.
     let previous_version = if user_config.previous_version.is_empty() {
         "6.0.0".to_string()
     } else {
@@ -356,31 +357,9 @@ fn maybe_run_silent_reinstall(user_config: &mut tracedecay::user_config::UserCon
 }
 
 fn run_silent_reinstall(user_config: &mut tracedecay::user_config::UserConfig, running: &str) {
-    if let (Some(home), Some(bin)) = (
-        tracedecay::agents::home_dir(),
-        tracedecay::agents::which_tracedecay(),
-    ) {
-        let mut all_ok = true;
-        for id in &user_config.installed_agents {
-            if let Ok(ag) = tracedecay::agents::get_integration(id) {
-                let ctx = tracedecay::agents::InstallContext {
-                    home: home.clone(),
-                    tracedecay_bin: bin.clone(),
-                    tool_permissions: tracedecay::agents::expected_tool_perms(),
-                    profile: None,
-                    project_root: None,
-                    dashboard: true,
-                };
-                if ag.install(&ctx).is_err() {
-                    all_ok = false;
-                }
-            }
-        }
-        if all_ok {
-            user_config.last_installed_version = running.to_string();
-            user_config.previous_version = running.to_string();
-            user_config.save();
-        }
+    if update_cmd::reinstall_tracked_agents(user_config) {
+        user_config.mark_version_installed(running);
+        user_config.save();
     }
 }
 
