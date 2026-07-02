@@ -62,24 +62,55 @@ pub(crate) fn refresh_generated_plugins() -> tracedecay::errors::Result<()> {
     Ok(())
 }
 
-fn refresh_daemon_service() -> tracedecay::errors::Result<()> {
+/// Rewrites and restarts the installed daemon service, returning the service
+/// path and its socket, or `None` when no service is installed.
+fn refresh_daemon_service() -> tracedecay::errors::Result<Option<(PathBuf, PathBuf)>> {
     let tracedecay_bin = tracedecay_bin_on_path()?;
     let spec = tracedecay::daemon::service_spec(tracedecay_bin, None)?;
     let socket_path = tracedecay::daemon::installed_service_socket_path()?
         .unwrap_or_else(|| spec.socket_path.clone());
-    match tracedecay::daemon::refresh_installed_service(&spec)? {
-        Some(service_path) => {
+    Ok(tracedecay::daemon::refresh_installed_service(&spec)?
+        .map(|service_path| (service_path, socket_path)))
+}
+
+fn refresh_daemon_service_after_update() -> tracedecay::errors::Result<()> {
+    match refresh_daemon_service()? {
+        Some((service_path, socket_path)) => {
             eprintln!(
                 "\x1b[32m✔\x1b[0m Daemon service refreshed at {}",
                 service_path.display()
             );
             eprintln!("Daemon socket: {}", socket_path.display());
         }
+        None if tracedecay::daemon::daemon_reachable() => {
+            eprintln!(
+                "  \x1b[33mwarning:\x1b[0m a TraceDecay daemon is running without an installed service; \
+                 it keeps serving the previous version until its `tracedecay daemon run` process is restarted."
+            );
+        }
         None => {
             eprintln!("TraceDecay daemon service is not installed; skipping daemon restart.");
         }
     }
     Ok(())
+}
+
+pub(crate) fn restart_daemon_service() -> tracedecay::errors::Result<()> {
+    match refresh_daemon_service()? {
+        Some((service_path, socket_path)) => {
+            eprintln!(
+                "\x1b[32m✔\x1b[0m Daemon service restarted at {}",
+                service_path.display()
+            );
+            eprintln!("Daemon socket: {}", socket_path.display());
+            Ok(())
+        }
+        None => Err(tracedecay::errors::TraceDecayError::Config {
+            message: "no TraceDecay daemon service is installed — restart your `tracedecay daemon run` \
+                      process manually, or run `tracedecay daemon install-service` to manage it as a service"
+                .to_string(),
+        }),
+    }
 }
 
 fn tracedecay_home_dir() -> tracedecay::errors::Result<PathBuf> {
@@ -138,7 +169,7 @@ fn run_post_update_subcommand(no_heal: bool) -> tracedecay::errors::Result<()> {
 
 pub(crate) async fn run_post_update_tasks(no_heal: bool) -> tracedecay::errors::Result<()> {
     refresh_generated_plugins()?;
-    if let Err(error) = refresh_daemon_service() {
+    if let Err(error) = refresh_daemon_service_after_update() {
         eprintln!("  \x1b[33mwarning:\x1b[0m daemon service refresh failed: {error}");
     }
     if no_heal {

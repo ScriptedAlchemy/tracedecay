@@ -480,6 +480,8 @@ pub enum DaemonAction {
         #[arg(long)]
         no_stop: bool,
     },
+    /// Restart the installed daemon service (e.g. after a version mismatch)
+    Restart,
     /// Print daemon service/socket status
     Status,
 }

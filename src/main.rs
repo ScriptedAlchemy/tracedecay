@@ -598,7 +598,7 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                 false,
             )?;
             let socket_path = tracedecay::daemon::default_socket_path()?;
-            if socket_path.exists() {
+            if tracedecay::daemon::should_proxy_serve_to_daemon(&socket_path).await {
                 tracedecay::daemon::proxy_stdio_to_daemon(&socket_path, &handshake, peeked_line)
                     .await?;
             } else {
@@ -633,6 +633,9 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                     "Removed TraceDecay daemon service at {}",
                     service_path.display()
                 );
+            }
+            DaemonAction::Restart => {
+                update_cmd::restart_daemon_service()?;
             }
             DaemonAction::Status => {
                 let socket_path = tracedecay::daemon::socket_path_or_default(None)?;

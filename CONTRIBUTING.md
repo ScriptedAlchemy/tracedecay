@@ -56,6 +56,12 @@ cargo nextest run --no-default-features --features lite
    ```bash
    cargo nextest run --workspace --no-fail-fast
    ```
+   Cargo-launched test processes are isolated from your real `~/.tracedecay`
+   profile: `.cargo/config.toml` pins `TRACEDECAY_DATA_DIR` to
+   `target/test-profile/.tracedecay` (enforced by
+   `tests/test_profile_isolation_test.rs`). Tests that need a private profile
+   should still override it per-test, e.g. via
+   `common::TraceDecayStorageEnvGuard` or `common::apply_tracedecay_home_env`.
 4. **Format your code** with the standard Rust toolchain:
    ```bash
    cargo fmt

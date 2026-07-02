@@ -14,6 +14,18 @@ CXXFLAGS = { value = "-DNDEBUG", force = false }
 # Installed binaries run outside cargo and are unaffected.
 TRACEDECAY_DISABLE_GLOBAL_DB = { value = "1", force = false }
 
+# Point cargo-launched processes at a workspace-local profile. Without this,
+# any test (or `tracedecay` binary a test spawns) that doesn't set
+# TRACEDECAY_DATA_DIR itself resolves storage to the developer's real
+# ~/.tracedecay, enrolling temp fixture repos into the real profile and
+# contending with a live daemon. Tests that need a private profile override
+# this per-test (`force = false`); the HOME-fallback tests remove the variable
+# in-process. Installed binaries run outside cargo and are unaffected, but the
+# profile does apply to `cargo run` — use the installed binary (or set
+# TRACEDECAY_DATA_DIR yourself) for real `daemon install-service` runs.
+# Enforced by tests/test_profile_isolation_test.rs.
+TRACEDECAY_DATA_DIR = { value = "target/test-profile/.tracedecay", force = false, relative = true }
+
 [alias]
 # Local default for the full Rust test suite. Requires cargo-nextest:
 # https://nexte.st/docs/installation/pre-built-binaries/
