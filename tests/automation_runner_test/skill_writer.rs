@@ -1,6 +1,4 @@
-mod automation_runner_support;
-
-use automation_runner_support::*;
+use crate::support::*;
 
 #[tokio::test]
 async fn skill_writer_runner_skips_when_task_is_disabled() {

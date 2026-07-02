@@ -36,7 +36,7 @@ platform = { host = 'cfg(windows)' }
 test-group = 'windows-tracedecay-init'
 
 [[profile.ci.overrides]]
-filter = 'binary(=automation_memory_curator_runner_test) | binary(=automation_runner_test) | binary(=automation_session_reflector_runner_test) | binary(=automation_skill_writer_runner_test) | binary(=branch_drift_test) | binary(=integration_test) | binary(=regression_core_engine_test) | binary(=tracedecay_test)'
+filter = '(binary(=automation_runner_test) & !test(~backend::)) | binary(=branch_drift_test) | binary(=integration_test) | binary(=regression_core_engine_test) | binary(=tracedecay_test)'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-init-heavy'
 
@@ -56,7 +56,7 @@ platform = { host = 'cfg(windows)' }
 test-group = 'windows-process-heavy'
 
 [[profile.ci.overrides]]
-filter = 'binary(=automation_backend_test)'
+filter = 'binary(=automation_runner_test) & test(~backend::)'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-subprocess'
 

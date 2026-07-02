@@ -18,9 +18,9 @@ use tracedecay::sessions::codex_app_server::{
     run_prompt_with_codex_app_server, CodexAppServerSummaryConfig,
 };
 
-mod common;
-
-use common::{fake_codex_bin, install_fake_codex_launcher, windows_python_launcher, EnvVarGuard};
+use crate::common::{
+    fake_codex_bin, install_fake_codex_launcher, windows_python_launcher, EnvVarGuard,
+};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
