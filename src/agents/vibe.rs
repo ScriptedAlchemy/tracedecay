@@ -153,7 +153,7 @@ impl AgentIntegration for VibeIntegration {
         profile_root: &Path,
     ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
         let prompt_path = project_root.join(".vibe/prompts/cli.md");
-        if !project_root.join(".vibe/config.toml").exists() || !prompt_path.exists() {
+        if !local_config_has_tracedecay(project_root) || !prompt_path.exists() {
             return Ok(Vec::new());
         }
         Ok(vec![
@@ -164,6 +164,15 @@ impl AgentIntegration for VibeIntegration {
             )?,
         ])
     }
+}
+
+fn local_config_has_tracedecay(project_root: &Path) -> bool {
+    let config_path = project_root.join(".vibe/config.toml");
+    if !config_path.exists() {
+        return false;
+    }
+    let contents = std::fs::read_to_string(&config_path).unwrap_or_default();
+    contents.contains(TOML_MARKER)
 }
 
 // ---------------------------------------------------------------------------

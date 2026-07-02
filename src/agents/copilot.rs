@@ -213,7 +213,7 @@ impl AgentIntegration for CopilotIntegration {
         profile_root: &Path,
     ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
         let instructions = project_root.join(".github/copilot-instructions.md");
-        if !project_root.join(".vscode/mcp.json").exists() || !instructions.exists() {
+        if !workspace_mcp_has_tracedecay(project_root) || !instructions.exists() {
             return Ok(Vec::new());
         }
         Ok(vec![
@@ -224,6 +224,17 @@ impl AgentIntegration for CopilotIntegration {
             )?,
         ])
     }
+}
+
+fn workspace_mcp_has_tracedecay(project_root: &Path) -> bool {
+    let settings_path = project_root.join(".vscode/mcp.json");
+    if !settings_path.exists() {
+        return false;
+    }
+    let json = load_jsonc_file(&settings_path);
+    json.get("servers")
+        .and_then(|servers| servers.get("tracedecay"))
+        .is_some()
 }
 
 /// Register MCP server in VS Code settings.json.

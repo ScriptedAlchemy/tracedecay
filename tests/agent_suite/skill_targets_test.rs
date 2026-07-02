@@ -1,7 +1,7 @@
 use serde_json::json;
 
 use tracedecay::agents::codex::export_codex_plugin_artifact;
-use tracedecay::agents::export_managed_skills_to_agents;
+use tracedecay::agents::{export_managed_skills_to_agent_hosts, export_managed_skills_to_agents};
 use tracedecay::automation::hermes_bridge::{load_hermes_skill_bridge, HermesSkillBridgeOptions};
 use tracedecay::automation::managed_skills::{
     approve_managed_skill, create_managed_skill_draft, default_managed_skill_targets,
@@ -416,6 +416,97 @@ async fn lifecycle_export_sweep_skips_agents_without_installs() {
         reports.is_empty(),
         "no detected installs means no export destinations: {reports:?}"
     );
+}
+
+#[tokio::test]
+async fn local_lifecycle_export_skips_unrelated_project_configs() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let project_root = temp.path().join("project");
+    let profile_root = temp.path().join("profile");
+    std::fs::create_dir_all(&home).unwrap();
+
+    let claude_md = project_root.join(".claude/CLAUDE.md");
+    std::fs::create_dir_all(claude_md.parent().unwrap()).unwrap();
+    std::fs::write(&claude_md, "# Claude rules\n").unwrap();
+    std::fs::write(
+        project_root.join(".mcp.json"),
+        r#"{"mcpServers":{"other":{"command":"other"}}}"#,
+    )
+    .unwrap();
+
+    let copilot_md = project_root.join(".github/copilot-instructions.md");
+    std::fs::create_dir_all(copilot_md.parent().unwrap()).unwrap();
+    std::fs::write(&copilot_md, "# Copilot rules\n").unwrap();
+    std::fs::create_dir_all(project_root.join(".vscode")).unwrap();
+    std::fs::write(
+        project_root.join(".vscode/mcp.json"),
+        r#"{"servers":{"other":{"command":"other"}}}"#,
+    )
+    .unwrap();
+
+    let agents_md = project_root.join("AGENTS.md");
+    std::fs::write(&agents_md, "# Agent rules\n").unwrap();
+    std::fs::create_dir_all(project_root.join(".kimi-code")).unwrap();
+    std::fs::write(
+        project_root.join(".kimi-code/mcp.json"),
+        r#"{"mcpServers":{"other":{"command":"other"}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project_root.join("opencode.json"),
+        r#"{"mcp":{"other":{"command":["other"]}}}"#,
+    )
+    .unwrap();
+
+    let vibe_prompt = project_root.join(".vibe/prompts/cli.md");
+    std::fs::create_dir_all(vibe_prompt.parent().unwrap()).unwrap();
+    std::fs::write(&vibe_prompt, "# Vibe rules\n").unwrap();
+    std::fs::write(
+        project_root.join(".vibe/config.toml"),
+        r#"[[mcp_servers]]
+name = "other"
+command = "other"
+"#,
+    )
+    .unwrap();
+
+    let kiro_index = project_root.join(".kiro/steering/tracedecay-managed-skills.md");
+    std::fs::create_dir_all(kiro_index.parent().unwrap()).unwrap();
+    std::fs::write(&kiro_index, "# Kiro managed skills\n").unwrap();
+    std::fs::create_dir_all(project_root.join(".kiro/settings")).unwrap();
+    std::fs::write(
+        project_root.join(".kiro/settings/mcp.json"),
+        r#"{"mcpServers":{"other":{"command":"other"}}}"#,
+    )
+    .unwrap();
+
+    create_managed_skill_draft(&profile_root, draft("repo-hygiene", "Repository hygiene"))
+        .await
+        .unwrap();
+    approve_managed_skill(&profile_root, "repo-hygiene")
+        .await
+        .unwrap();
+
+    let reports = export_managed_skills_to_agent_hosts(&home, &project_root, &profile_root);
+    assert!(
+        reports.is_empty(),
+        "unrelated project configs must not become export destinations: {reports:?}"
+    );
+    for path in [
+        &claude_md,
+        &copilot_md,
+        &agents_md,
+        &vibe_prompt,
+        &kiro_index,
+    ] {
+        let contents = std::fs::read_to_string(path).unwrap();
+        assert!(
+            !contents.contains("repo-hygiene"),
+            "unrelated config refreshed {}: {contents}",
+            path.display()
+        );
+    }
 }
 
 #[tokio::test]

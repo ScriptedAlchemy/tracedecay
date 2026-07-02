@@ -296,7 +296,7 @@ impl AgentIntegration for KiroIntegration {
         profile_root: &Path,
     ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
         let skill_index_path = project_root.join(".kiro/steering/tracedecay-managed-skills.md");
-        if !skill_index_path.exists() {
+        if !workspace_mcp_has_tracedecay(project_root) || !skill_index_path.exists() {
             return Ok(Vec::new());
         }
         Ok(vec![install_managed_skills(
@@ -305,6 +305,17 @@ impl AgentIntegration for KiroIntegration {
             &skill_index_path,
         )?])
     }
+}
+
+fn workspace_mcp_has_tracedecay(project_root: &Path) -> bool {
+    let path = workspace_mcp_config_path(project_root);
+    if !path.exists() {
+        return false;
+    }
+    let json = load_json_file(&path);
+    json.get("mcpServers")
+        .and_then(|servers| servers.get("tracedecay"))
+        .is_some()
 }
 
 // ---------------------------------------------------------------------------

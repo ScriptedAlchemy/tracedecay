@@ -150,7 +150,7 @@ impl AgentIntegration for ClaudeIntegration {
         profile_root: &Path,
     ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
         let claude_md_path = project_root.join(".claude").join("CLAUDE.md");
-        if !project_root.join(".mcp.json").exists() || !claude_md_path.exists() {
+        if !local_mcp_has_tracedecay(project_root) || !claude_md_path.exists() {
             return Ok(Vec::new());
         }
         Ok(vec![
@@ -180,6 +180,17 @@ impl AgentIntegration for ClaudeIntegration {
             .and_then(|v| v.get("tracedecay"))
             .is_some()
     }
+}
+
+fn local_mcp_has_tracedecay(project_root: &Path) -> bool {
+    let mcp_path = project_root.join(".mcp.json");
+    if !mcp_path.exists() {
+        return false;
+    }
+    let json = super::load_json_file(&mcp_path);
+    json.get("mcpServers")
+        .and_then(|servers| servers.get("tracedecay"))
+        .is_some()
 }
 
 // ---------------------------------------------------------------------------

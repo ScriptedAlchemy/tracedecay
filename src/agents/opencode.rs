@@ -128,7 +128,7 @@ impl AgentIntegration for OpenCodeIntegration {
         profile_root: &Path,
     ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
         let agents_md = project_root.join("AGENTS.md");
-        if !project_root.join("opencode.json").exists() || !agents_md.exists() {
+        if !local_config_has_tracedecay(project_root) || !agents_md.exists() {
             return Ok(Vec::new());
         }
         Ok(vec![
@@ -139,6 +139,17 @@ impl AgentIntegration for OpenCodeIntegration {
             )?,
         ])
     }
+}
+
+fn local_config_has_tracedecay(project_root: &Path) -> bool {
+    let config_path = project_root.join("opencode.json");
+    if !config_path.exists() {
+        return false;
+    }
+    let json = super::load_json_file(&config_path);
+    json.get("mcp")
+        .and_then(|servers| servers.get("tracedecay"))
+        .is_some()
 }
 
 // ---------------------------------------------------------------------------
