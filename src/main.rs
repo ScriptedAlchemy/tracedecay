@@ -547,6 +547,10 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
             let original_cwd = std::env::current_dir().ok();
             // Track the first stdin line if we need to peek at `initialize` roots.
             let mut peeked_line: Option<String> = None;
+            // Some MCP hosts (e.g. Cursor headless agent sessions) pass config
+            // template variables like `${workspaceFolder}` through literally;
+            // treat such values as "no --path" and use discovery instead.
+            let path = serve::sanitize_serve_path_arg(path);
             let explicit_path = path.is_some();
             let project_path = tracedecay::config::resolve_path_with_discovery(path);
             let cg = match serve::ensure_initialized(&project_path).await {

@@ -19,9 +19,15 @@ tracedecay serve --path ${workspaceFolder}
 
 This is intentionally workspace-scoped: each Cursor workspace uses its own
 `.tracedecay/` index instead of the legacy global Cursor MCP registration. The
-`${workspaceFolder}` variable is resolved by Cursor's MCP runner; if your Cursor
-build does not expand it, reinstall with the latest Cursor and run
-`tracedecay doctor --agent cursor` to inspect the generated plugin config.
+`${workspaceFolder}` variable is resolved by Cursor's MCP runner in normal
+editor windows. Some Cursor contexts (headless agent-session MCP scopes) spawn
+the server with the literal, unexpanded `${workspaceFolder}` string instead;
+`serve` detects that, warns on stderr, and falls back to its normal project
+discovery (cwd walk-up, MCP initialize roots, then the global project
+registry) rather than exiting — Cursor never retries a failed MCP scope, so an
+early exit would permanently break the connection for that session. If tools
+still do not connect, run `tracedecay doctor --agent cursor` to inspect the
+generated plugin config.
 
 Hook commands derive the active project from Cursor's event payload /
 `CURSOR_PROJECT_DIR`, not from the plugin directory.

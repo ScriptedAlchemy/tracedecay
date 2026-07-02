@@ -37,6 +37,38 @@ impl CwdProjectMatch {
     }
 }
 
+/// Returns the first unexpanded `${...}` template variable in a `--path`
+/// argument (e.g. `${workspaceFolder}`), or `None` when the value contains no
+/// template syntax. A bare `$` without braces is not template syntax — real
+/// directories can contain `$` in their names.
+pub fn unexpanded_template_variable(path: &str) -> Option<&str> {
+    let start = path.find("${")?;
+    let end = path[start..].find('}')?;
+    Some(&path[start..=start + end])
+}
+
+/// Filters a `serve --path` CLI argument that the MCP host failed to expand.
+///
+/// Some hosts pass config template variables through literally instead of
+/// expanding them — Cursor's headless agent-session scopes spawn
+/// `serve --path ${workspaceFolder}` verbatim, and Cursor never retries an
+/// MCP scope whose process exited, so a fatal config error here permanently
+/// breaks the connection. A literal `${...}` value can never name a real
+/// project, so it is discarded with a stderr warning and `serve` falls back
+/// to its normal no-path discovery chain (cwd walk-up, MCP initialize roots,
+/// global project registry).
+pub fn sanitize_serve_path_arg(path: Option<String>) -> Option<String> {
+    let raw = path?;
+    let Some(variable) = unexpanded_template_variable(&raw) else {
+        return Some(raw);
+    };
+    eprintln!(
+        "warning: --path '{raw}' contains the unexpanded template variable '{variable}' \
+         (the MCP host did not expand it); ignoring --path and falling back to project discovery"
+    );
+    None
+}
+
 pub fn global_db_ambiguity_message(paths: &[String]) -> String {
     let mut message =
         "Multiple tracedecay projects found — pass -p <path> to select one:".to_string();
@@ -281,5 +313,96 @@ fn hex_value(byte: u8) -> Option<u8> {
         b'a'..=b'f' => Some(byte - b'a' + 10),
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_literal_workspace_folder_variable() {
+        assert_eq!(
+            unexpanded_template_variable("${workspaceFolder}"),
+            Some("${workspaceFolder}")
+        );
+    }
+
+    #[test]
+    fn detects_template_variable_with_default_value_syntax() {
+        assert_eq!(
+            unexpanded_template_variable("${workspaceFolder:-/tmp/fallback}"),
+            Some("${workspaceFolder:-/tmp/fallback}")
+        );
+    }
+
+    #[test]
+    fn detects_other_host_template_variables() {
+        assert_eq!(
+            unexpanded_template_variable("${workspaceRoot}"),
+            Some("${workspaceRoot}")
+        );
+        assert_eq!(
+            unexpanded_template_variable("${userHome}"),
+            Some("${userHome}")
+        );
+    }
+
+    #[test]
+    fn detects_template_variable_embedded_in_a_longer_path() {
+        assert_eq!(
+            unexpanded_template_variable("${workspaceFolder}/packages/core"),
+            Some("${workspaceFolder}")
+        );
+        assert_eq!(
+            unexpanded_template_variable("/home/user/${workspaceFolderBasename}/src"),
+            Some("${workspaceFolderBasename}")
+        );
+    }
+
+    #[test]
+    fn plain_paths_are_not_templates() {
+        assert_eq!(unexpanded_template_variable("/home/user/project"), None);
+        assert_eq!(unexpanded_template_variable("relative/dir"), None);
+        assert_eq!(unexpanded_template_variable(""), None);
+    }
+
+    #[test]
+    fn dollar_signs_without_brace_syntax_are_not_templates() {
+        // Real directories can contain `$` — only `${...}` is template syntax.
+        assert_eq!(unexpanded_template_variable("/tmp/pri$ce/data"), None);
+        assert_eq!(unexpanded_template_variable("$workspaceFolder"), None);
+        assert_eq!(unexpanded_template_variable("/tmp/{braces}/x"), None);
+        assert_eq!(unexpanded_template_variable("/tmp/trailing$"), None);
+    }
+
+    #[test]
+    fn unterminated_template_syntax_is_not_a_template() {
+        assert_eq!(unexpanded_template_variable("/tmp/${unclosed"), None);
+    }
+
+    #[test]
+    fn sanitize_keeps_plain_paths_and_none() {
+        assert_eq!(
+            sanitize_serve_path_arg(Some("/home/user/project".to_string())),
+            Some("/home/user/project".to_string())
+        );
+        assert_eq!(
+            sanitize_serve_path_arg(Some("/tmp/pri$ce".to_string())),
+            Some("/tmp/pri$ce".to_string())
+        );
+        assert_eq!(sanitize_serve_path_arg(None), None);
+    }
+
+    #[test]
+    fn sanitize_discards_unexpanded_template_paths() {
+        assert_eq!(
+            sanitize_serve_path_arg(Some("${workspaceFolder}".to_string())),
+            None
+        );
+        assert_eq!(
+            sanitize_serve_path_arg(Some("${workspaceFolder}/nested".to_string())),
+            None
+        );
     }
 }

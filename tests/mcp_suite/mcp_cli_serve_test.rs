@@ -1042,6 +1042,253 @@ async fn initialize_roots_decode_file_uri_localhost_and_percent_escapes() {
     );
 }
 
+/// Spawns `serve --path <path_arg>` from `cwd` and drives a real MCP
+/// `initialize` + `tracedecay_runtime` tools/call over stdio. Callers assert
+/// on the returned output (success and failure paths are both exercised).
+fn run_serve_runtime_with_path_arg(home: &Path, cwd: &Path, path_arg: &str) -> Output {
+    let mut child = tracedecay_command_with_home(home)
+        .arg("serve")
+        .arg("--path")
+        .arg(path_arg)
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("tracedecay serve should start");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin should be piped");
+        // Failure-path tests exit before draining stdin; ignore broken pipes
+        // so the assertion happens on the process output instead.
+        let _ = writeln!(
+            stdin,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {}
+            })
+        );
+        let _ = writeln!(
+            stdin,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "tracedecay_runtime",
+                    "arguments": { "format": "json" }
+                }
+            })
+        );
+    }
+    child
+        .wait_with_output()
+        .expect("tracedecay serve should exit after stdin closes")
+}
+
+const UNEXPANDED_TEMPLATE_WARNING: &str = "unexpanded template variable";
+
+/// Exact reproduction of the Cursor headless agent-session spawn: the host
+/// launches `tracedecay serve --path ${workspaceFolder}` with the LITERAL
+/// (unexpanded) template variable and cwd set to the user home, not the
+/// workspace. `serve` must warn, discard the bogus path, and complete the MCP
+/// initialize handshake via discovery instead of exiting with a config error
+/// (Cursor never retries a failed MCP scope, so an early exit permanently
+/// breaks the connection).
+#[tokio::test]
+async fn literal_workspace_folder_path_from_home_cwd_serves_via_discovery() {
+    let home = TempDir::new().unwrap();
+    let project = init_project_with_file(home.path(), "pub fn headless_scope_marker() {}\n").await;
+    register_global_project(home.path(), project.path()).await;
+
+    let home_cwd = canonical_existing_path(home.path());
+    let output = run_serve_runtime_with_path_arg(home.path(), &home_cwd, "${workspaceFolder}");
+
+    assert!(
+        output.status.success(),
+        "serve must tolerate a literal ${{workspaceFolder}} --path instead of exiting\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\"protocolVersion\":\"2024-11-05\""),
+        "serve should answer the MCP initialize handshake\nstdout:\n{stdout}"
+    );
+    assert_eq!(
+        canonical_path_string(Path::new(&runtime_project_root(&output.stdout, 2))),
+        canonical_path_string(project.path()),
+        "serve should resolve the registered project via discovery"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(UNEXPANDED_TEMPLATE_WARNING)
+            && stderr.contains("${workspaceFolder}")
+            && stderr.contains("project discovery"),
+        "serve should warn that the host passed an unexpanded template variable\nstderr:\n{stderr}"
+    );
+}
+
+/// Other unexpanded `${...}` forms (different variable names, default-value
+/// syntax) must get the same tolerance as `${workspaceFolder}`.
+#[tokio::test]
+async fn literal_template_variant_paths_fall_back_to_discovery() {
+    for path_arg in ["${workspaceRoot}", "${workspaceFolder:-/tmp/never-used}"] {
+        let home = TempDir::new().unwrap();
+        let project =
+            init_project_with_file(home.path(), "pub fn template_variant_marker() {}\n").await;
+        register_global_project(home.path(), project.path()).await;
+        let cwd = TempDir::new().unwrap();
+
+        let output = run_serve_runtime_with_path_arg(home.path(), cwd.path(), path_arg);
+
+        assert!(
+            output.status.success(),
+            "serve must tolerate the literal template path {path_arg}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            canonical_path_string(Path::new(&runtime_project_root(&output.stdout, 2))),
+            canonical_path_string(project.path()),
+            "serve should resolve the registered project via discovery for {path_arg}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(UNEXPANDED_TEMPLATE_WARNING) && stderr.contains(path_arg),
+            "warning should name the unexpanded variable for {path_arg}\nstderr:\n{stderr}"
+        );
+    }
+}
+
+/// A real directory whose name merely contains `$` (no `${...}` syntax) is a
+/// legitimate explicit path and must NOT be diverted through discovery.
+#[tokio::test]
+async fn explicit_path_with_dollar_sign_directory_is_not_treated_as_template() {
+    let home = TempDir::new().unwrap();
+    let parent = TempDir::new().unwrap();
+    let dollar_project = init_project_under(
+        home.path(),
+        parent.path(),
+        "pri$ce-project",
+        "pub fn dollar_dir_marker() {}\n",
+    )
+    .await;
+    // A registered decoy proves the explicit path stays authoritative: if the
+    // `$` path were misread as a template, discovery would serve the decoy.
+    let decoy = init_project_with_file(home.path(), "pub fn decoy_marker() {}\n").await;
+    register_global_project(home.path(), decoy.path()).await;
+    let cwd = TempDir::new().unwrap();
+
+    let output =
+        run_serve_runtime_with_path_arg(home.path(), cwd.path(), dollar_project.to_str().unwrap());
+
+    assert!(
+        output.status.success(),
+        "serve should accept an explicit path containing '$'\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        canonical_path_string(Path::new(&runtime_project_root(&output.stdout, 2))),
+        canonical_path_string(&dollar_project),
+        "the explicit '$' directory must be served, not a discovery fallback"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains(UNEXPANDED_TEMPLATE_WARNING),
+        "a real '$' directory must not trigger the template warning\nstderr:\n{stderr}"
+    );
+}
+
+/// A genuinely wrong explicit path (no template syntax) must keep failing
+/// loudly — the template tolerance must not swallow real misconfiguration.
+#[tokio::test]
+async fn explicit_nonexistent_path_still_fails_instead_of_discovery() {
+    let home = TempDir::new().unwrap();
+    let active = init_project_with_file(home.path(), "pub fn active_project_marker() {}\n").await;
+    register_global_project(home.path(), active.path()).await;
+    let scratch = TempDir::new().unwrap();
+    let missing = scratch.path().join("does-not-exist");
+
+    let output = tracedecay_command_with_home(home.path())
+        .arg("serve")
+        .arg("--path")
+        .arg(&missing)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("tracedecay serve should run");
+
+    assert!(
+        !output.status.success(),
+        "a nonexistent explicit --path must stay fatal instead of falling back to discovery\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&missing.display().to_string()),
+        "error should name the missing explicit path\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains(UNEXPANDED_TEMPLATE_WARNING),
+        "a plain nonexistent path must not be mistaken for a template\nstderr:\n{stderr}"
+    );
+}
+
+/// Pins the template decision: no-path discovery from a home-directory cwd
+/// cannot pick between multiple same-depth registered projects, which is why
+/// the Cursor plugin template keeps `--path ${workspaceFolder}` (normal
+/// windows expand it) and relies on the literal-template fallback only when
+/// the host fails to expand. When that fallback also cannot disambiguate, the
+/// actionable ambiguity error must surface rather than an arbitrary project.
+#[tokio::test]
+async fn literal_workspace_folder_with_multiple_projects_reports_ambiguity() {
+    let home = TempDir::new().unwrap();
+    let home_cwd = canonical_existing_path(home.path());
+    let projects_dir = home_cwd.join("projects");
+    fs::create_dir_all(&projects_dir).unwrap();
+    let alpha = init_project_under(
+        home.path(),
+        &projects_dir,
+        "alpha",
+        "pub fn alpha_marker() {}\n",
+    )
+    .await;
+    let beta = init_project_under(
+        home.path(),
+        &projects_dir,
+        "beta",
+        "pub fn beta_marker() {}\n",
+    )
+    .await;
+    register_global_project(home.path(), &alpha).await;
+    register_global_project(home.path(), &beta).await;
+
+    let output = run_serve_runtime_with_path_arg(home.path(), &home_cwd, "${workspaceFolder}");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "ambiguous discovery must not silently pick a project\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        stderr
+    );
+    assert!(
+        stderr.contains(UNEXPANDED_TEMPLATE_WARNING),
+        "the template warning should still be emitted before the ambiguity error\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("Multiple tracedecay projects found"),
+        "stderr should surface the actionable ambiguity error\nstderr:\n{stderr}"
+    );
+}
+
 #[tokio::test]
 async fn same_depth_descendant_global_fallback_is_ambiguous() {
     let home = TempDir::new().unwrap();

@@ -202,7 +202,7 @@ rm -rf ~/.cursor/plugins/local/tracedecay
 cp -R /path/to/tracedecay/cursor-plugin ~/.cursor/plugins/local/tracedecay
 ```
 
-Reload Cursor after installing or replacing the plugin. Manual copies use the commands in the source bundle (`tracedecay ...`), so make sure GUI-launched Cursor can resolve `tracedecay` from `PATH`; the normal `tracedecay install --agent cursor` path rewrites commands to the absolute binary path. The plugin relies on Cursor expanding `${workspaceFolder}` in MCP config; if tools do not connect, upgrade Cursor and run `tracedecay doctor --agent cursor` to inspect the generated plugin files.
+Reload Cursor after installing or replacing the plugin. Manual copies use the commands in the source bundle (`tracedecay ...`), so make sure GUI-launched Cursor can resolve `tracedecay` from `PATH`; the normal `tracedecay install --agent cursor` path rewrites commands to the absolute binary path. The plugin relies on Cursor expanding `${workspaceFolder}` in MCP config for workspace scoping; when a Cursor context passes the literal unexpanded string instead (headless agent-session MCP scopes do this), `serve` warns and falls back to its normal project discovery rather than exiting. If tools do not connect, upgrade Cursor and run `tracedecay doctor --agent cursor` to inspect the generated plugin files.
 
 ### Codex plugin installs
 
