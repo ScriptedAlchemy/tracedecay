@@ -6,6 +6,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
 use crate::extraction::complexity::{count_complexity, PERL_COMPLEXITY};
+use crate::extraction::traversal::find_direct_child_by_kind;
 use crate::types::{
     generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
 };
@@ -237,7 +238,7 @@ impl PerlExtractor {
     /// we handle them by scanning ahead through siblings until the next
     /// `package_statement` or end of the `source_file` children.
     fn visit_package(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::find_child_by_kind(node, "package_name")
+        let name = find_direct_child_by_kind(node, "package_name")
             .map_or_else(|| "<anonymous>".to_string(), |pn| state.node_text(pn));
 
         // Skip `package main;` — it just returns to the top-level scope.
@@ -398,7 +399,7 @@ impl PerlExtractor {
         let left = node.child_by_field_name("variable");
         if let Some(left_node) = left {
             if left_node.kind() == "variable_declaration" {
-                let scope_node = Self::find_child_by_kind(left_node, "scope");
+                let scope_node = find_direct_child_by_kind(left_node, "scope");
                 let is_our = scope_node.is_some_and(|s| state.node_text(s) == "our");
 
                 if is_our {
@@ -525,7 +526,7 @@ impl PerlExtractor {
                         // These contain a call_expression_with_bareword child
                         // with a function_name field.
                         let callee_name =
-                            Self::find_child_by_kind(child, "call_expression_with_bareword")
+                            find_direct_child_by_kind(child, "call_expression_with_bareword")
                                 .and_then(|ceb| ceb.child_by_field_name("function_name"))
                                 .map(|n| state.node_text(n));
 
@@ -544,7 +545,7 @@ impl PerlExtractor {
                         }
                         // Also check for qualified calls (e.g., main::log_message)
                         if let Some(ceb) =
-                            Self::find_child_by_kind(child, "call_expression_with_bareword")
+                            find_direct_child_by_kind(child, "call_expression_with_bareword")
                         {
                             if let Some(pkg) = ceb.child_by_field_name("package_name") {
                                 let pkg_name = state.node_text(pkg);
@@ -664,23 +665,6 @@ impl PerlExtractor {
                 | "ref"
                 | "bless"
         )
-    }
-
-    /// Find the first child of a node with a given kind.
-    fn find_child_by_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == kind {
-                    return Some(child);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        None
     }
 
     /// Build the final `ExtractionResult` from the accumulated state.

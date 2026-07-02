@@ -9,6 +9,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
+use crate::extraction::traversal::find_direct_child_by_kind;
 use crate::types::{
     generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
 };
@@ -183,13 +184,13 @@ impl GwBasicExtractor {
 
     /// Parse a single `line` node into a `BasicLine` struct.
     fn parse_line<'a>(state: &ExtractionState, node: TsNode<'a>) -> Option<BasicLine<'a>> {
-        let line_number_node = Self::find_child_by_kind(node, "line_number")?;
+        let line_number_node = find_direct_child_by_kind(node, "line_number")?;
         let line_number_text = state.node_text(line_number_node);
         let line_number: u32 = line_number_text.trim().parse().unwrap_or(0);
 
         // Navigate: line -> statement_list -> statement -> specific_kind
-        let statement_list = Self::find_child_by_kind(node, "statement_list")?;
-        let statement = Self::find_child_by_kind(statement_list, "statement")?;
+        let statement_list = find_direct_child_by_kind(node, "statement_list")?;
+        let statement = find_direct_child_by_kind(statement_list, "statement")?;
 
         // Get the first named child of statement (the actual statement type).
         let mut stmt_cursor = statement.walk();
@@ -229,19 +230,19 @@ impl GwBasicExtractor {
             if basic_line.statement_kind != "def_fn_statement" {
                 continue;
             }
-            let Some(statement_list) = Self::find_child_by_kind(basic_line.node, "statement_list")
+            let Some(statement_list) = find_direct_child_by_kind(basic_line.node, "statement_list")
             else {
                 continue;
             };
-            let Some(statement) = Self::find_child_by_kind(statement_list, "statement") else {
+            let Some(statement) = find_direct_child_by_kind(statement_list, "statement") else {
                 continue;
             };
-            let Some(def_fn) = Self::find_child_by_kind(statement, "def_fn_statement") else {
+            let Some(def_fn) = find_direct_child_by_kind(statement, "def_fn_statement") else {
                 continue;
             };
 
             // Extract function name from user_function child.
-            let Some(fn_name_node) = Self::find_child_by_kind(def_fn, "user_function") else {
+            let Some(fn_name_node) = find_direct_child_by_kind(def_fn, "user_function") else {
                 continue;
             };
             let fn_name = state.node_text(fn_name_node);
@@ -315,22 +316,22 @@ impl GwBasicExtractor {
 
     /// Extract a LET statement as a Const node.
     fn visit_let_statement(state: &mut ExtractionState, basic_line: &BasicLine<'_>) {
-        let Some(statement_list) = Self::find_child_by_kind(basic_line.node, "statement_list")
+        let Some(statement_list) = find_direct_child_by_kind(basic_line.node, "statement_list")
         else {
             return;
         };
-        let Some(statement) = Self::find_child_by_kind(statement_list, "statement") else {
+        let Some(statement) = find_direct_child_by_kind(statement_list, "statement") else {
             return;
         };
-        let Some(let_stmt) = Self::find_child_by_kind(statement, "let_statement") else {
+        let Some(let_stmt) = find_direct_child_by_kind(statement, "let_statement") else {
             return;
         };
 
         // Extract the variable name from: let_statement -> variable -> identifier
-        let Some(var_node) = Self::find_child_by_kind(let_stmt, "variable") else {
+        let Some(var_node) = find_direct_child_by_kind(let_stmt, "variable") else {
             return;
         };
-        let Some(id_node) = Self::find_child_by_kind(var_node, "identifier") else {
+        let Some(id_node) = find_direct_child_by_kind(var_node, "identifier") else {
             return;
         };
         let name = state.node_text(id_node);
@@ -644,7 +645,7 @@ impl GwBasicExtractor {
         match kind {
             "gosub_statement" | "goto_statement" => {
                 // Extract the target line number.
-                if let Some(ln_node) = Self::find_child_by_kind(node, "line_number") {
+                if let Some(ln_node) = find_direct_child_by_kind(node, "line_number") {
                     let target = state.node_text(ln_node);
                     state.unresolved_refs.push(UnresolvedRef {
                         from_node_id: from_node_id.to_string(),
@@ -711,23 +712,6 @@ impl GwBasicExtractor {
         } else {
             trimmed
         }
-    }
-
-    /// Find the first child of a node with a given kind.
-    fn find_child_by_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == kind {
-                    return Some(child);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        None
     }
 
     /// Build the final `ExtractionResult` from the accumulated state.

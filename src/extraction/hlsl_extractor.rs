@@ -8,6 +8,9 @@ use tree_sitter::{Node as TsNode, Parser, Tree};
 
 use crate::extraction::common::extract_call_expression_sites;
 use crate::extraction::complexity::{count_complexity, C_COMPLEXITY};
+use crate::extraction::traversal::{
+    find_descendant_by_kind, find_direct_child_by_kind, has_direct_child_kind,
+};
 use crate::types::{
     generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
 };
@@ -210,12 +213,12 @@ impl HlslExtractor {
 
     fn extract_function_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
         // function_definition.declarator → function_declarator.declarator → identifier
-        if let Some(func_decl) = Self::find_descendant_by_kind(node, "function_declarator") {
-            if let Some(ident) = Self::find_child_by_kind(func_decl, "identifier") {
+        if let Some(func_decl) = find_descendant_by_kind(node, "function_declarator") {
+            if let Some(ident) = find_direct_child_by_kind(func_decl, "identifier") {
                 return Some(state.node_text(ident));
             }
             // Qualified identifier (e.g. ClassName::method)
-            if let Some(qi) = Self::find_child_by_kind(func_decl, "qualified_identifier") {
+            if let Some(qi) = find_direct_child_by_kind(func_decl, "qualified_identifier") {
                 return Some(state.node_text(qi));
             }
         }
@@ -306,8 +309,8 @@ impl HlslExtractor {
     }
 
     fn visit_field_declaration(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::find_descendant_by_kind(node, "field_identifier")
-            .or_else(|| Self::find_descendant_by_kind(node, "identifier"))
+        let name = find_descendant_by_kind(node, "field_identifier")
+            .or_else(|| find_descendant_by_kind(node, "identifier"))
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         let start_line = node.start_position().row as u32;
@@ -436,12 +439,12 @@ impl HlslExtractor {
 
     fn visit_declaration(state: &mut ExtractionState, node: TsNode<'_>) {
         // Skip function prototypes — handled by function_definition.
-        if Self::find_descendant_by_kind(node, "function_declarator").is_some() {
+        if find_descendant_by_kind(node, "function_declarator").is_some() {
             return;
         }
         // Skip struct/cbuffer declarations (visited separately).
-        if Self::has_child_kind(node, "struct_specifier")
-            || Self::has_child_kind(node, "cbuffer_specifier")
+        if has_direct_child_kind(node, "struct_specifier")
+            || has_direct_child_kind(node, "cbuffer_specifier")
         {
             Self::visit_children(state, node);
             return;
@@ -509,18 +512,18 @@ impl HlslExtractor {
                 return Some(state.node_text(decl));
             }
             // init_declarator: identifier "=" value
-            if let Some(ident) = Self::find_child_by_kind(decl, "identifier") {
+            if let Some(ident) = find_direct_child_by_kind(decl, "identifier") {
                 return Some(state.node_text(ident));
             }
             // array_declarator: identifier "[" ... "]"
-            if let Some(arr) = Self::find_child_by_kind(decl, "array_declarator") {
-                if let Some(ident) = Self::find_child_by_kind(arr, "identifier") {
+            if let Some(arr) = find_direct_child_by_kind(decl, "array_declarator") {
+                if let Some(ident) = find_direct_child_by_kind(arr, "identifier") {
                     return Some(state.node_text(ident));
                 }
             }
         }
         // Fallback: any identifier child
-        Self::find_child_by_kind(node, "identifier").map(|n| state.node_text(n))
+        find_direct_child_by_kind(node, "identifier").map(|n| state.node_text(n))
     }
 
     // -------------------------------------------------------
@@ -528,7 +531,7 @@ impl HlslExtractor {
     // -------------------------------------------------------
 
     fn visit_preproc_def(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::find_child_by_kind(node, "identifier")
+        let name = find_direct_child_by_kind(node, "identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         let start_line = node.start_position().row as u32;
@@ -577,8 +580,8 @@ impl HlslExtractor {
     }
 
     fn visit_preproc_include(state: &mut ExtractionState, node: TsNode<'_>) {
-        let include_path = Self::find_child_by_kind(node, "string_literal")
-            .or_else(|| Self::find_child_by_kind(node, "system_lib_string"))
+        let include_path = find_direct_child_by_kind(node, "string_literal")
+            .or_else(|| find_direct_child_by_kind(node, "system_lib_string"))
             .map_or_else(|| "<unknown>".to_string(), |n| state.node_text(n));
 
         let line = node.start_position().row as u32;
@@ -613,45 +616,6 @@ impl HlslExtractor {
     // -------------------------------------------------------
     // Utility helpers
     // -------------------------------------------------------
-
-    fn has_child_kind(node: TsNode<'_>, kind: &str) -> bool {
-        Self::find_child_by_kind(node, kind).is_some()
-    }
-
-    fn find_child_by_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == kind {
-                    return Some(child);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        None
-    }
-
-    fn find_descendant_by_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == kind {
-                    return Some(child);
-                }
-                if let Some(found) = Self::find_descendant_by_kind(child, kind) {
-                    return Some(found);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        None
-    }
 
     fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
         ExtractionResult {

@@ -12,6 +12,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
 use crate::extraction::complexity::{count_complexity, ComplexityMetrics, QBASIC_COMPLEXITY};
+use crate::extraction::traversal::find_direct_child_by_kind;
 use crate::types::{
     generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
 };
@@ -185,9 +186,9 @@ impl QBasicExtractor {
     /// Extract a comment from a line node, if the line is purely a comment.
     /// Returns the comment text (with leading ' stripped), or None if not a comment line.
     fn extract_line_comment(state: &ExtractionState, line: TsNode<'_>) -> Option<String> {
-        let stmt_list = Self::find_child_by_kind(line, "statement_list")?;
-        let stmt = Self::find_child_by_kind(stmt_list, "statement")?;
-        let comment = Self::find_child_by_kind(stmt, "apostrophe_comment")?;
+        let stmt_list = find_direct_child_by_kind(line, "statement_list")?;
+        let stmt = find_direct_child_by_kind(stmt_list, "statement")?;
+        let comment = find_direct_child_by_kind(stmt, "apostrophe_comment")?;
         let text = state.node_text(comment);
         // Strip leading ' and whitespace.
         let stripped = text.trim_start_matches('\'').trim().to_string();
@@ -196,10 +197,10 @@ impl QBasicExtractor {
 
     /// Visit a top-level `line` node, extracting CONST, DIM SHARED, CALL, etc.
     fn visit_line(state: &mut ExtractionState, line: TsNode<'_>, pending_comment: Option<&str>) {
-        let Some(stmt_list) = Self::find_child_by_kind(line, "statement_list") else {
+        let Some(stmt_list) = find_direct_child_by_kind(line, "statement_list") else {
             return;
         };
-        let Some(stmt) = Self::find_child_by_kind(stmt_list, "statement") else {
+        let Some(stmt) = find_direct_child_by_kind(stmt_list, "statement") else {
             return;
         };
 
@@ -233,7 +234,7 @@ impl QBasicExtractor {
         pending_comment: Option<&str>,
     ) {
         // Find the identifier child of const_statement.
-        let Some(id_node) = Self::find_child_by_kind(const_stmt, "identifier") else {
+        let Some(id_node) = find_direct_child_by_kind(const_stmt, "identifier") else {
             return;
         };
         let name = state.node_text(id_node);
@@ -297,10 +298,10 @@ impl QBasicExtractor {
         }
 
         // Find the dim_variable child, then get its identifier.
-        let Some(dim_var) = Self::find_child_by_kind(dim_stmt, "dim_variable") else {
+        let Some(dim_var) = find_direct_child_by_kind(dim_stmt, "dim_variable") else {
             return;
         };
-        let Some(id_node) = Self::find_child_by_kind(dim_var, "identifier") else {
+        let Some(id_node) = find_direct_child_by_kind(dim_var, "identifier") else {
             return;
         };
         let name = state.node_text(id_node);
@@ -426,7 +427,7 @@ impl QBasicExtractor {
 
     /// Visit a `type_member` inside a TYPE block and emit a Field node.
     fn visit_type_member(state: &mut ExtractionState, member: TsNode<'_>) {
-        let name = match Self::find_child_by_kind(member, "identifier") {
+        let name = match find_direct_child_by_kind(member, "identifier") {
             Some(id_node) => state.node_text(id_node),
             None => return,
         };
@@ -618,7 +619,7 @@ impl QBasicExtractor {
 
     /// Extract a call reference from a `call_statement` node.
     fn extract_call_from_call_statement(state: &mut ExtractionState, call_stmt: TsNode<'_>) {
-        let target_name = match Self::find_child_by_kind(call_stmt, "identifier") {
+        let target_name = match find_direct_child_by_kind(call_stmt, "identifier") {
             Some(id_node) => state.node_text(id_node),
             None => return,
         };
@@ -660,23 +661,6 @@ impl QBasicExtractor {
                 }
             }
         }
-    }
-
-    /// Find the first child of a node with a given kind.
-    fn find_child_by_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == kind {
-                    return Some(child);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        None
     }
 
     /// Build the final `ExtractionResult` from the accumulated state.

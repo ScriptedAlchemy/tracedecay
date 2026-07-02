@@ -7,6 +7,7 @@ use tree_sitter::{Node as TsNode, Parser, Tree};
 
 use crate::extraction::common::docstring_from_hash_comments;
 use crate::extraction::complexity::{count_complexity, RUBY_COMPLEXITY};
+use crate::extraction::traversal::find_direct_child_by_kind;
 use crate::types::{
     generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
 };
@@ -171,7 +172,7 @@ impl RubyExtractor {
     /// `is_singleton` controls whether this becomes a Method regardless of class depth
     /// (singleton methods are always `NodeKind::Method`).
     fn visit_method(state: &mut ExtractionState, node: TsNode<'_>, is_singleton: bool) {
-        let name = Self::find_child_by_kind(node, "identifier")
+        let name = find_direct_child_by_kind(node, "identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         let in_class = state.class_depth > 0 || is_singleton;
@@ -295,7 +296,7 @@ impl RubyExtractor {
     /// Extract a class definition.
     fn visit_class(state: &mut ExtractionState, node: TsNode<'_>) {
         // In tree-sitter-ruby, class node children include: "class", constant (name), superclass?, body
-        let name = Self::find_child_by_kind(node, "constant")
+        let name = find_direct_child_by_kind(node, "constant")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         let visibility = Visibility::Pub;
@@ -351,7 +352,7 @@ impl RubyExtractor {
         // Visit class body.
         state.node_stack.push((name.clone(), id));
         state.class_depth += 1;
-        if let Some(body) = Self::find_child_by_kind(node, "body_statement") {
+        if let Some(body) = find_direct_child_by_kind(node, "body_statement") {
             Self::visit_children(state, body);
         }
         state.class_depth -= 1;
@@ -360,7 +361,7 @@ impl RubyExtractor {
 
     /// Extract a module definition.
     fn visit_module(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::find_child_by_kind(node, "constant")
+        let name = find_direct_child_by_kind(node, "constant")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         let visibility = Visibility::Pub;
@@ -420,7 +421,7 @@ impl RubyExtractor {
         // Visit module body.
         state.node_stack.push((name.clone(), id));
         state.class_depth += 1;
-        if let Some(body) = Self::find_child_by_kind(node, "body_statement") {
+        if let Some(body) = find_direct_child_by_kind(node, "body_statement") {
             Self::visit_children(state, body);
         }
         state.class_depth -= 1;
@@ -520,8 +521,8 @@ impl RubyExtractor {
                     if child.kind() == "superclass" {
                         // The superclass node contains "< ConstantName"
                         // Find the constant child inside superclass
-                        if let Some(const_node) = Self::find_child_by_kind(child, "constant")
-                            .or_else(|| Self::find_child_by_kind(child, "scope_resolution"))
+                        if let Some(const_node) = find_direct_child_by_kind(child, "constant")
+                            .or_else(|| find_direct_child_by_kind(child, "scope_resolution"))
                         {
                             let base_name = state.node_text(const_node);
                             let line = const_node.start_position().row as u32;
@@ -665,23 +666,6 @@ impl RubyExtractor {
                 }
             }
         }
-    }
-
-    /// Find the first child of a node with a given kind.
-    fn find_child_by_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == kind {
-                    return Some(child);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        None
     }
 
     /// Build the final `ExtractionResult` from the accumulated state.

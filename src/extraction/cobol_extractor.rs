@@ -8,6 +8,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
+use crate::extraction::traversal::find_direct_child_by_kind;
 use crate::types::{
     generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
 };
@@ -194,7 +195,7 @@ impl CobolExtractor {
 
     /// Extract the PROGRAM-ID as a Module node.
     fn visit_identification_division(state: &mut ExtractionState, node: TsNode<'_>) {
-        let program_name_node = Self::find_child_by_kind(node, "program_name");
+        let program_name_node = find_direct_child_by_kind(node, "program_name");
         if let Some(pn) = program_name_node {
             let name = state.node_text(pn);
             let start_line = node.start_position().row as u32;
@@ -312,7 +313,7 @@ impl CobolExtractor {
         docstring: Option<String>,
     ) {
         // Only extract 01-level items.
-        let level_node = Self::find_child_by_kind(node, "level_number");
+        let level_node = find_direct_child_by_kind(node, "level_number");
         if let Some(ln) = level_node {
             let level_text = state.node_text(ln);
             if level_text.trim() != "01" {
@@ -322,14 +323,14 @@ impl CobolExtractor {
             return;
         }
 
-        let name_node = Self::find_child_by_kind(node, "entry_name");
+        let name_node = find_direct_child_by_kind(node, "entry_name");
         let name = if let Some(n) = name_node {
             state.node_text(n)
         } else {
             return;
         };
 
-        let has_value = Self::find_child_by_kind(node, "value_clause").is_some();
+        let has_value = find_direct_child_by_kind(node, "value_clause").is_some();
         let kind = if has_value {
             NodeKind::Const
         } else {
@@ -630,27 +631,10 @@ impl CobolExtractor {
     /// Extract the label name from a `perform_procedure` node.
     fn extract_label_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
         // perform_procedure -> label -> qualified_word -> WORD
-        let label = Self::find_child_by_kind(node, "label")?;
-        let qw = Self::find_child_by_kind(label, "qualified_word")?;
-        let word = Self::find_child_by_kind(qw, "WORD")?;
+        let label = find_direct_child_by_kind(node, "label")?;
+        let qw = find_direct_child_by_kind(label, "qualified_word")?;
+        let word = find_direct_child_by_kind(qw, "WORD")?;
         Some(state.node_text(word))
-    }
-
-    /// Find the first child of a node with a given kind.
-    fn find_child_by_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == kind {
-                    return Some(child);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        None
     }
 
     /// Build the final `ExtractionResult` from the accumulated state.
