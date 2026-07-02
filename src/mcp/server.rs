@@ -28,6 +28,120 @@ use super::tools::{
 };
 use super::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
 
+/// Every JSON-RPC method surface the MCP server understands. This is the
+/// single source of truth for protocol dispatch, shared by the full server
+/// ([`McpServer::handle_request`]) and the degraded startup server
+/// ([`super::degraded`]) so the two surfaces cannot drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum McpMethod {
+    Initialize,
+    /// `initialized` / `notifications/initialized` — compatibility no-ops.
+    InitializedAck,
+    ToolsList,
+    ToolsCall,
+    ResourcesList,
+    ResourcesRead,
+    /// `ping` / `logging/setLevel` — acknowledged with an empty result.
+    TrivialAck,
+    /// The daemon's internal hook-event notification.
+    HookEvent,
+    Unknown,
+}
+
+pub(crate) fn classify_mcp_method(method: &str) -> McpMethod {
+    if method == crate::daemon::HOOK_EVENT_METHOD {
+        return McpMethod::HookEvent;
+    }
+    match method {
+        "initialize" => McpMethod::Initialize,
+        "initialized" | "notifications/initialized" => McpMethod::InitializedAck,
+        "tools/list" => McpMethod::ToolsList,
+        "tools/call" => McpMethod::ToolsCall,
+        "resources/list" => McpMethod::ResourcesList,
+        "resources/read" => McpMethod::ResourcesRead,
+        "ping" | "logging/setLevel" => McpMethod::TrivialAck,
+        _ => McpMethod::Unknown,
+    }
+}
+
+/// The steering instructions advertised from the `initialize` handshake of a
+/// healthy server.
+pub(crate) const SERVER_INSTRUCTIONS: &str = "tracedecay is a code-graph MCP server. \
+    Start with tracedecay_context for any code exploration task \
+    — it returns relevant symbols, relationships, and code \
+    snippets for a natural-language query. Use tracedecay_search \
+    to find specific symbols by name. Discovery and analysis \
+    tools are read-only and safe to call in parallel. Edit \
+    and session-memory tools can mutate local project state \
+    and declare readOnlyHint=false. \
+    Every tool is also available from the shell: \
+    `tracedecay tool <name> --key value` (run `tracedecay tool` \
+    to list tools, `tracedecay tool <name> --help` for \
+    parameters). If an MCP call errors, times out, or this \
+    server disconnects, fall back to that CLI instead of \
+    querying .tracedecay databases directly or abandoning \
+    tracedecay. \
+    When a tool result contains a `tracedecay_metrics:` line, \
+    report the savings to the user (e.g. 'TraceDecay\\'d ~N tokens').";
+
+/// The `initialize` result payload. One definition serves both the full
+/// server and the degraded startup server (which substitutes its recovery
+/// notice for the standard instructions).
+pub(crate) fn initialize_result(instructions: &str) -> Value {
+    json!({
+        "protocolVersion": "2024-11-05",
+        "capabilities": {
+            "tools": {},
+            "resources": {},
+            "logging": {}
+        },
+        "serverInfo": {
+            "name": "tracedecay",
+            "version": env!("CARGO_PKG_VERSION")
+        },
+        "instructions": instructions,
+    })
+}
+
+/// The `resources/list` result payload, shared with the degraded startup
+/// server (the resource catalog is static).
+pub(crate) fn resources_list_result() -> Value {
+    json!({
+        "resources": [
+            {
+                "uri": "tracedecay://status",
+                "name": "Graph Status",
+                "description": "Code graph statistics: node/edge/file counts, languages, DB size, and index freshness.",
+                "mimeType": "application/json"
+            },
+            {
+                "uri": "tracedecay://files",
+                "name": "File List",
+                "description": "All indexed project files grouped by directory with symbol counts.",
+                "mimeType": "text/plain"
+            },
+            {
+                "uri": "tracedecay://overview",
+                "name": "Project Overview",
+                "description": "High-level project summary: language distribution, largest modules, and top entry points.",
+                "mimeType": "text/plain"
+            },
+            {
+                "uri": "tracedecay://branches",
+                "name": "Tracked Branches",
+                "description": "List of tracked branches with DB sizes, parent branch, and last sync time. Empty if multi-branch is not active.",
+                "mimeType": "application/json"
+            },
+            {
+                "uri": "tracedecay://schema",
+                "name": "SQLite Schema",
+                "description": "Documentation for the .tracedecay/tracedecay.db schema: tables, columns, indexes, and common query recipes. Use when MCP tools don't cover your query and you need to drop down to raw SQL.",
+                "mimeType": "text/markdown"
+            }
+        ]
+    })
+}
+
 /// Runtime statistics for the MCP server.
 pub struct ServerStats {
     started_at: Instant,
@@ -482,6 +596,12 @@ pub struct McpServer {
     /// [`maybe_sync_if_stale`](Self::maybe_sync_if_stale) so concurrent
     /// tool calls don't pile on the same walk.
     last_staleness_check_at: AtomicI64,
+    /// UNIX timestamp (secs) of the most recent staged-automation notice
+    /// check. Same `compare_exchange` cooldown pattern as
+    /// [`last_staleness_check_at`](Self::last_staleness_check_at) so the
+    /// pending-review stores are re-read at most once per window no matter
+    /// how many tool calls fire.
+    last_automation_notice_check_at: AtomicI64,
     /// Cached worktree-vs-index mismatch detection for this session. `None`
     /// when no mismatch exists (the common case) or detection was skipped
     /// (not a git repo / git missing). Computed once at startup so we
@@ -590,6 +710,7 @@ impl McpServer {
             shutdown_done: AtomicBool::new(false),
             timings_enabled: AtomicBool::new(false),
             last_staleness_check_at: AtomicI64::new(0),
+            last_automation_notice_check_at: AtomicI64::new(0),
             worktree_mismatch,
             startup_catch_up_done: AtomicBool::new(true),
             transcript_ingest_done: Arc::new(AtomicBool::new(true)),
@@ -941,6 +1062,40 @@ impl McpServer {
         // between our cooldown windows, in which case `stale` is empty
         // here but our in-memory `file_token_map` is still pre-sync.
         self.refresh_file_token_map().await;
+    }
+
+    /// Returns a compact one-line notice when automation runs have staged
+    /// output awaiting review (skill drafts, fact proposals) that the user
+    /// hasn't been told about yet — `TraceDecay`'s equivalent of Hermes's
+    /// inline "💾 Self-improvement review" moment (parity R5).
+    ///
+    /// Cheap by construction: a 60 s `compare_exchange` cooldown gates the
+    /// check, and the underlying dedupe state
+    /// ([`crate::automation::staged_notice`]) fires at most once per new
+    /// batch (latest run id or pending-count change), so dropping this into
+    /// every `tools/call` response is safe.
+    async fn maybe_automation_staged_notice(&self, cg: &TraceDecay) -> Option<String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let previous = self.last_automation_notice_check_at.load(Ordering::Acquire);
+        if now.saturating_sub(previous) < 60 {
+            return None;
+        }
+        if self
+            .last_automation_notice_check_at
+            .compare_exchange(previous, now, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return None;
+        }
+        let profile_root = crate::storage::default_profile_root().ok()?;
+        crate::automation::staged_notice::maybe_automation_staged_notice(
+            &cg.store_layout().dashboard_root,
+            &profile_root,
+        )
+        .await
     }
 
     /// Internal: snapshot of the current `file_token_map`. Exposed for
@@ -1334,35 +1489,32 @@ impl McpServer {
         if let Ok(mut counts) = self.method_call_counts.lock() {
             *counts.entry(request.method.clone()).or_insert(0) += 1;
         }
-        if request.method == crate::daemon::HOOK_EVENT_METHOD {
+        if matches!(classify_mcp_method(&request.method), McpMethod::HookEvent) {
             self.handle_hook_event_notification(request.params.as_ref())
                 .await;
             return None;
         }
         let id = request.id.clone()?;
 
-        let result = match request.method.as_str() {
-            "initialize" => Some(Self::handle_initialize(id)),
-            "initialized" => {
-                // Some clients send this notification with an id; keep it a no-op.
-                None
-            }
-            "notifications/initialized" => {
-                // Alternate initialized request path; also a compatibility no-op.
-                None
-            }
-            "tools/list" => Some(self.handle_tools_list(id).await),
-            "tools/call" => Some(
+        let result = match classify_mcp_method(&request.method) {
+            McpMethod::Initialize => Some(Self::handle_initialize(id)),
+            // Some clients send the initialized notification with an id (or
+            // via the alternate method name); both stay compatibility no-ops.
+            // Hook events were consumed by the early notification dispatch
+            // above and can never reach this match with a response due.
+            McpMethod::InitializedAck | McpMethod::HookEvent => None,
+            McpMethod::ToolsList => Some(self.handle_tools_list(id).await),
+            McpMethod::ToolsCall => Some(
                 self.handle_tools_call(id, request.params.as_ref(), timings_enabled)
                     .await,
             ),
-            "resources/list" => Some(Self::handle_resources_list(id)),
-            "resources/read" => Some(
+            McpMethod::ResourcesList => Some(Self::handle_resources_list(id)),
+            McpMethod::ResourcesRead => Some(
                 self.handle_resources_read(id, request.params.as_ref())
                     .await,
             ),
-            "ping" | "logging/setLevel" => Some(JsonRpcResponse::success(id, json!({}))),
-            _ => Some(JsonRpcResponse::error(
+            McpMethod::TrivialAck => Some(JsonRpcResponse::success(id, json!({}))),
+            McpMethod::Unknown => Some(JsonRpcResponse::error(
                 id,
                 ErrorCode::MethodNotFound,
                 format!("method not found: {}", request.method),
@@ -1483,38 +1635,7 @@ impl McpServer {
 
     /// Handles the `initialize` method, returning server capabilities.
     fn handle_initialize(id: Value) -> JsonRpcResponse {
-        JsonRpcResponse::success(
-            id,
-            json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": {
-                    "tools": {},
-                    "resources": {},
-                    "logging": {}
-                },
-                "serverInfo": {
-                    "name": "tracedecay",
-                    "version": env!("CARGO_PKG_VERSION")
-                },
-                "instructions": "tracedecay is a code-graph MCP server. \
-                    Start with tracedecay_context for any code exploration task \
-                    — it returns relevant symbols, relationships, and code \
-                    snippets for a natural-language query. Use tracedecay_search \
-                    to find specific symbols by name. Discovery and analysis \
-                    tools are read-only and safe to call in parallel. Edit \
-                    and session-memory tools can mutate local project state \
-                    and declare readOnlyHint=false. \
-                    Every tool is also available from the shell: \
-                    `tracedecay tool <name> --key value` (run `tracedecay tool` \
-                    to list tools, `tracedecay tool <name> --help` for \
-                    parameters). If an MCP call errors, times out, or this \
-                    server disconnects, fall back to that CLI instead of \
-                    querying .tracedecay databases directly or abandoning \
-                    tracedecay. \
-                    When a tool result contains a `tracedecay_metrics:` line, \
-                    report the savings to the user (e.g. 'TraceDecay\\'d ~N tokens')."
-            }),
-        )
+        JsonRpcResponse::success(id, initialize_result(SERVER_INSTRUCTIONS))
     }
 
     /// Handles the `tools/list` method, returning all available tool definitions.
@@ -1532,43 +1653,7 @@ impl McpServer {
 
     /// Handles the `resources/list` method, returning available resources.
     fn handle_resources_list(id: Value) -> JsonRpcResponse {
-        JsonRpcResponse::success(
-            id,
-            json!({
-                "resources": [
-                    {
-                        "uri": "tracedecay://status",
-                        "name": "Graph Status",
-                        "description": "Code graph statistics: node/edge/file counts, languages, DB size, and index freshness.",
-                        "mimeType": "application/json"
-                    },
-                    {
-                        "uri": "tracedecay://files",
-                        "name": "File List",
-                        "description": "All indexed project files grouped by directory with symbol counts.",
-                        "mimeType": "text/plain"
-                    },
-                    {
-                        "uri": "tracedecay://overview",
-                        "name": "Project Overview",
-                        "description": "High-level project summary: language distribution, largest modules, and top entry points.",
-                        "mimeType": "text/plain"
-                    },
-                    {
-                        "uri": "tracedecay://branches",
-                        "name": "Tracked Branches",
-                        "description": "List of tracked branches with DB sizes, parent branch, and last sync time. Empty if multi-branch is not active.",
-                        "mimeType": "application/json"
-                    },
-                    {
-                        "uri": "tracedecay://schema",
-                        "name": "SQLite Schema",
-                        "description": "Documentation for the .tracedecay/tracedecay.db schema: tables, columns, indexes, and common query recipes. Use when MCP tools don't cover your query and you need to drop down to raw SQL.",
-                        "mimeType": "text/markdown"
-                    }
-                ]
-            }),
-        )
+        JsonRpcResponse::success(id, resources_list_result())
     }
 
     /// Handles the `resources/read` method, returning resource contents.
@@ -1982,6 +2067,20 @@ impl McpServer {
                                 "data": warning
                             }
                         }));
+                    }
+                }
+
+                // Staged-automation nudge (Hermes parity R5): when automation
+                // runs have queued skill drafts / fact proposals for review,
+                // append a one-line notice so the approval queue doesn't grow
+                // silently. Deduped per batch and cooldown-gated inside.
+                if let Some(notice) = self.maybe_automation_staged_notice(&cg).await {
+                    if let Some(content) = result
+                        .value
+                        .get_mut("content")
+                        .and_then(|c| c.as_array_mut())
+                    {
+                        content.push(json!({"type": "text", "text": format!("\n{notice}")}));
                     }
                 }
 

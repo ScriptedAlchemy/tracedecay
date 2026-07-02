@@ -752,7 +752,7 @@ async fn skill_writer_runner_ledgers_malformed_backend_output() {
     assert_eq!(records[0].task_key.as_deref(), Some("skill_writer"));
     assert_eq!(
         records[0].prompt_version.as_deref(),
-        Some("skill_writer:v1")
+        Some("skill_writer:v2")
     );
     assert_eq!(records[0].status, AutomationRunStatus::Failed);
     assert_eq!(records[0].reviewed_count, 0);

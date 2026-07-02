@@ -586,7 +586,8 @@ fn print_tool_list(defs: &[ToolDefinition]) {
         groups.entry(group).or_default().push(def);
     }
 
-    println!("Available tools (run `tracedecay tool <name> --help` for parameters):\n");
+    println!("Available tools — run `tracedecay tool <name> --help` for parameters,");
+    println!("then invoke with `tracedecay tool <name> --key value [--json]`.\n");
 
     if !always.is_empty() {
         println!("[always-loaded]");
@@ -612,6 +613,9 @@ fn print_tool_list(defs: &[ToolDefinition]) {
         }
         println!();
     }
+
+    println!("Reserved flags: --json (raw payload), --project <path>, --args <json|@file>.");
+    println!("Values starting with @ are read from that file; see `tracedecay tool --help`.");
 }
 
 /// Display name without the `tracedecay_` prefix.
@@ -713,32 +717,39 @@ fn group_for(def: &ToolDefinition) -> &'static str {
     }
 }
 
-/// Print one tool's description and parameter table.
+/// Print one tool's description, usage line, and parameter table.
 fn print_tool_help(def: &ToolDefinition) {
-    println!("tracedecay tool {}", short_name(&def.name));
+    let short = short_name(&def.name);
+    println!("tracedecay tool {short}");
     println!();
     println!("{}", def.description);
     println!();
 
-    let Some(props) = def
+    let props = def
         .input_schema
         .get("properties")
         .and_then(Value::as_object)
-    else {
-        println!("(no parameters)");
-        return;
-    };
-    let required: std::collections::HashSet<&str> = def
+        .filter(|props| !props.is_empty());
+    let required: Vec<&str> = def
         .input_schema
         .get("required")
         .and_then(Value::as_array)
         .map(|arr| arr.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
 
-    if props.is_empty() {
+    let Some(props) = props else {
         println!("(no parameters)");
+        println!();
+        println!("Usage: tracedecay tool {short} [--json] [--project <path>]");
         return;
-    }
+    };
+
+    let usage_params: String = required
+        .iter()
+        .map(|req| format!(" --{} <value>", req.replace('_', "-")))
+        .collect();
+    println!("Usage: tracedecay tool {short}{usage_params} [--key value]... [--json]");
+    println!();
 
     println!("Parameters:");
     let mut entries: Vec<(&String, &Value)> = props.iter().collect();
@@ -748,7 +759,7 @@ fn print_tool_help(def: &ToolDefinition) {
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or("string");
-        let req = if required.contains(key.as_str()) {
+        let req = if required.contains(&key.as_str()) {
             "required"
         } else {
             "optional"
@@ -767,6 +778,7 @@ fn print_tool_help(def: &ToolDefinition) {
     }
     println!();
     println!("Reserved flags: --json, --project <path>, --args <json|@file>, -h/--help");
+    println!("Any value starting with @ is read from that file (multi-line payloads).");
 }
 
 #[cfg(test)]

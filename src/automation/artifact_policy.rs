@@ -69,5 +69,18 @@ pub(super) fn artifact_policy(task: AgentTaskKind) -> TaskArtifactPolicy {
             handoff_test: "cargo test --test automation_runner_test skill_writer",
             eval_replay_command: "cargo test --test automation_runner_test skill_writer_runner_creates_pending_skill_drafts_for_approval -- --nocapture",
         },
+        AgentTaskKind::CombinedReview => TaskArtifactPolicy {
+            optimizer_action: "update combined review evidence or per-task validation",
+            accepted_next_actions: &[
+                "review pending fact proposals and managed skill drafts",
+                "approve or reject each proposal from the dashboard",
+            ],
+            rejected_next_actions: &[
+                "review rejected fact and skill proposals",
+                "collect more evidence before rerunning",
+            ],
+            handoff_test: "cargo test --test automation_runner_test combined_review",
+            eval_replay_command: "cargo test --test automation_runner_test combined_review_runner_records_both_tasks_from_one_backend_call -- --nocapture",
+        },
     }
 }

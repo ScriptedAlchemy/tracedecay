@@ -4,13 +4,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::artifacts::sha256_json;
-use super::backend::{AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse};
+use super::backend::{
+    extract_json_object_prefix, AgentTaskBackend, AgentTaskKind, AgentTaskRequest,
+    AgentTaskResponse,
+};
 use super::config::AutomationConfig;
 use super::fact_proposals::{
     apply_fact_proposal, record_session_fact_proposals, FactProposalRecord, FactProposalState,
 };
 use super::lifecycle::{
-    failed_backend_fallback_report, AgentTaskRunContext, BackendTaskRun, SchedulerGate,
+    failed_backend_fallback_report, generated_run_id, task_run_gate, AgentRunFinalizer,
+    AgentTaskRunContext, BackendTaskRun, SchedulerGate,
 };
 use super::managed_skills::list_managed_skills;
 use super::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
@@ -162,6 +166,19 @@ enum SkillWriterEvidenceOutcome {
     },
 }
 
+struct SessionReflectorEvidenceBundle {
+    evidence: Value,
+    evidence_hash: Option<String>,
+}
+
+enum SessionReflectorEvidenceOutcome {
+    Ready(SessionReflectorEvidenceBundle),
+    Skipped {
+        reason: &'static str,
+        evidence_hash: Option<String>,
+    },
+}
+
 enum LcmAutomationStore {
     Available(PathBuf),
     NotIngested,
@@ -175,22 +192,13 @@ pub async fn run_session_reflector_with_backend(
 ) -> Result<SessionReflectorAutomationRun> {
     let mut run = AgentTaskRunContext::new(
         cg.store_layout().dashboard_root.clone(),
+        cg.store_layout().sessions_db_path.clone(),
         options.run_id.clone(),
         "session_reflector",
         options.trigger,
         config,
         AgentTaskKind::SessionReflector,
     );
-    let provider = normalized_non_empty(&options.provider).unwrap_or_else(default_session_provider);
-    let query =
-        normalized_non_empty(&options.query).unwrap_or_else(default_session_reflection_query);
-    let evidence_limit = options.evidence_limit.clamp(1, 50);
-    let storage_scope =
-        normalized_non_empty(&options.storage_scope).unwrap_or_else(default_lcm_storage_scope);
-    let session_id = options.session_id.as_deref().and_then(normalized_non_empty);
-    let source = options.source.as_deref().and_then(normalized_non_empty);
-    let role = options.role.as_deref().and_then(normalized_non_empty);
-
     let _run_lock = match run.gate().await? {
         SchedulerGate::Proceed(lock) => lock,
         SchedulerGate::Skip(reason) => {
@@ -198,61 +206,16 @@ pub async fn run_session_reflector_with_backend(
         }
     };
 
-    let sessions_db_path = match automation_lcm_db_path(
-        cg,
-        &storage_scope,
-        options.hermes_home.as_ref(),
-        "session_reflector",
-    )? {
-        LcmAutomationStore::Available(path) => path,
-        LcmAutomationStore::NotIngested => {
-            return skipped_session_reflector_run(&run, "lcm_not_ingested", None).await;
-        }
+    let SessionReflectorEvidenceBundle {
+        evidence,
+        evidence_hash,
+    } = match build_session_reflector_evidence(cg, &options).await? {
+        SessionReflectorEvidenceOutcome::Ready(bundle) => bundle,
+        SessionReflectorEvidenceOutcome::Skipped {
+            reason,
+            evidence_hash,
+        } => return skipped_session_reflector_run(&run, reason, evidence_hash).await,
     };
-    let Some(lcm_db) = GlobalDb::open_read_only_at(&sessions_db_path).await else {
-        return skipped_session_reflector_run(&run, "lcm_unavailable", None).await;
-    };
-    let hits = lcm_db
-        .lcm_grep(LcmGrepRequest {
-            provider: provider.clone(),
-            query: query.clone(),
-            scope: options.scope,
-            session_id: session_id.clone(),
-            include_summaries: options.include_summaries,
-            limit: evidence_limit,
-            sort: options.sort,
-            source: source.clone(),
-            role: role.clone(),
-            start_time: options.start_time,
-            end_time: options.end_time,
-        })
-        .await
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to build session reflection evidence: {e}"),
-        })?;
-    let evidence = json!({
-        "storage_scope": storage_scope,
-        "hermes_home": options.hermes_home.as_ref().map(|path| path.display().to_string()),
-        "provider": provider,
-        "query": query,
-        "scope": options.scope,
-        "session_id": session_id,
-        "include_summaries": options.include_summaries,
-        "sort": options.sort,
-        "source": source,
-        "role": role,
-        "start_time": options.start_time,
-        "end_time": options.end_time,
-        "hits": hits,
-    });
-    let evidence_hash = Some(sha256_json(&evidence));
-    if evidence
-        .get("hits")
-        .and_then(Value::as_array)
-        .is_none_or(Vec::is_empty)
-    {
-        return skipped_session_reflector_run(&run, "no_session_evidence", evidence_hash).await;
-    }
 
     let request = AgentTaskRequest::new(
         run.run_id.clone(),
@@ -289,13 +252,52 @@ pub async fn run_session_reflector_with_backend(
             "session reflector output must include a facts array",
         )
         .await?;
-    let (accepted_facts, rejected_facts) =
-        validate_fact_proposals(cg, &proposals, &evidence).await?;
+    let (report, record) = finalize_session_reflector_success(
+        cg,
+        config,
+        &finalizer,
+        &run.dashboard_root,
+        &run.run_id,
+        &response,
+        &evidence,
+        evidence_hash,
+        &proposed_ops,
+        &proposals,
+    )
+    .await?;
+    let record = finalizer
+        .append_success_record(&request, &response, record)
+        .await?;
+
+    Ok(SessionReflectorAutomationRun {
+        run_id: run.run_id,
+        report,
+        ledger_record: record,
+        backend_response: Some(response),
+    })
+}
+
+/// Validates and stages the `facts` half of a reflector (or combined) run,
+/// returning the report plus the not-yet-appended success ledger record.
+#[allow(clippy::too_many_arguments)]
+async fn finalize_session_reflector_success(
+    cg: &TraceDecay,
+    config: &AutomationConfig,
+    finalizer: &AgentRunFinalizer<'_>,
+    dashboard_root: &std::path::Path,
+    run_id: &str,
+    response: &AgentTaskResponse,
+    evidence: &Value,
+    evidence_hash: Option<String>,
+    proposed_ops: &Value,
+    proposals: &[Value],
+) -> Result<(Value, AutomationRunLedgerRecord)> {
+    let (accepted_facts, rejected_facts) = validate_fact_proposals(cg, proposals, evidence).await?;
     let accepted_count = accepted_facts.len();
     let rejected_count = rejected_facts.len();
     let mut proposal_records = record_session_fact_proposals(
-        &run.dashboard_root,
-        &run.run_id,
+        dashboard_root,
+        run_id,
         evidence_hash.as_deref(),
         &accepted_facts,
         &rejected_facts,
@@ -303,17 +305,13 @@ pub async fn run_session_reflector_with_backend(
     .await?;
     let auto_apply_facts = config.auto_apply_memory_ops && !config.require_dashboard_approval;
     let applied_fact_proposals = if auto_apply_facts {
-        auto_apply_session_fact_proposals(
-            cg,
-            &run.dashboard_root,
-            std::mem::take(&mut proposal_records),
-        )
-        .await?
+        auto_apply_session_fact_proposals(cg, dashboard_root, std::mem::take(&mut proposal_records))
+            .await?
     } else {
         Vec::new()
     };
     if auto_apply_facts {
-        proposal_records = applied_fact_proposals.clone();
+        proposal_records.clone_from(&applied_fact_proposals);
     }
     let proposal_ids: Vec<String> = proposal_records
         .iter()
@@ -356,7 +354,7 @@ pub async fn run_session_reflector_with_backend(
         "session_fact_apply_policy": session_fact_apply_policy,
     });
     let mut record = finalizer.success_record(
-        &response,
+        response,
         report
             .get("evidence_hash")
             .and_then(Value::as_str)
@@ -386,16 +384,7 @@ pub async fn run_session_reflector_with_backend(
             "accepted_facts": report.get("accepted_facts").cloned().unwrap_or_else(|| json!([])),
         },
     }));
-    let record = finalizer
-        .append_success_record(&request, &response, record)
-        .await?;
-
-    Ok(SessionReflectorAutomationRun {
-        run_id: run.run_id,
-        report,
-        ledger_record: record,
-        backend_response: Some(response),
-    })
+    Ok((report, record))
 }
 
 async fn auto_apply_session_fact_proposals(
@@ -431,6 +420,7 @@ pub async fn run_skill_writer_with_backend(
 ) -> Result<SkillWriterAutomationRun> {
     let mut run = AgentTaskRunContext::new(
         cg.store_layout().dashboard_root.clone(),
+        cg.store_layout().sessions_db_path.clone(),
         options.run_id.clone(),
         "skill_writer",
         options.trigger,
@@ -456,6 +446,19 @@ pub async fn run_skill_writer_with_backend(
         evidence,
         evidence_hash,
     } = evidence_bundle;
+
+    // Refresh adoption outcomes of previously approved skills so this run's
+    // feedback artifact reports real post-approval quality. Best effort: a
+    // stale snapshot must not block skill writing.
+    if let Err(err) = super::outcomes::refresh_skill_outcomes(
+        &profile_root,
+        &run.dashboard_root,
+        current_timestamp(),
+    )
+    .await
+    {
+        eprintln!("[tracedecay] warning: failed to refresh skill outcomes: {err}");
+    }
 
     let activation_policy = skill_writer_activation_policy(config);
     let request = AgentTaskRequest::new(
@@ -494,11 +497,53 @@ pub async fn run_skill_writer_with_backend(
             "skill writer output must include a skills array",
         )
         .await?;
+    let (report, record) = finalize_skill_writer_success(
+        config,
+        &finalizer,
+        &profile_root,
+        &run.run_id,
+        &response,
+        &evidence,
+        evidence_hash,
+        activation_policy,
+        &proposed_ops,
+        &proposals,
+    )
+    .await?;
+    let record = finalizer
+        .append_success_record(&request, &response, record)
+        .await?;
+
+    Ok(SkillWriterAutomationRun {
+        run_id: run.run_id,
+        report,
+        ledger_record: record,
+        backend_response: Some(response),
+    })
+}
+
+/// Validates and stages the `skills` half of a skill-writer (or combined)
+/// run, returning the report plus the not-yet-appended success ledger record.
+/// A skill-proposal validation failure appends a failed record before
+/// bubbling the error.
+#[allow(clippy::too_many_arguments)]
+async fn finalize_skill_writer_success(
+    config: &AutomationConfig,
+    finalizer: &AgentRunFinalizer<'_>,
+    profile_root: &std::path::Path,
+    run_id: &str,
+    response: &AgentTaskResponse,
+    evidence: &Value,
+    evidence_hash: Option<String>,
+    activation_policy: &'static str,
+    proposed_ops: &Value,
+    proposals: &[Value],
+) -> Result<(Value, AutomationRunLedgerRecord)> {
     let (created_skills, updated_skills, rejected_skills) =
         match validate_and_apply_skill_proposals(
-            &profile_root,
-            &run.run_id,
-            &proposals,
+            profile_root,
+            run_id,
+            proposals,
             config.auto_enable_skills,
         )
         .await
@@ -509,7 +554,7 @@ pub async fn run_skill_writer_with_backend(
                     .append_failed_record(
                         response.model.clone(),
                         evidence_hash,
-                        Some(proposed_ops),
+                        Some(proposed_ops.clone()),
                         err.to_string(),
                     )
                     .await?;
@@ -527,13 +572,13 @@ pub async fn run_skill_writer_with_backend(
         "created_skills": created_skills,
         "updated_skills": updated_skills,
         "rejected_skills": rejected_skills,
-        "skill_improvement_recommendations": request.context
-            .pointer("/skill_writer_evidence/skill_improvement_recommendations")
+        "skill_improvement_recommendations": evidence
+            .get("skill_improvement_recommendations")
             .cloned()
             .unwrap_or_else(|| json!([])),
     });
     let mut record = finalizer.success_record(
-        &response,
+        response,
         report
             .get("evidence_hash")
             .and_then(Value::as_str)
@@ -559,16 +604,109 @@ pub async fn run_skill_writer_with_backend(
         "accepted_count": accepted_count,
         "rejected_count": rejected_count,
     }));
-    let record = finalizer
-        .append_success_record(&request, &response, record)
-        .await?;
+    Ok((report, record))
+}
 
-    Ok(SkillWriterAutomationRun {
-        run_id: run.run_id,
-        report,
-        ledger_record: record,
-        backend_response: Some(response),
-    })
+async fn build_session_reflector_evidence(
+    cg: &TraceDecay,
+    options: &SessionReflectorAutomationOptions,
+) -> Result<SessionReflectorEvidenceOutcome> {
+    // Refresh outcomes of previously applied fact proposals so this run's
+    // feedback artifact reports real post-apply quality. Best effort: a
+    // missing memory store must not block reflection.
+    if let Ok(project_db) = cg.open_project_store_db().await {
+        if let Err(err) = super::outcomes::refresh_fact_outcomes(
+            &cg.store_layout().dashboard_root,
+            project_db.conn(),
+            current_timestamp(),
+        )
+        .await
+        {
+            eprintln!("[tracedecay] warning: failed to refresh fact outcomes: {err}");
+        }
+    }
+
+    let provider = normalized_non_empty(&options.provider).unwrap_or_else(default_session_provider);
+    let query =
+        normalized_non_empty(&options.query).unwrap_or_else(default_session_reflection_query);
+    let evidence_limit = options.evidence_limit.clamp(1, 50);
+    let storage_scope =
+        normalized_non_empty(&options.storage_scope).unwrap_or_else(default_lcm_storage_scope);
+    let session_id = options.session_id.as_deref().and_then(normalized_non_empty);
+    let source = options.source.as_deref().and_then(normalized_non_empty);
+    let role = options.role.as_deref().and_then(normalized_non_empty);
+
+    let sessions_db_path = match automation_lcm_db_path(
+        cg,
+        &storage_scope,
+        options.hermes_home.as_ref(),
+        "session_reflector",
+    )? {
+        LcmAutomationStore::Available(path) => path,
+        LcmAutomationStore::NotIngested => {
+            return Ok(SessionReflectorEvidenceOutcome::Skipped {
+                reason: "lcm_not_ingested",
+                evidence_hash: None,
+            });
+        }
+    };
+    let Some(lcm_db) = GlobalDb::open_read_only_at(&sessions_db_path).await else {
+        return Ok(SessionReflectorEvidenceOutcome::Skipped {
+            reason: "lcm_unavailable",
+            evidence_hash: None,
+        });
+    };
+    let hits = lcm_db
+        .lcm_grep(LcmGrepRequest {
+            provider: provider.clone(),
+            query: query.clone(),
+            scope: options.scope,
+            session_id: session_id.clone(),
+            include_summaries: options.include_summaries,
+            limit: evidence_limit,
+            sort: options.sort,
+            source: source.clone(),
+            role: role.clone(),
+            start_time: options.start_time,
+            end_time: options.end_time,
+        })
+        .await
+        .map_err(|e| TraceDecayError::Config {
+            message: format!("failed to build session reflection evidence: {e}"),
+        })?;
+    let evidence = json!({
+        "storage_scope": storage_scope,
+        "hermes_home": options.hermes_home.as_ref().map(|path| path.display().to_string()),
+        "provider": provider,
+        "query": query,
+        "scope": options.scope,
+        "session_id": session_id,
+        "include_summaries": options.include_summaries,
+        "sort": options.sort,
+        "source": source,
+        "role": role,
+        "start_time": options.start_time,
+        "end_time": options.end_time,
+        "hits": hits,
+    });
+    let evidence_hash = Some(sha256_json(&evidence));
+    if evidence
+        .get("hits")
+        .and_then(Value::as_array)
+        .is_none_or(Vec::is_empty)
+    {
+        return Ok(SessionReflectorEvidenceOutcome::Skipped {
+            reason: "no_session_evidence",
+            evidence_hash,
+        });
+    }
+
+    Ok(SessionReflectorEvidenceOutcome::Ready(
+        SessionReflectorEvidenceBundle {
+            evidence,
+            evidence_hash,
+        },
+    ))
 }
 
 async fn build_skill_writer_evidence(
@@ -738,16 +876,409 @@ async fn skipped_skill_writer_run(
     })
 }
 
-fn build_session_reflector_prompt(evidence: &Value) -> String {
+/// Options for the scheduler-only combined reflector+skill pass. Manual
+/// (CLI/dashboard) runs stay per-task; this path exists so one backend call
+/// can serve both tasks when they are due in the same scheduler tick.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct CombinedReviewAutomationOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default)]
+    pub session_reflector: SessionReflectorAutomationOptions,
+    #[serde(default)]
+    pub skill_writer: SkillWriterAutomationOptions,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CombinedReviewAutomationRun {
+    pub run_id: String,
+    pub session_reflector: SessionReflectorAutomationRun,
+    pub skill_writer: SkillWriterAutomationRun,
+}
+
+/// Outcome of attempting the combined dispatch. `NotCombined` means the
+/// caller should fall back to the normal sequential per-task runs; nothing
+/// was recorded and no locks are held.
+#[derive(Debug)]
+pub enum CombinedReviewDispatch {
+    Ran(Box<CombinedReviewAutomationRun>),
+    RecordedFailure {
+        run: Box<CombinedReviewAutomationRun>,
+        error: TraceDecayError,
+    },
+    NotCombined {
+        reason: &'static str,
+    },
+}
+
+/// Runs the session reflector and the skill writer as one combined backend
+/// call when both tasks are due in the same scheduler tick.
+///
+/// Both per-task scheduler gates must proceed (their locks are held for the
+/// whole combined run) and both evidence bundles must be available;
+/// otherwise the dispatch reports `NotCombined` and the caller runs the
+/// tasks sequentially as before. On a combined run, two ledger records are
+/// appended — one per task, so per-task last-run bookkeeping and the
+/// dashboard scheduler status stay coherent — sharing the combined request's
+/// `input_hash` and a `combined_run_id` correlation in `report_ref`, with
+/// `prompt_version` set to the combined contract's version.
+pub async fn run_combined_review_with_backend(
+    cg: &TraceDecay,
+    config: &AutomationConfig,
+    backend: &dyn AgentTaskBackend,
+    options: CombinedReviewAutomationOptions,
+) -> Result<CombinedReviewDispatch> {
+    if !config.combine_due_tasks {
+        return Ok(CombinedReviewDispatch::NotCombined {
+            reason: "combined_mode_disabled",
+        });
+    }
+    let dashboard_root = cg.store_layout().dashboard_root.clone();
+    let sessions_db_path = cg.store_layout().sessions_db_path.clone();
+    let started_at = current_timestamp().to_string();
+
+    let (reflector_gate, _) = task_run_gate(
+        config,
+        &dashboard_root,
+        &sessions_db_path,
+        AgentTaskKind::SessionReflector,
+        AutomationTrigger::Scheduler,
+    )
+    .await?;
+    let _reflector_lock = match reflector_gate {
+        SchedulerGate::Proceed(lock) => lock,
+        SchedulerGate::Skip(_) => {
+            return Ok(CombinedReviewDispatch::NotCombined {
+                reason: "session_reflector_not_due",
+            });
+        }
+    };
+    let (skill_gate, _) = task_run_gate(
+        config,
+        &dashboard_root,
+        &sessions_db_path,
+        AgentTaskKind::SkillWriter,
+        AutomationTrigger::Scheduler,
+    )
+    .await?;
+    let _skill_lock = match skill_gate {
+        SchedulerGate::Proceed(lock) => lock,
+        SchedulerGate::Skip(_) => {
+            return Ok(CombinedReviewDispatch::NotCombined {
+                reason: "skill_writer_not_due",
+            });
+        }
+    };
+
+    let reflector_bundle =
+        match build_session_reflector_evidence(cg, &options.session_reflector).await? {
+            SessionReflectorEvidenceOutcome::Ready(bundle) => bundle,
+            SessionReflectorEvidenceOutcome::Skipped { .. } => {
+                return Ok(CombinedReviewDispatch::NotCombined {
+                    reason: "session_reflector_evidence_unavailable",
+                });
+            }
+        };
+    let skill_bundle = match build_skill_writer_evidence(cg, options.skill_writer).await? {
+        SkillWriterEvidenceOutcome::Ready(bundle) => bundle,
+        SkillWriterEvidenceOutcome::Skipped { .. } => {
+            return Ok(CombinedReviewDispatch::NotCombined {
+                reason: "skill_writer_evidence_unavailable",
+            });
+        }
+    };
+
+    let run_id = options
+        .run_id
+        .unwrap_or_else(|| generated_run_id("combined_review"));
+    let reflector_run_id = format!("{run_id}_facts");
+    let skill_run_id = format!("{run_id}_skills");
+    let activation_policy = skill_writer_activation_policy(config);
+    let combined_evidence_hash = Some(sha256_json(&json!({
+        "session_reflection_evidence": reflector_bundle.evidence,
+        "skill_writer_evidence": skill_bundle.evidence,
+    })));
+    let request = AgentTaskRequest::new(
+        run_id.clone(),
+        AgentTaskKind::CombinedReview,
+        build_combined_review_prompt(&reflector_bundle.evidence, &skill_bundle.evidence),
+        combined_evidence_hash,
+        json!({
+            "session_reflection_evidence": reflector_bundle.evidence,
+            "skill_writer_evidence": skill_bundle.evidence,
+            "apply": false,
+            "activation_policy": activation_policy,
+        }),
+    );
+    let input_hash = Some(request.input_hash.clone());
+    let reflector_finalizer = AgentRunFinalizer::new(
+        &dashboard_root,
+        &reflector_run_id,
+        AutomationTrigger::Scheduler,
+        config,
+        AgentTaskKind::SessionReflector,
+        &started_at,
+        input_hash.clone(),
+    )
+    .for_combined_run(run_id.clone());
+    let skill_finalizer = AgentRunFinalizer::new(
+        &dashboard_root,
+        &skill_run_id,
+        AutomationTrigger::Scheduler,
+        config,
+        AgentTaskKind::SkillWriter,
+        &started_at,
+        input_hash,
+    )
+    .for_combined_run(run_id.clone());
+
+    let response = match backend.run_task(&request) {
+        Ok(response) => response,
+        Err(err) => {
+            let reflector_record = reflector_finalizer
+                .append_backend_fallback_record(
+                    reflector_bundle.evidence_hash.clone(),
+                    err.to_string(),
+                )
+                .await?;
+            let skill_record = skill_finalizer
+                .append_backend_fallback_record(skill_bundle.evidence_hash.clone(), err.to_string())
+                .await?;
+            return Ok(CombinedReviewDispatch::Ran(Box::new(
+                CombinedReviewAutomationRun {
+                    run_id,
+                    session_reflector: SessionReflectorAutomationRun {
+                        run_id: reflector_record.run_id.clone(),
+                        report: failed_backend_fallback_report(&reflector_record),
+                        ledger_record: reflector_record,
+                        backend_response: None,
+                    },
+                    skill_writer: SkillWriterAutomationRun {
+                        run_id: skill_record.run_id.clone(),
+                        report: failed_backend_fallback_report(&skill_record),
+                        ledger_record: skill_record,
+                        backend_response: None,
+                    },
+                },
+            )));
+        }
+    };
+
+    let output = match response
+        .output_json
+        .clone()
+        .map_or_else(|| extract_json_object_prefix(&response.output_text), Ok)
+    {
+        Ok(output) => output,
+        Err(err) => {
+            let (reflector_record, skill_record) = append_combined_failed_records(
+                &reflector_finalizer,
+                &skill_finalizer,
+                &response,
+                &reflector_bundle,
+                &skill_bundle,
+                None,
+                &err,
+            )
+            .await?;
+            return Ok(CombinedReviewDispatch::RecordedFailure {
+                run: combined_failed_run(run_id, reflector_record, skill_record, &response),
+                error: err,
+            });
+        }
+    };
+    let facts = output.get("facts").and_then(Value::as_array).cloned();
+    let skills = output.get("skills").and_then(Value::as_array).cloned();
+    let (Some(facts), Some(skills)) = (facts, skills) else {
+        let err = TraceDecayError::Config {
+            message: "combined review output must include facts and skills arrays".to_string(),
+        };
+        let (reflector_record, skill_record) = append_combined_failed_records(
+            &reflector_finalizer,
+            &skill_finalizer,
+            &response,
+            &reflector_bundle,
+            &skill_bundle,
+            Some(&output),
+            &err,
+        )
+        .await?;
+        return Ok(CombinedReviewDispatch::RecordedFailure {
+            run: combined_failed_run(run_id, reflector_record, skill_record, &response),
+            error: err,
+        });
+    };
+
+    let (reflector_report, reflector_record) = finalize_session_reflector_success(
+        cg,
+        config,
+        &reflector_finalizer,
+        &dashboard_root,
+        &reflector_run_id,
+        &response,
+        &reflector_bundle.evidence,
+        reflector_bundle.evidence_hash.clone(),
+        &output,
+        &facts,
+    )
+    .await?;
+    let reflector_record = reflector_finalizer
+        .append_success_record(&request, &response, reflector_record)
+        .await?;
+
+    let (skill_report, skill_record) = finalize_skill_writer_success(
+        config,
+        &skill_finalizer,
+        &skill_bundle.profile_root,
+        &skill_run_id,
+        &response,
+        &skill_bundle.evidence,
+        skill_bundle.evidence_hash.clone(),
+        activation_policy,
+        &output,
+        &skills,
+    )
+    .await?;
+    let skill_record = skill_finalizer
+        .append_success_record(&request, &response, skill_record)
+        .await?;
+
+    Ok(CombinedReviewDispatch::Ran(Box::new(
+        CombinedReviewAutomationRun {
+            run_id,
+            session_reflector: SessionReflectorAutomationRun {
+                run_id: reflector_run_id,
+                report: reflector_report,
+                ledger_record: reflector_record,
+                backend_response: Some(response.clone()),
+            },
+            skill_writer: SkillWriterAutomationRun {
+                run_id: skill_run_id,
+                report: skill_report,
+                ledger_record: skill_record,
+                backend_response: Some(response),
+            },
+        },
+    )))
+}
+
+fn combined_failed_run(
+    run_id: String,
+    reflector_record: AutomationRunLedgerRecord,
+    skill_record: AutomationRunLedgerRecord,
+    response: &AgentTaskResponse,
+) -> Box<CombinedReviewAutomationRun> {
+    Box::new(CombinedReviewAutomationRun {
+        run_id,
+        session_reflector: SessionReflectorAutomationRun {
+            run_id: reflector_record.run_id.clone(),
+            report: failed_backend_fallback_report(&reflector_record),
+            ledger_record: reflector_record,
+            backend_response: Some(response.clone()),
+        },
+        skill_writer: SkillWriterAutomationRun {
+            run_id: skill_record.run_id.clone(),
+            report: failed_backend_fallback_report(&skill_record),
+            ledger_record: skill_record,
+            backend_response: Some(response.clone()),
+        },
+    })
+}
+
+/// Records the same failure for both halves of a combined run so each task's
+/// cooldown/retry bookkeeping sees it.
+async fn append_combined_failed_records(
+    reflector_finalizer: &AgentRunFinalizer<'_>,
+    skill_finalizer: &AgentRunFinalizer<'_>,
+    response: &AgentTaskResponse,
+    reflector_bundle: &SessionReflectorEvidenceBundle,
+    skill_bundle: &SkillWriterEvidenceBundle,
+    proposed_ops: Option<&Value>,
+    err: &TraceDecayError,
+) -> Result<(AutomationRunLedgerRecord, AutomationRunLedgerRecord)> {
+    let reflector_record = reflector_finalizer
+        .append_failed_record(
+            response.model.clone(),
+            reflector_bundle.evidence_hash.clone(),
+            proposed_ops.cloned(),
+            err.to_string(),
+        )
+        .await?;
+    let skill_record = skill_finalizer
+        .append_failed_record(
+            response.model.clone(),
+            skill_bundle.evidence_hash.clone(),
+            proposed_ops.cloned(),
+            err.to_string(),
+        )
+        .await?;
+    Ok((reflector_record, skill_record))
+}
+
+fn build_combined_review_prompt(reflector_evidence: &Value, skill_evidence: &Value) -> String {
     format!(
-        "Review these bounded TraceDecay session snippets and propose only durable memory facts. Return only JSON with a facts array. Each fact must include content, category, optional tags, optional entities, trust, source_span, and reason. Category must be one of general, user_pref, project, tool, decision, or code_area. Use trust, not confidence; trust must be a JSON number from 0.0 to 1.0. Do not use string labels like high, medium, or low. source_span must cite one bounded evidence hit by session_id plus message_id for raw messages, by store_id for raw messages, or by node_id for summaries. Do not include secrets or ephemeral status.\n{}",
+        "This is a combined TraceDecay self-improvement review covering both session reflection and skill writing in one pass. Return only one JSON object containing both a facts array and a skills array; use an empty array for a part with nothing to propose. Follow each part's instructions exactly.\n\n## Part 1: session reflection\n{}\n\n## Part 2: skill review\n{}",
+        build_session_reflector_prompt(reflector_evidence),
+        build_skill_writer_prompt(skill_evidence)
+    )
+}
+
+fn build_session_reflector_prompt(evidence: &Value) -> String {
+    const POLICY: &str = concat!(
+        "Review these bounded TraceDecay session snippets and propose only durable memory facts.\n",
+        "\n",
+        "Signals worth capturing (any one is enough):\n",
+        "- The user revealed durable preferences, persona, expectations, or ways they want the agent to operate.\n",
+        "- The user corrected the agent's style, tone, format, verbosity, workflow, or approach. Frustration signals like 'stop doing X', 'this is too verbose', 'don't format like this', or an explicit 'remember this' are FIRST-CLASS signals: capture the correction as a durable user_pref or decision fact so the next session starts already knowing. These corrections should also end up embedded in the skill that governs that class of task, not only in memory; the skill writer handles the skill side, but the fact must still be recorded here.\n",
+        "- A durable project, tool, decision, or code-area fact emerged that a future session would need.\n",
+        "\n",
+        "Do NOT capture (these harden into stale or self-defeating rules):\n",
+        "- Environment-dependent failures: missing binaries, 'command not found', unconfigured credentials, uninstalled packages, post-migration path mismatches. The user can fix these; they are not durable facts.\n",
+        "- Negative claims about tools or features ('X is broken', 'Y does not work'). These harden into self-imposed refusals cited long after the actual problem was fixed. If a tool failed because of setup state, the durable fact is the FIX (install command, config step, env var), never 'this tool does not work'.\n",
+        "- Session-specific transient errors that resolved before the session ended. If retrying worked, the lesson is the retry pattern, not the original failure.\n",
+        "- One-off task narratives. A single 'summarize this' or 'analyze this PR' request is not a durable fact about the user or project.\n",
+        "- Secrets, credentials, tokens, or ephemeral status.\n",
+        "\n",
+        "Proposing nothing is a real option when the session ran smoothly and revealed nothing durable, but do not reach for it as a default.\n",
+        "\n",
+        "Response contract: Return only JSON with a facts array. Each fact must include content, category, optional tags, optional entities, trust, source_span, and reason. Category must be one of general, user_pref, project, tool, decision, or code_area. Use trust, not confidence; trust must be a JSON number from 0.0 to 1.0. Do not use string labels like high, medium, or low. source_span must cite one bounded evidence hit by session_id plus message_id for raw messages, by store_id for raw messages, or by node_id for summaries. Do not include secrets or ephemeral status.\n",
+    );
+    format!(
+        "{POLICY}{}",
         serde_json::to_string_pretty(evidence).unwrap_or_else(|_| "{}".to_string())
     )
 }
 
 fn build_skill_writer_prompt(evidence: &Value) -> String {
+    const POLICY: &str = concat!(
+        "Review these bounded TraceDecay session snippets and propose only reusable managed skills for repeated workflows, corrections, or tool-use patterns.\n",
+        "\n",
+        "Target shape of the skill library: CLASS-LEVEL umbrella skills, each with a rich body and support files for session-specific detail — not a long flat list of narrow one-session-one-skill entries. This shapes HOW you update, not WHETHER you update.\n",
+        "\n",
+        "Signals that warrant a skill proposal (any one is enough):\n",
+        "- The user corrected the agent's style, tone, format, verbosity, workflow, or approach. Frustration signals like 'stop doing X', 'this is too verbose', 'don't format like this', 'you always do Y and I hate it', or an explicit 'remember this' are FIRST-CLASS skill signals, not just memory signals. Embed the correction in the body of the skill that governs that class of task so the next session starts already knowing; a memory fact alone is not enough.\n",
+        "- A non-trivial technique, fix, workaround, debugging path, or tool-usage pattern emerged that a future session would benefit from.\n",
+        "- A skill that evidence shows was used or loaded this session turned out to be wrong, missing a step, or outdated. Patch it now.\n",
+        "\n",
+        "Preference order — pick the EARLIEST action that fits:\n",
+        "1. UPDATE a skill that the evidence (skill_usage_summaries, skill_improvement_recommendations, existing_managed_skills) shows was used or loaded recently. It was in play, so it is the right one to extend.\n",
+        "2. PATCH an existing umbrella skill from existing_managed_skills whose class covers the new learning. Add a subsection, a pitfall, or broaden a trigger.\n",
+        "3. ADD to an existing skill's scope via its support_files (reference notes, templates, or re-runnable snippets), with a one-line pointer in the skill body so future sessions find it.\n",
+        "4. CREATE a new skill only when nothing existing fits. The name MUST be at the class level and MUST survive the test: 'does this name only make sense for today's task?' If yes, it is wrong — no PR numbers, error strings, feature codenames, or fix-X/debug-Y session artifacts. Fall back to option 1, 2, or 3 instead.\n",
+        "\n",
+        "Do NOT capture (these become persistent self-imposed constraints that bite later when the environment changes):\n",
+        "- Environment-dependent failures: missing binaries, 'command not found', unconfigured credentials, uninstalled packages, post-migration path mismatches. The user can fix these; they are not durable rules.\n",
+        "- Negative claims about tools or features ('X is broken', 'browser tools do not work'). These harden into refusals the agent cites against itself long after the actual problem was fixed. If a tool failed because of setup state, capture the FIX (install command, config step, env var) under an existing setup or troubleshooting skill — never 'this tool does not work' as a standalone constraint.\n",
+        "- Session-specific transient errors that resolved before the session ended. If retrying worked, the lesson is the retry pattern, not the original failure.\n",
+        "- One-off task narratives. A single 'summarize this' or 'analyze this PR' request is not a class of work that warrants a skill.\n",
+        "- Secrets, credentials, or tokens in any skill body or support file.\n",
+        "\n",
+        "An empty skills array is a real option when the session ran smoothly with no corrections and produced no new technique, but do not reach for it as a default.\n",
+        "\n",
+        "Response contract: Return only JSON with a skills array of managed skill creates or updates. New skills may omit action or use action=create and must include id, title, summary, category, body_markdown, optional targets, optional support_files with text content, and reason. Targets, when present, must be an array using cursor, codex, claude, agents, opencode, kimi, or kiro; Hermes is host-owned and must not be targeted. Updates must use action=update or action=patch, include id and base_checksum, and include at least one changed field among title, summary, category, targets, body_markdown/body, support_files, or pinned. For updates, support_files is a complete replacement list, not a partial file patch. Activation is controlled only by the runner policy; do not assume activation from your response.\n",
+    );
     format!(
-        "Review these bounded TraceDecay session snippets and propose only reusable managed skills for repeated workflows, corrections, or tool-use patterns. Return only JSON with a skills array of managed skill creates or updates. New skills may omit action or use action=create and must include id, title, summary, category, body_markdown, optional targets, optional support_files with text content, and reason. Targets, when present, must be an array using cursor, codex, claude, agents, opencode, kimi, or kiro; Hermes is host-owned and must not be targeted. Updates must use action=update or action=patch, include id and base_checksum, and include at least one changed field among title, summary, category, targets, body_markdown/body, support_files, or pinned. For updates, support_files is a complete replacement list, not a partial file patch. Activation is controlled only by the runner policy; do not assume activation from your response.\n{}",
+        "{POLICY}{}",
         serde_json::to_string_pretty(evidence).unwrap_or_else(|_| "{}".to_string())
     )
 }

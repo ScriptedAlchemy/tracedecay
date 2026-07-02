@@ -26,8 +26,9 @@ pub(crate) use tracedecay::automation::run_ledger::{
     AutomationRunStatus, AutomationTrigger,
 };
 pub(crate) use tracedecay::automation::runner::{
-    run_memory_curator_with_backend, run_session_reflector_with_backend,
-    run_skill_writer_with_backend, MemoryCuratorAutomationOptions,
+    run_combined_review_with_backend, run_memory_curator_with_backend,
+    run_session_reflector_with_backend, run_skill_writer_with_backend,
+    CombinedReviewAutomationOptions, CombinedReviewDispatch, MemoryCuratorAutomationOptions,
     SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
 };
 pub(crate) use tracedecay::errors::TraceDecayError;
@@ -152,7 +153,7 @@ impl AgentTaskBackend for SkillJsonBackend {
     ) -> tracedecay::errors::Result<AgentTaskResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.task, AgentTaskKind::SkillWriter);
-        assert_request_contract(request, "skill_writer", "skill_writer:v1", "skills");
+        assert_request_contract(request, "skill_writer", "skill_writer:v2", "skills");
         assert!(request.prompt.contains("managed skill creates or updates"));
         assert_eq!(request.context["apply"], json!(false));
         assert_eq!(
@@ -221,7 +222,7 @@ impl AgentTaskBackend for InspectSkillWriterUsageBackend {
         request: &AgentTaskRequest,
     ) -> tracedecay::errors::Result<AgentTaskResponse> {
         assert_eq!(request.task, AgentTaskKind::SkillWriter);
-        assert_request_contract(request, "skill_writer", "skill_writer:v1", "skills");
+        assert_request_contract(request, "skill_writer", "skill_writer:v2", "skills");
         let summaries = request.context["skill_writer_evidence"]["skill_usage_summaries"]
             .as_array()
             .expect("skill usage summaries should be present");
@@ -262,7 +263,7 @@ impl AgentTaskBackend for InspectSkillWriterUnderusedBackend {
         request: &AgentTaskRequest,
     ) -> tracedecay::errors::Result<AgentTaskResponse> {
         assert_eq!(request.task, AgentTaskKind::SkillWriter);
-        assert_request_contract(request, "skill_writer", "skill_writer:v1", "skills");
+        assert_request_contract(request, "skill_writer", "skill_writer:v2", "skills");
         let families = request.context["skill_writer_evidence"]["underused_tool_families"]
             .as_array()
             .expect("underused tool family evidence should be present");
@@ -400,9 +401,10 @@ impl AgentTaskBackend for MalformedTextBackend {
         let (task_key, prompt_version, required_property) = match self.task {
             AgentTaskKind::MemoryCurator => ("memory_curator", "memory_curator:v1", "ops"),
             AgentTaskKind::SessionReflector => {
-                ("session_reflector", "session_reflector:v1", "facts")
+                ("session_reflector", "session_reflector:v2", "facts")
             }
-            AgentTaskKind::SkillWriter => ("skill_writer", "skill_writer:v1", "skills"),
+            AgentTaskKind::SkillWriter => ("skill_writer", "skill_writer:v2", "skills"),
+            AgentTaskKind::CombinedReview => ("combined_review", "combined_review:v1", "facts"),
         };
         assert_request_contract(request, task_key, prompt_version, required_property);
         Ok(AgentTaskResponse {
@@ -440,12 +442,67 @@ impl AgentTaskBackend for SessionJsonBackend {
         assert_request_contract(
             request,
             "session_reflector",
-            "session_reflector:v1",
+            "session_reflector:v2",
             "facts",
         );
         assert!(request.prompt.contains("durable memory facts"));
         assert_eq!(request.context["apply"], json!(false));
         assert!(request.context["session_reflection_evidence"]["hits"]
+            .as_array()
+            .is_some_and(|hits| !hits.is_empty()));
+        Ok(AgentTaskResponse {
+            run_id: request.run_id.clone(),
+            task: request.task,
+            output_text: self.output.to_string(),
+            output_json: Some(self.output.clone()),
+            model: Some("fixture-model".to_string()),
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+        })
+    }
+}
+
+pub(crate) struct CombinedJsonBackend {
+    calls: AtomicUsize,
+    output: Value,
+}
+
+impl CombinedJsonBackend {
+    pub(crate) fn new(output: Value) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            output,
+        }
+    }
+
+    pub(crate) fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl AgentTaskBackend for CombinedJsonBackend {
+    fn run_task(
+        &self,
+        request: &AgentTaskRequest,
+    ) -> tracedecay::errors::Result<AgentTaskResponse> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(request.task, AgentTaskKind::CombinedReview);
+        assert_eq!(request.contract.task_key, "combined_review");
+        assert_eq!(request.contract.prompt_version, "combined_review:v1");
+        assert!(request.contract.strict_json);
+        assert_eq!(
+            request.contract.response_schema["required"],
+            json!(["facts", "skills"])
+        );
+        // The combined prompt must compose both per-task prompts.
+        assert!(request.prompt.contains("durable memory facts"));
+        assert!(request.prompt.contains("managed skill creates or updates"));
+        assert_eq!(request.context["apply"], json!(false));
+        assert!(request.context["activation_policy"].is_string());
+        assert!(request.context["session_reflection_evidence"]["hits"]
+            .as_array()
+            .is_some_and(|hits| !hits.is_empty()));
+        assert!(request.context["skill_writer_evidence"]["hits"]
             .as_array()
             .is_some_and(|hits| !hits.is_empty()));
         Ok(AgentTaskResponse {
@@ -471,7 +528,7 @@ impl AgentTaskBackend for InspectSessionEvidenceBackend {
         assert_request_contract(
             request,
             "session_reflector",
-            "session_reflector:v1",
+            "session_reflector:v2",
             "facts",
         );
         let evidence = &request.context["session_reflection_evidence"];
@@ -627,6 +684,30 @@ pub(crate) async fn seed_search_underuse_session_evidence(cg: &TraceDecay) {
         metadata_json: Some(json!({ "cmd": "rg automation src" }).to_string()),
     };
     assert!(db.upsert_session_message(&message).await);
+}
+
+/// Seeds one session message at `timestamp` so the scheduler observes LCM
+/// session activity at that instant.
+pub(crate) async fn seed_session_activity(cg: &TraceDecay, timestamp: i64) {
+    let db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
+        .await
+        .expect("session db open");
+    seed_session_message_in_db(
+        &db,
+        cg.project_root(),
+        SeedSessionMessage {
+            provider: "cursor",
+            session_id: "activity-fixture",
+            message_id: &format!("activity-fixture-message-{timestamp}"),
+            role: "user",
+            timestamp,
+            // Matches the default session_reflector and skill_writer grep
+            // queries so evidence-driven runs see this message as a hit.
+            text: "Remember this repeated workflow correction: prefer the skill tool pattern.",
+            source: None,
+        },
+    )
+    .await;
 }
 
 pub(crate) struct SeedSessionMessage<'a> {
@@ -872,13 +953,15 @@ pub(crate) fn test_task_key(task: AgentTaskKind) -> &'static str {
         AgentTaskKind::MemoryCurator => "memory_curator",
         AgentTaskKind::SessionReflector => "session_reflector",
         AgentTaskKind::SkillWriter => "skill_writer",
+        AgentTaskKind::CombinedReview => "combined_review",
     }
 }
 
 pub(crate) fn test_prompt_version(task: AgentTaskKind) -> &'static str {
     match task {
         AgentTaskKind::MemoryCurator => "memory_curator:v1",
-        AgentTaskKind::SessionReflector => "session_reflector:v1",
-        AgentTaskKind::SkillWriter => "skill_writer:v1",
+        AgentTaskKind::SessionReflector => "session_reflector:v2",
+        AgentTaskKind::SkillWriter => "skill_writer:v2",
+        AgentTaskKind::CombinedReview => "combined_review:v1",
     }
 }

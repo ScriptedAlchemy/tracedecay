@@ -103,6 +103,14 @@ fn automation_config_is_dashboard_controllable_and_persistent() {
         assert_eq!(scheduler["paused"], false);
         assert_eq!(scheduler["scheduler_tick_secs"], 15);
         assert!(
+            scheduler["pending_fact_proposals"].is_u64(),
+            "scheduler status should expose the pending fact-proposal count: {scheduler}"
+        );
+        assert!(
+            scheduler["pending_skills"].is_u64(),
+            "scheduler status should expose the pending skill count: {scheduler}"
+        );
+        assert!(
             scheduler["tasks"]
                 .as_array()
                 .is_some_and(|tasks| tasks.iter().any(|task| {

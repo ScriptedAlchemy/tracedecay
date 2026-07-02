@@ -109,6 +109,7 @@ impl AgentIntegration for CursorIntegration {
             );
         }
         doctor_check_session_ingest(dc, &ctx.project_path);
+        super::cursor_diagnostics::report_cursor_mcp_log_findings(dc, &ctx.home);
     }
 
     fn is_detected(&self, home: &Path) -> bool {
@@ -239,6 +240,10 @@ const EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
     (
         "skills/fixing-build-and-type-errors/SKILL.md",
         include_str!("../../cursor-plugin/skills/fixing-build-and-type-errors/SKILL.md"),
+    ),
+    (
+        "skills/inspecting-managed-skills/SKILL.md",
+        include_str!("../../cursor-plugin/skills/inspecting-managed-skills/SKILL.md"),
     ),
     (
         "skills/memorize-subject/SKILL.md",
@@ -827,6 +832,11 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
             "Cursor tracedecay plugin manifest is incomplete in {}",
             manifest_path.display()
         ));
+    }
+    if let Some(message) =
+        super::cursor_diagnostics::plugin_version_staleness(&manifest, env!("CARGO_PKG_VERSION"))
+    {
+        dc.warn(&message);
     }
     doctor_check_plugin_mcp(dc, &plugin_dir.join("mcp.json"));
     doctor_check_plugin_hooks(dc, &plugin_dir.join("hooks/hooks.json"));

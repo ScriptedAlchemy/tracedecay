@@ -54,6 +54,90 @@ fn visible_subcommands_accept_clap_help() {
 }
 
 #[test]
+fn every_visible_top_level_subcommand_ships_rich_help() {
+    let command = Cli::command();
+    for subcommand in command
+        .get_subcommands()
+        .filter(|sub| !sub.is_hide_set() && sub.get_name() != "help")
+    {
+        let name = subcommand.get_name();
+        let long_about = subcommand
+            .get_long_about()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        assert!(
+            long_about.len() >= 80,
+            "`tracedecay {name}` needs a long_about paragraph (what it does and \
+             when to use it); got {} chars",
+            long_about.len()
+        );
+        let after_help = subcommand
+            .get_after_help()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        assert!(
+            after_help.contains("Examples:"),
+            "`tracedecay {name}` after_help must contain an `Examples:` section"
+        );
+        assert!(
+            after_help.contains("tracedecay "),
+            "`tracedecay {name}` examples must show real `tracedecay` invocations"
+        );
+        assert!(
+            after_help.contains("Related:") || after_help.contains("Notes:"),
+            "`tracedecay {name}` after_help must cross-reference related commands \
+             or carry agent-relevant notes"
+        );
+    }
+}
+
+#[test]
+fn every_visible_nested_subcommand_has_a_purpose_line() {
+    let command = Cli::command();
+    for path in visible_subcommand_paths(&command) {
+        if path.len() < 2 {
+            continue;
+        }
+        let mut current = &command;
+        for name in &path {
+            current = current
+                .find_subcommand(name)
+                .unwrap_or_else(|| panic!("subcommand path {path:?} should resolve"));
+        }
+        let about = current
+            .get_about()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        assert!(
+            about.trim().len() >= 10,
+            "`tracedecay {}` needs a descriptive purpose line; got {about:?}",
+            path.join(" ")
+        );
+    }
+}
+
+#[test]
+fn top_level_help_teaches_the_tool_discovery_flow() {
+    let command = Cli::command();
+    let after_help = command
+        .get_after_help()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    for needle in [
+        "tracedecay tool",
+        "--help",
+        "--args",
+        "--json",
+        "Quick start:",
+    ] {
+        assert!(
+            after_help.contains(needle),
+            "top-level after_help must teach the MCP tool discovery flow; missing {needle:?}"
+        );
+    }
+}
+
+#[test]
 fn tool_command_preserves_trailing_help_and_reserved_args() {
     let cli = Cli::try_parse_from([
         "tracedecay",
