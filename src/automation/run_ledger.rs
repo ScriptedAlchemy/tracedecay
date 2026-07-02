@@ -243,7 +243,15 @@ pub async fn append_run_record(
             .await
             .map_err(|e| config_error(format!("failed to create run ledger directory: {e}")))?;
     }
-    let line = serde_json::to_string(record).map_err(TraceDecayError::from)?;
+    // The record and its trailing newline must land in a single append.
+    // Concurrent runs (e.g. two dashboard automation jobs finishing at the
+    // same time) each append to this file; O_APPEND keeps one write atomic,
+    // but splitting the line across two writes let them interleave into
+    // `{recA}{recB}\n\n`, silently destroying both records at read time
+    // (load_run_records skips unparseable lines) and leaving the runs stuck
+    // at their previous status forever.
+    let mut line = serde_json::to_string(record).map_err(TraceDecayError::from)?;
+    line.push('\n');
     let mut file = tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -261,7 +269,7 @@ pub async fn append_run_record(
             path.display()
         ))
     })?;
-    file.write_all(b"\n").await.map_err(|e| {
+    file.flush().await.map_err(|e| {
         config_error(format!(
             "failed to finish automation run ledger '{}': {e}",
             path.display()
