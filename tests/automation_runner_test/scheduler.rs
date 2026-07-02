@@ -643,6 +643,47 @@ async fn load_session_activity_normalizes_millisecond_timestamps() {
     );
 }
 
+#[tokio::test]
+async fn load_session_activity_selects_newest_after_normalizing_mixed_timestamp_units() {
+    let temp = tempdir().unwrap();
+    let db_path = temp.path().join("sessions.db");
+    let db = GlobalDb::open_at(&db_path).await.expect("session db open");
+    seed_session_message_in_db(
+        &db,
+        temp.path(),
+        SeedSessionMessage {
+            provider: "cursor",
+            session_id: "activity-ms",
+            message_id: "activity-ms-message-001",
+            role: "user",
+            timestamp: 1_715_000_100_000,
+            text: "older millisecond provider timestamp",
+            source: None,
+        },
+    )
+    .await;
+    seed_session_message_in_db(
+        &db,
+        temp.path(),
+        SeedSessionMessage {
+            provider: "codex",
+            session_id: "activity-secs",
+            message_id: "activity-secs-message-001",
+            role: "user",
+            timestamp: 1_715_000_200,
+            text: "newer second provider timestamp",
+            source: None,
+        },
+    )
+    .await;
+    drop(db);
+
+    assert_eq!(
+        load_session_activity(&db_path).await,
+        SessionActivity::at(1_715_000_200)
+    );
+}
+
 #[test]
 fn config_requires_interval_secs_for_configured_interval_schedule() {
     let patch = AutomationConfigPatch {
