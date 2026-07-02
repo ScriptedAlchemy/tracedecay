@@ -67,30 +67,36 @@ async fn create_schema_db() -> (Connection, LibsqlDatabase, TempDir) {
 /// `memory_code_areas` tables, `user_version = 10`) into a fresh temp dir
 /// and opens it raw.
 async fn create_v10_db() -> (Connection, LibsqlDatabase, TempDir) {
-    let template = support::ensure_template_db("graph-v10-legacy", |path| async move {
-        let db = Builder::new_local(&path)
-            .build()
-            .await
-            .expect("failed to build v10 template database");
-        let conn = db.connect().expect("failed to connect to v10 template");
-        conn.execute_batch(
-            "PRAGMA auto_vacuum = INCREMENTAL;
+    // The v10 fixture schema is defined by SQL in this file, so fingerprint
+    // the whole file: editing it must invalidate the cached template.
+    let template = support::ensure_template_db(
+        "graph-v10-legacy",
+        include_bytes!("migration_test.rs"),
+        |path| async move {
+            let db = Builder::new_local(&path)
+                .build()
+                .await
+                .expect("failed to build v10 template database");
+            let conn = db.connect().expect("failed to connect to v10 template");
+            conn.execute_batch(
+                "PRAGMA auto_vacuum = INCREMENTAL;
              PRAGMA journal_mode = WAL;
              PRAGMA foreign_keys = ON;
              PRAGMA busy_timeout = 5000;",
-        )
-        .await
-        .expect("failed to apply v10 template pragmas");
-        create_v10_schema_for_v11_tests(&conn).await;
-        // wal_checkpoint returns a result row, so it must go through query().
-        let mut rows = conn
-            .query("PRAGMA wal_checkpoint(TRUNCATE)", ())
+            )
             .await
-            .expect("failed to checkpoint v10 template");
-        rows.next()
-            .await
-            .expect("failed to read v10 checkpoint result");
-    })
+            .expect("failed to apply v10 template pragmas");
+            create_v10_schema_for_v11_tests(&conn).await;
+            // wal_checkpoint returns a result row, so it must go through query().
+            let mut rows = conn
+                .query("PRAGMA wal_checkpoint(TRUNCATE)", ())
+                .await
+                .expect("failed to checkpoint v10 template");
+            rows.next()
+                .await
+                .expect("failed to read v10 checkpoint result");
+        },
+    )
     .await;
     let dir = TempDir::new().expect("failed to create temp dir");
     let db_path = dir.path().join("test.db");
