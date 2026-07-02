@@ -311,6 +311,53 @@ pub enum DegradedServeOutcome {
     },
 }
 
+/// How degraded mode retries project resolution on each tool call. Mirrors
+/// the startup resolution semantics: an explicit `--path` is authoritative
+/// (never silently replaced by a fallback project), while discovery mode may
+/// recover through any of its startup fallbacks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DegradedRetryStrategy {
+    /// Serve was started with an explicit `--path`; only that path is
+    /// rechecked.
+    ExplicitPath,
+    /// Serve was started without a path; recheck cwd discovery and the
+    /// global project registry (the MCP initialize roots were already
+    /// consumed at startup and cannot be re-peeked).
+    Discovery,
+}
+
+/// One degraded-mode resolution retry. Returns the project once any
+/// strategy-permitted resolution path starts succeeding.
+async fn retry_degraded_resolution(
+    project_path: &Path,
+    strategy: DegradedRetryStrategy,
+) -> Option<TraceDecay> {
+    // The startup `project_path` stays first so explicit paths are
+    // authoritative and a recovered discovery-mode session prefers the same
+    // project the startup attempt targeted.
+    if let Ok(cg) = ensure_initialized(project_path).await {
+        return Some(cg);
+    }
+    if strategy == DegradedRetryStrategy::ExplicitPath {
+        return None;
+    }
+    // `tracedecay init` may have created an enclosing project after startup,
+    // changing what cwd discovery resolves to.
+    let discovered = crate::config::resolve_path_with_discovery(None);
+    if discovered != project_path {
+        if let Ok(cg) = ensure_initialized(&discovered).await {
+            return Some(cg);
+        }
+    }
+    // Or it may have registered a project elsewhere in the global registry.
+    if let ServeGlobalDbResolution::Found(registered) = resolve_serve_from_global_db().await {
+        if let Ok(cg) = ensure_initialized(&registered).await {
+            return Some(cg);
+        }
+    }
+    None
+}
+
 /// Runs a minimal MCP server after startup project resolution failed.
 ///
 /// MCP hosts treat a dead server process as a permanently failed scope:
@@ -322,13 +369,14 @@ pub enum DegradedServeOutcome {
 /// tools, and answers every `tools/call` with an actionable error that names
 /// the failure, the fix, and the `tracedecay tool …` CLI fallback.
 ///
-/// Each `tools/call` first retries resolution of `project_path`; when it
-/// starts succeeding the loop hands control back so the caller can serve the
-/// project for real — no toggle or window reload needed after `tracedecay
-/// init`.
+/// Each `tools/call` first retries project resolution per `strategy`; when
+/// it starts succeeding the loop hands control back so the caller can serve
+/// the project for real — no toggle or window reload needed after
+/// `tracedecay init`.
 pub async fn run_degraded_mcp_server(
     transport: &mut impl McpTransport,
     project_path: &Path,
+    strategy: DegradedRetryStrategy,
     startup_error: &TraceDecayError,
 ) -> Result<DegradedServeOutcome> {
     let notice = degraded_serve_notice(project_path, startup_error);
@@ -343,10 +391,10 @@ pub async fn run_degraded_mcp_server(
             continue;
         }
         if is_tool_call_line(trimmed) {
-            if let Ok(cg) = ensure_initialized(project_path).await {
+            if let Some(cg) = retry_degraded_resolution(project_path, strategy).await {
                 eprintln!(
                     "[tracedecay] serve: project resolution recovered for '{}'; leaving degraded MCP mode",
-                    project_path.display()
+                    cg.project_root().display()
                 );
                 return Ok(DegradedServeOutcome::Recovered {
                     cg: Box::new(cg),

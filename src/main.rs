@@ -605,9 +605,19 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                          return this error until the project resolves",
                         serve::DEGRADED_SERVE_STDERR_MARKER
                     );
+                    let strategy = if explicit_path {
+                        serve::DegradedRetryStrategy::ExplicitPath
+                    } else {
+                        serve::DegradedRetryStrategy::Discovery
+                    };
                     let mut transport = ReplayStdioTransport::new(peeked_line.take());
-                    match serve::run_degraded_mcp_server(&mut transport, &project_path, &error)
-                        .await?
+                    match serve::run_degraded_mcp_server(
+                        &mut transport,
+                        &project_path,
+                        strategy,
+                        &error,
+                    )
+                    .await?
                     {
                         serve::DegradedServeOutcome::Closed => return Ok(()),
                         serve::DegradedServeOutcome::Recovered { cg, pending_line } => {

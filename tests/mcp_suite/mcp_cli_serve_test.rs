@@ -507,6 +507,101 @@ async fn degraded_serve_recovers_after_project_init() {
     assert!(status.success(), "recovered serve should exit cleanly");
 }
 
+/// Discovery-mode degraded serve (no `--path`, launched from a non-project
+/// cwd such as `$HOME`) must also recover when `tracedecay init` registers a
+/// project elsewhere: the retry re-runs discovery and the global-registry
+/// fallback, not just the original startup path.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn degraded_discovery_serve_recovers_after_global_registration() {
+    use std::io::{BufRead, BufReader};
+
+    let home = TempDir::new().unwrap();
+    let cwd = TempDir::new().unwrap();
+
+    let mut child = tracedecay_command_with_home(home.path())
+        .arg("serve")
+        .current_dir(cwd.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("tracedecay serve should start");
+    let mut stdin = child.stdin.take().expect("stdin should be piped");
+    let mut reader = BufReader::new(child.stdout.take().expect("stdout should be piped"));
+
+    let mut response_with_id = move |id: i64| -> Value {
+        for _ in 0..50 {
+            let mut line = String::new();
+            assert!(
+                reader.read_line(&mut line).expect("read serve stdout") > 0,
+                "serve stdout closed while waiting for JSON-RPC response {id}"
+            );
+            if let Ok(response) = serde_json::from_str::<Value>(line.trim()) {
+                if response.get("id") == Some(&json!(id)) {
+                    return response;
+                }
+            }
+        }
+        panic!("no JSON-RPC response {id} within 50 stdout lines");
+    };
+
+    writeln!(
+        stdin,
+        "{}",
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} })
+    )
+    .unwrap();
+    let initialize = response_with_id(1);
+    assert_eq!(initialize["result"]["protocolVersion"], json!("2024-11-05"));
+
+    let runtime_call = |id: i64| {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": { "name": "tracedecay_runtime", "arguments": { "format": "json" } }
+        })
+    };
+    writeln!(stdin, "{}", runtime_call(2)).unwrap();
+    let degraded = response_with_id(2);
+    assert_eq!(
+        degraded["result"]["isError"],
+        json!(true),
+        "pre-registration tool call should return the degraded error:\n{degraded}"
+    );
+
+    // The user initializes a project elsewhere; init registers it in the
+    // global registry (mirrored explicitly for the fixture-based init).
+    let project =
+        init_project_with_file(home.path(), "pub fn discovery_recovery_marker() {}\n").await;
+    register_global_project(home.path(), project.path()).await;
+
+    writeln!(stdin, "{}", runtime_call(3)).unwrap();
+    let recovered = response_with_id(3);
+    assert!(
+        recovered.get("error").is_none() && recovered["result"]["isError"] != json!(true),
+        "post-registration tool call should be served by the recovered server:\n{recovered}"
+    );
+    let text = recovered["result"]["content"][0]["text"]
+        .as_str()
+        .expect("recovered runtime tool should return text content");
+    let runtime: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(
+        canonical_path_string(Path::new(
+            runtime["database"]["project_root"]
+                .as_str()
+                .expect("runtime should include database.project_root")
+        )),
+        canonical_path_string(project.path()),
+        "recovered discovery-mode server must serve the newly registered project"
+    );
+
+    drop(stdin);
+    let status = child.wait().expect("serve should exit after stdin closes");
+    assert!(status.success(), "recovered serve should exit cleanly");
+}
+
 #[tokio::test]
 async fn serve_without_daemon_socket_falls_back_to_in_process_mcp() {
     let home = TempDir::new().unwrap();
