@@ -406,7 +406,11 @@ mod tests {
     use super::super::run_ledger::{AutomationRunStatus, AutomationTrigger};
     use super::*;
 
-    fn payload_fixture() -> (AgentTaskRequest, AgentTaskResponse, AutomationRunLedgerRecord) {
+    fn payload_fixture() -> (
+        AgentTaskRequest,
+        AgentTaskResponse,
+        AutomationRunLedgerRecord,
+    ) {
         let request = AgentTaskRequest::new(
             "run-outcomes".to_string(),
             AgentTaskKind::SkillWriter,
@@ -545,9 +549,7 @@ mod tests {
 
         let payload = feedback_payload(&ctx, &json!({"kind": "traces"}));
         assert_eq!(
-            payload
-                .pointer("/applied_change_outcomes/status")
-                .unwrap(),
+            payload.pointer("/applied_change_outcomes/status").unwrap(),
             &json!("no_outcomes_recorded")
         );
         assert!(generated_eval_payloads(&ctx).outcome_definitions.is_empty());

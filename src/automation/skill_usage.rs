@@ -232,10 +232,7 @@ pub async fn sync_skill_usage_metadata(profile_root: &Path, skill: &ManagedSkill
 pub async fn record_skill_approval(profile_root: &Path, skill: &ManagedSkill) -> Result<()> {
     let mut ledger = load_skill_usage_ledger(profile_root).await?;
     let skill_id = skill.metadata.id.clone();
-    let approved_at = skill
-        .metadata
-        .approved_at
-        .unwrap_or_else(current_timestamp);
+    let approved_at = skill.metadata.approved_at.unwrap_or_else(current_timestamp);
     let record = ledger
         .records
         .entry(skill_id.clone())

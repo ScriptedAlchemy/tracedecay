@@ -42,6 +42,110 @@ fn dashboard_plugin_manifest_assets_are_served() {
 }
 
 #[test]
+fn automation_outcomes_endpoint_returns_live_read_only_outcomes() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        use tracedecay::automation::fact_proposals::{
+            save_fact_proposal_store, FactProposalRecord, FactProposalState, FactProposalStore,
+        };
+        use tracedecay::automation::managed_skills::{
+            approve_managed_skill, create_managed_skill_draft, default_managed_skill_targets,
+            ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource,
+        };
+
+        let fixture = start_dashboard_fixture(false).await;
+        let profile_root = tracedecay::storage::default_profile_root()
+            .unwrap_or_else(|err| panic!("expected dashboard fixture profile root: {err}"));
+        let skill = create_managed_skill_draft(
+            &profile_root,
+            ManagedSkillDraft {
+                id: "dashboard-outcome-skill".to_string(),
+                title: "Dashboard outcome skill".to_string(),
+                summary: "Fixture skill for outcome endpoint coverage.".to_string(),
+                category: "maintenance".to_string(),
+                targets: default_managed_skill_targets(),
+                body_markdown: "Use when validating the outcomes endpoint.".to_string(),
+                support_files: Vec::new(),
+                provenance: ManagedSkillProvenance {
+                    source: ManagedSkillSource::AutomationRun,
+                    actor: "tracedecay".to_string(),
+                    run_id: Some("run_dashboard_outcomes".to_string()),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        approve_managed_skill(&profile_root, &skill.metadata.id)
+            .await
+            .unwrap();
+
+        set_fact_access_without_touching_updated_at(&fixture, 103, 2, 1_700_000_500).await;
+        let cg = TraceDecay::open(&fixture.project_root)
+            .await
+            .unwrap_or_else(|err| panic!("failed to reopen dashboard fixture project: {err}"));
+        let dashboard_root = cg.store_layout().dashboard_root.clone();
+        save_fact_proposal_store(
+            &dashboard_root,
+            &FactProposalStore {
+                schema_version: 1,
+                proposals: vec![FactProposalRecord {
+                    schema_version: 1,
+                    proposal_id: "fact_dashboard_outcome".to_string(),
+                    run_id: "run_dashboard_outcomes".to_string(),
+                    evidence_hash: None,
+                    state: FactProposalState::Applied,
+                    add_fact_request: None,
+                    proposal: None,
+                    validation_reason: None,
+                    validation: None,
+                    reviewer: Some("dashboard-test".to_string()),
+                    applied_fact_id: Some(103),
+                    apply_outcome: None,
+                    created_at: 1_700_000_400,
+                    updated_at: 1_700_000_400,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        let agent = http_agent();
+        let (status, payload) = get_json(
+            &agent,
+            &format!("{}/api/automation/outcomes", fixture.base_url),
+        );
+        assert_eq!(status, 200);
+        assert!(payload["generated_at"].is_number());
+        assert_eq!(payload["error"], "");
+
+        let skills = payload["skills"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected skill outcomes array: {payload}"));
+        let skill = skills
+            .iter()
+            .find(|skill| skill["skill_id"] == "dashboard-outcome-skill")
+            .unwrap_or_else(|| panic!("expected approved skill outcome: {payload}"));
+        assert_eq!(skill["verdict"], "too_early");
+        assert!(skill["approved_at"].is_number());
+
+        let facts = payload["facts"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected fact outcomes array: {payload}"));
+        let fact = facts
+            .iter()
+            .find(|fact| fact["proposal_id"] == "fact_dashboard_outcome")
+            .unwrap_or_else(|| panic!("expected applied fact outcome: {payload}"));
+        assert_eq!(fact["fact_id"], 103);
+        assert_eq!(fact["verdict"], "recalled_and_helpful");
+        assert_eq!(fact["still_exists"], true);
+        assert_eq!(fact["access_count"], 2);
+    });
+}
+
+#[test]
 fn holographic_dashboard_endpoints_return_seeded_payloads() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()

@@ -683,12 +683,9 @@ mod tests {
         let snapshot = AutomationOutcomesSnapshot {
             schema_version: 1,
             skills: compute_skill_outcomes(&[adopted], 20 * DAY),
-            facts: vec![fact_outcome(
-                &applied_proposal("fact_dead", 42, 5 * DAY),
-                None,
-                20 * DAY,
-            )
-            .unwrap()],
+            facts: vec![
+                fact_outcome(&applied_proposal("fact_dead", 42, 5 * DAY), None, 20 * DAY).unwrap(),
+            ],
             skills_refreshed_at: Some(20 * DAY),
             facts_refreshed_at: Some(20 * DAY),
         };
