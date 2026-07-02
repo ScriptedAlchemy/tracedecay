@@ -14,6 +14,9 @@ use super::artifact_optimizer::{
 use super::artifact_policy::TaskArtifactPolicy;
 use super::artifact_refs::{automation_run_artifact_api, automation_run_artifacts_api};
 use super::backend::{AgentTaskKind, AgentTaskRequest, AgentTaskResponse};
+use super::outcomes::{
+    outcome_eval_definitions, outcome_feedback_section, AutomationOutcomesSnapshot,
+};
 use super::run_ledger::{AutomationRunArtifactKind, AutomationRunLedgerRecord};
 use super::text::truncate_chars_for_prompt;
 
@@ -26,6 +29,9 @@ pub(super) struct ArtifactPayloadContext<'a> {
     pub(super) request: &'a AgentTaskRequest,
     pub(super) response: &'a AgentTaskResponse,
     pub(super) record: &'a AutomationRunLedgerRecord,
+    /// Post-approval outcomes of previously applied changes, when a snapshot
+    /// has been recorded for this project.
+    pub(super) outcomes: &'a AutomationOutcomesSnapshot,
 }
 
 pub(super) struct GeneratedEvalPayloads {
@@ -35,6 +41,10 @@ pub(super) struct GeneratedEvalPayloads {
     pub(super) replay_results: Vec<Value>,
     pub(super) status: &'static str,
     pub(super) validation_decision: &'static str,
+    /// Evals derived from real post-approval outcomes; tracked separately
+    /// from the validation-replay definitions so the replay gate semantics
+    /// stay unchanged.
+    pub(super) outcome_definitions: Vec<Value>,
 }
 
 pub(super) struct ImprovementGatePayload {
@@ -87,6 +97,7 @@ pub(super) fn feedback_payload(ctx: &ArtifactPayloadContext<'_>, trace_ref: &Val
         },
         "human": [],
         "model": validation_feedback_entries(ctx.record),
+        "applied_change_outcomes": outcome_feedback_section(ctx.task, ctx.outcomes),
     })
 }
 
@@ -101,6 +112,7 @@ pub(super) fn generated_eval_payloads(ctx: &ArtifactPayloadContext<'_>) -> Gener
         replay_results,
         status: generated_evals_status(count, runner_status),
         validation_decision: validation_gate_decision(ctx.record),
+        outcome_definitions: outcome_eval_definitions(ctx.task, ctx.task_key, ctx.outcomes),
     }
 }
 
@@ -130,6 +142,7 @@ pub(super) fn generated_evals_payload(
             "eval_count": evals.count,
             "accepted_count": ctx.record.accepted_count,
             "rejected_count": ctx.record.rejected_count,
+            "outcome_eval_count": evals.outcome_definitions.len(),
         },
         "runner": {
             "type": "validation_replay",
@@ -160,6 +173,7 @@ pub(super) fn generated_evals_payload(
             "auto_apply": false,
         },
         "eval_definitions": evals.definitions.clone(),
+        "outcome_eval_definitions": evals.outcome_definitions.clone(),
         "result_refs": [{
             "kind": "validation_report",
             "hash": validation_report_hash(ctx.record.validation_report.as_ref()),
@@ -382,4 +396,162 @@ pub(super) fn codex_handoff_payload(
         "next_actions": ctx.policy.next_actions(ctx.record),
         "tests_to_run": ctx.policy.handoff_tests(),
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::super::artifact_policy::artifact_policy;
+    use super::super::outcomes::{SkillOutcomeRecord, SkillOutcomeVerdict};
+    use super::super::run_ledger::{AutomationRunStatus, AutomationTrigger};
+    use super::*;
+
+    fn payload_fixture() -> (
+        AgentTaskRequest,
+        AgentTaskResponse,
+        AutomationRunLedgerRecord,
+    ) {
+        let request = AgentTaskRequest::new(
+            "run-outcomes".to_string(),
+            AgentTaskKind::SkillWriter,
+            "propose skills".to_string(),
+            Some("sha256:evidence".to_string()),
+            json!({}),
+        );
+        let response = AgentTaskResponse {
+            run_id: "run-outcomes".to_string(),
+            task: AgentTaskKind::SkillWriter,
+            output_text: "{\"skills\":[]}".to_string(),
+            output_json: Some(json!({"skills": []})),
+            model: None,
+            input_tokens: None,
+            output_tokens: None,
+        };
+        let record = AutomationRunLedgerRecord {
+            schema_version: 2,
+            run_id: "run-outcomes".to_string(),
+            trigger: AutomationTrigger::ManualCli,
+            task: AgentTaskKind::SkillWriter,
+            task_key: Some("skill_writer".to_string()),
+            backend: "codex_app_server".to_string(),
+            host_mode: None,
+            prompt_version: None,
+            response_schema: None,
+            strict_json: None,
+            model: None,
+            status: AutomationRunStatus::Succeeded,
+            evidence_hash: Some("sha256:evidence".to_string()),
+            input_hash: None,
+            output_hash: None,
+            proposed_ops: None,
+            applied_ops: None,
+            rejected_ops: None,
+            validation_report: None,
+            reviewed_count: 0,
+            accepted_count: 0,
+            rejected_count: 0,
+            skipped_count: 0,
+            fallback_status: None,
+            error: None,
+            error_classification: None,
+            error_retryable: None,
+            report_ref: None,
+            artifacts: Vec::new(),
+            started_at: "0".to_string(),
+            completed_at: "0".to_string(),
+        };
+        (request, response, record)
+    }
+
+    fn outcomes_snapshot() -> AutomationOutcomesSnapshot {
+        AutomationOutcomesSnapshot {
+            schema_version: 1,
+            skills: vec![SkillOutcomeRecord {
+                skill_id: "ignored-skill".to_string(),
+                title: Some("Ignored skill".to_string()),
+                approved_at: 1_000,
+                days_since_approval: 30,
+                views_since_approval: 2,
+                uses_since_approval: 0,
+                verdict: SkillOutcomeVerdict::Ignored,
+            }],
+            facts: Vec::new(),
+            skills_refreshed_at: Some(2_000),
+            facts_refreshed_at: None,
+        }
+    }
+
+    #[test]
+    fn feedback_payload_includes_applied_change_outcomes() {
+        let (request, response, record) = payload_fixture();
+        let outcomes = outcomes_snapshot();
+        let ctx = ArtifactPayloadContext {
+            run_id: "run-outcomes",
+            task: AgentTaskKind::SkillWriter,
+            task_key: "skill_writer",
+            prompt_version: "skill_writer:v1",
+            policy: artifact_policy(AgentTaskKind::SkillWriter),
+            request: &request,
+            response: &response,
+            record: &record,
+            outcomes: &outcomes,
+        };
+
+        let payload = feedback_payload(&ctx, &json!({"kind": "traces"}));
+        let section = payload.get("applied_change_outcomes").unwrap();
+        assert_eq!(section.get("status").unwrap(), &json!("available"));
+        assert_eq!(
+            section.pointer("/skill_verdicts/ignored").unwrap(),
+            &json!(1)
+        );
+        assert_eq!(
+            section.pointer("/skills/0/skill_id").unwrap(),
+            &json!("ignored-skill")
+        );
+
+        let evals = generated_eval_payloads(&ctx);
+        assert_eq!(evals.outcome_definitions.len(), 1);
+        let generated = generated_evals_payload(
+            &ctx,
+            (&json!({"kind": "traces"}), &json!({"kind": "feedback"})),
+            &evals,
+        );
+        assert_eq!(
+            generated.pointer("/summary/outcome_eval_count").unwrap(),
+            &json!(1)
+        );
+        assert_eq!(
+            generated
+                .pointer("/outcome_eval_definitions/0/observed_outcome")
+                .unwrap(),
+            &json!("ignored")
+        );
+        // The validation-replay definitions must stay outcome-free so the
+        // replay gate semantics are unchanged.
+        assert_eq!(evals.count, 0);
+    }
+
+    #[test]
+    fn empty_outcomes_snapshot_reports_none_recorded() {
+        let (request, response, record) = payload_fixture();
+        let outcomes = AutomationOutcomesSnapshot::default();
+        let ctx = ArtifactPayloadContext {
+            run_id: "run-outcomes",
+            task: AgentTaskKind::SessionReflector,
+            task_key: "session_reflector",
+            prompt_version: "session_reflector:v1",
+            policy: artifact_policy(AgentTaskKind::SessionReflector),
+            request: &request,
+            response: &response,
+            record: &record,
+            outcomes: &outcomes,
+        };
+
+        let payload = feedback_payload(&ctx, &json!({"kind": "traces"}));
+        assert_eq!(
+            payload.pointer("/applied_change_outcomes/status").unwrap(),
+            &json!("no_outcomes_recorded")
+        );
+        assert!(generated_eval_payloads(&ctx).outcome_definitions.is_empty());
+    }
 }

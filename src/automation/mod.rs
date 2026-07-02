@@ -18,6 +18,7 @@ mod managed_skill_model;
 mod managed_skill_validation;
 pub mod managed_skills;
 pub mod memory_curator;
+pub mod outcomes;
 pub mod run_ledger;
 pub mod runner;
 pub mod scheduler;
