@@ -93,7 +93,7 @@ pub fn format_context_as_markdown(context: &TaskContext) -> String {
                 "#### {} ({}:{})",
                 label, block.file_path, block.start_line,
             );
-            out.push_str("```rust\n");
+            let _ = writeln!(out, "```{}", markdown_fence_language(&block.file_path));
             out.push_str(&block.content);
             if !block.content.ends_with('\n') {
                 out.push('\n');
@@ -116,6 +116,41 @@ pub fn format_context_as_markdown(context: &TaskContext) -> String {
 /// Formats a `TaskContext` as pretty-printed JSON.
 pub fn format_context_as_json(context: &TaskContext) -> String {
     serde_json::to_string_pretty(context).unwrap_or_default()
+}
+
+fn markdown_fence_language(file_path: &str) -> &'static str {
+    match file_path.rsplit_once('.').map(|(_, extension)| extension) {
+        Some("bash" | "sh" | "zsh") => "bash",
+        Some("c") => "c",
+        Some("cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx") => "cpp",
+        Some("cs") => "csharp",
+        Some("css") => "css",
+        Some("dart") => "dart",
+        Some("dockerfile") => "dockerfile",
+        Some("go") => "go",
+        Some("html" | "htm") => "html",
+        Some("java") => "java",
+        Some("js" | "jsx" | "mjs" | "cjs") => "javascript",
+        Some("json" | "jsonc") => "json",
+        Some("kt" | "kts") => "kotlin",
+        Some("lua") => "lua",
+        Some("md" | "markdown") => "markdown",
+        Some("php") => "php",
+        Some("proto") => "protobuf",
+        Some("py" | "pyw") => "python",
+        Some("rb") => "ruby",
+        Some("rs") => "rust",
+        Some("scala" | "sc") => "scala",
+        Some("sql") => "sql",
+        Some("swift") => "swift",
+        Some("toml") => "toml",
+        Some("ts" | "tsx" | "mts" | "cts") => "typescript",
+        Some("vue") => "vue",
+        Some("xml") => "xml",
+        Some("yaml" | "yml") => "yaml",
+        Some("zig") => "zig",
+        _ => "",
+    }
 }
 
 #[cfg(test)]
@@ -226,13 +261,36 @@ mod tests {
                 updated_at: 0,
                 parent_id: None,
             }],
-            code_blocks: vec![CodeBlock {
-                content: "fn my_fn() {\n    println!(\"hello\");\n}".to_string(),
-                file_path: "src/main.rs".to_string(),
-                start_line: 1,
-                end_line: 3,
-                node_id: Some("function:abc".to_string()),
-            }],
+            code_blocks: vec![
+                CodeBlock {
+                    content: "fn my_fn() {\n    println!(\"hello\");\n}".to_string(),
+                    file_path: "src/main.rs".to_string(),
+                    start_line: 1,
+                    end_line: 3,
+                    node_id: Some("function:abc".to_string()),
+                },
+                CodeBlock {
+                    content: "export const answer = 42;".to_string(),
+                    file_path: "src/app.ts".to_string(),
+                    start_line: 5,
+                    end_line: 5,
+                    node_id: None,
+                },
+                CodeBlock {
+                    content: "def answer():\n    return 42".to_string(),
+                    file_path: "scripts/app.py".to_string(),
+                    start_line: 7,
+                    end_line: 8,
+                    node_id: None,
+                },
+                CodeBlock {
+                    content: "plain text".to_string(),
+                    file_path: "notes/example.unknown".to_string(),
+                    start_line: 9,
+                    end_line: 9,
+                    node_id: None,
+                },
+            ],
             related_files: vec!["src/main.rs".to_string()],
             seen_node_ids: vec![],
         };
@@ -240,6 +298,18 @@ mod tests {
         let md = format_context_as_markdown(&ctx);
         assert!(md.contains("#### my_fn (src/main.rs:1)"));
         assert!(md.contains("```rust"));
+        assert!(md.contains("#### unknown (src/app.ts:5)\n```typescript"));
+        assert!(md.contains("#### unknown (scripts/app.py:7)\n```python"));
+        assert!(md.contains("#### unknown (notes/example.unknown:9)\n```\nplain text"));
         assert!(md.contains("fn my_fn()"));
+    }
+
+    #[test]
+    fn test_markdown_fence_language_from_file_extension() {
+        assert_eq!(markdown_fence_language("src/main.rs"), "rust");
+        assert_eq!(markdown_fence_language("src/app.tsx"), "typescript");
+        assert_eq!(markdown_fence_language("scripts/build.py"), "python");
+        assert_eq!(markdown_fence_language("Makefile"), "");
+        assert_eq!(markdown_fence_language("notes/example.unknown"), "");
     }
 }
