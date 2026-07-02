@@ -51,7 +51,7 @@ platform = { host = 'cfg(windows)' }
 test-group = 'windows-session-sqlite'
 
 [[profile.ci.overrides]]
-filter = 'binary(=tool_first_touch_test) | binary(=lsp_code_diagnostics_test) | binary(=mcp_dashboard_tool_test) | binary(=extract_worker_test)'
+filter = 'binary(=tool_first_touch_test) | binary(=mcp_dashboard_tool_test) | (binary(=hooks_lsp_suite) & (test(/^lsp_code_diagnostics_test::/) | test(/^extract_worker_test::/)))'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-process-heavy'
 
@@ -66,6 +66,6 @@ platform = { host = 'cfg(windows)' }
 test-group = 'windows-memory-eval'
 
 [[profile.ci.overrides]]
-filter = 'test(=dead_code_marker_resolve_is_single_pass)'
+filter = 'test(=graph_test::dead_code_marker_resolve_is_single_pass)'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-timing-sensitive'
