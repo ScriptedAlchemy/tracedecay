@@ -549,35 +549,60 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
             let mut peeked_line: Option<String> = None;
             let explicit_path = path.is_some();
             let project_path = tracedecay::config::resolve_path_with_discovery(path);
-            let cg = match serve::ensure_initialized(&project_path).await {
-                Ok(cg) => cg,
-                Err(e) => {
-                    if explicit_path {
-                        return Err(e);
-                    }
+            let resolved = match serve::ensure_initialized(&project_path).await {
+                Ok(cg) => Ok(cg),
+                Err(e) if explicit_path => Err(e),
+                Err(_) => {
                     // CWD-based discovery failed (e.g. VS Code launched us from ~).
                     // Next try MCP initialize roots from editor workspace context.
                     if let Some(p) = serve::resolve_serve_from_mcp_roots(&mut peeked_line).await {
-                        serve::ensure_initialized(&p).await?
+                        serve::ensure_initialized(&p).await
                     } else {
                         // Last resort: fall back to the global DB's registered projects.
                         match serve::resolve_serve_from_global_db().await {
                             serve::ServeGlobalDbResolution::Found(p) => {
-                                serve::ensure_initialized(&p).await?
+                                serve::ensure_initialized(&p).await
                             }
                             serve::ServeGlobalDbResolution::Ambiguous(paths) => {
-                                return Err(tracedecay::errors::TraceDecayError::Config {
+                                Err(tracedecay::errors::TraceDecayError::Config {
                                     message: serve::global_db_ambiguity_message(&paths),
-                                });
+                                })
                             }
                             serve::ServeGlobalDbResolution::None => {
-                                return Err(tracedecay::errors::TraceDecayError::Config {
+                                Err(tracedecay::errors::TraceDecayError::Config {
                                     message: format!(
                                         "no TraceDecay index found at '{}' and no projects registered in the global database — run 'tracedecay init' in your project first",
                                         project_path.display()
                                     ),
-                                });
+                                })
                             }
+                        }
+                    }
+                }
+            };
+            let cg = match resolved {
+                Ok(cg) => cg,
+                Err(error) => {
+                    // Do NOT exit: MCP hosts (Cursor especially) treat a dead
+                    // server process as a permanently failed scope and never
+                    // retry it, so a startup exit over a recoverable config
+                    // problem breaks every later tool call in the session.
+                    // Serve a degraded MCP surface instead; it recovers on its
+                    // own once resolution starts succeeding.
+                    eprintln!("Error: {error}");
+                    eprintln!(
+                        "{} — MCP handshake will complete and tool calls will \
+                         return this error until the project resolves",
+                        serve::DEGRADED_SERVE_STDERR_MARKER
+                    );
+                    let mut transport = ReplayStdioTransport::new(peeked_line.take());
+                    match serve::run_degraded_mcp_server(&mut transport, &project_path, &error)
+                        .await?
+                    {
+                        serve::DegradedServeOutcome::Closed => return Ok(()),
+                        serve::DegradedServeOutcome::Recovered { cg, pending_line } => {
+                            peeked_line = Some(pending_line);
+                            *cg
                         }
                     }
                 }

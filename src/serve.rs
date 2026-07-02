@@ -1,7 +1,10 @@
 use std::path::{Path, PathBuf};
 
+use serde_json::json;
+
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
+use crate::mcp::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -282,4 +285,161 @@ fn hex_value(byte: u8) -> Option<u8> {
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Degraded MCP serving (startup project-resolution failures)
+// ---------------------------------------------------------------------------
+
+/// Marker line written to stderr when serve enters degraded mode. Grepped by
+/// `tracedecay doctor --agent cursor` from Cursor's MCP logs, so keep the
+/// wording stable.
+pub const DEGRADED_SERVE_STDERR_MARKER: &str =
+    "[tracedecay] serve: staying alive in degraded MCP mode";
+
+/// How a degraded serving session ended.
+pub enum DegradedServeOutcome {
+    /// stdin closed (client disconnected) while still degraded.
+    Closed,
+    /// Project resolution started succeeding mid-session (e.g. the user ran
+    /// `tracedecay init`). The pending request line is the `tools/call` that
+    /// triggered the successful retry; the caller must replay it into the
+    /// recovered full server. Boxed to keep the enum small next to `Closed`.
+    Recovered {
+        cg: Box<TraceDecay>,
+        pending_line: String,
+    },
+}
+
+/// Runs a minimal MCP server after startup project resolution failed.
+///
+/// MCP hosts treat a dead server process as a permanently failed scope:
+/// Cursor in particular never retries a failed spawn, so one startup exit
+/// (bad `--path`, uninitialized project, ambiguous global fallback) turns
+/// every later tool call in that session into "Timed out waiting for
+/// connection" until the user toggles the server or reloads the window.
+/// Instead of exiting, this loop completes the MCP handshake, lists the real
+/// tools, and answers every `tools/call` with an actionable error that names
+/// the failure, the fix, and the `tracedecay tool …` CLI fallback.
+///
+/// Each `tools/call` first retries resolution of `project_path`; when it
+/// starts succeeding the loop hands control back so the caller can serve the
+/// project for real — no toggle or window reload needed after `tracedecay
+/// init`.
+pub async fn run_degraded_mcp_server(
+    transport: &mut impl McpTransport,
+    project_path: &Path,
+    startup_error: &TraceDecayError,
+) -> Result<DegradedServeOutcome> {
+    let notice = degraded_serve_notice(project_path, startup_error);
+    loop {
+        let line = match transport.read_line().await {
+            Ok(Some(line)) => line,
+            Ok(None) => return Ok(DegradedServeOutcome::Closed),
+            Err(e) => return Err(e.into()),
+        };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if is_tool_call_line(trimmed) {
+            if let Ok(cg) = ensure_initialized(project_path).await {
+                eprintln!(
+                    "[tracedecay] serve: project resolution recovered for '{}'; leaving degraded MCP mode",
+                    project_path.display()
+                );
+                return Ok(DegradedServeOutcome::Recovered {
+                    cg: Box::new(cg),
+                    pending_line: trimmed.to_string(),
+                });
+            }
+        }
+        let Some(response) = degraded_response_for_line(trimmed, &notice) else {
+            continue;
+        };
+        let mut out = serde_json::to_string(&response)?;
+        out.push('\n');
+        transport.write_line(&out).await?;
+        transport.flush().await?;
+    }
+}
+
+fn is_tool_call_line(line: &str) -> bool {
+    serde_json::from_str::<JsonRpcRequest>(line).is_ok_and(|request| request.method == "tools/call")
+}
+
+/// Builds the actionable error text returned from every degraded `tools/call`.
+pub fn degraded_serve_notice(project_path: &Path, startup_error: &TraceDecayError) -> String {
+    format!(
+        "TraceDecay MCP server is running in degraded mode: project resolution failed at startup \
+         for '{path}'.\n\
+         \n\
+         Error: {startup_error}\n\
+         \n\
+         To fix:\n\
+         1. Run `tracedecay init` inside the project (or point the MCP server at an initialized \
+         project via `tracedecay serve --path <project>`).\n\
+         2. Retry the tool call — this server rechecks the project on every call and recovers \
+         automatically once resolution succeeds.\n\
+         3. If the MCP client shows connection errors instead of this message, toggle the \
+         tracedecay MCP server in Cursor Settings → MCP or reload the window; Cursor does not \
+         retry a failed MCP server on its own.\n\
+         \n\
+         Diagnose with `tracedecay doctor --agent cursor`. Every tool is also available from \
+         the shell: `tracedecay tool <name> --key value` (run `tracedecay tool` to list tools) \
+         from inside an initialized project.",
+        path = project_path.display(),
+    )
+}
+
+fn degraded_response_for_line(line: &str, notice: &str) -> Option<JsonRpcResponse> {
+    let request: JsonRpcRequest = match serde_json::from_str(line) {
+        Ok(request) => request,
+        Err(e) => {
+            return Some(JsonRpcResponse::error(
+                serde_json::Value::Null,
+                ErrorCode::ParseError,
+                format!("failed to parse JSON-RPC request: {e}"),
+            ));
+        }
+    };
+    let id = request.id?;
+    let response = match request.method.as_str() {
+        "initialize" => JsonRpcResponse::success(
+            id,
+            json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": { "tools": {}, "resources": {}, "logging": {} },
+                "serverInfo": {
+                    "name": "tracedecay",
+                    "version": env!("CARGO_PKG_VERSION")
+                },
+                "instructions": notice,
+            }),
+        ),
+        // Compatibility no-ops: some clients send these with an id.
+        "initialized" | "notifications/initialized" => return None,
+        "tools/list" => JsonRpcResponse::success(
+            id,
+            json!({ "tools": crate::mcp::tools::get_tool_definitions() }),
+        ),
+        "tools/call" => JsonRpcResponse::success(
+            id,
+            json!({
+                "content": [{ "type": "text", "text": notice }],
+                "isError": true,
+            }),
+        ),
+        "resources/list" => JsonRpcResponse::success(id, json!({ "resources": [] })),
+        "resources/read" => {
+            JsonRpcResponse::error(id, ErrorCode::InternalError, notice.to_string())
+        }
+        "ping" | "logging/setLevel" => JsonRpcResponse::success(id, json!({})),
+        other => JsonRpcResponse::error(
+            id,
+            ErrorCode::MethodNotFound,
+            format!("method not found: {other}"),
+        ),
+    };
+    Some(response)
 }
