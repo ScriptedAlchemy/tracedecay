@@ -40,7 +40,7 @@ platform = { host = 'cfg(windows)' }
 test-group = 'windows-profile-storage'
 
 [[profile.ci.overrides]]
-filter = 'binary(=session_suite) | (binary(=transcript_ingest_suite) & (test(~codex::) | test(~hermes::) | test(~cline_like::))) | (binary(=storage_suite) & (test(/^corruption_test::/) | test(/^db_query_test::/))) | binary(=memory_test) | (binary(=mcp_suite) & (test(/^mcp_handler_test::/) | test(/^mcp_server_test::/) | test(/^multi_mcp_coordination_test::/)))'
+filter = 'binary(=session_suite) | (binary(=transcript_ingest_suite) & (test(~codex::) | test(~hermes::) | test(~cline_like::))) | (binary(=storage_suite) & (test(/^corruption_test::/) | test(/^db_query_test::/))) | (binary(=memory_suite) & test(/^memory_test::/)) | (binary(=mcp_suite) & (test(/^mcp_handler_test::/) | test(/^mcp_server_test::/) | test(/^multi_mcp_coordination_test::/)))'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-session-sqlite'
 
@@ -55,7 +55,7 @@ platform = { host = 'cfg(windows)' }
 test-group = 'windows-subprocess'
 
 [[profile.ci.overrides]]
-filter = 'binary(=memory_eval_test)'
+filter = 'binary(=memory_suite) & test(/^memory_eval_test::/)'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-memory-eval'
 

@@ -15,11 +15,13 @@ use serde_json::Value;
 use tempfile::TempDir;
 use tokio::sync::OnceCell;
 use tracedecay::config::USER_DATA_DIR_ENV;
+use tracedecay::db::Database;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::types::{Node, NodeKind, Visibility};
 
 static EMPTY_LCM_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
+static EMPTY_GRAPH_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
 
 /// Sets (or removes) an environment variable for its lifetime, restoring the
 /// previous value on drop.
@@ -498,6 +500,49 @@ async fn seed_lcm_db_from_template(db_path: &Path) {
             db_path.display()
         )
     });
+}
+
+/// Opens a fresh graph-schema [`Database`] at `db_path` from a cached
+/// per-process template, skipping the full `create_schema` DDL run — a large
+/// fixed cost on Windows when a suite creates one store per test. The first
+/// call in a process pays one real `Database::initialize` to build the
+/// template; every further store is a file copy plus `Database::open`.
+pub async fn open_graph_db_from_template(db_path: &Path) -> Database {
+    let bytes = EMPTY_GRAPH_DB_TEMPLATE
+        .get_or_init(|| async {
+            let tmp = tempdir_or_panic();
+            let template_path = tmp.path().join("template-graph.db");
+            let (db, _) = Database::initialize(&template_path)
+                .await
+                .expect("template graph db initialize");
+            db.checkpoint().await.expect("template graph db checkpoint");
+            db.close();
+            fs::read(&template_path).unwrap_or_else(|err| {
+                panic!(
+                    "failed to read graph test DB template '{}': {err}",
+                    template_path.display()
+                )
+            })
+        })
+        .await;
+    if let Some(parent) = db_path.parent() {
+        fs::create_dir_all(parent).unwrap_or_else(|err| {
+            panic!(
+                "failed to create graph test DB directory '{}': {err}",
+                parent.display()
+            )
+        });
+    }
+    fs::write(db_path, bytes).unwrap_or_else(|err| {
+        panic!(
+            "failed to write graph test DB template '{}': {err}",
+            db_path.display()
+        )
+    });
+    let (db, _) = Database::open(db_path)
+        .await
+        .unwrap_or_else(|err| panic!("failed to open templated graph db: {err}"));
+    db
 }
 
 async fn empty_lcm_db_template() -> &'static [u8] {
