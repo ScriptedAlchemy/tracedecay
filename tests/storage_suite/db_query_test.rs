@@ -100,7 +100,7 @@ async fn test_empty_db_template_cache_seeds_without_migration() {
     let db_path = dir.path().join("test.db");
     support::seed_latest_graph_db(&db_path).await;
 
-    let template_path = support::template_db_path("graph-empty");
+    let template_path = support::template_db_path("graph-empty", &[]);
     assert!(template_path.exists(), "template should be cached on disk");
     assert!(
         template_path.metadata().unwrap().len() > 0,
