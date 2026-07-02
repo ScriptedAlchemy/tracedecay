@@ -44,6 +44,68 @@ const KIRO_POST_TOOL_HOOK: &str = "hook-kiro-post-tool-use";
 const KIRO_SHORT_HOOK_TIMEOUT_MS: u64 = 5_000;
 const KIRO_SYNC_HOOK_TIMEOUT_MS: u64 = 30_000;
 
+/// A hook the managed Kiro agent registers.
+struct KiroManagedHook {
+    event: &'static str,
+    matcher: Option<&'static str>,
+    subcommand: &'static str,
+    timeout_ms: u64,
+}
+
+/// Every managed-agent hook, in registration order. The single source of
+/// truth for the generated agent config ([`managed_agent_config`]) and the
+/// doctor checks.
+const KIRO_MANAGED_HOOKS: &[KiroManagedHook] = &[
+    KiroManagedHook {
+        event: "userPromptSubmit",
+        matcher: None,
+        subcommand: KIRO_PROMPT_HOOK,
+        timeout_ms: KIRO_SHORT_HOOK_TIMEOUT_MS,
+    },
+    KiroManagedHook {
+        event: "preToolUse",
+        matcher: Some("delegate"),
+        subcommand: KIRO_PRE_TOOL_HOOK,
+        timeout_ms: KIRO_SHORT_HOOK_TIMEOUT_MS,
+    },
+    KiroManagedHook {
+        event: "preToolUse",
+        matcher: Some("subagent"),
+        subcommand: KIRO_PRE_TOOL_HOOK,
+        timeout_ms: KIRO_SHORT_HOOK_TIMEOUT_MS,
+    },
+    KiroManagedHook {
+        event: "postToolUse",
+        matcher: Some("fs_write"),
+        subcommand: KIRO_POST_TOOL_HOOK,
+        timeout_ms: KIRO_SYNC_HOOK_TIMEOUT_MS,
+    },
+];
+
+/// Builds the managed agent's `hooks` object from [`KIRO_MANAGED_HOOKS`],
+/// grouping entries per event in table order.
+fn managed_agent_hooks(tracedecay_bin: &str) -> serde_json::Value {
+    let mut grouped: Vec<(&str, Vec<serde_json::Value>)> = Vec::new();
+    for hook in KIRO_MANAGED_HOOKS {
+        let mut entry = json!({
+            "command": super::hook_command(tracedecay_bin, hook.subcommand),
+            "timeout_ms": hook.timeout_ms,
+        });
+        if let Some(matcher) = hook.matcher {
+            entry["matcher"] = json!(matcher);
+        }
+        match grouped.iter_mut().find(|(event, _)| *event == hook.event) {
+            Some((_, entries)) => entries.push(entry),
+            None => grouped.push((hook.event, vec![entry])),
+        }
+    }
+    let mut events = serde_json::Map::new();
+    for (event, entries) in grouped {
+        events.insert(event.to_string(), serde_json::Value::Array(entries));
+    }
+    serde_json::Value::Object(events)
+}
+
 fn kiro_home(home: &Path) -> PathBuf {
     if let Ok(kiro) = std::env::var("KIRO_HOME") {
         let kiro_path = PathBuf::from(&kiro);
@@ -270,33 +332,7 @@ fn managed_agent_config(
         "resources": resources,
         "tools": [KIRO_AGENT_ALL_TOOLS],
         "allowedTools": [KIRO_ALLOWED_BUILTIN_TOOLS, KIRO_ALLOWED_TRACEDECAY_TOOLS],
-        "hooks": {
-            "userPromptSubmit": [
-                {
-                    "command": super::hook_command(tracedecay_bin, KIRO_PROMPT_HOOK),
-                    "timeout_ms": KIRO_SHORT_HOOK_TIMEOUT_MS
-                }
-            ],
-            "preToolUse": [
-                {
-                    "matcher": "delegate",
-                    "command": super::hook_command(tracedecay_bin, KIRO_PRE_TOOL_HOOK),
-                    "timeout_ms": KIRO_SHORT_HOOK_TIMEOUT_MS
-                },
-                {
-                    "matcher": "subagent",
-                    "command": super::hook_command(tracedecay_bin, KIRO_PRE_TOOL_HOOK),
-                    "timeout_ms": KIRO_SHORT_HOOK_TIMEOUT_MS
-                }
-            ],
-            "postToolUse": [
-                {
-                    "matcher": "fs_write",
-                    "command": super::hook_command(tracedecay_bin, KIRO_POST_TOOL_HOOK),
-                    "timeout_ms": KIRO_SYNC_HOOK_TIMEOUT_MS
-                }
-            ]
-        }
+        "hooks": managed_agent_hooks(tracedecay_bin)
     })
 }
 
@@ -458,22 +494,42 @@ fn ensure_child_object(config: &mut serde_json::Value, key: &str, path: &Path) -
     }
 }
 
-/// Add tracedecay's global steering resource for default Kiro sessions.
+/// Add or refresh tracedecay's global steering resource for default Kiro
+/// sessions. When the marker is present but the block content is stale (an
+/// older tracedecay version wrote it), the block is replaced in place: a
+/// marker-to-end-marker splice when the owned end marker exists, otherwise
+/// the generic marker-to-next-heading strip plus a fresh append.
 fn install_steering_rules(path: &Path) -> Result<()> {
     let existing = if path.exists() {
         std::fs::read_to_string(path).unwrap_or_default()
     } else {
         String::new()
     };
+    let block = prompt_rules_text();
+    if existing.contains(&block) {
+        eprintln!("  Kiro steering already contains tracedecay rules, skipping");
+        return Ok(());
+    }
     if existing.contains(PROMPT_MARKER) {
-        if existing.contains(PROMPT_END_MARKER) {
-            eprintln!("  Kiro steering already contains tracedecay rules, skipping");
+        if let Some(range) = tracedecay_prompt_block_range(&existing) {
+            let mut new_contents = String::with_capacity(existing.len() + block.len());
+            new_contents.push_str(&existing[..range.start]);
+            new_contents.push_str(&block);
+            new_contents.push_str(&existing[range.end..]);
+            std::fs::write(path, new_contents).map_err(|e| TraceDecayError::Config {
+                message: format!("failed to write {}: {e}", path.display()),
+            })?;
+            eprintln!(
+                "\x1b[32m✔\x1b[0m Refreshed tracedecay rules in {}",
+                path.display()
+            );
             return Ok(());
         }
-        eprintln!(
-            "  Kiro steering contains tracedecay rules without an owned end marker, leaving unchanged"
-        );
-        return Ok(());
+        // Legacy block without the owned end marker: fall back to the
+        // heading-based strip the other hosts use, then append fresh rules.
+        let stripped =
+            super::prompt_rules::strip_heading_block(&existing, PROMPT_MARKER).unwrap_or_default();
+        return super::prompt_rules::write_refreshed(path, &stripped, &block);
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| TraceDecayError::Config {
@@ -492,7 +548,7 @@ fn install_steering_rules(path: &Path) -> Result<()> {
     } else {
         "\n\n"
     };
-    writeln!(f, "{}{}", separator, prompt_rules_text()).map_err(|e| TraceDecayError::Config {
+    writeln!(f, "{separator}{block}").map_err(|e| TraceDecayError::Config {
         message: format!("failed to write {}: {e}", path.display()),
     })?;
     eprintln!(
@@ -907,38 +963,16 @@ fn doctor_check_managed_agent(dc: &mut DoctorCounters, home: &Path) {
         );
     }
 
-    doctor_check_agent_hook(
-        dc,
-        &config,
-        "userPromptSubmit",
-        None,
-        KIRO_PROMPT_HOOK,
-        KIRO_SHORT_HOOK_TIMEOUT_MS,
-    );
-    doctor_check_agent_hook(
-        dc,
-        &config,
-        "preToolUse",
-        Some("delegate"),
-        KIRO_PRE_TOOL_HOOK,
-        KIRO_SHORT_HOOK_TIMEOUT_MS,
-    );
-    doctor_check_agent_hook(
-        dc,
-        &config,
-        "preToolUse",
-        Some("subagent"),
-        KIRO_PRE_TOOL_HOOK,
-        KIRO_SHORT_HOOK_TIMEOUT_MS,
-    );
-    doctor_check_agent_hook(
-        dc,
-        &config,
-        "postToolUse",
-        Some("fs_write"),
-        KIRO_POST_TOOL_HOOK,
-        KIRO_SYNC_HOOK_TIMEOUT_MS,
-    );
+    for hook in KIRO_MANAGED_HOOKS {
+        doctor_check_agent_hook(
+            dc,
+            &config,
+            hook.event,
+            hook.matcher,
+            hook.subcommand,
+            hook.timeout_ms,
+        );
+    }
 }
 
 fn doctor_check_agent_tools(dc: &mut DoctorCounters, config: &serde_json::Value) {

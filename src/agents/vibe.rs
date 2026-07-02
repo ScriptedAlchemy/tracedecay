@@ -35,9 +35,15 @@ fn vibe_prompt_path(home: &Path) -> std::path::PathBuf {
     vibe_home(home).join("prompts/cli.md")
 }
 
+use super::prompt_rules::{PromptRulesOptions, PROMPT_RULE_MARKER};
+
 /// The TOML marker that identifies a tracedecay MCP server entry.
 const TOML_MARKER: &str = "name = \"tracedecay\"";
-const PROMPT_RULE_MARKER: &str = "## Prefer tracedecay MCP tools";
+
+/// Vibe-only closing paragraph appended after the shared rules text.
+const VIBE_EXTRA_PARAGRAPHS: &[&str] = &["When a tracedecay tool result contains a \
+     `tracedecay_metrics:` line, report the savings to the user (e.g. \"TraceDecay'd ~N \
+     tokens\"). Never silently omit this."];
 
 impl AgentIntegration for VibeIntegration {
     fn name(&self) -> &'static str {
@@ -171,61 +177,15 @@ fn install_mcp_server(config_path: &Path, tracedecay_bin: &str) -> Result<()> {
     Ok(())
 }
 
-/// Append prompt rules to the Vibe system prompt (idempotent).
+/// Install-or-refresh prompt rules in the Vibe system prompt.
 fn install_prompt_rules(prompt_path: &Path) -> Result<()> {
-    let existing = if prompt_path.exists() {
-        std::fs::read_to_string(prompt_path).unwrap_or_default()
-    } else {
-        String::new()
-    };
-    if existing.contains(PROMPT_RULE_MARKER) {
-        eprintln!("  Vibe prompt already contains tracedecay rules, skipping");
-        return Ok(());
-    }
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(prompt_path)
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to open {}: {e}", prompt_path.display()),
-        })?;
-    write!(
-        f,
-        "\n{PROMPT_RULE_MARKER}\n\n\
-        Before reading source files or scanning the codebase, use the tracedecay MCP tools \
-        (`tracedecay_context`, `tracedecay_search`, `tracedecay_callers`, `tracedecay_callees`, \
-        `tracedecay_impact`, `tracedecay_node`, `tracedecay_files`, `tracedecay_affected`). \
-        They provide instant semantic results from a pre-built knowledge graph and are \
-        faster than file reads.\n\n\
-        For project/storage identity questions, use `tracedecay_active_project` \
-        or `tracedecay_storage_status` instead of inferring from repo-local marker \
-        files or direct DB paths.\n\n\
-        If a code analysis question cannot be fully answered by tracedecay MCP tools, \
-        prefer built-in MCP tools first. If the user explicitly needs raw store \
-        inspection, use the resolved graph DB path reported by `tracedecay_storage_status` \
-        rather than a hardcoded repo-local path. Use SQL to answer complex structural \
-        queries that go beyond what the built-in tools expose.\n\n\
-        For durable project/user facts, prefer `tracedecay_fact_store`, \
-        `tracedecay_fact_feedback`, and `tracedecay_memory_status` over ad-hoc notes. \
-        Use `tracedecay_message_search` for active-project transcript recall when \
-        prior conversation context matters. Do not store secrets, credentials, or \
-        unnecessary PII in persistent facts.\n\n\
-        {cli_fallback}\n\n\
-        If you find a gap where tracedecay could answer a question natively, propose opening \
-        an issue at https://github.com/ScriptedAlchemy/tracedecay. Remind the user to strip \
-        sensitive or proprietary code from any issue text before submitting.\n\n\
-        When a tracedecay tool result contains a `tracedecay_metrics:` line, report the \
-        savings to the user (e.g. \"TraceDecay'd ~N tokens\"). Never silently omit this.\n",
-        cli_fallback = super::CLI_FALLBACK_PROMPT_RULES,
-    )
-    .map_err(|e| TraceDecayError::Config {
-        message: format!("failed to write Vibe prompt: {e}"),
-    })?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Added tracedecay rules to {}",
-        prompt_path.display()
+    let block = super::prompt_rules::standard_prompt_rules(
+        PROMPT_RULE_MARKER,
+        &PromptRulesOptions {
+            extra_paragraphs: VIBE_EXTRA_PARAGRAPHS,
+        },
     );
-    Ok(())
+    super::prompt_rules::reconcile_prompt_rules(prompt_path, PROMPT_RULE_MARKER, &block)
 }
 
 // ---------------------------------------------------------------------------
@@ -326,35 +286,7 @@ fn uninstall_mcp_server(config_path: &Path) {
 
 /// Remove tracedecay rules from the Vibe system prompt.
 fn uninstall_prompt_rules(prompt_path: &Path) {
-    if !prompt_path.exists() {
-        return;
-    }
-    let Ok(contents) = std::fs::read_to_string(prompt_path) else {
-        return;
-    };
-    if !contents.contains("tracedecay") {
-        eprintln!("  Vibe prompt does not contain tracedecay rules, skipping");
-        return;
-    }
-    let marker = PROMPT_RULE_MARKER;
-    let Some(start) = contents.find(marker) else {
-        return;
-    };
-    let before = &contents[..start];
-    let trimmed = before.trim_end().to_string();
-    if trimmed.is_empty() {
-        std::fs::remove_file(prompt_path).ok();
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed {} (was empty)",
-            prompt_path.display()
-        );
-    } else {
-        std::fs::write(prompt_path, format!("{trimmed}\n")).ok();
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay rules from {}",
-            prompt_path.display()
-        );
-    }
+    super::prompt_rules::remove_prompt_rules(prompt_path, PROMPT_RULE_MARKER);
 }
 
 // ---------------------------------------------------------------------------

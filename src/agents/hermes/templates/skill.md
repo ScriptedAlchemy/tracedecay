@@ -8,6 +8,16 @@ description: Prefer tracedecay tools for codebase exploration, graph queries, an
 Use tracedecay tools before broad file reads for codebase exploration, symbol lookup,
 call graph traversal, impact analysis, affected files, and architectural navigation.
 
+## If a tool call fails
+
+If a tracedecay tool invocation fails, times out, or the plugin is unavailable,
+every tool is also available directly as a shell command:
+`tracedecay tool <name> --key value` (`tracedecay tool` lists all tools,
+`tracedecay tool <name> --help` shows parameters). Hermes tool calls already run
+through this CLI under the hood, so a direct shell invocation follows the same
+execution path without the plugin wrapper. Fall back to it instead of querying
+`.tracedecay` databases directly or abandoning tracedecay.
+
 ## Memory
 
 - **Recall before external search.** Run `fact_search` (and `lcm_grep` for past

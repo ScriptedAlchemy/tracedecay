@@ -15,8 +15,8 @@ use crate::errors::{Result, TraceDecayError};
 
 use super::{
     backup_and_write_json, backup_config_file, expected_tool_perms, load_json_file_strict,
-    safe_write_json_file, write_json_file, AgentIntegration, DoctorCounters, HealthcheckContext,
-    InstallContext,
+    safe_write_json_file, safe_write_text_file, write_json_file, AgentIntegration, DoctorCounters,
+    HealthcheckContext, InstallContext, UpdatePluginOutcome,
 };
 
 /// Claude Code agent.
@@ -52,6 +52,7 @@ impl AgentIntegration for ClaudeIntegration {
             &claude_md_path,
             crate::automation::skill_targets::SkillInstallTarget::Claude,
         )?;
+        install_subagents(&claude_dir)?;
         install_clean_local_config();
 
         eprintln!();
@@ -83,7 +84,8 @@ impl AgentIntegration for ClaudeIntegration {
             &ctx.home,
             &claude_md_path,
             crate::automation::skill_targets::SkillInstallTarget::Claude,
-        )
+        )?;
+        install_subagents(&claude_dir)
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
@@ -96,6 +98,7 @@ impl AgentIntegration for ClaudeIntegration {
         uninstall_settings(&settings_path);
         super::remove_managed_skill_prompt_index(&claude_md_path)?;
         uninstall_claude_md_rules(&claude_md_path);
+        uninstall_subagents(&claude_dir);
 
         eprintln!();
         eprintln!("Uninstall complete. TraceDecay has been removed from Claude Code.");
@@ -103,11 +106,23 @@ impl AgentIntegration for ClaudeIntegration {
         Ok(())
     }
 
+    fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
+        let refreshed = refresh_installed_subagents(&ctx.home.join(".claude"))?;
+        if refreshed.is_empty() {
+            // MCP entry, hooks, permissions, and CLAUDE.md rules are all
+            // shared-config surfaces; `tracedecay reinstall` reconciles those.
+            Ok(UpdatePluginOutcome::ConfigOnly)
+        } else {
+            Ok(UpdatePluginOutcome::Refreshed(refreshed))
+        }
+    }
+
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mClaude Code integration\x1b[0m");
         doctor_check_claude_json(dc, &ctx.home);
         doctor_check_settings_json(dc, &ctx.home);
         doctor_check_claude_md(dc, &ctx.home);
+        doctor_check_subagents(dc, &ctx.home);
         doctor_check_local_config(dc, &ctx.project_path);
     }
 
@@ -200,35 +215,60 @@ fn install_hook_quiet(settings: &mut serde_json::Value, tracedecay_bin: &str) {
     install_hook_inner(settings, tracedecay_bin, true);
 }
 
-/// Every managed hook event with its subcommand. The single source of truth
-/// for install, uninstall, doctor checks, and doctor auto-repair.
-const MANAGED_HOOKS: &[(&str, &str)] = &[
-    ("PreToolUse", "hook-pre-tool-use"),
-    ("UserPromptSubmit", "hook-prompt-submit"),
-    ("Stop", "hook-stop"),
-    ("SessionStart", "hook-claude-session-start"),
-    ("PostToolUse", "hook-claude-post-tool-use"),
-];
+struct ManagedHook {
+    event: &'static str,
+    subcommand: &'static str,
+    matcher: Option<fn() -> String>,
+}
 
-/// Matcher registered for a managed hook event, if any.
-fn managed_hook_matcher(event: &str) -> Option<&'static str> {
-    match event {
-        // Only Agent tool calls are screened for explore-agent redirection.
-        "PreToolUse" => Some("Agent"),
-        // Only edit tools and shell commands can invalidate the graph.
-        "PostToolUse" => Some("Edit|MultiEdit|Write|NotebookEdit|Bash"),
-        _ => None,
+impl ManagedHook {
+    fn matcher_value(&self) -> Option<String> {
+        self.matcher.map(|build| build())
     }
 }
 
+/// Only Agent tool calls are screened for explore-agent redirection.
+fn pre_tool_use_matcher() -> String {
+    "Agent".to_string()
+}
+
+/// Every managed hook event, in registration order.
+const MANAGED_HOOKS: &[ManagedHook] = &[
+    ManagedHook {
+        event: "PreToolUse",
+        subcommand: "hook-pre-tool-use",
+        matcher: Some(pre_tool_use_matcher),
+    },
+    ManagedHook {
+        event: "UserPromptSubmit",
+        subcommand: "hook-prompt-submit",
+        matcher: None,
+    },
+    ManagedHook {
+        event: "Stop",
+        subcommand: "hook-stop",
+        matcher: None,
+    },
+    ManagedHook {
+        event: "SessionStart",
+        subcommand: "hook-claude-session-start",
+        matcher: None,
+    },
+    ManagedHook {
+        event: "PostToolUse",
+        subcommand: "hook-claude-post-tool-use",
+        matcher: Some(crate::hooks::claude_post_tool_use_matcher),
+    },
+];
+
 fn install_hook_inner(settings: &mut serde_json::Value, tracedecay_bin: &str, quiet: bool) {
-    for &(event, subcommand) in MANAGED_HOOKS {
+    for hook in MANAGED_HOOKS {
         install_single_hook(
             settings,
-            event,
+            hook.event,
             tracedecay_bin,
-            subcommand,
-            managed_hook_matcher(event),
+            hook.subcommand,
+            hook.matcher_value().as_deref(),
             quiet,
         );
     }
@@ -352,35 +392,65 @@ fn install_permissions(settings: &mut serde_json::Value, tool_permissions: &[Str
     eprintln!("\x1b[32m✔\x1b[0m Added tool permissions");
 }
 
-/// Append CLAUDE.md rules (idempotent).
-fn install_claude_md_rules(claude_md_path: &Path) -> Result<()> {
-    let marker = "## MANDATORY: No Explore Agents When Tracedecay Is Available";
-    // Display-case marker from older versions — treat as already present.
-    let display_marker = "## MANDATORY: No Explore Agents When TraceDecay Is Available";
-    let existing_md = if claude_md_path.is_file() {
-        std::fs::read_to_string(claude_md_path).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to read {}: {e}", claude_md_path.display()),
-        })?
-    } else {
-        String::new()
+/// Marker heading of the tracedecay-managed CLAUDE.md rules block.
+const CLAUDE_MD_MARKER: &str = "## MANDATORY: No Explore Agents When Tracedecay Is Available";
+/// Display-case marker written by older versions.
+const CLAUDE_MD_DISPLAY_MARKER: &str =
+    "## MANDATORY: No Explore Agents When TraceDecay Is Available";
+/// Marker fragment from the Codegraph product-name era. Matched as a
+/// substring because historical heading prefixes varied.
+const CLAUDE_MD_CODEGRAPH_MARKER: &str = "No Explore Agents When Codegraph Is Available";
+
+/// Markers the uninstall path recognizes (unchanged historical behavior).
+const CLAUDE_MD_UNINSTALL_MARKERS: &[&str] = &[CLAUDE_MD_MARKER, CLAUDE_MD_DISPLAY_MARKER];
+/// Markers the install reconcile treats as an existing (possibly stale)
+/// managed block, including the legacy Codegraph variant.
+const CLAUDE_MD_RECONCILE_MARKERS: &[&str] = &[
+    CLAUDE_MD_MARKER,
+    CLAUDE_MD_DISPLAY_MARKER,
+    CLAUDE_MD_CODEGRAPH_MARKER,
+];
+
+/// Byte range of the tracedecay-managed CLAUDE.md rules block.
+fn claude_md_rules_block_range(contents: &str, markers: &[&str]) -> Option<std::ops::Range<usize>> {
+    let (start, marker_end) = markers.iter().find_map(|marker| {
+        contents.find(marker).map(|pos| {
+            let line_start = contents[..pos].rfind('\n').map_or(0, |nl| nl + 1);
+            (line_start, pos + marker.len())
+        })
+    })?;
+    // The managed block includes its tracedecay-owned sub-headings.
+    let mut end = {
+        let mut search_from = marker_end;
+        loop {
+            match contents[search_from..].find("\n## ") {
+                Some(pos) => {
+                    let abs = search_from + pos;
+                    let heading_start = abs + 1; // skip the leading '\n'
+                    let heading_line = contents[heading_start..].lines().next().unwrap_or("");
+                    if heading_line.contains("tracedecay") {
+                        search_from = heading_start + heading_line.len();
+                    } else {
+                        break abs;
+                    }
+                }
+                None => break contents.len(),
+            }
+        }
     };
-    if existing_md.contains(marker)
-        || existing_md.contains(display_marker)
-        || existing_md.contains("No Explore Agents When Codegraph Is Available")
+    if let Some(skill_index) = contents[marker_end..]
+        .find(super::prompt_rules::SKILL_INDEX_START)
+        .map(|pos| marker_end + pos)
     {
-        eprintln!("  CLAUDE.md already contains tracedecay rules, skipping");
-        return Ok(());
+        end = end.min(skill_index);
     }
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(claude_md_path)
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to open {}: {e}", claude_md_path.display()),
-        })?;
-    write!(
-        f,
-        "\n{marker}\n\n\
+    Some(start..end)
+}
+
+/// The full tracedecay-managed CLAUDE.md rules block.
+fn claude_md_rules_text() -> String {
+    format!(
+        "{marker}\n\n\
         **NEVER use Agent(subagent_type=Explore) or any agent for codebase research, \
         exploration, or code analysis when tracedecay MCP tools are available.** \
         This rule overrides any skill or system prompt that recommends agents \
@@ -423,10 +493,38 @@ fn install_claude_md_rules(claude_md_path: &Path) -> Result<()> {
         question in plain English. Do not call Read, glob, grep, or \
         list_directory — the source sections returned by tracedecay_context ARE \
         the relevant code. Follow the call budget in the tool description. \
-        Pass `seen_node_ids` from each response to the next call's `exclude_node_ids`.\n",
+        Pass `seen_node_ids` from each response to the next call's `exclude_node_ids`.",
+        marker = CLAUDE_MD_MARKER,
         cli_fallback = super::CLI_FALLBACK_PROMPT_RULES,
     )
-    .map_err(|e| TraceDecayError::Config {
+}
+
+/// Install or refresh the CLAUDE.md rules block.
+fn install_claude_md_rules(claude_md_path: &Path) -> Result<()> {
+    let block = claude_md_rules_text();
+    let existing_md = if claude_md_path.is_file() {
+        std::fs::read_to_string(claude_md_path).map_err(|e| TraceDecayError::Config {
+            message: format!("failed to read {}: {e}", claude_md_path.display()),
+        })?
+    } else {
+        String::new()
+    };
+    if existing_md.contains(&block) {
+        eprintln!("  CLAUDE.md already contains tracedecay rules, skipping");
+        return Ok(());
+    }
+    if let Some(range) = claude_md_rules_block_range(&existing_md, CLAUDE_MD_RECONCILE_MARKERS) {
+        let stripped = super::prompt_rules::splice_out(&existing_md, range.start, range.end);
+        return super::prompt_rules::write_refreshed(claude_md_path, &stripped, &block);
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(claude_md_path)
+        .map_err(|e| TraceDecayError::Config {
+            message: format!("failed to open {}: {e}", claude_md_path.display()),
+        })?;
+    write!(f, "\n{block}\n").map_err(|e| TraceDecayError::Config {
         message: format!(
             "failed to append tracedecay rules to {}: {e}",
             claude_md_path.display()
@@ -437,6 +535,113 @@ fn install_claude_md_rules(claude_md_path: &Path) -> Result<()> {
         claude_md_path.display()
     );
     Ok(())
+}
+
+/// Claude Code custom subagent definitions installed to
+/// `<claude dir>/agents/<name>.md`. Ported from `cursor-plugin/agents/` so
+/// both hosts ship the same read-only tracedecay subagents.
+const CLAUDE_MANAGED_AGENTS: &[(&str, &str)] = &[
+    (
+        "code-explorer.md",
+        include_str!("claude_agents/code-explorer.md"),
+    ),
+    (
+        "code-health-auditor.md",
+        include_str!("claude_agents/code-health-auditor.md"),
+    ),
+    (
+        "session-historian.md",
+        include_str!("claude_agents/session-historian.md"),
+    ),
+];
+
+/// True when an existing agent file was written by tracedecay and is safe to
+/// replace or remove. All managed agent bodies reference tracedecay tools, so
+/// a same-named file without any tracedecay mention is user-authored.
+fn subagent_file_is_tracedecay_managed(path: &Path) -> bool {
+    std::fs::read_to_string(path).is_ok_and(|contents| contents.contains("tracedecay"))
+}
+
+/// Write the managed subagent definitions under `<claude dir>/agents/`,
+/// skipping any same-named file the user authored themselves.
+fn install_subagents(claude_dir: &Path) -> Result<()> {
+    let agents_dir = claude_dir.join("agents");
+    let mut installed = 0usize;
+    for &(file_name, contents) in CLAUDE_MANAGED_AGENTS {
+        let path = agents_dir.join(file_name);
+        if path.exists() && !subagent_file_is_tracedecay_managed(&path) {
+            eprintln!(
+                "  Skipping {} — an existing non-tracedecay agent uses that name",
+                path.display()
+            );
+            continue;
+        }
+        safe_write_text_file(&path, contents, None)?;
+        installed += 1;
+    }
+    if installed > 0 {
+        eprintln!(
+            "\x1b[32m✔\x1b[0m Installed {installed} Claude subagent(s) in {}",
+            agents_dir.display()
+        );
+    }
+    Ok(())
+}
+
+/// Remove the managed subagent definitions (managed copies only).
+fn uninstall_subagents(claude_dir: &Path) {
+    let agents_dir = claude_dir.join("agents");
+    let mut removed = 0usize;
+    for &(file_name, _) in CLAUDE_MANAGED_AGENTS {
+        let path = agents_dir.join(file_name);
+        if path.exists()
+            && subagent_file_is_tracedecay_managed(&path)
+            && std::fs::remove_file(&path).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        std::fs::remove_dir(&agents_dir).ok(); // only removes if now empty
+        eprintln!("\x1b[32m✔\x1b[0m Removed {removed} Claude subagent(s)");
+    }
+}
+
+/// Rewrite managed subagent files that are already installed, without
+/// creating new ones — the config-free refresh used by `update-plugin`.
+fn refresh_installed_subagents(claude_dir: &Path) -> Result<Vec<std::path::PathBuf>> {
+    let agents_dir = claude_dir.join("agents");
+    let mut refreshed = Vec::new();
+    for &(file_name, contents) in CLAUDE_MANAGED_AGENTS {
+        let path = agents_dir.join(file_name);
+        if path.exists() && subagent_file_is_tracedecay_managed(&path) {
+            safe_write_text_file(&path, contents, None)?;
+            refreshed.push(path);
+        }
+    }
+    Ok(refreshed)
+}
+
+/// Check the managed subagent definitions are installed.
+fn doctor_check_subagents(dc: &mut DoctorCounters, home: &Path) {
+    let agents_dir = home.join(".claude/agents");
+    let missing: Vec<&str> = CLAUDE_MANAGED_AGENTS
+        .iter()
+        .filter_map(|&(file_name, _)| (!agents_dir.join(file_name).exists()).then_some(file_name))
+        .collect();
+    if missing.is_empty() {
+        dc.pass(&format!(
+            "All {} tracedecay subagents installed in {}",
+            CLAUDE_MANAGED_AGENTS.len(),
+            agents_dir.display()
+        ));
+    } else {
+        dc.warn(&format!(
+            "tracedecay subagent(s) missing in {}: {} — run `tracedecay install`",
+            agents_dir.display(),
+            missing.join(", ")
+        ));
+    }
 }
 
 /// Clean up local project config (.mcp.json and settings.local.json).
@@ -624,8 +829,8 @@ fn uninstall_stale_mcp(settings: &mut serde_json::Value) -> bool {
 /// Remove all tracedecay hooks. Returns true if modified.
 fn uninstall_hook(settings: &mut serde_json::Value) -> bool {
     let mut modified = false;
-    for &(event, _) in MANAGED_HOOKS {
-        modified |= uninstall_single_hook(settings, event);
+    for hook in MANAGED_HOOKS {
+        modified |= uninstall_single_hook(settings, hook.event);
     }
     modified
 }
@@ -723,44 +928,10 @@ fn uninstall_claude_md_rules(claude_md_path: &Path) {
         return;
     }
     // Try steady marker first, then display-case marker.
-    let marker_new = "## MANDATORY: No Explore Agents When Tracedecay Is Available";
-    let marker_display = "## MANDATORY: No Explore Agents When TraceDecay Is Available";
-    let (marker, start) = if let Some(s) = contents.find(marker_new) {
-        (marker_new, s)
-    } else if let Some(s) = contents.find(marker_display) {
-        (marker_display, s)
-    } else {
+    let Some(range) = claude_md_rules_block_range(&contents, CLAUDE_MD_UNINSTALL_MARKERS) else {
         return;
     };
-    let after_marker = start + marker.len();
-    // Skip past any sub-headings that are part of our rules block
-    // (e.g. "## When you spawn an Explore agent").
-    let end = {
-        let mut search_from = after_marker;
-        loop {
-            match contents[search_from..].find("\n## ") {
-                Some(pos) => {
-                    let abs = search_from + pos;
-                    let heading_start = abs + 1; // skip the leading '\n'
-                    let heading_line = contents[heading_start..].lines().next().unwrap_or("");
-                    if heading_line.contains("tracedecay") {
-                        search_from = heading_start + heading_line.len();
-                    } else {
-                        break abs;
-                    }
-                }
-                None => break contents.len(),
-            }
-        }
-    };
-    let mut new_contents = String::new();
-    new_contents.push_str(contents[..start].trim_end());
-    let remainder = &contents[end..];
-    if !remainder.is_empty() {
-        new_contents.push_str("\n\n");
-        new_contents.push_str(remainder.trim_start());
-    }
-    let new_contents = new_contents.trim().to_string();
+    let new_contents = super::prompt_rules::splice_out(&contents, range.start, range.end);
     if new_contents.is_empty() {
         std::fs::remove_file(claude_md_path).ok();
         eprintln!(
@@ -893,14 +1064,14 @@ fn doctor_check_settings_json(dc: &mut DoctorCounters, home: &Path) {
 fn expected_hook_subcommand(event: &str) -> Option<&'static str> {
     MANAGED_HOOKS
         .iter()
-        .find(|(managed_event, _)| *managed_event == event)
-        .map(|&(_, subcommand)| subcommand)
+        .find(|hook| hook.event == event)
+        .map(|hook| hook.subcommand)
 }
 
 /// Check all tracedecay hooks in settings.
 fn doctor_check_hook(dc: &mut DoctorCounters, settings: &serde_json::Value) {
-    for &(event, _) in MANAGED_HOOKS {
-        doctor_check_single_hook(dc, settings, event);
+    for hook in MANAGED_HOOKS {
+        doctor_check_single_hook(dc, settings, hook.event);
     }
 }
 
@@ -958,11 +1129,11 @@ fn doctor_fix_hooks(dc: &mut DoctorCounters, settings_path: &Path, settings: &se
     let mut settings = settings.clone();
     let mut repaired = false;
 
-    for &(event, expected_sub) in MANAGED_HOOKS {
-        let current = find_tracedecay_hook(&settings, event);
+    for hook in MANAGED_HOOKS {
+        let current = find_tracedecay_hook(&settings, hook.event);
         let correct = current
             .as_ref()
-            .is_some_and(|(_, s, legacy)| !*legacy && s == expected_sub);
+            .is_some_and(|(_, s, legacy)| !*legacy && s == hook.subcommand);
         if correct {
             continue;
         }
@@ -978,14 +1149,14 @@ fn doctor_fix_hooks(dc: &mut DoctorCounters, settings_path: &Path, settings: &se
         };
 
         if current.is_some() {
-            uninstall_single_hook(&mut settings, event);
+            uninstall_single_hook(&mut settings, hook.event);
         }
         install_single_hook(
             &mut settings,
-            event,
+            hook.event,
             &bin,
-            expected_sub,
-            managed_hook_matcher(event),
+            hook.subcommand,
+            hook.matcher_value().as_deref(),
             true,
         );
         repaired = true;
@@ -1371,14 +1542,14 @@ mod tests {
                 "allow": ["mcp__tracedecay__search", "mcp__tracedecay__lookup"]
             }
         });
-        for &(event, subcommand) in MANAGED_HOOKS {
+        for hook in MANAGED_HOOKS {
             let mut entry = json!({
-                "hooks": [{ "type": "command", "command": bin, "args": [subcommand] }]
+                "hooks": [{ "type": "command", "command": bin, "args": [hook.subcommand] }]
             });
-            if let Some(matcher) = managed_hook_matcher(event) {
+            if let Some(matcher) = hook.matcher_value() {
                 entry["matcher"] = json!(matcher);
             }
-            settings["hooks"][event] = json!([entry]);
+            settings["hooks"][hook.event] = json!([entry]);
         }
         settings
     }
@@ -1498,13 +1669,95 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    fn subagents_install_refresh_and_uninstall_respect_user_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        let agents_dir = claude_dir.join("agents");
+
+        // A user-authored agent squatting on a managed name must survive
+        // install, refresh, and uninstall untouched.
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        let user_agent = agents_dir.join("code-explorer.md");
+        std::fs::write(&user_agent, "my own agent, nothing to do with the tool").unwrap();
+
+        install_subagents(&claude_dir).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&user_agent).unwrap(),
+            "my own agent, nothing to do with the tool"
+        );
+        assert!(agents_dir.join("code-health-auditor.md").exists());
+        assert!(agents_dir.join("session-historian.md").exists());
+
+        // Refresh rewrites only installed managed copies.
+        std::fs::write(
+            agents_dir.join("session-historian.md"),
+            "stale tracedecay copy",
+        )
+        .unwrap();
+        let refreshed = refresh_installed_subagents(&claude_dir).unwrap();
+        assert_eq!(
+            refreshed.len(),
+            2,
+            "two managed copies exist: {refreshed:?}"
+        );
+        assert!(
+            std::fs::read_to_string(agents_dir.join("session-historian.md"))
+                .unwrap()
+                .contains("tracedecay_message_search"),
+            "refresh must rewrite stale managed copies"
+        );
+
+        uninstall_subagents(&claude_dir);
+        assert!(user_agent.exists(), "user agent must survive uninstall");
+        assert!(!agents_dir.join("code-health-auditor.md").exists());
+        assert!(!agents_dir.join("session-historian.md").exists());
+    }
+
+    #[test]
+    fn managed_subagent_definitions_have_valid_frontmatter() {
+        for &(file_name, contents) in CLAUDE_MANAGED_AGENTS {
+            let stem = file_name.trim_end_matches(".md");
+            assert!(
+                contents.starts_with("---\n"),
+                "{file_name} must open YAML frontmatter"
+            );
+            assert!(
+                contents.contains(&format!("name: {stem}\n")),
+                "{file_name} frontmatter name must match its filename"
+            );
+            assert!(
+                contents.contains("description: "),
+                "{file_name} must carry a description for delegation"
+            );
+            assert!(
+                contents.contains("tracedecay"),
+                "{file_name} must reference tracedecay so it is recognized as managed"
+            );
+        }
+    }
+
+    /// The PostToolUse matcher is derived from the hook handler's tool list,
+    /// so the installed matcher can never accept tools the handler ignores.
+    #[test]
+    fn post_tool_use_matcher_comes_from_the_hook_handler_tool_list() {
+        let matcher = MANAGED_HOOKS
+            .iter()
+            .find(|hook| hook.event == "PostToolUse")
+            .and_then(ManagedHook::matcher_value)
+            .expect("PostToolUse must register a matcher");
+        assert_eq!(matcher, crate::hooks::claude_post_tool_use_matcher());
+        assert!(matcher.contains("Edit") && matcher.contains("Bash"));
+    }
+
+    #[test]
     fn install_adds_all_managed_hooks() {
         let mut settings = json!({});
         install_hook(&mut settings, "/usr/bin/tracedecay");
-        for &(event, _) in MANAGED_HOOKS {
+        for hook in MANAGED_HOOKS {
             assert!(
-                settings["hooks"][event].is_array(),
-                "{event} hook should be installed"
+                settings["hooks"][hook.event].is_array(),
+                "{} hook should be installed",
+                hook.event
             );
         }
     }
@@ -1541,7 +1794,8 @@ mod tests {
         let mut settings = json!({});
         install_hook(&mut settings, bin);
 
-        for &(event, expected_sub) in MANAGED_HOOKS {
+        for hook in MANAGED_HOOKS {
+            let (event, expected_sub) = (hook.event, hook.subcommand);
             let inner = &settings["hooks"][event][0]["hooks"][0];
             assert_eq!(
                 inner["command"].as_str().unwrap(),
@@ -1651,7 +1905,8 @@ mod tests {
             .to_str()
             .unwrap()
             .to_string();
-        for &(event, expected_sub) in MANAGED_HOOKS {
+        for hook in MANAGED_HOOKS {
+            let (event, expected_sub) = (hook.event, hook.subcommand);
             let inner = &after["hooks"][event][0]["hooks"][0];
             assert_eq!(
                 inner["command"].as_str().unwrap(),
@@ -1808,10 +2063,11 @@ mod tests {
             "C:/Users/u/tracedecay.exe hook-stop"
         );
         // Every managed event should now be present (backfill).
-        for &(event, _) in MANAGED_HOOKS {
+        for hook in MANAGED_HOOKS {
             assert!(
-                parsed["hooks"][event].is_array(),
-                "{event} hook should be backfilled"
+                parsed["hooks"][hook.event].is_array(),
+                "{} hook should be backfilled",
+                hook.event
             );
         }
     }
@@ -1951,10 +2207,11 @@ mod tests {
         // Re-read and verify every managed hook is present.
         let fixed: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
-        for &(event, _) in MANAGED_HOOKS {
+        for hook in MANAGED_HOOKS {
             assert!(
-                fixed["hooks"][event].is_array(),
-                "{event} hook should be repaired in"
+                fixed["hooks"][hook.event].is_array(),
+                "{} hook should be repaired in",
+                hook.event
             );
         }
     }

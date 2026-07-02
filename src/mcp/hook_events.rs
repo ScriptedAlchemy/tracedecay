@@ -7,9 +7,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
 
-/// Shared hook-agent identity: the same enum the hook processes use to build
-/// events, so a host registered on the send side can never be silently
-/// dropped by the receiver (see `crate::daemon::HookAgent`).
+/// Shared with hook emitters so the receiver accepts the same agent keys.
 pub(crate) use crate::daemon::HookAgent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

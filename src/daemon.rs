@@ -45,12 +45,8 @@ pub use service::{
 
 /// A host whose lifecycle hooks notify the daemon.
 ///
-/// This enum is the single source of truth for hook agent identity on **both**
-/// sides of the wire: the hook processes build [`DaemonHookEvent`]s through it,
-/// and the daemon-side receiver (`crate::mcp::hook_events`) parses the agent
-/// key back through [`HookAgent::from_wire`]. Adding a host here is the only
-/// step needed for its events to be accepted — a per-side string match can
-/// silently drop a new host's events (that bug shipped once for Claude).
+/// Kept shared between hook emitters and daemon-side parsing so new hosts
+/// cannot be accepted by one side and dropped by the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookAgent {
     Claude,

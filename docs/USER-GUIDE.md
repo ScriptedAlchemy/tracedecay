@@ -192,6 +192,8 @@ This is the default. It registers the MCP server in `~/.claude/settings.json`, g
 - `SessionStart` reports index freshness (or a `tracedecay init` nudge) and, when the session restarts from compaction, injects the LCM context-recovery hint.
 - `PostToolUse` (matcher `Edit|MultiEdit|Write|NotebookEdit|Bash`) notifies the daemon so edits and shell commands trigger targeted incremental sync.
 
+The install also ships three read-only custom subagents into `~/.claude/agents/` — `code-explorer`, `code-health-auditor`, and `session-historian` — the same tracedecay subagents the Cursor plugin bundles. They are only replaced or removed when the file is tracedecay-managed; a same-named agent you authored yourself is left untouched. `tracedecay update-plugin` refreshes installed copies.
+
 ### Other agents
 
 TraceDecay supports fifteen agents. Pass `--agent` to install for a specific one:

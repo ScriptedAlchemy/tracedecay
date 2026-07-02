@@ -18,6 +18,7 @@ pub mod kilo;
 pub mod kimi;
 pub mod kiro;
 pub mod opencode;
+pub mod prompt_rules;
 pub mod roo_code;
 pub mod vibe;
 pub mod zed;
