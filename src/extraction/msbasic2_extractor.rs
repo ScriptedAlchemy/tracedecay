@@ -10,6 +10,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
+use crate::extraction::basic_common::{
+    derive_function_name, find_subroutine_ranges, for_each_top_level_line, BasicLine,
+};
+use crate::extraction::traversal::find_direct_child_by_kind;
 use crate::types::{
     generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
 };
@@ -68,18 +72,6 @@ impl ExtractionState {
             .unwrap_or("<invalid utf8>")
             .to_string()
     }
-}
-
-/// Represents a collected line from the BASIC program for subroutine synthesis.
-struct BasicLine<'a> {
-    /// The `line` AST node.
-    node: TsNode<'a>,
-    /// The line number (e.g. 10, 20, 100).
-    line_number: u32,
-    /// The kind of the first statement on this line.
-    statement_kind: String,
-    /// The text of the REM comment, if this line is a REM.
-    comment_text: Option<String>,
 }
 
 impl MsBasic2Extractor {
@@ -181,13 +173,13 @@ impl MsBasic2Extractor {
 
     /// Parse a single `line` node into a `BasicLine` struct.
     fn parse_line<'a>(state: &ExtractionState, node: TsNode<'a>) -> Option<BasicLine<'a>> {
-        let line_number_node = Self::find_child_by_kind(node, "line_number")?;
+        let line_number_node = find_direct_child_by_kind(node, "line_number")?;
         let line_number_text = state.node_text(line_number_node);
         let line_number: u32 = line_number_text.trim().parse().unwrap_or(0);
 
         // Navigate: line -> statement_list -> statement -> specific_kind
-        let statement_list = Self::find_child_by_kind(node, "statement_list")?;
-        let statement = Self::find_child_by_kind(statement_list, "statement")?;
+        let statement_list = find_direct_child_by_kind(node, "statement_list")?;
+        let statement = find_direct_child_by_kind(statement_list, "statement")?;
 
         // Get the first named child of statement (the actual statement type).
         let mut stmt_cursor = statement.walk();
@@ -224,7 +216,7 @@ impl MsBasic2Extractor {
     /// In MS BASIC 2.0, lines like `30 LET MR = 3` serve as variable initialization.
     /// We treat only top-level LET assignments (those not inside subroutines) as constants.
     fn extract_top_level_lets(state: &mut ExtractionState, lines: &[BasicLine<'_>]) {
-        let subroutine_ranges = Self::find_subroutine_ranges(lines);
+        let subroutine_ranges = find_subroutine_ranges(lines);
         for (idx, basic_line) in lines.iter().enumerate() {
             // Skip lines that are inside subroutines.
             if subroutine_ranges
@@ -241,22 +233,22 @@ impl MsBasic2Extractor {
 
     /// Extract a LET statement as a Const node.
     fn visit_let_statement(state: &mut ExtractionState, basic_line: &BasicLine<'_>) {
-        let Some(statement_list) = Self::find_child_by_kind(basic_line.node, "statement_list")
+        let Some(statement_list) = find_direct_child_by_kind(basic_line.node, "statement_list")
         else {
             return;
         };
-        let Some(statement) = Self::find_child_by_kind(statement_list, "statement") else {
+        let Some(statement) = find_direct_child_by_kind(statement_list, "statement") else {
             return;
         };
-        let Some(let_stmt) = Self::find_child_by_kind(statement, "let_statement") else {
+        let Some(let_stmt) = find_direct_child_by_kind(statement, "let_statement") else {
             return;
         };
 
         // Extract the variable name from: let_statement -> variable -> identifier
-        let Some(var_node) = Self::find_child_by_kind(let_stmt, "variable") else {
+        let Some(var_node) = find_direct_child_by_kind(let_stmt, "variable") else {
             return;
         };
-        let Some(id_node) = Self::find_child_by_kind(var_node, "identifier") else {
+        let Some(id_node) = find_direct_child_by_kind(var_node, "identifier") else {
             return;
         };
         let name = state.node_text(id_node);
@@ -353,7 +345,7 @@ impl MsBasic2Extractor {
 
                 if has_return && body_start < body_end {
                     // Derive a function name from the first REM comment.
-                    let fn_name = Self::derive_function_name(&rem_comments);
+                    let fn_name = derive_function_name(&rem_comments);
                     let docstring = if rem_comments.is_empty() {
                         None
                     } else {
@@ -381,9 +373,9 @@ impl MsBasic2Extractor {
                     let mut returns: u32 = 0;
                     for line in &lines[body_start..body_end] {
                         // Try count_complexity on each line node that has children.
-                        let stmt_list = Self::find_child_by_kind(line.node, "statement_list");
+                        let stmt_list = find_direct_child_by_kind(line.node, "statement_list");
                         if let Some(sl) = stmt_list {
-                            let stmt = Self::find_child_by_kind(sl, "statement");
+                            let stmt = find_direct_child_by_kind(sl, "statement");
                             if let Some(s) = stmt {
                                 let mut sc = s.walk();
                                 if sc.goto_first_child() {
@@ -459,59 +451,14 @@ impl MsBasic2Extractor {
 
     /// Extract GOSUB/GOTO references from top-level lines (those not part of subroutines).
     fn extract_top_level_calls(state: &mut ExtractionState, lines: &[BasicLine<'_>]) {
-        // Determine which lines are part of subroutines (between first REM and RETURN).
-        let subroutine_ranges = Self::find_subroutine_ranges(lines);
-
         let file_node_id = state
             .node_stack
             .last()
             .map(|(_, id)| id.clone())
             .unwrap_or_default();
-
-        for (idx, line) in lines.iter().enumerate() {
-            // Skip lines that are inside subroutines.
-            if subroutine_ranges
-                .iter()
-                .any(|(start, end)| idx >= *start && idx < *end)
-            {
-                continue;
-            }
+        for_each_top_level_line(lines, |line| {
             Self::extract_calls_from_line(state, line, &file_node_id);
-        }
-    }
-
-    /// Find ranges of lines that belong to subroutines (REM ... RETURN blocks).
-    fn find_subroutine_ranges(lines: &[BasicLine<'_>]) -> Vec<(usize, usize)> {
-        let mut ranges = Vec::new();
-        let mut i = 0;
-        while i < lines.len() {
-            if lines[i].statement_kind == "comment" {
-                let rem_start = i;
-                while i < lines.len() && lines[i].statement_kind == "comment" {
-                    i += 1;
-                }
-                let mut body_end = i;
-                let mut has_return = false;
-                while body_end < lines.len() {
-                    if lines[body_end].statement_kind == "return_statement" {
-                        has_return = true;
-                        body_end += 1;
-                        break;
-                    }
-                    if lines[body_end].statement_kind == "comment" {
-                        break;
-                    }
-                    body_end += 1;
-                }
-                if has_return {
-                    ranges.push((rem_start, body_end));
-                }
-                i = body_end;
-            } else {
-                i += 1;
-            }
-        }
-        ranges
+        });
     }
 
     /// Extract GOSUB/GOTO call references from a single line.
@@ -529,7 +476,7 @@ impl MsBasic2Extractor {
         match kind {
             "gosub_statement" | "goto_statement" => {
                 // Extract the target line number.
-                if let Some(ln_node) = Self::find_child_by_kind(node, "line_number") {
+                if let Some(ln_node) = find_direct_child_by_kind(node, "line_number") {
                     let target = state.node_text(ln_node);
                     state.unresolved_refs.push(UnresolvedRef {
                         from_node_id: from_node_id.to_string(),
@@ -554,65 +501,6 @@ impl MsBasic2Extractor {
                 }
             }
         }
-    }
-
-    /// Derive a function name from REM comment text.
-    ///
-    /// Takes the first REM line text and converts it into a snake_case-like
-    /// identifier. For example, "LOG A MESSAGE" becomes "`LOG_A_MESSAGE`".
-    fn derive_function_name(rem_comments: &[String]) -> String {
-        if rem_comments.is_empty() {
-            return "UNNAMED_SUB".to_string();
-        }
-        let first = &rem_comments[0];
-        // Replace spaces with underscores and keep alphanumeric + underscore.
-        let name: String = first
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        // Collapse multiple underscores and trim.
-        let mut collapsed = String::new();
-        let mut prev_underscore = false;
-        for c in name.chars() {
-            if c == '_' {
-                if !prev_underscore && !collapsed.is_empty() {
-                    collapsed.push('_');
-                }
-                prev_underscore = true;
-            } else {
-                collapsed.push(c);
-                prev_underscore = false;
-            }
-        }
-        let trimmed = collapsed.trim_end_matches('_').to_string();
-        if trimmed.is_empty() {
-            "UNNAMED_SUB".to_string()
-        } else {
-            trimmed
-        }
-    }
-
-    /// Find the first child of a node with a given kind.
-    fn find_child_by_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == kind {
-                    return Some(child);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        None
     }
 
     /// Build the final `ExtractionResult` from the accumulated state.

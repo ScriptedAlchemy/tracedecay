@@ -7,6 +7,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
 use crate::extraction::complexity::{count_complexity, C_COMPLEXITY};
+use crate::extraction::traversal::{find_descendant_by_kind, find_direct_child_by_kind};
 use crate::types::{
     generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
 };
@@ -150,10 +151,10 @@ impl WgslExtractor {
     // -------------------------------------------------------
 
     fn visit_function_decl(state: &mut ExtractionState, node: TsNode<'_>) {
-        let Some(header) = Self::find_child_by_kind(node, "function_header") else {
+        let Some(header) = find_direct_child_by_kind(node, "function_header") else {
             return;
         };
-        let name = Self::find_child_by_kind(header, "ident")
+        let name = find_direct_child_by_kind(header, "ident")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         // Collect stage attributes (@vertex, @fragment, @compute).
@@ -172,7 +173,7 @@ impl WgslExtractor {
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
 
-        let body = Self::find_child_by_kind(node, "compound_statement");
+        let body = find_direct_child_by_kind(node, "compound_statement");
         let metrics = body
             .map(|b| count_complexity(b, &C_COMPLEXITY, &state.source))
             .unwrap_or_default();
@@ -235,7 +236,7 @@ impl WgslExtractor {
                 let child = cursor.node();
                 if child.kind() == "attribute" {
                     // attribute children: "@", ident, optional "(…)"
-                    if let Some(ident) = Self::find_child_by_kind(child, "ident") {
+                    if let Some(ident) = find_direct_child_by_kind(child, "ident") {
                         attrs.push(format!("@{}", state.node_text(ident)));
                     }
                 }
@@ -252,7 +253,7 @@ impl WgslExtractor {
     // -------------------------------------------------------
 
     fn visit_struct_decl(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::find_child_by_kind(node, "ident")
+        let name = find_direct_child_by_kind(node, "ident")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         let start_line = node.start_position().row as u32;
@@ -299,7 +300,7 @@ impl WgslExtractor {
         }
 
         // Visit struct members.
-        if let Some(body) = Self::find_child_by_kind(node, "struct_body_decl") {
+        if let Some(body) = find_direct_child_by_kind(node, "struct_body_decl") {
             state.node_stack.push((name, id));
             Self::visit_struct_members(state, body);
             state.node_stack.pop();
@@ -323,7 +324,7 @@ impl WgslExtractor {
 
     fn visit_struct_member(state: &mut ExtractionState, node: TsNode<'_>) {
         // struct_member: attribute* ident ":" type_decl
-        let Some(ident) = Self::find_child_by_kind(node, "ident") else {
+        let Some(ident) = find_direct_child_by_kind(node, "ident") else {
             return;
         };
         let name = state.node_text(ident);
@@ -380,8 +381,8 @@ impl WgslExtractor {
         // global_variable_decl: attribute* variable_decl ("=" expression)?
         // variable_decl: "var" variable_qualifier? variable_ident_decl
         // variable_ident_decl: ident (":" type_decl)?
-        let name = Self::find_descendant_by_kind(node, "variable_ident_decl")
-            .and_then(|vid| Self::find_child_by_kind(vid, "ident"))
+        let name = find_descendant_by_kind(node, "variable_ident_decl")
+            .and_then(|vid| find_direct_child_by_kind(vid, "ident"))
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         Self::emit_variable_node(state, node, name, NodeKind::Static);
@@ -389,9 +390,9 @@ impl WgslExtractor {
 
     fn visit_global_constant(state: &mut ExtractionState, node: TsNode<'_>) {
         // global_constant_decl: attribute* ("const"|"override") (ident | variable_ident_decl) "=" expression
-        let name = Self::find_descendant_by_kind(node, "variable_ident_decl")
-            .and_then(|vid| Self::find_child_by_kind(vid, "ident"))
-            .or_else(|| Self::find_child_by_kind(node, "ident"))
+        let name = find_descendant_by_kind(node, "variable_ident_decl")
+            .and_then(|vid| find_direct_child_by_kind(vid, "ident"))
+            .or_else(|| find_direct_child_by_kind(node, "ident"))
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         Self::emit_variable_node(state, node, name, NodeKind::Const);
@@ -454,7 +455,7 @@ impl WgslExtractor {
 
     fn visit_type_alias(state: &mut ExtractionState, node: TsNode<'_>) {
         // type_alias_decl: "type" ident "=" type_decl
-        let name = Self::find_child_by_kind(node, "ident")
+        let name = find_direct_child_by_kind(node, "ident")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         let start_line = node.start_position().row as u32;
@@ -537,41 +538,6 @@ impl WgslExtractor {
     // -------------------------------------------------------
     // Utility helpers
     // -------------------------------------------------------
-
-    fn find_child_by_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == kind {
-                    return Some(child);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        None
-    }
-
-    fn find_descendant_by_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == kind {
-                    return Some(child);
-                }
-                if let Some(found) = Self::find_descendant_by_kind(child, kind) {
-                    return Some(found);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        None
-    }
 
     fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
         ExtractionResult {

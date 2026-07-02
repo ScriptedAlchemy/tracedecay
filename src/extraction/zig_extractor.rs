@@ -6,6 +6,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
 use crate::extraction::complexity::{count_complexity, ZIG_COMPLEXITY};
+use crate::extraction::traversal::find_direct_child_by_kind;
 use crate::types::{
     generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
 };
@@ -172,7 +173,7 @@ impl ZigExtractor {
     /// We dispatch based on the value child.
     fn visit_variable_declaration(state: &mut ExtractionState, node: TsNode<'_>) {
         // Get the name from the first identifier child.
-        let name = Self::find_child_by_kind(node, "identifier")
+        let name = find_direct_child_by_kind(node, "identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         // Check what the value is: struct, enum, union, @import, or plain const.
@@ -238,7 +239,7 @@ impl ZigExtractor {
 
     /// Check if a `builtin_function` node is @import.
     fn is_import_call(state: &ExtractionState, node: TsNode<'_>) -> bool {
-        Self::find_child_by_kind(node, "builtin_identifier")
+        find_direct_child_by_kind(node, "builtin_identifier")
             .is_some_and(|n| state.node_text(n) == "@import")
     }
 
@@ -307,9 +308,9 @@ impl ZigExtractor {
     /// Looks for the string child inside the arguments: `@import("std")` -> `"std"`.
     fn extract_import_module(state: &ExtractionState, builtin_node: TsNode<'_>) -> Option<String> {
         // arguments -> string -> string_content
-        let args = Self::find_child_by_kind(builtin_node, "arguments")?;
-        let string_node = Self::find_child_by_kind(args, "string")?;
-        let content = Self::find_child_by_kind(string_node, "string_content")?;
+        let args = find_direct_child_by_kind(builtin_node, "arguments")?;
+        let string_node = find_direct_child_by_kind(args, "string")?;
+        let content = find_direct_child_by_kind(string_node, "string_content")?;
         let text = state.node_text(content);
         if text.is_empty() {
             None
@@ -722,8 +723,8 @@ impl ZigExtractor {
     /// Extract a test declaration: `test "name" { ... }`.
     fn visit_test(state: &mut ExtractionState, node: TsNode<'_>) {
         // The test name is in a string child.
-        let name = Self::find_child_by_kind(node, "string")
-            .and_then(|s| Self::find_child_by_kind(s, "string_content"))
+        let name = find_direct_child_by_kind(node, "string")
+            .and_then(|s| find_direct_child_by_kind(s, "string_content"))
             .map_or_else(|| "<anonymous test>".to_string(), |n| state.node_text(n));
 
         let start_line = node.start_position().row as u32;
@@ -917,28 +918,11 @@ impl ZigExtractor {
         match node.kind() {
             "builtin_function" => {
                 // @sqrt, @as, etc.
-                Self::find_child_by_kind(node, "builtin_identifier")
+                find_direct_child_by_kind(node, "builtin_identifier")
                     .map_or_else(|| state.node_text(node), |n| state.node_text(n))
             }
             _ => state.node_text(node),
         }
-    }
-
-    /// Find the first child of a node with a given kind.
-    fn find_child_by_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == kind {
-                    return Some(child);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        None
     }
 
     /// Build the final `ExtractionResult` from the accumulated state.

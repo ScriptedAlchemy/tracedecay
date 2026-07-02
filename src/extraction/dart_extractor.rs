@@ -6,6 +6,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
 use crate::extraction::complexity::{count_complexity, ComplexityMetrics, DART_COMPLEXITY};
+use crate::extraction::traversal::find_direct_child_by_kind;
 use crate::types::{
     generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
 };
@@ -165,8 +166,8 @@ impl DartExtractor {
                 "function_declaration" => {
                     // tree-sitter-dart 0.2 wraps top-level functions in
                     // `function_declaration { function_signature, function_body }`.
-                    if let Some(sig) = Self::find_child_by_kind(child, "function_signature") {
-                        let body = Self::find_child_by_kind(child, "function_body");
+                    if let Some(sig) = find_direct_child_by_kind(child, "function_signature") {
+                        let body = find_direct_child_by_kind(child, "function_body");
                         Self::visit_top_level_function(state, sig, body);
                     }
                 }
@@ -189,23 +190,23 @@ impl DartExtractor {
     /// `top_level_variable_declaration` whose declared "type" is the
     /// `library` keyword.
     fn is_library_directive(state: &ExtractionState, node: TsNode<'_>) -> bool {
-        let Some(ty) = Self::find_child_by_kind(node, "type") else {
+        let Some(ty) = find_direct_child_by_kind(node, "type") else {
             return false;
         };
-        let Some(type_id) = Self::find_child_by_kind(ty, "type_identifier") else {
+        let Some(type_id) = find_direct_child_by_kind(ty, "type_identifier") else {
             return false;
         };
         state.node_text(type_id) == "library"
     }
 
     fn visit_library_misparse(state: &mut ExtractionState, node: TsNode<'_>) {
-        let Some(list) = Self::find_child_by_kind(node, "initialized_identifier_list") else {
+        let Some(list) = find_direct_child_by_kind(node, "initialized_identifier_list") else {
             return;
         };
-        let Some(init) = Self::find_child_by_kind(list, "initialized_identifier") else {
+        let Some(init) = find_direct_child_by_kind(list, "initialized_identifier") else {
             return;
         };
-        let Some(ident) = Self::find_child_by_kind(init, "identifier") else {
+        let Some(ident) = find_direct_child_by_kind(init, "identifier") else {
             return;
         };
         let name = state.node_text(ident);
@@ -217,7 +218,7 @@ impl DartExtractor {
     // ----------------------------------
 
     fn visit_library(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::find_child_by_kind(node, "dotted_identifier_list").map_or_else(
+        let name = find_direct_child_by_kind(node, "dotted_identifier_list").map_or_else(
             || state.node_text(node).trim().to_string(),
             |n| state.node_text(n),
         );
@@ -444,7 +445,7 @@ impl DartExtractor {
     // ----------------------------------
 
     fn visit_class(state: &mut ExtractionState, node: TsNode<'_>) {
-        let is_abstract = Self::find_child_by_kind(node, "abstract").is_some();
+        let is_abstract = find_direct_child_by_kind(node, "abstract").is_some();
 
         let name = node
             .child_by_field_name("name")
@@ -504,7 +505,7 @@ impl DartExtractor {
 
         // Extract superclass extends reference.
         if let Some(superclass) = node.child_by_field_name("superclass") {
-            if let Some(type_id) = Self::find_child_by_kind(superclass, "type_identifier") {
+            if let Some(type_id) = find_direct_child_by_kind(superclass, "type_identifier") {
                 let type_name = state.node_text(type_id);
                 state.unresolved_refs.push(UnresolvedRef {
                     from_node_id: id.clone(),
@@ -535,7 +536,7 @@ impl DartExtractor {
     // ----------------------------------
 
     fn visit_mixin(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::find_child_by_kind(node, "identifier")
+        let name = find_direct_child_by_kind(node, "identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         let visibility = Self::dart_visibility(&name);
@@ -588,7 +589,7 @@ impl DartExtractor {
         Self::extract_annotations_from_modifiers(state, node, &id);
 
         // Visit mixin body (it uses class_body).
-        if let Some(body) = Self::find_child_by_kind(node, "class_body") {
+        if let Some(body) = find_direct_child_by_kind(node, "class_body") {
             state.node_stack.push((name, id.clone()));
             state.class_depth += 1;
             Self::visit_class_body(state, body);
@@ -602,7 +603,7 @@ impl DartExtractor {
     // ----------------------------------
 
     fn visit_extension(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::find_child_by_kind(node, "identifier")
+        let name = find_direct_child_by_kind(node, "identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         let visibility = Self::dart_visibility(&name);
@@ -801,8 +802,8 @@ impl DartExtractor {
     // ----------------------------------
 
     fn visit_type_alias(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::find_child_by_kind(node, "type_identifier")
-            .or_else(|| Self::find_child_by_kind(node, "identifier"))
+        let name = find_direct_child_by_kind(node, "type_identifier")
+            .or_else(|| find_direct_child_by_kind(node, "identifier"))
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         let visibility = Self::dart_visibility(&name);
@@ -900,7 +901,7 @@ impl DartExtractor {
     fn visit_method_declaration(state: &mut ExtractionState, node: TsNode<'_>) {
         let sig = node
             .child_by_field_name("signature")
-            .or_else(|| Self::find_child_by_kind(node, "method_signature"));
+            .or_else(|| find_direct_child_by_kind(node, "method_signature"));
         let Some(sig) = sig else {
             return;
         };
@@ -913,7 +914,7 @@ impl DartExtractor {
         }
         let body = node
             .child_by_field_name("body")
-            .or_else(|| Self::find_child_by_kind(node, "function_body"));
+            .or_else(|| find_direct_child_by_kind(node, "function_body"));
         loop {
             let child = cursor.node();
             match child.kind() {
@@ -1219,7 +1220,7 @@ impl DartExtractor {
         decl_node: TsNode<'_>,
         sig_node: TsNode<'_>,
     ) {
-        let name = Self::find_child_by_kind(sig_node, "identifier")
+        let name = find_direct_child_by_kind(sig_node, "identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         let visibility = Self::dart_visibility(&name);
@@ -1365,7 +1366,7 @@ impl DartExtractor {
     ) {
         let name = var_def.child_by_field_name("name").map_or_else(
             || {
-                Self::find_child_by_kind(var_def, "identifier")
+                find_direct_child_by_kind(var_def, "identifier")
                     .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n))
             },
             |n| state.node_text(n),
@@ -1387,7 +1388,7 @@ impl DartExtractor {
             loop {
                 let child = cursor.node();
                 if child.kind() == "initialized_identifier" {
-                    if let Some(ident) = Self::find_child_by_kind(child, "identifier") {
+                    if let Some(ident) = find_direct_child_by_kind(child, "identifier") {
                         let name = state.node_text(ident);
                         Self::emit_field(state, decl_node, &name);
                     }
@@ -1410,7 +1411,7 @@ impl DartExtractor {
             loop {
                 let child = cursor.node();
                 if child.kind() == "static_final_declaration" {
-                    if let Some(ident) = Self::find_child_by_kind(child, "identifier") {
+                    if let Some(ident) = find_direct_child_by_kind(child, "identifier") {
                         let name = state.node_text(ident);
                         Self::emit_field(state, decl_node, &name);
                     }
@@ -1537,7 +1538,7 @@ impl DartExtractor {
                 // sibling pairs (still kept below for compatibility with method
                 // calls of the form `obj.method()`).
                 "call_expression" => {
-                    if let Some(ident) = Self::find_child_by_kind(child, "identifier") {
+                    if let Some(ident) = find_direct_child_by_kind(child, "identifier") {
                         state.unresolved_refs.push(UnresolvedRef {
                             from_node_id: fn_node_id.to_string(),
                             reference_name: state.node_text(ident),
@@ -1556,8 +1557,8 @@ impl DartExtractor {
                     // Check if the next sibling is a selector containing argument_part.
                     if let Some(next) = child.next_named_sibling() {
                         if next.kind() == "selector"
-                            && (Self::find_child_by_kind(next, "argument_part").is_some()
-                                || Self::find_child_by_kind(next, "arguments").is_some())
+                            && (find_direct_child_by_kind(next, "argument_part").is_some()
+                                || find_direct_child_by_kind(next, "arguments").is_some())
                         {
                             state.unresolved_refs.push(UnresolvedRef {
                                 from_node_id: fn_node_id.to_string(),
@@ -1572,14 +1573,14 @@ impl DartExtractor {
                 }
                 // A selector that contains an identifier and argument_part: method call.
                 "selector" => {
-                    if Self::find_child_by_kind(child, "argument_part").is_some()
-                        || Self::find_child_by_kind(child, "arguments").is_some()
+                    if find_direct_child_by_kind(child, "argument_part").is_some()
+                        || find_direct_child_by_kind(child, "arguments").is_some()
                     {
                         // Look for identifier inside unconditional_assignable_selector.
                         if let Some(uas) =
-                            Self::find_child_by_kind(child, "unconditional_assignable_selector")
+                            find_direct_child_by_kind(child, "unconditional_assignable_selector")
                         {
-                            if let Some(ident) = Self::find_child_by_kind(uas, "identifier") {
+                            if let Some(ident) = find_direct_child_by_kind(uas, "identifier") {
                                 let callee_name = state.node_text(ident);
                                 state.unresolved_refs.push(UnresolvedRef {
                                     from_node_id: fn_node_id.to_string(),
@@ -1711,23 +1712,6 @@ impl DartExtractor {
         }
     }
 
-    /// Find the first named child of a node with a given kind.
-    fn find_child_by_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == kind {
-                    return Some(child);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        None
-    }
-
     /// Walk previous siblings and children of a declaration looking for
     /// `annotation` or `marker_annotation` nodes and extract annotation usages.
     fn extract_annotations_from_modifiers(
@@ -1833,7 +1817,7 @@ impl DartExtractor {
     ///
     /// Looks for an `identifier` child, or falls back to text after `@`, before `(`.
     fn extract_annotation_name(state: &ExtractionState, node: TsNode<'_>) -> String {
-        if let Some(ident) = Self::find_child_by_kind(node, "identifier") {
+        if let Some(ident) = find_direct_child_by_kind(node, "identifier") {
             return state.node_text(ident);
         }
         // Fallback: text after '@', before '('.

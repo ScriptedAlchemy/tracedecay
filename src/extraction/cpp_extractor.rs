@@ -7,6 +7,9 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
 use crate::extraction::{
+    common::{
+        clean_c_doc_comment, docstring_from_preceding_comments, extract_call_expression_sites,
+    },
     complexity::{count_complexity, CPP_COMPLEXITY},
     traversal::{find_descendant_by_kind, find_direct_child_by_kind, has_direct_child_kind},
 };
@@ -2082,31 +2085,13 @@ impl CppExtractor {
 
     /// Recursively find `call_expression` nodes and create unresolved Calls references.
     fn extract_call_sites(state: &mut ExtractionState, node: TsNode<'_>, fn_node_id: &str) {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == "call_expression" {
-                    if let Some(callee) = child.named_child(0) {
-                        let callee_name = state.node_text(callee);
-                        state.unresolved_refs.push(UnresolvedRef {
-                            from_node_id: fn_node_id.to_string(),
-                            reference_name: callee_name,
-                            reference_kind: EdgeKind::Calls,
-                            line: child.start_position().row as u32,
-                            column: child.start_position().column as u32,
-                            file_path: state.file_path.clone(),
-                        });
-                    }
-                    Self::extract_call_sites(state, child, fn_node_id);
-                } else {
-                    Self::extract_call_sites(state, child, fn_node_id);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
+        extract_call_expression_sites(
+            &state.source,
+            &state.file_path,
+            &mut state.unresolved_refs,
+            node,
+            fn_node_id,
+        );
     }
 
     // -------------------------------------------------------
@@ -2115,54 +2100,7 @@ impl CppExtractor {
 
     /// Extract docstrings from preceding comment nodes.
     fn extract_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        let mut comments = Vec::new();
-        let mut current = node.prev_named_sibling();
-        while let Some(sibling) = current {
-            if sibling.kind() == "comment" {
-                let text = state.node_text(sibling);
-                comments.push(text);
-                current = sibling.prev_named_sibling();
-            } else {
-                break;
-            }
-        }
-        if comments.is_empty() {
-            return None;
-        }
-        comments.reverse();
-        let cleaned: Vec<String> = comments.iter().map(|c| Self::clean_comment(c)).collect();
-        let result = cleaned.join("\n").trim().to_string();
-        if result.is_empty() {
-            None
-        } else {
-            Some(result)
-        }
-    }
-
-    /// Strip comment markers from a single C/C++ comment text.
-    fn clean_comment(comment: &str) -> String {
-        let trimmed = comment.trim();
-        if let Some(stripped) = trimmed.strip_prefix("///") {
-            stripped.strip_prefix(' ').unwrap_or(stripped).to_string()
-        } else if let Some(stripped) = trimmed.strip_prefix("//") {
-            stripped.strip_prefix(' ').unwrap_or(stripped).to_string()
-        } else if trimmed.starts_with("/*") && trimmed.ends_with("*/") {
-            let inner = &trimmed[2..trimmed.len() - 2];
-            inner
-                .lines()
-                .map(|line| {
-                    let l = line.trim();
-                    l.strip_prefix("* ")
-                        .or_else(|| l.strip_prefix('*'))
-                        .unwrap_or(l)
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-                .trim()
-                .to_string()
-        } else {
-            trimmed.to_string()
-        }
+        docstring_from_preceding_comments(&state.source, node, clean_c_doc_comment)
     }
 
     // -------------------------------------------------------

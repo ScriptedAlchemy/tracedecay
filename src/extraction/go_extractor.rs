@@ -5,7 +5,9 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
+use crate::extraction::common::{clean_c_comment, docstring_from_preceding_comments};
 use crate::extraction::complexity::{count_complexity, GO_COMPLEXITY};
+use crate::extraction::traversal::find_direct_child_by_kind;
 use crate::types::{
     generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
 };
@@ -167,7 +169,7 @@ impl GoExtractor {
 
     /// Extract a package clause node.
     fn visit_package(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::find_child_by_kind(node, "package_identifier")
+        let name = find_direct_child_by_kind(node, "package_identifier")
             .map_or_else(|| "<unknown>".to_string(), |n| state.node_text(n));
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -312,7 +314,7 @@ impl GoExtractor {
     /// Extract a function declaration node.
     fn visit_function(state: &mut ExtractionState, node: TsNode<'_>) {
         // In Go, function name is an `identifier` child.
-        let name = Self::find_child_by_kind(node, "identifier")
+        let name = find_direct_child_by_kind(node, "identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
         let visibility = Self::go_visibility(&name);
         let signature = Some(Self::extract_signature(state, node));
@@ -366,7 +368,7 @@ impl GoExtractor {
         Self::extract_type_params(state, node, &id);
 
         // Extract call sites from the function body.
-        if let Some(body) = Self::find_child_by_kind(node, "block") {
+        if let Some(body) = find_direct_child_by_kind(node, "block") {
             Self::extract_call_sites(state, body, &id);
         }
     }
@@ -374,7 +376,7 @@ impl GoExtractor {
     /// Extract a method declaration node (function with receiver).
     fn visit_method(state: &mut ExtractionState, node: TsNode<'_>) {
         // In Go, method name is a `field_identifier` child.
-        let name = Self::find_child_by_kind(node, "field_identifier")
+        let name = find_direct_child_by_kind(node, "field_identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
         let visibility = Self::go_visibility(&name);
         let signature = Some(Self::extract_signature(state, node));
@@ -428,7 +430,7 @@ impl GoExtractor {
         Self::extract_receiver(state, node, &id);
 
         // Extract call sites from the method body.
-        if let Some(body) = Self::find_child_by_kind(node, "block") {
+        if let Some(body) = find_direct_child_by_kind(node, "block") {
             Self::extract_call_sites(state, body, &id);
         }
     }
@@ -454,13 +456,13 @@ impl GoExtractor {
 
     /// Extract a `type_spec` node, dispatching on whether it defines a struct or interface.
     fn visit_type_spec(state: &mut ExtractionState, spec_node: TsNode<'_>, decl_node: TsNode<'_>) {
-        let name = Self::find_child_by_kind(spec_node, "type_identifier")
+        let name = find_direct_child_by_kind(spec_node, "type_identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         // Check what type is being defined.
-        if let Some(struct_type) = Self::find_child_by_kind(spec_node, "struct_type") {
+        if let Some(struct_type) = find_direct_child_by_kind(spec_node, "struct_type") {
             Self::visit_struct(state, &name, struct_type, decl_node);
-        } else if let Some(iface_type) = Self::find_child_by_kind(spec_node, "interface_type") {
+        } else if let Some(iface_type) = find_direct_child_by_kind(spec_node, "interface_type") {
             Self::visit_interface(state, &name, iface_type, decl_node);
         } else {
             // A plain type definition (e.g., `type Foo int`) that is not a type alias.
@@ -532,7 +534,7 @@ impl GoExtractor {
 
     /// Extract fields from a `struct_type` node.
     fn extract_struct_fields(state: &mut ExtractionState, struct_type: TsNode<'_>) {
-        if let Some(field_list) = Self::find_child_by_kind(struct_type, "field_declaration_list") {
+        if let Some(field_list) = find_direct_child_by_kind(struct_type, "field_declaration_list") {
             let mut cursor = field_list.walk();
             if cursor.goto_first_child() {
                 loop {
@@ -550,7 +552,7 @@ impl GoExtractor {
 
     /// Extract a single field from a `field_declaration` node.
     fn extract_single_field(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::find_child_by_kind(node, "field_identifier")
+        let name = find_direct_child_by_kind(node, "field_identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
         let visibility = Self::go_visibility(&name);
         let text = state.node_text(node);
@@ -599,7 +601,7 @@ impl GoExtractor {
         }
 
         // Extract struct tags (raw_string_literal in field_declaration).
-        if let Some(tag_node) = Self::find_child_by_kind(node, "raw_string_literal") {
+        if let Some(tag_node) = find_direct_child_by_kind(node, "raw_string_literal") {
             Self::extract_struct_tag(state, tag_node, &name, &id);
         }
     }
@@ -732,7 +734,7 @@ impl GoExtractor {
                 let child = cursor.node();
                 if child.kind() == "type_elem" {
                     // type_elem contains a type_identifier for the embedded interface.
-                    if let Some(type_id) = Self::find_child_by_kind(child, "type_identifier") {
+                    if let Some(type_id) = find_direct_child_by_kind(child, "type_identifier") {
                         let embedded_name = state.node_text(type_id);
                         let line = child.start_position().row as u32;
                         let column = child.start_position().column as u32;
@@ -759,7 +761,7 @@ impl GoExtractor {
         alias_node: TsNode<'_>,
         decl_node: TsNode<'_>,
     ) {
-        let name = Self::find_child_by_kind(alias_node, "type_identifier")
+        let name = find_direct_child_by_kind(alias_node, "type_identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
         let visibility = Self::go_visibility(&name);
         let docstring = Self::extract_docstring(state, decl_node);
@@ -877,7 +879,7 @@ impl GoExtractor {
 
     /// Extract a single const spec.
     fn visit_const_spec(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::find_child_by_kind(node, "identifier")
+        let name = find_direct_child_by_kind(node, "identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
         let visibility = Self::go_visibility(&name);
         let text = state.node_text(node);
@@ -944,7 +946,7 @@ impl GoExtractor {
 
     /// Extract a single var spec as a Static node (Go vars are package-level state).
     fn visit_var_spec(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::find_child_by_kind(node, "identifier")
+        let name = find_direct_child_by_kind(node, "identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
         let visibility = Self::go_visibility(&name);
         let text = state.node_text(node);
@@ -1007,7 +1009,7 @@ impl GoExtractor {
                 if child.kind() == "parameter_list" {
                     // This is the receiver parameter list.
                     // Extract the type name from the parameter_declaration inside.
-                    if let Some(param) = Self::find_child_by_kind(child, "parameter_declaration") {
+                    if let Some(param) = find_direct_child_by_kind(child, "parameter_declaration") {
                         let receiver_type = Self::extract_receiver_type_name(state, param);
                         if let Some(type_name) = receiver_type {
                             let line = child.start_position().row as u32;
@@ -1051,11 +1053,11 @@ impl GoExtractor {
     /// Handles both `c Circle` and `c *Circle` forms.
     fn extract_receiver_type_name(state: &ExtractionState, param: TsNode<'_>) -> Option<String> {
         // Look for type_identifier directly or inside pointer_type.
-        if let Some(type_id) = Self::find_child_by_kind(param, "type_identifier") {
+        if let Some(type_id) = find_direct_child_by_kind(param, "type_identifier") {
             return Some(state.node_text(type_id));
         }
-        if let Some(ptr_type) = Self::find_child_by_kind(param, "pointer_type") {
-            if let Some(type_id) = Self::find_child_by_kind(ptr_type, "type_identifier") {
+        if let Some(ptr_type) = find_direct_child_by_kind(param, "pointer_type") {
+            if let Some(type_id) = find_direct_child_by_kind(ptr_type, "type_identifier") {
                 return Some(state.node_text(type_id));
             }
         }
@@ -1064,14 +1066,14 @@ impl GoExtractor {
 
     /// Extract type parameters (generics) from a function or method declaration.
     fn extract_type_params(state: &mut ExtractionState, node: TsNode<'_>, parent_id: &str) {
-        if let Some(type_params) = Self::find_child_by_kind(node, "type_parameter_list") {
+        if let Some(type_params) = find_direct_child_by_kind(node, "type_parameter_list") {
             let mut cursor = type_params.walk();
             if cursor.goto_first_child() {
                 loop {
                     let child = cursor.node();
                     if child.kind() == "type_parameter_declaration" {
                         // Each type_parameter_declaration has an identifier for the param name.
-                        if let Some(ident) = Self::find_child_by_kind(child, "identifier") {
+                        if let Some(ident) = find_direct_child_by_kind(child, "identifier") {
                             let name = state.node_text(ident);
                             let start_line = child.start_position().row as u32;
                             let end_line = child.end_position().row as u32;
@@ -1180,53 +1182,7 @@ impl GoExtractor {
 
     /// Extract docstrings from preceding comment nodes.
     fn extract_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        let mut comments = Vec::new();
-        let mut current = node.prev_named_sibling();
-        while let Some(sibling) = current {
-            if sibling.kind() == "comment" {
-                let text = state.node_text(sibling);
-                comments.push(text);
-                current = sibling.prev_named_sibling();
-            } else {
-                break;
-            }
-        }
-        if comments.is_empty() {
-            return None;
-        }
-        // Comments are collected in reverse order (closest first).
-        comments.reverse();
-        let cleaned: Vec<String> = comments.iter().map(|c| Self::clean_comment(c)).collect();
-        let result = cleaned.join("\n").trim().to_string();
-        if result.is_empty() {
-            None
-        } else {
-            Some(result)
-        }
-    }
-
-    /// Strip comment markers from a single Go comment text.
-    fn clean_comment(comment: &str) -> String {
-        let trimmed = comment.trim();
-        if let Some(stripped) = trimmed.strip_prefix("//") {
-            stripped.strip_prefix(' ').unwrap_or(stripped).to_string()
-        } else if trimmed.starts_with("/*") && trimmed.ends_with("*/") {
-            let inner = &trimmed[2..trimmed.len() - 2];
-            inner
-                .lines()
-                .map(|line| {
-                    let l = line.trim();
-                    l.strip_prefix("* ")
-                        .or_else(|| l.strip_prefix('*'))
-                        .unwrap_or(l)
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-                .trim()
-                .to_string()
-        } else {
-            trimmed.to_string()
-        }
+        docstring_from_preceding_comments(&state.source, node, clean_c_comment)
     }
 
     /// Determine Go visibility: uppercase first character means exported (Pub),
@@ -1237,23 +1193,6 @@ impl GoExtractor {
         } else {
             Visibility::Private
         }
-    }
-
-    /// Find the first named child of a node with a given kind.
-    fn find_child_by_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == kind {
-                    return Some(child);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        None
     }
 
     /// Build the final `ExtractionResult` from the accumulated state.

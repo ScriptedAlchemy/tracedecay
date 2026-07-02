@@ -6,7 +6,13 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
+use crate::extraction::common::{
+    clean_c_comment, docstring_from_preceding_comments, extract_call_expression_sites,
+};
 use crate::extraction::complexity::{count_complexity, C_COMPLEXITY};
+use crate::extraction::traversal::{
+    find_descendant_by_kind, find_direct_child_by_kind, has_direct_child_kind,
+};
 use crate::types::{
     generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
 };
@@ -204,14 +210,14 @@ impl GlslExtractor {
         }
 
         // Extract call sites from the function body.
-        if let Some(body) = Self::find_child_by_kind(node, "compound_statement") {
+        if let Some(body) = find_direct_child_by_kind(node, "compound_statement") {
             Self::extract_call_sites(state, body, &id);
         }
     }
 
     fn extract_function_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        if let Some(declarator) = Self::find_descendant_by_kind(node, "function_declarator") {
-            if let Some(ident) = Self::find_child_by_kind(declarator, "identifier") {
+        if let Some(declarator) = find_descendant_by_kind(node, "function_declarator") {
+            if let Some(ident) = find_direct_child_by_kind(declarator, "identifier") {
                 return Some(state.node_text(ident));
             }
         }
@@ -233,13 +239,13 @@ impl GlslExtractor {
 
     fn visit_declaration(state: &mut ExtractionState, node: TsNode<'_>) {
         // Function prototype
-        if Self::find_descendant_by_kind(node, "function_declarator").is_some() {
+        if find_descendant_by_kind(node, "function_declarator").is_some() {
             Self::visit_function_prototype(state, node);
             return;
         }
 
         // Struct declaration
-        if Self::has_child_kind(node, "struct_specifier") {
+        if has_direct_child_kind(node, "struct_specifier") {
             Self::visit_children(state, node);
             return;
         }
@@ -369,24 +375,24 @@ impl GlslExtractor {
 
     fn extract_variable_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
         // init_declarator: `int x = 0;`
-        if let Some(init_decl) = Self::find_child_by_kind(node, "init_declarator") {
-            if let Some(ident) = Self::find_child_by_kind(init_decl, "identifier") {
+        if let Some(init_decl) = find_direct_child_by_kind(node, "init_declarator") {
+            if let Some(ident) = find_direct_child_by_kind(init_decl, "identifier") {
                 return Some(state.node_text(ident));
             }
             // array declarator: `float arr[3] = ...`
-            if let Some(arr) = Self::find_child_by_kind(init_decl, "array_declarator") {
-                if let Some(ident) = Self::find_child_by_kind(arr, "identifier") {
+            if let Some(arr) = find_direct_child_by_kind(init_decl, "array_declarator") {
+                if let Some(ident) = find_direct_child_by_kind(arr, "identifier") {
                     return Some(state.node_text(ident));
                 }
             }
         }
         // Direct identifier: `uniform vec3 lightPos;`
-        if let Some(ident) = Self::find_child_by_kind(node, "identifier") {
+        if let Some(ident) = find_direct_child_by_kind(node, "identifier") {
             return Some(state.node_text(ident));
         }
         // Array declarator without init: `in vec2 texCoords[];`
-        if let Some(arr) = Self::find_child_by_kind(node, "array_declarator") {
-            if let Some(ident) = Self::find_child_by_kind(arr, "identifier") {
+        if let Some(arr) = find_direct_child_by_kind(node, "array_declarator") {
+            if let Some(ident) = find_direct_child_by_kind(arr, "identifier") {
                 return Some(state.node_text(ident));
             }
         }
@@ -398,11 +404,11 @@ impl GlslExtractor {
     // -------------------------------------------------------
 
     fn visit_standalone_struct(state: &mut ExtractionState, node: TsNode<'_>) {
-        if Self::find_child_by_kind(node, "field_declaration_list").is_none() {
+        if find_direct_child_by_kind(node, "field_declaration_list").is_none() {
             return;
         }
 
-        let name = Self::find_child_by_kind(node, "type_identifier")
+        let name = find_direct_child_by_kind(node, "type_identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         let start_line = node.start_position().row as u32;
@@ -451,7 +457,7 @@ impl GlslExtractor {
         }
 
         // Extract struct fields.
-        if let Some(field_list) = Self::find_child_by_kind(node, "field_declaration_list") {
+        if let Some(field_list) = find_direct_child_by_kind(node, "field_declaration_list") {
             state.node_stack.push((name, id));
             Self::visit_struct_fields(state, field_list);
             state.node_stack.pop();
@@ -524,18 +530,18 @@ impl GlslExtractor {
 
     fn find_field_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
         // field_identifier is used in struct field declarations
-        if let Some(fi) = Self::find_child_by_kind(node, "field_identifier") {
+        if let Some(fi) = find_direct_child_by_kind(node, "field_identifier") {
             return Some(state.node_text(fi));
         }
-        if let Some(ident) = Self::find_child_by_kind(node, "identifier") {
+        if let Some(ident) = find_direct_child_by_kind(node, "identifier") {
             return Some(state.node_text(ident));
         }
         // Array field: `float values[4];`
-        if let Some(arr) = Self::find_child_by_kind(node, "array_declarator") {
-            if let Some(fi) = Self::find_child_by_kind(arr, "field_identifier") {
+        if let Some(arr) = find_direct_child_by_kind(node, "array_declarator") {
+            if let Some(fi) = find_direct_child_by_kind(arr, "field_identifier") {
                 return Some(state.node_text(fi));
             }
-            if let Some(ident) = Self::find_child_by_kind(arr, "identifier") {
+            if let Some(ident) = find_direct_child_by_kind(arr, "identifier") {
                 return Some(state.node_text(ident));
             }
         }
@@ -547,7 +553,7 @@ impl GlslExtractor {
     // -------------------------------------------------------
 
     fn visit_preproc_def(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::find_child_by_kind(node, "identifier")
+        let name = find_direct_child_by_kind(node, "identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         let start_line = node.start_position().row as u32;
@@ -596,8 +602,8 @@ impl GlslExtractor {
     }
 
     fn visit_preproc_include(state: &mut ExtractionState, node: TsNode<'_>) {
-        let include_path = Self::find_child_by_kind(node, "string_literal")
-            .or_else(|| Self::find_child_by_kind(node, "system_lib_string"))
+        let include_path = find_direct_child_by_kind(node, "string_literal")
+            .or_else(|| find_direct_child_by_kind(node, "system_lib_string"))
             .map_or_else(|| "<unknown>".to_string(), |n| state.node_text(n));
 
         let line = node.start_position().row as u32;
@@ -620,31 +626,13 @@ impl GlslExtractor {
     // -------------------------------------------------------
 
     fn extract_call_sites(state: &mut ExtractionState, node: TsNode<'_>, fn_node_id: &str) {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == "call_expression" {
-                    if let Some(callee) = child.named_child(0) {
-                        let callee_name = state.node_text(callee);
-                        state.unresolved_refs.push(UnresolvedRef {
-                            from_node_id: fn_node_id.to_string(),
-                            reference_name: callee_name,
-                            reference_kind: EdgeKind::Calls,
-                            line: child.start_position().row as u32,
-                            column: child.start_position().column as u32,
-                            file_path: state.file_path.clone(),
-                        });
-                    }
-                    Self::extract_call_sites(state, child, fn_node_id);
-                } else {
-                    Self::extract_call_sites(state, child, fn_node_id);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
+        extract_call_expression_sites(
+            &state.source,
+            &state.file_path,
+            &mut state.unresolved_refs,
+            node,
+            fn_node_id,
+        );
     }
 
     // -------------------------------------------------------
@@ -652,50 +640,7 @@ impl GlslExtractor {
     // -------------------------------------------------------
 
     fn extract_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        let mut comments = Vec::new();
-        let mut current = node.prev_named_sibling();
-        while let Some(sibling) = current {
-            if sibling.kind() == "comment" {
-                comments.push(state.node_text(sibling));
-                current = sibling.prev_named_sibling();
-            } else {
-                break;
-            }
-        }
-        if comments.is_empty() {
-            return None;
-        }
-        comments.reverse();
-        let cleaned: Vec<String> = comments.iter().map(|c| Self::clean_comment(c)).collect();
-        let result = cleaned.join("\n").trim().to_string();
-        if result.is_empty() {
-            None
-        } else {
-            Some(result)
-        }
-    }
-
-    fn clean_comment(comment: &str) -> String {
-        let trimmed = comment.trim();
-        if let Some(stripped) = trimmed.strip_prefix("//") {
-            stripped.strip_prefix(' ').unwrap_or(stripped).to_string()
-        } else if trimmed.starts_with("/*") && trimmed.ends_with("*/") {
-            let inner = &trimmed[2..trimmed.len() - 2];
-            inner
-                .lines()
-                .map(|line| {
-                    let l = line.trim();
-                    l.strip_prefix("* ")
-                        .or_else(|| l.strip_prefix('*'))
-                        .unwrap_or(l)
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-                .trim()
-                .to_string()
-        } else {
-            trimmed.to_string()
-        }
+        docstring_from_preceding_comments(&state.source, node, clean_c_comment)
     }
 
     // -------------------------------------------------------
@@ -720,7 +665,7 @@ impl GlslExtractor {
                 }
                 // Wrapped in type_qualifier: `type_qualifier > const`
                 if kind == "type_qualifier" {
-                    if let Some(inner) = Self::find_child_by_kind(child, qualifier) {
+                    if let Some(inner) = find_direct_child_by_kind(child, qualifier) {
                         let _ = inner;
                         return true;
                     }
@@ -731,45 +676,6 @@ impl GlslExtractor {
             }
         }
         false
-    }
-
-    fn has_child_kind(node: TsNode<'_>, kind: &str) -> bool {
-        Self::find_child_by_kind(node, kind).is_some()
-    }
-
-    fn find_child_by_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == kind {
-                    return Some(child);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        None
-    }
-
-    fn find_descendant_by_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == kind {
-                    return Some(child);
-                }
-                if let Some(found) = Self::find_descendant_by_kind(child, kind) {
-                    return Some(found);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        None
     }
 
     fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {

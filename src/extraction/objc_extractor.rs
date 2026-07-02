@@ -6,7 +6,9 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
+use crate::extraction::common::{clean_c_doc_comment, docstring_from_preceding_comments};
 use crate::extraction::complexity::{count_complexity, OBJC_COMPLEXITY};
+use crate::extraction::traversal::{find_descendant_by_kind, find_direct_child_by_kind};
 use crate::types::{
     generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
 };
@@ -175,8 +177,8 @@ impl ObjcExtractor {
 
     /// Extract a preprocessor #import or #include.
     fn visit_preproc_include(state: &mut ExtractionState, node: TsNode<'_>) {
-        let path = Self::find_child_by_kind(node, "string_literal")
-            .or_else(|| Self::find_child_by_kind(node, "system_lib_string"))
+        let path = find_direct_child_by_kind(node, "string_literal")
+            .or_else(|| find_direct_child_by_kind(node, "system_lib_string"))
             .map_or_else(
                 || "<unknown>".to_string(),
                 |n| {
@@ -237,7 +239,7 @@ impl ObjcExtractor {
 
     /// Extract a preprocessor #define.
     fn visit_preproc_def(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::find_child_by_kind(node, "identifier")
+        let name = find_direct_child_by_kind(node, "identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         let text = state.node_text(node);
@@ -301,8 +303,8 @@ impl ObjcExtractor {
     /// The enum variant names appear as `type_identifier` children with field "declarator".
     fn visit_type_definition(state: &mut ExtractionState, node: TsNode<'_>) {
         // Check if this is an NS_ENUM pattern
-        if let Some(macro_spec) = Self::find_child_by_kind(node, "macro_type_specifier") {
-            let macro_name = Self::find_child_by_kind(macro_spec, "identifier")
+        if let Some(macro_spec) = find_direct_child_by_kind(node, "macro_type_specifier") {
+            let macro_name = find_direct_child_by_kind(macro_spec, "identifier")
                 .map(|n| state.node_text(n))
                 .unwrap_or_default();
             if macro_name == "NS_ENUM" || macro_name == "NS_OPTIONS" {
@@ -408,7 +410,7 @@ impl ObjcExtractor {
                 let child = cursor.node();
                 if child.kind() == "ERROR" {
                     // Inside ERROR, find the identifier
-                    if let Some(ident) = Self::find_child_by_kind(child, "identifier") {
+                    if let Some(ident) = find_direct_child_by_kind(child, "identifier") {
                         return Some(state.node_text(ident));
                     }
                 }
@@ -544,7 +546,7 @@ impl ObjcExtractor {
     ///
     /// Maps to Interface node kind with method declarations inside.
     fn visit_protocol(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::find_child_by_kind(node, "identifier")
+        let name = find_direct_child_by_kind(node, "identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         let docstring = Self::extract_docstring(state, node);
@@ -594,7 +596,7 @@ impl ObjcExtractor {
         }
 
         // Extract protocol inheritance from protocol_reference_list
-        if let Some(ref_list) = Self::find_child_by_kind(node, "protocol_reference_list") {
+        if let Some(ref_list) = find_direct_child_by_kind(node, "protocol_reference_list") {
             Self::extract_protocol_refs(state, ref_list, &id, start_line);
         }
 
@@ -659,7 +661,7 @@ impl ObjcExtractor {
     ///
     /// This includes properties, method declarations, superclass, and protocol conformance.
     fn visit_class_interface(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::find_child_by_kind(node, "identifier")
+        let name = find_direct_child_by_kind(node, "identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         let docstring = Self::extract_docstring(state, node);
@@ -722,7 +724,7 @@ impl ObjcExtractor {
         }
 
         // Extract protocol conformance (<Protocol1, Protocol2>)
-        if let Some(params) = Self::find_child_by_kind(node, "parameterized_arguments") {
+        if let Some(params) = find_direct_child_by_kind(node, "parameterized_arguments") {
             Self::extract_protocol_conformance(state, params, &id, start_line);
         }
 
@@ -746,7 +748,7 @@ impl ObjcExtractor {
             loop {
                 let child = cursor.node();
                 if child.kind() == "type_name" {
-                    if let Some(type_id) = Self::find_child_by_kind(child, "type_identifier") {
+                    if let Some(type_id) = find_direct_child_by_kind(child, "type_identifier") {
                         let name = state.node_text(type_id);
                         state.unresolved_refs.push(UnresolvedRef {
                             from_node_id: from_node_id.to_string(),
@@ -843,19 +845,19 @@ impl ObjcExtractor {
 
     /// Extract the property name from a `property_declaration` node.
     fn extract_property_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        if let Some(struct_decl) = Self::find_child_by_kind(node, "struct_declaration") {
+        if let Some(struct_decl) = find_direct_child_by_kind(node, "struct_declaration") {
             if let Some(struct_declarator) =
-                Self::find_child_by_kind(struct_decl, "struct_declarator")
+                find_direct_child_by_kind(struct_decl, "struct_declarator")
             {
                 // Direct identifier
-                if let Some(ident) = Self::find_child_by_kind(struct_declarator, "identifier") {
+                if let Some(ident) = find_direct_child_by_kind(struct_declarator, "identifier") {
                     return Some(state.node_text(ident));
                 }
                 // Pointer declarator (NSString *name)
                 if let Some(ptr_decl) =
-                    Self::find_child_by_kind(struct_declarator, "pointer_declarator")
+                    find_direct_child_by_kind(struct_declarator, "pointer_declarator")
                 {
-                    if let Some(ident) = Self::find_child_by_kind(ptr_decl, "identifier") {
+                    if let Some(ident) = find_direct_child_by_kind(ptr_decl, "identifier") {
                         return Some(state.node_text(ident));
                     }
                 }
@@ -932,7 +934,7 @@ impl ObjcExtractor {
     ///
     /// Maps to Impl node kind with method definitions inside.
     fn visit_class_implementation(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::find_child_by_kind(node, "identifier")
+        let name = find_direct_child_by_kind(node, "identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         let docstring = Self::extract_docstring(state, node);
@@ -1008,7 +1010,7 @@ impl ObjcExtractor {
     /// Visit an `implementation_definition` which wraps a `method_definition`.
     fn visit_implementation_definition(state: &mut ExtractionState, node: TsNode<'_>) {
         // The implementation_definition contains a method_definition child
-        if let Some(method_def) = Self::find_child_by_kind(node, "method_definition") {
+        if let Some(method_def) = find_direct_child_by_kind(node, "method_definition") {
             // Check for docstring on the implementation_definition itself
             // (comments appear as siblings of implementation_definition inside class_implementation)
             let docstring = Self::extract_impl_method_docstring(state, node);
@@ -1019,28 +1021,7 @@ impl ObjcExtractor {
     /// Extract docstring for an `implementation_definition` by looking at preceding
     /// sibling comments within the `class_implementation`.
     fn extract_impl_method_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        let mut comments = Vec::new();
-        let mut current = node.prev_named_sibling();
-        while let Some(sibling) = current {
-            if sibling.kind() == "comment" {
-                let text = state.node_text(sibling);
-                comments.push(text);
-                current = sibling.prev_named_sibling();
-            } else {
-                break;
-            }
-        }
-        if comments.is_empty() {
-            return None;
-        }
-        comments.reverse();
-        let cleaned: Vec<String> = comments.iter().map(|c| Self::clean_comment(c)).collect();
-        let result = cleaned.join("\n").trim().to_string();
-        if result.is_empty() {
-            None
-        } else {
-            Some(result)
-        }
+        docstring_from_preceding_comments(&state.source, node, clean_c_doc_comment)
     }
 
     // -------------------------------------------------------
@@ -1103,7 +1084,7 @@ impl ObjcExtractor {
         }
 
         // Extract call sites from the method body
-        if let Some(body) = Self::find_child_by_kind(node, "compound_statement") {
+        if let Some(body) = find_direct_child_by_kind(node, "compound_statement") {
             Self::extract_call_sites(state, body, &id);
         }
     }
@@ -1163,7 +1144,7 @@ impl ObjcExtractor {
         }
 
         // Extract call sites from the function body
-        if let Some(body) = Self::find_child_by_kind(node, "compound_statement") {
+        if let Some(body) = find_direct_child_by_kind(node, "compound_statement") {
             Self::extract_call_sites(state, body, &id);
         }
     }
@@ -1171,7 +1152,7 @@ impl ObjcExtractor {
     /// Extract a C declaration (function prototype or variable).
     fn visit_declaration(state: &mut ExtractionState, node: TsNode<'_>) {
         // Check if this declaration contains a function_declarator (prototype)
-        if Self::find_descendant_by_kind(node, "function_declarator").is_some() {
+        if find_descendant_by_kind(node, "function_declarator").is_some() {
             Self::visit_function_prototype(state, node);
         }
     }
@@ -1333,8 +1314,8 @@ impl ObjcExtractor {
 
     /// Extract the function name from a `function_definition` or declaration node.
     fn extract_function_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        if let Some(declarator) = Self::find_descendant_by_kind(node, "function_declarator") {
-            if let Some(ident) = Self::find_child_by_kind(declarator, "identifier") {
+        if let Some(declarator) = find_descendant_by_kind(node, "function_declarator") {
+            if let Some(ident) = find_direct_child_by_kind(declarator, "identifier") {
                 return Some(state.node_text(ident));
             }
         }
@@ -1357,54 +1338,7 @@ impl ObjcExtractor {
 
     /// Extract docstrings from preceding comment nodes.
     fn extract_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        let mut comments = Vec::new();
-        let mut current = node.prev_named_sibling();
-        while let Some(sibling) = current {
-            if sibling.kind() == "comment" {
-                let text = state.node_text(sibling);
-                comments.push(text);
-                current = sibling.prev_named_sibling();
-            } else {
-                break;
-            }
-        }
-        if comments.is_empty() {
-            return None;
-        }
-        comments.reverse();
-        let cleaned: Vec<String> = comments.iter().map(|c| Self::clean_comment(c)).collect();
-        let result = cleaned.join("\n").trim().to_string();
-        if result.is_empty() {
-            None
-        } else {
-            Some(result)
-        }
-    }
-
-    /// Strip comment markers from a single C/ObjC comment text.
-    fn clean_comment(comment: &str) -> String {
-        let trimmed = comment.trim();
-        if let Some(stripped) = trimmed.strip_prefix("///") {
-            stripped.strip_prefix(' ').unwrap_or(stripped).to_string()
-        } else if let Some(stripped) = trimmed.strip_prefix("//") {
-            stripped.strip_prefix(' ').unwrap_or(stripped).to_string()
-        } else if trimmed.starts_with("/*") && trimmed.ends_with("*/") {
-            let inner = &trimmed[2..trimmed.len() - 2];
-            inner
-                .lines()
-                .map(|line| {
-                    let l = line.trim();
-                    l.strip_prefix("* ")
-                        .or_else(|| l.strip_prefix('*'))
-                        .unwrap_or(l)
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-                .trim()
-                .to_string()
-        } else {
-            trimmed.to_string()
-        }
+        docstring_from_preceding_comments(&state.source, node, clean_c_doc_comment)
     }
 
     // -------------------------------------------------------
@@ -1414,43 +1348,6 @@ impl ObjcExtractor {
     /// Extract first line of text as a signature.
     fn extract_first_line(text: &str) -> String {
         text.lines().next().unwrap_or(text).trim().to_string()
-    }
-
-    /// Find the first direct child of a node with a given kind.
-    fn find_child_by_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == kind {
-                    return Some(child);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        None
-    }
-
-    /// Find the first descendant of a node with a given kind (recursive search).
-    fn find_descendant_by_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == kind {
-                    return Some(child);
-                }
-                if let Some(found) = Self::find_descendant_by_kind(child, kind) {
-                    return Some(found);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        None
     }
 
     /// Build the final `ExtractionResult` from the accumulated state.

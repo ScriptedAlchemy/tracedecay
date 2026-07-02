@@ -7,6 +7,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
+use crate::extraction::traversal::find_direct_child_by_kind;
 use crate::extraction::{
     annotations::{
         emit_annotation_usage, scan_children_for_annotation_kinds, AnnotationEmitterState,
@@ -220,7 +221,7 @@ impl KotlinExtractor {
 
     /// Extract a package header.
     fn visit_package(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::find_child_by_kind(node, "identifier")
+        let name = find_direct_child_by_kind(node, "identifier")
             .map_or_else(|| "<unknown>".to_string(), |n| state.node_text(n));
 
         let start_line = node.start_position().row as u32;
@@ -301,7 +302,7 @@ impl KotlinExtractor {
 
     /// Extract a single import header as a Use node.
     fn visit_import(state: &mut ExtractionState, node: TsNode<'_>) {
-        let path = Self::find_child_by_kind(node, "identifier").map_or_else(
+        let path = find_direct_child_by_kind(node, "identifier").map_or_else(
             || {
                 let text = state.node_text(node);
                 text.trim()
@@ -453,7 +454,7 @@ impl KotlinExtractor {
 
         state.node_stack.push((name, id));
         state.class_depth += 1;
-        if let Some(body) = Self::find_child_by_kind(node, "class_body") {
+        if let Some(body) = find_direct_child_by_kind(node, "class_body") {
             Self::visit_children(state, body);
         }
         state.class_depth -= 1;
@@ -514,7 +515,7 @@ impl KotlinExtractor {
 
         state.node_stack.push((name, id));
         state.class_depth += 1;
-        if let Some(body) = Self::find_child_by_kind(node, "class_body") {
+        if let Some(body) = find_direct_child_by_kind(node, "class_body") {
             Self::visit_children(state, body);
         }
         state.class_depth -= 1;
@@ -574,7 +575,7 @@ impl KotlinExtractor {
 
         state.node_stack.push((name, id));
         state.class_depth += 1;
-        if let Some(body) = Self::find_child_by_kind(node, "class_body") {
+        if let Some(body) = find_direct_child_by_kind(node, "class_body") {
             Self::visit_children(state, body);
         }
         state.class_depth -= 1;
@@ -636,7 +637,7 @@ impl KotlinExtractor {
         state.inside_trait = true;
         state.node_stack.push((name, id));
         state.class_depth += 1;
-        if let Some(body) = Self::find_child_by_kind(node, "class_body") {
+        if let Some(body) = find_direct_child_by_kind(node, "class_body") {
             Self::visit_children(state, body);
         }
         state.class_depth -= 1;
@@ -698,7 +699,7 @@ impl KotlinExtractor {
         // Visit enum body to extract enum entries.
         state.node_stack.push((name, id));
         state.class_depth += 1;
-        if let Some(body) = Self::find_child_by_kind(node, "enum_class_body") {
+        if let Some(body) = find_direct_child_by_kind(node, "enum_class_body") {
             Self::visit_enum_body(state, body);
         }
         state.class_depth -= 1;
@@ -726,7 +727,7 @@ impl KotlinExtractor {
 
     /// Extract a single enum entry.
     fn visit_enum_entry(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::find_child_by_kind(node, "simple_identifier").map_or_else(
+        let name = find_direct_child_by_kind(node, "simple_identifier").map_or_else(
             || state.node_text(node).trim().to_string(),
             |n| state.node_text(n),
         );
@@ -781,7 +782,7 @@ impl KotlinExtractor {
 
     /// Extract an object declaration (Kotlin singleton).
     fn visit_object(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::find_child_by_kind(node, "type_identifier")
+        let name = find_direct_child_by_kind(node, "type_identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
         let visibility = Self::extract_visibility(node, state);
         let docstring = Self::extract_kdoc(state, node);
@@ -833,7 +834,7 @@ impl KotlinExtractor {
 
         state.node_stack.push((name, id));
         state.class_depth += 1;
-        if let Some(body) = Self::find_child_by_kind(node, "class_body") {
+        if let Some(body) = find_direct_child_by_kind(node, "class_body") {
             Self::visit_children(state, body);
         }
         state.class_depth -= 1;
@@ -847,7 +848,7 @@ impl KotlinExtractor {
     /// Extract a companion object.
     fn visit_companion_object(state: &mut ExtractionState, node: TsNode<'_>) {
         // Companion objects may have a name or be anonymous.
-        let name = Self::find_child_by_kind(node, "type_identifier")
+        let name = find_direct_child_by_kind(node, "type_identifier")
             .map_or_else(|| "Companion".to_string(), |n| state.node_text(n));
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -907,7 +908,7 @@ impl KotlinExtractor {
 
         state.node_stack.push((name, id));
         state.class_depth += 1;
-        if let Some(body) = Self::find_child_by_kind(node, "class_body") {
+        if let Some(body) = find_direct_child_by_kind(node, "class_body") {
             Self::visit_children(state, body);
         }
         state.class_depth -= 1;
@@ -920,7 +921,7 @@ impl KotlinExtractor {
 
     /// Extract a function or method declaration.
     fn visit_function(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::find_child_by_kind(node, "simple_identifier")
+        let name = find_direct_child_by_kind(node, "simple_identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         // Check if this is an extension function (has a receiver type before the dot and name).
@@ -939,7 +940,7 @@ impl KotlinExtractor {
         let is_async = Self::has_modifier_keyword(node, state, "suspend");
 
         // Determine if this is a function without a body (abstract) inside an interface.
-        let has_body = Self::find_child_by_kind(node, "function_body").is_some();
+        let has_body = find_direct_child_by_kind(node, "function_body").is_some();
 
         let kind = if state.inside_trait && !has_body {
             NodeKind::AbstractMethod
@@ -1001,7 +1002,7 @@ impl KotlinExtractor {
         Self::extract_type_refs(state, node, &id);
 
         // Extract call sites from the body.
-        if let Some(body) = Self::find_child_by_kind(node, "function_body") {
+        if let Some(body) = find_direct_child_by_kind(node, "function_body") {
             Self::extract_call_sites(state, body, &id);
         }
     }
@@ -1015,7 +1016,7 @@ impl KotlinExtractor {
         let name = Self::extract_property_name(state, node);
 
         // Determine val vs var.
-        let is_var = Self::find_child_by_kind(node, "binding_pattern_kind").is_some_and(|bpk| {
+        let is_var = find_direct_child_by_kind(node, "binding_pattern_kind").is_some_and(|bpk| {
             let text = state.node_text(bpk);
             text.trim() == "var"
         });
@@ -1154,20 +1155,20 @@ impl KotlinExtractor {
 
     /// Extract the class name from a `class_declaration` node.
     fn extract_class_name(state: &ExtractionState, node: TsNode<'_>) -> String {
-        Self::find_child_by_kind(node, "type_identifier")
+        find_direct_child_by_kind(node, "type_identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n))
     }
 
     /// Extract the property name from a `property_declaration` node.
     fn extract_property_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         // property_declaration has variable_declaration child which has simple_identifier
-        if let Some(var_decl) = Self::find_child_by_kind(node, "variable_declaration") {
-            if let Some(ident) = Self::find_child_by_kind(var_decl, "simple_identifier") {
+        if let Some(var_decl) = find_direct_child_by_kind(node, "variable_declaration") {
+            if let Some(ident) = find_direct_child_by_kind(var_decl, "simple_identifier") {
                 return state.node_text(ident);
             }
         }
         // Fallback: look for multi_variable_declaration
-        if let Some(multi) = Self::find_child_by_kind(node, "multi_variable_declaration") {
+        if let Some(multi) = find_direct_child_by_kind(node, "multi_variable_declaration") {
             return state.node_text(multi);
         }
         "<anonymous>".to_string()
@@ -1318,7 +1319,7 @@ impl KotlinExtractor {
             return text[..brace_pos].trim().to_string();
         }
         // Cut at first '=' for expression-bodied definitions.
-        if Self::find_child_by_kind(node, "function_body").is_some() {
+        if find_direct_child_by_kind(node, "function_body").is_some() {
             if let Some(eq_pos) = text.find('=') {
                 return text[..eq_pos].trim().to_string();
             }
@@ -1392,9 +1393,9 @@ impl KotlinExtractor {
     /// Extract a single delegation specifier (e.g. `: Foo()` or `: Bar`).
     fn extract_single_delegation(state: &mut ExtractionState, node: TsNode<'_>, owner_id: &str) {
         // delegation_specifier can contain constructor_invocation or user_type.
-        let type_name = Self::find_child_by_kind(node, "constructor_invocation")
-            .and_then(|ci| Self::find_child_by_kind(ci, "user_type"))
-            .or_else(|| Self::find_child_by_kind(node, "user_type"))
+        let type_name = find_direct_child_by_kind(node, "constructor_invocation")
+            .and_then(|ci| find_direct_child_by_kind(ci, "user_type"))
+            .or_else(|| find_direct_child_by_kind(node, "user_type"))
             .map_or_else(|| state.node_text(node), |ut| state.node_text(ut));
 
         let base_name = type_name
@@ -1431,16 +1432,16 @@ impl KotlinExtractor {
     /// Extract the name from an annotation node.
     fn extract_annotation_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         // annotation has constructor_invocation or user_type children.
-        if let Some(ci) = Self::find_child_by_kind(node, "constructor_invocation") {
-            if let Some(ut) = Self::find_child_by_kind(ci, "user_type") {
-                if let Some(ti) = Self::find_child_by_kind(ut, "type_identifier") {
+        if let Some(ci) = find_direct_child_by_kind(node, "constructor_invocation") {
+            if let Some(ut) = find_direct_child_by_kind(ci, "user_type") {
+                if let Some(ti) = find_direct_child_by_kind(ut, "type_identifier") {
                     return state.node_text(ti);
                 }
                 return state.node_text(ut);
             }
         }
-        if let Some(ut) = Self::find_child_by_kind(node, "user_type") {
-            if let Some(ti) = Self::find_child_by_kind(ut, "type_identifier") {
+        if let Some(ut) = find_direct_child_by_kind(node, "user_type") {
+            if let Some(ti) = find_direct_child_by_kind(ut, "type_identifier") {
                 return state.node_text(ti);
             }
             return state.node_text(ut);
@@ -1582,23 +1583,6 @@ impl KotlinExtractor {
         }
         let text = state.node_text(node);
         text.split('(').next().unwrap_or(&text).trim().to_string()
-    }
-
-    /// Find the first child node of a specific kind.
-    fn find_child_by_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == kind {
-                    return Some(child);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        None
     }
 
     /// Build the final `ExtractionResult` from the accumulated state.

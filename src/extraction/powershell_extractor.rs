@@ -6,6 +6,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
 use crate::extraction::complexity::{count_complexity, POWERSHELL_COMPLEXITY};
+use crate::extraction::traversal::find_direct_child_by_kind;
 use crate::types::{
     generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
 };
@@ -161,10 +162,10 @@ impl PowerShellExtractor {
     /// Visit a pipeline node, which can contain assignments (consts) or commands (imports).
     fn visit_pipeline(state: &mut ExtractionState, node: TsNode<'_>) {
         // A pipeline wraps either an assignment_expression or a pipeline_chain > command.
-        if let Some(assignment) = Self::find_child_by_kind(node, "assignment_expression") {
+        if let Some(assignment) = find_direct_child_by_kind(node, "assignment_expression") {
             Self::visit_assignment(state, assignment, node);
-        } else if let Some(chain) = Self::find_child_by_kind(node, "pipeline_chain") {
-            if let Some(command) = Self::find_child_by_kind(chain, "command") {
+        } else if let Some(chain) = find_direct_child_by_kind(node, "pipeline_chain") {
+            if let Some(command) = find_direct_child_by_kind(chain, "command") {
                 Self::visit_command(state, command);
             }
         }
@@ -172,7 +173,7 @@ impl PowerShellExtractor {
 
     /// Extract a function definition.
     fn visit_function(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::find_child_by_kind(node, "function_name")
+        let name = find_direct_child_by_kind(node, "function_name")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         let kind = NodeKind::Function;
@@ -235,7 +236,7 @@ impl PowerShellExtractor {
     fn visit_assignment(state: &mut ExtractionState, node: TsNode<'_>, pipeline_node: TsNode<'_>) {
         // Only treat top-level typed assignments as constants.
         // We detect a cast_expression inside the left_assignment_expression.
-        let Some(left) = Self::find_child_by_kind(node, "left_assignment_expression") else {
+        let Some(left) = find_direct_child_by_kind(node, "left_assignment_expression") else {
             return;
         };
 
@@ -311,12 +312,12 @@ impl PowerShellExtractor {
         if cmd_name == "Import-Module" {
             // Extract the module name from command_elements.
             if let Some(elements) = node.child_by_field_name("command_elements") {
-                if let Some(token) = Self::find_child_by_kind(elements, "generic_token") {
+                if let Some(token) = find_direct_child_by_kind(elements, "generic_token") {
                     let module_name = state.node_text(token);
                     Self::emit_use_node(state, node, &module_name);
                 }
             }
-        } else if Self::find_child_by_kind(node, "command_invokation_operator").is_some() {
+        } else if find_direct_child_by_kind(node, "command_invokation_operator").is_some() {
             // Dot-source command: `. .\Utils.ps1`
             // The path is in command_name_expr > command_name.
             if let Some(name_expr) = node.child_by_field_name("command_name") {
@@ -456,23 +457,6 @@ impl PowerShellExtractor {
                 }
             }
         }
-    }
-
-    /// Find the first child of a node with a given kind.
-    fn find_child_by_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == kind {
-                    return Some(child);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        None
     }
 
     /// Find the first descendant of a node with a given kind (recursive DFS).

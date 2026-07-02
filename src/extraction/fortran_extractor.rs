@@ -6,6 +6,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
 use crate::extraction::complexity::{count_complexity, FORTRAN_COMPLEXITY};
+use crate::extraction::traversal::find_direct_child_by_kind;
 use crate::types::{
     generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
 };
@@ -663,7 +664,7 @@ impl FortranExtractor {
 
     /// Extract a use statement.
     fn visit_use_statement(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::find_child_by_kind(node, "module_name")
+        let name = find_direct_child_by_kind(node, "module_name")
             .map_or_else(|| "<unknown>".to_string(), |n| state.node_text(n));
 
         let start_line = node.start_position().row as u32;
@@ -718,23 +719,23 @@ impl FortranExtractor {
     /// Find the module name from a module node.
     /// Structure: module -> `module_statement` -> name
     fn find_module_name(state: &ExtractionState, node: TsNode<'_>) -> String {
-        Self::find_child_by_kind(node, "module_statement")
-            .and_then(|stmt| Self::find_child_by_kind(stmt, "name"))
+        find_direct_child_by_kind(node, "module_statement")
+            .and_then(|stmt| find_direct_child_by_kind(stmt, "name"))
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n))
     }
 
     /// Find the program name from a program node.
     /// Structure: program -> `program_statement` -> name
     fn find_program_name(state: &ExtractionState, node: TsNode<'_>) -> String {
-        Self::find_child_by_kind(node, "program_statement")
-            .and_then(|stmt| Self::find_child_by_kind(stmt, "name"))
+        find_direct_child_by_kind(node, "program_statement")
+            .and_then(|stmt| find_direct_child_by_kind(stmt, "name"))
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n))
     }
 
     /// Find the subroutine name from a subroutine node.
     /// Structure: subroutine -> `subroutine_statement` (field name="name")
     fn find_subroutine_name(state: &ExtractionState, node: TsNode<'_>) -> String {
-        Self::find_child_by_kind(node, "subroutine_statement")
+        find_direct_child_by_kind(node, "subroutine_statement")
             .and_then(|stmt| stmt.child_by_field_name("name"))
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n))
     }
@@ -742,7 +743,7 @@ impl FortranExtractor {
     /// Find the function name from a function node.
     /// Structure: function -> `function_statement` (field name="name")
     fn find_function_name(state: &ExtractionState, node: TsNode<'_>) -> String {
-        Self::find_child_by_kind(node, "function_statement")
+        find_direct_child_by_kind(node, "function_statement")
             .and_then(|stmt| stmt.child_by_field_name("name"))
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n))
     }
@@ -753,14 +754,14 @@ impl FortranExtractor {
         state: &ExtractionState,
         node: TsNode<'_>,
     ) -> (String, Option<String>) {
-        let stmt = Self::find_child_by_kind(node, "derived_type_statement");
+        let stmt = find_direct_child_by_kind(node, "derived_type_statement");
         let name = stmt
-            .and_then(|s| Self::find_child_by_kind(s, "type_name"))
+            .and_then(|s| find_direct_child_by_kind(s, "type_name"))
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         let base_type = stmt
             .and_then(|s| s.child_by_field_name("base"))
-            .and_then(|base_spec| Self::find_child_by_kind(base_spec, "identifier"))
+            .and_then(|base_spec| find_direct_child_by_kind(base_spec, "identifier"))
             .map(|n| state.node_text(n));
 
         (name, base_type)
@@ -769,8 +770,8 @@ impl FortranExtractor {
     /// Find the interface name.
     /// Structure: interface -> `interface_statement` -> name
     fn find_interface_name(state: &ExtractionState, node: TsNode<'_>) -> String {
-        Self::find_child_by_kind(node, "interface_statement")
-            .and_then(|stmt| Self::find_child_by_kind(stmt, "name"))
+        find_direct_child_by_kind(node, "interface_statement")
+            .and_then(|stmt| find_direct_child_by_kind(stmt, "name"))
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n))
     }
 
@@ -886,23 +887,6 @@ impl FortranExtractor {
                 }
             }
         }
-    }
-
-    /// Find the first child of a node with a given kind.
-    fn find_child_by_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == kind {
-                    return Some(child);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        None
     }
 
     /// Build the final `ExtractionResult` from the accumulated state.

@@ -6,6 +6,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
 use crate::extraction::complexity::{count_complexity, LUA_COMPLEXITY};
+use crate::extraction::traversal::find_direct_child_by_kind;
 use crate::types::{
     generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
 };
@@ -271,17 +272,17 @@ impl LuaExtractor {
     /// - `local CONST = <literal>` → Const node (uppercase names)
     fn visit_variable_declaration(state: &mut ExtractionState, node: TsNode<'_>) {
         // variable_declaration contains an assignment_statement child.
-        let Some(assignment) = Self::find_child_by_kind(node, "assignment_statement") else {
+        let Some(assignment) = find_direct_child_by_kind(node, "assignment_statement") else {
             return;
         };
 
         // Get the variable name from the variable_list.
         let var_list = assignment
             .child_by_field_name("variable_list")
-            .or_else(|| Self::find_child_by_kind(assignment, "variable_list"));
+            .or_else(|| find_direct_child_by_kind(assignment, "variable_list"));
         let name_node = var_list.and_then(|vl| {
             // The first named child of variable_list should be the identifier.
-            Self::find_child_by_kind(vl, "identifier")
+            find_direct_child_by_kind(vl, "identifier")
         });
         let Some(n) = name_node else {
             return;
@@ -291,7 +292,7 @@ impl LuaExtractor {
         // Get the value from the expression_list.
         let expr_list = assignment
             .child_by_field_name("expression_list")
-            .or_else(|| Self::find_child_by_kind(assignment, "expression_list"));
+            .or_else(|| find_direct_child_by_kind(assignment, "expression_list"));
         let value_node = expr_list.and_then(|el| el.named_child(0));
 
         let Some(value_node) = value_node else {
@@ -432,7 +433,7 @@ impl LuaExtractor {
     fn extract_require_module(state: &ExtractionState, call_node: TsNode<'_>) -> Option<String> {
         let args = call_node
             .child_by_field_name("arguments")
-            .or_else(|| Self::find_child_by_kind(call_node, "arguments"))?;
+            .or_else(|| find_direct_child_by_kind(call_node, "arguments"))?;
         // Look for a string node inside arguments.
         let mut cursor = args.walk();
         if cursor.goto_first_child() {
@@ -440,7 +441,7 @@ impl LuaExtractor {
                 let child = cursor.node();
                 if child.kind() == "string" {
                     // The string node contains a string_content child.
-                    if let Some(content) = Self::find_child_by_kind(child, "string_content") {
+                    if let Some(content) = find_direct_child_by_kind(child, "string_content") {
                         return Some(state.node_text(content));
                     }
                     // Fall back to stripping quotes from the full text.
@@ -540,23 +541,6 @@ impl LuaExtractor {
                 }
             }
         }
-    }
-
-    /// Find the first child of a node with a given kind.
-    fn find_child_by_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == kind {
-                    return Some(child);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        None
     }
 
     /// Build the final `ExtractionResult` from the accumulated state.

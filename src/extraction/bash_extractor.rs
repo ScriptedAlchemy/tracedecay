@@ -5,7 +5,9 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
+use crate::extraction::common::docstring_from_hash_comments;
 use crate::extraction::complexity::{count_complexity, BASH_COMPLEXITY};
+use crate::extraction::traversal::find_direct_child_by_kind;
 use crate::types::{
     generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
 };
@@ -231,7 +233,7 @@ impl BashExtractor {
         }
 
         // Find the variable_assignment child to get the name.
-        if let Some(assignment) = Self::find_child_by_kind(node, "variable_assignment") {
+        if let Some(assignment) = find_direct_child_by_kind(node, "variable_assignment") {
             if let Some(name_node) = assignment.child_by_field_name("name") {
                 let name = state.node_text(name_node);
                 let start_line = node.start_position().row as u32;
@@ -361,23 +363,7 @@ impl BashExtractor {
     /// Bash uses comment lines (# ...) as documentation. We look for `comment`
     /// sibling nodes that immediately precede the given definition node.
     fn extract_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        let mut comments: Vec<String> = Vec::new();
-        let mut prev = node.prev_named_sibling();
-        while let Some(prev_node) = prev {
-            if prev_node.kind() == "comment" {
-                let text = state.node_text(prev_node);
-                let stripped = text.trim_start_matches('#').trim().to_string();
-                comments.push(stripped);
-                prev = prev_node.prev_named_sibling();
-            } else {
-                break;
-            }
-        }
-        if comments.is_empty() {
-            return None;
-        }
-        comments.reverse();
-        Some(comments.join("\n"))
+        docstring_from_hash_comments(&state.source, node)
     }
 
     /// Recursively find command nodes inside a given node and create unresolved Calls references.
@@ -426,23 +412,6 @@ impl BashExtractor {
                 let child = cursor.node();
                 if cursor.field_name() == Some("argument") {
                     return Some(state.node_text(child));
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        None
-    }
-
-    /// Find the first child of a node with a given kind.
-    fn find_child_by_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == kind {
-                    return Some(child);
                 }
                 if !cursor.goto_next_sibling() {
                     break;

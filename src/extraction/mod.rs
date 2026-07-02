@@ -14,6 +14,9 @@ mod swift_extractor;
 mod typescript_extractor;
 
 pub(crate) mod annotations;
+#[cfg(any(feature = "lang-gwbasic", feature = "lang-msbasic2"))]
+pub(crate) mod basic_common;
+pub(crate) mod common;
 pub mod complexity;
 pub(crate) mod traversal;
 pub mod ts_provider;
