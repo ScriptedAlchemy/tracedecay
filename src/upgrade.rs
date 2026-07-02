@@ -6,7 +6,10 @@
 //! Beta and stable are separate channels — a beta build only sees beta
 //! releases and vice versa.
 
-use std::path::Path;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 use crate::cloud::{self, InstallMethod};
 use crate::errors::{Result, TraceDecayError};
@@ -201,8 +204,13 @@ fn extract_zip(data: &[u8], bin_names: &[&str], dest: &Path) -> Result<()> {
 
 /// Replaces the running binary with `new_exe`, dispatching to the
 /// appropriate strategy for the detected install method. Cleans up the
-/// temp file afterwards regardless of outcome.
-fn replace_binary(new_exe: &Path, method: &InstallMethod, new_version: &str) -> Result<()> {
+/// temp file afterwards regardless of outcome. Returns the path the new
+/// binary was installed at, when known.
+fn replace_binary(
+    new_exe: &Path,
+    method: &InstallMethod,
+    new_version: &str,
+) -> Result<Option<PathBuf>> {
     let result = match method {
         InstallMethod::Brew => replace_for_brew(new_exe, new_version),
         InstallMethod::Scoop => replace_for_scoop(new_exe, new_version),
@@ -215,14 +223,19 @@ fn replace_binary(new_exe: &Path, method: &InstallMethod, new_version: &str) -> 
 /// Default replacement using `self_replace`. Falls back to a direct copy
 /// when the running binary is behind a symlink (avoids ENOENT caused by
 /// `self_replace` resolving relative symlink targets from CWD).
-fn replace_default(new_exe: &Path) -> Result<()> {
+/// Returns the path the new binary was written to, when known.
+fn replace_default(new_exe: &Path) -> Result<Option<PathBuf>> {
+    // Capture the exe path before the swap: on Linux the rename makes
+    // `/proc/self/exe` read `… (deleted)` afterwards.
+    let exe = std::env::current_exe().ok();
+
     #[cfg(unix)]
     {
-        let exe = std::env::current_exe().ok();
         let canonical = exe.as_ref().and_then(|e| e.canonicalize().ok());
-        if let (Some(exe), Some(ref canonical)) = (&exe, canonical) {
+        if let (Some(exe), Some(canonical)) = (&exe, canonical) {
             if exe.as_path() != canonical.as_path() {
-                return install_binary(new_exe, canonical);
+                install_binary(new_exe, &canonical)?;
+                return Ok(Some(canonical));
             }
         }
     }
@@ -233,7 +246,28 @@ fn replace_default(new_exe: &Path) -> Result<()> {
              The old version is still in place.\n  \
              To upgrade manually: https://github.com/{GITHUB_REPO}/releases/latest"
         ),
-    })
+    })?;
+    Ok(exe)
+}
+
+/// Outcome of an upgrade attempt that completed without error.
+///
+/// Mirrors the pre-install classification `UpgradeStatus`:
+/// `UpgradeStatus::AlreadyCurrent` maps to `UpgradeOutcome::AlreadyCurrent`,
+/// `UpgradeStatus::UpgradeAvailable` ends in `UpgradeOutcome::Installed`.
+#[derive(Debug)]
+pub enum UpgradeOutcome {
+    /// A new binary was installed (or a delegated package manager reported a
+    /// successful upgrade). Post-install refresh work is warranted.
+    Installed {
+        /// Where the freshly installed binary lives, when known. Callers
+        /// re-execing `post-update` must prefer this over re-resolving the
+        /// binary: `which_tracedecay()`'s current-exe-first order can point
+        /// at the OLD binary (e.g. a stale Homebrew keg) after an upgrade.
+        binary: Option<PathBuf>,
+    },
+    /// Already on the latest version — the binary was not replaced.
+    AlreadyCurrent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -329,9 +363,14 @@ fn install_upgrade_version(
     latest: &str,
     is_beta: bool,
     method: &InstallMethod,
-) -> Result<()> {
+) -> Result<Option<PathBuf>> {
     match source {
-        UpgradeSource::CratesIo => perform_cargo_upgrade(latest),
+        UpgradeSource::CratesIo => {
+            perform_cargo_upgrade(latest)?;
+            // Cargo replaces the binary in `$CARGO_HOME/bin` in place, so the
+            // PATH lookup in `which_tracedecay()` finds the new binary.
+            Ok(None)
+        }
         UpgradeSource::GitHubRelease => {
             let asset_url = preflight_asset_check(latest, is_beta)?;
             perform_upgrade(latest, &asset_url, method)
@@ -344,13 +383,13 @@ fn run_versioned_upgrade(
     is_beta: bool,
     method: &InstallMethod,
     source: UpgradeSource,
-) -> Result<String> {
+) -> Result<UpgradeOutcome> {
     eprintln!("Checking {}...", source.check_label());
     let latest = latest_upgrade_version(source, is_beta)?;
     let latest = match classify_upgrade(current, &latest) {
         UpgradeStatus::AlreadyCurrent => {
             eprintln!("\x1b[32m✔\x1b[0m Already up to date (v{current}).");
-            return Ok(current.to_string());
+            return Ok(UpgradeOutcome::AlreadyCurrent);
         }
         UpgradeStatus::UpgradeAvailable(latest) => latest,
     };
@@ -359,10 +398,10 @@ fn run_versioned_upgrade(
         "Upgrading v{current} → v{latest}{}...",
         source.upgrade_suffix()
     );
-    install_upgrade_version(source, latest, is_beta, method)?;
+    let binary = install_upgrade_version(source, latest, is_beta, method)?;
     record_previous_version();
     eprintln!("\x1b[32m✔\x1b[0m Successfully upgraded to v{latest}!");
-    Ok(latest.to_string())
+    Ok(UpgradeOutcome::Installed { binary })
 }
 
 /// Atomically replace a binary at `target` by copying `src` to a temp file
@@ -432,8 +471,10 @@ fn warn_best_effort(step: &str, error: &TraceDecayError) {
 
 /// Replace the binary inside the Homebrew Cellar, then rename the version
 /// directory and update the symlink so that `brew` reports the new version.
+/// Returns the stable `<prefix>/bin` symlink path when one exists, so
+/// downstream consumers never pin the keg-versioned path.
 #[cfg(unix)]
-fn replace_for_brew(new_exe: &Path, new_version: &str) -> Result<()> {
+fn replace_for_brew(new_exe: &Path, new_version: &str) -> Result<Option<PathBuf>> {
     let exe = std::env::current_exe().map_err(io_err("cannot determine current exe"))?;
     let canonical = exe
         .canonicalize()
@@ -468,6 +509,9 @@ fn replace_for_brew(new_exe: &Path, new_version: &str) -> Result<()> {
 
     // Step 1 (critical): replace the binary atomically.
     install_binary(new_exe, &canonical)?;
+    // The keg-versioned path is valid until the version-dir rename below;
+    // prefer the stable `<prefix>/bin` symlink when Homebrew manages one.
+    let mut installed_at = canonical.clone();
 
     // Steps 2-4 update Cellar metadata so `brew` sees the correct version.
     // These are best-effort — if they fail the binary itself is fine.
@@ -477,14 +521,17 @@ fn replace_for_brew(new_exe: &Path, new_version: &str) -> Result<()> {
         // Step 2: rename the version directory (e.g. 4.0.3 → 4.0.4).
         match std::fs::rename(version_dir, &new_version_dir) {
             Ok(()) => {
+                installed_at = new_version_dir.join("bin").join(bin_name);
+
                 // Step 3: update the symlink at <prefix>/bin/<binary>.
                 let symlink_path = prefix.join("bin").join(bin_name);
                 if let Ok(meta) = std::fs::symlink_metadata(&symlink_path) {
                     if meta.file_type().is_symlink() {
-                        if let Err(error) =
-                            retarget_homebrew_symlink(&symlink_path, &old_version, new_version)
-                        {
-                            warn_best_effort("could not update Homebrew symlink", &error);
+                        match retarget_homebrew_symlink(&symlink_path, &old_version, new_version) {
+                            Ok(()) => installed_at = symlink_path,
+                            Err(error) => {
+                                warn_best_effort("could not update Homebrew symlink", &error);
+                            }
                         }
                     }
                 }
@@ -508,11 +555,11 @@ fn replace_for_brew(new_exe: &Path, new_version: &str) -> Result<()> {
         }
     }
 
-    Ok(())
+    Ok(Some(installed_at))
 }
 
 #[cfg(not(unix))]
-fn replace_for_brew(new_exe: &Path, _new_version: &str) -> Result<()> {
+fn replace_for_brew(new_exe: &Path, _new_version: &str) -> Result<Option<PathBuf>> {
     replace_default(new_exe)
 }
 
@@ -522,7 +569,8 @@ fn replace_for_brew(new_exe: &Path, _new_version: &str) -> Result<()> {
 /// then update Scoop's version directory and junction so that
 /// `scoop status` reports the new version.
 #[cfg(windows)]
-fn replace_for_scoop(new_exe: &Path, new_version: &str) -> Result<()> {
+fn replace_for_scoop(new_exe: &Path, new_version: &str) -> Result<Option<PathBuf>> {
+    let exe = std::env::current_exe().ok();
     self_replace::self_replace(new_exe).map_err(|e| TraceDecayError::Config {
         message: format!(
             "binary replacement failed: {e}\n  \
@@ -534,7 +582,7 @@ fn replace_for_scoop(new_exe: &Path, new_version: &str) -> Result<()> {
     // Best-effort: update Scoop metadata for `scoop status` compatibility.
     update_scoop_metadata(new_version);
 
-    Ok(())
+    Ok(exe)
 }
 
 #[cfg(windows)]
@@ -627,7 +675,7 @@ fn find_scoop_version_dir(path: &Path) -> Option<std::path::PathBuf> {
 }
 
 #[cfg(not(windows))]
-fn replace_for_scoop(new_exe: &Path, _new_version: &str) -> Result<()> {
+fn replace_for_scoop(new_exe: &Path, _new_version: &str) -> Result<Option<PathBuf>> {
     replace_default(new_exe)
 }
 
@@ -665,7 +713,12 @@ fn record_previous_version() {
     }
 }
 
-fn perform_upgrade(version: &str, asset_url: &str, method: &InstallMethod) -> Result<()> {
+/// Returns the path the new binary was installed at, when known.
+fn perform_upgrade(
+    version: &str,
+    asset_url: &str,
+    method: &InstallMethod,
+) -> Result<Option<PathBuf>> {
     let bin_names: &[&str] = if cfg!(windows) {
         &["tracedecay.exe"]
     } else {
@@ -680,17 +733,79 @@ fn perform_upgrade(version: &str, asset_url: &str, method: &InstallMethod) -> Re
         _ => "",
     };
     eprint!("  Replacing binary{label}...");
-    replace_binary(&tmp, method, version)?;
+    let installed_at = replace_binary(&tmp, method, version)?;
     eprintln!(" Done");
 
-    Ok(())
+    Ok(installed_at)
 }
 
 fn brew_upgrade_command() -> (&'static str, [&'static str; 2]) {
     ("brew", ["upgrade", "tracedecay"])
 }
 
-fn run_brew_upgrade(current: &str) -> Result<String> {
+/// The stable Homebrew-managed binary path: the opt symlink reported by
+/// `brew --prefix tracedecay`, which survives keg-version bumps and cleanup
+/// (unlike the keg-versioned Cellar path the running process resolves to).
+fn brew_linked_binary() -> Option<PathBuf> {
+    let output = std::process::Command::new("brew")
+        .args(["--prefix", "tracedecay"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let prefix = String::from_utf8(output.stdout).ok()?;
+    let binary = Path::new(prefix.trim()).join("bin").join("tracedecay");
+    binary.exists().then_some(binary)
+}
+
+/// Extracts the version from `tracedecay --version` output
+/// (e.g. `tracedecay 5.0.1` → `5.0.1`).
+fn parse_version_output(output: &str) -> Option<String> {
+    let version = output.split_whitespace().last()?;
+    Some(version.trim_start_matches('v').to_string())
+}
+
+/// Asks the binary at `path` for its version, killing it after a short
+/// deadline so a wedged binary cannot hang the upgrade. `None` when it
+/// cannot be run, times out, or its output is unrecognizable.
+fn installed_binary_version(path: &Path) -> Option<String> {
+    let mut child = std::process::Command::new(path)
+        .arg("--version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(_) => return None,
+        }
+    };
+    if !status.success() {
+        return None;
+    }
+    let mut output = String::new();
+    child.stdout.take()?.read_to_string(&mut output).ok()?;
+    parse_version_output(&output)
+}
+
+/// Whether a delegated `brew upgrade` was a no-op: the linked binary still
+/// reports the version we are already running. `None` (undetectable) is
+/// treated as a real install so the refresh chain never silently skips.
+fn brew_upgrade_was_noop(current: &str, installed_version: Option<&str>) -> bool {
+    installed_version == Some(current)
+}
+
+fn run_brew_upgrade() -> Result<UpgradeOutcome> {
+    let current = env!("CARGO_PKG_VERSION");
     eprintln!("Updating Homebrew formula cache...");
     let update_ok = std::process::Command::new("brew")
         .args(["update", "--quiet"])
@@ -711,20 +826,31 @@ fn run_brew_upgrade(current: &str) -> Result<String> {
         .status()
         .map_err(io_err("failed to run Homebrew upgrade"))?;
 
-    if status.success() {
-        record_previous_version();
-        Ok(current.to_string())
-    } else {
-        Err(TraceDecayError::Config {
+    if !status.success() {
+        return Err(TraceDecayError::Config {
             message: format!("Homebrew upgrade failed with status: {status}"),
-        })
+        });
     }
+
+    // `brew upgrade` exits 0 even when the formula was already current, so
+    // ask the freshly linked binary for its version to tell the outcomes
+    // apart. When undetectable, assume an install so the refresh chain
+    // keeps generated plugins in sync.
+    let binary = brew_linked_binary();
+    let installed_version = binary.as_deref().and_then(installed_binary_version);
+    if brew_upgrade_was_noop(current, installed_version.as_deref()) {
+        eprintln!("\x1b[32m✔\x1b[0m Already up to date (v{current}).");
+        return Ok(UpgradeOutcome::AlreadyCurrent);
+    }
+
+    record_previous_version();
+    Ok(UpgradeOutcome::Installed { binary })
 }
 
 /// Check for a newer version and perform the upgrade if one is available.
 ///
-/// Returns the new version string on success.
-pub fn run_upgrade() -> Result<String> {
+/// Returns whether a new binary was actually installed.
+pub fn run_upgrade() -> Result<UpgradeOutcome> {
     let current = env!("CARGO_PKG_VERSION");
     let is_beta = cloud::is_beta();
     let channel = if is_beta { "beta" } else { "stable" };
@@ -739,7 +865,7 @@ pub fn run_upgrade() -> Result<String> {
     eprintln!("Current version: v{current} ({channel} channel{method_suffix})");
 
     if matches!(method, InstallMethod::Brew) {
-        return run_brew_upgrade(current);
+        return run_brew_upgrade();
     }
 
     match upgrade_source_for(&method) {
@@ -802,7 +928,9 @@ pub fn switch_channel(target_channel: &str) -> Result<String> {
 
     let asset_url = preflight_asset_check(&latest, target_is_beta)?;
 
-    perform_upgrade(&latest, &asset_url, &method)?;
+    // Channel switches do not yet run the post-update refresh chain, so the
+    // installed path is unused here (tracked as a follow-up on PR #193).
+    let _ = perform_upgrade(&latest, &asset_url, &method)?;
     record_previous_version();
     eprintln!("\x1b[32m✔\x1b[0m Switched to {target_channel} channel: v{latest}");
     Ok(latest)
@@ -867,6 +995,33 @@ mod tests {
 
         assert_eq!(program, "brew");
         assert_eq!(args, ["upgrade", "tracedecay"]);
+    }
+
+    #[test]
+    fn parse_version_output_extracts_trailing_version() {
+        assert_eq!(
+            parse_version_output("tracedecay 5.0.1\n").as_deref(),
+            Some("5.0.1")
+        );
+        assert_eq!(
+            parse_version_output("tracedecay v5.0.1").as_deref(),
+            Some("5.0.1")
+        );
+        assert_eq!(parse_version_output(""), None);
+    }
+
+    #[test]
+    fn brew_upgrade_is_a_noop_when_linked_binary_reports_running_version() {
+        // A no-op `brew upgrade` must map to `AlreadyCurrent` so it never
+        // triggers the post-upgrade refresh chain (daemon restart included).
+        assert!(brew_upgrade_was_noop("5.0.1", Some("5.0.1")));
+    }
+
+    #[test]
+    fn brew_upgrade_with_new_or_unknown_version_counts_as_install() {
+        assert!(!brew_upgrade_was_noop("5.0.1", Some("5.0.2")));
+        // Undetectable → assume install so the refresh never silently skips.
+        assert!(!brew_upgrade_was_noop("5.0.1", None));
     }
 
     #[test]

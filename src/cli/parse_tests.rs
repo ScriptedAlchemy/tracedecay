@@ -138,7 +138,10 @@ fn update_upgrade_and_update_plugin_parse_to_distinct_commands() {
         update.command,
         Some(Commands::Update { no_heal: false })
     ));
-    assert!(matches!(upgrade.command, Some(Commands::Upgrade)));
+    assert!(matches!(
+        upgrade.command,
+        Some(Commands::Upgrade { no_heal: false })
+    ));
     assert!(matches!(
         update_plugin.command,
         Some(Commands::UpdatePlugin)
@@ -169,11 +172,56 @@ fn update_and_post_update_parse_no_heal_flag() {
 }
 
 #[test]
-fn update_help_describes_refresh_scope() {
-    let help = Cli::command().render_long_help().to_string();
+fn upgrade_parses_no_heal_flag() {
+    let upgrade = Cli::try_parse_from(["tracedecay", "upgrade", "--no-heal"])
+        .expect("upgrade --no-heal should parse");
+    let upgrade_default =
+        Cli::try_parse_from(["tracedecay", "upgrade"]).expect("upgrade should parse");
 
-    assert!(help.contains("update"));
-    assert!(help.contains("Refresh the tracedecay binary, generated plugins, and daemon"));
+    assert!(matches!(
+        upgrade.command,
+        Some(Commands::Upgrade { no_heal: true })
+    ));
+    assert!(matches!(
+        upgrade_default.command,
+        Some(Commands::Upgrade { no_heal: false })
+    ));
+}
+
+/// The full about text for one subcommand, so help assertions don't couple
+/// to exact phrasing elsewhere in the global help output.
+fn subcommand_about(name: &str) -> String {
+    let command = Cli::command();
+    let subcommand = command
+        .find_subcommand(name)
+        .unwrap_or_else(|| panic!("`{name}` subcommand should exist"));
+    let about = subcommand
+        .get_long_about()
+        .or_else(|| subcommand.get_about())
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    format!("{} {about}", subcommand.get_about().unwrap_or_default())
+}
+
+#[test]
+fn upgrade_help_states_refresh_runs_only_after_install() {
+    let about = subcommand_about("upgrade").to_lowercase();
+
+    // The distinction from `update`: install first, and no refresh (plugins,
+    // daemon, health pass) on a no-op upgrade.
+    assert!(about.contains("install"));
+    assert!(about.contains("refresh"));
+    assert!(about.contains("already up to date"));
+}
+
+#[test]
+fn update_help_states_refresh_runs_even_when_current() {
+    let about = subcommand_about("update").to_lowercase();
+
+    // The distinction from `upgrade`: the refresh runs regardless of whether
+    // a new binary was installed.
+    assert!(about.contains("refresh"));
+    assert!(about.contains("even when"));
 }
 
 #[test]
