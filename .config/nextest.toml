@@ -26,7 +26,7 @@ retries = 2
 flaky-result = 'pass'
 
 [[profile.ci.overrides]]
-filter = 'binary(=dashboard_api_test) | binary(=dashboard_analytics_api_test) | binary(=dashboard_automation_api_test) | binary(=dashboard_automation_config_api_test) | binary(=dashboard_automation_skills_api_test) | binary(=dashboard_code_diagnostics_api_test) | binary(=dashboard_graph_api_test) | binary(=dashboard_lcm_api_test) | binary(=dashboard_lcm_fixes_test) | binary(=dashboard_memory_curation_api_test) | binary(=dashboard_savings_api_test)'
+filter = 'binary(=dashboard_api_test)'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-dashboard-server'
 

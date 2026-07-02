@@ -1,7 +1,4 @@
-mod common;
-mod dashboard_api_support;
-
-use dashboard_api_support::*;
+use crate::dashboard_api_support::*;
 
 #[test]
 fn curation_agent_plan_skips_when_automation_is_disabled_and_records_history() {

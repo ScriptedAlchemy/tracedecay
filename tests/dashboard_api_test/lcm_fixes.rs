@@ -3,11 +3,9 @@
 //! session pagination + ordinal ordering, accurate engine reporting, and the
 //! additive search pagination / message-enrichment fields.
 
-mod common;
-
 use std::path::Path;
 
-use common::{
+use crate::common::{
     create_runtime, get_json, http_agent, message_record_at, pick_free_port, tempdir_or_panic,
     wait_for_dashboard, write_empty_global_db_schema, EnvVarGuard, GLOBAL_DB_ENV,
     GLOBAL_DB_ENV_LOCK,
