@@ -19,9 +19,27 @@ tracedecay serve --path ${workspaceFolder}
 
 This is intentionally workspace-scoped: each Cursor workspace uses its own
 `.tracedecay/` index instead of the legacy global Cursor MCP registration. The
-`${workspaceFolder}` variable is resolved by Cursor's MCP runner; if your Cursor
-build does not expand it, reinstall with the latest Cursor and run
-`tracedecay doctor --agent cursor` to inspect the generated plugin config.
+`${workspaceFolder}` variable is resolved by Cursor's MCP runner in normal
+editor windows.
+
+Some Cursor contexts (headless agent-session MCP scopes) spawn the server with
+the literal, unexpanded `${workspaceFolder}` string instead, from a working
+directory set to the user home rather than the workspace. Cursor never retries
+a failed MCP scope, so exiting on that bogus path would permanently break the
+connection for the session ("Timed out waiting for connection" on every tool
+call). `serve` therefore detects an unexpanded `${...}` template value, warns
+on stderr, and falls back to project discovery where possible: cwd walk-up,
+MCP initialize roots, then the global project registry. Because the spawn
+directory says nothing about the intended workspace in this mode, the registry
+step accepts only a unique registered project — with several projects
+registered, `serve` still exits with an actionable "multiple projects" error
+instead of guessing, and it logs which project it picked and why when
+discovery succeeds. This is also why the template keeps
+`--path ${workspaceFolder}` rather than dropping it (as was done for VS Code
+Copilot in issue #66): normal Cursor windows do expand it, and from a home-dir
+cwd no-path discovery cannot scope multi-project setups. If tools still do not
+connect, run `tracedecay doctor --agent cursor` to inspect the generated
+plugin config.
 
 Hook commands derive the active project from Cursor's event payload /
 `CURSOR_PROJECT_DIR`, not from the plugin directory.
@@ -161,6 +179,34 @@ Notes:
 - Do **not** use `tracedecay:*` — it would auto-approve the editing tools too.
 - Entries from per-user and per-repo files are concatenated; allowlists are a
   convenience, not a security boundary.
+
+## Troubleshooting a dead MCP scope
+
+Cursor spawns MCP servers with the user home directory as the working
+directory, and it **never retries a failed MCP server**: if the `tracedecay
+serve` process exits at startup (for example when a headless agent scope
+passes a literal, unexpanded `${workspaceFolder}`), every later tool call in
+that session reports "Timed out waiting for connection" until you toggle the
+server or reload the window.
+
+Two layers of defense ship with this plugin:
+
+- `tracedecay serve` does not exit when project resolution fails at startup.
+  It completes the MCP handshake and answers tool calls with an actionable
+  error naming the failure and the fix; it rechecks the project on every tool
+  call and recovers automatically once `tracedecay init` (or a corrected
+  `--path`) makes resolution succeed.
+- `tracedecay doctor --agent cursor` scans Cursor's recent MCP logs
+  (`~/.config/Cursor/logs` on Linux, `~/Library/Application Support/Cursor/logs`
+  on macOS, `%APPDATA%\Cursor\logs` on Windows) for tracedecay spawn failures —
+  literal `${workspaceFolder}` errors, `Connection failed: MCP error -32000`,
+  degraded-mode notices — and checks that the installed plugin bundle version
+  matches the binary.
+
+If a scope has already failed: fix the cause (usually `tracedecay init` in the
+project, or upgrading a stale plugin with `tracedecay update-plugin`), then
+toggle the tracedecay MCP server in Cursor Settings → MCP or reload the Cursor
+window.
 
 ## Known limitations
 

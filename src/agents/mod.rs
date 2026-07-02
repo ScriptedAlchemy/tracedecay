@@ -12,6 +12,7 @@ pub mod cline;
 pub mod codex;
 pub mod copilot;
 pub mod cursor;
+pub(crate) mod cursor_diagnostics;
 pub mod gemini;
 pub mod hermes;
 pub mod kilo;

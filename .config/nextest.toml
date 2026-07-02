@@ -25,7 +25,7 @@ platform = { host = 'cfg(windows)' }
 test-group = 'windows-dashboard-server'
 
 [[profile.ci.overrides]]
-filter = 'binary(=agent_suite) | (binary(=storage_suite) & test(/^branch_db_safety_test::/)) | (binary(=core_cli_suite) & test(/^cli_non_interactive_test::/)) | (binary(=mcp_suite) & test(/^mcp_cli_serve_test::/))'
+filter = 'binary(=agent_suite) | (binary(=storage_suite) & test(/^branch_db_safety_test::/)) | (binary(=core_cli_suite) & test(/^cli_non_interactive_test::/)) | (binary(=mcp_suite) & test(/^(mcp_cli_serve_test|serve_template_path_test)::/))'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-tracedecay-init'
 

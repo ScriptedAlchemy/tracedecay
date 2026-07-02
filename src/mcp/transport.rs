@@ -148,6 +148,53 @@ pub trait McpTransport {
     fn flush(&mut self) -> impl std::future::Future<Output = std::io::Result<()>> + Send;
 }
 
+/// Wraps a transport with a queue of already-consumed input lines that must
+/// be re-delivered before reading from the underlying transport again.
+///
+/// Two serve flows need this: the startup peek of the MCP `initialize`
+/// request (to read workspace roots before a server exists), and the degraded
+/// startup server's recovery handoff (the `tools/call` that triggered a
+/// successful resolution retry must be answered by the recovered full
+/// server). Keeping one `ReplayTransport` alive across those phases is what
+/// prevents pipelined requests buffered by the inner reader from being lost —
+/// dropping the transport and constructing a fresh one would discard them.
+pub struct ReplayTransport<T: McpTransport + Send> {
+    replay: std::collections::VecDeque<String>,
+    inner: T,
+}
+
+impl<T: McpTransport + Send> ReplayTransport<T> {
+    pub fn new(inner: T) -> Self {
+        Self {
+            replay: std::collections::VecDeque::new(),
+            inner,
+        }
+    }
+
+    /// Queues a line to be re-delivered by the next `read_line` calls, ahead
+    /// of any new input from the inner transport.
+    pub fn push_replay(&mut self, line: String) {
+        self.replay.push_back(line);
+    }
+}
+
+impl<T: McpTransport + Send> McpTransport for ReplayTransport<T> {
+    async fn read_line(&mut self) -> std::io::Result<Option<String>> {
+        if let Some(line) = self.replay.pop_front() {
+            return Ok(Some(line));
+        }
+        self.inner.read_line().await
+    }
+
+    async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
+        self.inner.write_line(line).await
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush().await
+    }
+}
+
 /// Real stdio transport — reads from stdin, writes to stdout.
 pub struct StdioTransport {
     reader: tokio::io::Lines<tokio::io::BufReader<tokio::io::Stdin>>,

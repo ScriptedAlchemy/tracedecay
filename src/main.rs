@@ -23,37 +23,6 @@ pub use tracedecay::serve;
 
 use cli::*;
 
-struct ReplayStdioTransport {
-    replay_line: Option<String>,
-    inner: tracedecay::mcp::StdioTransport,
-}
-
-impl ReplayStdioTransport {
-    fn new(replay_line: Option<String>) -> Self {
-        Self {
-            replay_line,
-            inner: tracedecay::mcp::StdioTransport::new(),
-        }
-    }
-}
-
-impl tracedecay::mcp::McpTransport for ReplayStdioTransport {
-    async fn read_line(&mut self) -> std::io::Result<Option<String>> {
-        if self.replay_line.is_some() {
-            return Ok(self.replay_line.take());
-        }
-        self.inner.read_line().await
-    }
-
-    async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
-        self.inner.write_line(line).await
-    }
-
-    async fn flush(&mut self) -> std::io::Result<()> {
-        self.inner.flush().await
-    }
-}
-
 /// Alias for the shared timestamp utility.
 pub(crate) fn current_unix_timestamp() -> i64 {
     tracedecay::tracedecay::current_timestamp()
@@ -554,69 +523,7 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                 // host does not retry.
                 return Ok(());
             }
-            let original_cwd = std::env::current_dir().ok();
-            // Track the first stdin line if we need to peek at `initialize` roots.
-            let mut peeked_line: Option<String> = None;
-            let explicit_path = path.is_some();
-            let project_path = tracedecay::config::resolve_path_with_discovery(path);
-            let cg = match serve::ensure_initialized(&project_path).await {
-                Ok(cg) => cg,
-                Err(e) => {
-                    if explicit_path {
-                        return Err(e);
-                    }
-                    // CWD-based discovery failed (e.g. VS Code launched us from ~).
-                    // Next try MCP initialize roots from editor workspace context.
-                    if let Some(p) = serve::resolve_serve_from_mcp_roots(&mut peeked_line).await {
-                        serve::ensure_initialized(&p).await?
-                    } else {
-                        // Last resort: fall back to the global DB's registered projects.
-                        match serve::resolve_serve_from_global_db().await {
-                            serve::ServeGlobalDbResolution::Found(p) => {
-                                serve::ensure_initialized(&p).await?
-                            }
-                            serve::ServeGlobalDbResolution::Ambiguous(paths) => {
-                                return Err(tracedecay::errors::TraceDecayError::Config {
-                                    message: serve::global_db_ambiguity_message(&paths),
-                                });
-                            }
-                            serve::ServeGlobalDbResolution::None => {
-                                return Err(tracedecay::errors::TraceDecayError::Config {
-                                    message: format!(
-                                        "no TraceDecay index found at '{}' and no projects registered in the global database — run 'tracedecay init' in your project first",
-                                        project_path.display()
-                                    ),
-                                });
-                            }
-                        }
-                    }
-                }
-            };
-
-            // Compute scope prefix: relative path from project root to original cwd
-            let scope_prefix = original_cwd.and_then(|cwd| {
-                cwd.strip_prefix(cg.project_root())
-                    .ok()
-                    .filter(|rel| !rel.as_os_str().is_empty())
-                    .map(|rel| rel.to_string_lossy().into_owned())
-            });
-
-            let handshake = tracedecay::daemon::DaemonHandshake::for_current_client(
-                Some(cg.project_root().to_path_buf()),
-                scope_prefix,
-                timings,
-                false,
-            )?;
-            let socket_path = tracedecay::daemon::default_socket_path()?;
-            if tracedecay::daemon::should_proxy_serve_to_daemon(&socket_path).await {
-                tracedecay::daemon::proxy_stdio_to_daemon(&socket_path, &handshake, peeked_line)
-                    .await?;
-            } else {
-                let server =
-                    tracedecay::mcp::McpServer::new(cg, handshake.scope_prefix.clone()).await;
-                let mut transport = ReplayStdioTransport::new(peeked_line);
-                server.run(&mut transport).await?;
-            }
+            serve::run_serve(path, timings).await?;
         }
         Commands::Daemon { action } => match action {
             DaemonAction::Run { socket } => {

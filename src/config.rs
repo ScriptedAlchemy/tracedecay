@@ -409,13 +409,21 @@ fn absolutize_path(path: PathBuf) -> PathBuf {
 /// that needs a project root should resolve it in this order — new code must
 /// converge on this chain instead of inventing its own:
 ///
+/// 0. **Template pre-filter** (`serve` only,
+///    `serve::sanitize_serve_path_arg`): an explicit path that is a literal
+///    unexpanded `${...}` host template variable (e.g. `${workspaceFolder}`
+///    from a host that failed to expand it) is discarded with a warning and
+///    resolution continues as if no path was given — except that step 4 then
+///    requires a unique registered project
+///    (`serve::ServeGlobalDbMatch::UniqueOnly`), because the host's spawn
+///    directory says nothing about the intended workspace.
 /// 1. **Explicit path** (`--path`/`-p`, tool `path` argument): used verbatim,
 ///    no discovery, and failure to open is fatal — never silently fall back.
 /// 2. **CWD walk-up** (this function via [`resolve_path_with_discovery`]):
 ///    nearest ancestor of the working directory containing an initialised
 ///    project database (see [`get_project_db_path`]).
 /// 3. **MCP `initialize` roots** (`serve` only,
-///    `serve::resolve_serve_from_mcp_roots`): each workspace root the editor
+///    `serve::ServeProjectResolver`): each workspace root the editor
 ///    advertises is tried verbatim against registered projects, then walked
 ///    up via this function.
 /// 4. **Global DB registry** (`serve` only,
