@@ -585,48 +585,66 @@ fn codex_plugin_mcp(raw: &str, tracedecay_bin: &str, scope: InstallScope) -> Res
     Ok(format!("{}\n", serde_json::to_string_pretty(&mcp)?))
 }
 
+/// A lifecycle hook the Codex plugin registers.
+struct CodexManagedHook {
+    event: &'static str,
+    subcommand: &'static str,
+    timeout_secs: u64,
+    matcher: Option<&'static str>,
+}
+
+/// Every Codex lifecycle hook, in registration order. The single source of
+/// truth for install ([`codex_plugin_hooks`]), uninstall ([`uninstall_hooks`]),
+/// and doctor checks ([`doctor_check_hooks`]).
+const CODEX_MANAGED_HOOKS: &[CodexManagedHook] = &[
+    CodexManagedHook {
+        event: "SessionStart",
+        subcommand: "hook-codex-session-start",
+        timeout_secs: 5,
+        matcher: None,
+    },
+    CodexManagedHook {
+        event: "UserPromptSubmit",
+        subcommand: "hook-codex-user-prompt-submit",
+        timeout_secs: 5,
+        matcher: None,
+    },
+    CodexManagedHook {
+        event: "SubagentStart",
+        subcommand: "hook-codex-subagent-start",
+        timeout_secs: 5,
+        matcher: None,
+    },
+    CodexManagedHook {
+        event: "PostToolUse",
+        subcommand: "hook-codex-post-tool-use",
+        timeout_secs: 60,
+        matcher: Some("Bash|apply_patch"),
+    },
+    CodexManagedHook {
+        event: "PostCompact",
+        subcommand: "hook-codex-post-compact",
+        timeout_secs: 120,
+        matcher: Some("auto|manual"),
+    },
+];
+
+/// Subcommands from older bundles that uninstall must also strip even though
+/// the current bundle no longer registers them.
+const CODEX_LEGACY_HOOK_SUBCOMMANDS: &[&str] = &["hook-codex-pre-tool-use"];
+
 fn codex_plugin_hooks(raw: &str, tracedecay_bin: &str) -> Result<String> {
     let mut hooks: serde_json::Value = serde_json::from_str(raw)?;
-    install_codex_hook_event(
-        &mut hooks,
-        "SessionStart",
-        tracedecay_bin,
-        "hook-codex-session-start",
-        5,
-        None,
-    );
-    install_codex_hook_event(
-        &mut hooks,
-        "UserPromptSubmit",
-        tracedecay_bin,
-        "hook-codex-user-prompt-submit",
-        5,
-        None,
-    );
-    install_codex_hook_event(
-        &mut hooks,
-        "SubagentStart",
-        tracedecay_bin,
-        "hook-codex-subagent-start",
-        5,
-        None,
-    );
-    install_codex_hook_event(
-        &mut hooks,
-        "PostToolUse",
-        tracedecay_bin,
-        "hook-codex-post-tool-use",
-        60,
-        Some("Bash|apply_patch"),
-    );
-    install_codex_hook_event(
-        &mut hooks,
-        "PostCompact",
-        tracedecay_bin,
-        "hook-codex-post-compact",
-        120,
-        Some("auto|manual"),
-    );
+    for hook in CODEX_MANAGED_HOOKS {
+        install_codex_hook_event(
+            &mut hooks,
+            hook.event,
+            tracedecay_bin,
+            hook.subcommand,
+            hook.timeout_secs,
+            hook.matcher,
+        );
+    }
     Ok(format!("{}\n", serde_json::to_string_pretty(&hooks)?))
 }
 
@@ -973,14 +991,11 @@ fn print_hook_trust_guidance() {
 
 /// Remove tracedecay-owned hook groups from a Codex `hooks.json`.
 fn uninstall_hooks(hooks_path: &Path) {
-    const SUBCOMMANDS: [&str; 6] = [
-        "hook-codex-session-start",
-        "hook-codex-user-prompt-submit",
-        "hook-codex-subagent-start",
-        "hook-codex-post-tool-use",
-        "hook-codex-post-compact",
-        "hook-codex-pre-tool-use",
-    ];
+    let subcommands: Vec<&str> = CODEX_MANAGED_HOOKS
+        .iter()
+        .map(|hook| hook.subcommand)
+        .chain(CODEX_LEGACY_HOOK_SUBCOMMANDS.iter().copied())
+        .collect();
 
     if !hooks_path.exists() {
         return;
@@ -994,7 +1009,7 @@ fn uninstall_hooks(hooks_path: &Path) {
     };
     for groups in events.values_mut() {
         if let Some(arr) = groups.as_array_mut() {
-            arr.retain(|group| !SUBCOMMANDS.iter().any(|sc| group_has_subcommand(group, sc)));
+            arr.retain(|group| !subcommands.iter().any(|sc| group_has_subcommand(group, sc)));
         }
     }
     events.retain(|_, groups| groups.as_array().is_some_and(|a| !a.is_empty()));
@@ -1356,23 +1371,16 @@ fn doctor_check_hooks(dc: &mut DoctorCounters, hooks_path: &Path) {
         return;
     }
     let hooks = super::load_json_file(hooks_path);
-    let expected = [
-        ("SessionStart", "hook-codex-session-start"),
-        ("UserPromptSubmit", "hook-codex-user-prompt-submit"),
-        ("SubagentStart", "hook-codex-subagent-start"),
-        ("PostToolUse", "hook-codex-post-tool-use"),
-        ("PostCompact", "hook-codex-post-compact"),
-    ];
-    let missing: Vec<&str> = expected
+    let missing: Vec<&str> = CODEX_MANAGED_HOOKS
         .iter()
-        .filter_map(|(event, command)| {
-            (!codex_hook_present(&hooks, event, command)).then_some(*event)
+        .filter_map(|hook| {
+            (!codex_hook_present(&hooks, hook.event, hook.subcommand)).then_some(hook.event)
         })
         .collect();
     if missing.is_empty() {
         dc.pass(&format!(
             "All {} Codex lifecycle hooks registered in {}",
-            expected.len(),
+            CODEX_MANAGED_HOOKS.len(),
             hooks_path.display()
         ));
         dc.info(

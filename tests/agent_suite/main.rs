@@ -16,6 +16,7 @@ mod kiro_agent_test;
 mod managed_skills_test;
 mod opencode_agent_test;
 mod plugin_skill_contract_test;
+mod prompt_rules_parity_test;
 mod skill_targets_test;
 mod skill_usage_test;
 mod tool_skill_coverage_test;

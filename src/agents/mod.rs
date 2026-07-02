@@ -19,6 +19,7 @@ pub mod kilo;
 pub mod kimi;
 pub mod kiro;
 pub mod opencode;
+pub mod prompt_rules;
 pub mod roo_code;
 pub mod vibe;
 pub mod zed;
@@ -668,6 +669,18 @@ fn is_cargo_target_binary(path: &Path, cargo_target_dir: Option<&Path>) -> bool 
 fn normalize_path_separators(path: &str) -> String {
     path.replace('\\', "/")
 }
+
+/// CLI-fallback steering paragraph shared by every host's prompt rules.
+///
+/// Mirrors the guidance in the MCP server instructions and the bundled
+/// `using-the-cli` skill: when the MCP transport fails, agents should fall
+/// back to the `tracedecay tool` CLI instead of abandoning tracedecay or
+/// poking at `.tracedecay` databases directly.
+pub(crate) const CLI_FALLBACK_PROMPT_RULES: &str = "If a tracedecay MCP call errors, times out, \
+or the server is disconnected, every tool is also available as a shell command: \
+`tracedecay tool <name> --key value` (`tracedecay tool` lists all tools, \
+`tracedecay tool <name> --help` shows parameters). Fall back to that CLI instead of \
+querying `.tracedecay` databases directly or abandoning tracedecay.";
 
 pub(crate) fn hook_command(tracedecay_bin: &str, subcommand: &str) -> String {
     hook_command_for_platform(tracedecay_bin, subcommand, cfg!(windows))

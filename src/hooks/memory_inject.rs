@@ -240,11 +240,13 @@ fn render_fact_block(
 }
 
 /// Renders the session-start "durable project memory" digest within `budget`.
+#[cfg(test)]
 pub fn render_memory_digest(facts: &[FactRecord], budget: usize) -> Option<String> {
     render_fact_block(DIGEST_HEADER, facts, budget).map(|(text, _)| text)
 }
 
 /// Renders the per-prompt recall block within `budget`.
+#[cfg(test)]
 pub fn render_prompt_recall(facts: &[FactRecord], budget: usize) -> Option<String> {
     render_fact_block(PROMPT_RECALL_HEADER, facts, budget).map(|(text, _)| text)
 }
