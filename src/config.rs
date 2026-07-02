@@ -423,7 +423,7 @@ fn absolutize_path(path: PathBuf) -> PathBuf {
 ///    nearest ancestor of the working directory containing an initialised
 ///    project database (see [`get_project_db_path`]).
 /// 3. **MCP `initialize` roots** (`serve` only,
-///    `serve::resolve_serve_from_mcp_roots`): each workspace root the editor
+///    `serve::ServeProjectResolver`): each workspace root the editor
 ///    advertises is tried verbatim against registered projects, then walked
 ///    up via this function.
 /// 4. **Global DB registry** (`serve` only,

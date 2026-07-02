@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
+use crate::mcp::transport::{McpTransport, ReplayTransport, StdioTransport};
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -251,37 +252,50 @@ pub async fn resolve_serve_from_global_db(
     ServeGlobalDbResolution::Ambiguous(paths)
 }
 
-/// Last-resort fallback for `serve`: peek at the first stdin line to read the
-/// MCP `initialize` request's `roots` array.  If a root matches a registered
-/// project, return its path.  The raw line is stored in `out` so the caller
-/// can replay it into the MCP transport (the server still needs to see it).
-pub async fn resolve_serve_from_mcp_roots(out: &mut Option<String>) -> Option<std::path::PathBuf> {
-    let line = read_first_non_empty_stdin_line().await?;
+/// Peeks at the first stdin line to read the MCP `initialize` request's
+/// `roots` array, returning the local workspace root paths. The raw line is
+/// stored in `out` so the caller can replay it into the MCP transport (the
+/// server still needs to see it).
+async fn read_initialize_roots(out: &mut Option<String>) -> Vec<std::path::PathBuf> {
+    let Some(line) = read_first_non_empty_stdin_line().await else {
+        return Vec::new();
+    };
     *out = Some(line.trim().to_string());
 
-    let parsed: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
-    let roots = parsed.pointer("/params/roots").and_then(|v| v.as_array())?;
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+        return Vec::new();
+    };
+    let Some(roots) = parsed.pointer("/params/roots").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    roots
+        .iter()
+        .filter_map(|root| {
+            let uri = root.get("uri").and_then(|v| v.as_str())?;
+            local_path_from_mcp_root_uri(uri)
+        })
+        .collect()
+}
 
+/// Resolves a project from MCP `initialize` workspace roots: a root that IS a
+/// registered project wins, otherwise the nearest enclosing project of any
+/// root. First match wins.
+async fn resolve_project_from_roots(roots: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    if roots.is_empty() {
+        return None;
+    }
     let registered = match GlobalDb::open().await {
         Some(gdb) => initialized_project_paths(gdb.list_project_paths().await),
         None => Vec::new(),
     };
-
-    // Try each root URI — first match wins.
-    for root in roots {
-        let uri = root.get("uri").and_then(|v| v.as_str()).unwrap_or_default();
-        let Some(root_path) = local_path_from_mcp_root_uri(uri) else {
-            continue;
-        };
-        // Exact match: the root IS a registered project.
+    for root_path in roots {
         if let Some(hit) = registered
             .iter()
             .find(|p| std::path::Path::new(p) == root_path.as_path())
         {
             return Some(std::path::PathBuf::from(hit));
         }
-        // Walk up from the root to find the nearest enclosing project.
-        if let Some(discovered) = crate::config::discover_project_root(&root_path) {
+        if let Some(discovered) = crate::config::discover_project_root(root_path) {
             return Some(discovered);
         }
     }
@@ -379,6 +393,374 @@ fn hex_value(byte: u8) -> Option<u8> {
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Serve startup orchestration
+// ---------------------------------------------------------------------------
+
+/// Runs the `serve` command end to end: resolve the project (degrading
+/// instead of exiting when resolution fails — see
+/// [`ServeProjectResolver::resolve_once`] and [`run_degraded_mcp_server`]),
+/// then serve MCP over stdio, proxying to the daemon when one owns the
+/// socket.
+pub async fn run_serve(path_arg: Option<String>, timings: bool) -> Result<()> {
+    let original_cwd = std::env::current_dir().ok();
+    let (resolver, error, peeked_line) = match resolve_serve_startup(path_arg).await {
+        ServeStartup::Ready { cg, peeked_line } => {
+            return Box::pin(serve_resolved_project(
+                *cg,
+                original_cwd,
+                timings,
+                peeked_line,
+            ))
+            .await;
+        }
+        ServeStartup::Degraded {
+            resolver,
+            error,
+            peeked_line,
+        } => (resolver, error, peeked_line),
+    };
+
+    // Do NOT exit: MCP hosts (Cursor especially) treat a dead server process
+    // as a permanently failed scope and never retry it, so a startup exit
+    // over a recoverable config problem breaks every later tool call in the
+    // session. Serve a degraded MCP surface instead; it recovers on its own
+    // once resolution starts succeeding.
+    let mut transport = ReplayTransport::new(StdioTransport::new());
+    if let Some(line) = peeked_line {
+        transport.push_replay(line);
+    }
+    match run_degraded_mcp_server(&mut transport, &resolver, &error).await? {
+        DegradedServeOutcome::Closed => Ok(()),
+        DegradedServeOutcome::Recovered { cg, pending_line } => {
+            // Keep serving on the SAME transport: requests pipelined behind
+            // the recovery-triggering call may already sit in its read
+            // buffer, and a raw-stdin handoff (fresh transport or daemon
+            // proxy) would silently drop them. The recovery-triggering
+            // tools/call itself is replayed first.
+            transport.push_replay(pending_line);
+            let scope_prefix = serve_scope_prefix(original_cwd.as_deref(), cg.project_root());
+            let server = crate::mcp::McpServer::new(*cg, scope_prefix).await;
+            server.run(&mut transport).await
+        }
+    }
+}
+
+/// Serves a startup-resolved project: proxy to the daemon when one owns the
+/// socket, otherwise run the in-process MCP engine.
+async fn serve_resolved_project(
+    cg: TraceDecay,
+    original_cwd: Option<std::path::PathBuf>,
+    timings: bool,
+    peeked_line: Option<String>,
+) -> Result<()> {
+    let scope_prefix = serve_scope_prefix(original_cwd.as_deref(), cg.project_root());
+    let handshake = crate::daemon::DaemonHandshake::for_current_client(
+        Some(cg.project_root().to_path_buf()),
+        scope_prefix,
+        timings,
+        false,
+    )?;
+    let socket_path = crate::daemon::default_socket_path()?;
+    if crate::daemon::should_proxy_serve_to_daemon(&socket_path).await {
+        crate::daemon::proxy_stdio_to_daemon(&socket_path, &handshake, peeked_line).await
+    } else {
+        let server = crate::mcp::McpServer::new(cg, handshake.scope_prefix.clone()).await;
+        let mut transport = ReplayTransport::new(StdioTransport::new());
+        if let Some(line) = peeked_line {
+            transport.push_replay(line);
+        }
+        server.run(&mut transport).await
+    }
+}
+
+/// The scope prefix for a serve session: the relative path from the project
+/// root to the directory serve was launched from, when the latter is inside
+/// the project.
+fn serve_scope_prefix(original_cwd: Option<&Path>, project_root: &Path) -> Option<String> {
+    original_cwd.and_then(|cwd| {
+        cwd.strip_prefix(project_root)
+            .ok()
+            .filter(|rel| !rel.as_os_str().is_empty())
+            .map(|rel| rel.to_string_lossy().into_owned())
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Startup project resolution
+// ---------------------------------------------------------------------------
+
+/// The outcome of startup project resolution for `serve`.
+pub enum ServeStartup {
+    /// A project resolved; serve it normally. `peeked_line` is a stdin line
+    /// (the MCP `initialize` request) consumed while peeking workspace roots;
+    /// it must be replayed to whatever serves the session.
+    Ready {
+        cg: Box<TraceDecay>,
+        peeked_line: Option<String>,
+    },
+    /// Resolution failed with a recoverable config problem. The resolver
+    /// retries the same resolution ladder on every degraded tool call.
+    Degraded {
+        resolver: ServeProjectResolver,
+        error: TraceDecayError,
+        peeked_line: Option<String>,
+    },
+}
+
+/// Resolves the project to serve, capturing everything needed to retry the
+/// exact same resolution later from degraded mode.
+pub async fn resolve_serve_startup(path_arg: Option<String>) -> ServeStartup {
+    // Some MCP hosts (e.g. Cursor headless agent sessions) pass config
+    // template variables like `${workspaceFolder}` through literally; treat
+    // such values as "no --path" and use discovery instead.
+    let had_path_arg = path_arg.is_some();
+    let path = sanitize_serve_path_arg(path_arg);
+    let explicit_path = path.is_some();
+    let path_was_template = had_path_arg && !explicit_path;
+    let mut resolver = ServeProjectResolver {
+        project_path: crate::config::resolve_path_with_discovery(path),
+        explicit_path,
+        path_was_template,
+        // The host's spawn directory says nothing about the intended
+        // workspace when it failed to expand a template path, so the
+        // global-registry step must not depth-rank against cwd in that mode.
+        global_db_match: if path_was_template {
+            ServeGlobalDbMatch::UniqueOnly
+        } else {
+            ServeGlobalDbMatch::CwdHeuristic
+        },
+        initialize_roots: Vec::new(),
+    };
+
+    let mut peeked_line: Option<String> = None;
+    let first_error = match ensure_initialized(&resolver.project_path).await {
+        Ok(cg) => {
+            resolver
+                .log_choice_if_template(cg.project_root(), "discovered from the working directory");
+            return ServeStartup::Ready {
+                cg: Box::new(cg),
+                peeked_line,
+            };
+        }
+        Err(e) => e,
+    };
+    if resolver.explicit_path {
+        // An explicit path is authoritative: no discovery fallbacks, and the
+        // degraded retry only ever rechecks this path.
+        return ServeStartup::Degraded {
+            resolver,
+            error: first_error,
+            peeked_line,
+        };
+    }
+
+    // CWD-based discovery failed (e.g. an MCP host launched us from ~). Peek
+    // the MCP `initialize` request's workspace roots; the resolver remembers
+    // them so degraded retries can keep consulting them.
+    resolver.initialize_roots = read_initialize_roots(&mut peeked_line).await;
+    match resolver.resolve_once().await {
+        Ok(cg) => ServeStartup::Ready {
+            cg: Box::new(cg),
+            peeked_line,
+        },
+        Err(error) => ServeStartup::Degraded {
+            resolver,
+            error,
+            peeked_line,
+        },
+    }
+}
+
+/// Everything needed to attempt `serve` project resolution — at startup and
+/// again on every degraded tool call. One resolution ladder serves both, so
+/// degraded mode recovers through exactly the fallbacks startup would have
+/// used (cwd discovery, remembered MCP initialize roots, global registry).
+pub struct ServeProjectResolver {
+    /// The explicit `--path`, or the startup cwd-discovery result.
+    project_path: std::path::PathBuf,
+    /// A real (non-template) `--path` was given; it is authoritative.
+    explicit_path: bool,
+    /// The `--path` was a discarded unexpanded host template.
+    path_was_template: bool,
+    global_db_match: ServeGlobalDbMatch,
+    /// Workspace roots from the peeked MCP `initialize` request.
+    initialize_roots: Vec<std::path::PathBuf>,
+}
+
+impl ServeProjectResolver {
+    /// The path named in degraded-mode error messages.
+    pub(crate) fn project_path(&self) -> &Path {
+        &self.project_path
+    }
+
+    /// Runs the full resolution ladder once. Explicit paths never fall
+    /// back; discovery mode tries, in order: the startup path, a fresh cwd
+    /// walk-up (an intervening `tracedecay init` can create an enclosing
+    /// project), the remembered initialize roots, then the global registry.
+    async fn resolve_once(&self) -> Result<TraceDecay> {
+        let first_error = match ensure_initialized(&self.project_path).await {
+            Ok(cg) => {
+                self.log_choice_if_template(
+                    cg.project_root(),
+                    "discovered from the working directory",
+                );
+                return Ok(cg);
+            }
+            Err(e) => e,
+        };
+        if self.explicit_path {
+            return Err(first_error);
+        }
+
+        let discovered = crate::config::resolve_path_with_discovery(None);
+        if discovered != self.project_path {
+            if let Ok(cg) = ensure_initialized(&discovered).await {
+                self.log_choice_if_template(
+                    cg.project_root(),
+                    "discovered from the working directory",
+                );
+                return Ok(cg);
+            }
+        }
+
+        if let Some(p) = resolve_project_from_roots(&self.initialize_roots).await {
+            self.log_choice_if_template(&p, "matched an MCP initialize root");
+            return ensure_initialized(&p).await;
+        }
+
+        match resolve_serve_from_global_db(self.global_db_match).await {
+            ServeGlobalDbResolution::Found(p) => {
+                self.log_choice_if_template(&p, "resolved from the global project registry");
+                ensure_initialized(&p).await
+            }
+            ServeGlobalDbResolution::Ambiguous(paths) => Err(TraceDecayError::Config {
+                message: global_db_ambiguity_message(&paths),
+            }),
+            ServeGlobalDbResolution::None => Err(TraceDecayError::Config {
+                message: format!(
+                    "no TraceDecay index found at '{}' and no projects registered in the global database — run 'tracedecay init' in your project first",
+                    self.project_path.display()
+                ),
+            }),
+        }
+    }
+
+    fn log_choice_if_template(&self, project: &Path, why: &str) {
+        if self.path_was_template {
+            log_serve_project_choice(project, why);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Degraded MCP serving (startup project-resolution failures)
+// ---------------------------------------------------------------------------
+
+/// Marker line written to stderr when serve enters degraded mode. Grepped by
+/// `tracedecay doctor --agent cursor` from Cursor's MCP logs
+/// (`crate::agents::cursor_diagnostics`), so keep the wording stable.
+pub const DEGRADED_SERVE_STDERR_MARKER: &str =
+    "[tracedecay] serve: staying alive in degraded MCP mode";
+
+/// How a degraded serving session ended.
+pub enum DegradedServeOutcome {
+    /// stdin closed (client disconnected) while still degraded.
+    Closed,
+    /// Project resolution started succeeding mid-session (e.g. the user ran
+    /// `tracedecay init`). The pending request line is the `tools/call` that
+    /// triggered the successful retry; the caller must replay it into the
+    /// recovered full server. Boxed to keep the enum small next to `Closed`.
+    Recovered {
+        cg: Box<TraceDecay>,
+        pending_line: String,
+    },
+}
+
+/// Runs a minimal MCP server after startup project resolution failed.
+///
+/// MCP hosts treat a dead server process as a permanently failed scope:
+/// Cursor in particular never retries a failed spawn, so one startup exit
+/// (bad `--path`, uninitialized project, ambiguous global fallback) turns
+/// every later tool call in that session into "Timed out waiting for
+/// connection" until the user toggles the server or reloads the window.
+/// Instead of exiting, this loop completes the MCP handshake, lists the real
+/// tools, and answers every `tools/call` with an actionable error that names
+/// the failure, the fix, and the `tracedecay tool …` CLI fallback (protocol
+/// responses shared with the full server via [`crate::mcp::degraded`]).
+///
+/// Each `tools/call` first re-runs the startup resolution ladder; when it
+/// starts succeeding the loop hands control back so the caller can serve the
+/// project for real — no toggle or window reload needed after `tracedecay
+/// init`.
+pub async fn run_degraded_mcp_server(
+    transport: &mut impl McpTransport,
+    resolver: &ServeProjectResolver,
+    startup_error: &TraceDecayError,
+) -> Result<DegradedServeOutcome> {
+    eprintln!("Error: {startup_error}");
+    eprintln!(
+        "{DEGRADED_SERVE_STDERR_MARKER} — MCP handshake will complete and tool calls will \
+         return this error until the project resolves"
+    );
+    let notice = degraded_serve_notice(resolver.project_path(), startup_error);
+    loop {
+        let line = match transport.read_line().await {
+            Ok(Some(line)) => line,
+            Ok(None) => return Ok(DegradedServeOutcome::Closed),
+            Err(e) => return Err(e.into()),
+        };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if crate::mcp::degraded::is_tools_call_line(trimmed) {
+            if let Ok(cg) = resolver.resolve_once().await {
+                eprintln!(
+                    "[tracedecay] serve: project resolution recovered for '{}'; leaving degraded MCP mode",
+                    cg.project_root().display()
+                );
+                return Ok(DegradedServeOutcome::Recovered {
+                    cg: Box::new(cg),
+                    pending_line: trimmed.to_string(),
+                });
+            }
+        }
+        let Some(response) = crate::mcp::degraded::degraded_response_for_line(trimmed, &notice)
+        else {
+            continue;
+        };
+        let mut out = serde_json::to_string(&response)?;
+        out.push('\n');
+        transport.write_line(&out).await?;
+        transport.flush().await?;
+    }
+}
+
+/// Builds the actionable error text returned from every degraded `tools/call`.
+pub fn degraded_serve_notice(project_path: &Path, startup_error: &TraceDecayError) -> String {
+    format!(
+        "TraceDecay MCP server is running in degraded mode: project resolution failed at startup \
+         for '{path}'.\n\
+         \n\
+         Error: {startup_error}\n\
+         \n\
+         To fix:\n\
+         1. Run `tracedecay init` inside the project (or point the MCP server at an initialized \
+         project via `tracedecay serve --path <project>`).\n\
+         2. Retry the tool call — this server rechecks the project on every call and recovers \
+         automatically once resolution succeeds.\n\
+         3. If the MCP client shows connection errors instead of this message, toggle the \
+         tracedecay MCP server in Cursor Settings → MCP or reload the window; Cursor does not \
+         retry a failed MCP server on its own.\n\
+         \n\
+         Diagnose with `tracedecay doctor --agent cursor`. Every tool is also available from \
+         the shell: `tracedecay tool <name> --key value` (run `tracedecay tool` to list tools) \
+         from inside an initialized project.",
+        path = project_path.display(),
+    )
 }
 
 #[cfg(test)]

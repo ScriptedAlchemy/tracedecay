@@ -9,7 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`serve` no longer exits when project resolution fails at startup** — MCP hosts (Cursor especially) never retry a failed server spawn, so one startup exit over a recoverable config problem (uninitialized project, ambiguous global fallback, bad `--path`) turned every later tool call in the session into "Timed out waiting for connection". `serve` now stays alive in a degraded mode: it completes the MCP handshake, lists the real tools, and answers each tool call with an actionable error naming the failure, the fix, and the `tracedecay tool …` CLI fallback. It rechecks the project on every tool call and recovers in-session once `tracedecay init` (or a corrected path) makes resolution succeed — no server toggle or window reload needed.
 - **`serve` now tolerates a literal unexpanded `--path ${workspaceFolder}`** — Cursor's headless agent-session MCP scopes spawn the plugin's serve command without expanding the template variable and never retry the failed scope, which surfaced as "Timed out waiting for connection" on every tool call. `serve` now discards an unexpanded `${...}` template value with a stderr warning and falls back to project discovery where possible, requiring a unique registered project when discovery reaches the global registry in this mode. Rationale and details in `cursor-plugin/README.md`.
+
+### Added
+
+- **`tracedecay doctor --agent cursor` now diagnoses dead Cursor MCP scopes** — best-effort scan of Cursor's recent MCP logs for tracedecay spawn failures (literal unexpanded `${workspaceFolder}` paths, `Connection failed: MCP error -32000`, degraded-mode notices) with concrete remediation ("toggle the MCP server in Cursor Settings → MCP or reload the window"), plus a plugin-bundle-version-vs-binary-version staleness check that points at `tracedecay update-plugin`.
 
 ## [0.0.23](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.22...v0.0.23) - 2026-07-02
 

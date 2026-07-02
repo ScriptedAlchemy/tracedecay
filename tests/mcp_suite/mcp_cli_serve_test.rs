@@ -205,36 +205,6 @@ fn file_uri(path: &Path) -> String {
 }
 
 #[tokio::test]
-async fn explicit_uninitialized_path_reports_error_instead_of_global_fallback() {
-    let home = TempDir::new().unwrap();
-    let explicit = TempDir::new().unwrap();
-    let active = init_project_with_file(home.path(), "pub fn active_project_marker() {}\n").await;
-    register_global_project(home.path(), active.path()).await;
-
-    let output = tracedecay_command_with_home(home.path())
-        .arg("serve")
-        .arg("--path")
-        .arg(explicit.path())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .expect("tracedecay serve should run");
-
-    assert!(
-        !output.status.success(),
-        "explicit uninitialized --path should fail instead of serving a global fallback\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains(&explicit.path().display().to_string()),
-        "error should name the explicit project path\nstderr:\n{stderr}"
-    );
-}
-
-#[tokio::test]
 async fn serve_without_daemon_socket_falls_back_to_in_process_mcp() {
     let home = TempDir::new().unwrap();
     let project = init_project_with_file(home.path(), "pub fn client_only_marker() {}\n").await;
@@ -942,47 +912,5 @@ async fn initialize_roots_decode_file_uri_localhost_and_percent_escapes() {
         canonical_path_string(Path::new(&runtime_project_root(&output.stdout, 2))),
         canonical_path_string(&active),
         "serve should use the decoded MCP root project"
-    );
-}
-
-#[tokio::test]
-async fn same_depth_descendant_global_fallback_is_ambiguous() {
-    let home = TempDir::new().unwrap();
-    let cwd = TempDir::new().unwrap();
-    let alpha = init_project_under(
-        home.path(),
-        cwd.path(),
-        "alpha",
-        "pub fn alpha_marker() {}\n",
-    )
-    .await;
-    let beta =
-        init_project_under(home.path(), cwd.path(), "beta", "pub fn beta_marker() {}\n").await;
-    register_global_project(home.path(), &alpha).await;
-    register_global_project(home.path(), &beta).await;
-
-    let output = tracedecay_command_with_home(home.path())
-        .arg("serve")
-        .current_dir(cwd.path())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .expect("tracedecay serve should run");
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !output.status.success(),
-        "ambiguous same-depth descendants should not select an arbitrary project\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        stderr
-    );
-    assert!(
-        stderr.contains("Multiple tracedecay projects found"),
-        "stderr should explain the ambiguity:\n{stderr}"
-    );
-    assert!(
-        !stderr.contains("no projects registered in the global database"),
-        "stderr should not contradict ambiguity with a no-projects error:\n{stderr}"
     );
 }

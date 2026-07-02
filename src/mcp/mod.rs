@@ -4,6 +4,7 @@
 //! query the code graph interactively. Exposes tools for searching, context
 //! building, call graph traversal, impact analysis, and more.
 
+pub(crate) mod degraded;
 pub(crate) mod hook_events;
 /// MCP server implementation.
 pub mod response_handles;
@@ -19,5 +20,6 @@ pub mod transport;
 pub use server::McpServer;
 pub use tools::{get_tool_definitions, handle_tool_call, ToolDefinition, ToolResult};
 pub use transport::{
-    ErrorCode, JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpTransport, StdioTransport,
+    ErrorCode, JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpTransport, ReplayTransport,
+    StdioTransport,
 };
