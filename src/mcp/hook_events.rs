@@ -149,11 +149,21 @@ fn plan_shell_hook_event(
         return HookEventPlan::Noop;
     };
     let cwd = event.cwd.as_deref().unwrap_or(project_root);
-    if !crate::hooks::cursor_shell_command_targets_project(command, cwd, project_root) {
+    let hook_project_root = hook_project_root(cwd, project_root);
+    if !crate::hooks::cursor_shell_command_targets_project(command, cwd, &hook_project_root) {
         return HookEventPlan::Noop;
     }
+    let hook_current_branch;
+    let current_branch = if paths_same(&hook_project_root, project_root) {
+        current_branch
+    } else {
+        hook_current_branch = crate::branch::current_branch(&hook_project_root);
+        hook_current_branch.as_deref()
+    };
     match crate::hooks::cursor_shell_sync_plan_with_current_branch(command, current_branch) {
-        crate::hooks::CursorShellSyncPlan::BranchAdd(branch) => HookEventPlan::AddBranch(branch),
+        crate::hooks::CursorShellSyncPlan::BranchAdd(branch) => {
+            branch_plan_for_root(project_root, hook_project_root, branch)
+        }
         crate::hooks::CursorShellSyncPlan::WorktreeBranchAdd {
             branch,
             worktree_path,
@@ -165,13 +175,57 @@ fn plan_shell_hook_event(
             HookEventPlan::DebouncedIncrementalSync(event.agent)
         }
         crate::hooks::CursorShellSyncPlan::CurrentBranchSync(branch) => {
-            HookEventPlan::SyncCurrentBranch {
-                branch,
-                agent: event.agent,
+            if paths_same(&hook_project_root, project_root) {
+                HookEventPlan::SyncCurrentBranch {
+                    branch,
+                    agent: event.agent,
+                }
+            } else {
+                HookEventPlan::AddBranchAt {
+                    root: hook_project_root,
+                    branch,
+                }
             }
         }
         crate::hooks::CursorShellSyncPlan::Noop => HookEventPlan::Noop,
     }
+}
+
+fn hook_project_root(cwd: &Path, project_root: &Path) -> PathBuf {
+    if let Some(root) = crate::config::discover_project_root(cwd) {
+        return root;
+    }
+    let Some(worktree_root) = crate::worktree::git_worktree_root(cwd) else {
+        return project_root.to_path_buf();
+    };
+    let cwd_common = crate::worktree::git_common_dir(&worktree_root);
+    let project_common = crate::worktree::git_common_dir(project_root);
+    if cwd_common.is_some() && cwd_common == project_common {
+        worktree_root
+    } else {
+        project_root.to_path_buf()
+    }
+}
+
+fn branch_plan_for_root(
+    project_root: &Path,
+    hook_project_root: PathBuf,
+    branch: String,
+) -> HookEventPlan {
+    if paths_same(&hook_project_root, project_root) {
+        HookEventPlan::AddBranch(branch)
+    } else {
+        HookEventPlan::AddBranchAt {
+            root: hook_project_root,
+            branch,
+        }
+    }
+}
+
+fn paths_same(a: &Path, b: &Path) -> bool {
+    let a = a.canonicalize().unwrap_or_else(|_| a.to_path_buf());
+    let b = b.canonicalize().unwrap_or_else(|_| b.to_path_buf());
+    a == b
 }
 
 fn read_marker_secs(path: &Path) -> Option<i64> {
@@ -185,6 +239,7 @@ fn read_marker_secs(path: &Path) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::process::Command;
 
     use serde_json::json;
 
@@ -197,6 +252,52 @@ mod tests {
             Some(event) => event,
             None => panic!("hook event should parse"),
         }
+    }
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?} should run: {e}"));
+        assert!(
+            output.status.success(),
+            "git {:?} failed\nstdout:\n{}\nstderr:\n{}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn setup_linked_session_worktree() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf)
+    {
+        let base = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir should create: {e}"));
+        let base_root = base
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|e| panic!("tempdir should canonicalize: {e}"));
+        let project_root = base_root.join("project");
+        let worktree_root = base_root.join("session-worktree");
+        std::fs::create_dir_all(project_root.join("src"))
+            .unwrap_or_else(|e| panic!("project dirs should create: {e}"));
+        std::fs::write(project_root.join("src/lib.rs"), "pub fn marker() {}\n")
+            .unwrap_or_else(|e| panic!("source should write: {e}"));
+        run_git(&project_root, &["init", "-b", "main"]);
+        run_git(&project_root, &["config", "user.email", "test@test.com"]);
+        run_git(&project_root, &["config", "user.name", "Test"]);
+        run_git(&project_root, &["add", "."]);
+        run_git(&project_root, &["commit", "-m", "initial"]);
+        run_git(
+            &project_root,
+            &[
+                "worktree",
+                "add",
+                worktree_root.to_str().unwrap(),
+                "-b",
+                "feature/session",
+            ],
+        );
+        (base, project_root, worktree_root)
     }
 
     #[test]
@@ -355,6 +456,48 @@ mod tests {
             HookEventPlan::AddBranchAt {
                 root: base_root.join("wt"),
                 branch: "feature/daemon-hooks".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn plans_branch_switch_from_session_worktree_against_worktree_root() {
+        let (_base, project_root, worktree_root) = setup_linked_session_worktree();
+
+        let params = json!({
+            "agent": "codex",
+            "event": "postToolUseShell",
+            "command": "git switch feature/session",
+            "cwd": worktree_root
+        });
+        let event = parse_or_panic(&params);
+
+        assert_eq!(
+            plan_hook_event(&event, &project_root, Some("main")),
+            HookEventPlan::AddBranchAt {
+                root: worktree_root,
+                branch: "feature/session".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn plans_ambiguous_git_change_from_session_worktree_with_worktree_branch() {
+        let (_base, project_root, worktree_root) = setup_linked_session_worktree();
+
+        let params = json!({
+            "agent": "codex",
+            "event": "postToolUseShell",
+            "command": "git pull --rebase",
+            "cwd": worktree_root
+        });
+        let event = parse_or_panic(&params);
+
+        assert_eq!(
+            plan_hook_event(&event, &project_root, Some("main")),
+            HookEventPlan::AddBranchAt {
+                root: worktree_root,
+                branch: "feature/session".to_string(),
             }
         );
     }
