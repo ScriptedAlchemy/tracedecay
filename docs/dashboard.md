@@ -231,9 +231,8 @@ The Curation panel is organized into five sub-tabs:
 
 - **Plan**: Dry-run analysis showing proposed actions (persisted to
   `.tracedecay/dashboard/curation_preview.json` so it survives server
-  restarts), plus the Preview / Apply controls. Applying executes
-  deduplication (**permanently hard-DELETES** the lower-trust fact in each
-  duplicate pair).
+  restarts), plus the Preview / Apply controls. Applying deduplicates by
+  permanently deleting the lower-trust fact in each duplicate pair.
 - **Automation**: Scheduler state (with pause/resume), the effective
   automation config editor (backend, host mode, model, per-task schedules),
   per-task **Run** buttons for the memory curator / session reflector /

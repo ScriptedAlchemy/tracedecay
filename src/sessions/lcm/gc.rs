@@ -338,9 +338,7 @@ pub async fn run_payload_gc_with_apply(
         .and_then(|value| value.parse::<i64>().ok());
     report.last_error = schema::get_gc_meta(conn, "last_error").await?;
 
-    // Stores that never externalized a payload have no `lcm-payloads`
-    // directory. That is a healthy empty state, not an IO failure: report
-    // "nothing to reclaim" instead of erroring on the missing directory.
+    // A store with no payload directory has nothing to reclaim.
     if fs::symlink_metadata(payload::payload_dir(storage_root)).is_err() {
         report.ended_at = now;
         return Ok(report);

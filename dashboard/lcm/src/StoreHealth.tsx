@@ -1,19 +1,57 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
-/**
- * Store maintenance card: surfaces the LCM payload-health diagnostics
- * (`GET /payloads/health`) and drives the two-step payload GC flow
- * (`GET /payloads/gc` dry-run preview, then `POST /payloads/gc` with the
- * returned token to apply).
- */
-
 import React, { useCallback, useEffect, useState } from "react";
 import { fetchJSON } from "../../lib/sdk";
 import { ErrorPanel, SkeletonLines } from "../../lib/primitives";
 import { API, fmtInt, friendlyError } from "./helpers";
 import { TimeText } from "./components";
 
-function fmtBytes(value: any): string {
+interface PayloadHealth {
+  status?: string | null;
+  externalized_count?: number | string | null;
+  total_bytes?: number | string | null;
+  reclaimable_bytes_after_grace?: number | string | null;
+  orphan_file_count?: number | string | null;
+  orphan_file_bytes?: number | string | null;
+  missing_count?: number | string | null;
+  missing_placeholder_file_count?: number | string | null;
+  tombstoned_count?: number | string | null;
+  gc_candidate_count?: number | string | null;
+  last_gc_at?: number | string | null;
+  last_gc_status?: string | null;
+}
+
+interface PayloadHealthResponse {
+  payload_health?: PayloadHealth | null;
+}
+
+interface GcPhase {
+  count?: number | string | null;
+  bytes?: number | string | null;
+}
+
+interface GcTotals {
+  files?: number | string | null;
+  bytes?: number | string | null;
+  rows_deleted?: number | string | null;
+  placeholders_rewritten?: number | string | null;
+}
+
+interface GcReport {
+  orphans?: GcPhase | null;
+  unreferenced?: GcPhase | null;
+  missing?: GcPhase | null;
+  dangling?: GcPhase | null;
+  deferred?: GcPhase | null;
+  totals?: GcTotals | null;
+}
+
+interface GcResponse {
+  provider?: string | null;
+  session_id?: string | null;
+  dry_run_token?: string | null;
+  gc_report?: GcReport | null;
+}
+
+function fmtBytes(value: number | string | null | undefined): string {
   const bytes = Number(value) || 0;
   if (bytes < 1024) return `${bytes} B`;
   const units = ["KiB", "MiB", "GiB", "TiB"];
@@ -31,10 +69,10 @@ function healthPillClass(status: string): string {
   return "hermes-lcm-pill";
 }
 
-function gcPhaseSummary(report: any): string {
+function gcPhaseSummary(report: GcReport | null): string {
   if (!report) return "";
   const parts: string[] = [];
-  const phases: Array<[string, any]> = [
+  const phases: Array<[string, GcPhase | null | undefined]> = [
     ["orphans", report.orphans],
     ["unreferenced", report.unreferenced],
     ["missing", report.missing],
@@ -52,13 +90,13 @@ function gcPhaseSummary(report: any): string {
 }
 
 export function StoreHealthCard(): React.ReactElement {
-  const [health, setHealth] = useState<any>(null);
+  const [health, setHealth] = useState<PayloadHealthResponse | null>(null);
   const [healthLoading, setHealthLoading] = useState(false);
   const [healthError, setHealthError] = useState("");
   const [reloadToken, setReloadToken] = useState(0);
 
-  const [gcPreview, setGcPreview] = useState<any>(null);
-  const [gcApplied, setGcApplied] = useState<any>(null);
+  const [gcPreview, setGcPreview] = useState<GcResponse | null>(null);
+  const [gcApplied, setGcApplied] = useState<GcResponse | null>(null);
   const [gcBusy, setGcBusy] = useState(false);
   const [gcError, setGcError] = useState("");
 
@@ -66,7 +104,7 @@ export function StoreHealthCard(): React.ReactElement {
     let active = true;
     setHealthLoading(true);
     setHealthError("");
-    fetchJSON(`${API}/payloads/health`).then(function (json) {
+    fetchJSON<PayloadHealthResponse>(`${API}/payloads/health`).then(function (json) {
       if (active) setHealth(json);
     }).catch(function (err) {
       if (active) setHealthError(friendlyError(err));
@@ -84,7 +122,7 @@ export function StoreHealthCard(): React.ReactElement {
     setGcBusy(true);
     setGcError("");
     setGcApplied(null);
-    fetchJSON(`${API}/payloads/gc`).then(function (json: any) {
+    fetchJSON<GcResponse>(`${API}/payloads/gc`).then(function (json) {
       setGcPreview(json);
     }).catch(function (err) {
       setGcPreview(null);
@@ -98,7 +136,7 @@ export function StoreHealthCard(): React.ReactElement {
     if (!gcPreview || !gcPreview.dry_run_token) return;
     setGcBusy(true);
     setGcError("");
-    fetchJSON(`${API}/payloads/gc`, {
+    fetchJSON<GcResponse>(`${API}/payloads/gc`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -107,7 +145,7 @@ export function StoreHealthCard(): React.ReactElement {
         confirm: true,
         dry_run_token: gcPreview.dry_run_token,
       }),
-    }).then(function (json: any) {
+    }).then(function (json: GcResponse) {
       setGcApplied(json);
       setGcPreview(null);
       refresh();
