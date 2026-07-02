@@ -14,7 +14,7 @@ use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::TraceDecay;
 
-static HOME_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+use crate::support::HOME_ENV_LOCK;
 
 struct HomeEnvGuard {
     previous_home: Option<OsString>,

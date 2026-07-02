@@ -8,7 +8,8 @@
 //! - The dirty sentinel lifecycle works correctly
 //! - The full crash→detect→repair cycle works end-to-end
 
-mod common;
+use crate::common;
+use crate::support;
 
 use std::io::{Seek, Write};
 use tempfile::TempDir;
@@ -16,12 +17,17 @@ use tracedecay::db::Database;
 use tracedecay::types::*;
 
 /// Helper: create a temp database and return (Database, TempDir, db_path).
+/// Seeded from the cached latest-schema template instead of running
+/// `Database::initialize` per test; the initialize path itself is covered by
+/// `corrupt_db_detected_and_repaired_on_reopen` and db_test.
 async fn setup_db() -> (Database, TempDir, std::path::PathBuf) {
     let dir = TempDir::new().expect("failed to create temp dir");
     let db_path = dir.path().join("test.db");
-    let (db, _) = Database::initialize(&db_path)
+    support::seed_latest_graph_db(&db_path).await;
+    let (db, migrated) = Database::open(&db_path)
         .await
-        .expect("failed to initialize database");
+        .expect("failed to open template database");
+    assert!(!migrated, "template database should not require migration");
     (db, dir, db_path)
 }
 

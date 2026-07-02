@@ -4,14 +4,20 @@ use tempfile::TempDir;
 use tracedecay::db::Database;
 use tracedecay::types::*;
 
-/// Helper: create an in-memory-style temp database and return (Database, TempDir).
-/// The TempDir is returned so that it stays alive for the duration of the test.
+use crate::support;
+
+/// Helper: create an empty latest-schema temp database and return
+/// (Database, TempDir). Seeded from the cached template rather than running
+/// `Database::initialize` per test; `test_initialize_creates_database` still
+/// covers the real initialize path.
 async fn setup_db() -> (Database, TempDir) {
     let dir = TempDir::new().expect("failed to create temp dir");
     let db_path = dir.path().join("test.db");
-    let (db, _) = Database::initialize(&db_path)
+    support::seed_latest_graph_db(&db_path).await;
+    let (db, migrated) = Database::open(&db_path)
         .await
-        .expect("failed to initialize database");
+        .expect("failed to open template database");
+    assert!(!migrated, "template database should not require migration");
     (db, dir)
 }
 

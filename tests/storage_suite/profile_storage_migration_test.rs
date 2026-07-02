@@ -28,7 +28,7 @@ use tracedecay::storage::{
 };
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
-static HOME_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+use crate::support::HOME_ENV_LOCK;
 
 struct HomeEnvGuard {
     previous_home: Option<OsString>,

@@ -297,5 +297,5 @@ independent. Suggested order by impact:
 6. **Pattern 6** (path finding) — same technique, lower priority
 
 For each pattern, the existing test suite (`tests/graph_test.rs`,
-`tests/db_query_test.rs`) provides coverage — the optimizations change
+`tests/storage_suite/db_query_test.rs`) provides coverage — the optimizations change
 query strategy, not behavior.

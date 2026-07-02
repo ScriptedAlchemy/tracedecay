@@ -1,6 +1,5 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
 
 use libsql::Builder;
 #[cfg(unix)]
@@ -28,8 +27,9 @@ fn canonical_temp_path(path: &Path) -> PathBuf {
 }
 
 fn with_env_vars<T>(vars: &[(&str, Option<&Path>)], f: impl FnOnce() -> T) -> T {
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    // Shares the suite-wide lock because HOME/HERMES_HOME mutations here can
+    // race with the HomeEnvGuard-based modules under plain `cargo test`.
+    let _guard = crate::support::HOME_ENV_LOCK.blocking_lock();
     let previous = vars
         .iter()
         .map(|(name, _)| (*name, std::env::var_os(name)))

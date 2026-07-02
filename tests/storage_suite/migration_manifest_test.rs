@@ -2,9 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-mod common;
-
-use common::sample_node;
+use crate::common::sample_node;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 use tempfile::TempDir;
