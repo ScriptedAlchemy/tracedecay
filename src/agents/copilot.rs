@@ -16,7 +16,7 @@ use super::{
     DoctorCounters, HealthcheckContext, InstallContext,
 };
 
-const PROMPT_RULE_MARKER: &str = "## Prefer tracedecay MCP tools";
+use super::prompt_rules::{PromptRulesOptions, PROMPT_RULE_MARKER};
 
 /// GitHub Copilot agent.
 pub struct CopilotIntegration;
@@ -382,106 +382,20 @@ fn uninstall_cli_mcp_server(settings_path: &Path) {
 // Prompt rules helpers
 // ---------------------------------------------------------------------------
 
-/// Append prompt rules to a copilot-instructions.md file (idempotent).
+/// Install-or-refresh prompt rules in a copilot-instructions.md file.
 fn install_prompt_rules(instructions_path: &Path) -> Result<()> {
-    use std::io::Write;
-    let existing = if instructions_path.exists() {
-        std::fs::read_to_string(instructions_path).unwrap_or_default()
-    } else {
-        String::new()
-    };
-    if existing.contains(PROMPT_RULE_MARKER) {
-        eprintln!(
-            "  {} already contains tracedecay rules, skipping",
-            instructions_path.display()
-        );
-        return Ok(());
-    }
-    if let Some(parent) = instructions_path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(instructions_path)
-        .map_err(|e| crate::errors::TraceDecayError::Config {
-            message: format!("failed to open {}: {e}", instructions_path.display()),
-        })?;
-    write!(
-        f,
-        "\n{PROMPT_RULE_MARKER}\n\n\
-        Before reading source files or scanning the codebase, use the tracedecay MCP tools \
-        (`tracedecay_context`, `tracedecay_search`, `tracedecay_callers`, `tracedecay_callees`, \
-        `tracedecay_impact`, `tracedecay_node`, `tracedecay_files`, `tracedecay_affected`). \
-        They provide instant semantic results from a pre-built knowledge graph and are \
-        faster than file reads.\n\n\
-        For project/storage identity questions, use `tracedecay_active_project` \
-        or `tracedecay_storage_status` instead of inferring from repo-local marker \
-        files or direct DB paths.\n\n\
-        If a code analysis question cannot be fully answered by tracedecay MCP tools, \
-        prefer built-in MCP tools first. If the user explicitly needs raw store \
-        inspection, use the resolved graph DB path reported by `tracedecay_storage_status` \
-        rather than a hardcoded repo-local path. Use SQL to answer complex structural \
-        queries that go beyond what the built-in tools expose.\n\n\
-        For durable project/user facts, prefer `tracedecay_fact_store`, \
-        `tracedecay_fact_feedback`, and `tracedecay_memory_status` over ad-hoc notes. \
-        Use `tracedecay_message_search` for active-project transcript recall when \
-        prior conversation context matters. Do not store secrets, credentials, or \
-        unnecessary PII in persistent facts.\n\n\
-        If you find a gap where tracedecay could answer a question natively, propose opening \
-        an issue at https://github.com/ScriptedAlchemy/tracedecay. Remind the user to strip \
-        sensitive or proprietary code from any issue text before submitting.\n"
-    )
-    .map_err(|e| crate::errors::TraceDecayError::Config {
-        message: format!("failed to write {}: {e}", instructions_path.display()),
-    })?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Added tracedecay rules to {}",
-        instructions_path.display()
+    let block = super::prompt_rules::standard_prompt_rules(
+        PROMPT_RULE_MARKER,
+        &PromptRulesOptions {
+            extra_paragraphs: &[],
+        },
     );
-    Ok(())
+    super::prompt_rules::reconcile_prompt_rules(instructions_path, PROMPT_RULE_MARKER, &block)
 }
 
 /// Remove tracedecay rules from a copilot-instructions.md file.
 fn uninstall_prompt_rules(instructions_path: &Path) {
-    if !instructions_path.exists() {
-        return;
-    }
-    let Ok(contents) = std::fs::read_to_string(instructions_path) else {
-        return;
-    };
-    if !contents.contains("tracedecay") {
-        return;
-    }
-    let marker = PROMPT_RULE_MARKER;
-    let Some(start) = contents.find(marker) else {
-        return;
-    };
-    let after_marker = start + marker.len();
-    let end = contents[after_marker..]
-        .find("\n## ")
-        .map_or(contents.len(), |pos| after_marker + pos);
-    let mut new_contents = String::new();
-    new_contents.push_str(contents[..start].trim_end());
-    let remainder = &contents[end..];
-    if !remainder.is_empty() {
-        new_contents.push_str("\n\n");
-        new_contents.push_str(remainder.trim_start());
-    }
-    let new_contents = new_contents.trim().to_string();
-    if new_contents.is_empty() {
-        std::fs::remove_file(instructions_path).ok();
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed {} (was empty)",
-            instructions_path.display()
-        );
-    } else {
-        std::fs::write(instructions_path, format!("{new_contents}\n")).ok();
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay rules from {}",
-            instructions_path.display()
-        );
-    }
+    super::prompt_rules::remove_prompt_rules(instructions_path, PROMPT_RULE_MARKER);
 }
 
 // ---------------------------------------------------------------------------
