@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.21](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.20...v0.0.21) - 2026-07-02
+
+### Fixed
+
+- ride out daemon restarts in MCP daemon clients
+
+### Other
+
+- Merge remote-tracking branch 'origin/master' into codex/self-improve-20260701
+- Merge remote-tracking branch 'origin/master' into codex/update-daemon-reconnect
+- Merge pull request #173 from ScriptedAlchemy/codex/daemon-incremental-sync
+- address plugin skill contract review findings
+- add canonical skill frontmatter parser
+- add plugin skill contract checks
+
 ### Other
 
 - isolate the test suite from the real `~/.tracedecay` profile by default
