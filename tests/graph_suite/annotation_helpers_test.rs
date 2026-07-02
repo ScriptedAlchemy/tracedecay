@@ -1,8 +1,6 @@
-mod types {
-    pub use tracedecay::types::*;
-}
-
-#[path = "../src/extraction/annotations.rs"]
+// `crate::types` (needed by the included `annotations.rs`) is provided by the
+// `types` shim in this suite's `main.rs`.
+#[path = "../../src/extraction/annotations.rs"]
 mod annotations;
 
 use annotations::{

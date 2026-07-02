@@ -1,6 +1,4 @@
-mod common;
-
-use common::{EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK};
+use crate::common::{EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK};
 use std::path::Path;
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::hooks::{

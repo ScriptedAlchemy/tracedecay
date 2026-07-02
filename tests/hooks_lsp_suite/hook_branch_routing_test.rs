@@ -13,8 +13,6 @@ use tracedecay::hooks::{
 use tracedecay::storage::{write_enrollment_marker, EnrollmentMarker, StorageMode};
 use tracedecay::tracedecay::TraceDecay;
 
-static HOME_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 struct HomeEnvGuard {
     previous_home: Option<OsString>,
     previous_userprofile: Option<OsString>,
@@ -163,8 +161,14 @@ fn ambiguous_state_changes_fall_back_to_current_branch_when_available() {
 }
 
 #[tokio::test]
+// Intentional: HOME/USERPROFILE/profile env stay pinned while the awaited
+// branch-tracking call runs; all env-mutating tests in this binary serialize
+// on the shared lock.
+#[allow(clippy::await_holding_lock)]
 async fn hook_branch_tracking_writes_profile_sharded_branch_db() {
-    let _guard = HOME_ENV_LOCK.lock().await;
+    let _guard = crate::common::GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let dir = TempDir::new().unwrap();
     let temp_root = canonical_temp_path(dir.path());
     let home = temp_root.join("home");
