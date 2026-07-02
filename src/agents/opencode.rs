@@ -122,6 +122,24 @@ impl AgentIntegration for OpenCodeIntegration {
             )?,
         ])
     }
+
+    fn export_managed_skills_local(
+        &self,
+        project_root: &Path,
+        profile_root: &Path,
+    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+        let agents_md = project_root.join("AGENTS.md");
+        if !project_root.join("opencode.json").exists() || !agents_md.exists() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![
+            crate::automation::skill_targets::install_managed_skills(
+                profile_root,
+                crate::automation::skill_targets::SkillInstallTarget::OpenCode,
+                &agents_md,
+            )?,
+        ])
+    }
 }
 
 // ---------------------------------------------------------------------------

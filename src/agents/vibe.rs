@@ -140,6 +140,24 @@ impl AgentIntegration for VibeIntegration {
             )?,
         ])
     }
+
+    fn export_managed_skills_local(
+        &self,
+        project_root: &Path,
+        profile_root: &Path,
+    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+        let prompt_path = project_root.join(".vibe/prompts/cli.md");
+        if !project_root.join(".vibe/config.toml").exists() || !prompt_path.exists() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![
+            crate::automation::skill_targets::install_managed_skills(
+                profile_root,
+                crate::automation::skill_targets::SkillInstallTarget::Agents,
+                &prompt_path,
+            )?,
+        ])
+    }
 }
 
 // ---------------------------------------------------------------------------

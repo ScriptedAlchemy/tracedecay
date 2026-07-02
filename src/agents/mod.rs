@@ -110,6 +110,37 @@ pub fn export_managed_skills_to_agents(
     reports
 }
 
+/// Re-runs managed-skill exports for global installs under `home` plus
+/// project-local installs under `project_root`. Reports are merged per agent
+/// so dashboard callers can present one lifecycle refresh result per host.
+pub fn export_managed_skills_to_agent_hosts(
+    home: &Path,
+    project_root: &Path,
+    profile_root: &Path,
+) -> Vec<ManagedSkillExportReport> {
+    let mut reports = Vec::new();
+    for ag in all_integrations() {
+        let mut exports = Vec::new();
+        let mut errors = Vec::new();
+        match ag.export_managed_skills(home, profile_root) {
+            Ok(global_exports) => exports.extend(global_exports),
+            Err(err) => errors.push(err.to_string()),
+        }
+        match ag.export_managed_skills_local(project_root, profile_root) {
+            Ok(local_exports) => exports.extend(local_exports),
+            Err(err) => errors.push(err.to_string()),
+        }
+        if !exports.is_empty() || !errors.is_empty() {
+            reports.push(ManagedSkillExportReport {
+                agent: ag.id().to_string(),
+                exports,
+                error: (!errors.is_empty()).then(|| errors.join("; ")),
+            });
+        }
+    }
+    reports
+}
+
 // ---------------------------------------------------------------------------
 // AgentIntegration trait
 // ---------------------------------------------------------------------------
@@ -184,6 +215,17 @@ pub trait AgentIntegration {
     fn export_managed_skills(
         &self,
         _home: &Path,
+        _profile_root: &Path,
+    ) -> Result<Vec<SkillInstallSummary>> {
+        Ok(Vec::new())
+    }
+
+    /// Re-export active managed skills into destinations created by
+    /// [`AgentIntegration::install_local`] under a project/workspace. The
+    /// default is a no-op for agents without project-local skill exports.
+    fn export_managed_skills_local(
+        &self,
+        _project_root: &Path,
         _profile_root: &Path,
     ) -> Result<Vec<SkillInstallSummary>> {
         Ok(Vec::new())

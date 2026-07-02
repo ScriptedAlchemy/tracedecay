@@ -333,14 +333,22 @@ fn managed_skills_are_dashboard_controllable_with_explicit_approval() {
         );
         assert_eq!(updated["skill"]["metadata"]["state"], "pending_approval");
 
-        // A detected Claude Code install must receive the export as soon as
-        // the dashboard approves the skill — not on the next `tracedecay
-        // install` / `update-plugin`.
+        // Detected global and project-local Claude Code installs must receive
+        // the export as soon as the dashboard approves the skill — not on the
+        // next `tracedecay install` / `update-plugin`.
         let claude_md = home.join(".claude/CLAUDE.md");
         std::fs::create_dir_all(home.join(".claude")).unwrap();
         std::fs::write(&claude_md, "# Claude rules\n").unwrap();
         std::fs::write(
             home.join(".claude.json"),
+            r#"{"mcpServers":{"tracedecay":{"command":"tracedecay","args":["serve"]}}}"#,
+        )
+        .unwrap();
+        let local_claude_md = project_root.join(".claude/CLAUDE.md");
+        std::fs::create_dir_all(project_root.join(".claude")).unwrap();
+        std::fs::write(&local_claude_md, "# Local Claude rules\n").unwrap();
+        std::fs::write(
+            project_root.join(".mcp.json"),
             r#"{"mcpServers":{"tracedecay":{"command":"tracedecay","args":["serve"]}}}"#,
         )
         .unwrap();
@@ -371,15 +379,29 @@ fn managed_skills_are_dashboard_controllable_with_explicit_approval() {
                 "{action} claude export should succeed: {claude_report}"
             );
             let expected_count = i64::from(expect_deployed);
+            let export_counts = claude_report["exports"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{action} should report claude exports: {payload}"))
+                .iter()
+                .map(|export| export["exported_count"].as_i64().unwrap())
+                .collect::<Vec<_>>();
             assert_eq!(
-                claude_report["exports"][0]["exported_count"], expected_count,
-                "{action} should leave {expected_count} skill(s) deployed"
+                export_counts,
+                vec![expected_count, expected_count],
+                "{action} should refresh global and local Claude exports"
             );
             let claude_contents = std::fs::read_to_string(&claude_md).unwrap();
             assert_eq!(
                 claude_contents.contains("repo-hygiene"),
                 expect_deployed,
                 "{action} should {} the skill in CLAUDE.md: {claude_contents}",
+                if expect_deployed { "deploy" } else { "retract" }
+            );
+            let local_claude_contents = std::fs::read_to_string(&local_claude_md).unwrap();
+            assert_eq!(
+                local_claude_contents.contains("repo-hygiene"),
+                expect_deployed,
+                "{action} should {} the skill in local CLAUDE.md: {local_claude_contents}",
                 if expect_deployed { "deploy" } else { "retract" }
             );
         }

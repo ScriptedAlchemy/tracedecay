@@ -227,6 +227,22 @@ impl AgentIntegration for KiroIntegration {
             &managed_skill_index_path(home),
         )?])
     }
+
+    fn export_managed_skills_local(
+        &self,
+        project_root: &Path,
+        profile_root: &Path,
+    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+        let skill_index_path = project_root.join(".kiro/steering/tracedecay-managed-skills.md");
+        if !skill_index_path.exists() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![install_managed_skills(
+            profile_root,
+            SkillInstallTarget::Kiro,
+            &skill_index_path,
+        )?])
+    }
 }
 
 // ---------------------------------------------------------------------------
