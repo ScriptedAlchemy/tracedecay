@@ -331,10 +331,7 @@ async fn lifecycle_export_sweep_deploys_and_retracts_across_detected_agents() {
         .unwrap();
 
     let reports = export_managed_skills_to_agents(&home, &profile_root);
-    let agents: Vec<&str> = reports
-        .iter()
-        .map(|report| report.agent.as_str())
-        .collect();
+    let agents: Vec<&str> = reports.iter().map(|report| report.agent.as_str()).collect();
     assert_eq!(agents, vec!["claude", "cursor"], "reports: {reports:?}");
     for report in &reports {
         assert_eq!(report.error, None, "{} export failed", report.agent);
