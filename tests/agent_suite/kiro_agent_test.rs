@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use common::EnvVarGuard;
+use crate::common::EnvVarGuard;
 use tempfile::TempDir;
 use tracedecay::agents::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, KiroIntegration,
@@ -12,9 +12,7 @@ use tracedecay::automation::managed_skills::{
 };
 use tracedecay::config::USER_DATA_DIR_ENV;
 
-mod common;
-
-static KIRO_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+use crate::common::PROCESS_ENV_LOCK as KIRO_ENV_LOCK;
 
 fn make_ctx(home: &Path) -> InstallContext {
     InstallContext {

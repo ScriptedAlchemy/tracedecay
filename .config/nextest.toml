@@ -31,7 +31,7 @@ platform = { host = 'cfg(windows)' }
 test-group = 'windows-dashboard-server'
 
 [[profile.ci.overrides]]
-filter = 'binary(=agent_test) | binary(=branch_db_safety_test) | binary(=cli_non_interactive_test) | binary(=mcp_cli_serve_test)'
+filter = 'binary(=agent_suite) | binary(=branch_db_safety_test) | binary(=cli_non_interactive_test) | binary(=mcp_cli_serve_test)'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-tracedecay-init'
 

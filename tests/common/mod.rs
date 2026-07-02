@@ -888,3 +888,11 @@ pub fn write_pyyaml_shim(scratch: &Path) -> PathBuf {
     std::fs::write(shim_dir.join("yaml.py"), PYYAML_SHIM).unwrap();
     shim_dir
 }
+
+/// Serializes tests that mutate process-wide environment variables (HOME,
+/// USER_DATA_DIR_ENV, HERMES_HOME, ...) across every module of a consolidated
+/// test binary. Only matters for in-process runners like `cargo test`;
+/// nextest runs one process per test. A tokio mutex so async tests can hold
+/// the guard across `.await` (sync tests use `blocking_lock`), and unlike a
+/// std mutex it cannot poison when a failing test panics while holding it.
+pub static PROCESS_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());

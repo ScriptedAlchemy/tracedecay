@@ -9,22 +9,17 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
 
 use tempfile::TempDir;
 use tracedecay::agents::{get_integration, InstallContext, UpdatePluginOutcome};
 
-mod common;
-use common::EnvVarGuard;
+use crate::common::{EnvVarGuard, PROCESS_ENV_LOCK};
 
 const OLD_BIN: &str = "/old/bin/tracedecay";
 const NEW_BIN: &str = "/new/bin/tracedecay";
-static HERMES_ENV_LOCK: Mutex<()> = Mutex::new(());
 
-fn hermes_env_guard() -> (MutexGuard<'static, ()>, EnvVarGuard) {
-    let lock = HERMES_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
+fn hermes_env_guard() -> (tokio::sync::MutexGuard<'static, ()>, EnvVarGuard) {
+    let lock = PROCESS_ENV_LOCK.blocking_lock();
     let guard = EnvVarGuard::unset("HERMES_HOME");
     (lock, guard)
 }
