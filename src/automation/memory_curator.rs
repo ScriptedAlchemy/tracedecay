@@ -53,6 +53,7 @@ pub async fn run_memory_curator_with_backend(
 ) -> Result<MemoryCuratorAutomationRun> {
     let mut run = AgentTaskRunContext::new(
         cg.store_layout().dashboard_root.clone(),
+        cg.store_layout().sessions_db_path.clone(),
         options.run_id.clone(),
         "memory_curator",
         options.trigger,

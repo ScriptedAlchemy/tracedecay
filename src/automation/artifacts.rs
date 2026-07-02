@@ -12,6 +12,7 @@ use super::artifact_refs::artifact_ref;
 use super::backend::{
     prompt_version, task_key, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
 };
+use super::outcomes::load_outcomes_snapshot;
 use super::run_ledger::{
     write_run_artifact, AutomationRunArtifact, AutomationRunArtifactKind, AutomationRunLedgerRecord,
 };
@@ -74,6 +75,11 @@ pub(crate) async fn write_improvement_artifacts(
     let task_key = task_key(task);
     let prompt_version = prompt_version(task);
     let policy = artifact_policy(task);
+    // A missing or unreadable outcomes snapshot must never block the run's
+    // artifact trail; it only means no post-approval signal is available yet.
+    let outcomes = load_outcomes_snapshot(dashboard_root)
+        .await
+        .unwrap_or_default();
     let ctx = ArtifactPayloadContext {
         run_id,
         task,
@@ -83,6 +89,7 @@ pub(crate) async fn write_improvement_artifacts(
         request,
         response,
         record,
+        outcomes: &outcomes,
     };
     let mut writer = ImprovementArtifactWriter::new(dashboard_root, run_id, &created_at);
 

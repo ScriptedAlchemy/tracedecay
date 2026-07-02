@@ -10,8 +10,8 @@ The `tracedecay` binary exposes every MCP tool as a shell command. MCP and CLI h
 ## Discovery
 
 1. **List every tool → `tracedecay tool`** (no name): all tools grouped by category with one-line summaries.
-2. **One tool's parameters → `tracedecay tool <name> --help`**: the tool's full description plus each parameter with its type and required/optional flag.
-3. **Everything else → `tracedecay --help`**: the non-tool subcommands (`init`, `sync`, `status`, `doctor`, `daemon`, `sessions`, `dashboard`, …).
+2. **One tool's parameters → `tracedecay tool <name> --help`**: the tool's full description, a ready-to-copy usage line with its required flags, and each parameter with its type and required/optional flag.
+3. **Everything else → `tracedecay --help`**: the non-tool subcommands (`init`, `sync`, `status`, `doctor`, `daemon`, `sessions`, `dashboard`, …) plus a quick-start trailer that restates this discovery flow. Every subcommand's own `--help` carries an `Examples:` section with real flag combinations and `Related:` cross-references — read it before improvising flags.
 
 ## Invocation
 

@@ -16,7 +16,8 @@ use super::run_ledger::{
     AutomationTrigger,
 };
 use super::scheduler::{
-    schedule_decision, stale_lock_secs, AutomationScheduleDecision, AutomationTaskLock,
+    load_session_activity, schedule_decision, stale_lock_secs, AutomationScheduleDecision,
+    AutomationTaskLock,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::current_timestamp;
@@ -37,6 +38,9 @@ pub(crate) struct AgentTaskRunContext<'a> {
     pub(crate) run_id: String,
     pub(crate) trigger: AutomationTrigger,
     pub(crate) dashboard_root: PathBuf,
+    /// LCM sessions database for the project store; the scheduler gate reads
+    /// its newest message timestamp as the session-activity signal.
+    sessions_db_path: PathBuf,
     config: &'a AutomationConfig,
     task: AgentTaskKind,
     started_at: String,
@@ -50,6 +54,7 @@ pub(crate) struct AgentTaskRunContext<'a> {
 impl<'a> AgentTaskRunContext<'a> {
     pub(crate) fn new(
         dashboard_root: PathBuf,
+        sessions_db_path: PathBuf,
         run_id: Option<String>,
         run_id_prefix: &'static str,
         trigger: AutomationTrigger,
@@ -60,6 +65,7 @@ impl<'a> AgentTaskRunContext<'a> {
             run_id: run_id.unwrap_or_else(|| generated_run_id(run_id_prefix)),
             trigger,
             dashboard_root,
+            sessions_db_path,
             config,
             task,
             started_at: current_timestamp().to_string(),
@@ -72,8 +78,14 @@ impl<'a> AgentTaskRunContext<'a> {
     }
 
     pub(crate) async fn gate(&mut self) -> Result<SchedulerGate> {
-        let (gate, records) =
-            task_run_gate(self.config, &self.dashboard_root, self.task, self.trigger).await?;
+        let (gate, records) = task_run_gate(
+            self.config,
+            &self.dashboard_root,
+            &self.sessions_db_path,
+            self.task,
+            self.trigger,
+        )
+        .await?;
         self.ledger_records = records;
         Ok(gate)
     }
@@ -149,6 +161,7 @@ pub(crate) fn task_skip_reason(
 pub(crate) async fn scheduler_gate(
     config: &AutomationConfig,
     dashboard_root: &Path,
+    sessions_db_path: &Path,
     task: AgentTaskKind,
     trigger: AutomationTrigger,
 ) -> Result<(SchedulerGate, Option<Vec<AutomationRunLedgerRecord>>)> {
@@ -169,7 +182,8 @@ pub(crate) async fn scheduler_gate(
         return Ok((SchedulerGate::Skip("scheduler_lock_active"), Some(records)));
     };
 
-    let decision = schedule_decision(config, task, &records, now_secs);
+    let activity = load_session_activity(sessions_db_path).await;
+    let decision = schedule_decision(config, task, &records, activity, now_secs);
     if let Some(reason) = scheduler_skip_reason(&decision, task) {
         return Ok((SchedulerGate::Skip(reason), Some(records)));
     }
@@ -180,10 +194,12 @@ pub(crate) async fn scheduler_gate(
 pub(crate) async fn task_run_gate(
     config: &AutomationConfig,
     dashboard_root: &Path,
+    sessions_db_path: &Path,
     task: AgentTaskKind,
     trigger: AutomationTrigger,
 ) -> Result<(SchedulerGate, Option<Vec<AutomationRunLedgerRecord>>)> {
-    let (gate, records) = scheduler_gate(config, dashboard_root, task, trigger).await?;
+    let (gate, records) =
+        scheduler_gate(config, dashboard_root, sessions_db_path, task, trigger).await?;
     let gate = match gate {
         SchedulerGate::Skip(reason) => SchedulerGate::Skip(reason),
         SchedulerGate::Proceed(lock) => match task_skip_reason(config, task) {
@@ -378,6 +394,12 @@ pub(crate) struct AgentRunFinalizer<'a> {
     task: AgentTaskKind,
     started_at: &'a str,
     input_hash: Option<String>,
+    /// When set, this finalizer records one half of a combined
+    /// reflector+skill run: ledger records keep their per-task `task` and
+    /// `task_key` (so per-task last-run bookkeeping still works) but carry
+    /// the combined contract's `prompt_version`/`response_schema` plus a
+    /// `combined_run_id` correlation in `report_ref`.
+    combined_run_id: Option<String>,
 }
 
 impl<'a> AgentRunFinalizer<'a> {
@@ -398,7 +420,14 @@ impl<'a> AgentRunFinalizer<'a> {
             task,
             started_at,
             input_hash,
+            combined_run_id: None,
         }
+    }
+
+    #[must_use]
+    pub(crate) fn for_combined_run(mut self, combined_run_id: String) -> Self {
+        self.combined_run_id = Some(combined_run_id);
+        self
     }
 
     pub(crate) async fn append_backend_fallback_record(
@@ -406,7 +435,7 @@ impl<'a> AgentRunFinalizer<'a> {
         evidence_hash: Option<String>,
         error: String,
     ) -> Result<AutomationRunLedgerRecord> {
-        let record = failed_backend_fallback_record(
+        let mut record = failed_backend_fallback_record(
             self.run_id,
             self.trigger,
             self.config,
@@ -416,6 +445,7 @@ impl<'a> AgentRunFinalizer<'a> {
             error,
             self.started_at,
         );
+        self.annotate_combined_run(&mut record);
         append_run_record(self.dashboard_root, &record).await?;
         Ok(record)
     }
@@ -560,6 +590,23 @@ impl<'a> AgentRunFinalizer<'a> {
     fn finish_record(&self, record: &mut AutomationRunLedgerRecord) {
         record.input_hash.clone_from(&self.input_hash);
         record.output_hash = record.proposed_ops.as_ref().map(sha256_json);
+        self.annotate_combined_run(record);
+    }
+
+    fn annotate_combined_run(&self, record: &mut AutomationRunLedgerRecord) {
+        let Some(combined_run_id) = &self.combined_run_id else {
+            return;
+        };
+        let contract = agent_task_contract(AgentTaskKind::CombinedReview);
+        record.prompt_version = Some(contract.prompt_version);
+        record.response_schema = Some(contract.response_schema);
+        if let Some(report_ref) = record.report_ref.as_mut().and_then(Value::as_object_mut) {
+            report_ref.insert("combined_run_id".to_string(), json!(combined_run_id));
+            report_ref.insert(
+                "combined_task_key".to_string(),
+                json!(task_key(AgentTaskKind::CombinedReview)),
+            );
+        }
     }
 }
 
@@ -568,6 +615,9 @@ fn task_disabled(config: &AutomationConfig, task: AgentTaskKind) -> bool {
         AgentTaskKind::MemoryCurator => !config.tasks.memory_curator.enabled,
         AgentTaskKind::SessionReflector => !config.tasks.session_reflector.enabled,
         AgentTaskKind::SkillWriter => !config.tasks.skill_writer.enabled,
+        AgentTaskKind::CombinedReview => {
+            !config.tasks.session_reflector.enabled || !config.tasks.skill_writer.enabled
+        }
     }
 }
 
@@ -576,6 +626,7 @@ fn task_disabled_reason(task: AgentTaskKind) -> &'static str {
         AgentTaskKind::MemoryCurator => "memory_curator_disabled",
         AgentTaskKind::SessionReflector => "session_reflector_disabled",
         AgentTaskKind::SkillWriter => "skill_writer_disabled",
+        AgentTaskKind::CombinedReview => "combined_review_disabled",
     }
 }
 
@@ -589,7 +640,7 @@ fn scheduler_skip_reason(
     }
 }
 
-fn generated_run_id(prefix: &str) -> String {
+pub(crate) fn generated_run_id(prefix: &str) -> String {
     let mut random = [0u8; 8];
     let entropy = match getrandom::getrandom(&mut random) {
         Ok(()) => hex::encode(random),
@@ -665,6 +716,7 @@ fn noop_output_for_task(task: AgentTaskKind) -> Value {
         AgentTaskKind::MemoryCurator => json!({ "ops": [] }),
         AgentTaskKind::SessionReflector => json!({ "facts": [] }),
         AgentTaskKind::SkillWriter => json!({ "skills": [] }),
+        AgentTaskKind::CombinedReview => json!({ "facts": [], "skills": [] }),
     }
 }
 
@@ -695,6 +747,7 @@ mod tests {
         let config = AutomationConfig::default();
         let mut run = AgentTaskRunContext::new(
             dashboard_root.to_path_buf(),
+            dashboard_root.join("sessions.db"),
             Some(run_id.to_string()),
             "test",
             trigger,
@@ -825,6 +878,7 @@ mod tests {
         let config = scheduler_enabled_config();
         let mut run = AgentTaskRunContext::new(
             dashboard_root.to_path_buf(),
+            dashboard_root.join("sessions.db"),
             Some(run_id.to_string()),
             "test",
             AutomationTrigger::Scheduler,

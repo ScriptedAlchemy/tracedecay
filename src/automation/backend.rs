@@ -17,6 +17,11 @@ pub enum AgentTaskKind {
     MemoryCurator,
     SessionReflector,
     SkillWriter,
+    /// One backend call covering both the session reflector and the skill
+    /// writer when the scheduler finds both due in the same tick. The
+    /// response must carry both a `facts` and a `skills` array; each array is
+    /// validated and applied by the existing per-task pipelines.
+    CombinedReview,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -214,32 +219,42 @@ pub fn task_key(task: AgentTaskKind) -> &'static str {
         AgentTaskKind::MemoryCurator => "memory_curator",
         AgentTaskKind::SessionReflector => "session_reflector",
         AgentTaskKind::SkillWriter => "skill_writer",
+        AgentTaskKind::CombinedReview => "combined_review",
     }
 }
 
 pub fn prompt_version(task: AgentTaskKind) -> &'static str {
     match task {
         AgentTaskKind::MemoryCurator => "memory_curator:v1",
-        AgentTaskKind::SessionReflector => "session_reflector:v1",
-        AgentTaskKind::SkillWriter => "skill_writer:v1",
+        AgentTaskKind::SessionReflector => "session_reflector:v2",
+        AgentTaskKind::SkillWriter => "skill_writer:v2",
+        AgentTaskKind::CombinedReview => "combined_review:v1",
     }
 }
 
 fn response_schema(task: AgentTaskKind) -> Value {
     match task {
-        AgentTaskKind::MemoryCurator => json_schema_for_array_property("ops"),
-        AgentTaskKind::SessionReflector => json_schema_for_array_property("facts"),
-        AgentTaskKind::SkillWriter => json_schema_for_array_property("skills"),
+        AgentTaskKind::MemoryCurator => json_schema_for_array_properties(&["ops"]),
+        AgentTaskKind::SessionReflector => json_schema_for_array_properties(&["facts"]),
+        AgentTaskKind::SkillWriter => json_schema_for_array_properties(&["skills"]),
+        AgentTaskKind::CombinedReview => json_schema_for_array_properties(&["facts", "skills"]),
     }
 }
 
-fn json_schema_for_array_property(property: &str) -> Value {
+fn json_schema_for_array_properties(properties: &[&str]) -> Value {
+    let schema_properties: serde_json::Map<String, Value> = properties
+        .iter()
+        .map(|property| {
+            (
+                (*property).to_string(),
+                serde_json::json!({ "type": "array" }),
+            )
+        })
+        .collect();
     serde_json::json!({
         "type": "object",
-        "required": [property],
-        "properties": {
-            property: { "type": "array" }
-        },
+        "required": properties,
+        "properties": schema_properties,
         "additionalProperties": true
     })
 }
@@ -453,15 +468,15 @@ fn validate_response_schema(value: &Value, contract: &AgentTaskContract) -> Resu
         .response_schema
         .get("required")
         .and_then(Value::as_array)
-        .and_then(|required| required.first())
-        .and_then(Value::as_str)
     else {
         return Ok(());
     };
-    if value.get(required).and_then(Value::as_array).is_none() {
-        return config_error(format!(
-            "automation backend output must include a {required} array"
-        ));
+    for property in required.iter().filter_map(Value::as_str) {
+        if value.get(property).and_then(Value::as_array).is_none() {
+            return config_error(format!(
+                "automation backend output must include a {property} array"
+            ));
+        }
     }
     Ok(())
 }

@@ -128,6 +128,7 @@ impl ManagedSkillDraft {
                 checksum: String::new(),
                 created_at: now,
                 updated_at: now,
+                approved_at: None,
                 provenance: self.provenance,
             },
             body_markdown: self.body_markdown,
@@ -155,6 +156,11 @@ pub struct ManagedSkillMetadata {
     pub created_at: i64,
     #[serde(default)]
     pub updated_at: i64,
+    /// When the skill last transitioned into `Active` (human approval).
+    /// Anchors post-approval outcome tracking; absent for never-approved
+    /// skills and records written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_at: Option<i64>,
     pub provenance: ManagedSkillProvenance,
 }
 
@@ -214,6 +220,9 @@ impl ManagedSkill {
     pub fn set_state(&mut self, state: ManagedSkillState) {
         if self.metadata.state != state {
             self.metadata.state = state;
+            if state == ManagedSkillState::Active {
+                self.metadata.approved_at = Some(current_metadata_timestamp());
+            }
             self.touch();
         }
     }

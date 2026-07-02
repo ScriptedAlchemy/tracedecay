@@ -9,6 +9,7 @@ use super::config::{
 };
 use super::run_ledger::{AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger};
 use crate::errors::{Result, TraceDecayError};
+use crate::global_db::GlobalDb;
 
 const DEFAULT_FAILURE_COOLDOWN_SECS: u64 = 300;
 const DEFAULT_STALE_LOCK_SECS: u64 = 6 * 60 * 60;
@@ -25,6 +26,42 @@ pub enum AutomationSchedule {
     Manual,
     ConfiguredInterval,
     Interval { every_secs: u64 },
+}
+
+/// Most recent LCM session ingest activity for the project, in unix seconds.
+///
+/// `None` means the session store does not exist yet or holds no timestamped
+/// messages; gates that need an activity signal treat that as "no activity
+/// observed" rather than an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SessionActivity {
+    pub last_activity_secs: Option<i64>,
+}
+
+impl SessionActivity {
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    pub fn at(last_activity_secs: i64) -> Self {
+        Self {
+            last_activity_secs: Some(last_activity_secs),
+        }
+    }
+}
+
+/// Reads the session-activity signal from the LCM sessions database.
+///
+/// This is a single indexed `ORDER BY timestamp DESC LIMIT 1` lookup against
+/// the read-only store, so it is cheap and race-safe to call from every
+/// scheduler tick; concurrent ingest writers only ever move the value forward.
+pub async fn load_session_activity(sessions_db_path: &Path) -> SessionActivity {
+    let Some(db) = GlobalDb::open_read_only_at(sessions_db_path).await else {
+        return SessionActivity::none();
+    };
+    SessionActivity {
+        last_activity_secs: db.latest_session_activity_secs().await,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,6 +207,7 @@ pub fn schedule_decision(
     config: &AutomationConfig,
     task: AgentTaskKind,
     records: &[AutomationRunLedgerRecord],
+    activity: SessionActivity,
     now_secs: i64,
 ) -> AutomationScheduleDecision {
     if !config.enabled {
@@ -181,7 +219,9 @@ pub fn schedule_decision(
     if config.backend == AutomationBackend::Disabled {
         return AutomationScheduleDecision::skipped("backend_disabled");
     }
-    let task_config = task_config(config, task);
+    let Some(task_config) = task_config(config, task) else {
+        return AutomationScheduleDecision::skipped("task_not_schedulable");
+    };
     if !task_config.enabled {
         return AutomationScheduleDecision::skipped("task_disabled");
     }
@@ -200,10 +240,12 @@ pub fn schedule_decision(
         return AutomationScheduleDecision::skipped("scheduler_schedule_manual");
     };
 
+    // `min_idle_secs` is a true idle window: the project must have been quiet
+    // (no LCM session ingest activity) for at least this long. An unknown
+    // activity signal (no session store yet) counts as idle.
     if let Some(min_idle_secs) = task_config.min_idle_secs {
-        if let Some(record) = latest_non_skipped_record(records, task, None) {
-            let completed_at = record.completed_at.parse::<i64>().ok().unwrap_or(0);
-            if elapsed_secs(completed_at, now_secs) < min_idle_secs {
+        if let Some(last_activity) = activity.last_activity_secs {
+            if elapsed_secs(last_activity, now_secs) < min_idle_secs {
                 return AutomationScheduleDecision::skipped("scheduler_idle_window_active");
             }
         }
@@ -235,12 +277,39 @@ pub fn schedule_decision(
         }
     }
 
+    // Session-evidence tasks only re-run when new session activity landed
+    // after their last successful run started; a run without fresh evidence
+    // would re-review the same transcript slices. Skips do not consume the
+    // interval clock, so the task fires on the first tick after new activity.
+    if task_consumes_session_evidence(task) {
+        if let Some(record) = latest_successful_record(records, task) {
+            let started_at = record.started_at.parse::<i64>().ok().unwrap_or(0);
+            let has_new_activity = activity
+                .last_activity_secs
+                .is_some_and(|last_activity| last_activity > started_at);
+            if !has_new_activity {
+                return AutomationScheduleDecision::skipped("no_new_session_activity");
+            }
+        }
+    }
+
     AutomationScheduleDecision::due()
+}
+
+/// Tasks whose evidence comes from the LCM session store; they are gated on
+/// new session activity since their last successful run.
+fn task_consumes_session_evidence(task: AgentTaskKind) -> bool {
+    match task {
+        AgentTaskKind::SessionReflector
+        | AgentTaskKind::SkillWriter
+        | AgentTaskKind::CombinedReview => true,
+        AgentTaskKind::MemoryCurator => false,
+    }
 }
 
 pub fn stale_lock_secs(config: &AutomationConfig, task: AgentTaskKind) -> Option<u64> {
     task_config(config, task)
-        .stale_lock_secs
+        .and_then(|task_config| task_config.stale_lock_secs)
         .or(Some(DEFAULT_STALE_LOCK_SECS))
 }
 
@@ -295,12 +364,25 @@ pub fn parse_schedule(schedule: Option<&str>) -> Result<AutomationSchedule> {
     Ok(AutomationSchedule::Interval { every_secs })
 }
 
-fn task_config(config: &AutomationConfig, task: AgentTaskKind) -> &AutomationTaskConfig {
+fn task_config(config: &AutomationConfig, task: AgentTaskKind) -> Option<&AutomationTaskConfig> {
     match task {
-        AgentTaskKind::MemoryCurator => &config.tasks.memory_curator,
-        AgentTaskKind::SessionReflector => &config.tasks.session_reflector,
-        AgentTaskKind::SkillWriter => &config.tasks.skill_writer,
+        AgentTaskKind::MemoryCurator => Some(&config.tasks.memory_curator),
+        AgentTaskKind::SessionReflector => Some(&config.tasks.session_reflector),
+        AgentTaskKind::SkillWriter => Some(&config.tasks.skill_writer),
+        // The combined review has no schedule of its own; it is dispatched
+        // when the two per-task schedules are both due in the same tick.
+        AgentTaskKind::CombinedReview => None,
     }
+}
+
+fn latest_successful_record(
+    records: &[AutomationRunLedgerRecord],
+    task: AgentTaskKind,
+) -> Option<&AutomationRunLedgerRecord> {
+    records
+        .iter()
+        .filter(|record| record.task == task && record.status == AutomationRunStatus::Succeeded)
+        .max_by_key(|record| record.completed_at.parse::<i64>().ok().unwrap_or(0))
 }
 
 fn latest_non_skipped_record(

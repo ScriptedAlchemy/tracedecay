@@ -842,3 +842,87 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
         server.stop();
     });
 }
+
+#[test]
+fn automation_outcomes_endpoint_reports_applied_fact_trajectories() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let tmp = tempdir_or_panic();
+        let tmp_root = tmp
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
+        let project_root = tmp_root.join("project");
+        let global_db_path = tmp_root.join("global").join("global.db");
+        let profile_root = tmp_root.join("profile").join(".tracedecay");
+        let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
+        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
+
+        let cg = setup_project(&project_root).await;
+        seed_memory_fixture(&cg).await;
+        let dashboard_root = cg.store_layout().dashboard_root.clone();
+
+        // One applied proposal whose fact still exists (seeded fact 101) and
+        // one whose fact was deleted by curation (no such fact id).
+        let applied = |proposal_id: &str, fact_id: i64| {
+            tracedecay::automation::fact_proposals::FactProposalRecord {
+                schema_version: 1,
+                proposal_id: proposal_id.to_string(),
+                run_id: "run_outcomes".to_string(),
+                evidence_hash: None,
+                state: tracedecay::automation::fact_proposals::FactProposalState::Applied,
+                add_fact_request: None,
+                proposal: None,
+                validation_reason: None,
+                validation: None,
+                reviewer: Some("dashboard".to_string()),
+                applied_fact_id: Some(fact_id),
+                apply_outcome: None,
+                created_at: 1_700_000_000,
+                updated_at: 1_700_000_050,
+            }
+        };
+        tracedecay::automation::fact_proposals::save_fact_proposal_store(
+            &dashboard_root,
+            &tracedecay::automation::fact_proposals::FactProposalStore {
+                schema_version: 1,
+                proposals: vec![applied("fact_alive", 101), applied("fact_gone", 999_999)],
+            },
+        )
+        .await
+        .unwrap();
+
+        let agent = http_agent();
+        let port = pick_free_port();
+        let base_url = format!("http://127.0.0.1:{port}");
+        let mut server = spawn_dashboard_server(cg, port);
+        wait_for_dashboard(&agent, &base_url).await;
+
+        let (status, outcomes) = get_json(&agent, &format!("{base_url}/api/automation/outcomes"));
+        assert_eq!(status, 200, "outcomes endpoint failed: {outcomes}");
+        assert_eq!(outcomes["error"], "");
+        assert_eq!(outcomes["skills"], serde_json::json!([]));
+        let facts = outcomes["facts"]
+            .as_array()
+            .unwrap_or_else(|| panic!("facts must be an array: {outcomes}"));
+        assert_eq!(facts.len(), 2);
+        let by_id = |id: &str| {
+            facts
+                .iter()
+                .find(|fact| fact["proposal_id"] == id)
+                .unwrap_or_else(|| panic!("missing proposal {id}: {outcomes}"))
+        };
+        let alive = by_id("fact_alive");
+        assert_eq!(alive["verdict"], "never_recalled");
+        assert_eq!(alive["still_exists"], true);
+        assert_eq!(alive["helpful_count"], 5);
+        let gone = by_id("fact_gone");
+        assert_eq!(gone["verdict"], "deleted");
+        assert_eq!(gone["still_exists"], false);
+
+        server.stop();
+    });
+}

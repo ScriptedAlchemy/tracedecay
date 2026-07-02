@@ -2297,6 +2297,32 @@ impl GlobalDb {
         Ok(out)
     }
 
+    /// Timestamp of the most recent ingested session message, in unix
+    /// seconds, or `None` when no timestamped messages exist. Providers store
+    /// either seconds or milliseconds; millisecond values are normalized.
+    /// Backed by `idx_session_messages_timestamp`, so this is a cheap index
+    /// seek suitable for every automation scheduler tick.
+    pub async fn latest_session_activity_secs(&self) -> Option<i64> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT timestamp FROM session_messages
+                 WHERE timestamp IS NOT NULL
+                 ORDER BY timestamp DESC
+                 LIMIT 1",
+                (),
+            )
+            .await
+            .ok()?;
+        let row = rows.next().await.ok()??;
+        let timestamp = row.get::<i64>(0).ok()?;
+        Some(if timestamp >= 1_000_000_000_000 {
+            timestamp / 1000
+        } else {
+            timestamp
+        })
+    }
+
     /// Inserts or replaces a provider message. Returns `false` on any DB error.
     pub async fn upsert_session_message(&self, message: &SessionMessageRecord) -> bool {
         if self.conn.execute("BEGIN IMMEDIATE", ()).await.is_err() {

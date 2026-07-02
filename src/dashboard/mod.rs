@@ -25,6 +25,7 @@ mod analytics_api;
 pub(crate) mod assets;
 mod automation_config_api;
 mod automation_fact_proposals_api;
+mod automation_outcomes_api;
 mod automation_run_api;
 mod automation_run_service;
 mod automation_scheduler_api;
@@ -550,6 +551,10 @@ fn project_api_router() -> Router<DashboardState> {
         .route(
             "/api/automation/scheduler/resume",
             post(automation_scheduler_api::resume),
+        )
+        .route(
+            "/api/automation/outcomes",
+            get(automation_outcomes_api::outcomes),
         )
         .route(
             "/api/automation/runs/{run_id}/artifacts",
