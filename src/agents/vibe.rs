@@ -128,6 +128,51 @@ impl AgentIntegration for VibeIntegration {
         let contents = std::fs::read_to_string(&config_path).unwrap_or_default();
         contents.contains(TOML_MARKER)
     }
+
+    fn export_managed_skills(
+        &self,
+        home: &Path,
+        profile_root: &Path,
+    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+        let prompt_path = vibe_prompt_path(home);
+        if !self.has_tracedecay(home) || !prompt_path.exists() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![
+            crate::automation::skill_targets::install_managed_skills(
+                profile_root,
+                crate::automation::skill_targets::SkillInstallTarget::Agents,
+                &prompt_path,
+            )?,
+        ])
+    }
+
+    fn export_managed_skills_local(
+        &self,
+        project_root: &Path,
+        profile_root: &Path,
+    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+        let prompt_path = project_root.join(".vibe/prompts/cli.md");
+        if !local_config_has_tracedecay(project_root) || !prompt_path.exists() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![
+            crate::automation::skill_targets::install_managed_skills(
+                profile_root,
+                crate::automation::skill_targets::SkillInstallTarget::Agents,
+                &prompt_path,
+            )?,
+        ])
+    }
+}
+
+fn local_config_has_tracedecay(project_root: &Path) -> bool {
+    let config_path = project_root.join(".vibe/config.toml");
+    if !config_path.exists() {
+        return false;
+    }
+    let contents = std::fs::read_to_string(&config_path).unwrap_or_default();
+    contents.contains(TOML_MARKER)
 }
 
 // ---------------------------------------------------------------------------

@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 
 use super::util::{http_detail, JsonError};
 use super::DashboardState;
+use crate::agents::{export_managed_skills_to_agent_hosts, home_dir, ManagedSkillExportReport};
 use crate::automation::managed_skills::{
     approve_managed_skill, create_managed_skill_draft, discard_pending_managed_skill_update,
     list_managed_skills, load_managed_skill, managed_skill_dir, managed_skill_root,
@@ -165,14 +166,15 @@ pub(crate) async fn update(
 }
 
 pub(crate) async fn approve(
-    State(_state): State<DashboardState>,
+    State(state): State<DashboardState>,
     Path(id): Path<String>,
 ) -> ApiResult {
     let profile_root = profile_root_or_error()?;
     let skill = approve_managed_skill(&profile_root, &id)
         .await
         .map_err(|err| not_found_or_internal(&err))?;
-    skill_payload(&profile_root, skill).await
+    let exports = export_skills_to_agent_hosts(&profile_root, &state.project_root).await;
+    skill_payload_with_exports(&profile_root, skill, Some(exports)).await
 }
 
 pub(crate) async fn discard_update(
@@ -187,32 +189,39 @@ pub(crate) async fn discard_update(
 }
 
 pub(crate) async fn disable(
-    State(_state): State<DashboardState>,
+    State(state): State<DashboardState>,
     Path(id): Path<String>,
 ) -> ApiResult {
-    set_state(&id, ManagedSkillState::Disabled).await
+    set_state(&state, &id, ManagedSkillState::Disabled).await
 }
 
 pub(crate) async fn archive(
-    State(_state): State<DashboardState>,
+    State(state): State<DashboardState>,
     Path(id): Path<String>,
 ) -> ApiResult {
-    set_state(&id, ManagedSkillState::Archived).await
+    set_state(&state, &id, ManagedSkillState::Archived).await
 }
 
 pub(crate) async fn restore(
-    State(_state): State<DashboardState>,
+    State(state): State<DashboardState>,
     Path(id): Path<String>,
 ) -> ApiResult {
-    set_state(&id, ManagedSkillState::PendingApproval).await
+    set_state(&state, &id, ManagedSkillState::PendingApproval).await
 }
 
-async fn set_state(id: &str, state: ManagedSkillState) -> ApiResult {
+async fn set_state(
+    dashboard_state: &DashboardState,
+    id: &str,
+    state: ManagedSkillState,
+) -> ApiResult {
     let profile_root = profile_root_or_error()?;
     let skill = set_managed_skill_state(&profile_root, id, state)
         .await
         .map_err(|err| not_found_or_internal(&err))?;
-    skill_payload(&profile_root, skill).await
+    // Disable/archive must retract the skill from every export destination
+    // (and restore must refresh them) just like approve deploys it.
+    let exports = export_skills_to_agent_hosts(&profile_root, &dashboard_state.project_root).await;
+    skill_payload_with_exports(&profile_root, skill, Some(exports)).await
 }
 
 impl ManagedSkillDraftRequest {
@@ -234,7 +243,35 @@ impl ManagedSkillDraftRequest {
     }
 }
 
+/// Re-exports active managed skills to every detected agent host, off the
+/// async runtime (the exports are synchronous fs I/O). Never fails: export
+/// problems are reported per agent inside the returned reports so the
+/// lifecycle action that triggered the export still succeeds.
+async fn export_skills_to_agent_hosts(
+    profile_root: &std::path::Path,
+    project_root: &std::path::Path,
+) -> Vec<ManagedSkillExportReport> {
+    let Some(home) = home_dir() else {
+        return Vec::new();
+    };
+    let profile_root = profile_root.to_path_buf();
+    let project_root = project_root.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        export_managed_skills_to_agent_hosts(&home, &project_root, &profile_root)
+    })
+    .await
+    .unwrap_or_default()
+}
+
 async fn skill_payload(profile_root: &std::path::Path, skill: ManagedSkill) -> ApiResult {
+    skill_payload_with_exports(profile_root, skill, None).await
+}
+
+async fn skill_payload_with_exports(
+    profile_root: &std::path::Path,
+    skill: ManagedSkill,
+    exports: Option<Vec<ManagedSkillExportReport>>,
+) -> ApiResult {
     let skill_dir = managed_skill_dir(profile_root, &skill.metadata.id)
         .map_err(|err| bad_request_or_internal(&err))?;
     let usage_summary = summarize_skill_usage_for(profile_root, &skill)
@@ -251,7 +288,7 @@ async fn skill_payload(profile_root: &std::path::Path, skill: ManagedSkill) -> A
         skill_improvement_recommendations(std::slice::from_ref(&usage_summary))
             .into_iter()
             .next();
-    Ok(Json(json!({
+    let mut payload = json!({
         "profile_root": profile_root.display().to_string(),
         "skills_root": managed_skill_root(profile_root).display().to_string(),
         "skill_dir": skill_dir.display().to_string(),
@@ -259,7 +296,12 @@ async fn skill_payload(profile_root: &std::path::Path, skill: ManagedSkill) -> A
         "usage_summary": usage_summary,
         "stale_recommendation": stale_recommendation,
         "improvement_recommendation": improvement_recommendation,
-    })))
+    });
+    if let Some(exports) = exports {
+        payload["skill_exports"] =
+            serde_json::to_value(exports).map_err(|err| internal_error(&err))?;
+    }
+    Ok(Json(payload))
 }
 
 async fn sync_project_skill_analytics(

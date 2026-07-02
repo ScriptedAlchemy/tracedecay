@@ -85,6 +85,23 @@ impl AgentIntegration for CursorIntegration {
         ]))
     }
 
+    fn export_managed_skills(
+        &self,
+        home: &Path,
+        profile_root: &Path,
+    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+        if !cursor_plugin_manifest_path(home).exists() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![
+            crate::automation::skill_targets::install_managed_skills(
+                profile_root,
+                crate::automation::skill_targets::SkillInstallTarget::Cursor,
+                &cursor_plugin_install_dir(home),
+            )?,
+        ])
+    }
+
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
         remove_cursor_plugin_install(&cursor_plugin_install_dir(&ctx.home))?;
         let mcp_path = ctx.home.join(".cursor/mcp.json");

@@ -140,6 +140,47 @@ impl AgentIntegration for CodexIntegration {
         Ok(UpdatePluginOutcome::Refreshed(vec![target]))
     }
 
+    fn export_managed_skills(
+        &self,
+        home: &Path,
+        profile_root: &Path,
+    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+        let mut plugin_dirs = codex_plugin_cached_install_dirs(home);
+        if codex_plugin_manifest_path(home).exists() {
+            plugin_dirs.push(codex_plugin_install_dir(home));
+        }
+        plugin_dirs
+            .iter()
+            .map(|dir| {
+                crate::automation::skill_targets::install_managed_skills(
+                    profile_root,
+                    crate::automation::skill_targets::SkillInstallTarget::Codex,
+                    dir,
+                )
+            })
+            .collect()
+    }
+
+    fn export_managed_skills_local(
+        &self,
+        project_root: &Path,
+        profile_root: &Path,
+    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+        let repo_dir = codex_repo_plugin_install_dir(project_root);
+        if !repo_dir.join(".codex-plugin/plugin.json").exists()
+            || !codex_plugin_dir_is_tracedecay(&repo_dir)
+        {
+            return Ok(Vec::new());
+        }
+        Ok(vec![
+            crate::automation::skill_targets::install_managed_skills(
+                profile_root,
+                crate::automation::skill_targets::SkillInstallTarget::Codex,
+                &repo_dir,
+            )?,
+        ])
+    }
+
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mCodex CLI integration\x1b[0m");
         let local_codex_dir = ctx.project_path.join(".codex");
