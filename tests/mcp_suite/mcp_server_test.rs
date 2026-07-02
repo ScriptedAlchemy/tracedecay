@@ -2072,7 +2072,7 @@ async fn hook_event_workspace_context_routes_followup_graph_reads() {
         McpServer::new_with_dbs(active_cg, None, None, Some(Arc::new(registry_db)), false).await;
 
     let responses = run_server_with_messages(
-        server,
+        server.clone(),
         vec![
             jsonrpc_notification_with_params(
                 "tracedecay/hookEvent",
@@ -2103,6 +2103,30 @@ async fn hook_event_workspace_context_routes_followup_graph_reads() {
     assert!(
         !text.contains("active_only.rs"),
         "ambient hook route should not fall back to active project when the hook cwd resolves"
+    );
+
+    let responses = run_server_with_messages(
+        server,
+        vec![jsonrpc_request(
+            json!(2),
+            "tools/call",
+            json!({
+                "name": "tracedecay_files",
+                "arguments": {}
+            }),
+        )],
+    )
+    .await;
+
+    let response = response_with_id(&responses, json!(2));
+    let text = extract_tool_text(&response["result"]);
+    assert!(
+        text.contains("active_only.rs"),
+        "hook workspace context must not leak across socket clients, got: {text}"
+    );
+    assert!(
+        !text.contains("target_only.rs"),
+        "new socket client without a hook should use the active project"
     );
 }
 
