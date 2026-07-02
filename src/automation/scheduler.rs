@@ -219,7 +219,9 @@ pub fn schedule_decision(
     if config.backend == AutomationBackend::Disabled {
         return AutomationScheduleDecision::skipped("backend_disabled");
     }
-    let task_config = task_config(config, task);
+    let Some(task_config) = task_config(config, task) else {
+        return AutomationScheduleDecision::skipped("task_not_schedulable");
+    };
     if !task_config.enabled {
         return AutomationScheduleDecision::skipped("task_disabled");
     }
@@ -298,14 +300,16 @@ pub fn schedule_decision(
 /// new session activity since their last successful run.
 fn task_consumes_session_evidence(task: AgentTaskKind) -> bool {
     match task {
-        AgentTaskKind::SessionReflector | AgentTaskKind::SkillWriter => true,
+        AgentTaskKind::SessionReflector
+        | AgentTaskKind::SkillWriter
+        | AgentTaskKind::CombinedReview => true,
         AgentTaskKind::MemoryCurator => false,
     }
 }
 
 pub fn stale_lock_secs(config: &AutomationConfig, task: AgentTaskKind) -> Option<u64> {
     task_config(config, task)
-        .stale_lock_secs
+        .and_then(|task_config| task_config.stale_lock_secs)
         .or(Some(DEFAULT_STALE_LOCK_SECS))
 }
 
@@ -360,11 +364,14 @@ pub fn parse_schedule(schedule: Option<&str>) -> Result<AutomationSchedule> {
     Ok(AutomationSchedule::Interval { every_secs })
 }
 
-fn task_config(config: &AutomationConfig, task: AgentTaskKind) -> &AutomationTaskConfig {
+fn task_config(config: &AutomationConfig, task: AgentTaskKind) -> Option<&AutomationTaskConfig> {
     match task {
-        AgentTaskKind::MemoryCurator => &config.tasks.memory_curator,
-        AgentTaskKind::SessionReflector => &config.tasks.session_reflector,
-        AgentTaskKind::SkillWriter => &config.tasks.skill_writer,
+        AgentTaskKind::MemoryCurator => Some(&config.tasks.memory_curator),
+        AgentTaskKind::SessionReflector => Some(&config.tasks.session_reflector),
+        AgentTaskKind::SkillWriter => Some(&config.tasks.skill_writer),
+        // The combined review has no schedule of its own; it is dispatched
+        // when the two per-task schedules are both due in the same tick.
+        AgentTaskKind::CombinedReview => None,
     }
 }
 
