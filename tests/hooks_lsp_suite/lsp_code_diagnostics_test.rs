@@ -137,9 +137,12 @@ async fn stdio_client_keeps_listening_after_initial_empty_publish() {
         &[script_path.display().to_string()],
         temp.path(),
         vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
-        // 250ms (from the Windows wall-time trim) misses the fake server's
-        // late publish on contended macOS runners; 500ms was stable before.
-        std::time::Duration::from_millis(500),
+        // The fake server emits the empty and the late publish back to back
+        // (no wall-clock delay), so the deadline only has to cover one
+        // didOpen -> publishDiagnostics round trip, same as the other fake
+        // LSP tests. The client processes the messages in order either way,
+        // which is the behaviour under test.
+        FAKE_LSP_TIMEOUT,
     )
     .await
     .unwrap();
@@ -558,7 +561,7 @@ fn fake_lsp_script() -> String {
 }
 
 fn fake_lsp_script_with_initial_empty_publish() -> String {
-    fake_lsp_script_with_preamble("import time\n", INITIAL_EMPTY_THEN_DIAGNOSTIC_PUBLISH)
+    fake_lsp_script_with_preamble("", INITIAL_EMPTY_THEN_DIAGNOSTIC_PUBLISH)
 }
 
 fn fake_lsp_script_that_records_start(counter_path: &std::path::Path) -> String {
@@ -641,7 +644,6 @@ const FAKE_DIAGNOSTIC_PUBLISH: &str = r#"        send({
 "#;
 
 const INITIAL_EMPTY_THEN_DIAGNOSTIC_PUBLISH: &str = r#"        send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": {"uri": uri, "diagnostics": []}})
-        time.sleep(0.05)
         send({
             "jsonrpc": "2.0",
             "method": "textDocument/publishDiagnostics",
