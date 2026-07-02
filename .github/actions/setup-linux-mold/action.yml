@@ -1,0 +1,20 @@
+name: Setup Linux mold linker
+description: Install and configure mold for Linux Rust builds.
+
+runs:
+  using: composite
+  steps:
+    - name: Install mold
+      if: runner.os == 'Linux'
+      uses: rui314/setup-mold@v1
+      with:
+        mold-version: 2.41.0
+        make-default: false
+
+    - name: Configure Cargo to use mold
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        set -euo pipefail
+        mold --version
+        echo "RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> "$GITHUB_ENV"
