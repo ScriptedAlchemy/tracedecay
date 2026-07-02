@@ -222,57 +222,28 @@ const CODEX_EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
     // Codex auto-discovers every `SKILL.md` under the manifest `skills/` dir by
     // its `name`/`description` frontmatter. The Codex bundle mirrors the
     // model-invocable Cursor skills (`hooks::CURSOR_PLUGIN_SKILLS`) so both
-    // hosts steer agents toward the same tracedecay workflows; the parity is
-    // enforced by `codex_skills_match_the_cursor_source_for_parity`. The
-    // Cursor-only slash dispatchers (`tracedecay-*`) and explicit-invoke memory
-    // skills are intentionally omitted (Codex has no slash-command surface).
+    // hosts steer agents toward the same consolidated tracedecay workflows; the
+    // parity is enforced by `codex_skills_match_the_cursor_source_for_parity`.
+    // Cursor-only slash dispatchers (`tracedecay-*`) are intentionally omitted.
     (
-        "skills/architecture-overview/SKILL.md",
-        include_str!("../../codex-plugin/skills/architecture-overview/SKILL.md"),
+        "skills/assessing-impact/SKILL.md",
+        include_str!("../../codex-plugin/skills/assessing-impact/SKILL.md"),
     ),
     (
-        "skills/assessing-test-coverage/SKILL.md",
-        include_str!("../../codex-plugin/skills/assessing-test-coverage/SKILL.md"),
-    ),
-    (
-        "skills/atomic-code-edits/SKILL.md",
-        include_str!("../../codex-plugin/skills/atomic-code-edits/SKILL.md"),
-    ),
-    (
-        "skills/auditing-code-safety/SKILL.md",
-        include_str!("../../codex-plugin/skills/auditing-code-safety/SKILL.md"),
-    ),
-    (
-        "skills/cleaning-up-dead-code/SKILL.md",
-        include_str!("../../codex-plugin/skills/cleaning-up-dead-code/SKILL.md"),
-    ),
-    (
-        "skills/code-health-report/SKILL.md",
-        include_str!("../../codex-plugin/skills/code-health-report/SKILL.md"),
-    ),
-    (
-        "skills/cross-branch-investigation/SKILL.md",
-        include_str!("../../codex-plugin/skills/cross-branch-investigation/SKILL.md"),
+        "skills/code-health/SKILL.md",
+        include_str!("../../codex-plugin/skills/code-health/SKILL.md"),
     ),
     (
         "skills/curating-project-memory/SKILL.md",
         include_str!("../../codex-plugin/skills/curating-project-memory/SKILL.md"),
     ),
     (
-        "skills/drafting-commit-and-pr/SKILL.md",
-        include_str!("../../codex-plugin/skills/drafting-commit-and-pr/SKILL.md"),
+        "skills/editing-safely/SKILL.md",
+        include_str!("../../codex-plugin/skills/editing-safely/SKILL.md"),
     ),
     (
-        "skills/exploring-types-and-traits/SKILL.md",
-        include_str!("../../codex-plugin/skills/exploring-types-and-traits/SKILL.md"),
-    ),
-    (
-        "skills/finding-duplicate-logic/SKILL.md",
-        include_str!("../../codex-plugin/skills/finding-duplicate-logic/SKILL.md"),
-    ),
-    (
-        "skills/finding-impacted-areas/SKILL.md",
-        include_str!("../../codex-plugin/skills/finding-impacted-areas/SKILL.md"),
+        "skills/exploring-code/SKILL.md",
+        include_str!("../../codex-plugin/skills/exploring-code/SKILL.md"),
     ),
     (
         "skills/fixing-build-and-type-errors/SKILL.md",
@@ -283,18 +254,6 @@ const CODEX_EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
         include_str!("../../codex-plugin/skills/inspecting-managed-skills/SKILL.md"),
     ),
     (
-        "skills/porting-code/SKILL.md",
-        include_str!("../../codex-plugin/skills/porting-code/SKILL.md"),
-    ),
-    (
-        "skills/project-status/SKILL.md",
-        include_str!("../../codex-plugin/skills/project-status/SKILL.md"),
-    ),
-    (
-        "skills/reading-code-cheaply/SKILL.md",
-        include_str!("../../codex-plugin/skills/reading-code-cheaply/SKILL.md"),
-    ),
-    (
         "skills/recalling-project-memory/SKILL.md",
         include_str!("../../codex-plugin/skills/recalling-project-memory/SKILL.md"),
     ),
@@ -303,32 +262,20 @@ const CODEX_EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
         include_str!("../../codex-plugin/skills/recalling-session-context/SKILL.md"),
     ),
     (
-        "skills/refactoring-safely/SKILL.md",
-        include_str!("../../codex-plugin/skills/refactoring-safely/SKILL.md"),
-    ),
-    (
-        "skills/reviewing-a-diff/SKILL.md",
-        include_str!("../../codex-plugin/skills/reviewing-a-diff/SKILL.md"),
-    ),
-    (
-        "skills/running-impacted-tests/SKILL.md",
-        include_str!("../../codex-plugin/skills/running-impacted-tests/SKILL.md"),
-    ),
-    (
-        "skills/searching-for-code/SKILL.md",
-        include_str!("../../codex-plugin/skills/searching-for-code/SKILL.md"),
+        "skills/reviewing-changes/SKILL.md",
+        include_str!("../../codex-plugin/skills/reviewing-changes/SKILL.md"),
     ),
     (
         "skills/tracing-functions/SKILL.md",
         include_str!("../../codex-plugin/skills/tracing-functions/SKILL.md"),
     ),
     (
-        "skills/tracking-session-health/SKILL.md",
-        include_str!("../../codex-plugin/skills/tracking-session-health/SKILL.md"),
-    ),
-    (
         "skills/using-the-cli/SKILL.md",
         include_str!("../../codex-plugin/skills/using-the-cli/SKILL.md"),
+    ),
+    (
+        "skills/using-tracedecay/SKILL.md",
+        include_str!("../../codex-plugin/skills/using-tracedecay/SKILL.md"),
     ),
 ];
 
@@ -500,7 +447,14 @@ fn install_codex_plugin_bundle(
     profile_home: &Path,
 ) -> Result<()> {
     write_codex_plugin_bundle_base(install_dir, tracedecay_bin, scope)?;
-    install_codex_managed_skill_overlay(profile_home, install_dir).map(|_| ())
+    install_codex_managed_skill_overlay(profile_home, install_dir)?;
+    let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(profile_home);
+    crate::automation::memory_digest::sync_memory_digest_export(
+        &profile_root,
+        crate::automation::skill_targets::SkillInstallTarget::Codex,
+        install_dir,
+    )?;
+    Ok(())
 }
 
 /// Export a complete shareable Codex plugin bundle with active managed skills.
@@ -585,48 +539,66 @@ fn codex_plugin_mcp(raw: &str, tracedecay_bin: &str, scope: InstallScope) -> Res
     Ok(format!("{}\n", serde_json::to_string_pretty(&mcp)?))
 }
 
+/// A lifecycle hook the Codex plugin registers.
+struct CodexManagedHook {
+    event: &'static str,
+    subcommand: &'static str,
+    timeout_secs: u64,
+    matcher: Option<&'static str>,
+}
+
+/// Every Codex lifecycle hook, in registration order. The single source of
+/// truth for install ([`codex_plugin_hooks`]), uninstall ([`uninstall_hooks`]),
+/// and doctor checks ([`doctor_check_hooks`]).
+const CODEX_MANAGED_HOOKS: &[CodexManagedHook] = &[
+    CodexManagedHook {
+        event: "SessionStart",
+        subcommand: "hook-codex-session-start",
+        timeout_secs: 5,
+        matcher: None,
+    },
+    CodexManagedHook {
+        event: "UserPromptSubmit",
+        subcommand: "hook-codex-user-prompt-submit",
+        timeout_secs: 5,
+        matcher: None,
+    },
+    CodexManagedHook {
+        event: "SubagentStart",
+        subcommand: "hook-codex-subagent-start",
+        timeout_secs: 5,
+        matcher: None,
+    },
+    CodexManagedHook {
+        event: "PostToolUse",
+        subcommand: "hook-codex-post-tool-use",
+        timeout_secs: 60,
+        matcher: Some("Bash|apply_patch"),
+    },
+    CodexManagedHook {
+        event: "PostCompact",
+        subcommand: "hook-codex-post-compact",
+        timeout_secs: 120,
+        matcher: Some("auto|manual"),
+    },
+];
+
+/// Subcommands from older bundles that uninstall must also strip even though
+/// the current bundle no longer registers them.
+const CODEX_LEGACY_HOOK_SUBCOMMANDS: &[&str] = &["hook-codex-pre-tool-use"];
+
 fn codex_plugin_hooks(raw: &str, tracedecay_bin: &str) -> Result<String> {
     let mut hooks: serde_json::Value = serde_json::from_str(raw)?;
-    install_codex_hook_event(
-        &mut hooks,
-        "SessionStart",
-        tracedecay_bin,
-        "hook-codex-session-start",
-        5,
-        None,
-    );
-    install_codex_hook_event(
-        &mut hooks,
-        "UserPromptSubmit",
-        tracedecay_bin,
-        "hook-codex-user-prompt-submit",
-        5,
-        None,
-    );
-    install_codex_hook_event(
-        &mut hooks,
-        "SubagentStart",
-        tracedecay_bin,
-        "hook-codex-subagent-start",
-        5,
-        None,
-    );
-    install_codex_hook_event(
-        &mut hooks,
-        "PostToolUse",
-        tracedecay_bin,
-        "hook-codex-post-tool-use",
-        60,
-        Some("Bash|apply_patch"),
-    );
-    install_codex_hook_event(
-        &mut hooks,
-        "PostCompact",
-        tracedecay_bin,
-        "hook-codex-post-compact",
-        120,
-        Some("auto|manual"),
-    );
+    for hook in CODEX_MANAGED_HOOKS {
+        install_codex_hook_event(
+            &mut hooks,
+            hook.event,
+            tracedecay_bin,
+            hook.subcommand,
+            hook.timeout_secs,
+            hook.matcher,
+        );
+    }
     Ok(format!("{}\n", serde_json::to_string_pretty(&hooks)?))
 }
 
@@ -746,7 +718,30 @@ fn remove_codex_managed_skill_overlay(install_dir: &Path) {
     std::fs::remove_dir_all(install_dir.join("skills/agent-managed")).ok();
 }
 
+const RETIRED_CODEX_PLUGIN_SKILL_DIRS: &[&str] = &[
+    "architecture-overview",
+    "assessing-test-coverage",
+    "atomic-code-edits",
+    "auditing-code-safety",
+    "cleaning-up-dead-code",
+    "code-health-report",
+    "cross-branch-investigation",
+    "drafting-commit-and-pr",
+    "exploring-types-and-traits",
+    "finding-duplicate-logic",
+    "finding-impacted-areas",
+    "porting-code",
+    "project-status",
+    "reading-code-cheaply",
+    "refactoring-safely",
+    "reviewing-a-diff",
+    "running-impacted-tests",
+    "searching-for-code",
+    "tracking-session-health",
+];
+
 fn remove_codex_plugin_managed_skills(install_dir: &Path, skills_dir: &Path) -> Result<()> {
+    remove_retired_codex_plugin_skill_dirs(skills_dir)?;
     let managed: HashSet<PathBuf> = codex_plugin_managed_paths(install_dir)
         .into_iter()
         .filter(|path| path.starts_with(skills_dir))
@@ -775,6 +770,34 @@ fn codex_skill_file_is_legacy_tracedecay_managed(path: &Path) -> bool {
             contents
                 .lines()
                 .any(|line| line.starts_with("name: tracedecay:"))
+        })
+}
+
+fn remove_retired_codex_plugin_skill_dirs(skills_dir: &Path) -> Result<()> {
+    for name in RETIRED_CODEX_PLUGIN_SKILL_DIRS {
+        let skill_dir = skills_dir.join(name);
+        if !codex_skill_dir_is_retired_managed(&skill_dir, name) {
+            continue;
+        }
+        std::fs::remove_dir_all(&skill_dir).map_err(|e| TraceDecayError::Config {
+            message: format!(
+                "failed to remove retired Codex skill {}: {e}",
+                skill_dir.display()
+            ),
+        })?;
+    }
+    Ok(())
+}
+
+fn codex_skill_dir_is_retired_managed(skill_dir: &Path, expected_name: &str) -> bool {
+    let skill_file = skill_dir.join("SKILL.md");
+    let expected_name_line = format!("name: {expected_name}");
+    skill_file.is_file()
+        && std::fs::read_to_string(&skill_file).is_ok_and(|contents| {
+            contents
+                .lines()
+                .map(str::trim)
+                .any(|line| line == expected_name_line)
         })
 }
 
@@ -847,10 +870,12 @@ fn codex_plugin_dir_has_only_managed_files(install_dir: &Path) -> bool {
 }
 
 fn codex_plugin_managed_paths(install_dir: &Path) -> Vec<PathBuf> {
-    CODEX_EMBEDDED_PLUGIN_FILES
+    let mut paths: Vec<PathBuf> = CODEX_EMBEDDED_PLUGIN_FILES
         .iter()
         .map(|&(relative, _)| install_dir.join(relative))
-        .collect()
+        .collect();
+    paths.push(install_dir.join("skills/agent-managed-memory/SKILL.md"));
+    paths
 }
 
 fn collect_regular_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
@@ -973,14 +998,11 @@ fn print_hook_trust_guidance() {
 
 /// Remove tracedecay-owned hook groups from a Codex `hooks.json`.
 fn uninstall_hooks(hooks_path: &Path) {
-    const SUBCOMMANDS: [&str; 6] = [
-        "hook-codex-session-start",
-        "hook-codex-user-prompt-submit",
-        "hook-codex-subagent-start",
-        "hook-codex-post-tool-use",
-        "hook-codex-post-compact",
-        "hook-codex-pre-tool-use",
-    ];
+    let subcommands: Vec<&str> = CODEX_MANAGED_HOOKS
+        .iter()
+        .map(|hook| hook.subcommand)
+        .chain(CODEX_LEGACY_HOOK_SUBCOMMANDS.iter().copied())
+        .collect();
 
     if !hooks_path.exists() {
         return;
@@ -994,7 +1016,7 @@ fn uninstall_hooks(hooks_path: &Path) {
     };
     for groups in events.values_mut() {
         if let Some(arr) = groups.as_array_mut() {
-            arr.retain(|group| !SUBCOMMANDS.iter().any(|sc| group_has_subcommand(group, sc)));
+            arr.retain(|group| !subcommands.iter().any(|sc| group_has_subcommand(group, sc)));
         }
     }
     events.retain(|_, groups| groups.as_array().is_some_and(|a| !a.is_empty()));
@@ -1356,23 +1378,16 @@ fn doctor_check_hooks(dc: &mut DoctorCounters, hooks_path: &Path) {
         return;
     }
     let hooks = super::load_json_file(hooks_path);
-    let expected = [
-        ("SessionStart", "hook-codex-session-start"),
-        ("UserPromptSubmit", "hook-codex-user-prompt-submit"),
-        ("SubagentStart", "hook-codex-subagent-start"),
-        ("PostToolUse", "hook-codex-post-tool-use"),
-        ("PostCompact", "hook-codex-post-compact"),
-    ];
-    let missing: Vec<&str> = expected
+    let missing: Vec<&str> = CODEX_MANAGED_HOOKS
         .iter()
-        .filter_map(|(event, command)| {
-            (!codex_hook_present(&hooks, event, command)).then_some(*event)
+        .filter_map(|hook| {
+            (!codex_hook_present(&hooks, hook.event, hook.subcommand)).then_some(hook.event)
         })
         .collect();
     if missing.is_empty() {
         dc.pass(&format!(
             "All {} Codex lifecycle hooks registered in {}",
-            expected.len(),
+            CODEX_MANAGED_HOOKS.len(),
             hooks_path.display()
         ));
         dc.info(
@@ -1581,22 +1596,11 @@ mod tests {
     #[test]
     fn codex_skills_match_the_cursor_source_for_parity() {
         // Skills deliberately specialized for Codex (host-specific bodies that
-        // are not compared against the Cursor source at all):
-        //
-        // - `curating-project-memory`: the Cursor source hands the "add a
-        //   researched subject from scratch" flow off to the `memorizing-subject`
-        //   skill, an explicit-invoke (`disable-model-invocation: true`) slash
-        //   workflow Codex intentionally does not ship. The Codex copy inlines
-        //   that flow's guardrails (read-only research, dedupe, cited facts,
-        //   secret/PII rejection) instead of pointing at a skill absent here.
-        const CODEX_SKILL_BODY_DIVERGENCES: &[&str] = &["curating-project-memory"];
+        // are not compared against the Cursor source at all).
+        const CODEX_SKILL_BODY_DIVERGENCES: &[&str] = &[];
         // Skills whose frontmatter legitimately diverges while the bodies must
-        // still mirror byte-for-byte (compared after stripping frontmatter):
-        //
-        // - `running-impacted-tests`: Cursor keeps `paths` frontmatter so its
-        //   host can path-scope the skill, while Codex must omit that key to
-        //   satisfy the Codex skill-creator quick_validate.py schema.
-        const CODEX_SKILL_FRONTMATTER_DIVERGENCES: &[&str] = &["running-impacted-tests"];
+        // still mirror byte-for-byte (compared after stripping frontmatter).
+        const CODEX_SKILL_FRONTMATTER_DIVERGENCES: &[&str] = &[];
         let root = repo_root();
         for &skill in crate::hooks::CURSOR_PLUGIN_SKILLS {
             let codex_path = root
@@ -1674,7 +1678,7 @@ mod tests {
 
     /// Every `tracedecay:<skill>` handoff inside the embedded Codex skill bodies
     /// must resolve to a skill this bundle actually ships. A dangling reference
-    /// (e.g. to a Cursor-only explicit-invoke skill like `memorizing-subject`)
+    /// (e.g. to a Cursor-only explicit-invoke skill)
     /// would point a Codex agent at a workflow that does not exist here.
     #[test]
     fn codex_skill_cross_references_resolve_to_shipped_skills() {

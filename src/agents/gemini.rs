@@ -5,19 +5,18 @@
 //! Gemini CLI has no hook system. Tool auto-approval is handled via the
 //! `trust: true` flag on the MCP server entry.
 
-use std::io::Write;
 use std::path::Path;
 
 use serde_json::json;
 
-use crate::errors::{Result, TraceDecayError};
+use crate::errors::Result;
 
 use super::{
     backup_and_write_json, backup_config_file, load_json_file, load_json_file_strict,
     safe_write_json_file, AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext,
 };
 
-const PROMPT_RULE_MARKER: &str = "## Prefer tracedecay MCP tools";
+use super::prompt_rules::{PromptRulesOptions, PROMPT_RULE_MARKER};
 
 /// Gemini CLI agent.
 pub struct GeminiIntegration;
@@ -130,57 +129,15 @@ fn install_mcp_server(settings_path: &Path, tracedecay_bin: &str) -> Result<()> 
     Ok(())
 }
 
-/// Append prompt rules to GEMINI.md (idempotent).
+/// Install-or-refresh prompt rules in GEMINI.md.
 fn install_prompt_rules(gemini_md: &Path) -> Result<()> {
-    let existing = if gemini_md.exists() {
-        std::fs::read_to_string(gemini_md).unwrap_or_default()
-    } else {
-        String::new()
-    };
-    if existing.contains(PROMPT_RULE_MARKER) {
-        eprintln!("  GEMINI.md already contains tracedecay rules, skipping");
-        return Ok(());
-    }
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(gemini_md)
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to open GEMINI.md: {e}"),
-        })?;
-    write!(
-        f,
-        "\n{PROMPT_RULE_MARKER}\n\n\
-        Before reading source files or scanning the codebase, use the tracedecay MCP tools \
-        (`tracedecay_context`, `tracedecay_search`, `tracedecay_callers`, `tracedecay_callees`, \
-        `tracedecay_impact`, `tracedecay_node`, `tracedecay_files`, `tracedecay_affected`). \
-        They provide instant semantic results from a pre-built knowledge graph and are \
-        faster than file reads.\n\n\
-        For project/storage identity questions, use `tracedecay_active_project` \
-        or `tracedecay_storage_status` instead of inferring from marker \
-        files or direct DB paths.\n\n\
-        If a code analysis question cannot be fully answered by tracedecay MCP tools, \
-        prefer built-in MCP tools first. If the user explicitly needs raw store \
-        inspection, use the resolved graph DB path reported by `tracedecay_storage_status` \
-        rather than a hardcoded repo path. Use SQL to answer complex structural \
-        queries that go beyond what the built-in tools expose.\n\n\
-        For durable project/user facts, prefer `tracedecay_fact_store`, \
-        `tracedecay_fact_feedback`, and `tracedecay_memory_status` over ad-hoc notes. \
-        Use `tracedecay_message_search` for active-project transcript recall when \
-        prior conversation context matters. Do not store secrets, credentials, or \
-        unnecessary PII in persistent facts.\n\n\
-        If you discover a gap where an extractor, schema, or tracedecay tool could be \
-        improved to answer a question natively, propose to the user that they open an issue \
-        at https://github.com/ScriptedAlchemy/tracedecay describing the limitation. \
-        **Remind the user to strip any sensitive or proprietary code from the bug description \
-        before submitting.**\n"
-    )
-    .ok();
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Appended tracedecay rules to {}",
-        gemini_md.display()
+    let block = super::prompt_rules::standard_prompt_rules(
+        PROMPT_RULE_MARKER,
+        &PromptRulesOptions {
+            extra_paragraphs: &[],
+        },
     );
-    Ok(())
+    super::prompt_rules::reconcile_prompt_rules(gemini_md, PROMPT_RULE_MARKER, &block)
 }
 
 // ---------------------------------------------------------------------------
@@ -232,45 +189,7 @@ fn uninstall_mcp_server(settings_path: &Path) {
 
 /// Remove tracedecay rules from GEMINI.md.
 fn uninstall_prompt_rules(gemini_md: &Path) {
-    if !gemini_md.exists() {
-        return;
-    }
-    let Ok(contents) = std::fs::read_to_string(gemini_md) else {
-        return;
-    };
-    if !contents.contains("tracedecay") {
-        eprintln!("  GEMINI.md does not contain tracedecay rules, skipping");
-        return;
-    }
-    let marker = PROMPT_RULE_MARKER;
-    let Some(start) = contents.find(marker) else {
-        return;
-    };
-    let after_marker = start + marker.len();
-    let end = contents[after_marker..]
-        .find("\n## ")
-        .map_or(contents.len(), |pos| after_marker + pos);
-    let mut new_contents = String::new();
-    new_contents.push_str(contents[..start].trim_end());
-    let remainder = &contents[end..];
-    if !remainder.is_empty() {
-        new_contents.push_str("\n\n");
-        new_contents.push_str(remainder.trim_start());
-    }
-    let new_contents = new_contents.trim().to_string();
-    if new_contents.is_empty() {
-        std::fs::remove_file(gemini_md).ok();
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed {} (was empty)",
-            gemini_md.display()
-        );
-    } else {
-        std::fs::write(gemini_md, format!("{new_contents}\n")).ok();
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay rules from {}",
-            gemini_md.display()
-        );
-    }
+    super::prompt_rules::remove_prompt_rules(gemini_md, PROMPT_RULE_MARKER);
 }
 
 // ---------------------------------------------------------------------------

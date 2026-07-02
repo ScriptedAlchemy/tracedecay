@@ -104,6 +104,15 @@ fn write_stale_codex_skill(plugin_dir: &Path) {
     .unwrap();
 }
 
+fn write_retired_codex_skill(plugin_dir: &Path, name: &str) {
+    std::fs::create_dir_all(plugin_dir.join("skills").join(name)).unwrap();
+    std::fs::write(
+        plugin_dir.join("skills").join(name).join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: retired tracedecay skill\n---\n"),
+    )
+    .unwrap();
+}
+
 /// Every regular file under `root`, relative to it, sorted.
 fn file_listing(root: &Path) -> Vec<PathBuf> {
     fn walk(dir: &Path, root: &Path, out: &mut Vec<PathBuf>) {
@@ -257,6 +266,14 @@ fn cursor_update_plugin_refreshes_bundle_and_preserves_user_config() {
 
     // An unmanaged user file inside the plugin dir must survive the refresh.
     std::fs::write(plugin_dir.join("user-note.txt"), "mine\n").unwrap();
+    // A pre-consolidation workflow skill must not survive alongside the new
+    // consolidated model-invoked skill catalog.
+    std::fs::create_dir_all(plugin_dir.join("skills/reading-code-cheaply")).unwrap();
+    std::fs::write(
+        plugin_dir.join("skills/reading-code-cheaply/SKILL.md"),
+        "---\nname: reading-code-cheaply\ndescription: retired tracedecay skill\n---\n",
+    )
+    .unwrap();
     let user_mcp_before = bytes(&user_mcp);
 
     let outcome = cursor.update_plugin(&ctx(home.path(), NEW_BIN)).unwrap();
@@ -268,6 +285,10 @@ fn cursor_update_plugin_refreshes_bundle_and_preserves_user_config() {
     // User config byte-identical; unmanaged file preserved.
     assert_eq!(bytes(&user_mcp), user_mcp_before);
     assert_eq!(text(&plugin_dir.join("user-note.txt")), "mine\n");
+    assert!(
+        !plugin_dir.join("skills/reading-code-cheaply").exists(),
+        "update-plugin must sweep retired Cursor skill dirs so stale workflows are not rediscovered"
+    );
 
     // Generated bundle re-baked: plugin-owned mcp.json command, hook command
     // paths, and the manifest version stamp.
@@ -320,6 +341,7 @@ fn codex_update_plugin_refreshes_bundle_without_touching_config() {
         "---\nname: private-skill\n---\n",
     )
     .unwrap();
+    write_retired_codex_skill(&plugin_dir, "architecture-overview");
     let config_before = bytes(&codex_config);
 
     let outcome = codex
@@ -335,6 +357,10 @@ fn codex_update_plugin_refreshes_bundle_without_touching_config() {
     assert_eq!(
         text(&plugin_dir.join("skills/private-skill/SKILL.md")),
         "---\nname: private-skill\n---\n"
+    );
+    assert!(
+        !plugin_dir.join("skills/architecture-overview").exists(),
+        "update-plugin must remove retired bundled Codex skill dirs that lack tracedecay-prefixed names"
     );
     assert_codex_bundle_contains_bin(&plugin_dir, NEW_BIN);
     assert!(text(&plugin_dir.join(".codex-plugin/plugin.json")).contains(env!("CARGO_PKG_VERSION")));

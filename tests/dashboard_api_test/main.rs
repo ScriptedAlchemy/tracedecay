@@ -23,3 +23,4 @@ mod lcm_fixes;
 mod memory_curation;
 mod projects;
 mod savings;
+mod settings;
