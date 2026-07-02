@@ -489,8 +489,6 @@ async fn run_post_update_tasks(no_heal: bool) -> tracedecay::errors::Result<()> 
     if no_heal {
         eprintln!("Skipping post-update health pass (--no-heal).");
     } else {
-        // Failure-tolerant by construction: the health pass collects every
-        // error as a printed warning and never fails the update.
         tracedecay::doctor::heal::run_post_update_health_pass().await;
     }
     Ok(())

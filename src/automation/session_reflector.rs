@@ -129,17 +129,14 @@ async fn validate_fact_proposal(
             "entities must be an array of strings",
         ));
     };
-    let trust = match object.get("trust") {
-        Some(value) => match proposal_trust_value(value) {
-            Some(trust) => Some(trust),
-            None => {
-                return Ok(rejected_fact(
-                    proposal,
-                    "trust must be a number between 0 and 1, or one of low, medium, high",
-                ))
-            }
-        },
-        None => return Ok(rejected_fact(proposal, "trust is required")),
+    let Some(trust) = object.get("trust") else {
+        return Ok(rejected_fact(proposal, "trust is required"));
+    };
+    let Some(trust) = proposal_trust_value(trust) else {
+        return Ok(rejected_fact(
+            proposal,
+            "trust must be a number between 0 and 1, or one of low, medium, high",
+        ));
     };
     if object.contains_key("confidence") {
         return Ok(rejected_fact(
@@ -209,7 +206,7 @@ async fn validate_fact_proposal(
         source: Some("session_reflector".to_string()),
         tags,
         entities,
-        trust,
+        trust: Some(trust),
         metadata: json!({
             "source": "session_reflector",
             "source_span": source_span,

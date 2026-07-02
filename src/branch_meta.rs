@@ -8,8 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// Filename of the branch metadata file inside a project data dir.
-pub const BRANCH_META_FILENAME: &str = "branch-meta.json";
+const BRANCH_META_FILENAME: &str = "branch-meta.json";
 
 /// Metadata for a single tracked branch.
 #[derive(Debug, Clone, Serialize, Deserialize)]

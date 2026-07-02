@@ -19,9 +19,9 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::branch_meta::BRANCH_META_FILENAME;
 use crate::global_db::GlobalDb;
 use crate::migrate::registry::stale_code_projects;
+use crate::storage::BRANCH_META_FILENAME;
 
 /// A corrupt `branch-meta.json` that was renamed out of the way.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,7 +111,7 @@ fn print_warnings(warnings: &[String]) {
 /// Renames every `branch-meta.json` under `<profile_root>/projects/*` that is
 /// not valid JSON to `branch-meta.json.corrupt-<timestamp>`, preserving the
 /// corrupt content as evidence while restoring the single-DB fallback.
-pub fn quarantine_corrupt_branch_meta(profile_root: &Path, report: &mut HealthPassReport) {
+fn quarantine_corrupt_branch_meta(profile_root: &Path, report: &mut HealthPassReport) {
     let projects_root = profile_root.join("projects");
     let Ok(entries) = std::fs::read_dir(&projects_root) else {
         return;

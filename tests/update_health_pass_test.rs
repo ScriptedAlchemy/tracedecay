@@ -4,11 +4,13 @@
 //! All tests spawn the real binary against an isolated home directory via
 //! `apply_tracedecay_home_env`, so they never touch the real `~/.tracedecay`.
 
+mod common;
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
-
-mod common;
 
 use common::apply_tracedecay_home_env;
 use tempfile::TempDir;
@@ -48,7 +50,6 @@ fn add_tracedecay_path_shim(command: &mut Command, home: &Path) {
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
         let mut permissions = std::fs::metadata(&shim).unwrap().permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&shim, permissions).unwrap();

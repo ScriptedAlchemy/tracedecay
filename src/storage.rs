@@ -1,5 +1,5 @@
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -467,21 +467,15 @@ impl PrivateStoreIo {
     /// processes never interleave partial lines or lose each other's entries
     /// the way read-modify-rewrite appends do.
     pub fn append_line(path: &Path, line: &str) -> io::Result<()> {
-        use io::Write;
-
         if let Some(parent) = path.parent() {
             Self::create_dir_all(parent)?;
         }
         reject_symlink_components(path, "private store file")?;
-        let mut payload = String::with_capacity(line.len() + 1);
-        payload.push_str(line);
-        payload.push('\n');
-        let mut file = fs::OpenOptions::new()
+        fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(path)?;
-        file.write_all(payload.as_bytes())?;
-        drop(file);
+            .open(path)?
+            .write_all(format!("{line}\n").as_bytes())?;
         set_private_file_permissions(path)
     }
 
