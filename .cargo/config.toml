@@ -14,16 +14,13 @@ CXXFLAGS = { value = "-DNDEBUG", force = false }
 # Installed binaries run outside cargo and are unaffected.
 TRACEDECAY_DISABLE_GLOBAL_DB = { value = "1", force = false }
 
-# Profile-storage isolation for cargo-launched processes. Without this, any
-# test (or `tracedecay` binary a test spawns) that doesn't set
+# Point cargo-launched processes at a workspace-local profile. Without this,
+# any test (or `tracedecay` binary a test spawns) that doesn't set
 # TRACEDECAY_DATA_DIR itself resolves storage to the developer's real
-# ~/.tracedecay, enrolling every temp fixture repo into the real profile and
-# contending with a live daemon. Point everything cargo launches at a
-# workspace-local profile instead; `cargo clean` wipes it. Tests that need a
-# private profile still override this per-test (child-process `.env()` /
-# in-process EnvVarGuard win over cargo's value), and the HOME-fallback tests
-# remove the variable in-process before asserting.
-# Installed binaries run outside cargo and are unaffected.
+# ~/.tracedecay, enrolling temp fixture repos into the real profile and
+# contending with a live daemon. Tests that need a private profile override
+# this per-test (`force = false`); the HOME-fallback tests remove the variable
+# in-process. Installed binaries run outside cargo and are unaffected.
 # Enforced by tests/test_profile_isolation_test.rs.
 TRACEDECAY_DATA_DIR = { value = "target/test-profile/.tracedecay", force = false, relative = true }
 

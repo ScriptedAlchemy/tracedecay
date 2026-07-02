@@ -10,10 +10,6 @@ use std::path::{Path, PathBuf};
 
 use tracedecay::config::{user_data_dir, USER_DATA_DIR_ENV};
 
-fn real_profile_root() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".tracedecay"))
-}
-
 fn canonical(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
@@ -32,14 +28,14 @@ fn cargo_env_pins_data_dir_for_tests() {
 #[test]
 fn resolved_data_dir_is_not_the_real_user_profile() {
     let resolved = user_data_dir().expect("user_data_dir should resolve in tests");
-    let Some(real_profile) = real_profile_root() else {
+    let Some(real_profile) = dirs::home_dir().map(|home| home.join(".tracedecay")) else {
         return;
     };
 
     let resolved = canonical(&resolved);
     let real_profile = canonical(&real_profile);
     assert!(
-        resolved != real_profile && !resolved.starts_with(&real_profile),
+        !resolved.starts_with(&real_profile),
         "tests resolved TraceDecay storage to the real user profile '{}'; \
          the suite must stay isolated (see the {USER_DATA_DIR_ENV} entry in \
          .cargo/config.toml). If {USER_DATA_DIR_ENV} is set in your shell, \
