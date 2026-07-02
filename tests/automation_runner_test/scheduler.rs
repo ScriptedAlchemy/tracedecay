@@ -12,6 +12,8 @@ use tracedecay::automation::scheduler::{
     scheduler_control_path, AutomationSchedule, AutomationSchedulerControl, AutomationTaskLock,
 };
 
+use crate::support::scheduler_record_for;
+
 fn automation_config(schedule: Option<&str>, interval_secs: Option<u64>) -> AutomationConfig {
     AutomationConfig {
         enabled: true,
@@ -50,53 +52,8 @@ fn record(
     completed_at: i64,
 ) -> AutomationRunLedgerRecord {
     AutomationRunLedgerRecord {
-        schema_version: 2,
-        run_id: run_id.to_string(),
-        trigger: AutomationTrigger::Scheduler,
-        task,
-        task_key: Some(test_task_key(task).to_string()),
-        backend: "codex_app_server".to_string(),
-        host_mode: Some("standalone".to_string()),
-        prompt_version: Some(test_prompt_version(task).to_string()),
-        response_schema: None,
-        strict_json: None,
         model: Some("test-model".to_string()),
-        status,
-        evidence_hash: None,
-        input_hash: None,
-        output_hash: None,
-        proposed_ops: None,
-        applied_ops: None,
-        rejected_ops: None,
-        validation_report: None,
-        reviewed_count: 0,
-        accepted_count: 0,
-        rejected_count: 0,
-        skipped_count: usize::from(status == AutomationRunStatus::Skipped),
-        error: None,
-        error_classification: None,
-        error_retryable: None,
-        fallback_status: None,
-        report_ref: None,
-        artifacts: Vec::new(),
-        started_at: (completed_at - 1).to_string(),
-        completed_at: completed_at.to_string(),
-    }
-}
-
-fn test_task_key(task: AgentTaskKind) -> &'static str {
-    match task {
-        AgentTaskKind::MemoryCurator => "memory_curator",
-        AgentTaskKind::SessionReflector => "session_reflector",
-        AgentTaskKind::SkillWriter => "skill_writer",
-    }
-}
-
-fn test_prompt_version(task: AgentTaskKind) -> &'static str {
-    match task {
-        AgentTaskKind::MemoryCurator => "memory_curator:v1",
-        AgentTaskKind::SessionReflector => "session_reflector:v1",
-        AgentTaskKind::SkillWriter => "skill_writer:v1",
+        ..scheduler_record_for(run_id, task, status, completed_at)
     }
 }
 
