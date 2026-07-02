@@ -856,7 +856,7 @@ fn test_build_codex_session_context_for_generic_workspace_uses_session_guidance(
     assert!(context.contains("tracedecay_message_search"));
     assert!(context.contains("tracedecay_fact_store"));
     assert!(context.contains("before asking the user to repeat"));
-    assert!(context.contains("Do not store task progress"));
+    assert!(context.contains("Do NOT store secrets or credentials"));
     assert!(
         !context.contains("tracedecay init"),
         "non-project chats should not be told to initialize a code graph: {context}"

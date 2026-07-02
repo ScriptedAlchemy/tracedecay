@@ -14,6 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
+pub mod memory_inject;
 pub mod tool_hints;
 
 use tool_hints::{decide_hint, HintAgent, HintCategory, ToolHint, ToolHintInput};
@@ -595,6 +596,20 @@ pub async fn hook_cursor_session_start() -> i32 {
     )
     .await;
     let mut context = cursor_session_context_for_root(root.as_deref()).await;
+    if let Some(root) = root.as_deref() {
+        let session_id = serde_json::from_str::<Value>(&event)
+            .ok()
+            .as_ref()
+            .and_then(event_session_id);
+        if let Some(digest) =
+            memory_inject::session_memory_digest(root, session_id.as_deref()).await
+        {
+            append_context_block(&mut context, &digest);
+        }
+        // Keep the materialized always-applied memory rule fresh (best-effort,
+        // content-hash gated inside).
+        memory_inject::regenerate_cursor_memory_rule(root).await;
+    }
     if session_start_from_compaction(&event) {
         append_context_recovery_hint(&mut context);
     }
@@ -669,6 +684,9 @@ pub async fn hook_cursor_workspace_open() -> i32 {
     let root = cursor_project_root_from_event(&event);
     record_hook_invoked(root.as_deref(), HintAgent::Cursor, "workspaceOpen", &event);
     notify_cursor_workspace_open(&event).await;
+    if let Some(root) = root.as_deref() {
+        memory_inject::regenerate_cursor_memory_rule(root).await;
+    }
     println!("{}", serde_json::json!({}));
     0
 }
@@ -1517,11 +1535,12 @@ pub fn build_codex_session_context_for_workspace(
             s.push_str(
                 "TraceDecay session context is available via MCP. For prior conversation \
                  recovery, use tracedecay_lcm_expand_query, tracedecay_message_search, and \
-                 tracedecay_lcm_describe before asking the user to repeat themselves. Use \
-                 tracedecay_fact_store only for durable preferences, environment details, \
-                 tool quirks, or decisions that will still matter later. Do not store task \
-                 progress, temporary TODOs, or soon-stale session outcomes; recover those \
-                 from transcripts instead.\n",
+                 tracedecay_lcm_describe before asking the user to repeat themselves. When \
+                 a durable preference, decision, correction, or pitfall surfaces, store it \
+                 proactively with tracedecay_fact_store (action \"add\"). Do NOT store \
+                 secrets or credentials, transient errors, environment-specific failures, \
+                 one-off narratives, task progress, or soon-stale session outcomes; \
+                 recover those from transcripts instead.\n",
             );
             s.push_str("Workspace status: no active project workspace; no setup guidance needed for this prompt.\n");
         }
@@ -1537,11 +1556,24 @@ fn append_codex_recall_and_registry_guidance(s: &mut String) {
          project_path to tracedecay_context/search for cross-project code context before \
          scanning parent directories. When the user references prior conversation or \
          missing context, use tracedecay_message_search or tracedecay_lcm_expand_query \
-         before asking the user to repeat themselves. Use tracedecay_fact_store only for \
-         durable preferences, environment details, tool quirks, or decisions that will \
-         still matter later. Do not store task progress, temporary TODOs, or soon-stale \
-         session outcomes; recover those from transcripts instead.\n",
+         before asking the user to repeat themselves. When a durable decision, user \
+         preference, correction, or pitfall surfaces, store it proactively with \
+         tracedecay_fact_store (action \"add\") with calibrated trust — do not wait \
+         to be asked. Do NOT store secrets or credentials, transient errors, \
+         environment-specific failures, one-off narratives, task progress, or \
+         soon-stale session outcomes; recover those from transcripts instead.\n",
     );
+}
+
+/// Appends a rendered context block (e.g. a memory digest) on its own lines.
+fn append_context_block(context: &mut String, block: &str) {
+    if !context.is_empty() && !context.ends_with('\n') {
+        context.push('\n');
+    }
+    context.push_str(block);
+    if !block.ends_with('\n') {
+        context.push('\n');
+    }
 }
 
 fn append_context_recovery_hint(context: &mut String) {
@@ -1704,6 +1736,17 @@ pub async fn hook_codex_session_start() -> i32 {
     let root = codex_project_root_from_event(&event);
     record_hook_invoked(root.as_deref(), HintAgent::Codex, "SessionStart", &event);
     let (mut context, _) = codex_session_context_for_event(&event).await;
+    if let Some(root) = root.as_deref() {
+        let session_id = serde_json::from_str::<Value>(&event)
+            .ok()
+            .as_ref()
+            .and_then(event_session_id);
+        if let Some(digest) =
+            memory_inject::session_memory_digest(root, session_id.as_deref()).await
+        {
+            append_context_block(&mut context, &digest);
+        }
+    }
     if session_start_from_compaction(&event) {
         append_context_recovery_hint(&mut context);
     }
@@ -1742,8 +1785,23 @@ pub async fn codex_user_prompt_submit_context_for_event(event: &str) -> String {
         if let Some(hint) = codex_prompt_hint(event) {
             append_tool_hint(&mut context, &hint);
         }
+        if let Some(recall) = codex_prompt_memory_recall(event).await {
+            append_context_block(&mut context, &recall);
+        }
     }
     context
+}
+
+/// Prompt-relevance-gated fact recall for Codex `UserPromptSubmit`: queries
+/// the project fact store with the submitted prompt text and injects at most a
+/// few high-trust matches, deduplicated against facts already injected this
+/// session. Fail-open (`None` on any miss).
+async fn codex_prompt_memory_recall(event_json: &str) -> Option<String> {
+    let parsed = serde_json::from_str::<Value>(event_json).ok()?;
+    let root = codex_project_root_from_parsed_event(&parsed)?;
+    let prompt = prompt_like_text(&parsed)?;
+    let session_id = event_session_id(&parsed);
+    memory_inject::prompt_memory_recall(&root, session_id.as_deref(), &prompt).await
 }
 
 /// Codex `SubagentStart` hook handler.
@@ -1751,12 +1809,19 @@ pub async fn codex_user_prompt_submit_context_for_event(event: &str) -> String {
 /// Steers research/explore subagents toward tracedecay MCP tools. Codex cannot
 /// hard-stop a subagent at start (`continue: false` is ignored for this event),
 /// so this injects `additionalContext` instead of denying.
-pub fn hook_codex_subagent_start() -> i32 {
+pub async fn hook_codex_subagent_start() -> i32 {
     let event = read_hook_event!();
     let root = codex_project_root_from_event(&event);
     record_hook_invoked(root.as_deref(), HintAgent::Codex, "SubagentStart", &event);
     let count = record_codex_subagent_start(&event);
     let output = evaluate_codex_subagent_start(&event);
+    // Subagents run in fresh context windows, so the memory digest is always
+    // rendered in full here (no per-session fact dedupe: session_id is None).
+    let digest = match root.as_deref() {
+        Some(root) => memory_inject::session_memory_digest(root, None).await,
+        None => None,
+    };
+    let output = merge_codex_subagent_output(output, digest);
     eprintln!(
         "{}",
         codex_subagent_start_log_line(&event, count, output.is_some())
@@ -1765,6 +1830,30 @@ pub fn hook_codex_subagent_start() -> i32 {
         println!("{output}");
     }
     0
+}
+
+/// Combines the tool-steering `SubagentStart` payload with the memory digest
+/// into a single `additionalContext` payload, tolerating either being absent.
+fn merge_codex_subagent_output(output: Option<String>, digest: Option<String>) -> Option<String> {
+    let Some(digest) = digest else {
+        return output;
+    };
+    let Some(output) = output else {
+        return Some(codex_additional_context_json("SubagentStart", &digest));
+    };
+    let Ok(mut parsed) = serde_json::from_str::<Value>(&output) else {
+        return Some(output);
+    };
+    let Some(context) = parsed
+        .pointer_mut("/hookSpecificOutput/additionalContext")
+        .and_then(|value| value.as_str().map(str::to_string))
+    else {
+        return Some(output);
+    };
+    let mut merged = context;
+    append_context_block(&mut merged, &digest);
+    parsed["hookSpecificOutput"]["additionalContext"] = Value::String(merged);
+    Some(parsed.to_string())
 }
 
 /// Codex `PostToolUse` hook handler used to keep the graph fresh after writes.
@@ -2755,6 +2844,41 @@ mod tests {
     use super::*;
     use crate::config::USER_DATA_DIR_ENV;
     use std::sync::{Mutex, OnceLock};
+
+    #[test]
+    fn codex_subagent_output_merges_memory_digest_into_additional_context() {
+        let steering = codex_additional_context_json("SubagentStart", "steering text");
+        let digest = "Durable project memory:\n- [decision #1 trust 0.90] fact".to_string();
+
+        // Digest merges into an existing steering payload.
+        let merged =
+            merge_codex_subagent_output(Some(steering.clone()), Some(digest.clone())).unwrap();
+        let parsed: Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(
+            parsed["hookSpecificOutput"]["hookEventName"],
+            "SubagentStart"
+        );
+        let context = parsed["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(context.starts_with("steering text"));
+        assert!(context.contains("Durable project memory"));
+
+        // Digest alone still yields a valid Codex payload.
+        let digest_only = merge_codex_subagent_output(None, Some(digest)).unwrap();
+        let parsed: Value = serde_json::from_str(&digest_only).unwrap();
+        assert_eq!(
+            parsed["hookSpecificOutput"]["hookEventName"],
+            "SubagentStart"
+        );
+
+        // No digest passes steering through untouched; nothing yields nothing.
+        assert_eq!(
+            merge_codex_subagent_output(Some(steering.clone()), None),
+            Some(steering)
+        );
+        assert_eq!(merge_codex_subagent_output(None, None), None);
+    }
 
     struct EnvGuard {
         key: &'static str,
