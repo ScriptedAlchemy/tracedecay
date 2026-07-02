@@ -87,10 +87,10 @@ async fn seed_session_store(db_path: &Path, project: &Path) {
             "msg-1",
             "assistant",
             1,
-            "Using tracedecay:searching-for-code before shell search.",
+            "Using tracedecay:exploring-code before shell search.",
             "message",
             Some("mcp__tracedecay__tracedecay_context,mcp__tracedecay__tracedecay_search"),
-            Some(r#"{"skills":["tracedecay:searching-for-code"]}"#),
+            Some(r#"{"skills":["tracedecay:exploring-code"]}"#),
         ),
         message(
             "msg-2",

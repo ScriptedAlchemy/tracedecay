@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 # /tracedecay-map-architecture
 
-Apply the `tracedecay:architecture-overview` skill.
+Apply the `tracedecay:code-health` skill.
 
 - **Scope:** the whole repo, or the directory named after the command if one was given.
 - Follow that skill's read-only workflow and guardrails; don't restate the tool ladder here.

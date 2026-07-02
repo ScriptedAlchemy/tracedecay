@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 # /tracedecay-test-changes
 
-Apply the `tracedecay:running-impacted-tests` skill.
+Apply the `tracedecay:assessing-impact` skill.
 
 - **Args:** interpret the text after the command as explicit changed paths; if absent, use the current working tree.
 - Follow that skill's workflow and guardrails (`tracedecay_run_affected_tests` and `tracedecay_diagnostics` run cargo-backed checks — respect Cursor approval/run-mode; preview scope read-only first).

@@ -7,7 +7,7 @@ description: 'Use when reviewing, updating, merging, deleting, pruning, or repai
 
 Destructive curation is a parent-agent responsibility. Use subagents only for scoped inspection or recommendation work, with explicit project selectors and non-overlapping ownership; do not delegate delete/apply/merge/retention actions to subagents. TraceDecay should progressively expose registered-project selectors in its own MCP and CLI surfaces, so this skill documents the workflow rather than being the sole routing mechanism.
 
-This skill owns memory lifecycle changes. For read-only recall, start with `tracedecay:recalling-project-memory`. For autonomous curation, begin read-only, gather evidence, propose a mutation plan, then write only narrow durable changes. The installed Codex plugin ships this skill as the required operator runbook, so follow the workflow below without depending on external `docs/` files.
+This skill owns memory lifecycle changes. For read-only recall, start with `tracedecay:recalling-project-memory`. For autonomous curation, begin read-only, gather evidence, propose a mutation plan, then write only narrow durable changes. The installed plugin ships this skill as the required operator runbook, so follow the workflow below without depending on external `docs/` files.
 
 ## Workflow
 
@@ -65,7 +65,7 @@ Use only when the user explicitly asks to memorize or remember a subject, code a
 ## Handoff
 
 - Need raw session messages or summary-DAG replay -> `tracedecay:recalling-session-context`.
-- Need only index/server status, not memory mutation -> `tracedecay:project-status`.
+- Need only index/server status, not memory mutation -> `tracedecay:code-health`.
 
 ## Output
 

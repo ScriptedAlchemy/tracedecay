@@ -19,6 +19,8 @@ use crate::sessions::{
     SessionMessageRecord, SessionMessageSearchResult, SessionRecord, SessionSearchScope,
 };
 
+const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;
+
 /// Total savings + call count for a project (or all projects when `project` is None).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SavingsTotal {
@@ -2299,28 +2301,44 @@ impl GlobalDb {
 
     /// Timestamp of the most recent ingested session message, in unix
     /// seconds, or `None` when no timestamped messages exist. Providers store
-    /// either seconds or milliseconds; millisecond values are normalized.
-    /// Backed by `idx_session_messages_timestamp`, so this is a cheap index
-    /// seek suitable for every automation scheduler tick.
+    /// either seconds or milliseconds; compare the newest value from each unit
+    /// bucket after normalization. Each bucket lookup is backed by
+    /// `idx_session_messages_timestamp`, keeping scheduler ticks bounded.
     pub async fn latest_session_activity_secs(&self) -> Option<i64> {
         let mut rows = self
             .conn
             .query(
-                "SELECT timestamp FROM session_messages
-                 WHERE timestamp IS NOT NULL
-                 ORDER BY timestamp DESC
-                 LIMIT 1",
-                (),
+                "WITH latest_seconds AS (
+                    SELECT timestamp FROM session_messages
+                    WHERE timestamp IS NOT NULL
+                      AND timestamp < ?1
+                    ORDER BY timestamp DESC
+                    LIMIT 1
+                 ),
+                 latest_millis AS (
+                    SELECT timestamp FROM session_messages
+                    WHERE timestamp >= ?1
+                    ORDER BY timestamp DESC
+                    LIMIT 1
+                 )
+                 SELECT timestamp FROM latest_seconds
+                 UNION ALL
+                 SELECT timestamp FROM latest_millis",
+                [UNIX_TIMESTAMP_MILLIS_THRESHOLD],
             )
             .await
             .ok()?;
-        let row = rows.next().await.ok()??;
-        let timestamp = row.get::<i64>(0).ok()?;
-        Some(if timestamp >= 1_000_000_000_000 {
-            timestamp / 1000
-        } else {
-            timestamp
-        })
+        let mut latest: Option<i64> = None;
+        while let Some(row) = rows.next().await.ok()? {
+            let timestamp = row.get::<i64>(0).ok()?;
+            let normalized = if timestamp >= UNIX_TIMESTAMP_MILLIS_THRESHOLD {
+                timestamp / 1000
+            } else {
+                timestamp
+            };
+            latest = Some(latest.map_or(normalized, |current| current.max(normalized)));
+        }
+        latest
     }
 
     /// Inserts or replaces a provider message. Returns `false` on any DB error.

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Claude Code installs now register `SessionStart` and `PostToolUse` lifecycle hooks, matching the freshness/steering coverage Cursor, Codex, and Kiro already had: `SessionStart` reports index freshness and injects the LCM context-recovery hint after compaction; `PostToolUse` notifies the daemon for targeted incremental sync after edits and shell commands. Existing installs pick the hooks up via the post-upgrade backfill or `tracedecay doctor`.
+- The CLI-fallback steering ("if MCP fails, use `tracedecay tool ...`") now reaches every host with a prompt-rules surface — Claude Code, Copilot/VS Code, Gemini, OpenCode, Kimi, Vibe, and Kiro — instead of only the Cursor rule and Codex session hook.
+
 ### Fixed
 
 - **`serve` no longer exits when project resolution fails at startup** — MCP hosts (Cursor especially) never retry a failed server spawn, so one startup exit over a recoverable config problem (uninitialized project, ambiguous global fallback, bad `--path`) turned every later tool call in the session into "Timed out waiting for connection". `serve` now stays alive in a degraded mode: it completes the MCP handshake, lists the real tools, and answers each tool call with an actionable error naming the failure, the fix, and the `tracedecay tool …` CLI fallback. It rechecks the project on every tool call and recovers in-session once `tracedecay init` (or a corrected path) makes resolution succeed — no server toggle or window reload needed.

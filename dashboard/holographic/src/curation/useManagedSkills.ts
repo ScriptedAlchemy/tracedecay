@@ -2,6 +2,7 @@ import { useCallback, useState } from "react";
 
 import type {
   ManagedSkill,
+  ManagedSkillExportReport,
   ManagedSkillResponse,
   SkillImprovementRecommendation,
   SkillStaleRecommendation,
@@ -11,6 +12,12 @@ import { errorMessage } from "./errors";
 import type { CurationApi } from "./useCurationData";
 
 type ManagedSkillAction = "approve" | "discard-update" | "disable" | "archive" | "restore";
+
+export interface ManagedSkillExportsResult {
+  skillId: string;
+  action: ManagedSkillAction;
+  reports: ManagedSkillExportReport[];
+}
 
 function indexBySkillId<T extends { skill_id: string }>(items: T[] = []): Record<string, T> {
   return Object.fromEntries(items.map((item) => [item.skill_id, item]));
@@ -31,6 +38,9 @@ export function useManagedSkills(api: CurationApi) {
   const [managedSkillsLoading, setManagedSkillsLoading] = useState(false);
   const [managedSkillsError, setManagedSkillsError] = useState("");
   const [managedSkillActioning, setManagedSkillActioning] = useState<string | null>(null);
+  const [managedSkillExports, setManagedSkillExports] = useState<ManagedSkillExportsResult | null>(
+    null,
+  );
 
   const applyManagedSkillResponse = useCallback((response: ManagedSkillResponse) => {
     const skillId = response.skill.metadata.id;
@@ -123,6 +133,13 @@ export function useManagedSkills(api: CurationApi) {
       }[action];
       const response = await call(id);
       applyManagedSkillResponse(response);
+      // Lifecycle actions re-export managed skills to detected agent hosts;
+      // keep the per-agent results visible after the list refresh below.
+      setManagedSkillExports(
+        response.skill_exports
+          ? { skillId: id, action, reports: response.skill_exports }
+          : null,
+      );
       await loadManagedSkills(false);
       return response;
     } catch (err) {
@@ -143,6 +160,7 @@ export function useManagedSkills(api: CurationApi) {
     managedSkillsLoading,
     managedSkillsError,
     managedSkillActioning,
+    managedSkillExports,
     loadManagedSkills,
     loadManagedSkill,
     runManagedSkillAction,

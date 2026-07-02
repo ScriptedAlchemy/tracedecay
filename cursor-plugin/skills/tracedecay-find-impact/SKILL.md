@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 # /tracedecay-find-impact
 
-Apply the `tracedecay:finding-impacted-areas` skill.
+Apply the `tracedecay:assessing-impact` skill.
 
 - **Args:** interpret the text after the command as the symbol, file, or change to analyze; if absent, use the current working-tree diff.
 - Follow that skill's read-only workflow and guardrails (shallow `max_depth` first; it identifies impact, it does not run tests).
