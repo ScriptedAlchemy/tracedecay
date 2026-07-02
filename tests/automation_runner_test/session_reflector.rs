@@ -1,6 +1,4 @@
-mod automation_runner_support;
-
-use automation_runner_support::*;
+use crate::support::*;
 use tracedecay::automation::fact_proposals::record_session_fact_proposals;
 
 #[tokio::test]

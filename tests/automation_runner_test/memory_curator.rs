@@ -1,6 +1,4 @@
-mod automation_runner_support;
-
-use automation_runner_support::*;
+use crate::support::*;
 
 #[tokio::test]
 async fn memory_curator_runner_skips_when_automation_is_disabled() {
