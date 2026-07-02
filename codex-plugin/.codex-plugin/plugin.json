@@ -1,7 +1,7 @@
 {
   "name": "tracedecay",
   "version": "0.0.0",
-  "description": "Codex integration for the TraceDecay semantic code intelligence MCP server.",
+  "description": "Codex integration for TraceDecay semantic code intelligence: MCP server plus a `tracedecay tool` CLI fallback exposing the same tools when MCP is unavailable.",
   "author": {
     "name": "ScriptedAlchemy",
     "url": "https://github.com/ScriptedAlchemy"

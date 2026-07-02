@@ -8,7 +8,8 @@ use std::path::{Component, Path, PathBuf};
 use crate::agents::{self, DoctorCounters, HealthcheckContext};
 use crate::display::{format_bytes, format_token_count};
 use crate::migrate::registry::code_project_root_exists;
-use crate::tracedecay::TraceDecay;
+use crate::storage::StoreLayout;
+use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 pub mod heal;
 mod registry_drift;
@@ -30,15 +31,24 @@ pub async fn run_doctor(agent_filter: Option<&str>) {
 
     eprintln!("\n\x1b[1mCurrent project\x1b[0m");
     let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let data_dir = crate::config::get_tracedecay_dir(&project_path);
-    if TraceDecay::is_initialized(&project_path) {
-        dc.pass(&format!("Index found: {}/", data_dir.display()));
-        check_database(&mut dc, &project_path).await;
-    } else {
-        dc.warn(&format!(
-            "No index at {}/ — run `tracedecay init`",
-            data_dir.display()
-        ));
+    match resolve_current_project_store(&project_path, &TraceDecayOpenOptions::default()).await {
+        CurrentProjectStore::Resolved(layout) => {
+            dc.pass(&describe_resolved_store(&layout));
+            check_database(&mut dc, &project_path).await;
+        }
+        CurrentProjectStore::LegacyRepoLocal => {
+            dc.pass(&format!(
+                "Index found: {}/ (legacy repo-local store)",
+                crate::config::get_tracedecay_dir(&project_path).display()
+            ));
+            check_database(&mut dc, &project_path).await;
+        }
+        CurrentProjectStore::Uninitialized => {
+            dc.warn(&format!(
+                "No index found for {} — run `tracedecay init`",
+                project_path.display()
+            ));
+        }
     }
 
     check_global_db(&mut dc);
@@ -73,11 +83,54 @@ pub async fn run_doctor(agent_filter: Option<&str>) {
     print_summary(&dc);
 }
 
-/// Check database health: report size and run VACUUM to reclaim space.
-async fn check_database(dc: &mut DoctorCounters, project_path: &Path) {
-    let db_path = crate::config::get_project_db_path(project_path);
-    let size_before = std::fs::metadata(&db_path).map_or(0, |m| m.len());
+/// How the doctor "Current project" check sees the working directory's store.
+#[derive(Debug)]
+enum CurrentProjectStore {
+    /// A store resolved through the same registry/alias-aware path the tools
+    /// use (enrollment marker, git-common-dir alias, profile shard, …).
+    Resolved(Box<StoreLayout>),
+    /// No resolvable store, but an old repo-local `.tracedecay/` database exists.
+    LegacyRepoLocal,
+    /// Resolution genuinely found nothing — `tracedecay init` is warranted.
+    Uninitialized,
+}
 
+async fn resolve_current_project_store(
+    project_path: &Path,
+    open_options: &TraceDecayOpenOptions,
+) -> CurrentProjectStore {
+    if let Some(layout) =
+        TraceDecay::initialized_store_layout_with_options(project_path, open_options).await
+    {
+        return CurrentProjectStore::Resolved(Box::new(layout));
+    }
+    if crate::config::has_project_database(project_path) {
+        return CurrentProjectStore::LegacyRepoLocal;
+    }
+    CurrentProjectStore::Uninitialized
+}
+
+fn describe_resolved_store(layout: &StoreLayout) -> String {
+    let mode = match layout.storage_mode {
+        crate::storage::StorageMode::ProjectLocal => "repo-local",
+        crate::storage::StorageMode::ProfileSharded => "profile-sharded",
+    };
+    let store_id = layout
+        .identity
+        .project_id
+        .as_deref()
+        .map_or_else(String::new, |id| format!(", store {id}"));
+    format!(
+        "Index found: {}/ ({mode}{store_id})",
+        layout.data_root.display()
+    )
+}
+
+/// Check database health: report size and run VACUUM to reclaim space.
+///
+/// The DB path is taken from the opened instance so the size measured is the
+/// same file (possibly a branch-specific DB) that VACUUM actually compacts.
+async fn check_database(dc: &mut DoctorCounters, project_path: &Path) {
     let ts = match TraceDecay::open(project_path).await {
         Ok(ts) => ts,
         Err(e) => {
@@ -85,6 +138,8 @@ async fn check_database(dc: &mut DoctorCounters, project_path: &Path) {
             return;
         }
     };
+    let db_path = ts.db_path();
+    let size_before = std::fs::metadata(&db_path).map_or(0, |m| m.len());
 
     dc.pass(&format!("DB size: {}", format_bytes(size_before)));
 
@@ -650,6 +705,83 @@ mod tests {
         assert_eq!(format_bytes(2048), "2.0 KB");
         // 1536 = 1.5 KB
         assert_eq!(format_bytes(1536), "1.5 KB");
+    }
+
+    #[tokio::test]
+    async fn current_project_store_resolves_profile_shard_via_registry_alias(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::TempDir::new()?;
+        let profile_root = dir.path().join("profile");
+        let project_root = dir.path().join("repo");
+        std::fs::create_dir_all(&project_root)?;
+        let project_root = canonical_temp_path(&project_root);
+        let shard_root =
+            crate::storage::profile_sharded_data_root(&profile_root, "proj_doctor_current");
+        std::fs::create_dir_all(&shard_root)?;
+        std::fs::write(
+            shard_root.join(crate::config::db_filename(&shard_root)),
+            b"graph",
+        )?;
+
+        let global_db_path = dir.path().join("global.db");
+        let db = crate::global_db::GlobalDb::open_at(&global_db_path)
+            .await
+            .ok_or_else(|| std::io::Error::other("could not open global db"))?;
+        db.upsert_code_project(
+            "proj_doctor_current",
+            &project_root,
+            None,
+            None,
+            Some("main"),
+        )
+        .await
+        .ok_or_else(|| std::io::Error::other("could not upsert project"))?;
+        db.upsert_store_instance(StoreInstanceUpsert {
+            store_id: "store:proj_doctor_current:profile_sharded".to_string(),
+            project_id: "proj_doctor_current".to_string(),
+            store_kind: "code_project".to_string(),
+            storage_mode: "profile_sharded".to_string(),
+            store_relpath: Path::new("projects")
+                .join("proj_doctor_current")
+                .to_string_lossy()
+                .to_string(),
+            manifest_relpath: Some(crate::storage::STORE_MANIFEST_FILENAME.to_string()),
+            last_verified_at: Some(1_800_000_000),
+            last_write_at: Some(1_800_000_000),
+        })
+        .await
+        .ok_or_else(|| std::io::Error::other("could not upsert store"))?;
+
+        let open_options = TraceDecayOpenOptions {
+            profile_root: Some(profile_root.clone()),
+            global_db_path: Some(global_db_path),
+        };
+
+        // No repo-local `.tracedecay/` index exists, yet the project must not
+        // be reported as uninitialized: resolution finds the profile shard.
+        assert!(!crate::config::has_project_database(&project_root));
+        match resolve_current_project_store(&project_root, &open_options).await {
+            CurrentProjectStore::Resolved(layout) => {
+                assert_eq!(layout.data_root, shard_root);
+                assert_eq!(
+                    layout.identity.project_id.as_deref(),
+                    Some("proj_doctor_current")
+                );
+                assert!(describe_resolved_store(&layout).contains("profile-sharded"));
+            }
+            other => panic!("expected resolved profile shard, got {other:?}"),
+        }
+
+        // A project the registry knows nothing about should still get the
+        // `tracedecay init` advice.
+        let unregistered = dir.path().join("unregistered");
+        std::fs::create_dir_all(&unregistered)?;
+        let unregistered = canonical_temp_path(&unregistered);
+        assert!(matches!(
+            resolve_current_project_store(&unregistered, &open_options).await,
+            CurrentProjectStore::Uninitialized
+        ));
+        Ok(())
     }
 
     #[tokio::test]
