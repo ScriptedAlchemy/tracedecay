@@ -415,16 +415,20 @@ async fn dashboard_job_skip_reason(
     if config.backend == AutomationBackend::Disabled {
         return Ok(Some("backend_disabled"));
     }
-    let task_config = match task {
-        AgentTaskKind::MemoryCurator => &config.tasks.memory_curator,
-        AgentTaskKind::SessionReflector => &config.tasks.session_reflector,
-        AgentTaskKind::SkillWriter => &config.tasks.skill_writer,
+    let task_enabled = match task {
+        AgentTaskKind::MemoryCurator => config.tasks.memory_curator.enabled,
+        AgentTaskKind::SessionReflector => config.tasks.session_reflector.enabled,
+        AgentTaskKind::SkillWriter => config.tasks.skill_writer.enabled,
+        AgentTaskKind::CombinedReview => {
+            config.tasks.session_reflector.enabled && config.tasks.skill_writer.enabled
+        }
     };
-    if !task_config.enabled {
+    if !task_enabled {
         return Ok(Some(match task {
             AgentTaskKind::MemoryCurator => "memory_curator_disabled",
             AgentTaskKind::SessionReflector => "session_reflector_disabled",
             AgentTaskKind::SkillWriter => "skill_writer_disabled",
+            AgentTaskKind::CombinedReview => "combined_review_disabled",
         }));
     }
     Ok(None)
@@ -507,6 +511,7 @@ fn dashboard_task_label(task: AgentTaskKind) -> &'static str {
         AgentTaskKind::MemoryCurator => "memory-curator",
         AgentTaskKind::SessionReflector => "session-reflector",
         AgentTaskKind::SkillWriter => "skill-writer",
+        AgentTaskKind::CombinedReview => "combined-review",
     }
 }
 

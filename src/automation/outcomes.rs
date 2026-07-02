@@ -358,6 +358,10 @@ fn task_outcomes(
 ) -> (Vec<&SkillOutcomeRecord>, Vec<&FactOutcomeRecord>) {
     match task {
         AgentTaskKind::SkillWriter => (snapshot.skills.iter().collect(), Vec::new()),
+        AgentTaskKind::CombinedReview => (
+            snapshot.skills.iter().collect(),
+            snapshot.facts.iter().collect(),
+        ),
         AgentTaskKind::SessionReflector | AgentTaskKind::MemoryCurator => {
             (Vec::new(), snapshot.facts.iter().collect())
         }

@@ -83,6 +83,53 @@ fn backend_contract_round_trips_structured_task_output() {
 }
 
 #[test]
+fn combined_review_contract_requires_both_arrays_with_deterministic_input_hash() {
+    let request = AgentTaskRequest::new(
+        "run_combined".to_string(),
+        AgentTaskKind::CombinedReview,
+        "combined prompt".to_string(),
+        Some("sha256:evidence".to_string()),
+        json!({"apply": false}),
+    );
+
+    assert_eq!(request.contract.task_key, "combined_review");
+    assert_eq!(request.contract.prompt_version, "combined_review:v1");
+    assert!(request.contract.strict_json);
+    assert_eq!(
+        request.contract.response_schema["required"],
+        json!(["facts", "skills"])
+    );
+    assert_eq!(
+        request.contract.response_schema["properties"]["facts"]["type"],
+        "array"
+    );
+    assert_eq!(
+        request.contract.response_schema["properties"]["skills"]["type"],
+        "array"
+    );
+    assert!(request.input_hash.starts_with("sha256:"));
+
+    // Same inputs hash identically; run_id is not part of the input hash.
+    let same_inputs = AgentTaskRequest::new(
+        "run_combined_other".to_string(),
+        AgentTaskKind::CombinedReview,
+        "combined prompt".to_string(),
+        Some("sha256:evidence".to_string()),
+        json!({"apply": false}),
+    );
+    assert_eq!(request.input_hash, same_inputs.input_hash);
+
+    let different_evidence = AgentTaskRequest::new(
+        "run_combined".to_string(),
+        AgentTaskKind::CombinedReview,
+        "combined prompt".to_string(),
+        Some("sha256:other-evidence".to_string()),
+        json!({"apply": false}),
+    );
+    assert_ne!(request.input_hash, different_evidence.input_hash);
+}
+
+#[test]
 fn extracts_one_plain_or_fenced_json_object() {
     assert_eq!(
         extract_json_object_prefix(r#" { "ok": true } "#).unwrap()["ok"],

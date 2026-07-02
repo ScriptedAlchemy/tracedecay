@@ -26,8 +26,9 @@ pub(crate) use tracedecay::automation::run_ledger::{
     AutomationRunStatus, AutomationTrigger,
 };
 pub(crate) use tracedecay::automation::runner::{
-    run_memory_curator_with_backend, run_session_reflector_with_backend,
-    run_skill_writer_with_backend, MemoryCuratorAutomationOptions,
+    run_combined_review_with_backend, run_memory_curator_with_backend,
+    run_session_reflector_with_backend, run_skill_writer_with_backend,
+    CombinedReviewAutomationOptions, CombinedReviewDispatch, MemoryCuratorAutomationOptions,
     SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
 };
 pub(crate) use tracedecay::errors::TraceDecayError;
@@ -403,6 +404,7 @@ impl AgentTaskBackend for MalformedTextBackend {
                 ("session_reflector", "session_reflector:v2", "facts")
             }
             AgentTaskKind::SkillWriter => ("skill_writer", "skill_writer:v2", "skills"),
+            AgentTaskKind::CombinedReview => ("combined_review", "combined_review:v1", "facts"),
         };
         assert_request_contract(request, task_key, prompt_version, required_property);
         Ok(AgentTaskResponse {
@@ -446,6 +448,61 @@ impl AgentTaskBackend for SessionJsonBackend {
         assert!(request.prompt.contains("durable memory facts"));
         assert_eq!(request.context["apply"], json!(false));
         assert!(request.context["session_reflection_evidence"]["hits"]
+            .as_array()
+            .is_some_and(|hits| !hits.is_empty()));
+        Ok(AgentTaskResponse {
+            run_id: request.run_id.clone(),
+            task: request.task,
+            output_text: self.output.to_string(),
+            output_json: Some(self.output.clone()),
+            model: Some("fixture-model".to_string()),
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+        })
+    }
+}
+
+pub(crate) struct CombinedJsonBackend {
+    calls: AtomicUsize,
+    output: Value,
+}
+
+impl CombinedJsonBackend {
+    pub(crate) fn new(output: Value) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            output,
+        }
+    }
+
+    pub(crate) fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl AgentTaskBackend for CombinedJsonBackend {
+    fn run_task(
+        &self,
+        request: &AgentTaskRequest,
+    ) -> tracedecay::errors::Result<AgentTaskResponse> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(request.task, AgentTaskKind::CombinedReview);
+        assert_eq!(request.contract.task_key, "combined_review");
+        assert_eq!(request.contract.prompt_version, "combined_review:v1");
+        assert!(request.contract.strict_json);
+        assert_eq!(
+            request.contract.response_schema["required"],
+            json!(["facts", "skills"])
+        );
+        // The combined prompt must compose both per-task prompts.
+        assert!(request.prompt.contains("durable memory facts"));
+        assert!(request.prompt.contains("managed skill creates or updates"));
+        assert_eq!(request.context["apply"], json!(false));
+        assert!(request.context["activation_policy"].is_string());
+        assert!(request.context["session_reflection_evidence"]["hits"]
+            .as_array()
+            .is_some_and(|hits| !hits.is_empty()));
+        assert!(request.context["skill_writer_evidence"]["hits"]
             .as_array()
             .is_some_and(|hits| !hits.is_empty()));
         Ok(AgentTaskResponse {
@@ -896,6 +953,7 @@ pub(crate) fn test_task_key(task: AgentTaskKind) -> &'static str {
         AgentTaskKind::MemoryCurator => "memory_curator",
         AgentTaskKind::SessionReflector => "session_reflector",
         AgentTaskKind::SkillWriter => "skill_writer",
+        AgentTaskKind::CombinedReview => "combined_review",
     }
 }
 
@@ -904,5 +962,6 @@ pub(crate) fn test_prompt_version(task: AgentTaskKind) -> &'static str {
         AgentTaskKind::MemoryCurator => "memory_curator:v1",
         AgentTaskKind::SessionReflector => "session_reflector:v2",
         AgentTaskKind::SkillWriter => "skill_writer:v2",
+        AgentTaskKind::CombinedReview => "combined_review:v1",
     }
 }

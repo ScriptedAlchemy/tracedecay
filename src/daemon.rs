@@ -1342,8 +1342,9 @@ async fn run_automation_scheduler_tick(
     use crate::automation::backend::{AgentTaskKind, CodexAppServerBackend};
     use crate::automation::run_ledger::AutomationTrigger;
     use crate::automation::runner::{
-        run_memory_curator_with_backend, run_session_reflector_with_backend,
-        run_skill_writer_with_backend, MemoryCuratorAutomationOptions,
+        run_combined_review_with_backend, run_memory_curator_with_backend,
+        run_session_reflector_with_backend, run_skill_writer_with_backend,
+        CombinedReviewAutomationOptions, CombinedReviewDispatch, MemoryCuratorAutomationOptions,
         SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
     };
 
@@ -1400,48 +1401,101 @@ async fn run_automation_scheduler_tick(
             first_error.get_or_insert(e);
         }
     }
-    log_scheduler_task_start(project_path, AgentTaskKind::SessionReflector);
-    match run_session_reflector_with_backend(
-        &cg,
-        &config,
-        &backend,
-        SessionReflectorAutomationOptions {
-            trigger: AutomationTrigger::Scheduler,
-            ..SessionReflectorAutomationOptions::default()
-        },
-    )
-    .await
-    {
-        Ok(run) => {
-            any_succeeded |= run.ledger_record.status
-                == crate::automation::run_ledger::AutomationRunStatus::Succeeded;
-            log_daemon_scheduler_record(project_path, &run.ledger_record);
-        }
-        Err(e) => {
-            log_scheduler_task_error(project_path, AgentTaskKind::SessionReflector, &e);
-            first_error.get_or_insert(e);
+    // When both the reflector and the skill writer are due in this tick, the
+    // combined path serves them with one backend call. Any other outcome
+    // (combined mode disabled, only one task due, missing evidence) falls
+    // back to the sequential per-task runs below.
+    let mut combined_handled = false;
+    if config.combine_due_tasks {
+        log_scheduler_task_start(project_path, AgentTaskKind::CombinedReview);
+        match run_combined_review_with_backend(
+            &cg,
+            &config,
+            &backend,
+            CombinedReviewAutomationOptions::default(),
+        )
+        .await
+        {
+            Ok(CombinedReviewDispatch::Ran(run)) => {
+                any_succeeded |= run.session_reflector.ledger_record.status
+                    == crate::automation::run_ledger::AutomationRunStatus::Succeeded;
+                any_succeeded |= run.skill_writer.ledger_record.status
+                    == crate::automation::run_ledger::AutomationRunStatus::Succeeded;
+                log_daemon_scheduler_record(project_path, &run.session_reflector.ledger_record);
+                log_daemon_scheduler_record(project_path, &run.skill_writer.ledger_record);
+                combined_handled = true;
+            }
+            Ok(CombinedReviewDispatch::RecordedFailure { run, error }) => {
+                any_succeeded |= run.session_reflector.ledger_record.status
+                    == crate::automation::run_ledger::AutomationRunStatus::Succeeded;
+                any_succeeded |= run.skill_writer.ledger_record.status
+                    == crate::automation::run_ledger::AutomationRunStatus::Succeeded;
+                log_daemon_scheduler_record(project_path, &run.session_reflector.ledger_record);
+                log_daemon_scheduler_record(project_path, &run.skill_writer.ledger_record);
+                log_scheduler_task_error(project_path, AgentTaskKind::CombinedReview, &error);
+                first_error.get_or_insert(error);
+                combined_handled = true;
+            }
+            Ok(CombinedReviewDispatch::NotCombined { reason }) => {
+                log_daemon_event(
+                    "scheduler_task",
+                    &[
+                        ("project", project_path.display().to_string()),
+                        ("task", "combined_review".to_string()),
+                        ("outcome", "not_combined".to_string()),
+                        ("reason", reason.to_string()),
+                    ],
+                );
+            }
+            Err(e) => {
+                log_scheduler_task_error(project_path, AgentTaskKind::CombinedReview, &e);
+            }
         }
     }
-    log_scheduler_task_start(project_path, AgentTaskKind::SkillWriter);
-    match run_skill_writer_with_backend(
-        &cg,
-        &config,
-        &backend,
-        SkillWriterAutomationOptions {
-            trigger: AutomationTrigger::Scheduler,
-            ..SkillWriterAutomationOptions::default()
-        },
-    )
-    .await
-    {
-        Ok(run) => {
-            any_succeeded |= run.ledger_record.status
-                == crate::automation::run_ledger::AutomationRunStatus::Succeeded;
-            log_daemon_scheduler_record(project_path, &run.ledger_record);
+    if !combined_handled {
+        log_scheduler_task_start(project_path, AgentTaskKind::SessionReflector);
+        match run_session_reflector_with_backend(
+            &cg,
+            &config,
+            &backend,
+            SessionReflectorAutomationOptions {
+                trigger: AutomationTrigger::Scheduler,
+                ..SessionReflectorAutomationOptions::default()
+            },
+        )
+        .await
+        {
+            Ok(run) => {
+                any_succeeded |= run.ledger_record.status
+                    == crate::automation::run_ledger::AutomationRunStatus::Succeeded;
+                log_daemon_scheduler_record(project_path, &run.ledger_record);
+            }
+            Err(e) => {
+                log_scheduler_task_error(project_path, AgentTaskKind::SessionReflector, &e);
+                first_error.get_or_insert(e);
+            }
         }
-        Err(e) => {
-            log_scheduler_task_error(project_path, AgentTaskKind::SkillWriter, &e);
-            first_error.get_or_insert(e);
+        log_scheduler_task_start(project_path, AgentTaskKind::SkillWriter);
+        match run_skill_writer_with_backend(
+            &cg,
+            &config,
+            &backend,
+            SkillWriterAutomationOptions {
+                trigger: AutomationTrigger::Scheduler,
+                ..SkillWriterAutomationOptions::default()
+            },
+        )
+        .await
+        {
+            Ok(run) => {
+                any_succeeded |= run.ledger_record.status
+                    == crate::automation::run_ledger::AutomationRunStatus::Succeeded;
+                log_daemon_scheduler_record(project_path, &run.ledger_record);
+            }
+            Err(e) => {
+                log_scheduler_task_error(project_path, AgentTaskKind::SkillWriter, &e);
+                first_error.get_or_insert(e);
+            }
         }
     }
     if any_succeeded {
