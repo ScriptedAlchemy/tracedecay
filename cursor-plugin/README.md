@@ -20,14 +20,26 @@ tracedecay serve --path ${workspaceFolder}
 This is intentionally workspace-scoped: each Cursor workspace uses its own
 `.tracedecay/` index instead of the legacy global Cursor MCP registration. The
 `${workspaceFolder}` variable is resolved by Cursor's MCP runner in normal
-editor windows. Some Cursor contexts (headless agent-session MCP scopes) spawn
-the server with the literal, unexpanded `${workspaceFolder}` string instead;
-`serve` detects that, warns on stderr, and falls back to its normal project
-discovery (cwd walk-up, MCP initialize roots, then the global project
-registry) rather than exiting — Cursor never retries a failed MCP scope, so an
-early exit would permanently break the connection for that session. If tools
-still do not connect, run `tracedecay doctor --agent cursor` to inspect the
-generated plugin config.
+editor windows.
+
+Some Cursor contexts (headless agent-session MCP scopes) spawn the server with
+the literal, unexpanded `${workspaceFolder}` string instead, from a working
+directory set to the user home rather than the workspace. Cursor never retries
+a failed MCP scope, so exiting on that bogus path would permanently break the
+connection for the session ("Timed out waiting for connection" on every tool
+call). `serve` therefore detects an unexpanded `${...}` template value, warns
+on stderr, and falls back to project discovery where possible: cwd walk-up,
+MCP initialize roots, then the global project registry. Because the spawn
+directory says nothing about the intended workspace in this mode, the registry
+step accepts only a unique registered project — with several projects
+registered, `serve` still exits with an actionable "multiple projects" error
+instead of guessing, and it logs which project it picked and why when
+discovery succeeds. This is also why the template keeps
+`--path ${workspaceFolder}` rather than dropping it (as was done for VS Code
+Copilot in issue #66): normal Cursor windows do expand it, and from a home-dir
+cwd no-path discovery cannot scope multi-project setups. If tools still do not
+connect, run `tracedecay doctor --agent cursor` to inspect the generated
+plugin config.
 
 Hook commands derive the active project from Cursor's event payload /
 `CURSOR_PROJECT_DIR`, not from the plugin directory.

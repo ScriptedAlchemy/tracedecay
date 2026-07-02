@@ -550,11 +550,26 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
             // Some MCP hosts (e.g. Cursor headless agent sessions) pass config
             // template variables like `${workspaceFolder}` through literally;
             // treat such values as "no --path" and use discovery instead.
+            let had_path_arg = path.is_some();
             let path = serve::sanitize_serve_path_arg(path);
             let explicit_path = path.is_some();
+            let path_was_template = had_path_arg && !explicit_path;
+            let global_db_match = if path_was_template {
+                serve::ServeGlobalDbMatch::UniqueOnly
+            } else {
+                serve::ServeGlobalDbMatch::CwdHeuristic
+            };
             let project_path = tracedecay::config::resolve_path_with_discovery(path);
             let cg = match serve::ensure_initialized(&project_path).await {
-                Ok(cg) => cg,
+                Ok(cg) => {
+                    if path_was_template {
+                        serve::log_serve_project_choice(
+                            cg.project_root(),
+                            "discovered from the working directory",
+                        );
+                    }
+                    cg
+                }
                 Err(e) => {
                     if explicit_path {
                         return Err(e);
@@ -562,11 +577,20 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                     // CWD-based discovery failed (e.g. VS Code launched us from ~).
                     // Next try MCP initialize roots from editor workspace context.
                     if let Some(p) = serve::resolve_serve_from_mcp_roots(&mut peeked_line).await {
+                        if path_was_template {
+                            serve::log_serve_project_choice(&p, "matched an MCP initialize root");
+                        }
                         serve::ensure_initialized(&p).await?
                     } else {
                         // Last resort: fall back to the global DB's registered projects.
-                        match serve::resolve_serve_from_global_db().await {
+                        match serve::resolve_serve_from_global_db(global_db_match).await {
                             serve::ServeGlobalDbResolution::Found(p) => {
+                                if path_was_template {
+                                    serve::log_serve_project_choice(
+                                        &p,
+                                        "resolved from the global project registry",
+                                    );
+                                }
                                 serve::ensure_initialized(&p).await?
                             }
                             serve::ServeGlobalDbResolution::Ambiguous(paths) => {

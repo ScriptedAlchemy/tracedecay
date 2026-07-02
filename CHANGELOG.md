@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`serve` now tolerates a literal unexpanded `--path ${workspaceFolder}`** — Cursor's headless agent-session MCP scopes spawn the plugin's `tracedecay serve --path ${workspaceFolder}` command without expanding the template variable, and Cursor never retries a failed MCP scope, so the resulting `no TraceDecay index found` exit permanently surfaced as "Timed out waiting for connection". `serve` now detects an unexpanded `${...}` template value, warns on stderr, and falls back to its normal no-path project discovery (cwd walk-up, MCP initialize roots, global project registry). The plugin template keeps `--path ${workspaceFolder}` because normal Cursor windows expand it and MCP servers are spawned with cwd set to the user home, where no-path discovery cannot disambiguate multiple registered projects.
+- **`serve` now tolerates a literal unexpanded `--path ${workspaceFolder}`** — Cursor's headless agent-session MCP scopes spawn the plugin's serve command without expanding the template variable and never retry the failed scope, which surfaced as "Timed out waiting for connection" on every tool call. `serve` now discards an unexpanded `${...}` template value with a stderr warning and falls back to project discovery where possible, requiring a unique registered project when discovery reaches the global registry in this mode. Rationale and details in `cursor-plugin/README.md`.
 
 ## [0.0.22](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.21...v0.0.22) - 2026-07-02
 

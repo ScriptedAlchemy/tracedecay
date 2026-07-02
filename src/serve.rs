@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::errors::{Result, TraceDecayError};
@@ -37,36 +38,73 @@ impl CwdProjectMatch {
     }
 }
 
-/// Returns the first unexpanded `${...}` template variable in a `--path`
-/// argument (e.g. `${workspaceFolder}`), or `None` when the value contains no
-/// template syntax. A bare `$` without braces is not template syntax — real
-/// directories can contain `$` in their names.
+/// Returns the first plausible unexpanded `${...}` template variable in a
+/// `--path` argument (e.g. `${workspaceFolder}`), or `None` when the value
+/// contains no template syntax. The brace contents must look like a variable
+/// name — a leading ASCII letter followed by word/`.`/`-` characters,
+/// optionally with a `:`-introduced modifier such as a default value — so
+/// degenerate forms (`${}`, `${ }`, `${a/b}`) and directories that merely
+/// contain `$` are not misclassified. A matching value is overwhelmingly more
+/// likely to be an unexpanded host template than a real directory name, so
+/// callers treat it as "no path given".
 pub fn unexpanded_template_variable(path: &str) -> Option<&str> {
-    let start = path.find("${")?;
-    let end = path[start..].find('}')?;
-    Some(&path[start..=start + end])
+    let mut search_from = 0;
+    while let Some(offset) = path[search_from..].find("${") {
+        let start = search_from + offset;
+        let inner_start = start + 2;
+        let end = inner_start + path[inner_start..].find('}')?;
+        if plausible_template_contents(&path[inner_start..end]) {
+            return Some(&path[start..=end]);
+        }
+        search_from = inner_start;
+    }
+    None
+}
+
+fn plausible_template_contents(contents: &str) -> bool {
+    // Variable name, optionally followed by a `:`-introduced modifier
+    // (e.g. `${workspaceFolder:-/tmp/fallback}`); only the name is validated.
+    let name = contents.split(':').next().unwrap_or_default();
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
 }
 
 /// Filters a `serve --path` CLI argument that the MCP host failed to expand.
 ///
-/// Some hosts pass config template variables through literally instead of
-/// expanding them — Cursor's headless agent-session scopes spawn
-/// `serve --path ${workspaceFolder}` verbatim, and Cursor never retries an
-/// MCP scope whose process exited, so a fatal config error here permanently
-/// breaks the connection. A literal `${...}` value can never name a real
-/// project, so it is discarded with a stderr warning and `serve` falls back
-/// to its normal no-path discovery chain (cwd walk-up, MCP initialize roots,
-/// global project registry).
+/// Some hosts pass config template variables like `${workspaceFolder}`
+/// through literally instead of expanding them (Cursor's headless
+/// agent-session MCP scopes do this; see `cursor-plugin/README.md`). Such a
+/// value is discarded with a stderr warning so `serve` can fall back to its
+/// no-path discovery chain where possible; callers must use
+/// [`ServeGlobalDbMatch::UniqueOnly`] for the global-registry step in that
+/// mode because the host's spawn directory says nothing about the intended
+/// workspace.
 pub fn sanitize_serve_path_arg(path: Option<String>) -> Option<String> {
     let raw = path?;
     let Some(variable) = unexpanded_template_variable(&raw) else {
         return Some(raw);
     };
-    eprintln!(
+    // The host may have spawned us with stderr closed; a failed diagnostic
+    // write must not take the server down.
+    let _ = writeln!(
+        std::io::stderr(),
         "warning: --path '{raw}' contains the unexpanded template variable '{variable}' \
          (the MCP host did not expand it); ignoring --path and falling back to project discovery"
     );
     None
+}
+
+/// Reports which project the discarded-template fallback settled on and why,
+/// so a wrong pick is diagnosable from the host's MCP logs.
+pub fn log_serve_project_choice(project: &Path, why: &str) {
+    let _ = writeln!(
+        std::io::stderr(),
+        "tracedecay serve: using project '{}' ({why})",
+        project.display()
+    );
 }
 
 pub fn global_db_ambiguity_message(paths: &[String]) -> String {
@@ -144,12 +182,33 @@ fn cwd_match_resolution(
     )))
 }
 
+/// How [`resolve_serve_from_global_db`] may pick among multiple registered
+/// projects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServeGlobalDbMatch {
+    /// Disambiguate via the cwd heuristic (ancestor/descendant depth ranking).
+    /// Appropriate when the user genuinely ran `serve` without a path: cwd is
+    /// where they invoked it, so proximity is meaningful.
+    CwdHeuristic,
+    /// Require exactly one registered project; report every multi-project
+    /// registry as ambiguous. Used when an explicit `--path` was discarded as
+    /// an unexpanded host template: the host's spawn directory (typically the
+    /// user home) says nothing about the intended workspace, so a silent
+    /// depth-ranked pick risks serving the wrong project's index.
+    UniqueOnly,
+}
+
 /// Fallback for `serve`: when CWD-based discovery fails, check the global DB
-/// for registered projects. When multiple projects exist, pick the best match
-/// against cwd: prefer a project that is an ancestor of cwd (cwd is inside the
-/// project), then a project that is a descendant of cwd (project is under cwd).
-/// Ties at the winning depth are ambiguous and require an explicit path.
-pub async fn resolve_serve_from_global_db() -> ServeGlobalDbResolution {
+/// for registered projects. With [`ServeGlobalDbMatch::CwdHeuristic`],
+/// multiple projects are ranked against cwd: prefer a project that is an
+/// ancestor of cwd (cwd is inside the project), then a project that is a
+/// descendant of cwd (project is under cwd); ties at the winning depth are
+/// ambiguous and require an explicit path. With
+/// [`ServeGlobalDbMatch::UniqueOnly`], any multi-project registry is
+/// ambiguous.
+pub async fn resolve_serve_from_global_db(
+    match_mode: ServeGlobalDbMatch,
+) -> ServeGlobalDbResolution {
     let Some(gdb) = GlobalDb::open().await else {
         return ServeGlobalDbResolution::None;
     };
@@ -160,6 +219,12 @@ pub async fn resolve_serve_from_global_db() -> ServeGlobalDbResolution {
     }
     if paths.is_empty() {
         return ServeGlobalDbResolution::None;
+    }
+    match match_mode {
+        ServeGlobalDbMatch::UniqueOnly => {
+            return ServeGlobalDbResolution::Ambiguous(paths);
+        }
+        ServeGlobalDbMatch::CwdHeuristic => {}
     }
 
     // Multiple projects — try to resolve using cwd.
@@ -379,6 +444,26 @@ mod tests {
     #[test]
     fn unterminated_template_syntax_is_not_a_template() {
         assert_eq!(unexpanded_template_variable("/tmp/${unclosed"), None);
+    }
+
+    #[test]
+    fn degenerate_brace_forms_are_not_templates() {
+        // Empty / whitespace / path-like brace contents are not plausible
+        // variable names, so a directory literally named that way stays a
+        // real path.
+        assert_eq!(unexpanded_template_variable("${}"), None);
+        assert_eq!(unexpanded_template_variable("${ }"), None);
+        assert_eq!(unexpanded_template_variable("/tmp/${a/b}/x"), None);
+        assert_eq!(unexpanded_template_variable("${1invalid}"), None);
+        assert_eq!(unexpanded_template_variable("${_underscore}"), None);
+    }
+
+    #[test]
+    fn later_plausible_template_wins_over_earlier_degenerate_braces() {
+        assert_eq!(
+            unexpanded_template_variable("/tmp/${ }/x/${workspaceFolder}"),
+            Some("${workspaceFolder}")
+        );
     }
 
     #[test]

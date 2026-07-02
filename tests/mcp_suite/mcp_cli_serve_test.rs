@@ -6,6 +6,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 
 use crate::common::{canonical_existing_path, tracedecay_command_with_home};
+#[cfg(unix)]
+use crate::serve_harness::runtime_project_root;
+#[cfg(unix)]
+use crate::serve_harness::{canonical_path_string, run_serve_runtime};
+use crate::serve_harness::{
+    init_project_under, init_project_with_file, profile_root, register_global_project,
+};
 use libsql::Builder;
 use serde_json::{json, Value};
 #[cfg(unix)]
@@ -22,68 +29,15 @@ use tracedecay::automation::run_ledger::{
     AutomationRunStatus, AutomationTrigger,
 };
 use tracedecay::db::Database;
-use tracedecay::global_db::GlobalDb;
 use tracedecay::mcp::handle_tool_call;
 use tracedecay::serve;
 use tracedecay::storage::{
     default_profile_sharded_layout, write_enrollment_marker, EnrollmentMarker, StorageMode,
 };
-use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay::tracedecay::TraceDecay;
 
 #[cfg(unix)]
 static READ_ONLY_SERVE_ENV_LOCK: Mutex<()> = Mutex::const_new(());
-
-async fn init_project_with_file(home: &Path, contents: &str) -> TempDir {
-    let dir = TempDir::new().unwrap();
-    std::fs::create_dir_all(dir.path().join("src")).unwrap();
-    std::fs::write(dir.path().join("src/lib.rs"), contents).unwrap();
-    init_project_direct(home, dir.path()).await;
-    dir
-}
-
-async fn init_project_under(home: &Path, parent: &Path, name: &str, contents: &str) -> PathBuf {
-    let path = parent.join(name);
-    fs::create_dir_all(path.join("src")).unwrap();
-    fs::write(path.join("src/lib.rs"), contents).unwrap();
-    init_project_direct(home, &path).await;
-    path
-}
-
-async fn init_project_direct(home: &Path, project: &Path) {
-    let profile_root = profile_root(home);
-    let open_options = TraceDecayOpenOptions {
-        profile_root: Some(profile_root.clone()),
-        global_db_path: Some(profile_root.join("global.db")),
-    };
-    crate::fixture::init_project_from_template_with_options(project, open_options)
-        .await
-        .expect("tracedecay project should initialize");
-}
-
-async fn register_global_project(home: &Path, project: &Path) {
-    let home = canonical_existing_path(home);
-    let db_path = home.join(".tracedecay/global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    db.upsert(project, 0).await;
-    db.checkpoint().await;
-}
-
-fn runtime_project_root(stdout: &[u8], id: i64) -> String {
-    let stdout = String::from_utf8(stdout.to_vec()).unwrap();
-    let runtime_response: Value = stdout
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .find(|response| response.get("id") == Some(&json!(id)))
-        .unwrap_or_else(|| panic!("missing runtime response in stdout:\n{stdout}"));
-    let text = runtime_response["result"]["content"][0]["text"]
-        .as_str()
-        .expect("runtime tool should return text content");
-    let runtime: Value = serde_json::from_str(text).unwrap();
-    runtime["database"]["project_root"]
-        .as_str()
-        .expect("runtime should include database.project_root")
-        .to_string()
-}
 
 fn json_rpc_tool_payload(stdout: &[u8], id: i64) -> Value {
     let stdout_text = String::from_utf8(stdout.to_vec()).unwrap();
@@ -142,57 +96,17 @@ fn run_serve_runtime_with_initialize_root(
     root_uri: String,
     root_name: &str,
 ) -> Output {
-    let mut command = tracedecay_command_with_home(home);
-    command.arg("serve");
-    if let Some(path) = explicit_path {
-        command.arg("--path").arg(path);
-    }
-
-    let mut child = command
-        .current_dir(cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("tracedecay serve should start");
-
-    {
-        let stdin = child.stdin.as_mut().expect("stdin should be piped");
-        writeln!(
-            stdin,
-            "{}",
-            json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "roots": [{
-                        "uri": root_uri,
-                        "name": root_name
-                    }]
-                }
-            })
-        )
-        .unwrap();
-        writeln!(
-            stdin,
-            "{}",
-            json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/call",
-                "params": {
-                    "name": "tracedecay_runtime",
-                    "arguments": { "format": "json" }
-                }
-            })
-        )
-        .unwrap();
-    }
-
-    let output = child
-        .wait_with_output()
-        .expect("tracedecay serve should exit after stdin closes");
+    let output = run_serve_runtime(
+        home,
+        cwd,
+        explicit_path.map(Path::as_os_str),
+        json!({
+            "roots": [{
+                "uri": root_uri,
+                "name": root_name
+            }]
+        }),
+    );
     assert!(
         output.status.success(),
         "tracedecay serve failed\nstdout:\n{}\nstderr:\n{}",
@@ -200,17 +114,6 @@ fn run_serve_runtime_with_initialize_root(
         String::from_utf8_lossy(&output.stderr)
     );
     output
-}
-
-fn canonical_path_string(path: &Path) -> String {
-    path.canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf())
-        .to_string_lossy()
-        .into_owned()
-}
-
-fn profile_root(home: &Path) -> PathBuf {
-    canonical_existing_path(home).join(".tracedecay")
 }
 
 async fn set_user_version(db_path: &Path, version: u32) {
@@ -1039,253 +942,6 @@ async fn initialize_roots_decode_file_uri_localhost_and_percent_escapes() {
         canonical_path_string(Path::new(&runtime_project_root(&output.stdout, 2))),
         canonical_path_string(&active),
         "serve should use the decoded MCP root project"
-    );
-}
-
-/// Spawns `serve --path <path_arg>` from `cwd` and drives a real MCP
-/// `initialize` + `tracedecay_runtime` tools/call over stdio. Callers assert
-/// on the returned output (success and failure paths are both exercised).
-fn run_serve_runtime_with_path_arg(home: &Path, cwd: &Path, path_arg: &str) -> Output {
-    let mut child = tracedecay_command_with_home(home)
-        .arg("serve")
-        .arg("--path")
-        .arg(path_arg)
-        .current_dir(cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("tracedecay serve should start");
-    {
-        let stdin = child.stdin.as_mut().expect("stdin should be piped");
-        // Failure-path tests exit before draining stdin; ignore broken pipes
-        // so the assertion happens on the process output instead.
-        let _ = writeln!(
-            stdin,
-            "{}",
-            json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {}
-            })
-        );
-        let _ = writeln!(
-            stdin,
-            "{}",
-            json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/call",
-                "params": {
-                    "name": "tracedecay_runtime",
-                    "arguments": { "format": "json" }
-                }
-            })
-        );
-    }
-    child
-        .wait_with_output()
-        .expect("tracedecay serve should exit after stdin closes")
-}
-
-const UNEXPANDED_TEMPLATE_WARNING: &str = "unexpanded template variable";
-
-/// Exact reproduction of the Cursor headless agent-session spawn: the host
-/// launches `tracedecay serve --path ${workspaceFolder}` with the LITERAL
-/// (unexpanded) template variable and cwd set to the user home, not the
-/// workspace. `serve` must warn, discard the bogus path, and complete the MCP
-/// initialize handshake via discovery instead of exiting with a config error
-/// (Cursor never retries a failed MCP scope, so an early exit permanently
-/// breaks the connection).
-#[tokio::test]
-async fn literal_workspace_folder_path_from_home_cwd_serves_via_discovery() {
-    let home = TempDir::new().unwrap();
-    let project = init_project_with_file(home.path(), "pub fn headless_scope_marker() {}\n").await;
-    register_global_project(home.path(), project.path()).await;
-
-    let home_cwd = canonical_existing_path(home.path());
-    let output = run_serve_runtime_with_path_arg(home.path(), &home_cwd, "${workspaceFolder}");
-
-    assert!(
-        output.status.success(),
-        "serve must tolerate a literal ${{workspaceFolder}} --path instead of exiting\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("\"protocolVersion\":\"2024-11-05\""),
-        "serve should answer the MCP initialize handshake\nstdout:\n{stdout}"
-    );
-    assert_eq!(
-        canonical_path_string(Path::new(&runtime_project_root(&output.stdout, 2))),
-        canonical_path_string(project.path()),
-        "serve should resolve the registered project via discovery"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains(UNEXPANDED_TEMPLATE_WARNING)
-            && stderr.contains("${workspaceFolder}")
-            && stderr.contains("project discovery"),
-        "serve should warn that the host passed an unexpanded template variable\nstderr:\n{stderr}"
-    );
-}
-
-/// Other unexpanded `${...}` forms (different variable names, default-value
-/// syntax) must get the same tolerance as `${workspaceFolder}`.
-#[tokio::test]
-async fn literal_template_variant_paths_fall_back_to_discovery() {
-    for path_arg in ["${workspaceRoot}", "${workspaceFolder:-/tmp/never-used}"] {
-        let home = TempDir::new().unwrap();
-        let project =
-            init_project_with_file(home.path(), "pub fn template_variant_marker() {}\n").await;
-        register_global_project(home.path(), project.path()).await;
-        let cwd = TempDir::new().unwrap();
-
-        let output = run_serve_runtime_with_path_arg(home.path(), cwd.path(), path_arg);
-
-        assert!(
-            output.status.success(),
-            "serve must tolerate the literal template path {path_arg}\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(
-            canonical_path_string(Path::new(&runtime_project_root(&output.stdout, 2))),
-            canonical_path_string(project.path()),
-            "serve should resolve the registered project via discovery for {path_arg}"
-        );
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains(UNEXPANDED_TEMPLATE_WARNING) && stderr.contains(path_arg),
-            "warning should name the unexpanded variable for {path_arg}\nstderr:\n{stderr}"
-        );
-    }
-}
-
-/// A real directory whose name merely contains `$` (no `${...}` syntax) is a
-/// legitimate explicit path and must NOT be diverted through discovery.
-#[tokio::test]
-async fn explicit_path_with_dollar_sign_directory_is_not_treated_as_template() {
-    let home = TempDir::new().unwrap();
-    let parent = TempDir::new().unwrap();
-    let dollar_project = init_project_under(
-        home.path(),
-        parent.path(),
-        "pri$ce-project",
-        "pub fn dollar_dir_marker() {}\n",
-    )
-    .await;
-    // A registered decoy proves the explicit path stays authoritative: if the
-    // `$` path were misread as a template, discovery would serve the decoy.
-    let decoy = init_project_with_file(home.path(), "pub fn decoy_marker() {}\n").await;
-    register_global_project(home.path(), decoy.path()).await;
-    let cwd = TempDir::new().unwrap();
-
-    let output =
-        run_serve_runtime_with_path_arg(home.path(), cwd.path(), dollar_project.to_str().unwrap());
-
-    assert!(
-        output.status.success(),
-        "serve should accept an explicit path containing '$'\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(
-        canonical_path_string(Path::new(&runtime_project_root(&output.stdout, 2))),
-        canonical_path_string(&dollar_project),
-        "the explicit '$' directory must be served, not a discovery fallback"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !stderr.contains(UNEXPANDED_TEMPLATE_WARNING),
-        "a real '$' directory must not trigger the template warning\nstderr:\n{stderr}"
-    );
-}
-
-/// A genuinely wrong explicit path (no template syntax) must keep failing
-/// loudly — the template tolerance must not swallow real misconfiguration.
-#[tokio::test]
-async fn explicit_nonexistent_path_still_fails_instead_of_discovery() {
-    let home = TempDir::new().unwrap();
-    let active = init_project_with_file(home.path(), "pub fn active_project_marker() {}\n").await;
-    register_global_project(home.path(), active.path()).await;
-    let scratch = TempDir::new().unwrap();
-    let missing = scratch.path().join("does-not-exist");
-
-    let output = tracedecay_command_with_home(home.path())
-        .arg("serve")
-        .arg("--path")
-        .arg(&missing)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .expect("tracedecay serve should run");
-
-    assert!(
-        !output.status.success(),
-        "a nonexistent explicit --path must stay fatal instead of falling back to discovery\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains(&missing.display().to_string()),
-        "error should name the missing explicit path\nstderr:\n{stderr}"
-    );
-    assert!(
-        !stderr.contains(UNEXPANDED_TEMPLATE_WARNING),
-        "a plain nonexistent path must not be mistaken for a template\nstderr:\n{stderr}"
-    );
-}
-
-/// Pins the template decision: no-path discovery from a home-directory cwd
-/// cannot pick between multiple same-depth registered projects, which is why
-/// the Cursor plugin template keeps `--path ${workspaceFolder}` (normal
-/// windows expand it) and relies on the literal-template fallback only when
-/// the host fails to expand. When that fallback also cannot disambiguate, the
-/// actionable ambiguity error must surface rather than an arbitrary project.
-#[tokio::test]
-async fn literal_workspace_folder_with_multiple_projects_reports_ambiguity() {
-    let home = TempDir::new().unwrap();
-    let home_cwd = canonical_existing_path(home.path());
-    let projects_dir = home_cwd.join("projects");
-    fs::create_dir_all(&projects_dir).unwrap();
-    let alpha = init_project_under(
-        home.path(),
-        &projects_dir,
-        "alpha",
-        "pub fn alpha_marker() {}\n",
-    )
-    .await;
-    let beta = init_project_under(
-        home.path(),
-        &projects_dir,
-        "beta",
-        "pub fn beta_marker() {}\n",
-    )
-    .await;
-    register_global_project(home.path(), &alpha).await;
-    register_global_project(home.path(), &beta).await;
-
-    let output = run_serve_runtime_with_path_arg(home.path(), &home_cwd, "${workspaceFolder}");
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !output.status.success(),
-        "ambiguous discovery must not silently pick a project\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        stderr
-    );
-    assert!(
-        stderr.contains(UNEXPANDED_TEMPLATE_WARNING),
-        "the template warning should still be emitted before the ambiguity error\nstderr:\n{stderr}"
-    );
-    assert!(
-        stderr.contains("Multiple tracedecay projects found"),
-        "stderr should surface the actionable ambiguity error\nstderr:\n{stderr}"
     );
 }
 
