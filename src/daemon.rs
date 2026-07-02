@@ -43,6 +43,53 @@ pub use service::{
     socket_path_or_default, uninstall_service, DaemonServiceSpec,
 };
 
+/// A host whose lifecycle hooks notify the daemon.
+///
+/// This enum is the single source of truth for hook agent identity on **both**
+/// sides of the wire: the hook processes build [`DaemonHookEvent`]s through it,
+/// and the daemon-side receiver (`crate::mcp::hook_events`) parses the agent
+/// key back through [`HookAgent::from_wire`]. Adding a host here is the only
+/// step needed for its events to be accepted — a per-side string match can
+/// silently drop a new host's events (that bug shipped once for Claude).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookAgent {
+    Claude,
+    Codex,
+    Cursor,
+    Kiro,
+}
+
+impl HookAgent {
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Cursor => "cursor",
+            Self::Kiro => "kiro",
+        }
+    }
+
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "claude" => Some(Self::Claude),
+            "codex" => Some(Self::Codex),
+            "cursor" => Some(Self::Cursor),
+            "kiro" => Some(Self::Kiro),
+            _ => None,
+        }
+    }
+
+    /// Marker file used to debounce this agent's incremental syncs.
+    pub fn sync_marker_file(self) -> &'static str {
+        match self {
+            Self::Claude => ".claude_post_tool_sync_at",
+            Self::Codex => ".codex_shell_sync_at",
+            Self::Cursor => ".cursor_shell_sync_at",
+            Self::Kiro => ".kiro_post_tool_sync_at",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonHookEvent {
     pub agent: String,
@@ -57,14 +104,14 @@ pub struct DaemonHookEvent {
 
 impl DaemonHookEvent {
     fn new(
-        agent: &'static str,
+        agent: HookAgent,
         event: &'static str,
         rel_paths: Vec<String>,
         command: Option<String>,
         cwd: Option<PathBuf>,
     ) -> Self {
         Self {
-            agent: agent.to_string(),
+            agent: agent.as_wire().to_string(),
             event: event.to_string(),
             rel_paths,
             command,
@@ -73,12 +120,12 @@ impl DaemonHookEvent {
     }
 
     pub fn cursor_after_file_edit(rel_paths: Vec<String>) -> Self {
-        Self::new("cursor", "afterFileEdit", rel_paths, None, None)
+        Self::new(HookAgent::Cursor, "afterFileEdit", rel_paths, None, None)
     }
 
     pub fn cursor_after_shell_execution(command: String, cwd: PathBuf) -> Self {
         Self::new(
-            "cursor",
+            HookAgent::Cursor,
             "afterShellExecution",
             Vec::new(),
             Some(command),
@@ -87,30 +134,25 @@ impl DaemonHookEvent {
     }
 
     pub fn cursor_workspace_open(cwd: PathBuf) -> Self {
-        Self::new("cursor", "workspaceOpen", Vec::new(), None, Some(cwd))
-    }
-
-    pub fn codex_post_tool_use_edit(rel_paths: Vec<String>, cwd: PathBuf) -> Self {
-        Self::new("codex", "postToolUseEdit", rel_paths, None, Some(cwd))
-    }
-
-    pub fn claude_post_tool_use_edit(rel_paths: Vec<String>, cwd: PathBuf) -> Self {
-        Self::new("claude", "postToolUseEdit", rel_paths, None, Some(cwd))
-    }
-
-    pub fn claude_post_tool_use_shell(command: String, cwd: PathBuf) -> Self {
         Self::new(
-            "claude",
-            "postToolUseShell",
+            HookAgent::Cursor,
+            "workspaceOpen",
             Vec::new(),
-            Some(command),
+            None,
             Some(cwd),
         )
     }
 
-    pub fn codex_post_tool_use_shell(command: String, cwd: PathBuf) -> Self {
+    /// A file-edit tool finished: request targeted sync of the edited paths.
+    pub fn post_tool_use_edit(agent: HookAgent, rel_paths: Vec<String>, cwd: PathBuf) -> Self {
+        Self::new(agent, "postToolUseEdit", rel_paths, None, Some(cwd))
+    }
+
+    /// A shell command finished: let the daemon classify it (branch add,
+    /// worktree add, incremental sync, or noop).
+    pub fn post_tool_use_shell(agent: HookAgent, command: String, cwd: PathBuf) -> Self {
         Self::new(
-            "codex",
+            agent,
             "postToolUseShell",
             Vec::new(),
             Some(command),
@@ -119,7 +161,7 @@ impl DaemonHookEvent {
     }
 
     pub fn kiro_post_tool_use(rel_paths: Vec<String>, cwd: Option<PathBuf>) -> Self {
-        Self::new("kiro", "postToolUse", rel_paths, None, cwd)
+        Self::new(HookAgent::Kiro, "postToolUse", rel_paths, None, cwd)
     }
 }
 
@@ -381,12 +423,7 @@ fn safe_daemon_hook_rel_paths(paths: &[String]) -> Vec<String> {
 
 #[cfg(not(unix))]
 fn hook_marker_file(agent: &str) -> &'static str {
-    match agent {
-        "codex" => ".codex_shell_sync_at",
-        "cursor" => ".cursor_shell_sync_at",
-        "kiro" => ".kiro_post_tool_sync_at",
-        _ => ".daemon_hook_shell_sync_at",
-    }
+    HookAgent::from_wire(agent).map_or(".daemon_hook_shell_sync_at", HookAgent::sync_marker_file)
 }
 
 #[cfg(not(unix))]

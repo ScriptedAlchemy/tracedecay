@@ -1786,7 +1786,11 @@ async fn claude_post_tool_use(event_json: &str) {
         }
         crate::daemon::notify_hook_event(
             &root,
-            crate::daemon::DaemonHookEvent::claude_post_tool_use_edit(rels, cwd),
+            crate::daemon::DaemonHookEvent::post_tool_use_edit(
+                crate::daemon::HookAgent::Claude,
+                rels,
+                cwd,
+            ),
         )
         .await;
     } else if is_claude_bash_tool(tool_name) {
@@ -1800,7 +1804,11 @@ async fn claude_post_tool_use(event_json: &str) {
         }
         crate::daemon::notify_hook_event(
             &root,
-            crate::daemon::DaemonHookEvent::claude_post_tool_use_shell(command.to_string(), cwd),
+            crate::daemon::DaemonHookEvent::post_tool_use_shell(
+                crate::daemon::HookAgent::Claude,
+                command.to_string(),
+                cwd,
+            ),
         )
         .await;
     }
@@ -2302,13 +2310,21 @@ async fn codex_post_tool_use(event_json: &str) {
         }
         crate::daemon::notify_hook_event(
             &root,
-            crate::daemon::DaemonHookEvent::codex_post_tool_use_edit(rels, cwd),
+            crate::daemon::DaemonHookEvent::post_tool_use_edit(
+                crate::daemon::HookAgent::Codex,
+                rels,
+                cwd,
+            ),
         )
         .await;
     } else if is_codex_bash_tool(tool_name) {
         crate::daemon::notify_hook_event(
             &root,
-            crate::daemon::DaemonHookEvent::codex_post_tool_use_shell(command.to_string(), cwd),
+            crate::daemon::DaemonHookEvent::post_tool_use_shell(
+                crate::daemon::HookAgent::Codex,
+                command.to_string(),
+                cwd,
+            ),
         )
         .await;
     }

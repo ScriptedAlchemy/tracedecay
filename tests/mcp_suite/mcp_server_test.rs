@@ -2730,6 +2730,68 @@ async fn hook_branch_add_reopens_server_from_single_db_mode() {
     );
 }
 
+/// Regression for the silently-dropped `claude` agent key: the hook-event
+/// receiver used to accept only `codex`/`cursor`/`kiro`, so Claude's
+/// PostToolUse notifications were parsed to `None` and never planned. This
+/// exercises the same branch-add path as the codex test above but with the
+/// `claude` agent key, proving claude events are accepted end-to-end.
+#[tokio::test]
+async fn claude_hook_events_are_accepted_and_processed() {
+    let _branch_lock = BRANCH_DRIFT_TEST_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().to_path_buf();
+
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub fn main_only() -> u32 { 1 }\n",
+    )
+    .unwrap();
+    fs::write(project.join(".gitignore"), ".tracedecay/\n").unwrap();
+    git(&project, &["init"]);
+    git(&project, &["config", "user.email", "test@test.com"]);
+    git(&project, &["config", "user.name", "Test"]);
+    git(&project, &["add", "."]);
+    git(&project, &["commit", "-m", "initial"]);
+    git(&project, &["branch", "-M", "main"]);
+
+    {
+        let cg = TraceDecay::init(&project).await.unwrap();
+        cg.index_all().await.unwrap();
+        cg.checkpoint().await.unwrap();
+    }
+
+    let cg = TraceDecay::open(&project).await.unwrap();
+    assert_eq!(cg.serving_branch(), Some("main"));
+    let server = McpServer::new(cg, None).await;
+    git(&project, &["checkout", "-b", "feature"]);
+
+    let responses = run_server_with_messages(
+        server.clone(),
+        vec![jsonrpc_notification_with_params(
+            tracedecay::daemon::HOOK_EVENT_METHOD,
+            json!({
+                "agent": "claude",
+                "event": "postToolUseShell",
+                "command": "git switch feature",
+                "cwd": project,
+            }),
+        )],
+    )
+    .await;
+    assert!(
+        responses.is_empty(),
+        "hook notification should not produce a JSON-RPC response"
+    );
+
+    let cg_now = server.cg().await;
+    assert_eq!(
+        cg_now.serving_branch(),
+        Some("feature"),
+        "a claude-keyed hook event must be accepted and planned, not silently dropped"
+    );
+}
+
 #[tokio::test]
 async fn tool_calls_reopen_branch_db_after_mid_session_checkout() {
     let _branch_lock = BRANCH_DRIFT_TEST_LOCK.lock().await;

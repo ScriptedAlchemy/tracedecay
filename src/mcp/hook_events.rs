@@ -7,31 +7,10 @@ use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HookAgent {
-    Codex,
-    Cursor,
-    Kiro,
-}
-
-impl HookAgent {
-    fn from_wire(value: &str) -> Option<Self> {
-        match value {
-            "codex" => Some(Self::Codex),
-            "cursor" => Some(Self::Cursor),
-            "kiro" => Some(Self::Kiro),
-            _ => None,
-        }
-    }
-
-    fn marker_file(self) -> &'static str {
-        match self {
-            Self::Codex => ".codex_shell_sync_at",
-            Self::Cursor => ".cursor_shell_sync_at",
-            Self::Kiro => ".kiro_post_tool_sync_at",
-        }
-    }
-}
+/// Shared hook-agent identity: the same enum the hook processes use to build
+/// events, so a host registered on the send side can never be silently
+/// dropped by the receiver (see `crate::daemon::HookAgent`).
+pub(crate) use crate::daemon::HookAgent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HookEventKind {
@@ -111,7 +90,7 @@ pub(crate) fn plan_hook_event(
 }
 
 pub(crate) fn sync_marker_path(data_root: &Path, agent: HookAgent) -> PathBuf {
-    data_root.join(agent.marker_file())
+    data_root.join(agent.sync_marker_file())
 }
 
 pub(crate) fn should_run_sync(marker: &Path, now_secs: i64, debounce_secs: i64) -> bool {
@@ -255,6 +234,29 @@ mod tests {
         });
 
         assert!(parse_hook_event(Some(&params)).is_none());
+    }
+
+    /// Regression: the receiver used to keep its own agent string match, so
+    /// the claude-keyed events added for Claude PostToolUse were silently
+    /// dropped. Every agent the send side can construct must parse here.
+    #[test]
+    fn accepts_every_constructible_hook_agent() {
+        for agent in [
+            HookAgent::Claude,
+            HookAgent::Codex,
+            HookAgent::Cursor,
+            HookAgent::Kiro,
+        ] {
+            let params = json!({
+                "agent": agent.as_wire(),
+                "event": "postToolUseEdit",
+                "rel_paths": ["src/lib.rs"],
+                "cwd": "/tmp/project"
+            });
+            let event = parse_or_panic(&params);
+            assert_eq!(event.agent, agent);
+            assert_eq!(event.kind, HookEventKind::FileEdit);
+        }
     }
 
     #[test]
