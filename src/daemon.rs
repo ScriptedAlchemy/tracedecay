@@ -1509,7 +1509,15 @@ async fn run_automation_scheduler_tick(
     if any_succeeded {
         log_automation_staged_if_pending(project_path, &cg.store_layout().dashboard_root).await;
     }
-    run_user_jobs_scheduler_pass(project_path, &cg, &config, &backend, &mut first_error).await;
+    run_user_jobs_scheduler_pass(
+        project_path,
+        &handshake.client_identity.profile_root,
+        &cg,
+        &config,
+        &backend,
+        &mut first_error,
+    )
+    .await;
     match first_error {
         Some(err) => Err(err),
         None => Ok(()),
@@ -1604,6 +1612,7 @@ async fn automation_scheduler_has_work(
 #[cfg(unix)]
 async fn run_user_jobs_scheduler_pass(
     project_path: &Path,
+    profile_root: &Path,
     cg: &crate::tracedecay::TraceDecay,
     config: &crate::automation::config::AutomationConfig,
     backend: &crate::automation::backend::CodexAppServerBackend,
@@ -1640,6 +1649,8 @@ async fn run_user_jobs_scheduler_pass(
             job,
             crate::automation::jobs::UserJobRunOptions {
                 trigger: crate::automation::run_ledger::AutomationTrigger::Scheduler,
+                profile_root: Some(profile_root.to_path_buf()),
+                project_root: Some(project_path.to_path_buf()),
                 ..crate::automation::jobs::UserJobRunOptions::default()
             },
         )

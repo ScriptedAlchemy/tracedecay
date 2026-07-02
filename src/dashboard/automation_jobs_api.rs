@@ -219,12 +219,14 @@ pub(crate) async fn run(
         "status": "accepted",
     });
     let dashboard_root = state.dashboard_root.clone();
+    let project_root = state.project_root.clone();
     tokio::spawn(async move {
         let backend = CodexAppServerBackend::from_automation_config(&config);
         let options = UserJobRunOptions {
             trigger: AutomationTrigger::Dashboard,
             run_id: Some(run_id),
             profile_root: None,
+            project_root: Some(project_root),
         };
         if let Err(err) =
             run_user_job_with_backend(&dashboard_root, &config, &backend, &job, options).await

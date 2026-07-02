@@ -121,6 +121,9 @@ pub struct UserJobRunOptions {
     /// Managed-skill profile root; defaults to the user profile directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_root: Option<PathBuf>,
+    /// Project root used as cwd for optional pre-run commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_root: Option<PathBuf>,
 }
 
 impl Default for UserJobRunOptions {
@@ -129,6 +132,7 @@ impl Default for UserJobRunOptions {
             trigger: AutomationTrigger::ManualCli,
             run_id: None,
             profile_root: None,
+            project_root: None,
         }
     }
 }
@@ -264,12 +268,24 @@ fn validate_relative_output_path(path: &str) -> Result<()> {
     if candidate.components().count() == 0 {
         return job_error("job file delivery path must not be empty");
     }
+    let mut normal_components = Vec::new();
     for component in candidate.components() {
-        if !matches!(component, Component::Normal(_)) {
-            return job_error(
+        match component {
+            Component::Normal(component) => normal_components.push(component),
+            _ => return job_error(
                 "job file delivery path must be relative and stay under the dashboard directory",
-            );
+            ),
         }
+    }
+    if normal_components
+        .first()
+        .and_then(|component| component.to_str())
+        != Some(JOB_OUTPUT_DIR)
+        || normal_components.len() < 2
+    {
+        return job_error(&format!(
+            "job file delivery path must stay under {JOB_OUTPUT_DIR}/"
+        ));
     }
     Ok(())
 }
@@ -393,17 +409,20 @@ pub async fn run_user_job_with_backend(
     options: UserJobRunOptions,
 ) -> Result<UserJobAutomationRun> {
     validate_job(job)?;
-    let run_id = options
-        .run_id
-        .clone()
-        .unwrap_or_else(|| generated_run_id("user_job"));
+    let UserJobRunOptions {
+        trigger,
+        run_id,
+        profile_root,
+        project_root,
+    } = options;
+    let run_id = run_id.unwrap_or_else(|| generated_run_id("user_job"));
     let started_at = current_timestamp().to_string();
     let ctx = JobRunContext {
         dashboard_root,
         config,
         job,
         run_id: &run_id,
-        trigger: options.trigger,
+        trigger,
         started_at: &started_at,
     };
 
@@ -412,7 +431,7 @@ pub async fn run_user_job_with_backend(
     }
 
     let mut scheduler_records = None;
-    let _lock = if options.trigger == AutomationTrigger::Scheduler {
+    let _lock = if trigger == AutomationTrigger::Scheduler {
         let now_secs = current_timestamp();
         let records = load_run_records(dashboard_root, JOB_LEDGER_LOOKBACK).await?;
         let lock = AutomationTaskLock::try_acquire_keyed(
@@ -446,7 +465,7 @@ pub async fn run_user_job_with_backend(
             .await;
     }
 
-    let profile_root = match options.profile_root {
+    let profile_root = match profile_root {
         Some(path) => path,
         None => crate::storage::default_profile_root()?,
     };
@@ -454,7 +473,7 @@ pub async fn run_user_job_with_backend(
         attached_skill_sections(&profile_root, &job.skill_ids).await;
 
     let command_output = match &job.pre_run_command {
-        Some(command) => match run_pre_run_command(command).await {
+        Some(command) => match run_pre_run_command(command, project_root.as_deref()).await {
             Ok(output) => Some(output),
             Err(err) => {
                 let record = ctx
@@ -475,6 +494,7 @@ pub async fn run_user_job_with_backend(
         "missing_skills": missing_skills,
         "pre_run_command": job.pre_run_command,
         "pre_run_command_output_chars": command_output.as_ref().map(String::len),
+        "project_root": project_root.as_ref().map(|path| path.display().to_string()),
     });
     let mut request = AgentTaskRequest::new(
         run_id.clone(),
@@ -740,7 +760,7 @@ fn build_job_prompt(
     prompt
 }
 
-async fn run_pre_run_command(command: &str) -> Result<String> {
+async fn run_pre_run_command(command: &str, project_root: Option<&Path>) -> Result<String> {
     #[cfg(windows)]
     let mut process = {
         let mut process = tokio::process::Command::new("cmd");
@@ -753,6 +773,9 @@ async fn run_pre_run_command(command: &str) -> Result<String> {
         process.arg("-c").arg(command);
         process
     };
+    if let Some(project_root) = project_root {
+        process.current_dir(project_root);
+    }
     let output = tokio::time::timeout(
         Duration::from_secs(JOB_COMMAND_TIMEOUT_SECS),
         process.output(),

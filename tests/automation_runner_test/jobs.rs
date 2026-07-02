@@ -129,6 +129,30 @@ fn job_validation_rejects_bad_definitions() {
     };
     assert!(validate_job(&job).is_err());
 
+    let mut job = sample_job("reserved-job-state");
+    job.delivery = JobDelivery::File {
+        path: Some("automation_jobs.json".to_string()),
+    };
+    assert!(validate_job(&job).is_err());
+
+    let mut job = sample_job("reserved-run-ledger");
+    job.delivery = JobDelivery::File {
+        path: Some("automation_runs.jsonl".to_string()),
+    };
+    assert!(validate_job(&job).is_err());
+
+    let mut job = sample_job("reserved-artifact-dir");
+    job.delivery = JobDelivery::File {
+        path: Some("automation_artifacts/run/output.md".to_string()),
+    };
+    assert!(validate_job(&job).is_err());
+
+    let mut job = sample_job("safe-custom-output");
+    job.delivery = JobDelivery::File {
+        path: Some("job-output/custom.md".to_string()),
+    };
+    validate_job(&job).unwrap();
+
     let mut job = sample_job("hook");
     job.delivery = JobDelivery::Webhook {
         url: "ftp://example.test".to_string(),
@@ -272,6 +296,7 @@ async fn user_job_delivers_output_to_file_and_records_ledger() {
             trigger: AutomationTrigger::Dashboard,
             run_id: Some("user-job-run-1".to_string()),
             profile_root: Some(profile_root),
+            project_root: None,
         },
     )
     .await
@@ -348,6 +373,7 @@ async fn user_job_pre_run_command_is_refused_unless_allowed() {
             trigger: AutomationTrigger::Dashboard,
             run_id: Some("cmd-run-1".to_string()),
             profile_root: Some(profile_root.clone()),
+            project_root: None,
         },
     )
     .await
@@ -394,6 +420,134 @@ async fn user_job_pre_run_command_is_refused_unless_allowed() {
             trigger: AutomationTrigger::Dashboard,
             run_id: Some("cmd-run-2".to_string()),
             profile_root: Some(profile_root),
+            project_root: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(run.report["status"], json!("delivered"));
+}
+
+#[tokio::test]
+async fn user_job_pre_run_command_runs_from_project_root() {
+    let temp = tempdir().unwrap();
+    let dashboard_root = temp.path().join("dashboard");
+    let profile_root = temp.path().join("profile");
+    let project_root = temp.path().join("project");
+    fs::create_dir_all(&profile_root).unwrap();
+    fs::create_dir_all(&project_root).unwrap();
+    fs::write(project_root.join("marker.txt"), "project-marker").unwrap();
+
+    let mut job = sample_job("cmd-cwd");
+    job.pre_run_command = Some("cat marker.txt".to_string());
+
+    struct AssertProjectCommandOutputBackend;
+    impl AgentTaskBackend for AssertProjectCommandOutputBackend {
+        fn run_task(
+            &self,
+            request: &AgentTaskRequest,
+        ) -> tracedecay::errors::Result<AgentTaskResponse> {
+            assert!(request.prompt.contains("## Pre-run command output"));
+            assert!(request.prompt.contains("project-marker"));
+            Ok(AgentTaskResponse {
+                run_id: request.run_id.clone(),
+                task: request.task,
+                output_text: "done".to_string(),
+                output_json: None,
+                model: Some("fixture-model".to_string()),
+                input_tokens: None,
+                output_tokens: None,
+            })
+        }
+    }
+
+    let config = AutomationConfig {
+        allow_job_commands: true,
+        ..enabled_job_config()
+    };
+    let run = run_user_job_with_backend(
+        &dashboard_root,
+        &config,
+        &AssertProjectCommandOutputBackend,
+        &job,
+        UserJobRunOptions {
+            trigger: AutomationTrigger::Dashboard,
+            run_id: Some("cmd-cwd-run".to_string()),
+            profile_root: Some(profile_root),
+            project_root: Some(project_root),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(run.report["status"], json!("delivered"));
+}
+
+#[tokio::test]
+async fn scheduler_user_job_uses_explicit_profile_root_for_attached_skills() {
+    let temp = tempdir().unwrap();
+    let dashboard_root = temp.path().join("dashboard");
+    let profile_root = temp.path().join("profile");
+    let project_root = temp.path().join("project");
+    fs::create_dir_all(&profile_root).unwrap();
+    fs::create_dir_all(&project_root).unwrap();
+    create_managed_skill_draft(
+        &profile_root,
+        ManagedSkillDraft {
+            id: "job-context".to_string(),
+            title: "Job context".to_string(),
+            summary: "Adds job context.".to_string(),
+            category: "workflow".to_string(),
+            targets: tracedecay::automation::managed_skills::default_managed_skill_targets(),
+            body_markdown: "Use the profile-specific job context.".to_string(),
+            support_files: Vec::new(),
+            provenance: ManagedSkillProvenance {
+                source: ManagedSkillSource::UserDraft,
+                actor: "test".to_string(),
+                run_id: None,
+            },
+        },
+    )
+    .await
+    .unwrap();
+    approve_managed_skill(&profile_root, "job-context")
+        .await
+        .unwrap();
+
+    let mut job = sample_job("profile-skill");
+    job.skill_ids = vec!["job-context".to_string()];
+
+    struct AssertAttachedSkillBackend;
+    impl AgentTaskBackend for AssertAttachedSkillBackend {
+        fn run_task(
+            &self,
+            request: &AgentTaskRequest,
+        ) -> tracedecay::errors::Result<AgentTaskResponse> {
+            assert!(request.prompt.contains("## Attached skill: Job context"));
+            assert!(request.prompt.contains("profile-specific job context"));
+            assert_eq!(request.context["attached_skills"], json!(["job-context"]));
+            assert_eq!(request.context["missing_skills"], json!([]));
+            Ok(AgentTaskResponse {
+                run_id: request.run_id.clone(),
+                task: request.task,
+                output_text: "done".to_string(),
+                output_json: None,
+                model: Some("fixture-model".to_string()),
+                input_tokens: None,
+                output_tokens: None,
+            })
+        }
+    }
+
+    let run = run_user_job_with_backend(
+        &dashboard_root,
+        &enabled_job_config(),
+        &AssertAttachedSkillBackend,
+        &job,
+        UserJobRunOptions {
+            trigger: AutomationTrigger::Scheduler,
+            run_id: Some("profile-skill-run".to_string()),
+            profile_root: Some(profile_root),
+            project_root: Some(project_root),
         },
     )
     .await
@@ -420,6 +574,7 @@ async fn user_job_backend_failure_records_failed_ledger_entry() {
             trigger: AutomationTrigger::Dashboard,
             run_id: Some("fail-run-1".to_string()),
             profile_root: Some(profile_root),
+            project_root: None,
         },
     )
     .await
@@ -464,6 +619,7 @@ async fn scheduler_trigger_skips_repeat_and_respects_lock_discipline() {
                 trigger: AutomationTrigger::Scheduler,
                 run_id: Some(run_id.to_string()),
                 profile_root: Some(profile_root.clone()),
+                project_root: None,
             },
         )
         .await
