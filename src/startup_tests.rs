@@ -4,13 +4,11 @@ use super::{
         validate_hermes_project_root_flag,
     },
     is_local_install_command, should_skip_agent_install_maintenance,
-    should_skip_startup_maintenance,
-    update_cmd::{run_update_steps, run_upgrade_steps},
-    Commands,
+    should_skip_startup_maintenance, silent_reinstall_action, update_cmd, Commands,
+    SilentReinstallAction,
 };
-use std::cell::RefCell;
 use tempfile::TempDir;
-use tracedecay::upgrade::UpgradeOutcome;
+use tracedecay::user_config::UserConfig;
 
 #[test]
 fn doctor_skips_startup_maintenance() {
@@ -135,124 +133,62 @@ fn agent_install_maintenance_is_selective() {
 }
 
 #[test]
-fn update_steps_run_post_update_after_upgrade() {
-    let calls = RefCell::new(Vec::new());
+fn silent_reinstall_runs_after_minor_bump_without_post_update() {
+    // An upgraded binary whose `post-update` never ran (or predates the
+    // marker advancement) still triggers the reinstall pass.
+    let config = UserConfig {
+        installed_agents: vec!["cursor".to_string()],
+        previous_version: "6.0.0".to_string(),
+        ..UserConfig::default()
+    };
 
-    run_update_steps(
-        || {
-            calls.borrow_mut().push("upgrade");
-            Ok(())
-        },
-        || {
-            calls.borrow_mut().push("post-update");
-            Ok(())
-        },
-    )
-    .expect("update steps should succeed");
-
-    assert_eq!(calls.into_inner(), vec!["upgrade", "post-update"]);
-}
-
-#[test]
-fn update_steps_stop_after_upgrade_failure() {
-    let calls = RefCell::new(Vec::new());
-
-    let result = run_update_steps(
-        || {
-            calls.borrow_mut().push("upgrade");
-            Err(tracedecay::errors::TraceDecayError::Config {
-                message: "upgrade failed".to_string(),
-            })
-        },
-        || {
-            calls.borrow_mut().push("post-update");
-            Ok(())
-        },
+    assert_eq!(
+        silent_reinstall_action(&config, "6.1.0"),
+        SilentReinstallAction::Reinstall
     );
-
-    assert!(result.is_err());
-    assert_eq!(calls.into_inner(), vec!["upgrade"]);
 }
 
 #[test]
-fn upgrade_steps_run_post_update_after_install() {
-    let calls = RefCell::new(Vec::new());
+fn post_update_marker_advancement_prevents_duplicate_silent_reinstall() {
+    // `post-update` refreshed the plugins and advanced the markers; the next
+    // ordinary command must not repeat that work via silent reinstall.
+    let running = "6.1.0";
+    let mut config = UserConfig {
+        installed_agents: vec!["cursor".to_string()],
+        previous_version: "6.0.0".to_string(),
+        ..UserConfig::default()
+    };
 
-    run_upgrade_steps(
-        || {
-            calls.borrow_mut().push("upgrade");
-            Ok(UpgradeOutcome::Installed)
-        },
-        || {
-            calls.borrow_mut().push("post-update");
-            Ok(())
-        },
-    )
-    .expect("upgrade steps should succeed");
-
-    assert_eq!(calls.into_inner(), vec!["upgrade", "post-update"]);
-}
-
-#[test]
-fn upgrade_steps_skip_post_update_when_already_up_to_date() {
-    let calls = RefCell::new(Vec::new());
-
-    run_upgrade_steps(
-        || {
-            calls.borrow_mut().push("upgrade");
-            Ok(UpgradeOutcome::AlreadyUpToDate)
-        },
-        || {
-            calls.borrow_mut().push("post-update");
-            Ok(())
-        },
-    )
-    .expect("an up-to-date upgrade should stay a successful no-op");
-
-    assert_eq!(calls.into_inner(), vec!["upgrade"]);
-}
-
-#[test]
-fn upgrade_steps_tolerate_post_update_failure() {
-    let calls = RefCell::new(Vec::new());
-
-    let result = run_upgrade_steps(
-        || {
-            calls.borrow_mut().push("upgrade");
-            Ok(UpgradeOutcome::Installed)
-        },
-        || {
-            calls.borrow_mut().push("post-update");
-            Err(tracedecay::errors::TraceDecayError::Config {
-                message: "plugin refresh failed".to_string(),
-            })
-        },
+    assert!(update_cmd::mark_running_version_installed(
+        &mut config,
+        running
+    ));
+    assert_eq!(config.previous_version, running);
+    assert_eq!(config.last_installed_version, running);
+    assert_eq!(
+        silent_reinstall_action(&config, running),
+        SilentReinstallAction::Nothing
     );
-
-    // The binary upgrade itself succeeded — a refresh failure only warns.
-    assert!(result.is_ok());
-    assert_eq!(calls.into_inner(), vec!["upgrade", "post-update"]);
+    // Idempotent: a second post-update run has nothing left to record.
+    assert!(!update_cmd::mark_running_version_installed(
+        &mut config,
+        running
+    ));
 }
 
 #[test]
-fn upgrade_steps_stop_after_upgrade_failure() {
-    let calls = RefCell::new(Vec::new());
+fn patch_bump_only_advances_the_marker() {
+    let config = UserConfig {
+        installed_agents: vec!["cursor".to_string()],
+        previous_version: "6.1.0".to_string(),
+        last_installed_version: "6.1.0".to_string(),
+        ..UserConfig::default()
+    };
 
-    let result = run_upgrade_steps(
-        || {
-            calls.borrow_mut().push("upgrade");
-            Err(tracedecay::errors::TraceDecayError::Config {
-                message: "upgrade failed".to_string(),
-            })
-        },
-        || {
-            calls.borrow_mut().push("post-update");
-            Ok(())
-        },
+    assert_eq!(
+        silent_reinstall_action(&config, "6.1.1"),
+        SilentReinstallAction::AdvanceMarker
     );
-
-    assert!(result.is_err());
-    assert_eq!(calls.into_inner(), vec!["upgrade"]);
 }
 
 #[test]

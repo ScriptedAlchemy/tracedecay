@@ -2,9 +2,10 @@
 //! upgrade via subprocess re-exec, generated-plugin refresh, daemon service
 //! refresh, and the post-update health pass.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tracedecay::upgrade::UpgradeOutcome;
+use tracedecay::user_config::UserConfig;
 
 pub(crate) fn refresh_generated_plugins() -> tracedecay::errors::Result<()> {
     let home = tracedecay_home_dir()?;
@@ -129,70 +130,100 @@ pub(crate) fn tracedecay_bin_on_path() -> tracedecay::errors::Result<String> {
     })
 }
 
+/// How the `post-update` re-exec reacts to the binary-upgrade outcome.
+pub(crate) enum RefreshPolicy {
+    /// `update`: refresh even when nothing was installed, and a refresh
+    /// failure fails the command.
+    Always,
+    /// `upgrade`: refresh only after a real install, and a refresh failure
+    /// only warns — the binary upgrade itself already succeeded (mirroring
+    /// how the health pass inside `post-update` is best-effort).
+    AfterInstall,
+}
+
+/// The shared `update` / `upgrade` flow: install the new binary, then re-exec
+/// the NEW binary's `post-update` subcommand — passed the freshly installed
+/// binary path, when known — so the plugin refresh, daemon refresh, and
+/// health pass run on the new version. `policy` decides whether the refresh
+/// runs on a no-op upgrade and whether a refresh failure is fatal.
 pub(crate) fn run_update_steps<U, P>(
-    mut upgrade: U,
-    mut post_update: P,
+    policy: RefreshPolicy,
+    upgrade: U,
+    post_update: P,
 ) -> tracedecay::errors::Result<()>
 where
-    U: FnMut() -> tracedecay::errors::Result<()>,
-    P: FnMut() -> tracedecay::errors::Result<()>,
+    U: FnOnce() -> tracedecay::errors::Result<UpgradeOutcome>,
+    P: FnOnce(Option<&Path>) -> tracedecay::errors::Result<()>,
 {
-    upgrade()?;
-    post_update()?;
-    Ok(())
+    let outcome = upgrade()?;
+    match policy {
+        RefreshPolicy::Always => {
+            let binary = match &outcome {
+                UpgradeOutcome::Installed { binary } => binary.as_deref(),
+                UpgradeOutcome::AlreadyCurrent => None,
+            };
+            post_update(binary)
+        }
+        RefreshPolicy::AfterInstall => match outcome {
+            UpgradeOutcome::Installed { binary } => {
+                if let Err(error) = post_update(binary.as_deref()) {
+                    // Point the retry at the installed binary when we know
+                    // where it lives — a bare `tracedecay` may not be on PATH.
+                    let retry = match &binary {
+                        Some(path) => format!("`{} update`", path.display()),
+                        None => "`tracedecay update`".to_string(),
+                    };
+                    eprintln!(
+                        "  \x1b[33mwarning:\x1b[0m post-upgrade refresh failed: {error}\n  \
+                         The new binary is installed; run {retry} to retry the \
+                         plugin refresh and health pass."
+                    );
+                }
+                Ok(())
+            }
+            UpgradeOutcome::AlreadyCurrent => {
+                eprintln!(
+                    "Nothing was installed, so plugins were left untouched — \
+                     run `tracedecay update` to refresh generated plugins anyway."
+                );
+                Ok(())
+            }
+        },
+    }
 }
 
 pub(crate) fn run_update_command(no_heal: bool) -> tracedecay::errors::Result<()> {
     run_update_steps(
-        || tracedecay::upgrade::run_upgrade().map(|_| ()),
-        || run_post_update_subcommand(no_heal),
+        RefreshPolicy::Always,
+        tracedecay::upgrade::run_upgrade,
+        |binary| run_post_update_subcommand(no_heal, binary),
     )
 }
 
-/// The `upgrade` flow: install the new binary, then — only when something was
-/// actually installed — re-exec the NEW binary's `post-update` subcommand so
-/// the plugin refresh, daemon refresh, and health pass run on the new version.
-///
-/// Unlike `update`, a refresh failure only warns: the binary upgrade itself
-/// succeeded, so the command must not report failure (mirroring how the
-/// health pass inside `post-update` is best-effort).
-pub(crate) fn run_upgrade_steps<U, P>(
-    mut upgrade: U,
-    mut post_update: P,
-) -> tracedecay::errors::Result<()>
-where
-    U: FnMut() -> tracedecay::errors::Result<UpgradeOutcome>,
-    P: FnMut() -> tracedecay::errors::Result<()>,
-{
-    match upgrade()? {
-        UpgradeOutcome::Installed => {
-            if let Err(error) = post_update() {
-                eprintln!(
-                    "  \x1b[33mwarning:\x1b[0m post-upgrade refresh failed: {error}\n  \
-                     The new binary is installed; run `tracedecay update` to retry the \
-                     plugin refresh and health pass."
-                );
-            }
-            Ok(())
-        }
-        UpgradeOutcome::AlreadyUpToDate => {
-            eprintln!(
-                "Nothing was installed, so plugins were left untouched — \
-                 run `tracedecay update` to refresh generated plugins anyway."
-            );
-            Ok(())
-        }
+pub(crate) fn run_upgrade_command(no_heal: bool) -> tracedecay::errors::Result<()> {
+    run_update_steps(
+        RefreshPolicy::AfterInstall,
+        tracedecay::upgrade::run_upgrade,
+        |binary| run_post_update_subcommand(no_heal, binary),
+    )
+}
+
+/// The binary to re-exec for `post-update`: the freshly installed one when
+/// the upgrade reported where it landed, otherwise the usual resolution.
+/// Never `which_tracedecay()` alone — its current-exe-first order can point
+/// at the OLD binary (e.g. a stale Homebrew keg) right after an upgrade.
+fn post_update_binary(installed: Option<&Path>) -> tracedecay::errors::Result<String> {
+    match installed.filter(|path| path.exists()) {
+        Some(path) => Ok(path.to_string_lossy().into_owned()),
+        None => tracedecay_bin_on_path(),
     }
 }
 
-pub(crate) fn run_upgrade_command(no_heal: bool) -> tracedecay::errors::Result<()> {
-    run_upgrade_steps(tracedecay::upgrade::run_upgrade, || {
-        run_post_update_subcommand(no_heal)
-    })
-}
-
-fn run_post_update_subcommand(no_heal: bool) -> tracedecay::errors::Result<()> {
-    let tracedecay_bin = tracedecay_bin_on_path()?;
+fn run_post_update_subcommand(
+    no_heal: bool,
+    installed: Option<&Path>,
+) -> tracedecay::errors::Result<()> {
+    let tracedecay_bin = post_update_binary(installed)?;
     let mut command = std::process::Command::new(&tracedecay_bin);
     command.arg("post-update");
     if no_heal {
@@ -211,6 +242,19 @@ fn run_post_update_subcommand(no_heal: bool) -> tracedecay::errors::Result<()> {
     })
 }
 
+/// Marks `running` as fully installed in the version markers, returning
+/// whether anything changed. Run at the end of a successful `post-update` so
+/// the next ordinary command's startup maintenance does not re-run the
+/// plugin refresh (silent reinstall) that `post-update` just performed.
+pub(crate) fn mark_running_version_installed(config: &mut UserConfig, running: &str) -> bool {
+    if config.previous_version == running && config.last_installed_version == running {
+        return false;
+    }
+    config.previous_version = running.to_string();
+    config.last_installed_version = running.to_string();
+    true
+}
+
 pub(crate) async fn run_post_update_tasks(no_heal: bool) -> tracedecay::errors::Result<()> {
     refresh_generated_plugins()?;
     if let Err(error) = refresh_daemon_service_after_update() {
@@ -221,5 +265,210 @@ pub(crate) async fn run_post_update_tasks(no_heal: bool) -> tracedecay::errors::
     } else {
         tracedecay::doctor::heal::run_post_update_health_pass().await;
     }
+
+    let mut config = UserConfig::load();
+    if mark_running_version_installed(&mut config, env!("CARGO_PKG_VERSION")) {
+        config.save();
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+
+    use super::{post_update_binary, run_update_steps, RefreshPolicy};
+    use tracedecay::upgrade::UpgradeOutcome;
+
+    fn config_err(message: &str) -> tracedecay::errors::TraceDecayError {
+        tracedecay::errors::TraceDecayError::Config {
+            message: message.to_string(),
+        }
+    }
+
+    /// Closure factory for the upgrade step: records `label`, returns `result`.
+    fn record_upgrade<'a>(
+        calls: &'a RefCell<Vec<&'static str>>,
+        label: &'static str,
+        result: tracedecay::errors::Result<UpgradeOutcome>,
+    ) -> impl FnOnce() -> tracedecay::errors::Result<UpgradeOutcome> + 'a {
+        move || {
+            calls.borrow_mut().push(label);
+            result
+        }
+    }
+
+    /// Closure factory for the post-update step: records `label` and the
+    /// binary path it was handed, returns `result`.
+    fn record_post_update<'a>(
+        calls: &'a RefCell<Vec<&'static str>>,
+        label: &'static str,
+        seen_binary: &'a RefCell<Option<Option<PathBuf>>>,
+        result: tracedecay::errors::Result<()>,
+    ) -> impl FnOnce(Option<&Path>) -> tracedecay::errors::Result<()> + 'a {
+        move |binary| {
+            calls.borrow_mut().push(label);
+            *seen_binary.borrow_mut() = Some(binary.map(Path::to_path_buf));
+            result
+        }
+    }
+
+    #[test]
+    fn update_policy_runs_post_update_after_upgrade() {
+        let calls = RefCell::new(Vec::new());
+        let seen_binary = RefCell::new(None);
+
+        run_update_steps(
+            RefreshPolicy::Always,
+            record_upgrade(&calls, "upgrade", Ok(UpgradeOutcome::AlreadyCurrent)),
+            record_post_update(&calls, "post-update", &seen_binary, Ok(())),
+        )
+        .expect("update steps should succeed");
+
+        assert_eq!(calls.into_inner(), vec!["upgrade", "post-update"]);
+        // Nothing was installed, so no installed-binary path to prefer.
+        assert_eq!(seen_binary.into_inner(), Some(None));
+    }
+
+    #[test]
+    fn update_policy_stops_after_upgrade_failure() {
+        let calls = RefCell::new(Vec::new());
+        let seen_binary = RefCell::new(None);
+
+        let result = run_update_steps(
+            RefreshPolicy::Always,
+            record_upgrade(&calls, "upgrade", Err(config_err("upgrade failed"))),
+            record_post_update(&calls, "post-update", &seen_binary, Ok(())),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(calls.into_inner(), vec!["upgrade"]);
+    }
+
+    #[test]
+    fn update_policy_treats_post_update_failure_as_fatal() {
+        let calls = RefCell::new(Vec::new());
+        let seen_binary = RefCell::new(None);
+
+        let result = run_update_steps(
+            RefreshPolicy::Always,
+            record_upgrade(&calls, "upgrade", Ok(UpgradeOutcome::AlreadyCurrent)),
+            record_post_update(
+                &calls,
+                "post-update",
+                &seen_binary,
+                Err(config_err("plugin refresh failed")),
+            ),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(calls.into_inner(), vec!["upgrade", "post-update"]);
+    }
+
+    #[test]
+    fn upgrade_policy_forwards_installed_binary_to_post_update() {
+        let calls = RefCell::new(Vec::new());
+        let seen_binary = RefCell::new(None);
+        let installed = PathBuf::from("/opt/homebrew/bin/tracedecay");
+
+        run_update_steps(
+            RefreshPolicy::AfterInstall,
+            record_upgrade(
+                &calls,
+                "upgrade",
+                Ok(UpgradeOutcome::Installed {
+                    binary: Some(installed.clone()),
+                }),
+            ),
+            record_post_update(&calls, "post-update", &seen_binary, Ok(())),
+        )
+        .expect("upgrade steps should succeed");
+
+        assert_eq!(calls.into_inner(), vec!["upgrade", "post-update"]);
+        // The refresh must re-exec the binary the upgrade just installed,
+        // never a re-resolved (possibly stale) one.
+        assert_eq!(seen_binary.into_inner(), Some(Some(installed)));
+    }
+
+    #[test]
+    fn upgrade_policy_skips_post_update_when_already_current() {
+        let calls = RefCell::new(Vec::new());
+        let seen_binary = RefCell::new(None);
+
+        run_update_steps(
+            RefreshPolicy::AfterInstall,
+            record_upgrade(&calls, "upgrade", Ok(UpgradeOutcome::AlreadyCurrent)),
+            record_post_update(&calls, "post-update", &seen_binary, Ok(())),
+        )
+        .expect("an up-to-date upgrade should stay a successful no-op");
+
+        assert_eq!(calls.into_inner(), vec!["upgrade"]);
+        assert_eq!(seen_binary.into_inner(), None);
+    }
+
+    #[test]
+    fn upgrade_policy_tolerates_post_update_failure() {
+        let calls = RefCell::new(Vec::new());
+        let seen_binary = RefCell::new(None);
+
+        let result = run_update_steps(
+            RefreshPolicy::AfterInstall,
+            record_upgrade(
+                &calls,
+                "upgrade",
+                Ok(UpgradeOutcome::Installed { binary: None }),
+            ),
+            record_post_update(
+                &calls,
+                "post-update",
+                &seen_binary,
+                Err(config_err("plugin refresh failed")),
+            ),
+        );
+
+        // The binary upgrade itself succeeded — a refresh failure only warns.
+        assert!(result.is_ok());
+        assert_eq!(calls.into_inner(), vec!["upgrade", "post-update"]);
+    }
+
+    #[test]
+    fn upgrade_policy_stops_after_upgrade_failure() {
+        let calls = RefCell::new(Vec::new());
+        let seen_binary = RefCell::new(None);
+
+        let result = run_update_steps(
+            RefreshPolicy::AfterInstall,
+            record_upgrade(&calls, "upgrade", Err(config_err("upgrade failed"))),
+            record_post_update(&calls, "post-update", &seen_binary, Ok(())),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(calls.into_inner(), vec!["upgrade"]);
+    }
+
+    #[test]
+    fn post_update_binary_prefers_the_freshly_installed_path() {
+        let temp = tempfile::tempdir().expect("tempdir should exist");
+        let installed = temp.path().join("tracedecay");
+        std::fs::write(&installed, b"new-binary").expect("binary should be writable");
+
+        let resolved = post_update_binary(Some(&installed)).expect("installed path should resolve");
+
+        assert_eq!(resolved, installed.to_string_lossy());
+    }
+
+    #[test]
+    fn post_update_binary_ignores_a_missing_installed_path() {
+        let temp = tempfile::tempdir().expect("tempdir should exist");
+        let missing = temp.path().join("does-not-exist/tracedecay");
+
+        // A dangling path (e.g. brew cleaned the keg) must fall back to the
+        // normal resolution instead of re-execing a nonexistent file.
+        let resolved = post_update_binary(Some(&missing));
+
+        if let Ok(resolved) = resolved {
+            assert_ne!(resolved, missing.to_string_lossy());
+        }
+    }
 }
