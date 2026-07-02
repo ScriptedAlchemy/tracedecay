@@ -110,6 +110,24 @@ impl AgentIntegration for ClaudeIntegration {
         doctor_check_local_config(dc, &ctx.project_path);
     }
 
+    fn export_managed_skills(
+        &self,
+        home: &Path,
+        profile_root: &Path,
+    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+        let claude_md_path = home.join(".claude").join("CLAUDE.md");
+        if !self.has_tracedecay(home) || !claude_md_path.exists() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![
+            crate::automation::skill_targets::install_managed_skills(
+                profile_root,
+                crate::automation::skill_targets::SkillInstallTarget::Claude,
+                &claude_md_path,
+            )?,
+        ])
+    }
+
     fn is_detected(&self, home: &Path) -> bool {
         home.join(".claude").is_dir()
     }

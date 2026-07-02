@@ -1,6 +1,7 @@
 use serde_json::json;
 
 use tracedecay::agents::codex::export_codex_plugin_artifact;
+use tracedecay::agents::export_managed_skills_to_agents;
 use tracedecay::automation::hermes_bridge::{load_hermes_skill_bridge, HermesSkillBridgeOptions};
 use tracedecay::automation::managed_skills::{
     approve_managed_skill, create_managed_skill_draft, default_managed_skill_targets,
@@ -284,6 +285,142 @@ async fn prompt_index_preserves_user_content_and_routes_full_body_through_mcp() 
     let second = std::fs::read_to_string(&prompt_path).unwrap();
     assert_eq!(second.matches("TRACEDECAY MANAGED SKILLS START").count(), 1);
     assert!(second.contains("This Claude index lists"));
+}
+
+/// Fakes a Claude Code global install under `home`: the tracedecay MCP
+/// registration in `.claude.json` plus the CLAUDE.md prompt file the export
+/// writes its skill index into.
+fn install_fake_claude(home: &std::path::Path) -> std::path::PathBuf {
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
+    let claude_md = home.join(".claude/CLAUDE.md");
+    std::fs::write(&claude_md, "# Claude rules\n").unwrap();
+    std::fs::write(
+        home.join(".claude.json"),
+        r#"{"mcpServers":{"tracedecay":{"command":"tracedecay","args":["serve"]}}}"#,
+    )
+    .unwrap();
+    claude_md
+}
+
+/// Fakes an installed Cursor plugin bundle under `home` (manifest presence is
+/// the detection signal) and returns the plugin install dir.
+fn install_fake_cursor_plugin(home: &std::path::Path) -> std::path::PathBuf {
+    let plugin_dir = home.join(".cursor/plugins/local/tracedecay");
+    std::fs::create_dir_all(plugin_dir.join(".cursor-plugin")).unwrap();
+    std::fs::write(
+        plugin_dir.join(".cursor-plugin/plugin.json"),
+        r#"{"name":"tracedecay"}"#,
+    )
+    .unwrap();
+    plugin_dir
+}
+
+#[tokio::test]
+async fn lifecycle_export_sweep_deploys_and_retracts_across_detected_agents() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let profile_root = temp.path().join("profile");
+    let claude_md = install_fake_claude(&home);
+    let cursor_plugin = install_fake_cursor_plugin(&home);
+
+    create_managed_skill_draft(&profile_root, draft("repo-hygiene", "Repository hygiene"))
+        .await
+        .unwrap();
+    approve_managed_skill(&profile_root, "repo-hygiene")
+        .await
+        .unwrap();
+
+    let reports = export_managed_skills_to_agents(&home, &profile_root);
+    let agents: Vec<&str> = reports
+        .iter()
+        .map(|report| report.agent.as_str())
+        .collect();
+    assert_eq!(agents, vec!["claude", "cursor"], "reports: {reports:?}");
+    for report in &reports {
+        assert_eq!(report.error, None, "{} export failed", report.agent);
+        assert_eq!(report.exports.len(), 1);
+        assert_eq!(report.exports[0].exported_count, 1);
+        assert_eq!(report.exports[0].exported[0].id, "repo-hygiene");
+    }
+    assert!(cursor_plugin
+        .join("skills/agent-managed/repo-hygiene/SKILL.md")
+        .is_file());
+    let claude_contents = std::fs::read_to_string(&claude_md).unwrap();
+    assert!(claude_contents.contains("`repo-hygiene`"));
+    assert!(claude_contents.contains("# Claude rules"));
+
+    disable_managed_skill(&profile_root, "repo-hygiene")
+        .await
+        .unwrap();
+    let reports = export_managed_skills_to_agents(&home, &profile_root);
+    for report in &reports {
+        assert_eq!(report.error, None, "{} retraction failed", report.agent);
+        assert_eq!(report.exports[0].exported_count, 0);
+    }
+    assert!(!cursor_plugin
+        .join("skills/agent-managed/repo-hygiene/SKILL.md")
+        .exists());
+    let claude_contents = std::fs::read_to_string(&claude_md).unwrap();
+    assert!(!claude_contents.contains("repo-hygiene"));
+    assert!(claude_contents.contains("# Claude rules"));
+}
+
+#[tokio::test]
+async fn lifecycle_export_sweep_isolates_per_agent_failures() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let profile_root = temp.path().join("profile");
+    let claude_md = install_fake_claude(&home);
+    let cursor_plugin = install_fake_cursor_plugin(&home);
+    // A directory where the prompt file should be makes the Claude export
+    // fail while leaving the Cursor overlay export unaffected.
+    std::fs::remove_file(&claude_md).unwrap();
+    std::fs::create_dir_all(&claude_md).unwrap();
+
+    create_managed_skill_draft(&profile_root, draft("repo-hygiene", "Repository hygiene"))
+        .await
+        .unwrap();
+    approve_managed_skill(&profile_root, "repo-hygiene")
+        .await
+        .unwrap();
+
+    let reports = export_managed_skills_to_agents(&home, &profile_root);
+    let claude = reports
+        .iter()
+        .find(|report| report.agent == "claude")
+        .expect("claude failure must be reported");
+    assert!(claude.error.is_some());
+    assert!(claude.exports.is_empty());
+    let cursor = reports
+        .iter()
+        .find(|report| report.agent == "cursor")
+        .expect("cursor export must still run");
+    assert_eq!(cursor.error, None);
+    assert_eq!(cursor.exports[0].exported_count, 1);
+    assert!(cursor_plugin
+        .join("skills/agent-managed/repo-hygiene/SKILL.md")
+        .is_file());
+}
+
+#[tokio::test]
+async fn lifecycle_export_sweep_skips_agents_without_installs() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let profile_root = temp.path().join("profile");
+    std::fs::create_dir_all(&home).unwrap();
+
+    create_managed_skill_draft(&profile_root, draft("repo-hygiene", "Repository hygiene"))
+        .await
+        .unwrap();
+    approve_managed_skill(&profile_root, "repo-hygiene")
+        .await
+        .unwrap();
+
+    let reports = export_managed_skills_to_agents(&home, &profile_root);
+    assert!(
+        reports.is_empty(),
+        "no detected installs means no export destinations: {reports:?}"
+    );
 }
 
 #[tokio::test]

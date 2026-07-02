@@ -35,6 +35,9 @@ pub(crate) struct DashboardFixture {
     pub(crate) _tmp: TempDir,
     pub(crate) _env_guard: EnvVarGuard,
     pub(crate) _data_dir_guard: EnvVarGuard,
+    pub(crate) _home_guard: EnvVarGuard,
+    pub(crate) _userprofile_guard: EnvVarGuard,
+    pub(crate) home: std::path::PathBuf,
     pub(crate) base_url: String,
     pub(crate) project_root: std::path::PathBuf,
     pub(crate) project_db_path: std::path::PathBuf,
@@ -517,8 +520,16 @@ async fn start_dashboard_fixture_with_options(
     let project_root = tmp_root.join("project");
     let global_db_path = tmp_root.join("global").join("global.db");
     let profile_root = tmp_root.join("profile").join(".tracedecay");
+    // Skill lifecycle endpoints re-export managed skills into agent configs
+    // under the process home; point HOME at the fixture so tests never touch
+    // the developer's real agent installations.
+    let home = tmp_root.join("home");
+    std::fs::create_dir_all(&home)
+        .unwrap_or_else(|err| panic!("failed to create fixture home: {err}"));
     let env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
     let data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
+    let home_guard = EnvVarGuard::set("HOME", &home);
+    let userprofile_guard = EnvVarGuard::set("USERPROFILE", &home);
     if let Err(err) = write_enrollment_marker(
         &project_root,
         &EnrollmentMarker {
@@ -557,6 +568,9 @@ async fn start_dashboard_fixture_with_options(
         _tmp: tmp,
         _env_guard: env_guard,
         _data_dir_guard: data_dir_guard,
+        _home_guard: home_guard,
+        _userprofile_guard: userprofile_guard,
+        home,
         base_url,
         project_root,
         project_db_path,

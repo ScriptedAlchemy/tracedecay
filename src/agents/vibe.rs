@@ -122,6 +122,24 @@ impl AgentIntegration for VibeIntegration {
         let contents = std::fs::read_to_string(&config_path).unwrap_or_default();
         contents.contains(TOML_MARKER)
     }
+
+    fn export_managed_skills(
+        &self,
+        home: &Path,
+        profile_root: &Path,
+    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+        let prompt_path = vibe_prompt_path(home);
+        if !self.has_tracedecay(home) || !prompt_path.exists() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![
+            crate::automation::skill_targets::install_managed_skills(
+                profile_root,
+                crate::automation::skill_targets::SkillInstallTarget::Agents,
+                &prompt_path,
+            )?,
+        ])
+    }
 }
 
 // ---------------------------------------------------------------------------

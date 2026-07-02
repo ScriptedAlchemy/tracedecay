@@ -104,6 +104,24 @@ impl AgentIntegration for OpenCodeIntegration {
         let mcp = json.get("mcp");
         mcp.and_then(|v| v.get("tracedecay")).is_some()
     }
+
+    fn export_managed_skills(
+        &self,
+        home: &Path,
+        profile_root: &Path,
+    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+        let prompt_path = opencode_prompt_path(home);
+        if !self.has_tracedecay(home) || !prompt_path.exists() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![
+            crate::automation::skill_targets::install_managed_skills(
+                profile_root,
+                crate::automation::skill_targets::SkillInstallTarget::OpenCode,
+                &prompt_path,
+            )?,
+        ])
+    }
 }
 
 // ---------------------------------------------------------------------------

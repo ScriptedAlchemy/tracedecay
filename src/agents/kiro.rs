@@ -212,6 +212,21 @@ impl AgentIntegration for KiroIntegration {
             .and_then(|v| v.get("tracedecay"))
             .is_some()
     }
+
+    fn export_managed_skills(
+        &self,
+        home: &Path,
+        profile_root: &Path,
+    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+        if !self.has_tracedecay(home) {
+            return Ok(Vec::new());
+        }
+        Ok(vec![install_managed_skills(
+            profile_root,
+            SkillInstallTarget::Kiro,
+            &managed_skill_index_path(home),
+        )?])
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -180,6 +180,32 @@ impl AgentIntegration for CopilotIntegration {
 
         vscode_has_tracedecay || insiders_has_tracedecay || cli_has_tracedecay
     }
+
+    fn export_managed_skills(
+        &self,
+        home: &Path,
+        profile_root: &Path,
+    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+        if !self.has_tracedecay(home) {
+            return Ok(Vec::new());
+        }
+        let prompt_paths = [
+            super::vscode_data_dir(home).join("User/prompts/copilot-instructions.md"),
+            super::vscode_insiders_data_dir(home).join("User/prompts/copilot-instructions.md"),
+            super::copilot_cli_dir(home).join("copilot-instructions.md"),
+        ];
+        prompt_paths
+            .iter()
+            .filter(|path| path.exists())
+            .map(|path| {
+                crate::automation::skill_targets::install_managed_skills(
+                    profile_root,
+                    crate::automation::skill_targets::SkillInstallTarget::Agents,
+                    path,
+                )
+            })
+            .collect()
+    }
 }
 
 /// Register MCP server in VS Code settings.json.

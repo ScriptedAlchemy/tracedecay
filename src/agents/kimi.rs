@@ -111,6 +111,24 @@ impl AgentIntegration for KimiIntegration {
         let servers = json.get("mcpServers");
         servers.and_then(|v| v.get("tracedecay")).is_some()
     }
+
+    fn export_managed_skills(
+        &self,
+        home: &Path,
+        profile_root: &Path,
+    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+        let agents_md = home.join(".kimi").join("AGENTS.md");
+        if !self.has_tracedecay(home) || !agents_md.exists() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![
+            crate::automation::skill_targets::install_managed_skills(
+                profile_root,
+                crate::automation::skill_targets::SkillInstallTarget::Kimi,
+                &agents_md,
+            )?,
+        ])
+    }
 }
 
 // ---------------------------------------------------------------------------
