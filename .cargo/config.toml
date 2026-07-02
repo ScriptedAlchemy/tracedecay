@@ -20,7 +20,9 @@ TRACEDECAY_DISABLE_GLOBAL_DB = { value = "1", force = false }
 # ~/.tracedecay, enrolling temp fixture repos into the real profile and
 # contending with a live daemon. Tests that need a private profile override
 # this per-test (`force = false`); the HOME-fallback tests remove the variable
-# in-process. Installed binaries run outside cargo and are unaffected.
+# in-process. Installed binaries run outside cargo and are unaffected, but the
+# profile does apply to `cargo run` — use the installed binary (or set
+# TRACEDECAY_DATA_DIR yourself) for real `daemon install-service` runs.
 # Enforced by tests/test_profile_isolation_test.rs.
 TRACEDECAY_DATA_DIR = { value = "target/test-profile/.tracedecay", force = false, relative = true }
 
