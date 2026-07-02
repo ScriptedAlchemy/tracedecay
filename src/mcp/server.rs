@@ -18,7 +18,9 @@ use crate::global_db::GlobalDb;
 use crate::mcp::response_handles::{
     cleanup_expired_response_handles, response_handle_stats_json, RESPONSE_RETRIEVE_TOOL,
 };
-use crate::mcp::tool_analytics::{mcp_tool_analytics_event, McpToolAnalyticsEvent};
+use crate::mcp::tool_analytics::{
+    hook_route_analytics_event, mcp_tool_analytics_event, McpToolAnalyticsEvent,
+};
 use crate::path_tree::format_compact_annotated_path_list;
 use crate::tracedecay::TraceDecay;
 
@@ -1538,6 +1540,7 @@ impl McpServer {
         let cg = self.reopen_if_branch_drifted().await;
         let root = cg.project_root().to_path_buf();
         let current_branch = crate::branch::current_branch(&root);
+        self.record_hook_route_analytics(&root, &event, current_branch.as_deref());
         let plan = hook_events::plan_hook_event(&event, &root, current_branch.as_deref());
         self.run_hook_event_plan(cg, &root, plan).await;
     }
@@ -2232,6 +2235,30 @@ impl McpServer {
         self.spawn_observed_ledger_write(async move {
             if let Err(e) = gdb.append_analytics_event(&event).await {
                 eprintln!("[tracedecay] analytics_events insert failed: {e}");
+            }
+        });
+    }
+
+    fn record_hook_route_analytics(
+        &self,
+        project_root: &std::path::Path,
+        event: &hook_events::HookEvent,
+        current_branch: Option<&str>,
+    ) {
+        let Some(event) = hook_route_analytics_event(
+            project_root,
+            event,
+            current_branch,
+            crate::tracedecay::current_timestamp(),
+        ) else {
+            return;
+        };
+        let Some(gdb) = self.global_db.clone() else {
+            return;
+        };
+        self.spawn_observed_ledger_write(async move {
+            if let Err(e) = gdb.append_analytics_event(&event).await {
+                eprintln!("[tracedecay] hook route analytics insert failed: {e}");
             }
         });
     }

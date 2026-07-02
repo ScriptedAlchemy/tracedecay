@@ -28,6 +28,15 @@ impl HookEventKind {
             _ => None,
         }
     }
+
+    pub(crate) fn as_key(self) -> &'static str {
+        match self {
+            Self::FileEdit => "file_edit",
+            Self::Shell => "shell",
+            Self::WorkspaceOpen => "workspace_open",
+            Self::IncrementalSync => "incremental_sync",
+        }
+    }
 }
 
 pub(crate) struct HookEvent {
@@ -36,6 +45,7 @@ pub(crate) struct HookEvent {
     pub(crate) rel_paths: Vec<String>,
     pub(crate) command: Option<String>,
     pub(crate) cwd: Option<PathBuf>,
+    pub(crate) route: Option<crate::daemon::HookRouteMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +66,7 @@ pub(crate) fn parse_hook_event(params: Option<&Value>) -> Option<HookEvent> {
         rel_paths: safe_hook_rel_paths(&event.rel_paths),
         command: event.command.filter(|command| !command.is_empty()),
         cwd: event.cwd,
+        route: event.route,
     })
 }
 
@@ -212,6 +223,35 @@ mod tests {
         assert_eq!(shell.command.as_deref(), Some("git pull --rebase"));
         assert_eq!(workspace.agent, HookAgent::Kiro);
         assert_eq!(workspace.kind, HookEventKind::WorkspaceOpen);
+    }
+
+    #[test]
+    fn preserves_route_metadata_from_hook_notification() {
+        let params = json!({
+            "agent": "codex",
+            "event": "postToolUseShell",
+            "command": "cargo test",
+            "cwd": "/tmp/project",
+            "route": {
+                "session_id": "session-123",
+                "thread_id": "thread-456",
+                "cwd": "/tmp/project",
+                "worktree": "/tmp/project-worktree",
+                "branch": "feature/hook-route"
+            }
+        });
+
+        let event = parse_or_panic(&params);
+
+        let route = event.route.as_ref().expect("route metadata should parse");
+        assert_eq!(route.session_id.as_deref(), Some("session-123"));
+        assert_eq!(route.thread_id.as_deref(), Some("thread-456"));
+        assert_eq!(route.cwd.as_deref(), Some(Path::new("/tmp/project")));
+        assert_eq!(
+            route.worktree.as_deref(),
+            Some(Path::new("/tmp/project-worktree"))
+        );
+        assert_eq!(route.branch.as_deref(), Some("feature/hook-route"));
     }
 
     #[test]

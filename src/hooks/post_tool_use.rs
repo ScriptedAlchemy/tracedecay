@@ -11,7 +11,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use super::{codex, event_cwd_from_parsed, rel_under_root};
+use super::{codex, event_cwd_from_parsed, hook_route_metadata_from_parsed, rel_under_root};
 
 /// Claude Code tools whose `PostToolUse` events the hook consumes. The
 /// installer's `PostToolUse` matcher is derived from this list so the matcher
@@ -86,7 +86,8 @@ pub(crate) async fn notify_post_tool_use(spec: &PostToolUseSpec, event_json: &st
         }
         crate::daemon::notify_hook_event(
             &root,
-            crate::daemon::DaemonHookEvent::post_tool_use_edit(spec.agent, rels, cwd),
+            crate::daemon::DaemonHookEvent::post_tool_use_edit(spec.agent, rels, cwd)
+                .with_route(hook_route_metadata_from_parsed(&parsed, &root)),
         )
         .await;
     } else if (spec.is_shell_tool)(tool_name) {
@@ -100,7 +101,8 @@ pub(crate) async fn notify_post_tool_use(spec: &PostToolUseSpec, event_json: &st
                 spec.agent,
                 command.to_string(),
                 cwd,
-            ),
+            )
+            .with_route(hook_route_metadata_from_parsed(&parsed, &root)),
         )
         .await;
     }

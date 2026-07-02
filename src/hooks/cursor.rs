@@ -20,8 +20,9 @@ use super::steering::{
 };
 use super::tool_hints::{decide_hint, HintAgent, ToolHint, ToolHintInput};
 use super::{
-    deduped_project_hint, event_session_id, format_tool_hint, nearest_project_like_root,
-    read_hook_event, record_hint_analytics, record_hook_invoked, rel_under_root, text_field,
+    deduped_project_hint, event_session_id, format_tool_hint, hook_route_metadata_from_event,
+    nearest_project_like_root, read_hook_event, record_hint_analytics, record_hook_invoked,
+    rel_under_root, text_field,
 };
 
 /// Largest tail the `beforeSubmitPrompt` hot path will read in one call. Larger
@@ -510,7 +511,8 @@ async fn notify_cursor_after_file_edit(event_json: &str) {
     }
     crate::daemon::notify_hook_event(
         &root,
-        crate::daemon::DaemonHookEvent::cursor_after_file_edit(rels),
+        crate::daemon::DaemonHookEvent::cursor_after_file_edit(rels)
+            .with_route(hook_route_metadata_from_event(event_json, &root)),
     )
     .await;
 }
@@ -533,7 +535,8 @@ async fn notify_cursor_after_shell_event(event_json: &str) {
     let cwd = cursor_event_cwd(&parsed).unwrap_or_else(|| root.clone());
     crate::daemon::notify_hook_event(
         &root,
-        crate::daemon::DaemonHookEvent::cursor_after_shell_execution(command.to_string(), cwd),
+        crate::daemon::DaemonHookEvent::cursor_after_shell_execution(command.to_string(), cwd)
+            .with_route(hook_route_metadata_from_event(event_json, &root)),
     )
     .await;
 }
@@ -548,7 +551,8 @@ async fn notify_cursor_workspace_open(event_json: &str) {
     }
     crate::daemon::notify_hook_event(
         &root,
-        crate::daemon::DaemonHookEvent::cursor_workspace_open(root.clone()),
+        crate::daemon::DaemonHookEvent::cursor_workspace_open(root.clone())
+            .with_route(hook_route_metadata_from_event(event_json, &root)),
     )
     .await;
 }

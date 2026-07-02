@@ -236,6 +236,40 @@ fn record_hint_emitted(
     record_hint_analytics(root, "hint_emitted", agent, session_id, hint);
 }
 
+fn hook_route_metadata_from_event(
+    event_json: &str,
+    project_root: &Path,
+) -> Option<crate::daemon::HookRouteMetadata> {
+    let parsed = serde_json::from_str::<Value>(event_json).ok()?;
+    hook_route_metadata_from_parsed(&parsed, project_root)
+}
+
+fn hook_route_metadata_from_parsed(
+    parsed: &Value,
+    project_root: &Path,
+) -> Option<crate::daemon::HookRouteMetadata> {
+    let cwd = event_cwd_from_parsed(parsed);
+    let route_root = cwd.as_deref().unwrap_or(project_root);
+    let worktree = crate::worktree::git_worktree_root(route_root)
+        .unwrap_or_else(|| project_root.to_path_buf());
+    let branch = crate::branch::current_branch(&worktree);
+    Some(crate::daemon::HookRouteMetadata {
+        session_id: event_session_id(parsed),
+        thread_id: text_field(
+            parsed,
+            &[
+                "thread_id",
+                "threadId",
+                "conversation_thread_id",
+                "conversationThreadId",
+            ],
+        ),
+        cwd,
+        worktree: Some(worktree),
+        branch,
+    })
+}
+
 fn deduped_project_hint(
     root: Option<PathBuf>,
     agent: HintAgent,

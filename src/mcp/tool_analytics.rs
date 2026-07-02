@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 
 use crate::global_db::{AnalyticsEventInsert, GlobalDb};
+use crate::mcp::hook_events::HookEvent;
 
 pub(super) struct McpToolAnalyticsEvent<'a> {
     pub(super) project_root: &'a std::path::Path,
@@ -59,6 +60,42 @@ pub(super) fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> Anal
     }
 }
 
+pub(super) fn hook_route_analytics_event(
+    project_root: &std::path::Path,
+    event: &HookEvent,
+    current_branch: Option<&str>,
+    timestamp: i64,
+) -> Option<AnalyticsEventInsert> {
+    let route = event.route.as_ref()?;
+    let metadata = json!({
+        "agent": event.agent.as_wire(),
+        "hook_kind": event.kind.as_key(),
+        "event_cwd": event.cwd.as_ref().map(|path| path.display().to_string()),
+        "route_cwd": route.cwd.as_ref().map(|path| path.display().to_string()),
+        "worktree": route.worktree.as_ref().map(|path| path.display().to_string()),
+        "route_branch": route.branch.as_deref(),
+        "current_branch": current_branch,
+        "thread_id": route.thread_id.as_deref(),
+        "rel_path_count": event.rel_paths.len(),
+        "has_command": event.command.is_some(),
+    });
+    Some(AnalyticsEventInsert {
+        provider: "daemon_hook".to_string(),
+        project_id: GlobalDb::canonical_project_key(project_root),
+        session_id: route.session_id.clone(),
+        timestamp,
+        event_kind: "hook_route".to_string(),
+        hook_name: Some(event.kind.as_key().to_string()),
+        tool_name: None,
+        tool_category: None,
+        skill_name: None,
+        hint_category: None,
+        hint_id: None,
+        outcome: Some("observed".to_string()),
+        metadata_json: Some(metadata.to_string()),
+    })
+}
+
 fn append_tool_response_analytics(
     tool_name: &str,
     arguments: &Value,
@@ -94,4 +131,49 @@ fn append_tool_response_analytics(
         "fact_ids": [],
         "error": null,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use crate::daemon::HookRouteMetadata;
+    use crate::mcp::hook_events::{HookAgent, HookEvent, HookEventKind};
+
+    use super::hook_route_analytics_event;
+
+    #[test]
+    fn hook_route_analytics_event_preserves_correlation_fields() {
+        let event = HookEvent {
+            agent: HookAgent::Codex,
+            kind: HookEventKind::Shell,
+            rel_paths: Vec::new(),
+            command: Some("cargo test".to_string()),
+            cwd: Some(PathBuf::from("/repo")),
+            route: Some(HookRouteMetadata {
+                session_id: Some("session-123".to_string()),
+                thread_id: Some("thread-456".to_string()),
+                cwd: Some(PathBuf::from("/repo")),
+                worktree: Some(PathBuf::from("/repo")),
+                branch: Some("feature/hook-route".to_string()),
+            }),
+        };
+
+        let record = hook_route_analytics_event(Path::new("/repo"), &event, Some("main"), 12345)
+            .expect("route metadata should create analytics record");
+        let metadata: serde_json::Value =
+            serde_json::from_str(record.metadata_json.as_deref().unwrap_or("{}"))
+                .expect("metadata should parse");
+
+        assert_eq!(record.provider, "daemon_hook");
+        assert_eq!(record.session_id.as_deref(), Some("session-123"));
+        assert_eq!(record.event_kind, "hook_route");
+        assert_eq!(record.hook_name.as_deref(), Some("shell"));
+        assert_eq!(record.outcome.as_deref(), Some("observed"));
+        assert_eq!(metadata["agent"], "codex");
+        assert_eq!(metadata["thread_id"], "thread-456");
+        assert_eq!(metadata["route_branch"], "feature/hook-route");
+        assert_eq!(metadata["current_branch"], "main");
+        assert_eq!(metadata["has_command"], true);
+    }
 }
