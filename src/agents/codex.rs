@@ -321,6 +321,10 @@ const CODEX_EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
         "skills/tracking-session-health/SKILL.md",
         include_str!("../../codex-plugin/skills/tracking-session-health/SKILL.md"),
     ),
+    (
+        "skills/using-the-cli/SKILL.md",
+        include_str!("../../codex-plugin/skills/using-the-cli/SKILL.md"),
+    ),
 ];
 
 fn codex_plugin_install_dir(home: &Path) -> PathBuf {

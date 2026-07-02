@@ -1408,6 +1408,7 @@ pub const CURSOR_PLUGIN_SKILLS: &[&str] = &[
     "searching-for-code",
     "tracing-functions",
     "tracking-session-health",
+    "using-the-cli",
 ];
 
 /// Builds the Cursor `sessionStart` `additional_context` text.
@@ -1490,7 +1491,12 @@ pub fn build_codex_session_context_for_workspace(
                  (tracedecay_context, tracedecay_search, tracedecay_callers, tracedecay_callees, \
                  tracedecay_impact, tracedecay_files, tracedecay_affected) over broad file reads \
                  or shell search for codebase exploration, symbol lookup, call graphs, and \
-                 impact analysis. Fall back to file reads only when tracedecay cannot answer.\n",
+                 impact analysis. Fall back to file reads only when tracedecay cannot answer.\n\
+                 If an MCP call errors, times out, or the server is disconnected, every tool \
+                 is also a shell command: `tracedecay tool <name> --key value` (`tracedecay \
+                 tool` lists tools, `tracedecay tool <name> --help` shows parameters). Use \
+                 that CLI instead of querying .tracedecay databases directly or abandoning \
+                 tracedecay.\n",
             );
             append_codex_recall_and_registry_guidance(&mut s);
             match status {
