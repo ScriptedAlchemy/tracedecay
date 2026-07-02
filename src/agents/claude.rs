@@ -1717,16 +1717,19 @@ mod tests {
     fn managed_subagent_definitions_have_valid_frontmatter() {
         for &(file_name, contents) in CLAUDE_MANAGED_AGENTS {
             let stem = file_name.trim_end_matches(".md");
-            assert!(
-                contents.starts_with("---\n"),
+            let lines: Vec<&str> = contents.lines().collect();
+            assert_eq!(
+                lines.first().copied(),
+                Some("---"),
                 "{file_name} must open YAML frontmatter"
             );
+            let expected_name = format!("name: {stem}");
             assert!(
-                contents.contains(&format!("name: {stem}\n")),
+                lines.contains(&expected_name.as_str()),
                 "{file_name} frontmatter name must match its filename"
             );
             assert!(
-                contents.contains("description: "),
+                lines.iter().any(|line| line.starts_with("description: ")),
                 "{file_name} must carry a description for delegation"
             );
             assert!(
