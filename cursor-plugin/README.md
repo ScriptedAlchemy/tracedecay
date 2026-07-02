@@ -26,6 +26,13 @@ build does not expand it, reinstall with the latest Cursor and run
 Hook commands derive the active project from Cursor's event payload /
 `CURSOR_PROJECT_DIR`, not from the plugin directory.
 
+Every MCP tool is also available from the shell as `tracedecay tool <name>`
+(`tracedecay tool` lists all tools; `tracedecay tool <name> --help` shows a
+tool's parameters). The bundled `using-the-cli` skill and the always-applied
+rule steer agents to that CLI fallback when the MCP transport errors or times
+out, instead of querying `.tracedecay` databases directly or giving up on
+tracedecay.
+
 For sessions resumed from compacted context, the `sessionStart` hook adds a
 short recovery hint through Cursor's `additional_context` channel so the agent
 knows to query TraceDecay LCM/session recall before assuming the compacted

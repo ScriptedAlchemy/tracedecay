@@ -376,10 +376,20 @@ fn tool_error_response(id: Value, tool_name: &str, error: &TraceDecayError) -> J
         }
     }
 
-    JsonRpcResponse::error(
+    let cli_name = tool_name.strip_prefix("tracedecay_").unwrap_or(tool_name);
+    JsonRpcResponse::error_with_data(
         id,
         ErrorCode::InternalError,
         format!("tool execution failed: {error}"),
+        Some(json!({
+            "tool": tool_name,
+            "cli_fallback": format!(
+                "This tool is also available from the shell: `tracedecay tool {cli_name} ...` \
+                 (`tracedecay tool {cli_name} --help` for parameters). If MCP calls keep \
+                 failing or timing out, fall back to that CLI instead of querying \
+                 .tracedecay databases directly."
+            ),
+        })),
     )
 }
 
@@ -1494,6 +1504,13 @@ impl McpServer {
                     tools are read-only and safe to call in parallel. Edit \
                     and session-memory tools can mutate local project state \
                     and declare readOnlyHint=false. \
+                    Every tool is also available from the shell: \
+                    `tracedecay tool <name> --key value` (run `tracedecay tool` \
+                    to list tools, `tracedecay tool <name> --help` for \
+                    parameters). If an MCP call errors, times out, or this \
+                    server disconnects, fall back to that CLI instead of \
+                    querying .tracedecay databases directly or abandoning \
+                    tracedecay. \
                     When a tool result contains a `tracedecay_metrics:` line, \
                     report the savings to the user (e.g. 'TraceDecay\\'d ~N tokens')."
             }),

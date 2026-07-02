@@ -349,6 +349,10 @@ const EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
         include_str!("../../cursor-plugin/skills/tracking-session-health/SKILL.md"),
     ),
     (
+        "skills/using-the-cli/SKILL.md",
+        include_str!("../../cursor-plugin/skills/using-the-cli/SKILL.md"),
+    ),
+    (
         "agents/code-explorer.md",
         include_str!("../../cursor-plugin/agents/code-explorer.md"),
     ),
