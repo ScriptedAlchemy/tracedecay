@@ -1,9 +1,7 @@
-mod common;
-
 use std::path::Path;
 use std::process::Command;
 
-use common::{write_pyyaml_shim, EnvVarGuard, PYYAML_FALLBACK_PRELUDE};
+use crate::common::{write_pyyaml_shim, EnvVarGuard, PYYAML_FALLBACK_PRELUDE};
 use tempfile::TempDir;
 use tracedecay::agents::*;
 use tracedecay::automation::managed_skills::{
@@ -16,7 +14,7 @@ use tracedecay::sessions::SessionRecord;
 use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::TraceDecay;
 
-static AGENT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+use crate::common::PROCESS_ENV_LOCK as AGENT_ENV_LOCK;
 
 // ---------------------------------------------------------------------------
 // 1. Registry tests
@@ -132,6 +130,11 @@ fn test_agent_names_are_human_readable() {
 // 3. Install / config creation tests (with tempdir)
 // ---------------------------------------------------------------------------
 
+/// Install contexts in this suite disable the Hermes dashboard-wrapper
+/// deploy: none of these tests assert on the deployed `dashboard/` page
+/// (that coverage lives in `hermes_dashboard_test`), and skipping it avoids
+/// rewriting ~300KB of embedded UI bundles per install — a real cost on
+/// Windows CI. Agents other than Hermes ignore the flag entirely.
 fn make_install_ctx(home: &Path) -> InstallContext {
     InstallContext {
         home: home.to_path_buf(),
@@ -139,7 +142,50 @@ fn make_install_ctx(home: &Path) -> InstallContext {
         tool_permissions: expected_tool_perms(),
         profile: None,
         project_root: None,
-        dashboard: true,
+        dashboard: false,
+    }
+}
+
+/// The Hermes plugin generated for [`make_install_ctx`] is identical for
+/// every empty test home (fixed fake binary path, no profile, no pin), so
+/// render it once per process and copy the resulting `.hermes` tree into
+/// each test home instead of re-running template + tool-schema generation.
+/// Tests that pre-seed `~/.hermes/config.yaml` (config-merge coverage) must
+/// keep calling `HermesIntegration.install` directly.
+static HERMES_DEFAULT_INSTALL_TEMPLATE: std::sync::OnceLock<Vec<(std::path::PathBuf, Vec<u8>)>> =
+    std::sync::OnceLock::new();
+
+fn install_hermes_default(home: &Path) {
+    let files = HERMES_DEFAULT_INSTALL_TEMPLATE.get_or_init(|| {
+        let template_home = TempDir::new().unwrap();
+        HermesIntegration
+            .install(&make_install_ctx(template_home.path()))
+            .unwrap();
+        let root = template_home.path().join(".hermes");
+        let mut files = Vec::new();
+        collect_files_recursive(&root, &root, &mut files);
+        assert!(
+            !files.is_empty(),
+            "hermes install template should contain generated files"
+        );
+        files
+    });
+    for (relative, contents) in files {
+        let path = home.join(".hermes").join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+}
+
+fn collect_files_recursive(root: &Path, dir: &Path, out: &mut Vec<(std::path::PathBuf, Vec<u8>)>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            collect_files_recursive(root, &path, out);
+        } else {
+            let relative = path.strip_prefix(root).unwrap().to_path_buf();
+            out.push((relative, std::fs::read(&path).unwrap()));
+        }
     }
 }
 
@@ -497,9 +543,9 @@ fn test_cursor_plugin_bundle_files_are_valid() {
 
 #[test]
 fn generated_guidance_prefers_resolved_active_project_store() {
-    let cursor_status = include_str!("../cursor-plugin/skills/project-status/SKILL.md");
-    let codex_status = include_str!("../codex-plugin/skills/project-status/SKILL.md");
-    let cursor_rule = include_str!("../cursor-plugin/rules/tracedecay.mdc");
+    let cursor_status = include_str!("../../cursor-plugin/skills/project-status/SKILL.md");
+    let codex_status = include_str!("../../codex-plugin/skills/project-status/SKILL.md");
+    let cursor_rule = include_str!("../../cursor-plugin/rules/tracedecay.mdc");
 
     for (name, guidance) in [
         ("cursor project-status", cursor_status),
@@ -575,13 +621,13 @@ fn valid_single_quoted_yaml_scalar(value: &str) -> bool {
 #[test]
 fn generated_prompt_rules_do_not_hardcode_repo_local_graph_db() {
     for (name, source) in [
-        ("claude", include_str!("../src/agents/claude.rs")),
-        ("copilot", include_str!("../src/agents/copilot.rs")),
-        ("gemini", include_str!("../src/agents/gemini.rs")),
-        ("kiro", include_str!("../src/agents/kiro.rs")),
-        ("kimi", include_str!("../src/agents/kimi.rs")),
-        ("opencode", include_str!("../src/agents/opencode.rs")),
-        ("vibe", include_str!("../src/agents/vibe.rs")),
+        ("claude", include_str!("../../src/agents/claude.rs")),
+        ("copilot", include_str!("../../src/agents/copilot.rs")),
+        ("gemini", include_str!("../../src/agents/gemini.rs")),
+        ("kiro", include_str!("../../src/agents/kiro.rs")),
+        ("kimi", include_str!("../../src/agents/kimi.rs")),
+        ("opencode", include_str!("../../src/agents/opencode.rs")),
+        ("vibe", include_str!("../../src/agents/vibe.rs")),
     ] {
         assert!(
             !source.contains(".tracedecay/tracedecay.db"),
@@ -597,7 +643,7 @@ fn generated_prompt_rules_do_not_hardcode_repo_local_graph_db() {
 
 #[test]
 fn profile_storage_docs_do_not_overclaim_unimplemented_bundle_or_quota_support() {
-    let docs = include_str!("../docs/PROFILE-STORAGE-SUPPORT.md");
+    let docs = include_str!("../../docs/PROFILE-STORAGE-SUPPORT.md");
     assert!(
         !docs.contains("tracedecay support bundle --redact"),
         "profile-storage docs must not present support-bundle behavior as implemented"
@@ -610,7 +656,7 @@ fn profile_storage_docs_do_not_overclaim_unimplemented_bundle_or_quota_support()
 
 #[test]
 fn hermes_dashboard_wrapper_docs_describe_deployed_profile_default() {
-    let wrapper = include_str!("../dashboard/hermes-wrapper/plugin_api.py");
+    let wrapper = include_str!("../../dashboard/hermes-wrapper/plugin_api.py");
     assert!(
         wrapper.contains("deploy-time default"),
         "Hermes dashboard wrapper docs should describe the deployed project default"
@@ -691,7 +737,7 @@ fn test_cursor_plugin_hooks_quote_binary_paths_with_spaces() {
         tool_permissions: expected_tool_perms(),
         profile: None,
         project_root: None,
-        dashboard: true,
+        dashboard: false,
     };
 
     CursorIntegration.install(&ctx).unwrap();
@@ -1016,8 +1062,8 @@ fn test_hermes_local_install_writes_profile_plugin() {
 
 #[test]
 fn test_hermes_generated_plugin_templates_live_outside_installer() {
-    let installer_source = include_str!("../src/agents/hermes.rs");
-    let template_source = include_str!("../src/agents/hermes/templates.rs");
+    let installer_source = include_str!("../../src/agents/hermes.rs");
+    let template_source = include_str!("../../src/agents/hermes/templates.rs");
 
     for marker in [
         r#""""Generated tracedecay tool handlers for Hermes.""""#,
@@ -1040,9 +1086,7 @@ fn test_hermes_generated_plugin_templates_live_outside_installer() {
 #[test]
 fn test_hermes_generated_python_registers_lcm_context_engine() {
     let home = TempDir::new().unwrap();
-    HermesIntegration
-        .install(&make_install_ctx(home.path()))
-        .unwrap();
+    install_hermes_default(home.path());
 
     let init_py =
         std::fs::read_to_string(home.path().join(".hermes/plugins/tracedecay/__init__.py"))
@@ -1127,7 +1171,7 @@ fn test_hermes_generated_python_handles_quoted_unicode_tracedecay_path() {
         tool_permissions: expected_tool_perms(),
         profile: None,
         project_root: None,
-        dashboard: true,
+        dashboard: false,
     };
 
     HermesIntegration.install(&ctx).unwrap();
@@ -1854,7 +1898,7 @@ fn test_hermes_profile_install_targets_named_profile() {
         tool_permissions: expected_tool_perms(),
         profile: Some("Work_Profile".to_string()),
         project_root: None,
-        dashboard: true,
+        dashboard: false,
     };
 
     HermesIntegration.install(&ctx).unwrap();
@@ -2037,7 +2081,7 @@ fn test_hermes_install_rejects_invalid_profile_names() {
         tool_permissions: expected_tool_perms(),
         profile: Some("_bad".to_string()),
         project_root: None,
-        dashboard: true,
+        dashboard: false,
     };
 
     let err = HermesIntegration.install(&ctx).unwrap_err().to_string();
@@ -2413,7 +2457,7 @@ fn test_hermes_install_preserves_user_keys_in_tracedecay_config_block() {
         tool_permissions: expected_tool_perms(),
         profile: None,
         project_root: Some(std::path::PathBuf::from("/pinned/project")),
-        dashboard: true,
+        dashboard: false,
     };
     HermesIntegration.install(&ctx).unwrap();
 
@@ -2446,9 +2490,7 @@ fn test_hermes_install_preserves_user_keys_in_tracedecay_config_block() {
 fn test_hermes_healthcheck_warns_on_stale_plugin_and_missing_pin() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
-    HermesIntegration
-        .install(&make_install_ctx(home.path()))
-        .unwrap();
+    install_hermes_default(home.path());
 
     let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
     let hctx = HealthcheckContext {
@@ -2487,7 +2529,7 @@ fn test_hermes_healthcheck_warns_on_stale_plugin_and_missing_pin() {
             tool_permissions: expected_tool_perms(),
             profile: None,
             project_root: Some(std::path::PathBuf::from("/missing/pinned/project")),
-            dashboard: true,
+            dashboard: false,
         })
         .unwrap();
     let mut dc = DoctorCounters::new();
@@ -2541,7 +2583,7 @@ fn test_hermes_uninstall_preserves_other_profile_plugins_and_config() {
         tool_permissions: expected_tool_perms(),
         profile: Some("work".to_string()),
         project_root: None,
-        dashboard: true,
+        dashboard: false,
     };
 
     HermesIntegration.uninstall(&ctx).unwrap();
@@ -2729,94 +2771,139 @@ fn test_local_install_cursor_allows_legacy_free_symlinked_cursor_dir() {
     );
 }
 
-#[test]
-fn test_local_install_supported_agents_write_project_paths() {
-    let cases = [
-        (
-            "claude",
-            vec![".mcp.json", ".claude/settings.json", ".claude/CLAUDE.md"],
-        ),
-        (
-            "codex",
-            vec![
-                ".agents/plugins/marketplace.json",
-                "plugins/tracedecay/.codex-plugin/plugin.json",
-                "plugins/tracedecay/.mcp.json",
-                "plugins/tracedecay/hooks/hooks.json",
-                "plugins/tracedecay/skills/reading-code-cheaply/SKILL.md",
-            ],
-        ),
-        ("gemini", vec![".gemini/settings.json", "GEMINI.md"]),
-        (
-            "kiro",
-            vec![
-                ".kiro/settings/mcp.json",
-                ".kiro/steering/tracedecay.md",
-                ".kiro/agents/tracedecay.json",
-            ],
-        ),
-        ("opencode", vec!["opencode.json", "AGENTS.md"]),
-        ("copilot", vec![".vscode/mcp.json"]),
-        ("zed", vec![".zed/settings.json"]),
-        ("roo-code", vec![".roo/mcp.json"]),
-        ("kimi", vec![".kimi-code/mcp.json", "AGENTS.md"]),
-        ("kilo", vec!["kilo.json"]),
-        ("vibe", vec![".vibe/config.toml", ".vibe/prompts/cli.md"]),
-    ];
+/// Shared body of the per-agent `test_local_install_*_writes_project_paths`
+/// tests. Split into one test per agent (instead of a single loop) so the
+/// eleven CLI install spawns run in parallel; each spawn costs noticeable
+/// wall time on Windows CI.
+fn assert_local_install_writes_project_paths(agent: &str, paths: &[&str]) {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
 
-    for (agent, paths) in cases {
-        let home = TempDir::new().unwrap();
-        let project = TempDir::new().unwrap();
+    assert_local_install_success(agent, project.path(), home.path());
 
-        assert_local_install_success(agent, project.path(), home.path());
-
-        for relative in paths {
-            let path = project.path().join(relative);
-            assert!(
-                path.exists(),
-                "{agent} local install should create project path {}",
-                path.display()
-            );
-            let body = std::fs::read_to_string(&path).unwrap();
-            assert!(
-                body.contains("tracedecay"),
-                "{agent} local file {} should mention tracedecay",
-                path.display()
-            );
-            let is_instruction_file = matches!(
-                path.extension().and_then(|ext| ext.to_str()),
-                Some("md" | "mdc")
-            );
-            if is_instruction_file && agent != "codex" {
-                assert!(
-                    body.contains("tracedecay_fact_store"),
-                    "{agent} local instruction file {} should mention fact memory tools",
-                    path.display()
-                );
-                assert!(
-                    body.contains("tracedecay_message_search"),
-                    "{agent} local instruction file {} should mention transcript message search",
-                    path.display()
-                );
-            }
-            let is_codex_metadata = agent == "codex"
-                && (relative == ".agents/plugins/marketplace.json"
-                    || relative.ends_with(".codex-plugin/plugin.json"));
-            if !is_instruction_file && !is_codex_metadata {
-                let expected = expected_tracedecay_bin();
-                assert!(
-                    body.contains(&expected),
-                    "{agent} local config {} should use the resolved absolute tracedecay executable",
-                    path.display()
-                );
-            }
-        }
-
+    for relative in paths {
+        let path = project.path().join(relative);
         assert!(
-            !home.path().join(".tracedecay/config.toml").exists(),
-            "{agent} local install must not create or mutate user-level install tracking"
+            path.exists(),
+            "{agent} local install should create project path {}",
+            path.display()
         );
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            body.contains("tracedecay"),
+            "{agent} local file {} should mention tracedecay",
+            path.display()
+        );
+        let is_instruction_file = matches!(
+            path.extension().and_then(|ext| ext.to_str()),
+            Some("md" | "mdc")
+        );
+        if is_instruction_file && agent != "codex" {
+            assert!(
+                body.contains("tracedecay_fact_store"),
+                "{agent} local instruction file {} should mention fact memory tools",
+                path.display()
+            );
+            assert!(
+                body.contains("tracedecay_message_search"),
+                "{agent} local instruction file {} should mention transcript message search",
+                path.display()
+            );
+        }
+        let is_codex_metadata = agent == "codex"
+            && (*relative == ".agents/plugins/marketplace.json"
+                || relative.ends_with(".codex-plugin/plugin.json"));
+        if !is_instruction_file && !is_codex_metadata {
+            let expected = expected_tracedecay_bin();
+            assert!(
+                body.contains(&expected),
+                "{agent} local config {} should use the resolved absolute tracedecay executable",
+                path.display()
+            );
+        }
     }
+
+    assert!(
+        !home.path().join(".tracedecay/config.toml").exists(),
+        "{agent} local install must not create or mutate user-level install tracking"
+    );
+}
+
+#[test]
+fn test_local_install_claude_writes_project_paths() {
+    assert_local_install_writes_project_paths(
+        "claude",
+        &[".mcp.json", ".claude/settings.json", ".claude/CLAUDE.md"],
+    );
+}
+
+#[test]
+fn test_local_install_codex_writes_project_paths() {
+    assert_local_install_writes_project_paths(
+        "codex",
+        &[
+            ".agents/plugins/marketplace.json",
+            "plugins/tracedecay/.codex-plugin/plugin.json",
+            "plugins/tracedecay/.mcp.json",
+            "plugins/tracedecay/hooks/hooks.json",
+            "plugins/tracedecay/skills/reading-code-cheaply/SKILL.md",
+        ],
+    );
+}
+
+#[test]
+fn test_local_install_gemini_writes_project_paths() {
+    assert_local_install_writes_project_paths("gemini", &[".gemini/settings.json", "GEMINI.md"]);
+}
+
+#[test]
+fn test_local_install_kiro_writes_project_paths() {
+    assert_local_install_writes_project_paths(
+        "kiro",
+        &[
+            ".kiro/settings/mcp.json",
+            ".kiro/steering/tracedecay.md",
+            ".kiro/agents/tracedecay.json",
+        ],
+    );
+}
+
+#[test]
+fn test_local_install_opencode_writes_project_paths() {
+    assert_local_install_writes_project_paths("opencode", &["opencode.json", "AGENTS.md"]);
+}
+
+#[test]
+fn test_local_install_copilot_writes_project_paths() {
+    assert_local_install_writes_project_paths("copilot", &[".vscode/mcp.json"]);
+}
+
+#[test]
+fn test_local_install_zed_writes_project_paths() {
+    assert_local_install_writes_project_paths("zed", &[".zed/settings.json"]);
+}
+
+#[test]
+fn test_local_install_roo_code_writes_project_paths() {
+    assert_local_install_writes_project_paths("roo-code", &[".roo/mcp.json"]);
+}
+
+#[test]
+fn test_local_install_kimi_writes_project_paths() {
+    assert_local_install_writes_project_paths("kimi", &[".kimi-code/mcp.json", "AGENTS.md"]);
+}
+
+#[test]
+fn test_local_install_kilo_writes_project_paths() {
+    assert_local_install_writes_project_paths("kilo", &["kilo.json"]);
+}
+
+#[test]
+fn test_local_install_vibe_writes_project_paths() {
+    assert_local_install_writes_project_paths(
+        "vibe",
+        &[".vibe/config.toml", ".vibe/prompts/cli.md"],
+    );
 }
 
 #[test]
@@ -4214,7 +4301,7 @@ fn test_antigravity_install_writes_cli_plugin() {
         tool_permissions: expected_tool_perms(),
         profile: None,
         project_root: None,
-        dashboard: true,
+        dashboard: false,
     };
 
     AntigravityIntegration.install(&ctx).expect("install ok");
@@ -4266,7 +4353,7 @@ fn test_antigravity_uninstall_removes_both_locations() {
         tool_permissions: expected_tool_perms(),
         profile: None,
         project_root: None,
-        dashboard: true,
+        dashboard: false,
     };
 
     AntigravityIntegration.install(&ctx).unwrap();
@@ -4434,7 +4521,7 @@ fn make_install_ctx_with_real_bin(home: &Path) -> InstallContext {
         tool_permissions: expected_tool_perms(),
         profile: None,
         project_root: None,
-        dashboard: true,
+        dashboard: false,
     }
 }
 
@@ -4640,7 +4727,7 @@ fn test_healthcheck_hermes_profile_install_checks_named_profiles() {
         tool_permissions: expected_tool_perms(),
         profile: Some("work".to_string()),
         project_root: None,
-        dashboard: true,
+        dashboard: false,
     };
     HermesIntegration.install(&ctx).unwrap();
 
@@ -5694,7 +5781,7 @@ fn test_hermes_install_writes_and_preserves_project_root_pin() {
         tool_permissions: expected_tool_perms(),
         profile: None,
         project_root: Some(std::path::PathBuf::from("/pinned/project")),
-        dashboard: true,
+        dashboard: false,
     };
     HermesIntegration.install(&pinned).unwrap();
 

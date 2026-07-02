@@ -1505,7 +1505,7 @@ mod tests {
     /// correct in both hosts. Intentional per-skill divergences must be listed
     /// (with a reason) in one of the divergence allowlists below. Per-host
     /// frontmatter schemas (allowed keys per plugin) are enforced separately
-    /// by `tests/plugin_skill_contract_test.rs`.
+    /// by `tests/agent_suite/plugin_skill_contract_test.rs`.
     #[test]
     fn codex_skills_match_the_cursor_source_for_parity() {
         // Skills deliberately specialized for Codex (host-specific bodies that

@@ -6,7 +6,7 @@
 //! or double-quoted), and block values made of indented lines (list items or
 //! nested maps). This module is the one place that subset is parsed so
 //! consumers ([`crate::automation::hermes_skill_inventory`] and the plugin
-//! contract tests in `tests/plugin_skill_contract_test.rs`) stop growing
+//! contract tests in `tests/agent_suite/plugin_skill_contract_test.rs`) stop growing
 //! bespoke, subtly different parsers.
 //!
 //! Parsing is line-ending tolerant: CRLF checkouts (e.g. GitHub Windows

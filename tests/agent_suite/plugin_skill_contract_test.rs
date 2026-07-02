@@ -8,13 +8,10 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
-use common::EnvVarGuard;
+use crate::common::{EnvVarGuard, PROCESS_ENV_LOCK};
 use tempfile::TempDir;
 use tracedecay::agents::{expected_tool_perms, get_integration, InstallContext};
 use tracedecay::automation::skill_frontmatter::{parse_skill_frontmatter, SkillFrontmatterValue};
@@ -49,9 +46,6 @@ const CURSOR_ALLOWED_FRONTMATTER: &[&str] = &[
     "name",
     "paths",
 ];
-
-/// Serializes the generated-bundle tests, which mutate process-wide env vars.
-static INSTALL_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug)]
 struct SkillDoc {
@@ -201,10 +195,9 @@ fn load_skill_docs(root: &str) -> Vec<SkillDoc> {
         .collect()
 }
 
-fn install_env_lock() -> std::sync::MutexGuard<'static, ()> {
-    INSTALL_ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+/// Serializes the generated-bundle tests, which mutate process-wide env vars.
+fn install_env_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    PROCESS_ENV_LOCK.blocking_lock()
 }
 
 /// Pins TraceDecay profile storage to the temp home so an ambient
