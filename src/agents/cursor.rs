@@ -887,6 +887,35 @@ fn doctor_check_plugin_mcp(dc: &mut DoctorCounters, mcp_path: &Path) {
     }
 }
 
+/// `(event, hook subcommand)` pairs parsed from the embedded plugin
+/// `hooks/hooks.json` template, so the doctor check can never drift from the
+/// hooks the bundle actually registers.
+fn cursor_plugin_hook_expectations() -> Vec<(String, String)> {
+    let raw = EMBEDDED_PLUGIN_FILES
+        .iter()
+        .find(|(relative, _)| *relative == "hooks/hooks.json")
+        .map_or("{}", |&(_, contents)| contents);
+    let template: serde_json::Value = serde_json::from_str(raw).unwrap_or_else(|_| json!({}));
+    let Some(events) = template.get("hooks").and_then(|hooks| hooks.as_object()) else {
+        return Vec::new();
+    };
+    events
+        .iter()
+        .flat_map(|(event, entries)| {
+            entries
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| {
+                    entry["command"]
+                        .as_str()
+                        .and_then(|command| command.strip_prefix("tracedecay "))
+                        .map(|subcommand| (event.clone(), subcommand.to_string()))
+                })
+        })
+        .collect()
+}
+
 fn doctor_check_plugin_hooks(dc: &mut DoctorCounters, hooks_path: &Path) {
     if !hooks_path.exists() {
         dc.warn(&format!(
@@ -899,28 +928,20 @@ fn doctor_check_plugin_hooks(dc: &mut DoctorCounters, hooks_path: &Path) {
         dc.fail(&format!("{e}"));
         json!({})
     });
-    let expected = [
-        ("sessionStart", "hook-cursor-session-start"),
-        ("sessionEnd", "hook-cursor-session-end"),
-        ("postToolUse", "hook-cursor-post-tool-use"),
-        ("preCompact", "hook-cursor-pre-compact"),
-        ("beforeSubmitPrompt", "hook-cursor-before-submit-prompt"),
-        ("afterFileEdit", "hook-cursor-after-file-edit"),
-        ("afterShellExecution", "hook-cursor-after-shell"),
-        ("workspaceOpen", "hook-cursor-workspace-open"),
-        ("stop", "hook-cursor-stop"),
-    ];
+    let expected = cursor_plugin_hook_expectations();
     let missing: Vec<&str> = expected
         .iter()
         .filter_map(|(event, command)| {
-            let has = hooks["hooks"][*event].as_array().is_some_and(|entries| {
-                entries.iter().any(|entry| {
-                    entry["command"]
-                        .as_str()
-                        .is_some_and(|value| value.contains(command))
-                })
-            });
-            (!has).then_some(*event)
+            let has = hooks["hooks"][event.as_str()]
+                .as_array()
+                .is_some_and(|entries| {
+                    entries.iter().any(|entry| {
+                        entry["command"]
+                            .as_str()
+                            .is_some_and(|value| value.contains(command))
+                    })
+                });
+            (!has).then_some(event.as_str())
         })
         .collect();
     if missing.is_empty() {
@@ -1040,6 +1061,26 @@ mod tests {
             .collect();
         paths.sort();
         paths
+    }
+
+    /// The doctor's expected-hooks list is parsed from the embedded bundle
+    /// template; a parse regression would silently disable the hook checks.
+    #[test]
+    fn plugin_hook_expectations_cover_the_bundled_hooks() {
+        let expectations = cursor_plugin_hook_expectations();
+        assert_eq!(
+            expectations.len(),
+            9,
+            "expected one entry per bundled lifecycle hook, got {expectations:?}"
+        );
+        assert!(expectations.contains(&(
+            "sessionStart".to_string(),
+            "hook-cursor-session-start".to_string()
+        )));
+        assert!(expectations.contains(&(
+            "afterFileEdit".to_string(),
+            "hook-cursor-after-file-edit".to_string()
+        )));
     }
 
     #[test]

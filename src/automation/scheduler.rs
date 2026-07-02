@@ -52,9 +52,9 @@ impl SessionActivity {
 
 /// Reads the session-activity signal from the LCM sessions database.
 ///
-/// This is a single indexed `ORDER BY timestamp DESC LIMIT 1` lookup against
-/// the read-only store, so it is cheap and race-safe to call from every
-/// scheduler tick; concurrent ingest writers only ever move the value forward.
+/// This reads from the read-only store using bounded indexed timestamp lookups,
+/// so it is cheap and race-safe to call from every scheduler tick; concurrent
+/// ingest writers only ever move the value forward.
 pub async fn load_session_activity(sessions_db_path: &Path) -> SessionActivity {
     let Some(db) = GlobalDb::open_read_only_at(sessions_db_path).await else {
         return SessionActivity::none();
