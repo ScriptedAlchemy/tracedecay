@@ -701,6 +701,62 @@ async fn session_reflector_replays_recent_sessions_without_keyword_matches() {
 }
 
 #[tokio::test]
+async fn session_reflector_suppresses_replay_for_filtered_runs() {
+    let temp = tempdir().unwrap();
+    let cg = init_project(temp.path()).await;
+    seed_session_message_in_db(
+        &GlobalDb::open_at(&cg.store_layout().sessions_db_path)
+            .await
+            .expect("session db open"),
+        cg.project_root(),
+        SeedSessionMessage {
+            provider: "cursor",
+            session_id: "session-replay-filtered",
+            message_id: "session-replay-filtered-message-001",
+            role: "user",
+            timestamp: 1_715_000_070,
+            text: "Always pass the offline flag to cargo nextest on this machine.",
+            source: None,
+        },
+    )
+    .await;
+    let backend = SessionJsonBackend::new(json!({"facts": []}));
+    let config = AutomationConfig {
+        enabled: true,
+        backend: AutomationBackend::CodexAppServer,
+        host_mode: AutomationHostMode::Standalone,
+        tasks: AutomationTaskSet {
+            session_reflector: AutomationTaskConfig {
+                enabled: true,
+                schedule: Some("manual".to_string()),
+                ..AutomationTaskConfig::default()
+            },
+            ..AutomationTaskSet::default()
+        },
+        ..AutomationConfig::default()
+    };
+
+    let run = run_session_reflector_with_backend(
+        &cg,
+        &config,
+        &backend,
+        SessionReflectorAutomationOptions {
+            role: Some("assistant".to_string()),
+            ..SessionReflectorAutomationOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(backend.calls(), 0);
+    assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
+    assert_eq!(
+        run.ledger_record.error.as_deref(),
+        Some("no_session_evidence")
+    );
+}
+
+#[tokio::test]
 async fn session_reflector_skips_when_replay_disabled_and_no_grep_hits() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;

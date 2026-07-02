@@ -544,12 +544,8 @@ impl AgentTaskBackend for InspectSessionEvidenceBackend {
         assert_eq!(evidence["role"], json!("assistant"));
         assert_eq!(evidence["start_time"], json!(1_715_100_000_i64));
         assert_eq!(evidence["end_time"], json!(1_715_100_010_i64));
-        assert_eq!(evidence["evidence_mode"], json!("session_replay_with_grep"));
-        let slices = &evidence["recent_session_slices"];
-        assert_eq!(slices["session_selection"], json!("explicit_session_id"));
-        let replay_sessions = slices["sessions"].as_array().expect("replay sessions");
-        assert_eq!(replay_sessions.len(), 1);
-        assert_eq!(replay_sessions[0]["session_id"], json!("hermes-reflect-1"));
+        assert_eq!(evidence["evidence_mode"], json!("grep_only"));
+        assert_eq!(evidence["recent_session_slices"], json!(null));
         let hits = evidence["hits"].as_array().expect("hits array");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0]["session_id"], json!("hermes-reflect-1"));

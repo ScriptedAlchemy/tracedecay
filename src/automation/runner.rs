@@ -715,8 +715,7 @@ async fn build_session_reflector_evidence(
             role.as_deref(),
             options.start_time,
             options.end_time,
-        )
-    {
+        ) {
         recent_session_replay_evidence(
             &lcm_db,
             &provider,
