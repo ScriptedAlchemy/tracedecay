@@ -15,10 +15,10 @@ contract at session start** (`EXTREMELY_IMPORTANT`, "you ABSOLUTELY MUST"), give
 the model a **decision procedure** (a flowchart plus a "red flags" table that
 pre-empts every rationalization for skipping skills), and keeps its skill
 catalog **small and process-shaped** (14 skills, each owning one workflow
-stage). TraceDecay does the opposite on every axis: its session-start injection
-is deliberately lean status text, its rule says "prefer X first", its
+stage). TraceDecay is weaker on each of those surfaces: its session-start
+injection is deliberately lean status text, its rule says "prefer X first", its
 25 model-invocable skills overlap heavily, and its runtime hint system — the one
-mechanism that could nudge a model mid-session — is effectively dead:
+mechanism that could nudge a model mid-session — is mostly inactive:
 **984 hint candidates in the last week, 979 suppressed by dedupe, 6 emitted**,
 and none of that lifecycle ever reaches the dashboard, which reports zeros.
 
@@ -86,8 +86,8 @@ only then respond*. Two details do heavy lifting:
 
 ### 1.4 The red-flags rationalization table
 
-The single most clever mechanism. It lists the model's *own escape thoughts*
-and rebuts each one:
+The red-flags table lists the model's *own escape thoughts* and rebuts each
+one:
 
 > | Thought | Reality |
 > |---------|---------|
@@ -97,9 +97,9 @@ and rebuts each one:
 > | "I'll just do this one thing first" | Check BEFORE doing anything. |
 > | "I know what that means" | Knowing the concept ≠ using the skill. Invoke it. |
 
-This is prompt-level inoculation: every plausible rationalization for skipping
-a skill has a pre-written counter already in context. TraceDecay has nothing
-equivalent — a model thinking "grep is faster here" meets no resistance.
+Every common rationalization for skipping a skill has a pre-written counter
+already in context. TraceDecay has no equivalent; a model thinking "grep is
+faster here" meets no resistance.
 
 ### 1.5 Skill priority ordering and a small, staged catalog
 
@@ -182,7 +182,7 @@ All numbers from the live dashboard (`/api/plugins/analytics/*`) and
 | `tracedecay_outline` | 139 | 4.9% |
 | top-5 subtotal | 1,893 | 66.1% |
 
-The graph-native tools — the reason TraceDecay exists — barely register:
+The graph-native tools barely register:
 `tracedecay_callers` 16, `tracedecay_impact` 7, `tracedecay_callees` 6,
 `tracedecay_implementations` 3, and **17 tools were called exactly once**
 (`circular`, `coupling`, `gini`, `dsm`, `doc_coverage`, `field_sites`,
@@ -205,9 +205,9 @@ TraceDecay. Caveat: `usage_events` is 0 for *all* families even though the MCP
 log shows 210 `tracedecay_context` / 250 `tracedecay_search` calls — the usage
 side of the correlation (`infer_usage_events` in `src/analytics.rs`) appears
 disconnected from the MCP call log, so the *ratio* is unreliable even though
-the missed-opportunity counts are directionally damning.
+the missed-opportunity counts are still directionally useful.
 
-### 3.3 The hint system is effectively dead — and its telemetry is broken
+### 3.3 The hint system is mostly inactive — and its telemetry is broken
 
 `/api/plugins/analytics/hints` reports **zero** emitted/followed/ignored/
 suppressed across all 10 categories. The raw hook log tells the real story
@@ -233,7 +233,7 @@ Two independent failures:
    (`src/dashboard/analytics_api.rs`) reads durable `analytics_events` (with a
    legacy `dashboard_hint_events` fallback), which only MCP-side code
    (`src/mcp/tool_analytics.rs`) populates. Result: the dashboard reports a
-   silent all-zeros hint system, so this outage was invisible.
+   silent all-zeros hint system, so this failure mode was invisible.
 
 ### 3.4 Skills
 
@@ -272,7 +272,7 @@ uses". `tracedecay_skill_list` was called 3 times ever;
    injection was a deliberate token economy (`src/hooks.rs:1413`), but it
    delegates all steering to a rule that sits among *dozens* of other
    always-applied rules and skill listings, with no priority claim.
-3. **The mid-session correction loop is dead.** Once-per-session-per-category
+3. **The mid-session correction loop is mostly inactive.** Once-per-session-per-category
    dedupe means the 962 file-read candidates produced ~3 nudges; and because
    hint telemetry never reaches the dashboard, the all-zeros table looked like
    "no data" rather than "system down".

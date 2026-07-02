@@ -298,8 +298,8 @@ Ranked by effect ÷ effort. A + B are the core; C–F layer on.
 
 *Effort: S–M. Effect: high. Risk: low (fail-open, additive).*
 
-Codex is the easy win because `UserPromptSubmit` carries the prompt text and
-honors `hookSpecificOutput.additionalContext`, and the hook binary *is*
+Codex is the lowest-effort path because `UserPromptSubmit` carries the prompt
+text and honors `hookSpecificOutput.additionalContext`, and the hook binary is
 `tracedecay` with in-process store access (no MCP hop, fits the 5s timeout).
 
 - `SessionStart`: in `codex_session_context_for_event` (`src/hooks.rs:624`),
@@ -370,8 +370,8 @@ mirrors) to:
   calibrated trust" — the add-path already defends against junk
   (near_duplicate / possible_conflict / secret rejection, §3.3).
 
-This is exactly Cursor's own hybrid design (sidecar + tool calls), with the
-tool-call half pointed at TraceDecay.
+This mirrors Cursor's hybrid design (sidecar + tool calls), with the tool-call
+half pointed at TraceDecay.
 
 ### D. Enable the reflection loop (sidecar-equivalent storage) — **medium**
 
