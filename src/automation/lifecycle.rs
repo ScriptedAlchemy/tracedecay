@@ -40,6 +40,11 @@ pub(crate) struct AgentTaskRunContext<'a> {
     config: &'a AutomationConfig,
     task: AgentTaskKind,
     started_at: String,
+    /// Ledger records loaded once by [`Self::gate`] on the scheduler path.
+    /// Both gate-level and post-gate skips compute their repeat-skip dedup
+    /// from these cached records, so the append path never re-reads the
+    /// ledger.
+    ledger_records: Option<Vec<AutomationRunLedgerRecord>>,
 }
 
 impl<'a> AgentTaskRunContext<'a> {
@@ -58,6 +63,7 @@ impl<'a> AgentTaskRunContext<'a> {
             config,
             task,
             started_at: current_timestamp().to_string(),
+            ledger_records: None,
         }
     }
 
@@ -65,8 +71,11 @@ impl<'a> AgentTaskRunContext<'a> {
         &self.started_at
     }
 
-    pub(crate) async fn gate(&self) -> Result<SchedulerGate> {
-        task_run_gate(self.config, &self.dashboard_root, self.task, self.trigger).await
+    pub(crate) async fn gate(&mut self) -> Result<SchedulerGate> {
+        let (gate, records) =
+            task_run_gate(self.config, &self.dashboard_root, self.task, self.trigger).await?;
+        self.ledger_records = records;
+        Ok(gate)
     }
 
     pub(crate) async fn skipped_parts(
@@ -85,8 +94,21 @@ impl<'a> AgentTaskRunContext<'a> {
             reason,
             self.started_at(),
             report_task_key,
+            self.scheduler_skip_is_repeat(reason),
         )
         .await
+    }
+
+    /// Computes the repeat-skip dedup decision from the records cached by
+    /// [`Self::gate`], with no ledger I/O. A scheduler-trigger context whose
+    /// gate has not run yet has no cached records and conservatively persists
+    /// the skip.
+    fn scheduler_skip_is_repeat(&self, reason: &str) -> bool {
+        self.trigger == AutomationTrigger::Scheduler
+            && self
+                .ledger_records
+                .as_deref()
+                .is_some_and(|records| is_repeat_scheduler_skip(records, self.task, reason))
     }
 
     pub(crate) fn finalizer(&self, input_hash: Option<String>) -> AgentRunFinalizer<'_> {
@@ -121,17 +143,21 @@ pub(crate) fn task_skip_reason(
     None
 }
 
+/// Evaluates the scheduler gate, returning the ledger records it loaded so
+/// callers can reuse them for skip dedup instead of re-reading the ledger.
+/// The ledger is read at most once per gate evaluation.
 pub(crate) async fn scheduler_gate(
     config: &AutomationConfig,
     dashboard_root: &Path,
     task: AgentTaskKind,
     trigger: AutomationTrigger,
-) -> Result<SchedulerGate> {
+) -> Result<(SchedulerGate, Option<Vec<AutomationRunLedgerRecord>>)> {
     if trigger != AutomationTrigger::Scheduler {
-        return Ok(SchedulerGate::Proceed(None));
+        return Ok((SchedulerGate::Proceed(None), None));
     }
 
     let now_secs = current_timestamp();
+    let records = load_run_records(dashboard_root, 200).await?;
     let Some(lock) = AutomationTaskLock::try_acquire(
         dashboard_root,
         task,
@@ -140,16 +166,15 @@ pub(crate) async fn scheduler_gate(
     )
     .await?
     else {
-        return Ok(SchedulerGate::Skip("scheduler_lock_active"));
+        return Ok((SchedulerGate::Skip("scheduler_lock_active"), Some(records)));
     };
 
-    let records = load_run_records(dashboard_root, 200).await?;
     let decision = schedule_decision(config, task, &records, now_secs);
     if let Some(reason) = scheduler_skip_reason(&decision, task) {
-        return Ok(SchedulerGate::Skip(reason));
+        return Ok((SchedulerGate::Skip(reason), Some(records)));
     }
 
-    Ok(SchedulerGate::Proceed(Some(lock)))
+    Ok((SchedulerGate::Proceed(Some(lock)), Some(records)))
 }
 
 pub(crate) async fn task_run_gate(
@@ -157,16 +182,21 @@ pub(crate) async fn task_run_gate(
     dashboard_root: &Path,
     task: AgentTaskKind,
     trigger: AutomationTrigger,
-) -> Result<SchedulerGate> {
-    match scheduler_gate(config, dashboard_root, task, trigger).await? {
-        SchedulerGate::Skip(reason) => Ok(SchedulerGate::Skip(reason)),
+) -> Result<(SchedulerGate, Option<Vec<AutomationRunLedgerRecord>>)> {
+    let (gate, records) = scheduler_gate(config, dashboard_root, task, trigger).await?;
+    let gate = match gate {
+        SchedulerGate::Skip(reason) => SchedulerGate::Skip(reason),
         SchedulerGate::Proceed(lock) => match task_skip_reason(config, task) {
-            Some(reason) => Ok(SchedulerGate::Skip(reason)),
-            None => Ok(SchedulerGate::Proceed(lock)),
+            Some(reason) => SchedulerGate::Skip(reason),
+            None => SchedulerGate::Proceed(lock),
         },
-    }
+    };
+    Ok((gate, records))
 }
 
+/// Appends a skipped run record unless the caller already determined it is a
+/// repeat scheduler skip. Performs no ledger reads: `is_repeat` must be
+/// computed from the records the gate evaluation loaded.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn append_skipped_record(
     dashboard_root: &Path,
@@ -177,6 +207,7 @@ pub(crate) async fn append_skipped_record(
     evidence_hash: Option<String>,
     reason: &str,
     started_at: &str,
+    is_repeat: bool,
 ) -> Result<AutomationRunLedgerRecord> {
     let record = ledger_record(
         run_id,
@@ -195,9 +226,11 @@ pub(crate) async fn append_skipped_record(
     // skip condition (interval not elapsed, task disabled, ...) would append
     // thousands of identical records and drown real runs out of the ledger.
     // Persist only the first record of each consecutive identical skip.
-    if trigger == AutomationTrigger::Scheduler
-        && is_repeat_scheduler_skip(dashboard_root, task, reason).await?
-    {
+    //
+    // The gate's ledger read and this append are not atomic: two concurrent
+    // writers can both observe no prior skip and each append the "first"
+    // record. The duplicate is benign, so no cross-process locking is done.
+    if trigger == AutomationTrigger::Scheduler && is_repeat {
         return Ok(record);
     }
     append_run_record(dashboard_root, &record).await?;
@@ -206,20 +239,22 @@ pub(crate) async fn append_skipped_record(
 
 /// True when the most recent ledger record for `task` is already a scheduler
 /// skip with the same reason.
-async fn is_repeat_scheduler_skip(
-    dashboard_root: &Path,
+///
+/// The skip reason is read out of `record.error`, inheriting the pre-existing
+/// modeling wart that skipped runs store their reason in the error field.
+fn is_repeat_scheduler_skip(
+    records: &[AutomationRunLedgerRecord],
     task: AgentTaskKind,
     reason: &str,
-) -> Result<bool> {
-    let records = load_run_records(dashboard_root, 200).await?;
-    Ok(records
+) -> bool {
+    records
         .iter()
         .find(|record| record.task == task)
         .is_some_and(|record| {
             record.trigger == AutomationTrigger::Scheduler
                 && record.status == AutomationRunStatus::Skipped
                 && record.error.as_deref() == Some(reason)
-        }))
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -233,6 +268,7 @@ pub(crate) async fn skipped_run_parts(
     reason: &str,
     started_at: &str,
     report_task_key: Option<&'static str>,
+    is_repeat: bool,
 ) -> Result<(Value, AutomationRunLedgerRecord)> {
     let mut report = json!({
         "status": "skipped",
@@ -253,6 +289,7 @@ pub(crate) async fn skipped_run_parts(
         evidence_hash,
         reason,
         started_at,
+        is_repeat,
     )
     .await?;
     Ok((report, record))
@@ -634,6 +671,7 @@ fn noop_output_for_task(task: AgentTaskKind) -> Value {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use super::super::config::{AutomationTaskConfig, AutomationTaskSet};
     use super::*;
 
     #[test]
@@ -644,6 +682,9 @@ mod tests {
         assert_ne!(first, second);
     }
 
+    /// Runs the production skip path: evaluate the gate (which caches ledger
+    /// records for scheduler triggers) and then record the skip, exactly as a
+    /// gate-level skip does in the task runners.
     async fn append_skip(
         dashboard_root: &Path,
         run_id: &str,
@@ -652,18 +693,20 @@ mod tests {
         reason: &str,
     ) -> AutomationRunLedgerRecord {
         let config = AutomationConfig::default();
-        append_skipped_record(
-            dashboard_root,
-            run_id,
+        let mut run = AgentTaskRunContext::new(
+            dashboard_root.to_path_buf(),
+            Some(run_id.to_string()),
+            "test",
             trigger,
             &config,
             task,
-            None,
-            reason,
-            "1000",
-        )
-        .await
-        .expect("append skipped record")
+        );
+        run.gate().await.expect("gate");
+        let (_report, record) = run
+            .skipped_parts(None, reason, None)
+            .await
+            .expect("append skipped record");
+        record
     }
 
     #[tokio::test]
@@ -757,5 +800,110 @@ mod tests {
 
         let records = load_run_records(root, 50).await.expect("load records");
         assert_eq!(records.len(), 2, "manual skips must always be recorded");
+    }
+
+    fn scheduler_enabled_config() -> AutomationConfig {
+        AutomationConfig {
+            enabled: true,
+            backend: AutomationBackend::CodexAppServer,
+            host_mode: AutomationHostMode::Standalone,
+            tasks: AutomationTaskSet {
+                memory_curator: AutomationTaskConfig {
+                    enabled: true,
+                    schedule: Some("hourly".to_string()),
+                    ..AutomationTaskConfig::default()
+                },
+                ..AutomationTaskSet::default()
+            },
+            ..AutomationConfig::default()
+        }
+    }
+
+    /// Runs the production post-gate skip path: the gate proceeds (caching
+    /// ledger records), and the task body later decides to skip.
+    async fn post_gate_scheduler_skip(dashboard_root: &Path, run_id: &str, reason: &str) {
+        let config = scheduler_enabled_config();
+        let mut run = AgentTaskRunContext::new(
+            dashboard_root.to_path_buf(),
+            Some(run_id.to_string()),
+            "test",
+            AutomationTrigger::Scheduler,
+            &config,
+            AgentTaskKind::MemoryCurator,
+        );
+        let SchedulerGate::Proceed(lock) = run.gate().await.expect("gate") else {
+            panic!("gate must proceed so the skip is decided post-gate");
+        };
+        run.skipped_parts(None, reason, None)
+            .await
+            .expect("append post-gate skip");
+        drop(lock);
+    }
+
+    #[tokio::test]
+    async fn consecutive_identical_post_gate_scheduler_skips_persist_once() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let root = temp.path();
+
+        post_gate_scheduler_skip(root, "run-1", "nothing_to_review").await;
+        post_gate_scheduler_skip(root, "run-2", "nothing_to_review").await;
+
+        let records = load_run_records(root, 50).await.expect("load records");
+        assert_eq!(
+            records.len(),
+            1,
+            "repeat post-gate scheduler skip must not append a second record"
+        );
+        assert_eq!(records[0].run_id, "run-1");
+    }
+
+    #[tokio::test]
+    async fn append_path_relies_solely_on_caller_computed_repeat_flag() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let root = temp.path();
+        let config = AutomationConfig::default();
+        let task = AgentTaskKind::MemoryCurator;
+
+        // Both identical scheduler skips persist when the caller reports
+        // is_repeat=false, even though the second is a repeat on disk: the
+        // append path must not perform its own ledger read to second-guess
+        // the flag computed from the gate's cached records.
+        for run_id in ["run-1", "run-2"] {
+            append_skipped_record(
+                root,
+                run_id,
+                AutomationTrigger::Scheduler,
+                &config,
+                task,
+                None,
+                "scheduler_interval_not_elapsed",
+                "1000",
+                false,
+            )
+            .await
+            .expect("append skipped record");
+        }
+        let records = load_run_records(root, 50).await.expect("load records");
+        assert_eq!(
+            records.len(),
+            2,
+            "append path must trust the caller-computed repeat flag"
+        );
+
+        append_skipped_record(
+            root,
+            "run-3",
+            AutomationTrigger::Scheduler,
+            &config,
+            task,
+            None,
+            "scheduler_interval_not_elapsed",
+            "1000",
+            true,
+        )
+        .await
+        .expect("append skipped record");
+        let records = load_run_records(root, 50).await.expect("load records");
+        assert_eq!(records.len(), 2, "is_repeat=true must suppress the append");
     }
 }

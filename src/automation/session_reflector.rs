@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 
 use crate::errors::Result;
 use crate::memory::retrieval::FactRetriever;
+use crate::memory::trust::{DEFAULT_TRUST, HIGH_TRUST_REPRESENTATIVE, LOW_TRUST_REPRESENTATIVE};
 use crate::memory::types::{AddFactRequest, MemoryCategory};
 use crate::tracedecay::TraceDecay;
 
@@ -233,16 +234,22 @@ async fn validate_fact_proposal(
 
 /// Accepts numeric trust in `[0, 1]` plus the `low`/`medium`/`high` bucket
 /// labels models frequently emit despite the numeric prompt instruction.
-/// Buckets map to representative scores inside the matching
-/// [`crate::memory::trust::trust_bucket`] range.
+/// Buckets map to the representative scores defined next to
+/// [`crate::memory::trust::trust_bucket`], so they cannot drift out of their
+/// documented ranges.
+///
+/// Deliberate decision: the prompt forbids string labels, but they are
+/// accepted defensively rather than rejecting an otherwise valid fact. Note
+/// that the "high" representative can clear auto-apply thresholds when
+/// `auto_apply_memory_ops` is enabled — this is intentional.
 fn proposal_trust_value(value: &Value) -> Option<f64> {
     if let Some(trust) = value.as_f64() {
         return (0.0..=1.0).contains(&trust).then_some(trust);
     }
     match value.as_str()?.trim().to_ascii_lowercase().as_str() {
-        "low" => Some(0.15),
-        "medium" => Some(0.5),
-        "high" => Some(0.85),
+        "low" => Some(LOW_TRUST_REPRESENTATIVE),
+        "medium" => Some(DEFAULT_TRUST),
+        "high" => Some(HIGH_TRUST_REPRESENTATIVE),
         _ => None,
     }
 }

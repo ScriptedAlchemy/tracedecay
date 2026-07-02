@@ -2,8 +2,6 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 #[cfg(unix)]
-use std::future::Future;
-#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
@@ -794,11 +792,15 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         "daemon_shutdown",
         &[("socket", socket_path.display().to_string())],
     );
-    let completed = await_shutdown_within_deadline(
-        async move { engine.shutdown_all().await },
-        DAEMON_SHUTDOWN_DEADLINE,
-    )
-    .await;
+    // Graceful shutdown persists tokens-saved counters and checkpoints WALs
+    // for every live project server sequentially; with many servers or large
+    // WALs that can exceed systemd's stop timeout, which then sends `SIGKILL`
+    // to the daemon. On timeout the shutdown future is dropped and we proceed
+    // to exit: the remaining persistence is best-effort and the database WAL
+    // keeps state crash-safe.
+    let completed = timeout(DAEMON_SHUTDOWN_DEADLINE, engine.shutdown_all())
+        .await
+        .is_ok();
     if !completed {
         log_daemon_event(
             "daemon_shutdown",
@@ -813,29 +815,6 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
     }
     let _ = std::fs::remove_file(&socket_path);
     Ok(())
-}
-
-/// Runs the shutdown future on its own task and waits at most `deadline` for
-/// it to finish, returning `true` when it completed in time.
-///
-/// Graceful shutdown persists tokens-saved counters and checkpoints WALs for
-/// every live project server sequentially; with many servers or large WALs
-/// that can exceed systemd's stop timeout, which then sends `SIGKILL` to the
-/// daemon. On timeout the task is aborted and we proceed to exit: the
-/// remaining persistence is best-effort and the database WAL keeps state
-/// crash-safe.
-#[cfg(unix)]
-async fn await_shutdown_within_deadline<F>(shutdown: F, deadline: Duration) -> bool
-where
-    F: Future<Output = ()> + Send + 'static,
-{
-    let mut handle = tokio::spawn(shutdown);
-    if timeout(deadline, &mut handle).await.is_ok() {
-        true
-    } else {
-        handle.abort();
-        false
-    }
 }
 
 #[cfg(unix)]
@@ -2345,32 +2324,5 @@ mod tests {
             .await
             .expect("server B task")
             .expect("server B result");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn shutdown_deadline_reports_completion_for_fast_shutdown() {
-        let completed = super::await_shutdown_within_deadline(
-            std::future::ready(()),
-            std::time::Duration::from_secs(5),
-        )
-        .await;
-        assert!(completed, "instant shutdown should finish within deadline");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn shutdown_deadline_aborts_stalled_shutdown() {
-        let started = std::time::Instant::now();
-        let completed = super::await_shutdown_within_deadline(
-            std::future::pending(),
-            std::time::Duration::from_millis(50),
-        )
-        .await;
-        assert!(!completed, "stalled shutdown must report a timeout");
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(5),
-            "timeout must return promptly instead of waiting on the stalled task"
-        );
     }
 }
