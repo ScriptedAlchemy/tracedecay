@@ -309,6 +309,17 @@ mod tests {
         (base, project_root, worktree_root)
     }
 
+    fn assert_add_branch_at(plan: HookEventPlan, expected_root: &Path, expected_branch: &str) {
+        let HookEventPlan::AddBranchAt { root, branch } = plan else {
+            panic!("expected AddBranchAt plan, got {plan:?}");
+        };
+        assert!(
+            super::paths_same(&root, expected_root),
+            "planned root {root:?} should match expected root {expected_root:?}"
+        );
+        assert_eq!(branch, expected_branch);
+    }
+
     #[test]
     fn parses_agent_and_event_kind_from_hook_notification() {
         let params = json!({
@@ -481,12 +492,10 @@ mod tests {
         });
         let event = parse_or_panic(&params);
 
-        assert_eq!(
+        assert_add_branch_at(
             plan_hook_event(&event, &project_root, Some("main")),
-            HookEventPlan::AddBranchAt {
-                root: worktree_root,
-                branch: "feature/session".to_string(),
-            }
+            &worktree_root,
+            "feature/session",
         );
     }
 
@@ -502,12 +511,10 @@ mod tests {
         });
         let event = parse_or_panic(&params);
 
-        assert_eq!(
+        assert_add_branch_at(
             plan_hook_event(&event, &project_root, Some("main")),
-            HookEventPlan::AddBranchAt {
-                root: worktree_root,
-                branch: "feature/session".to_string(),
-            }
+            &worktree_root,
+            "feature/session",
         );
     }
 
