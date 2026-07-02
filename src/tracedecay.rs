@@ -1163,9 +1163,22 @@ impl TraceDecay {
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
     ) -> bool {
+        Self::initialized_store_layout_with_options(project_root, open_options)
+            .await
+            .is_some()
+    }
+
+    /// Resolves the store layout for a project using the same registry/alias
+    /// aware path as [`Self::has_initialized_store`], returning it only when
+    /// the resolved store's graph database actually exists.
+    pub async fn initialized_store_layout_with_options(
+        project_root: &Path,
+        open_options: &TraceDecayOpenOptions,
+    ) -> Option<StoreLayout> {
         Self::resolve_store_layout_for_local_identity(project_root, open_options)
             .await
-            .is_ok_and(|layout| layout.graph_db_path.is_file())
+            .ok()
+            .filter(|layout| layout.graph_db_path.is_file())
     }
 
     async fn resolve_store_layout_for_local_identity(
