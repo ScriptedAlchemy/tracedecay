@@ -119,14 +119,24 @@ pub fn format_context_as_json(context: &TaskContext) -> String {
 }
 
 fn markdown_fence_language(file_path: &str) -> &'static str {
-    match file_path.rsplit_once('.').map(|(_, extension)| extension) {
+    let file_name = file_path
+        .rsplit_once('/')
+        .map_or(file_path, |(_, name)| name);
+    if matches!(file_name, "Dockerfile" | "Containerfile") {
+        return "dockerfile";
+    }
+
+    match file_path
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_ascii_lowercase())
+        .as_deref()
+    {
         Some("bash" | "sh" | "zsh") => "bash",
         Some("c") => "c",
         Some("cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx") => "cpp",
         Some("cs") => "csharp",
         Some("css") => "css",
         Some("dart") => "dart",
-        Some("dockerfile") => "dockerfile",
         Some("go") => "go",
         Some("html" | "htm") => "html",
         Some("java") => "java",
@@ -308,7 +318,13 @@ mod tests {
     fn test_markdown_fence_language_from_file_extension() {
         assert_eq!(markdown_fence_language("src/main.rs"), "rust");
         assert_eq!(markdown_fence_language("src/app.tsx"), "typescript");
+        assert_eq!(markdown_fence_language("src/App.TSX"), "typescript");
         assert_eq!(markdown_fence_language("scripts/build.py"), "python");
+        assert_eq!(markdown_fence_language("Dockerfile"), "dockerfile");
+        assert_eq!(
+            markdown_fence_language("deploy/Containerfile"),
+            "dockerfile"
+        );
         assert_eq!(markdown_fence_language("Makefile"), "");
         assert_eq!(markdown_fence_language("notes/example.unknown"), "");
     }
