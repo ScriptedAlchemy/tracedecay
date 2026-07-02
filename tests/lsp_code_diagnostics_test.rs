@@ -137,7 +137,9 @@ async fn stdio_client_keeps_listening_after_initial_empty_publish() {
         &[script_path.display().to_string()],
         temp.path(),
         vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
-        std::time::Duration::from_millis(250),
+        // 250ms (from the Windows wall-time trim) misses the fake server's
+        // late publish on contended macOS runners; 500ms was stable before.
+        std::time::Duration::from_millis(500),
     )
     .await
     .unwrap();
