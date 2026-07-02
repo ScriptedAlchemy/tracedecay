@@ -1,3 +1,7 @@
 # Force LF line endings for test fixtures — tree-sitter grammars
 # expect Unix line endings and produce wrong parse trees with CRLF.
 tests/fixtures/** text eol=lf
+# Force LF for embedded Hermes plugin template assets — they are pulled into
+# the binary via include_str! and the generated-plugin snapshot test asserts
+# their exact bytes.
+src/agents/hermes/templates/** text eol=lf
