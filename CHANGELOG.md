@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Other
+
+- isolate the test suite from the real `~/.tracedecay` profile by default
+
 ## [0.0.20](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.19...v0.0.20) - 2026-07-01
 
 ### Other
