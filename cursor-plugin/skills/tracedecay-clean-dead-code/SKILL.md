@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 # /tracedecay-clean-dead-code
 
-Apply the `tracedecay:cleaning-up-dead-code` skill.
+Apply the `tracedecay:reviewing-changes` skill.
 
 - **Scope:** the whole repo, or the directory named after the command if one was given.
 - Follow that skill's workflow and guardrails: confirm zero real callers before deleting anything, be conservative with `pub` items, and respect Cursor approval/run-mode for edits and verification runs.

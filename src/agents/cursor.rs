@@ -199,52 +199,24 @@ const EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
         include_str!("../../cursor-plugin/rules/tracedecay-memory.mdc"),
     ),
     (
-        "skills/architecture-overview/SKILL.md",
-        include_str!("../../cursor-plugin/skills/architecture-overview/SKILL.md"),
+        "skills/assessing-impact/SKILL.md",
+        include_str!("../../cursor-plugin/skills/assessing-impact/SKILL.md"),
     ),
     (
-        "skills/assessing-test-coverage/SKILL.md",
-        include_str!("../../cursor-plugin/skills/assessing-test-coverage/SKILL.md"),
-    ),
-    (
-        "skills/atomic-code-edits/SKILL.md",
-        include_str!("../../cursor-plugin/skills/atomic-code-edits/SKILL.md"),
-    ),
-    (
-        "skills/auditing-code-safety/SKILL.md",
-        include_str!("../../cursor-plugin/skills/auditing-code-safety/SKILL.md"),
-    ),
-    (
-        "skills/cleaning-up-dead-code/SKILL.md",
-        include_str!("../../cursor-plugin/skills/cleaning-up-dead-code/SKILL.md"),
-    ),
-    (
-        "skills/code-health-report/SKILL.md",
-        include_str!("../../cursor-plugin/skills/code-health-report/SKILL.md"),
-    ),
-    (
-        "skills/cross-branch-investigation/SKILL.md",
-        include_str!("../../cursor-plugin/skills/cross-branch-investigation/SKILL.md"),
+        "skills/code-health/SKILL.md",
+        include_str!("../../cursor-plugin/skills/code-health/SKILL.md"),
     ),
     (
         "skills/curating-project-memory/SKILL.md",
         include_str!("../../cursor-plugin/skills/curating-project-memory/SKILL.md"),
     ),
     (
-        "skills/drafting-commit-and-pr/SKILL.md",
-        include_str!("../../cursor-plugin/skills/drafting-commit-and-pr/SKILL.md"),
+        "skills/editing-safely/SKILL.md",
+        include_str!("../../cursor-plugin/skills/editing-safely/SKILL.md"),
     ),
     (
-        "skills/exploring-types-and-traits/SKILL.md",
-        include_str!("../../cursor-plugin/skills/exploring-types-and-traits/SKILL.md"),
-    ),
-    (
-        "skills/finding-duplicate-logic/SKILL.md",
-        include_str!("../../cursor-plugin/skills/finding-duplicate-logic/SKILL.md"),
-    ),
-    (
-        "skills/finding-impacted-areas/SKILL.md",
-        include_str!("../../cursor-plugin/skills/finding-impacted-areas/SKILL.md"),
+        "skills/exploring-code/SKILL.md",
+        include_str!("../../cursor-plugin/skills/exploring-code/SKILL.md"),
     ),
     (
         "skills/fixing-build-and-type-errors/SKILL.md",
@@ -255,26 +227,6 @@ const EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
         include_str!("../../cursor-plugin/skills/inspecting-managed-skills/SKILL.md"),
     ),
     (
-        "skills/memorize-subject/SKILL.md",
-        include_str!("../../cursor-plugin/skills/memorize-subject/SKILL.md"),
-    ),
-    (
-        "skills/memorizing-subject/SKILL.md",
-        include_str!("../../cursor-plugin/skills/memorizing-subject/SKILL.md"),
-    ),
-    (
-        "skills/porting-code/SKILL.md",
-        include_str!("../../cursor-plugin/skills/porting-code/SKILL.md"),
-    ),
-    (
-        "skills/project-status/SKILL.md",
-        include_str!("../../cursor-plugin/skills/project-status/SKILL.md"),
-    ),
-    (
-        "skills/reading-code-cheaply/SKILL.md",
-        include_str!("../../cursor-plugin/skills/reading-code-cheaply/SKILL.md"),
-    ),
-    (
         "skills/recalling-project-memory/SKILL.md",
         include_str!("../../cursor-plugin/skills/recalling-project-memory/SKILL.md"),
     ),
@@ -283,20 +235,8 @@ const EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
         include_str!("../../cursor-plugin/skills/recalling-session-context/SKILL.md"),
     ),
     (
-        "skills/refactoring-safely/SKILL.md",
-        include_str!("../../cursor-plugin/skills/refactoring-safely/SKILL.md"),
-    ),
-    (
-        "skills/reviewing-a-diff/SKILL.md",
-        include_str!("../../cursor-plugin/skills/reviewing-a-diff/SKILL.md"),
-    ),
-    (
-        "skills/running-impacted-tests/SKILL.md",
-        include_str!("../../cursor-plugin/skills/running-impacted-tests/SKILL.md"),
-    ),
-    (
-        "skills/searching-for-code/SKILL.md",
-        include_str!("../../cursor-plugin/skills/searching-for-code/SKILL.md"),
+        "skills/reviewing-changes/SKILL.md",
+        include_str!("../../cursor-plugin/skills/reviewing-changes/SKILL.md"),
     ),
     // Slash-command dispatcher skills (`disable-model-invocation: true`).
     // Slugs keep the `tracedecay-` prefix (so `/tracedecay` lists them all) with
@@ -359,12 +299,12 @@ const EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
         include_str!("../../cursor-plugin/skills/tracing-functions/SKILL.md"),
     ),
     (
-        "skills/tracking-session-health/SKILL.md",
-        include_str!("../../cursor-plugin/skills/tracking-session-health/SKILL.md"),
-    ),
-    (
         "skills/using-the-cli/SKILL.md",
         include_str!("../../cursor-plugin/skills/using-the-cli/SKILL.md"),
+    ),
+    (
+        "skills/using-tracedecay/SKILL.md",
+        include_str!("../../cursor-plugin/skills/using-tracedecay/SKILL.md"),
     ),
     (
         "agents/code-explorer.md",
@@ -484,9 +424,31 @@ fn cursor_plugin_hooks(raw: &str, tracedecay_bin: &str) -> Result<String> {
 /// standalone Commands surface. The `skills/tracedecay-*` entries are
 /// legacy dispatcher slugs renamed to
 /// verb-phrase slugs because Cursor displays the humanized slug as the skill
-/// title.
+/// title. The other `skills/*` entries are model-invoked workflow skills
+/// retired by the consolidated skill catalog.
 const LEGACY_PLUGIN_DIRS: &[&str] = &[
     "commands",
+    "skills/architecture-overview",
+    "skills/assessing-test-coverage",
+    "skills/atomic-code-edits",
+    "skills/auditing-code-safety",
+    "skills/cleaning-up-dead-code",
+    "skills/code-health-report",
+    "skills/cross-branch-investigation",
+    "skills/drafting-commit-and-pr",
+    "skills/exploring-types-and-traits",
+    "skills/finding-duplicate-logic",
+    "skills/finding-impacted-areas",
+    "skills/memorize-subject",
+    "skills/memorizing-subject",
+    "skills/porting-code",
+    "skills/project-status",
+    "skills/reading-code-cheaply",
+    "skills/refactoring-safely",
+    "skills/reviewing-a-diff",
+    "skills/running-impacted-tests",
+    "skills/searching-for-code",
+    "skills/tracking-session-health",
     "skills/tracedecay-arch",
     "skills/tracedecay-audit",
     "skills/tracedecay-branch",
@@ -1112,9 +1074,7 @@ mod tests {
         // so released installs are no longer missing the bundle that the
         // symlink path provides.
         assert!(
-            install_dir
-                .join("skills/searching-for-code/SKILL.md")
-                .exists(),
+            install_dir.join("skills/exploring-code/SKILL.md").exists(),
             "a representative skill should be embedded"
         );
         assert!(
@@ -1318,9 +1278,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let install_dir = tmp.path().join("tracedecay");
         write_embedded_plugin(&install_dir, "tracedecay").expect("embedded install should succeed");
-        assert!(install_dir
-            .join("skills/searching-for-code/SKILL.md")
-            .exists());
+        assert!(install_dir.join("skills/exploring-code/SKILL.md").exists());
 
         // Because managed paths cover every embedded file, uninstall recognises a
         // tracedecay-only directory and removes it entirely.

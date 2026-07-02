@@ -384,7 +384,7 @@ fn assert_codex_plugin_bundle(
         expected_command,
     );
 
-    let skill = std::fs::read_to_string(plugin_dir.join("skills/reading-code-cheaply/SKILL.md"))
+    let skill = std::fs::read_to_string(plugin_dir.join("skills/exploring-code/SKILL.md"))
         .expect("Codex plugin should ship tracedecay steering skills");
     assert!(skill.contains("tracedecay"));
 }
@@ -544,13 +544,13 @@ fn test_cursor_plugin_bundle_files_are_valid() {
 
 #[test]
 fn generated_guidance_prefers_resolved_active_project_store() {
-    let cursor_status = include_str!("../../cursor-plugin/skills/project-status/SKILL.md");
-    let codex_status = include_str!("../../codex-plugin/skills/project-status/SKILL.md");
+    let cursor_status = include_str!("../../cursor-plugin/skills/code-health/SKILL.md");
+    let codex_status = include_str!("../../codex-plugin/skills/code-health/SKILL.md");
     let cursor_rule = include_str!("../../cursor-plugin/rules/tracedecay.mdc");
 
     for (name, guidance) in [
-        ("cursor project-status", cursor_status),
-        ("codex project-status", codex_status),
+        ("cursor code-health", cursor_status),
+        ("codex code-health", codex_status),
     ] {
         assert!(
             guidance.contains("tracedecay_active_project"),
@@ -2920,7 +2920,7 @@ fn test_local_install_codex_writes_project_paths() {
             "plugins/tracedecay/.codex-plugin/plugin.json",
             "plugins/tracedecay/.mcp.json",
             "plugins/tracedecay/hooks/hooks.json",
-            "plugins/tracedecay/skills/reading-code-cheaply/SKILL.md",
+            "plugins/tracedecay/skills/exploring-code/SKILL.md",
         ],
     );
 }
