@@ -1,7 +1,4 @@
-mod common;
-mod dashboard_api_support;
-
-use dashboard_api_support::*;
+use crate::dashboard_api_support::*;
 
 #[test]
 fn automation_config_is_dashboard_controllable_and_persistent() {

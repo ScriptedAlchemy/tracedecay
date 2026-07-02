@@ -7,14 +7,11 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
-
 use std::path::Path;
-use std::sync::Mutex;
 
-use common::{
+use crate::common::{
     create_runtime, get_json, http_agent, message_record_at, pick_free_port, wait_for_dashboard,
-    EnvVarGuard,
+    write_empty_global_db_schema, EnvVarGuard, GLOBAL_DB_ENV_LOCK as ENV_LOCK,
 };
 use serde_json::Value;
 use tempfile::TempDir;
@@ -24,9 +21,6 @@ use tracedecay::sessions::cursor::project_session_db_path;
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::tracedecay::TraceDecay;
 use tracedecay::types::CostTurn;
-
-/// Serializes tests in this binary: they mutate process-wide env vars.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 struct Fixture {
     _tmp: TempDir,
@@ -431,6 +425,11 @@ async fn start_fixture(seed: FixtureSeed) -> Fixture {
         ),
     ];
 
+    // Pre-create both GlobalDb-schema stores from the cached empty template
+    // so seeding and dashboard startup open existing DBs instead of paying a
+    // full schema creation each (slow on Windows).
+    write_empty_global_db_schema(&global_db_path).await;
+
     let now = now_unix();
     let day_start = now - (now % 86_400);
     match seed {
@@ -443,6 +442,9 @@ async fn start_fixture(seed: FixtureSeed) -> Fixture {
         .await
         .expect("tracedecay init");
     let session_db_path = project_session_db_path(&project_root);
+    if !session_db_path.exists() {
+        write_empty_global_db_schema(&session_db_path).await;
+    }
     match seed {
         FixtureSeed::Base => seed_global_db(&session_db_path, &project_root, day_start).await,
         FixtureSeed::LedgerOnly => {}

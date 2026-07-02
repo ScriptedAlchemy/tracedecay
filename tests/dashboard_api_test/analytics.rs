@@ -2,14 +2,11 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
-
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
-use common::{
+use crate::common::{
     create_runtime, get_json, http_agent, message_record_at, pick_free_port, wait_for_dashboard,
-    write_empty_global_db_schema, EnvVarGuard,
+    write_empty_global_db_schema, EnvVarGuard, GLOBAL_DB_ENV_LOCK as ENV_LOCK,
 };
 use serde_json::Value;
 use tempfile::TempDir;
@@ -19,8 +16,6 @@ use tracedecay::sessions::cursor::project_session_db_path;
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::TraceDecay;
-
-static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 struct Fixture {
     _tmp: TempDir,

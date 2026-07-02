@@ -1,7 +1,4 @@
-mod common;
-mod dashboard_api_support;
-
-use dashboard_api_support::*;
+use crate::dashboard_api_support::*;
 
 #[test]
 fn dashboard_plugin_manifest_assets_are_served() {
@@ -613,19 +610,6 @@ fn lcm_endpoints_return_empty_state_when_no_rows_exist() {
             "empty LCM store search should have zero summary-node matches"
         );
     });
-}
-
-/// Opens (creating if needed) the resolved project session store — profile
-/// sharded by default, project-local only for explicit or legacy projects.
-async fn open_project_session_store(project_root: &Path) -> GlobalDb {
-    let db_path = tracedecay::sessions::cursor::project_session_db_path(project_root);
-    match GlobalDb::open_at(&db_path).await {
-        Some(db) => db,
-        None => panic!(
-            "failed to open project session store at {}",
-            db_path.display()
-        ),
-    }
 }
 
 /// Without a `TRACEDECAY_GLOBAL_DB` override the dashboard must serve the

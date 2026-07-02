@@ -4,14 +4,11 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
-
 use std::path::Path;
-use std::sync::Mutex;
 
-use common::{
+use crate::common::{
     create_runtime, get_json, http_agent, message_record_at, pick_free_port, response_to_json,
-    wait_for_dashboard, EnvVarGuard,
+    wait_for_dashboard, write_empty_global_db_schema, EnvVarGuard, GLOBAL_DB_ENV_LOCK as ENV_LOCK,
 };
 
 use serde_json::{json, Value};
@@ -22,8 +19,6 @@ use tracedecay::sessions::cursor::project_session_db_path;
 use tracedecay::sessions::lcm::{LcmCleanConfig, LcmGcConfig, LcmSourceRef, LcmSummaryNodeDraft};
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::tracedecay::TraceDecay;
-
-static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 struct Fixture {
     _tmp: TempDir,
@@ -218,10 +213,15 @@ async fn start_fixture() -> Fixture {
 
     let global_db_path = tmp.path().join("global").join("global.db");
     let env_guards = vec![EnvVarGuard::set("TRACEDECAY_GLOBAL_DB", &global_db_path)];
+    // Pre-create both GlobalDb-schema stores from the cached empty template
+    // so seeding and dashboard startup open existing DBs instead of paying a
+    // full schema creation each (slow on Windows).
+    write_empty_global_db_schema(&global_db_path).await;
     let cg = TraceDecay::init(&project_root)
         .await
         .expect("tracedecay init");
     let session_db_path = project_session_db_path(&project_root);
+    write_empty_global_db_schema(&session_db_path).await;
     let (session_id, child_node_id, parent_node_id) =
         seed_lcm_store(&session_db_path, &project_root).await;
     let port = pick_free_port();

@@ -1,11 +1,9 @@
-mod common;
-
 use std::fs;
 use std::path::Path;
 
-use common::{
+use crate::common::{
     create_runtime, get_json, http_agent, pick_free_port, tempdir_or_panic, wait_for_dashboard,
-    EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK,
+    write_empty_global_db_schema, EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK,
 };
 use serde_json::Value;
 use tempfile::TempDir;
@@ -183,6 +181,10 @@ async fn start_dashboard_fixture_with(with_orphan: bool) -> DashboardFixture {
     let project_root = tmp.path().join("project");
     let global_db_path = tmp.path().join("global").join("global.db");
     let env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
+    // Pre-create the global store from the cached empty template so init and
+    // dashboard startup open an existing DB instead of paying a full schema
+    // creation (slow on Windows).
+    write_empty_global_db_schema(&global_db_path).await;
 
     let cg = setup_project(&project_root).await;
     seed_graph_fixture(&cg).await;

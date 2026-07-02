@@ -105,10 +105,24 @@ pub(crate) async fn setup_project(project_root: &Path) -> TraceDecay {
         &project_root.join("src/lib.rs"),
         "pub fn seed_fixture() -> &'static str { \"dashboard\" }\n",
     );
-    match TraceDecay::init(project_root).await {
+    // Pre-create the GlobalDb-schema stores that init and the dashboard
+    // server will open, from the cached empty template: opening an existing
+    // DB is a file copy instead of a full schema creation (slow on Windows).
+    if let Some(global_db_path) = std::env::var_os(GLOBAL_DB_ENV) {
+        let global_db_path = PathBuf::from(global_db_path);
+        if !global_db_path.exists() {
+            write_empty_global_db_schema(&global_db_path).await;
+        }
+    }
+    let cg = match TraceDecay::init(project_root).await {
         Ok(cg) => cg,
         Err(err) => panic!("failed to initialize tracedecay fixture project: {err}"),
+    };
+    let sessions_db_path = &cg.store_layout().sessions_db_path;
+    if !sessions_db_path.exists() {
+        write_empty_global_db_schema(sessions_db_path).await;
     }
+    cg
 }
 
 pub(crate) fn blob_param(bytes: Vec<u8>) -> libsql::Value {
@@ -515,18 +529,16 @@ async fn start_dashboard_fixture_with_options(
         panic!("failed to enroll dashboard fixture in profile storage: {err}");
     }
 
-    // Pre-create both GlobalDb-schema stores from the cached empty template:
-    // the init-time registry write, LCM seeding, and the dashboard server's
-    // startup LCM resolve + catch-up ingest then all open existing DBs
-    // instead of each paying a full schema creation (slow on Windows).
-    write_empty_global_db_schema(&global_db_path).await;
-
+    // `setup_project` pre-creates the global and session stores from the
+    // cached empty template, so the init-time registry write, LCM seeding,
+    // and the dashboard server's startup LCM resolve + catch-up ingest all
+    // open existing DBs instead of each paying a full schema creation (slow
+    // on Windows).
     let cg = setup_project(&project_root).await;
     if seed_memory {
         seed_memory_fixture(&cg).await;
     }
 
-    write_empty_global_db_schema(&cg.store_layout().sessions_db_path).await;
     if seed_lcm {
         let session_store = open_project_session_store(&project_root).await;
         seed_lcm_fixture(&session_store, &project_root).await;
@@ -731,8 +743,13 @@ pub(crate) async fn index_all_retrying_sync_lock(cg: &TraceDecay, context: &str)
 
 /// Opens (creating if needed) the resolved project session store — profile
 /// sharded by default, project-local only for explicit or legacy projects.
+/// A missing store is written from the cached empty-schema template so the
+/// open skips full schema creation (a large fixed cost on Windows).
 pub(crate) async fn open_project_session_store(project_root: &Path) -> GlobalDb {
     let db_path = tracedecay::sessions::cursor::project_session_db_path(project_root);
+    if !db_path.exists() {
+        write_empty_global_db_schema(&db_path).await;
+    }
     match GlobalDb::open_at(&db_path).await {
         Some(db) => db,
         None => panic!(

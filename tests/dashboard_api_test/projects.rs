@@ -1,7 +1,4 @@
-mod common;
-mod dashboard_api_support;
-
-use dashboard_api_support::*;
+use crate::dashboard_api_support::*;
 use std::path::PathBuf;
 
 async fn setup_target_project(fixture: &DashboardFixture) -> (PathBuf, TraceDecay) {
