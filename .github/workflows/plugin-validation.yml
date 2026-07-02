@@ -20,6 +20,14 @@ on:
       - "tests/agent_suite/*plugin*"
       - "tests/agent_suite/*skill*"
       - "scripts/mcp-conformance-smoke.sh"
+      # The Inspector smoke is the workflow's SDK-backed coverage for
+      # `tracedecay serve` protocol and tool-schema compatibility.
+      - "src/serve.rs"
+      - "src/main.rs"
+      - "src/lib.rs"
+      - "src/mcp/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/plugin-validation.yml"
 
 permissions:
