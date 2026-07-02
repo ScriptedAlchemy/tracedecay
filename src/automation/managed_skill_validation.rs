@@ -5,9 +5,9 @@ use crate::errors::{Result, TraceDecayError};
 
 use super::managed_skill_format::target_key;
 use super::managed_skill_model::{
-    ManagedSkill, ManagedSkillPendingUpdate, ManagedSkillUpdate, ManagedSupportFile,
-    SkillInstallTarget, MAX_MANAGED_SKILL_BODY_BYTES, MAX_MANAGED_SUPPORT_FILES,
-    MAX_MANAGED_SUPPORT_FILE_BYTES,
+    ManagedSkill, ManagedSkillPendingUpdate, ManagedSkillState, ManagedSkillUpdate,
+    ManagedSupportFile, SkillInstallTarget, MAX_MANAGED_SKILL_BODY_BYTES,
+    MAX_MANAGED_SUPPORT_FILES, MAX_MANAGED_SUPPORT_FILE_BYTES,
 };
 
 const ALLOWED_SUPPORT_ROOTS: &[&str] = &["references", "templates", "scripts", "assets"];
@@ -240,6 +240,13 @@ pub(crate) fn validate_managed_pending_update(
         return Err(config_error(
             "managed skill staged_at must be a positive timestamp".to_string(),
         ));
+    }
+    if let Some(resulting_state) = pending.resulting_state {
+        if resulting_state != ManagedSkillState::Archived {
+            return Err(config_error(
+                "managed skill pending update resulting_state must be archived".to_string(),
+            ));
+        }
     }
     let skill = ManagedSkill {
         metadata: pending.metadata.clone(),

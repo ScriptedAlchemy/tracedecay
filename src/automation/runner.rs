@@ -20,7 +20,8 @@ use super::managed_skills::list_managed_skills;
 use super::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
 use super::session_reflector::validate_fact_proposals;
 use super::skill_usage::{
-    ingest_project_analytics_events, stale_skill_recommendations, summarize_skill_usage,
+    ingest_project_analytics_events, skill_overlap_candidates, stale_skill_recommendations,
+    summarize_skill_usage, DEFAULT_SKILL_OVERLAP_LIMIT,
 };
 use super::skill_writer::{
     activation_policy as skill_writer_activation_policy, skill_improvement_recommendations,
@@ -539,39 +540,41 @@ async fn finalize_skill_writer_success(
     proposed_ops: &Value,
     proposals: &[Value],
 ) -> Result<(Value, AutomationRunLedgerRecord)> {
-    let (created_skills, updated_skills, rejected_skills) =
-        match validate_and_apply_skill_proposals(
-            profile_root,
-            run_id,
-            proposals,
-            config.auto_enable_skills,
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(err) => {
-                finalizer
-                    .append_failed_record(
-                        response.model.clone(),
-                        evidence_hash,
-                        Some(proposed_ops.clone()),
-                        err.to_string(),
-                    )
-                    .await?;
-                return Err(err);
-            }
-        };
-    let accepted_count = created_skills.len() + updated_skills.len();
-    let rejected_count = rejected_skills.len();
+    let proposal_outcome = match validate_and_apply_skill_proposals(
+        profile_root,
+        run_id,
+        proposals,
+        config.auto_enable_skills,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(err) => {
+            finalizer
+                .append_failed_record(
+                    response.model.clone(),
+                    evidence_hash,
+                    Some(proposed_ops.clone()),
+                    err.to_string(),
+                )
+                .await?;
+            return Err(err);
+        }
+    };
+    let accepted_count = proposal_outcome.created.len()
+        + proposal_outcome.updated.len()
+        + proposal_outcome.consolidations.len();
+    let rejected_count = proposal_outcome.rejected.len();
     let report = json!({
         "status": if config.auto_enable_skills { "auto_enabled" } else { "needs_approval" },
         "dry_run": true,
         "task": "skill_writer",
         "evidence_hash": evidence_hash,
         "activation_policy": activation_policy,
-        "created_skills": created_skills,
-        "updated_skills": updated_skills,
-        "rejected_skills": rejected_skills,
+        "created_skills": proposal_outcome.created,
+        "updated_skills": proposal_outcome.updated,
+        "staged_consolidations": proposal_outcome.consolidations,
+        "rejected_skills": proposal_outcome.rejected,
         "skill_improvement_recommendations": evidence
             .get("skill_improvement_recommendations")
             .cloned()
@@ -587,6 +590,7 @@ async fn finalize_skill_writer_success(
             "skills": proposed_ops.get("skills").cloned().unwrap_or_else(|| json!([])),
             "created_skills": report.get("created_skills").cloned().unwrap_or_else(|| json!([])),
             "updated_skills": report.get("updated_skills").cloned().unwrap_or_else(|| json!([])),
+            "staged_consolidations": report.get("staged_consolidations").cloned().unwrap_or_else(|| json!([])),
             "rejected_skills": report.get("rejected_skills").cloned().unwrap_or_else(|| json!([])),
         })),
         accepted_count,
@@ -595,6 +599,7 @@ async fn finalize_skill_writer_success(
     record.applied_ops = Some(json!({
         "created_skills": report.get("created_skills").cloned().unwrap_or_else(|| json!([])),
         "updated_skills": report.get("updated_skills").cloned().unwrap_or_else(|| json!([])),
+        "staged_consolidations": report.get("staged_consolidations").cloned().unwrap_or_else(|| json!([])),
     }));
     record.rejected_ops = report.get("rejected_skills").cloned();
     record.validation_report = Some(json!({
@@ -788,11 +793,14 @@ async fn build_skill_writer_evidence(
             }))
         })
         .unwrap_or_default();
+    let overlap_candidates =
+        skill_overlap_candidates(&existing_skills, DEFAULT_SKILL_OVERLAP_LIMIT);
     let skill_improvement_recommendations = skill_improvement_recommendations(
         &hits,
         &skill_usage_summaries,
         &stale_recommendations,
         &underused_tool_families,
+        &overlap_candidates,
     );
     let evidence = json!({
         "storage_scope": storage_scope,
@@ -803,6 +811,7 @@ async fn build_skill_writer_evidence(
         "skill_usage_summaries": skill_usage_summaries,
         "stale_recommendations": stale_recommendations,
         "underused_tool_families": underused_tool_families,
+        "skill_overlap_candidates": overlap_candidates,
         "skill_improvement_recommendations": skill_improvement_recommendations,
         "existing_managed_skills": existing_skills
             .iter()
@@ -1275,7 +1284,7 @@ fn build_skill_writer_prompt(evidence: &Value) -> String {
         "\n",
         "An empty skills array is a real option when the session ran smoothly with no corrections and produced no new technique, but do not reach for it as a default.\n",
         "\n",
-        "Response contract: Return only JSON with a skills array of managed skill creates or updates. New skills may omit action or use action=create and must include id, title, summary, category, body_markdown, optional targets, optional support_files with text content, and reason. Targets, when present, must be an array using cursor, codex, claude, agents, opencode, kimi, or kiro; Hermes is host-owned and must not be targeted. Updates must use action=update or action=patch, include id and base_checksum, and include at least one changed field among title, summary, category, targets, body_markdown/body, support_files, or pinned. For updates, support_files is a complete replacement list, not a partial file patch. Activation is controlled only by the runner policy; do not assume activation from your response.\n",
+        "Response contract: Return only JSON with a skills array of managed skill creates or updates. New skills may omit action or use action=create and must include id, title, summary, category, body_markdown, optional targets, optional support_files with text content, and reason. Targets, when present, must be an array using cursor, codex, claude, agents, opencode, kimi, or kiro; Hermes is host-owned and must not be targeted. Updates must use action=update or action=patch, include id and base_checksum, and include at least one changed field among title, summary, category, targets, body_markdown/body, support_files, or pinned. For updates, support_files is a complete replacement list, not a partial file patch. Consolidations: when skill_overlap_candidates shows overlapping managed skills, you may propose action=merge (include id for the surviving skill, base_checksum, source_skill_id, source_base_checksum, reason, and optional merged title/summary/category/targets/body_markdown/support_files) or action=archive (include id, base_checksum, reason). Consolidations are always staged for human approval and archive-only; content is never deleted. Never propose merge or archive for pinned or user-authored skills. Activation is controlled only by the runner policy; do not assume activation from your response.\n",
     );
     format!(
         "{POLICY}{}",
