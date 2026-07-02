@@ -779,6 +779,80 @@ fn default_available_socket_path() -> Result<PathBuf> {
     }
 }
 
+/// How long daemon clients keep retrying a failed connect before giving up.
+///
+/// `tracedecay update` restarts the daemon service (`systemctl --user restart`);
+/// between the old daemon unlinking its socket and the new one binding it,
+/// connects fail with `NotFound` or `ConnectionRefused`. Long-lived MCP
+/// sessions (Cursor's `tracedecay serve` stdio proxy) reconnect per request,
+/// so retrying inside this window lets a live session ride out a self-update
+/// instead of surfacing a hard JSON-RPC error.
+#[cfg(unix)]
+const DAEMON_RESTART_GRACE: Duration = Duration::from_secs(8);
+#[cfg(unix)]
+const DAEMON_RESTART_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+#[cfg(unix)]
+fn is_transient_daemon_connect_error(kind: std::io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+    )
+}
+
+#[cfg(unix)]
+fn daemon_connect_error(socket_path: &Path, err: &std::io::Error) -> TraceDecayError {
+    let hint = if is_transient_daemon_connect_error(err.kind()) {
+        " The daemon may be restarting (e.g. after `tracedecay update`) — retry shortly, or check `tracedecay daemon status`."
+    } else {
+        ""
+    };
+    TraceDecayError::Config {
+        message: format!(
+            "could not connect to TraceDecay daemon socket '{}': {err}.{hint}",
+            socket_path.display()
+        ),
+    }
+}
+
+/// Connects to the daemon socket, tolerating the restart outage caused by
+/// `tracedecay update` (see [`DAEMON_RESTART_GRACE`]).
+#[cfg(unix)]
+async fn connect_to_daemon(socket_path: &Path) -> Result<UnixStream> {
+    connect_with_restart_grace(
+        socket_path,
+        DAEMON_RESTART_GRACE,
+        DAEMON_RESTART_POLL_INTERVAL,
+    )
+    .await
+}
+
+/// Connects to the daemon socket, tolerating a short restart outage.
+///
+/// Retrying here is safe: nothing has been written yet, so no request can be
+/// duplicated. Non-transient errors (e.g. permission denied) fail immediately.
+#[cfg(unix)]
+async fn connect_with_restart_grace(
+    socket_path: &Path,
+    grace: Duration,
+    poll_interval: Duration,
+) -> Result<UnixStream> {
+    let deadline = tokio::time::Instant::now() + grace;
+    loop {
+        match UnixStream::connect(socket_path).await {
+            Ok(stream) => return Ok(stream),
+            Err(err) => {
+                if !is_transient_daemon_connect_error(err.kind())
+                    || tokio::time::Instant::now() >= deadline
+                {
+                    return Err(daemon_connect_error(socket_path, &err));
+                }
+                tokio::time::sleep(poll_interval).await;
+            }
+        }
+    }
+}
+
 #[cfg(unix)]
 pub async fn run_foreground(socket_path: PathBuf) -> Result<()> {
     run_foreground_unix(socket_path).await
@@ -863,7 +937,7 @@ async fn send_daemon_request_line(
     handshake: &DaemonHandshake,
     line: &str,
 ) -> Result<Vec<String>> {
-    let stream = UnixStream::connect(socket_path).await?;
+    let stream = connect_to_daemon(socket_path).await?;
     let (reader, mut writer) = stream.into_split();
 
     writer.write_all(handshake.to_line()?.as_bytes()).await?;
@@ -900,8 +974,10 @@ async fn send_daemon_request_line(
     }
     if !matched_response {
         return Err(TraceDecayError::Config {
-            message: "daemon closed the connection before returning a matching response"
-                .to_string(),
+            message:
+                "daemon closed the connection before returning a matching response \
+                      — it may have been restarted (e.g. by `tracedecay update`); retry the request"
+                    .to_string(),
         });
     }
     Ok(responses)
@@ -943,7 +1019,7 @@ pub async fn call_tool(
     tool_name: &str,
     arguments: serde_json::Value,
 ) -> Result<serde_json::Value> {
-    let stream = UnixStream::connect(socket_path).await?;
+    let stream = connect_to_daemon(socket_path).await?;
     let (reader, mut writer) = stream.into_split();
     let id = json!(1);
     let request = JsonRpcRequest {
@@ -1051,8 +1127,13 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         "daemon_shutdown",
         &[("socket", socket_path.display().to_string())],
     );
-    engine.shutdown_all().await;
+    // Stop accepting and unlink the socket before draining so clients that
+    // connect during shutdown get NotFound/ConnectionRefused (which they retry
+    // via `connect_with_restart_grace`) instead of a queued connection that
+    // will never be served.
+    drop(listener);
     let _ = std::fs::remove_file(&socket_path);
+    engine.shutdown_all().await;
     Ok(())
 }
 
@@ -1968,6 +2049,137 @@ mod tests {
             status.contains(&format!("socket: {} (connectable)", socket.display())),
             "status should report connectable socket, got:\n{status}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transient_daemon_connect_errors_cover_restart_window_only() {
+        assert!(super::is_transient_daemon_connect_error(
+            std::io::ErrorKind::NotFound
+        ));
+        assert!(super::is_transient_daemon_connect_error(
+            std::io::ErrorKind::ConnectionRefused
+        ));
+        assert!(!super::is_transient_daemon_connect_error(
+            std::io::ErrorKind::PermissionDenied
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connect_with_restart_grace_reconnects_once_daemon_rebinds() {
+        let dir = TempDir::new().expect("temp dir");
+        let socket = dir.path().join("daemon.sock");
+
+        // Simulate the `tracedecay update` restart window: the socket is
+        // missing for a while, then the new daemon binds the same path.
+        let bind_path = socket.clone();
+        let daemon = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            tokio::net::UnixListener::bind(&bind_path).expect("bind restarted daemon socket")
+        });
+
+        super::connect_with_restart_grace(
+            &socket,
+            std::time::Duration::from_secs(8),
+            std::time::Duration::from_millis(50),
+        )
+        .await
+        .expect("connect should succeed once the restarted daemon binds");
+        daemon.await.expect("daemon bind task");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connect_with_restart_grace_gives_up_with_restart_hint() {
+        let dir = TempDir::new().expect("temp dir");
+        let socket = dir.path().join("daemon.sock");
+
+        let err = super::connect_with_restart_grace(
+            &socket,
+            std::time::Duration::from_millis(300),
+            std::time::Duration::from_millis(50),
+        )
+        .await
+        .expect_err("connect should fail when no daemon ever binds");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("tracedecay update"),
+            "error should hint that the daemon may be restarting after an update, got: {message}"
+        );
+        assert!(
+            message.contains(&socket.display().to_string()),
+            "error should name the socket path, got: {message}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn proxied_request_survives_daemon_restart_window() {
+        let dir = TempDir::new().expect("temp dir");
+        let socket = dir.path().join("daemon.sock");
+
+        let bind_path = socket.clone();
+        let daemon = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let listener =
+                tokio::net::UnixListener::bind(&bind_path).expect("bind restarted daemon socket");
+            let (stream, _addr) = listener.accept().await.expect("accept proxied client");
+            let (reader, mut writer) = stream.into_split();
+            let mut lines = tokio::io::BufReader::new(reader).lines();
+            let handshake_line = lines
+                .next_line()
+                .await
+                .expect("read handshake")
+                .expect("handshake line");
+            DaemonHandshake::from_line(&handshake_line).expect("parse handshake");
+            let request_line = lines
+                .next_line()
+                .await
+                .expect("read request")
+                .expect("request line");
+            let request: Value = serde_json::from_str(&request_line).expect("request json");
+            let response = json!({
+                "jsonrpc": "2.0",
+                "id": request["id"],
+                "result": { "ok": true }
+            });
+            writer
+                .write_all(
+                    serde_json::to_string(&response)
+                        .expect("response json")
+                        .as_bytes(),
+                )
+                .await
+                .expect("write response");
+            writer.write_all(b"\n").await.expect("write newline");
+        });
+
+        let handshake = DaemonHandshake {
+            project_path: None,
+            scope_prefix: None,
+            timings: false,
+            allow_init: false,
+            client_identity: test_client_identity(),
+        };
+        let request = serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": 42,
+            "method": "tools/list"
+        }))
+        .expect("request json");
+
+        let responses = super::send_daemon_request_line(&socket, &handshake, &request)
+            .await
+            .expect("request should succeed once the restarted daemon is back");
+
+        assert_eq!(responses.len(), 1);
+        let response: Value =
+            serde_json::from_str(responses[0].trim()).expect("proxied response json");
+        assert_eq!(response["id"], json!(42));
+        assert_eq!(response["result"]["ok"], json!(true));
+        daemon.await.expect("fake daemon task");
     }
 
     #[cfg(unix)]
