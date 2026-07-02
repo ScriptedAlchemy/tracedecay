@@ -1,11 +1,8 @@
 //! Cross-bundle sync enforcement for the shipped plugin source bundles.
 //!
-//! `cursor-plugin/` and `codex-plugin/` (and any future ecosystem bundle,
-//! e.g. `claude-plugin/`) must not silently drift: every content unit is
-//! either present and byte-identical in all bundles, or covered by a
+//! `cursor-plugin/` and `codex-plugin/` must not silently drift: every content
+//! unit is either present and byte-identical in all bundles, or covered by a
 //! declarative exception below that documents why it diverges or is absent.
-//! Adding a bundle means adding one `Bundle` row plus manifest entries — the
-//! assertions themselves are bundle-count agnostic.
 //!
 //! Division of labour with existing tests (do not duplicate them here):
 //! - `tests/agent_suite/plugin_skill_contract_test.rs` — per-host frontmatter
@@ -15,9 +12,7 @@
 //!   `src/agents/codex.rs` unit tests
 //!   (`codex_embedded_file_list_covers_the_whole_source_bundle`) — the
 //!   private `EMBEDDED_PLUGIN_FILES` / `CODEX_EMBEDDED_PLUGIN_FILES`
-//!   registries must cover exactly the on-disk bundle trees. Because those
-//!   pin registry == disk, the disk-level sync enforced here transitively
-//!   keeps the embedded registries in sync too.
+//!   registries must cover exactly the on-disk bundle trees.
 //! - `src/agents/codex.rs` `codex_skills_match_the_cursor_source_for_parity`
 //!   — the original two-bundle skill parity check with its own allowlists.
 //!   The skill exceptions below mirror those allowlists; if the two tables
@@ -38,9 +33,7 @@ struct Bundle {
     root: &'static str,
 }
 
-/// Every ecosystem bundle shipped from this repo. A third ecosystem (e.g.
-/// `claude-plugin/`) joins the sync check by adding a row here plus its
-/// host-specific rows in [`TOP_LEVEL_MANIFEST`] / [`SKILL_SYNC_EXCEPTIONS`].
+/// Every ecosystem bundle shipped from this repo.
 const BUNDLES: &[Bundle] = &[
     Bundle {
         name: "cursor",
@@ -267,10 +260,7 @@ fn skills_are_synced_across_bundles_or_declared_exceptions() {
 }
 
 /// The cross-bundle shared skill set must equal the runtime skill index the
-/// hooks advertise (`hooks::CURSOR_PLUGIN_SKILLS`), tying this manifest to
-/// the session-context steering and to the codex.rs parity unit tests. If a
-/// future bundle intentionally ships a subset, its missing skills become
-/// `OnlyIn` exceptions and this expectation must be revisited alongside them.
+/// hooks advertise (`hooks::CURSOR_PLUGIN_SKILLS`).
 #[test]
 fn skills_shared_by_every_bundle_match_the_runtime_skill_index() {
     let bundle_count = BUNDLES.len();

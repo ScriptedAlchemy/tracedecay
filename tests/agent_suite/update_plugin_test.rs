@@ -14,7 +14,9 @@ use serde_json::json;
 use tempfile::TempDir;
 use tracedecay::agents::{get_integration, InstallContext, UpdatePluginOutcome};
 
-use crate::common::{assert_schema_valid, compile_schema, EnvVarGuard, PROCESS_ENV_LOCK};
+use crate::common::{
+    assert_schema_valid, compile_schema, relative_files_under, EnvVarGuard, PROCESS_ENV_LOCK,
+};
 
 const OLD_BIN: &str = "/old/bin/tracedecay";
 const NEW_BIN: &str = "/new/bin/tracedecay";
@@ -103,27 +105,6 @@ fn write_stale_codex_skill(plugin_dir: &Path) {
         "---\nname: tracedecay:stale-skill\n---\n",
     )
     .unwrap();
-}
-
-/// Every regular file under `root`, relative to it, sorted.
-fn file_listing(root: &Path) -> Vec<PathBuf> {
-    fn walk(dir: &Path, root: &Path, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                walk(&path, root, out);
-            } else {
-                out.push(path.strip_prefix(root).unwrap().to_path_buf());
-            }
-        }
-    }
-    let mut out = Vec::new();
-    walk(root, root, &mut out);
-    out.sort();
-    out
 }
 
 // ---------------------------------------------------------------------------
@@ -637,7 +618,7 @@ fn config_only_integrations_report_config_only_and_write_nothing() {
             "{id} should be config-only"
         );
         assert!(
-            file_listing(home.path()).is_empty(),
+            relative_files_under(home.path()).is_empty(),
             "{id} update_plugin wrote files into the home dir"
         );
     }
@@ -727,7 +708,7 @@ fn rendered_json_placeholders(install_dir: &Path) -> Vec<(String, String, String
         }
     }
     let mut found = Vec::new();
-    for relative in file_listing(install_dir) {
+    for relative in relative_files_under(install_dir) {
         if relative.extension().and_then(|ext| ext.to_str()) != Some("json") {
             continue;
         }
@@ -748,20 +729,20 @@ fn rendered_json_placeholders(install_dir: &Path) -> Vec<(String, String, String
 /// wipes the previous managed files first. The rendered dir may hold extras
 /// (managed skill overlay, user files); source ⊆ rendered is the contract.
 fn assert_source_bundle_fully_rendered(source_dir: &Path, install_dir: &Path) {
-    let source = file_listing(source_dir);
+    let source = relative_files_under(source_dir);
     assert!(
         !source.is_empty(),
         "source bundle {} should not be empty",
         source_dir.display()
     );
-    let rendered = file_listing(install_dir);
+    let rendered = relative_files_under(install_dir);
     let missing: Vec<&PathBuf> = source
         .iter()
         .filter(|relative| !rendered.contains(relative))
         .collect();
     assert!(
         missing.is_empty(),
-        "files present in {} but silently dropped from the rendered install {}: {missing:?}",
+        "files present in {} but missing from rendered install {}: {missing:?}",
         source_dir.display(),
         install_dir.display()
     );

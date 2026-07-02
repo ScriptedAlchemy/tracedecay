@@ -15,7 +15,7 @@
 //! cross-checked against the hooks.json files shipped by official plugins in
 //! <https://github.com/cursor/plugins> (commit 0452e08). See each schema's
 //! top-level `description` for provenance details. The `plugin.json`
-//! manifests themselves are covered by `tests/plugin_manifest_schema_test.rs`.
+//! manifests themselves are covered by `plugin_manifest_schema_test.rs`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

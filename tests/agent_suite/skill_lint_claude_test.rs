@@ -1,9 +1,8 @@
 //! Claude Code / Agent Skills portability lint for the bundled skill
 //! collections (`cursor-plugin/skills/` and `codex-plugin/skills/`).
 //!
-//! TraceDecay may ship a `claude-plugin/` bundle later; these tests verify the
-//! centralized skills already satisfy Claude Code's skill rules so the bundle
-//! would be a re-packaging exercise, not a rewrite.
+//! These tests keep the shared skills close to Claude Code's documented skill
+//! rules so a Claude bundle can reuse them without a rewrite.
 //!
 //! Rule sources (fetched 2026-07-02):
 //! - Claude Code skills reference (frontmatter field table, 1,536-char
@@ -258,11 +257,9 @@ fn documented_conflict_fields_are_actually_used_by_the_cursor_bundle() {
     }
 }
 
-/// A future claude-plugin bundle would preload every model-invocable skill's
-/// name + description into Claude Code's skill listing (default budget ~1% of
-/// context). Keep the aggregate small so the bundle never crowds the window;
-/// this mirrors the 6,000-char house budget the Cursor/Codex contract test
-/// uses for the same reason.
+/// Claude Code preloads model-invocable skill metadata into its skill listing.
+/// Keep the aggregate near the Cursor/Codex contract budget so the listing
+/// stays small.
 #[test]
 fn model_invocable_skill_metadata_fits_a_claude_listing_budget() {
     const MAX_PRELOADED_METADATA_CHARS: usize = 6_000;
