@@ -42,6 +42,19 @@ pub fn helper() { foo(); }
     (dir, cg)
 }
 
+/// Pushes a file's mtime a few seconds into the future so second-resolution
+/// staleness checks (`mtime > indexed_at`) fire without sleeping past a
+/// wall-clock second boundary.
+fn bump_mtime(path: &std::path::Path) {
+    let future = std::time::SystemTime::now() + Duration::from_secs(5);
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(future)
+        .unwrap();
+}
+
 fn run_git(project: &std::path::Path, args: &[&str]) {
     let output = Command::new("git")
         .args(["-c", "core.hooksPath=.git/no-hooks"])
@@ -258,14 +271,15 @@ async fn test_check_file_staleness_not_stale() {
 async fn test_check_file_staleness_after_modification() {
     let (dir, cg) = setup().await;
 
-    // Wait a moment, then modify the file so mtime > indexed_at
-    std::thread::sleep(std::time::Duration::from_secs(2));
+    // Modify the file and push its mtime forward so mtime > indexed_at
+    // without sleeping past the second-resolution boundary.
     let file_path = dir.path().join("src/lib.rs");
     fs::write(
         &file_path,
         "pub fn foo() { bar(); }\nfn bar() {}\nfn new_function() {}\n",
     )
     .unwrap();
+    bump_mtime(&file_path);
 
     let stale = cg.check_file_staleness(&["src/lib.rs".to_string()]).await;
     assert!(
@@ -405,12 +419,12 @@ async fn sync_if_stale_silent_does_not_create_duplicate_row_for_backslash_path()
     let cg = TraceDecay::init(project).await.unwrap();
     cg.sync().await.unwrap();
 
-    // Sleep past the indexed_at second boundary so the mtime check in
-    // `check_file_staleness` fires when we rewrite the file. Without
+    // Push the mtime past the indexed_at second boundary so the mtime check
+    // in `check_file_staleness` fires when we rewrite the file. Without
     // this, second-resolution mtimes on some filesystems can leave
     // `mtime == indexed_at` and the staleness check returns empty.
-    std::thread::sleep(std::time::Duration::from_secs(1));
     fs::write(project.join("src/a.rs"), "fn a() { let _x = 1; }").unwrap();
+    bump_mtime(&project.join("src/a.rs"));
 
     cg.sync_if_stale_silent(&["src\\a.rs".to_string()])
         .await

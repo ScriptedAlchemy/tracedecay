@@ -31,12 +31,12 @@ platform = { host = 'cfg(windows)' }
 test-group = 'windows-dashboard-server'
 
 [[profile.ci.overrides]]
-filter = 'binary(=agent_suite) | binary(=branch_db_safety_test) | binary(=cli_non_interactive_test) | binary(=mcp_cli_serve_test)'
+filter = 'binary(=agent_suite) | binary(=branch_db_safety_test) | (binary(=core_cli_suite) & test(/^cli_non_interactive_test::/)) | binary(=mcp_cli_serve_test)'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-tracedecay-init'
 
 [[profile.ci.overrides]]
-filter = '(binary(=automation_runner_test) & !test(~backend::)) | binary(=branch_drift_test) | binary(=integration_test) | binary(=regression_core_engine_test) | binary(=tracedecay_test)'
+filter = '(binary(=automation_runner_test) & !test(~backend::)) | binary(=branch_drift_test) | (binary(=core_cli_suite) & test(/^(integration_test|regression_core_engine_test|tracedecay_test)::/))'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-init-heavy'
 
@@ -51,7 +51,7 @@ platform = { host = 'cfg(windows)' }
 test-group = 'windows-session-sqlite'
 
 [[profile.ci.overrides]]
-filter = 'binary(=tool_first_touch_test) | binary(=mcp_dashboard_tool_test) | (binary(=hooks_lsp_suite) & (test(/^lsp_code_diagnostics_test::/) | test(/^extract_worker_test::/)))'
+filter = '(binary(=core_cli_suite) & test(/^tool_first_touch_test::/)) | binary(=mcp_dashboard_tool_test) | (binary(=hooks_lsp_suite) & (test(/^lsp_code_diagnostics_test::/) | test(/^extract_worker_test::/)))'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-process-heavy'
 
