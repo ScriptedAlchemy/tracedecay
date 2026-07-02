@@ -19,6 +19,8 @@ use crate::sessions::{
     SessionMessageRecord, SessionMessageSearchResult, SessionRecord, SessionSearchScope,
 };
 
+const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;
+
 /// Total savings + call count for a project (or all projects when `project` is None).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SavingsTotal {
@@ -2309,27 +2311,27 @@ impl GlobalDb {
                 "WITH latest_seconds AS (
                     SELECT timestamp FROM session_messages
                     WHERE timestamp IS NOT NULL
-                      AND timestamp < 1000000000000
+                      AND timestamp < ?1
                     ORDER BY timestamp DESC
                     LIMIT 1
                  ),
                  latest_millis AS (
                     SELECT timestamp FROM session_messages
-                    WHERE timestamp >= 1000000000000
+                    WHERE timestamp >= ?1
                     ORDER BY timestamp DESC
                     LIMIT 1
                  )
                  SELECT timestamp FROM latest_seconds
                  UNION ALL
                  SELECT timestamp FROM latest_millis",
-                (),
+                [UNIX_TIMESTAMP_MILLIS_THRESHOLD],
             )
             .await
             .ok()?;
         let mut latest: Option<i64> = None;
         while let Some(row) = rows.next().await.ok()? {
             let timestamp = row.get::<i64>(0).ok()?;
-            let normalized = if timestamp >= 1_000_000_000_000 {
+            let normalized = if timestamp >= UNIX_TIMESTAMP_MILLIS_THRESHOLD {
                 timestamp / 1000
             } else {
                 timestamp
