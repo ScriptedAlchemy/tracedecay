@@ -1,16 +1,4 @@
-//! Dashboard endpoints for `TraceDecay` settings management.
-//!
-//! `GET /api/settings` aggregates every configuration surface into one
-//! payload: the project indexing config (`config.json` in the resolved
-//! store), the editable user-level settings (`~/.tracedecay/config.toml`),
-//! read-only environment-variable gates, storage paths, and version/channel
-//! info. `PATCH /api/settings/project` and `PATCH /api/settings/user` apply
-//! validated partial updates following the automation-config error contract
-//! (`validation_errors` array with `field` + `message`).
-//!
-//! The automation config is deliberately NOT editable here — it already has
-//! a full dashboard editor at `/api/plugins/holographic/curation/config`;
-//! this payload only links to it.
+//! Dashboard endpoints for project and user settings.
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -26,8 +14,6 @@ use crate::user_config::{self, UserConfig};
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
 
-/// Endpoint where the automation config is edited (existing editor; linked
-/// from the Settings UI instead of being re-implemented there).
 const AUTOMATION_CONFIG_ENDPOINT: &str = "/api/plugins/holographic/curation/config";
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -98,9 +84,6 @@ pub(crate) async fn patch_project_settings(
         git_ignore: patch.git_ignore.unwrap_or(current.git_ignore),
         ..current.clone()
     };
-    // Every project-config field influences what gets indexed, so any change
-    // means the graph may be stale until the next sync. The endpoint never
-    // auto-runs a sync; it only flags the recommendation.
     let resync_recommended = updated != current;
     if resync_recommended {
         save_config(&state.project_root, &updated).map_err(|err| internal_error(&err))?;
@@ -138,8 +121,6 @@ pub(crate) async fn patch_user_settings(
     }
 
     let mut config = UserConfig::load();
-    // These knobs are read at daemon/MCP-server startup, so edits only take
-    // effect after a restart; the flag lets the UI say so honestly.
     let restart_recommended = patch
         .watcher_debounce
         .as_ref()
@@ -186,8 +167,6 @@ async fn settings_payload(state: &DashboardState) -> std::result::Result<Value, 
         "project": {
             "config_path": project_config_path.display().to_string(),
             "config": project_config,
-            // `.tracedecay/` marker-dir gitignore status (the `tracedecay
-            // gitignore` CLI concern is the `git_ignore` config flag above).
             "tracedecay_dir_gitignored": crate::config::is_in_gitignore(&state.project_root),
         },
         "user": {
@@ -224,8 +203,6 @@ async fn settings_payload(state: &DashboardState) -> std::result::Result<Value, 
     }))
 }
 
-/// Read-only environment-variable gates. Env vars can't be edited at runtime,
-/// so each entry carries an explanation the UI can surface verbatim.
 fn environment_payload() -> Value {
     let accounting_mode = crate::global_db::global_accounting_mode();
     let pricing_offline =

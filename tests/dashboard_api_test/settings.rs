@@ -1,7 +1,3 @@
-//! Integration tests for the aggregated Settings API
-//! (`GET /api/settings`, `PATCH /api/settings/project`,
-//! `PATCH /api/settings/user`).
-
 use crate::dashboard_api_support::*;
 use serde_json::json;
 
@@ -16,11 +12,9 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         let agent = http_agent();
         let url = format!("{}/api/settings", fixture.base_url);
 
-        // --- GET /api/settings aggregates every surface -------------------
         let (status, settings) = get_json(&agent, &url);
         assert_eq!(status, 200, "GET settings failed: {settings}");
 
-        // Project indexing config (config.json defaults).
         assert_eq!(settings["project"]["config"]["git_ignore"], true);
         assert_eq!(settings["project"]["config"]["extract_docstrings"], true);
         assert_eq!(settings["project"]["config"]["track_call_sites"], true);
@@ -37,25 +31,21 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             .unwrap_or_default()
             .ends_with("config.json"));
 
-        // User-level settings (defaults from an isolated TRACEDECAY_DATA_DIR).
         assert_eq!(settings["user"]["upload_enabled"], true);
         assert_eq!(settings["user"]["watcher_debounce"], "2s");
         assert_eq!(settings["user"]["extraction_timeout_secs"], 60);
 
-        // Automation is linked to the existing editor, not re-implemented.
         assert_eq!(
             settings["automation"]["config_endpoint"],
             "/api/plugins/holographic/curation/config"
         );
 
-        // Storage paths mirror /api/capabilities.
         assert_eq!(settings["storage"]["storage_mode"], "profile_sharded");
         assert!(!settings["storage"]["graph_db"]
             .as_str()
             .unwrap_or_default()
             .is_empty());
 
-        // Version/channel info.
         assert_eq!(settings["version"]["version"], env!("CARGO_PKG_VERSION"));
         let channel = settings["version"]["channel"].as_str().unwrap_or_default();
         assert!(
@@ -63,8 +53,6 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             "unexpected channel: {channel}"
         );
 
-        // Environment gates are surfaced read-only with explanations. The
-        // fixture pins TRACEDECAY_GLOBAL_DB, so that variable must be active.
         let variables = settings["environment"]["variables"]
             .as_array()
             .unwrap_or_else(|| panic!("expected environment variables array: {settings}"));
@@ -94,7 +82,6 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         assert_eq!(global_db_var["active"], true);
         assert!(settings["environment"]["global_accounting_enabled"].is_boolean());
 
-        // --- PATCH /api/settings/project -----------------------------------
         let project_url = format!("{url}/project");
         let (status, patched) = patch_json_body(
             &agent,
@@ -118,16 +105,13 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
                 .map(Vec::len),
             Some(2)
         );
-        // Untouched fields survive a partial patch.
         assert_eq!(patched["project"]["config"]["git_ignore"], true);
 
-        // A no-op patch persists nothing and recommends no re-sync.
         let (status, unchanged) =
             patch_json_body(&agent, &project_url, &json!({ "max_file_size": 2048 }));
         assert_eq!(status, 200, "no-op project patch failed: {unchanged}");
         assert_eq!(unchanged["resync_recommended"], false);
 
-        // Invalid glob patterns are rejected with field-level errors.
         let (status, invalid) =
             patch_json_body(&agent, &project_url, &json!({ "exclude": ["[invalid"] }));
         assert_eq!(status, 400, "invalid glob should 400: {invalid}");
@@ -137,18 +121,15 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             .unwrap_or_default()
             .contains("[invalid"));
 
-        // Unknown fields are rejected (additive shape, no silent drops).
         let (status, unknown) =
             patch_json_body(&agent, &project_url, &json!({ "made_up_field": true }));
         assert_eq!(status, 400, "unknown field should 400: {unknown}");
         assert_eq!(unknown["validation_errors"][0]["field"], "made_up_field");
 
-        // Zero max_file_size is rejected.
         let (status, zero) = patch_json_body(&agent, &project_url, &json!({ "max_file_size": 0 }));
         assert_eq!(status, 400, "zero max_file_size should 400: {zero}");
         assert_eq!(zero["validation_errors"][0]["field"], "max_file_size");
 
-        // --- PATCH /api/settings/user --------------------------------------
         let user_url = format!("{url}/user");
         let (status, user) = patch_json_body(
             &agent,
@@ -166,13 +147,11 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         assert_eq!(user["user"]["upload_enabled"], false);
         assert_eq!(user["user"]["watcher_debounce"], "15s");
 
-        // upload_enabled alone does not require a restart.
         let (status, upload_only) =
             patch_json_body(&agent, &user_url, &json!({ "upload_enabled": true }));
         assert_eq!(status, 200, "upload-only patch failed: {upload_only}");
         assert_eq!(upload_only["restart_recommended"], false);
 
-        // Invalid debounce durations are rejected with field-level errors.
         let (status, bad_debounce) =
             patch_json_body(&agent, &user_url, &json!({ "watcher_debounce": "1h" }));
         assert_eq!(status, 400, "bad debounce should 400: {bad_debounce}");
@@ -181,7 +160,6 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             "watcher_debounce"
         );
 
-        // --- Persistence round-trip ------------------------------------------
         let (status, reloaded) = get_json(&agent, &url);
         assert_eq!(status, 200);
         assert_eq!(reloaded["project"]["config"]["max_file_size"], 2048);
