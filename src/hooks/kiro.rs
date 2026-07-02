@@ -11,8 +11,8 @@ use serde_json::Value;
 use super::claude::is_code_research_prompt;
 use super::tool_hints::{decide_hint, HintAgent, ToolHintInput};
 use super::{
-    event_cwd, event_cwd_from_parsed, event_session_id, read_hook_event, record_hook_invoked,
-    rel_under_root, research_block_reason,
+    event_cwd, event_cwd_from_parsed, event_session_id, hook_route_metadata_from_event,
+    read_hook_event, record_hook_invoked, rel_under_root, research_block_reason,
 };
 
 /// Largest transcript tail the Kiro `userPromptSubmit` hook will read per call.
@@ -188,7 +188,8 @@ async fn notify_kiro_post_tool_use(event_json: &str) {
     let rel_paths = kiro_post_tool_use_rel_paths(event_json, &project_root);
     crate::daemon::notify_hook_event(
         &project_root,
-        crate::daemon::DaemonHookEvent::kiro_post_tool_use(rel_paths, event_cwd(event_json)),
+        crate::daemon::DaemonHookEvent::kiro_post_tool_use(rel_paths, event_cwd(event_json))
+            .with_route(hook_route_metadata_from_event(event_json, &project_root)),
     )
     .await;
 }

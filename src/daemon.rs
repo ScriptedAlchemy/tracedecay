@@ -87,6 +87,20 @@ impl HookAgent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookRouteMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonHookEvent {
     pub agent: String,
     pub event: String,
@@ -96,6 +110,8 @@ pub struct DaemonHookEvent {
     pub command: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<HookRouteMetadata>,
 }
 
 impl DaemonHookEvent {
@@ -112,7 +128,14 @@ impl DaemonHookEvent {
             rel_paths,
             command,
             cwd,
+            route: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_route(mut self, route: Option<HookRouteMetadata>) -> Self {
+        self.route = route;
+        self
     }
 
     pub fn cursor_after_file_edit(rel_paths: Vec<String>) -> Self {
