@@ -44,7 +44,7 @@ export function useAutomationRuns({
 }: {
   api: AutomationRunsApi;
   pollFastMs: number;
-  setActiveTab: (tab: "history") => void;
+  setActiveTab: (tab: "automation") => void;
   setMemoryPreviewFromRun: (report: MemoryCurateResponse) => void;
   loadMemoryPreview: (force?: boolean) => Promise<unknown>;
   loadActivity: (showSpinner?: boolean) => void;
@@ -151,7 +151,7 @@ export function useAutomationRuns({
   const runAutomationTask = useCallback(async (task: AutomationRunTask) => {
     setAutomationRunActioning(task);
     setAutomationRunError("");
-      setActiveTab("history");
+    setActiveTab("automation");
     try {
       const descriptor = AUTOMATION_TASK_BY_ID[task];
       const response = await api[descriptor.runMethod]({ dry_run: true });

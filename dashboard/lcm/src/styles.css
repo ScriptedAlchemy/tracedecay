@@ -1313,3 +1313,18 @@
 :root[data-theme="light"] .hermes-lcm-drawer {
   box-shadow: -28px 0 80px rgba(15, 40, 35, 0.12);
 }
+
+/* Store maintenance card (payload health + GC) */
+.hermes-lcm-storehealth-stats {
+  margin-top: 0.6rem;
+}
+
+.hermes-lcm-storehealth-actions {
+  margin-top: 0.7rem;
+}
+
+.hermes-lcm-storehealth-report {
+  margin-top: 0.5rem;
+  font-size: 0.74rem;
+  word-break: break-word;
+}

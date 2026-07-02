@@ -39,6 +39,7 @@ import {
   toolBadge,
 } from "./components";
 import { BarList, EmptyState, ErrorPanel, SkeletonLines, Stat } from "../../lib/primitives";
+import { StoreHealthCard } from "./StoreHealth";
 
 function storageScopeLabel(scope: string | undefined): string | null {
   if (scope === "project_local") return "Project store";
@@ -1028,6 +1029,12 @@ function App(): React.ReactElement {
                     : <SkeletonLines count={3} widths={["90%", "82%", "74%"]} />)}
             </div>
           </div>
+        </div>
+      )}
+
+      {serverUnreachable || !data || !data.exists ? null : (
+        <div className="hermes-lcm-grid">
+          <StoreHealthCard />
         </div>
       )}
 

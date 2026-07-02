@@ -338,6 +338,14 @@ pub async fn run_payload_gc_with_apply(
         .and_then(|value| value.parse::<i64>().ok());
     report.last_error = schema::get_gc_meta(conn, "last_error").await?;
 
+    // Stores that never externalized a payload have no `lcm-payloads`
+    // directory. That is a healthy empty state, not an IO failure: report
+    // "nothing to reclaim" instead of erroring on the missing directory.
+    if fs::symlink_metadata(payload::payload_dir(storage_root)).is_err() {
+        report.ended_at = now;
+        return Ok(report);
+    }
+
     if apply && cfg.backup_before_reap {
         checkpoint_wal_for_backup(conn).await?;
         report.backup = Some(backup_database(
@@ -1381,6 +1389,37 @@ mod tests {
         };
         assert_eq!(err, LcmError::InvalidPayloadRef);
         assert!(dir.join(SECONDARY_REF).is_dir());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn gc_on_store_without_payload_dir_reports_empty_run() -> Result<(), String> {
+        let store = test_store().await?;
+        assert!(!payload::payload_dir(&store.storage_root).exists());
+        let cfg = LcmGcConfig {
+            backup_before_reap: false,
+            ..Default::default()
+        }
+        .normalized();
+        for apply in [false, true] {
+            let report = run_payload_gc_with_apply(
+                &store.conn,
+                &store.storage_root,
+                PROVIDER,
+                None,
+                &cfg,
+                apply,
+                1_000,
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+            assert_eq!(report.orphans.count, 0);
+            assert_eq!(report.unreferenced.count, 0);
+            assert_eq!(report.missing.count, 0);
+            assert_eq!(report.totals.files, 0);
+            assert!(report.errors.is_empty());
+        }
+        assert!(!payload::payload_dir(&store.storage_root).exists());
         Ok(())
     }
 

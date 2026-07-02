@@ -453,6 +453,16 @@ vi.mock("../holographic/src/api", () => ({
   api: apiMock,
 }));
 
+function renderAutomationPanel() {
+  render(<CurationPanel />);
+  fireEvent.click(screen.getByRole("tab", { name: /automation/i }));
+}
+
+function renderProposalsPanel() {
+  render(<CurationPanel />);
+  fireEvent.click(screen.getByRole("tab", { name: /proposals/i }));
+}
+
 function renderHistoryPanel() {
   render(<CurationPanel />);
   fireEvent.click(screen.getByRole("tab", { name: /history/i }));
@@ -464,12 +474,18 @@ describe("CurationPanel", () => {
 
     const tabs = screen.getAllByRole("tab");
 
-    expect(tabs).toHaveLength(3);
-    expect(tabs.map((tab) => tab.getAttribute("tabindex"))).toEqual(["0", "0", "0"]);
+    expect(tabs).toHaveLength(5);
+    expect(tabs.map((tab) => tab.getAttribute("tabindex"))).toEqual([
+      "0",
+      "0",
+      "0",
+      "0",
+      "0",
+    ]);
   });
 
   it("saves automation runtime limits from dashboard controls", async () => {
-    renderHistoryPanel();
+    renderAutomationPanel();
 
     const maxTokens = await screen.findByLabelText("Max tokens");
     const temperature = await screen.findByLabelText("Temperature");
@@ -492,7 +508,7 @@ describe("CurationPanel", () => {
   });
 
   it("resets automation overrides from dashboard controls", async () => {
-    renderHistoryPanel();
+    renderAutomationPanel();
 
     await screen.findByLabelText("Max tokens");
     fireEvent.click(screen.getByRole("button", { name: /reset defaults/i }));
@@ -503,7 +519,7 @@ describe("CurationPanel", () => {
   });
 
   it("shows scheduler state and pauses scheduler from dashboard controls", async () => {
-    renderHistoryPanel();
+    renderAutomationPanel();
 
     expect(await screen.findByText("Scheduler")).toBeTruthy();
     expect(await screen.findByText("memory curator")).toBeTruthy();
@@ -544,7 +560,7 @@ describe("CurationPanel", () => {
       },
     });
 
-    renderHistoryPanel();
+    renderAutomationPanel();
 
     expect(await screen.findByText(/was not found/i)).toBeTruthy();
     const runButtons = await screen.findAllByRole("button", { name: /^run$/i });
@@ -589,7 +605,7 @@ describe("CurationPanel", () => {
       ),
     );
 
-    renderHistoryPanel();
+    renderAutomationPanel();
 
     const timeoutInput = await screen.findByLabelText("Timeout seconds");
     fireEvent.change(timeoutInput, { target: { value: "0" } });
@@ -609,15 +625,15 @@ describe("CurationPanel", () => {
   });
 
   it("does not offer the unimplemented external command backend", async () => {
-    renderHistoryPanel();
+    renderAutomationPanel();
 
     const backend = (await screen.findByLabelText("Backend")) as HTMLSelectElement;
     const values = Array.from(backend.options).map((option) => option.value);
     expect(values).toEqual(["disabled", "codex_app_server"]);
   });
 
-  it("renders automation run ledger entries in history", async () => {
-    renderHistoryPanel();
+  it("renders automation run ledger entries in the automation tab", async () => {
+    renderAutomationPanel();
 
     await waitFor(() => {
       expect(apiMock.getMemoryAutomationRuns).toHaveBeenCalledWith({ limit: 20 });
@@ -644,8 +660,8 @@ describe("CurationPanel", () => {
     expect(screen.getByText(/review dashboard artifact payload/)).toBeTruthy();
   });
 
-  it("runs standalone automation tasks from history controls", async () => {
-    renderHistoryPanel();
+  it("runs standalone automation tasks from the automation tab", async () => {
+    renderAutomationPanel();
 
     await screen.findByLabelText("Session reflector schedule");
     const runButtons = screen.getAllByRole("button", { name: /^run$/i });
@@ -675,8 +691,16 @@ describe("CurationPanel", () => {
     });
   });
 
-  it("renders and applies fact proposals in history", async () => {
+  it("renders run history and memory operations in the history tab", async () => {
     renderHistoryPanel();
+
+    expect(await screen.findByText("Run history")).toBeTruthy();
+    expect(await screen.findByText("Recent snapshots")).toBeTruthy();
+    expect(await screen.findByText("Recent memory operations")).toBeTruthy();
+  });
+
+  it("renders and applies fact proposals in the proposals tab", async () => {
+    renderProposalsPanel();
 
     await waitFor(() => {
       expect(apiMock.getFactProposals).toHaveBeenCalledWith({ limit: 50 });
@@ -691,8 +715,8 @@ describe("CurationPanel", () => {
     });
   });
 
-  it("renders managed skill approvals in history", async () => {
-    renderHistoryPanel();
+  it("renders managed skill approvals in the proposals tab", async () => {
+    renderProposalsPanel();
 
     await waitFor(() => {
       expect(apiMock.getManagedSkills).toHaveBeenCalled();

@@ -13,7 +13,7 @@ import { useAutomationRuns } from "./useAutomationRuns";
 import { useFactProposals } from "./useFactProposals";
 import { useManagedSkills } from "./useManagedSkills";
 
-export type CurationTab = "plan" | "history" | "activity";
+export type CurationTab = "plan" | "automation" | "proposals" | "history" | "activity";
 
 export type CurationApi = Pick<
   typeof defaultApi,
@@ -301,7 +301,11 @@ export function useCurationData({
   }, [activeTab, applying, loadSavedPreview, loading]);
 
   useEffect(() => {
-    if (activeTab === "history" && !status && !statusLoading) {
+    if (
+      (activeTab === "history" || activeTab === "automation") &&
+      !status &&
+      !statusLoading
+    ) {
       loadStatus();
     }
   }, [activeTab, loadStatus, status, statusLoading]);
@@ -309,19 +313,29 @@ export function useCurationData({
   useEffect(() => {
     if (activeTab === "history") {
       loadOplog();
+    }
+  }, [activeTab, loadOplog]);
+
+  useEffect(() => {
+    if (activeTab === "automation") {
       loadAutomationRuns();
       loadSchedulerStatus(false).catch(() => {});
+    }
+  }, [activeTab, loadAutomationRuns, loadSchedulerStatus]);
+
+  useEffect(() => {
+    if (activeTab === "proposals") {
       loadFactProposals();
       loadManagedSkills();
     }
-  }, [
-    activeTab,
-    loadAutomationRuns,
-    loadFactProposals,
-    loadManagedSkills,
-    loadOplog,
-    loadSchedulerStatus,
-  ]);
+  }, [activeTab, loadFactProposals, loadManagedSkills]);
+
+  // Load once on mount so the Proposals tab badge shows pending counts
+  // before the tab is first opened.
+  useEffect(() => {
+    void Promise.allSettled([loadFactProposals(), loadManagedSkills()]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (activeTab === "activity" && activity.length === 0) {

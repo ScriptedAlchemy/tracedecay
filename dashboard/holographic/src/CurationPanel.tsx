@@ -1,5 +1,7 @@
 import {
+  Bot,
   History,
+  Inbox,
   ListChecks,
   ScrollText,
   Wand2,
@@ -17,6 +19,8 @@ import {
   useCurationData,
   type CurationTab,
 } from "./curation/useCurationData";
+import { CurationAutomationPanel } from "./curation/CurationAutomationPanel";
+import { CurationProposalsPanel } from "./curation/CurationProposalsPanel";
 import { CurationHistoryPanel } from "./curation/CurationHistoryPanel";
 import { InlineConfirm } from "./curation/InlineConfirm";
 import { isActiveAutomationStatus, type AutomationRunTask } from "./curation/automationTasks";
@@ -198,8 +202,16 @@ export default function CurationPanel({
   const selectedImprovementRecommendation = selectedManagedSkill
     ? managedSkillImprovementRecommendations[selectedManagedSkill.metadata.id]
     : null;
+  const pendingProposalCount =
+    factProposals.filter((proposal) => proposal.state === "pending_approval").length +
+    managedSkills.filter((skill) => skill.metadata.state === "pending_approval").length;
+  const proposalsLabel = pendingProposalCount
+    ? `Proposals ${pendingProposalCount}`
+    : "Proposals";
   const tabs: Array<{ id: CurationTab; label: string; Icon: typeof Wand2 }> = [
     { id: "plan", label: planLabel, Icon: ListChecks },
+    { id: "automation", label: "Automation", Icon: Bot },
+    { id: "proposals", label: proposalsLabel, Icon: Inbox },
     { id: "history", label: "History", Icon: History },
     { id: "activity", label: "Activity", Icon: ScrollText },
   ];
@@ -244,7 +256,7 @@ export default function CurationPanel({
           ref={panelRef}
           role="tablist"
           aria-label="Curation views"
-          className="grid grid-cols-3 gap-1 rounded-sm border border-border bg-secondary/30 p-1 shrink-0"
+          className="grid grid-cols-5 gap-1 rounded-sm border border-border bg-secondary/30 p-1 shrink-0"
         >
           {tabs.map(({ id, label, Icon }) => {
             const active = activeTab === id;
@@ -406,21 +418,11 @@ export default function CurationPanel({
           </div>
         ) : null}
 
-        {activeTab === "history" ? (
-          <CurationHistoryPanel
-            report={report}
-            previewSavedAt={previewSavedAt}
-            previewStale={previewStale}
-            previewStaleReason={previewStaleReason}
-            actionsLength={actions.length}
-            actionCounts={actionCounts}
-            diagnosticCounts={diagnosticCounts}
-            isPlan={isPlan}
+        {activeTab === "automation" ? (
+          <CurationAutomationPanel
             status={status}
             statusLoading={statusLoading}
             statusError={statusError}
-            oplog={oplog}
-            oplogError={oplogError}
             automationRuns={automationRuns}
             automationRunsError={automationRunsError}
             automationRunActioning={automationRunActioning}
@@ -429,19 +431,6 @@ export default function CurationPanel({
             automationRunArtifact={automationRunArtifact}
             automationRunArtifactLoading={automationRunArtifactLoading}
             automationRunArtifactError={automationRunArtifactError}
-            factProposals={factProposals}
-            factProposalsLoading={factProposalsLoading}
-            factProposalsError={factProposalsError}
-            factProposalActioning={factProposalActioning}
-            managedSkills={managedSkills}
-            selectedManagedSkillId={selectedManagedSkillId}
-            selectedManagedSkill={selectedManagedSkill}
-            selectedUsage={selectedUsage}
-            selectedRecommendation={selectedRecommendation}
-            selectedImprovementRecommendation={selectedImprovementRecommendation}
-            managedSkillsLoading={managedSkillsLoading}
-            managedSkillsError={managedSkillsError}
-            managedSkillActioning={managedSkillActioning}
             configDraft={configDraft}
             configLoading={configLoading}
             configSaving={configSaving}
@@ -461,16 +450,10 @@ export default function CurationPanel({
             automationTaskLabel={automationTaskLabel}
             taskFieldError={taskFieldError}
             loadStatus={loadStatus}
-            loadOplog={loadOplog}
             loadAutomationRuns={loadAutomationRuns}
             loadSchedulerStatus={loadSchedulerStatus}
             loadAutomationRunArtifact={loadAutomationRunArtifact}
-            loadFactProposals={loadFactProposals}
-            loadManagedSkills={loadManagedSkills}
-            loadManagedSkill={loadManagedSkill}
             runAutomationTask={runAutomationTask}
-            runFactProposalAction={runFactProposalAction}
-            runManagedSkillAction={runManagedSkillAction}
             setSchedulerPaused={setSchedulerPaused}
             updateConfigDraft={updateConfigDraft}
             updateConfigTaskDraft={updateConfigTaskDraft}
@@ -478,6 +461,49 @@ export default function CurationPanel({
             resetConfigDraft={resetConfigDraft}
             resetConfigToDefaults={resetConfigToDefaults}
             saveConfigDraft={saveConfigDraft}
+          />
+        ) : null}
+
+        {activeTab === "proposals" ? (
+          <CurationProposalsPanel
+            factProposals={factProposals}
+            factProposalsLoading={factProposalsLoading}
+            factProposalsError={factProposalsError}
+            factProposalActioning={factProposalActioning}
+            managedSkills={managedSkills}
+            selectedManagedSkillId={selectedManagedSkillId}
+            selectedManagedSkill={selectedManagedSkill}
+            selectedUsage={selectedUsage}
+            selectedRecommendation={selectedRecommendation}
+            selectedImprovementRecommendation={selectedImprovementRecommendation}
+            managedSkillsLoading={managedSkillsLoading}
+            managedSkillsError={managedSkillsError}
+            managedSkillActioning={managedSkillActioning}
+            loadFactProposals={loadFactProposals}
+            loadManagedSkills={loadManagedSkills}
+            loadManagedSkill={loadManagedSkill}
+            runFactProposalAction={runFactProposalAction}
+            runManagedSkillAction={runManagedSkillAction}
+          />
+        ) : null}
+
+        {activeTab === "history" ? (
+          <CurationHistoryPanel
+            report={report}
+            previewSavedAt={previewSavedAt}
+            previewStale={previewStale}
+            previewStaleReason={previewStaleReason}
+            actionsLength={actions.length}
+            actionCounts={actionCounts}
+            diagnosticCounts={diagnosticCounts}
+            isPlan={isPlan}
+            status={status}
+            statusLoading={statusLoading}
+            statusError={statusError}
+            oplog={oplog}
+            oplogError={oplogError}
+            loadStatus={loadStatus}
+            loadOplog={loadOplog}
           />
         ) : null}
       </CardContent>

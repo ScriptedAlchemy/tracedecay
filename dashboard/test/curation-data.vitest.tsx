@@ -592,7 +592,7 @@ describe("useCurationData", () => {
     expect(result.current.configDirty).toBe(true);
   });
 
-  it("loads automation run history when the history tab opens", async () => {
+  it("loads automation run history when the automation tab opens", async () => {
     const api = makeApi({
       getMemoryAutomationRuns: vi.fn().mockResolvedValue({
         records: [
@@ -621,7 +621,7 @@ describe("useCurationData", () => {
       expect(result.current.configDraft).toBeTruthy();
     });
 
-    act(() => result.current.setActiveTab("history"));
+    act(() => result.current.setActiveTab("automation"));
 
     await waitFor(() => {
       expect(api.getMemoryAutomationRuns).toHaveBeenCalledWith({ limit: 20 });
@@ -827,7 +827,7 @@ describe("useCurationData", () => {
     expect(api.getManagedSkills).toHaveBeenCalledTimes(1);
   });
 
-  it("loads and applies fact proposals from the history tab", async () => {
+  it("loads and applies fact proposals from the proposals tab", async () => {
     const pendingProposal = {
       schema_version: 1,
       proposal_id: "prop-1",
@@ -850,6 +850,11 @@ describe("useCurationData", () => {
           count: 1,
           limit: 50,
         })
+        .mockResolvedValueOnce({
+          proposals: [pendingProposal],
+          count: 1,
+          limit: 50,
+        })
         .mockResolvedValue({
           proposals: [appliedProposal],
           count: 1,
@@ -863,7 +868,7 @@ describe("useCurationData", () => {
       expect(result.current.configDraft).toBeTruthy();
     });
 
-    act(() => result.current.setActiveTab("history"));
+    act(() => result.current.setActiveTab("proposals"));
 
     await waitFor(() => {
       expect(api.getFactProposals).toHaveBeenCalledWith({ limit: 50 });
@@ -878,7 +883,7 @@ describe("useCurationData", () => {
     expect(result.current.factProposals[0].state).toBe("applied");
   });
 
-  it("loads and approves managed skills from the history tab", async () => {
+  it("loads and approves managed skills from the proposals tab", async () => {
     const pendingSkill = {
       metadata: {
         id: "repo-hygiene",
@@ -916,6 +921,21 @@ describe("useCurationData", () => {
           ],
           count: 1,
         })
+        .mockResolvedValueOnce({
+          skills: [pendingSkill],
+          skill_metadata: [pendingSkill.metadata],
+          improvement_recommendations: [
+            {
+              skill_id: "repo-hygiene",
+              improvement: true,
+              recommendation: "patch_review",
+              reason: "repeated patches suggest the skill instructions may still be unstable",
+              priority: "medium",
+              evidence: ["patches=2"],
+            },
+          ],
+          count: 1,
+        })
         .mockResolvedValue({
           skills: [activeSkill],
           skill_metadata: [activeSkill.metadata],
@@ -933,6 +953,7 @@ describe("useCurationData", () => {
         }),
       getManagedSkill: vi.fn()
         .mockResolvedValueOnce({ skill: pendingSkill })
+        .mockResolvedValueOnce({ skill: pendingSkill })
         .mockResolvedValue({ skill: activeSkill }),
       approveManagedSkill: vi.fn().mockResolvedValue({ skill: activeSkill }),
     });
@@ -942,7 +963,7 @@ describe("useCurationData", () => {
       expect(result.current.configDraft).toBeTruthy();
     });
 
-    act(() => result.current.setActiveTab("history"));
+    act(() => result.current.setActiveTab("proposals"));
 
     await waitFor(() => {
       expect(api.getManagedSkills).toHaveBeenCalled();
