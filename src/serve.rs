@@ -407,12 +407,17 @@ fn hex_value(byte: u8) -> Option<u8> {
 pub async fn run_serve(path_arg: Option<String>, timings: bool) -> Result<()> {
     let original_cwd = std::env::current_dir().ok();
     let (resolver, error, peeked_line) = match resolve_serve_startup(path_arg).await {
-        ServeStartup::Ready { cg, peeked_line } => {
+        ServeStartup::Ready {
+            cg,
+            peeked_line,
+            allow_initialize_root_routing,
+        } => {
             return Box::pin(serve_resolved_project(
                 *cg,
                 original_cwd,
                 timings,
                 peeked_line,
+                allow_initialize_root_routing,
             ))
             .await;
         }
@@ -455,14 +460,16 @@ async fn serve_resolved_project(
     original_cwd: Option<std::path::PathBuf>,
     timings: bool,
     peeked_line: Option<String>,
+    allow_initialize_root_routing: bool,
 ) -> Result<()> {
     let scope_prefix = serve_scope_prefix(original_cwd.as_deref(), cg.project_root());
-    let handshake = crate::daemon::DaemonHandshake::for_current_client(
+    let mut handshake = crate::daemon::DaemonHandshake::for_current_client(
         Some(cg.project_root().to_path_buf()),
         scope_prefix,
         timings,
         false,
     )?;
+    handshake.allow_initialize_root_routing = allow_initialize_root_routing;
     let socket_path = crate::daemon::default_socket_path()?;
     if crate::daemon::should_proxy_serve_to_daemon(&socket_path).await {
         crate::daemon::proxy_stdio_to_daemon(&socket_path, &handshake, peeked_line).await
@@ -500,6 +507,7 @@ pub enum ServeStartup {
     Ready {
         cg: Box<TraceDecay>,
         peeked_line: Option<String>,
+        allow_initialize_root_routing: bool,
     },
     /// Resolution failed with a recoverable config problem. The resolver
     /// retries the same resolution ladder on every degraded tool call.
@@ -543,6 +551,7 @@ pub async fn resolve_serve_startup(path_arg: Option<String>) -> ServeStartup {
             return ServeStartup::Ready {
                 cg: Box::new(cg),
                 peeked_line,
+                allow_initialize_root_routing: false,
             };
         }
         Err(e) => e,
@@ -561,10 +570,11 @@ pub async fn resolve_serve_startup(path_arg: Option<String>) -> ServeStartup {
     // the MCP `initialize` request's workspace roots; the resolver remembers
     // them so degraded retries can keep consulting them.
     resolver.initialize_roots = read_initialize_roots(&mut peeked_line).await;
-    match resolver.resolve_once().await {
-        Ok(cg) => ServeStartup::Ready {
+    match resolver.resolve_once_with_origin().await {
+        Ok((cg, origin)) => ServeStartup::Ready {
             cg: Box::new(cg),
             peeked_line,
+            allow_initialize_root_routing: origin == ServeProjectResolutionOrigin::InitializeRoots,
         },
         Err(error) => ServeStartup::Degraded {
             resolver,
@@ -590,6 +600,14 @@ pub struct ServeProjectResolver {
     initialize_roots: Vec<std::path::PathBuf>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServeProjectResolutionOrigin {
+    StartupPath,
+    FreshCwd,
+    InitializeRoots,
+    GlobalDb,
+}
+
 impl ServeProjectResolver {
     /// The path named in degraded-mode error messages.
     pub(crate) fn project_path(&self) -> &Path {
@@ -601,13 +619,19 @@ impl ServeProjectResolver {
     /// walk-up (an intervening `tracedecay init` can create an enclosing
     /// project), the remembered initialize roots, then the global registry.
     async fn resolve_once(&self) -> Result<TraceDecay> {
+        self.resolve_once_with_origin()
+            .await
+            .map(|(cg, _origin)| cg)
+    }
+
+    async fn resolve_once_with_origin(&self) -> Result<(TraceDecay, ServeProjectResolutionOrigin)> {
         let first_error = match ensure_initialized(&self.project_path).await {
             Ok(cg) => {
                 self.log_choice_if_template(
                     cg.project_root(),
                     "discovered from the working directory",
                 );
-                return Ok(cg);
+                return Ok((cg, ServeProjectResolutionOrigin::StartupPath));
             }
             Err(e) => e,
         };
@@ -622,19 +646,23 @@ impl ServeProjectResolver {
                     cg.project_root(),
                     "discovered from the working directory",
                 );
-                return Ok(cg);
+                return Ok((cg, ServeProjectResolutionOrigin::FreshCwd));
             }
         }
 
         if let Some(p) = resolve_project_from_roots(&self.initialize_roots).await {
             self.log_choice_if_template(&p, "matched an MCP initialize root");
-            return ensure_initialized(&p).await;
+            return ensure_initialized(&p)
+                .await
+                .map(|cg| (cg, ServeProjectResolutionOrigin::InitializeRoots));
         }
 
         match resolve_serve_from_global_db(self.global_db_match).await {
             ServeGlobalDbResolution::Found(p) => {
                 self.log_choice_if_template(&p, "resolved from the global project registry");
-                ensure_initialized(&p).await
+                ensure_initialized(&p)
+                    .await
+                    .map(|cg| (cg, ServeProjectResolutionOrigin::GlobalDb))
             }
             ServeGlobalDbResolution::Ambiguous(paths) => Err(TraceDecayError::Config {
                 message: global_db_ambiguity_message(&paths),
