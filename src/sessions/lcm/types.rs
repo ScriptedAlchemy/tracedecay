@@ -148,6 +148,64 @@ pub struct LcmLoadSessionMessage {
     pub metadata_json: Option<String>,
 }
 
+/// Recency-ordered overview of one session in the LCM raw store, used to
+/// select "recently active" sessions for automation replay evidence.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmRecentSession {
+    pub provider: String,
+    pub session_id: String,
+    pub message_count: i64,
+    pub first_timestamp: Option<i64>,
+    pub last_timestamp: Option<i64>,
+    pub last_store_id: i64,
+}
+
+/// Bounded turn-ordered replay slice request for one session: up to
+/// `head_limit` opening turns, `tail_limit` closing turns, and
+/// `summary_limit` summary-DAG nodes, each snippet capped by chars.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmSessionReplayRequest {
+    pub provider: String,
+    pub session_id: String,
+    pub head_limit: usize,
+    pub tail_limit: usize,
+    pub max_snippet_chars: usize,
+    pub summary_limit: usize,
+    pub max_summary_chars: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmSessionReplaySlice {
+    pub provider: String,
+    pub session_id: String,
+    pub total_messages: i64,
+    /// Messages between the head and tail slices that were not included.
+    pub omitted_messages: i64,
+    pub head: Vec<LcmReplayMessage>,
+    pub tail: Vec<LcmReplayMessage>,
+    pub summary_nodes: Vec<LcmReplaySummaryNode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmReplayMessage {
+    pub message_id: String,
+    pub store_id: i64,
+    pub role: String,
+    pub ordinal: i64,
+    pub timestamp: Option<i64>,
+    pub snippet: String,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmReplaySummaryNode {
+    pub node_id: String,
+    pub depth: i64,
+    pub created_at: i64,
+    pub snippet: String,
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LcmScope {

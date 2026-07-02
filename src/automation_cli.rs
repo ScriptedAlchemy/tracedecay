@@ -513,6 +513,7 @@ async fn handle_automation_run_command(
                     role,
                     start_time,
                     end_time,
+                    ..SessionReflectorAutomationOptions::default()
                 },
             )
             .await?;
@@ -559,6 +560,7 @@ async fn handle_automation_run_command(
                     query,
                     evidence_limit,
                     profile_root: None,
+                    ..SkillWriterAutomationOptions::default()
                 },
             )
             .await?;

@@ -16,8 +16,9 @@ use super::{
     LcmExpandQuerySynthesisPrompt, LcmExpandRequest, LcmExpandResponse, LcmExpandSourcePagination,
     LcmExpandTarget, LcmExpandedSummarySource, LcmGcConfig, LcmGrepHit, LcmGrepRequest,
     LcmGrepSort, LcmLoadSessionMessage, LcmLoadSessionPage, LcmLoadSessionRequest, LcmRawMessage,
-    LcmRawMessageOverview, LcmScope, LcmSourceRef, LcmStatus, LcmStorageKind, LcmStoreStatus,
-    LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeOverview,
+    LcmRawMessageOverview, LcmRecentSession, LcmReplayMessage, LcmReplaySummaryNode, LcmScope,
+    LcmSessionReplayRequest, LcmSessionReplaySlice, LcmSourceRef, LcmStatus, LcmStorageKind,
+    LcmStoreStatus, LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeOverview,
     LCM_COMPRESSION_BOUNDARY_COOLDOWN_SECONDS, LCM_DEFAULT_FRESH_TAIL_COUNT,
     LCM_DEFAULT_SUMMARY_FAN_IN, LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT, LCM_SCHEMA_VERSION,
 };
@@ -154,6 +155,181 @@ pub(crate) async fn load_session(
         messages,
         next_cursor,
     })
+}
+
+/// Lists sessions in the raw LCM store ordered by most recent activity
+/// (latest message timestamp, falling back to insertion order).
+pub(crate) async fn recent_sessions(
+    conn: &Connection,
+    provider: Option<&str>,
+    limit: usize,
+) -> Result<Vec<LcmRecentSession>, LcmError> {
+    let limit = clamp_limit(limit);
+    let mut values = Vec::new();
+    let provider_clause = match provider {
+        Some(provider) => {
+            values.push(Value::Text(provider.to_string()));
+            "WHERE provider = ?"
+        }
+        None => "",
+    };
+    values.push(Value::Integer(limit as i64));
+    let sql = format!(
+        "SELECT provider, session_id, COUNT(*), MIN(timestamp), MAX(timestamp), MAX(store_id)
+         FROM lcm_raw_messages
+         {provider_clause}
+         GROUP BY provider, session_id
+         ORDER BY COALESCE(MAX(timestamp), MAX(store_id)) DESC, MAX(store_id) DESC
+         LIMIT ?"
+    );
+    let mut rows = conn.query(&sql, values).await?;
+    let mut sessions = Vec::new();
+    while let Some(row) = rows.next().await? {
+        sessions.push(LcmRecentSession {
+            provider: row.get(0)?,
+            session_id: row.get(1)?,
+            message_count: row.get(2)?,
+            first_timestamp: row.get(3)?,
+            last_timestamp: row.get(4)?,
+            last_store_id: row.get(5)?,
+        });
+    }
+    Ok(sessions)
+}
+
+/// Loads a bounded turn-ordered replay slice for one session: head turns,
+/// tail turns (deduplicated against the head), and top summary-DAG nodes.
+pub(crate) async fn session_replay_slice(
+    conn: &Connection,
+    request: &LcmSessionReplayRequest,
+) -> Result<LcmSessionReplaySlice, LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM lcm_raw_messages WHERE provider = ?1 AND session_id = ?2",
+            params![request.provider.as_str(), request.session_id.as_str()],
+        )
+        .await?;
+    let total_messages: i64 = match rows.next().await? {
+        Some(row) => row.get(0)?,
+        None => 0,
+    };
+
+    let head = replay_slice_messages(conn, request, ReplayDirection::Head, None).await?;
+    let last_head_store_id = head.last().map(|message| message.store_id);
+    let mut tail =
+        replay_slice_messages(conn, request, ReplayDirection::Tail, last_head_store_id).await?;
+    tail.reverse();
+    let included = (head.len() + tail.len()) as i64;
+    let summary_nodes = replay_slice_summary_nodes(conn, request).await?;
+
+    Ok(LcmSessionReplaySlice {
+        provider: request.provider.clone(),
+        session_id: request.session_id.clone(),
+        total_messages,
+        omitted_messages: (total_messages - included).max(0),
+        head,
+        tail,
+        summary_nodes,
+    })
+}
+
+#[derive(Clone, Copy)]
+enum ReplayDirection {
+    Head,
+    Tail,
+}
+
+async fn replay_slice_messages(
+    conn: &Connection,
+    request: &LcmSessionReplayRequest,
+    direction: ReplayDirection,
+    after_store_id: Option<i64>,
+) -> Result<Vec<LcmReplayMessage>, LcmError> {
+    let limit = match direction {
+        ReplayDirection::Head => request.head_limit,
+        ReplayDirection::Tail => request.tail_limit,
+    };
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let order = match direction {
+        ReplayDirection::Head => "ASC",
+        ReplayDirection::Tail => "DESC",
+    };
+    let values = vec![
+        Value::Text(request.provider.clone()),
+        Value::Text(request.session_id.clone()),
+        Value::Integer(after_store_id.unwrap_or(0)),
+        Value::Integer(clamp_limit(limit) as i64),
+    ];
+    let sql = format!(
+        "SELECT message_id, store_id, role, ordinal, timestamp, snippet_text
+         FROM lcm_raw_messages
+         WHERE provider = ? AND session_id = ? AND store_id > ?
+         ORDER BY store_id {order}
+         LIMIT ?"
+    );
+    let mut rows = conn.query(&sql, values).await?;
+    let mut messages = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let snippet_text: String = row.get(5)?;
+        let (snippet, truncated) = bounded_replay_snippet(&snippet_text, request.max_snippet_chars);
+        messages.push(LcmReplayMessage {
+            message_id: row.get(0)?,
+            store_id: row.get(1)?,
+            role: row.get(2)?,
+            ordinal: row.get(3)?,
+            timestamp: row.get(4)?,
+            snippet,
+            truncated,
+        });
+    }
+    Ok(messages)
+}
+
+async fn replay_slice_summary_nodes(
+    conn: &Connection,
+    request: &LcmSessionReplayRequest,
+) -> Result<Vec<LcmReplaySummaryNode>, LcmError> {
+    if request.summary_limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut rows = conn
+        .query(
+            "SELECT node_id, depth, created_at, summary_text
+             FROM lcm_summary_nodes
+             WHERE provider = ?1 AND session_id = ?2
+             ORDER BY depth DESC, created_at DESC, node_id
+             LIMIT ?3",
+            params![
+                request.provider.as_str(),
+                request.session_id.as_str(),
+                clamp_limit(request.summary_limit) as i64,
+            ],
+        )
+        .await?;
+    let mut nodes = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let summary_text: String = row.get(3)?;
+        let (snippet, truncated) = bounded_replay_snippet(&summary_text, request.max_summary_chars);
+        nodes.push(LcmReplaySummaryNode {
+            node_id: row.get(0)?,
+            depth: row.get(1)?,
+            created_at: row.get(2)?,
+            snippet,
+            truncated,
+        });
+    }
+    Ok(nodes)
+}
+
+fn bounded_replay_snippet(text: &str, max_chars: usize) -> (String, bool) {
+    let text = text.trim();
+    if text.chars().nth(max_chars).is_none() {
+        (text.to_string(), false)
+    } else {
+        (text.chars().take(max_chars).collect(), true)
+    }
 }
 
 pub(crate) async fn grep(
