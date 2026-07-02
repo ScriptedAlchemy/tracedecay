@@ -53,10 +53,10 @@ pub fn read_source_file(path: &Path) -> std::io::Result<String> {
 /// giving up. Other platforms read directly: `PermissionDenied` there is a
 /// real ACL problem that retrying cannot fix.
 fn read_file_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
+    const RETRY_DELAYS_MS: [u64; 4] = [10, 20, 40, 80];
     if !cfg!(windows) {
         return std::fs::read(path);
     }
-    const RETRY_DELAYS_MS: [u64; 4] = [10, 20, 40, 80];
     let mut delays = RETRY_DELAYS_MS.iter();
     loop {
         match std::fs::read(path) {
@@ -72,9 +72,9 @@ fn read_file_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
 }
 
 /// True for Windows errors that indicate another process is briefly holding
-/// the file: ERROR_SHARING_VIOLATION (32) and ERROR_LOCK_VIOLATION (33) map
-/// through as raw OS errors, while Defender-style scans surface as plain
-/// `PermissionDenied` (ERROR_ACCESS_DENIED, os error 5).
+/// the file: `ERROR_SHARING_VIOLATION` (32) and `ERROR_LOCK_VIOLATION` (33)
+/// map through as raw OS errors, while Defender-style scans surface as plain
+/// `PermissionDenied` (`ERROR_ACCESS_DENIED`, os error 5).
 fn is_transient_windows_file_lock(err: &std::io::Error) -> bool {
     const ERROR_SHARING_VIOLATION: i32 = 32;
     const ERROR_LOCK_VIOLATION: i32 = 33;
