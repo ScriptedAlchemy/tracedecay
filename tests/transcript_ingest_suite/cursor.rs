@@ -1,8 +1,5 @@
 use std::io::Write;
 
-mod common;
-
-use common::{EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK};
 use tempfile::TempDir;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::hooks::cursor_pre_compact_for_event_with_config;
@@ -15,13 +12,8 @@ use tracedecay::sessions::lcm::{LcmDescribeRequest, LcmDescribeTarget};
 use tracedecay::sessions::source::ingest_source;
 use tracedecay::sessions::SessionSearchScope;
 
-fn init_project(tmp: &TempDir) -> std::path::PathBuf {
-    let project = tmp.path().join("project");
-    std::fs::create_dir_all(&project).unwrap();
-    std::fs::create_dir(project.join(".tracedecay")).unwrap();
-    std::fs::write(project.join(".tracedecay/tracedecay.db"), "").unwrap();
-    project
-}
+use crate::common::{EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK};
+use crate::support::{init_project, init_project_at};
 
 fn cursor_event(project: &std::path::Path, transcript: &std::path::Path) -> serde_json::Value {
     serde_json::json!({
@@ -485,10 +477,8 @@ async fn cursor_transcript_ingest_uses_cwd_root_in_multi_root_workspace() {
     let tmp = TempDir::new().unwrap();
     let root_a = tmp.path().join("root-a");
     let root_b = tmp.path().join("root-b");
-    std::fs::create_dir_all(root_a.join(".tracedecay")).unwrap();
-    std::fs::create_dir_all(root_b.join(".tracedecay")).unwrap();
-    std::fs::write(root_a.join(".tracedecay/tracedecay.db"), "").unwrap();
-    std::fs::write(root_b.join(".tracedecay/tracedecay.db"), "").unwrap();
+    init_project_at(&root_a);
+    init_project_at(&root_b);
     let cwd_b = root_b.join("workspace");
     std::fs::create_dir_all(&cwd_b).unwrap();
     let transcript = root_b.join("cursor-session.jsonl");
@@ -1086,8 +1076,7 @@ async fn cursor_sweep_skips_ambiguous_project_slug() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
     let project = tmp.path().join("work").join("foo-bar");
-    std::fs::create_dir_all(project.join(".tracedecay")).unwrap();
-    std::fs::write(project.join(".tracedecay/tracedecay.db"), "").unwrap();
+    init_project_at(&project);
     // A second *existing* directory that encodes to the same slug as the
     // project ("…-work-foo-bar"): the sweep must skip rather than guess
     // which workspace the slug's transcripts belong to.

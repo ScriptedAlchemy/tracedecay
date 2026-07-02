@@ -4,14 +4,7 @@ use tracedecay::sessions::cline_like::ClineLikeSource;
 use tracedecay::sessions::cursor::{open_project_session_db, project_session_db_path};
 use tracedecay::sessions::source::ingest_source;
 
-fn setup(tmp: &TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
-    let home = tmp.path().join("home");
-    let project = tmp.path().join("project");
-    std::fs::create_dir_all(&project).unwrap();
-    std::fs::create_dir(project.join(".tracedecay")).unwrap();
-    std::fs::write(project.join(".tracedecay/tracedecay.db"), "").unwrap();
-    (home, project)
-}
+use crate::support::setup;
 
 fn vscode_storage_root(home: &std::path::Path, extension_id: &str) -> std::path::PathBuf {
     tracedecay::agents::vscode_data_dir(home)
