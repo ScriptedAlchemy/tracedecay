@@ -8,7 +8,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::common::{
     is_kebab_case_skill_name, load_skill_docs, relative_files_under, repo_path, EnvVarGuard,
@@ -68,7 +68,7 @@ fn generated_codex_plugin_skills_are_byte_copies_of_the_source_bundle() {
         .install(&install_ctx(home.path()))
         .expect("install generated Codex plugin bundle");
 
-    let source_root = skills_source_root(CODEX_SKILL_ROOT);
+    let source_root = repo_path(CODEX_SKILL_ROOT);
     let installed_root = home.path().join("plugins/tracedecay/skills");
     assert_eq!(
         skill_dir_names(&installed_root),
@@ -98,7 +98,7 @@ fn generated_cursor_plugin_skills_are_byte_copies_of_the_source_bundle() {
         .install(&install_ctx(home.path()))
         .expect("install generated Cursor plugin bundle");
 
-    let source_root = skills_source_root(CURSOR_SKILL_ROOT);
+    let source_root = repo_path(CURSOR_SKILL_ROOT);
     let installed_root = home.path().join(".cursor/plugins/local/tracedecay/skills");
     assert_eq!(
         skill_dir_names(&installed_root),
@@ -152,10 +152,6 @@ fn produced_plugin_skills_follow_skill_creator_design_advice() {
         assert_skill_tree_uses_supported_files(skill_dir);
         assert_openai_yaml_contract_if_present(skill_dir);
     }
-}
-
-fn skills_source_root(root: &str) -> PathBuf {
-    repo_path(root)
 }
 
 /// Serializes the generated-bundle tests, which mutate process-wide env vars.

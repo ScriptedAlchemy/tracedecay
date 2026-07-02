@@ -54,7 +54,7 @@ const NON_TOOL_IDENTIFIERS: &[&str] = &["tracedecay_metrics"];
 
 #[test]
 fn cursor_skill_files_are_hygienic() {
-    let skills = load_skills();
+    let skills = load_skill_docs(CURSOR_SKILL_ROOT);
     let mut violations = Vec::new();
 
     for skill in &skills {
@@ -112,7 +112,7 @@ fn cursor_skill_files_are_hygienic() {
 
 #[test]
 fn cursor_skill_bodies_follow_heading_conventions() {
-    let skills = load_skills();
+    let skills = load_skill_docs(CURSOR_SKILL_ROOT);
     let mut violations = Vec::new();
 
     for skill in &skills {
@@ -170,7 +170,7 @@ fn cursor_skill_bodies_follow_heading_conventions() {
 
 #[test]
 fn cursor_skill_names_and_descriptions_meet_lint_quality_bar() {
-    let skills = load_skills();
+    let skills = load_skill_docs(CURSOR_SKILL_ROOT);
     let mut violations = Vec::new();
     let mut descriptions_seen: BTreeMap<String, String> = BTreeMap::new();
 
@@ -216,7 +216,7 @@ fn cursor_skill_names_and_descriptions_meet_lint_quality_bar() {
 
 #[test]
 fn cursor_skill_references_resolve() {
-    let skills = load_skills();
+    let skills = load_skill_docs(CURSOR_SKILL_ROOT);
     let skill_names: BTreeSet<&str> = skills.iter().map(|skill| skill.name.as_str()).collect();
     let tool_names = mcp_tool_names();
     let mut violations = Vec::new();
@@ -323,10 +323,6 @@ fn cursor_skill_references_resolve() {
          the lint regexes are broken"
     );
     assert_no_violations("reference integrity", &violations);
-}
-
-fn load_skills() -> Vec<SkillDoc> {
-    load_skill_docs(CURSOR_SKILL_ROOT)
 }
 
 fn first_content_line(body: &str) -> Option<&str> {
