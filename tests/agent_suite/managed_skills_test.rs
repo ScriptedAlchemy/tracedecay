@@ -940,3 +940,43 @@ async fn managed_skill_usage_ledger_records_views_uses_and_patches() {
     assert_eq!(summary.targets, vec!["codex", "cursor"]);
     assert!(summary.last_activity_at > 0);
 }
+
+#[tokio::test]
+async fn approval_stamps_approved_at_and_usage_baselines() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let skill = create_managed_skill_draft(&profile_root, draft())
+        .await
+        .unwrap();
+    assert!(skill.metadata.approved_at.is_none());
+
+    record_skill_usage(
+        &profile_root,
+        &skill,
+        SkillUsageAction::View,
+        "dashboard",
+        vec!["dashboard".to_string()],
+        Some("dashboard".to_string()),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let approved = approve_managed_skill(&profile_root, "repo-hygiene")
+        .await
+        .unwrap();
+    let approved_at = approved.metadata.approved_at.unwrap();
+    assert!(approved_at > 0);
+
+    let summary = summarize_skill_usage_for(&profile_root, &approved)
+        .await
+        .unwrap();
+    assert_eq!(summary.approved_at, Some(approved_at));
+    assert_eq!(summary.view_count_at_approval, Some(1));
+    assert_eq!(summary.use_count_at_approval, Some(0));
+
+    let reloaded = load_managed_skill(&profile_root, "repo-hygiene")
+        .await
+        .unwrap();
+    assert_eq!(reloaded.metadata.approved_at, Some(approved_at));
+}

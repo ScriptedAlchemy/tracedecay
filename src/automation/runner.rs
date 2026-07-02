@@ -198,6 +198,21 @@ pub async fn run_session_reflector_with_backend(
         }
     };
 
+    // Refresh outcomes of previously applied fact proposals so this run's
+    // feedback artifact reports real post-apply quality. Best effort: a
+    // missing memory store must not block reflection.
+    if let Ok(project_db) = cg.open_project_store_db().await {
+        if let Err(err) = super::outcomes::refresh_fact_outcomes(
+            &run.dashboard_root,
+            project_db.conn(),
+            current_timestamp(),
+        )
+        .await
+        {
+            eprintln!("[tracedecay] warning: failed to refresh fact outcomes: {err}");
+        }
+    }
+
     let sessions_db_path = match automation_lcm_db_path(
         cg,
         &storage_scope,
@@ -456,6 +471,19 @@ pub async fn run_skill_writer_with_backend(
         evidence,
         evidence_hash,
     } = evidence_bundle;
+
+    // Refresh adoption outcomes of previously approved skills so this run's
+    // feedback artifact reports real post-approval quality. Best effort: a
+    // stale snapshot must not block skill writing.
+    if let Err(err) = super::outcomes::refresh_skill_outcomes(
+        &profile_root,
+        &run.dashboard_root,
+        current_timestamp(),
+    )
+    .await
+    {
+        eprintln!("[tracedecay] warning: failed to refresh skill outcomes: {err}");
+    }
 
     let activation_policy = skill_writer_activation_policy(config);
     let request = AgentTaskRequest::new(

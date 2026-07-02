@@ -53,6 +53,16 @@ pub struct SkillUsageRecord {
     pub last_viewed_at: Option<i64>,
     pub last_used_at: Option<i64>,
     pub last_patched_at: Option<i64>,
+    /// When the skill last transitioned into the active state; mirrors the
+    /// managed skill metadata so outcome scoring works from summaries alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_at: Option<i64>,
+    /// View/use totals captured at approval time so activity since approval
+    /// is an exact delta rather than a heuristic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_count_at_approval: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_count_at_approval: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,6 +127,9 @@ impl SkillUsageRecord {
             last_viewed_at: None,
             last_used_at: None,
             last_patched_at: None,
+            approved_at: None,
+            view_count_at_approval: None,
+            use_count_at_approval: None,
         }
     }
 
@@ -127,6 +140,9 @@ impl SkillUsageRecord {
         self.pinned = skill.metadata.pinned;
         self.created_by = Some(skill.metadata.provenance.actor.clone());
         self.provenance_source = Some(skill.metadata.provenance.source);
+        if skill.metadata.approved_at.is_some() {
+            self.approved_at = skill.metadata.approved_at;
+        }
     }
 
     fn record(&mut self, event: &SkillUsageEvent) {
@@ -207,6 +223,27 @@ pub async fn sync_skill_usage_metadata(profile_root: &Path, skill: &ManagedSkill
         .entry(skill_id.clone())
         .or_insert_with(|| SkillUsageRecord::new(skill_id, 0));
     record.merge_skill_metadata(skill);
+    save_skill_usage_ledger(profile_root, &ledger).await
+}
+
+/// Records an approval on the usage ledger: stamps `approved_at` and
+/// snapshots the current view/use totals as post-approval baselines so
+/// adoption can be measured as an exact delta.
+pub async fn record_skill_approval(profile_root: &Path, skill: &ManagedSkill) -> Result<()> {
+    let mut ledger = load_skill_usage_ledger(profile_root).await?;
+    let skill_id = skill.metadata.id.clone();
+    let approved_at = skill
+        .metadata
+        .approved_at
+        .unwrap_or_else(current_timestamp);
+    let record = ledger
+        .records
+        .entry(skill_id.clone())
+        .or_insert_with(|| SkillUsageRecord::new(skill_id, approved_at));
+    record.merge_skill_metadata(skill);
+    record.approved_at = Some(approved_at);
+    record.view_count_at_approval = Some(record.view_count);
+    record.use_count_at_approval = Some(record.use_count);
     save_skill_usage_ledger(profile_root, &ledger).await
 }
 

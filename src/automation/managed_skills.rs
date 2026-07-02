@@ -430,17 +430,21 @@ async fn record_skill_patch(
 
 pub async fn approve_managed_skill(profile_root: &Path, id: &str) -> Result<ManagedSkill> {
     let skill = load_managed_skill(profile_root, id).await?;
-    let Some(pending) = skill.pending_update else {
-        return set_managed_skill_state(profile_root, id, ManagedSkillState::Active).await;
+    let approved = match skill.pending_update {
+        None => set_managed_skill_state(profile_root, id, ManagedSkillState::Active).await?,
+        Some(pending) => {
+            let mut promoted = pending.into_skill();
+            promoted.set_state(ManagedSkillState::Active);
+            promoted.refresh_checksum();
+            remove_pending_update(profile_root, id).await?;
+            save_managed_skill(profile_root, &promoted).await?;
+            record_skill_patch(profile_root, &promoted, "approve_staged_update".to_string())
+                .await?;
+            promoted
+        }
     };
-
-    let mut promoted = pending.into_skill();
-    promoted.set_state(ManagedSkillState::Active);
-    promoted.refresh_checksum();
-    remove_pending_update(profile_root, id).await?;
-    save_managed_skill(profile_root, &promoted).await?;
-    record_skill_patch(profile_root, &promoted, "approve_staged_update".to_string()).await?;
-    Ok(promoted)
+    super::skill_usage::record_skill_approval(profile_root, &approved).await?;
+    Ok(approved)
 }
 
 pub async fn disable_managed_skill(profile_root: &Path, id: &str) -> Result<ManagedSkill> {
