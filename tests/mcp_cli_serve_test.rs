@@ -606,6 +606,151 @@ async fn serve_stdio_smokes_automation_run_artifact_view() {
     );
 }
 
+/// Regression test for the serve/daemon-restart race: a serve process started
+/// while `tracedecay update` is restarting the daemon sees no socket file, but
+/// must not silently commit to in-process mode when an installed service is
+/// about to rebind the socket.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn serve_started_during_daemon_restart_window_proxies_to_restarted_daemon() {
+    use std::io::{BufRead, BufReader, Read};
+    use std::os::unix::net::UnixListener;
+    use std::time::{Duration, Instant};
+
+    let home = TempDir::new().unwrap();
+    let project = init_project_with_file(home.path(), "pub fn restart_window_marker() {}\n").await;
+    let socket_path = common::daemon_socket_path(home.path());
+    fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
+
+    // An installed service unit claims the socket, but the socket file is
+    // missing — exactly the window between daemon shutdown and rebind.
+    let unit_dir = canonical_existing_path(home.path()).join(".config/systemd/user");
+    fs::create_dir_all(&unit_dir).unwrap();
+    fs::write(
+        unit_dir.join("tracedecay.service"),
+        format!(
+            "[Service]\nExecStart=/opt/tracedecay/bin/tracedecay daemon run --socket {}\n",
+            socket_path.display()
+        ),
+    )
+    .unwrap();
+
+    // The "restarted daemon" binds the socket only after serve has started.
+    // It answers `initialize` with a sentinel server name and a skewed
+    // version, so a proxied response is distinguishable from the in-process
+    // fallback and exercises the client-side version-skew warning.
+    let listener_path = socket_path.clone();
+    let fake_daemon = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(400));
+        let listener = UnixListener::bind(&listener_path).expect("bind restarted daemon socket");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking fake daemon listener");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for serve to proxy a request to the restarted daemon"
+            );
+            let mut stream = match listener.accept() {
+                Ok((stream, _addr)) => stream,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(e) => panic!("accept serve connection: {e}"),
+            };
+            stream
+                .set_nonblocking(false)
+                .expect("blocking fake daemon stream");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone fake daemon stream"));
+            let mut handshake_line = String::new();
+            if reader
+                .read_line(&mut handshake_line)
+                .expect("read handshake")
+                == 0
+            {
+                // The transport probe connects and hangs up without a handshake.
+                continue;
+            }
+            let mut request_line = String::new();
+            if reader.read_line(&mut request_line).expect("read request") == 0 {
+                continue;
+            }
+            let request: Value = serde_json::from_str(request_line.trim()).expect("request json");
+            let response = json!({
+                "jsonrpc": "2.0",
+                "id": request["id"],
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": { "tools": {} },
+                    "serverInfo": {
+                        "name": "sentinel-restarted-daemon",
+                        "version": "0.0.1-sentinel"
+                    }
+                }
+            });
+            writeln!(stream, "{response}").expect("write fake daemon response");
+            // Drain until the proxy hangs up so the response is not lost to a
+            // connection reset.
+            let mut scratch = [0_u8; 64];
+            while matches!(reader.read(&mut scratch), Ok(n) if n > 0) {}
+            return;
+        }
+    });
+
+    let mut child = tracedecay_command_with_home(home.path())
+        .arg("serve")
+        .arg("--path")
+        .arg(project.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("tracedecay serve should run");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin should be piped");
+        writeln!(
+            stdin,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {}
+            })
+        )
+        .unwrap();
+    }
+    drop(child.stdin.take());
+
+    let output = child
+        .wait_with_output()
+        .expect("tracedecay serve should exit after stdin closes");
+    fake_daemon.join().expect("fake daemon thread should exit");
+
+    assert!(
+        output.status.success(),
+        "serve should ride out the daemon restart window\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let response: Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|err| {
+        panic!("stdout should contain one JSON-RPC response: {err}\n{stdout}")
+    });
+    assert_eq!(
+        response["result"]["serverInfo"]["name"],
+        json!("sentinel-restarted-daemon"),
+        "initialize must be answered by the restarted daemon, not an in-process fallback:\n{response}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("0.0.1-sentinel") && stderr.contains("tracedecay daemon restart"),
+        "proxy should warn about the daemon/client version skew\nstderr:\n{stderr}"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn serve_daemon_proxy_reports_daemon_disconnect_as_json_rpc_error() {
