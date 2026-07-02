@@ -59,12 +59,8 @@ async fn scheduler_status_payload(state: &DashboardState) -> ApiResult {
         .await
         .map_err(|err| internal_error(&err))?;
     let now = current_timestamp();
-    let activity = load_session_activity(
-        &state
-            .store_root
-            .join(crate::storage::SESSIONS_DB_FILENAME),
-    )
-    .await;
+    let activity =
+        load_session_activity(&state.store_root.join(crate::storage::SESSIONS_DB_FILENAME)).await;
     Ok(Json(json!({
         "status": scheduler_status_label(&effective, control.paused),
         "paused": control.paused,

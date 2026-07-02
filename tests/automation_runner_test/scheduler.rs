@@ -120,13 +120,27 @@ fn scheduler_skips_disabled_and_manual_only_tasks() {
     let mut config = automation_config(Some("every 10m"), None);
     config.enabled = false;
     assert_eq!(
-        schedule_decision(&config, AgentTaskKind::MemoryCurator, &[], SessionActivity::none(), 1_000).skip_reason(),
+        schedule_decision(
+            &config,
+            AgentTaskKind::MemoryCurator,
+            &[],
+            SessionActivity::none(),
+            1_000
+        )
+        .skip_reason(),
         Some("automation_disabled")
     );
 
     let config = automation_config(Some("manual"), None);
     assert_eq!(
-        schedule_decision(&config, AgentTaskKind::MemoryCurator, &[], SessionActivity::none(), 1_000).skip_reason(),
+        schedule_decision(
+            &config,
+            AgentTaskKind::MemoryCurator,
+            &[],
+            SessionActivity::none(),
+            1_000
+        )
+        .skip_reason(),
         Some("scheduler_schedule_manual")
     );
 }
@@ -142,10 +156,24 @@ fn scheduler_uses_interval_and_latest_successful_ledger_record() {
     )];
 
     assert_eq!(
-        schedule_decision(&config, AgentTaskKind::MemoryCurator, &records, SessionActivity::none(), 1_500).skip_reason(),
+        schedule_decision(
+            &config,
+            AgentTaskKind::MemoryCurator,
+            &records,
+            SessionActivity::none(),
+            1_500
+        )
+        .skip_reason(),
         Some("scheduler_interval_not_elapsed")
     );
-    assert!(schedule_decision(&config, AgentTaskKind::MemoryCurator, &records, SessionActivity::none(), 1_700).is_due());
+    assert!(schedule_decision(
+        &config,
+        AgentTaskKind::MemoryCurator,
+        &records,
+        SessionActivity::none(),
+        1_700
+    )
+    .is_due());
 }
 
 #[test]
@@ -166,7 +194,14 @@ fn scheduler_ignores_non_terminal_lifecycle_records_for_interval_decisions() {
         ),
     ];
 
-    assert!(schedule_decision(&config, AgentTaskKind::MemoryCurator, &records, SessionActivity::none(), 1_700).is_due());
+    assert!(schedule_decision(
+        &config,
+        AgentTaskKind::MemoryCurator,
+        &records,
+        SessionActivity::none(),
+        1_700
+    )
+    .is_due());
 }
 
 #[test]
@@ -180,10 +215,24 @@ fn scheduler_respects_configured_interval_field() {
     )];
 
     assert_eq!(
-        schedule_decision(&config, AgentTaskKind::MemoryCurator, &records, SessionActivity::none(), 1_100).skip_reason(),
+        schedule_decision(
+            &config,
+            AgentTaskKind::MemoryCurator,
+            &records,
+            SessionActivity::none(),
+            1_100
+        )
+        .skip_reason(),
         Some("scheduler_interval_not_elapsed")
     );
-    assert!(schedule_decision(&config, AgentTaskKind::MemoryCurator, &records, SessionActivity::none(), 1_700).is_due());
+    assert!(schedule_decision(
+        &config,
+        AgentTaskKind::MemoryCurator,
+        &records,
+        SessionActivity::none(),
+        1_700
+    )
+    .is_due());
 }
 
 #[test]
@@ -197,10 +246,24 @@ fn scheduler_retries_failures_after_cooldown_instead_of_full_interval() {
     )];
 
     assert_eq!(
-        schedule_decision(&config, AgentTaskKind::MemoryCurator, &records, SessionActivity::none(), 1_100).skip_reason(),
+        schedule_decision(
+            &config,
+            AgentTaskKind::MemoryCurator,
+            &records,
+            SessionActivity::none(),
+            1_100
+        )
+        .skip_reason(),
         Some("scheduler_cooldown_active")
     );
-    assert!(schedule_decision(&config, AgentTaskKind::MemoryCurator, &records, SessionActivity::none(), 1_400).is_due());
+    assert!(schedule_decision(
+        &config,
+        AgentTaskKind::MemoryCurator,
+        &records,
+        SessionActivity::none(),
+        1_400
+    )
+    .is_due());
 }
 
 #[test]
@@ -218,7 +281,14 @@ fn scheduler_does_not_retry_explicit_non_retryable_failures() {
     let records = vec![failed];
 
     assert_eq!(
-        schedule_decision(&config, AgentTaskKind::MemoryCurator, &records, SessionActivity::none(), 1_400).skip_reason(),
+        schedule_decision(
+            &config,
+            AgentTaskKind::MemoryCurator,
+            &records,
+            SessionActivity::none(),
+            1_400
+        )
+        .skip_reason(),
         Some("scheduler_non_retryable_failure")
     );
 }
@@ -239,10 +309,24 @@ fn scheduler_rechecks_stale_non_retryable_backend_transport_failures() {
     let records = vec![failed];
 
     assert_eq!(
-        schedule_decision(&config, AgentTaskKind::MemoryCurator, &records, SessionActivity::none(), 1_100).skip_reason(),
+        schedule_decision(
+            &config,
+            AgentTaskKind::MemoryCurator,
+            &records,
+            SessionActivity::none(),
+            1_100
+        )
+        .skip_reason(),
         Some("scheduler_cooldown_active")
     );
-    assert!(schedule_decision(&config, AgentTaskKind::MemoryCurator, &records, SessionActivity::none(), 1_400).is_due());
+    assert!(schedule_decision(
+        &config,
+        AgentTaskKind::MemoryCurator,
+        &records,
+        SessionActivity::none(),
+        1_400
+    )
+    .is_due());
 }
 
 #[test]
@@ -260,19 +344,54 @@ fn scheduler_retries_explicit_retryable_failures_after_cooldown() {
     let records = vec![failed];
 
     assert_eq!(
-        schedule_decision(&config, AgentTaskKind::MemoryCurator, &records, SessionActivity::none(), 1_100).skip_reason(),
+        schedule_decision(
+            &config,
+            AgentTaskKind::MemoryCurator,
+            &records,
+            SessionActivity::none(),
+            1_100
+        )
+        .skip_reason(),
         Some("scheduler_cooldown_active")
     );
-    assert!(schedule_decision(&config, AgentTaskKind::MemoryCurator, &records, SessionActivity::none(), 1_400).is_due());
+    assert!(schedule_decision(
+        &config,
+        AgentTaskKind::MemoryCurator,
+        &records,
+        SessionActivity::none(),
+        1_400
+    )
+    .is_due());
 }
 
 #[test]
 fn scheduler_supports_all_self_improvement_tasks() {
     let config = automation_config(Some("hourly"), None);
 
-    assert!(schedule_decision(&config, AgentTaskKind::MemoryCurator, &[], SessionActivity::none(), 1_000).is_due());
-    assert!(schedule_decision(&config, AgentTaskKind::SessionReflector, &[], SessionActivity::none(), 1_000).is_due());
-    assert!(schedule_decision(&config, AgentTaskKind::SkillWriter, &[], SessionActivity::none(), 1_000).is_due());
+    assert!(schedule_decision(
+        &config,
+        AgentTaskKind::MemoryCurator,
+        &[],
+        SessionActivity::none(),
+        1_000
+    )
+    .is_due());
+    assert!(schedule_decision(
+        &config,
+        AgentTaskKind::SessionReflector,
+        &[],
+        SessionActivity::none(),
+        1_000
+    )
+    .is_due());
+    assert!(schedule_decision(
+        &config,
+        AgentTaskKind::SkillWriter,
+        &[],
+        SessionActivity::none(),
+        1_000
+    )
+    .is_due());
 }
 
 #[test]
@@ -294,7 +413,14 @@ fn scheduler_uses_latest_record_status_before_failure_cooldown() {
     ];
 
     assert_eq!(
-        schedule_decision(&config, AgentTaskKind::SkillWriter, &records, SessionActivity::none(), 1_500).skip_reason(),
+        schedule_decision(
+            &config,
+            AgentTaskKind::SkillWriter,
+            &records,
+            SessionActivity::none(),
+            1_500
+        )
+        .skip_reason(),
         Some("scheduler_interval_not_elapsed")
     );
 }
@@ -307,20 +433,11 @@ fn scheduler_idle_window_measures_time_since_session_activity() {
 
     // Activity landed 500s ago: still inside the 600s idle window.
     assert_eq!(
-        schedule_decision(
-            &config,
-            AgentTaskKind::SkillWriter,
-            &[],
-            activity,
-            1_500
-        )
-        .skip_reason(),
+        schedule_decision(&config, AgentTaskKind::SkillWriter, &[], activity, 1_500).skip_reason(),
         Some("scheduler_idle_window_active")
     );
     // 600s of quiet have elapsed: the project is idle, the task is due.
-    assert!(
-        schedule_decision(&config, AgentTaskKind::SkillWriter, &[], activity, 1_600).is_due()
-    );
+    assert!(schedule_decision(&config, AgentTaskKind::SkillWriter, &[], activity, 1_600).is_due());
     // Unknown activity (no session store yet) counts as idle.
     assert!(schedule_decision(
         &config,
@@ -381,8 +498,7 @@ fn scheduler_skips_session_evidence_tasks_without_new_activity() {
         );
         // Activity landed after the run started: due on the next tick.
         assert!(
-            schedule_decision(&config, task, &records, SessionActivity::at(1_650), 1_700)
-                .is_due()
+            schedule_decision(&config, task, &records, SessionActivity::at(1_650), 1_700).is_due()
         );
         // The interval gate still wins while it has not elapsed.
         assert_eq!(
