@@ -267,9 +267,22 @@ pub enum Commands {
         #[command(subcommand)]
         action: DaemonAction,
     },
-    /// Download and install the latest version from GitHub
-    Upgrade,
-    /// Refresh the tracedecay binary, generated plugins, and daemon
+    /// Install the latest version; refreshes plugins only after a real install
+    ///
+    /// Downloads and installs the newest release. When a new binary was
+    /// installed, also refreshes generated plugins and the daemon service and
+    /// runs the post-update health pass on the new version. When already up
+    /// to date it stops there — use `tracedecay update` to refresh regardless.
+    Upgrade {
+        /// Skip the post-update health pass (safe repairs + doctor summary)
+        #[arg(long)]
+        no_heal: bool,
+    },
+    /// Refresh generated plugins and the daemon, even when already up to date
+    ///
+    /// Upgrades the binary first when a newer release exists, then always
+    /// refreshes generated plugins and the daemon service and runs the
+    /// post-update health pass — even when the binary was already current.
     Update {
         /// Skip the post-update health pass (safe repairs + doctor summary)
         #[arg(long)]

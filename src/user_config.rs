@@ -187,6 +187,21 @@ impl UserConfig {
     pub fn exists() -> bool {
         config_path().is_some_and(|p| p.exists())
     }
+
+    /// Marks `running` as fully installed by advancing both version markers,
+    /// returning whether anything changed. This is the single home of the
+    /// marker-advancement protocol: only a completed full agent install pass
+    /// (the startup silent reinstall, or `post-update`'s reinstall step) may
+    /// record its version here, so the next startup's maintenance knows the
+    /// work does not need repeating.
+    pub fn mark_version_installed(&mut self, running: &str) -> bool {
+        if self.previous_version == running && self.last_installed_version == running {
+            return false;
+        }
+        self.previous_version = running.to_string();
+        self.last_installed_version = running.to_string();
+        true
+    }
 }
 
 /// Parse a human-readable duration string like "15s" or "1m" into a Duration.
