@@ -9,6 +9,7 @@ use crate::agents::{self, DoctorCounters, HealthcheckContext};
 use crate::display::{format_bytes, format_token_count};
 use crate::tracedecay::TraceDecay;
 
+pub mod heal;
 mod registry_drift;
 
 /// Runs a comprehensive health check of the tracedecay installation.
@@ -470,17 +471,33 @@ fn check_orphan_store_manifests(dc: &mut DoctorCounters, project_paths: &[String
     let Some(profile_root) = crate::config::user_data_dir() else {
         return;
     };
+    let (orphan_count, issues) = orphan_store_manifest_report(&profile_root, project_paths);
+    for issue in issues.iter().take(10) {
+        dc.warn(&format!("Store manifest issue: {issue}"));
+    }
+    if orphan_count > 0 {
+        dc.warn(&format!(
+            "{orphan_count} orphan profile store manifest(s) can reconstruct registry rows"
+        ));
+        dc.info("    Run `tracedecay migrate reconstruct --profile-root <profile> --apply` after review.");
+    }
+}
+
+/// Counts profile store manifests with no matching registry row, plus any
+/// manifest scan issues. Shared between `doctor` and the post-update health
+/// pass.
+pub(crate) fn orphan_store_manifest_report(
+    profile_root: &Path,
+    project_paths: &[String],
+) -> (usize, Vec<String>) {
     let registered: std::collections::HashSet<String> = project_paths
         .iter()
         .map(|path| crate::global_db::GlobalDb::canonical_project_key(std::path::Path::new(path)))
         .collect();
     let report = crate::migrate::registry::scan_profile_store_manifests(
-        &profile_root,
+        profile_root,
         crate::tracedecay::current_timestamp(),
     );
-    for issue in report.issues.iter().take(10) {
-        dc.warn(&format!("Store manifest issue: {issue}"));
-    }
     let orphan_count = report
         .plans
         .iter()
@@ -489,12 +506,7 @@ fn check_orphan_store_manifests(dc: &mut DoctorCounters, project_paths: &[String
             !registered.contains(&key)
         })
         .count();
-    if orphan_count > 0 {
-        dc.warn(&format!(
-            "{orphan_count} orphan profile store manifest(s) can reconstruct registry rows"
-        ));
-        dc.info("    Run `tracedecay migrate reconstruct --profile-root <profile> --apply` after review.");
-    }
+    (orphan_count, report.issues)
 }
 
 /// Check user config file.

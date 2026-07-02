@@ -454,17 +454,21 @@ where
     Ok(())
 }
 
-fn run_update_command() -> tracedecay::errors::Result<()> {
+fn run_update_command(no_heal: bool) -> tracedecay::errors::Result<()> {
     run_update_steps(
         || tracedecay::upgrade::run_upgrade().map(|_| ()),
-        run_post_update_subcommand,
+        || run_post_update_subcommand(no_heal),
     )
 }
 
-fn run_post_update_subcommand() -> tracedecay::errors::Result<()> {
+fn run_post_update_subcommand(no_heal: bool) -> tracedecay::errors::Result<()> {
     let tracedecay_bin = tracedecay_bin_on_path()?;
-    let status = std::process::Command::new(&tracedecay_bin)
-        .arg("post-update")
+    let mut command = std::process::Command::new(&tracedecay_bin);
+    command.arg("post-update");
+    if no_heal {
+        command.arg("--no-heal");
+    }
+    let status = command
         .status()
         .map_err(|e| tracedecay::errors::TraceDecayError::Config {
             message: format!("failed to run post-update with '{tracedecay_bin}': {e}"),
@@ -477,10 +481,17 @@ fn run_post_update_subcommand() -> tracedecay::errors::Result<()> {
     })
 }
 
-fn run_post_update_tasks() -> tracedecay::errors::Result<()> {
+async fn run_post_update_tasks(no_heal: bool) -> tracedecay::errors::Result<()> {
     refresh_generated_plugins()?;
     if let Err(error) = refresh_daemon_service() {
         eprintln!("  \x1b[33mwarning:\x1b[0m daemon service refresh failed: {error}");
+    }
+    if no_heal {
+        eprintln!("Skipping post-update health pass (--no-heal).");
+    } else {
+        // Failure-tolerant by construction: the health pass collects every
+        // error as a printed warning and never fails the update.
+        tracedecay::doctor::heal::run_post_update_health_pass().await;
     }
     Ok(())
 }
@@ -774,11 +785,11 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
         Commands::Upgrade => {
             tracedecay::upgrade::run_upgrade()?;
         }
-        Commands::Update => {
-            run_update_command()?;
+        Commands::Update { no_heal } => {
+            run_update_command(no_heal)?;
         }
-        Commands::PostUpdate => {
-            run_post_update_tasks()?;
+        Commands::PostUpdate { no_heal } => {
+            run_post_update_tasks(no_heal).await?;
         }
         Commands::Channel { channel } => match channel {
             Some(target) => {
@@ -911,8 +922,8 @@ fn should_skip_startup_maintenance(command: &Commands) -> bool {
         Commands::Install { .. }
             | Commands::Reinstall
             | Commands::UpdatePlugin
-            | Commands::Update
-            | Commands::PostUpdate
+            | Commands::Update { .. }
+            | Commands::PostUpdate { .. }
             | Commands::Uninstall { .. }
             | Commands::Lsp { .. }
             | Commands::Doctor { .. }
@@ -976,8 +987,8 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
             | Commands::Install { .. }
             | Commands::Reinstall
             | Commands::UpdatePlugin
-            | Commands::Update
-            | Commands::PostUpdate
+            | Commands::Update { .. }
+            | Commands::PostUpdate { .. }
             | Commands::Uninstall { .. }
             | Commands::Lsp { .. }
             | Commands::Doctor { .. }

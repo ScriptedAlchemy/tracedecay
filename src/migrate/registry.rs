@@ -4,7 +4,9 @@ use std::path::{Component, Path, PathBuf};
 use serde::Serialize;
 
 use crate::branch_meta;
-use crate::global_db::{GlobalDb, GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert};
+use crate::global_db::{
+    CodeProjectRecord, GlobalDb, GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert,
+};
 use crate::storage::{
     read_store_manifest, validate_project_id, StorageMode, StoreKind, STORE_MANIFEST_FILENAME,
     STORE_MANIFEST_SCHEMA_VERSION,
@@ -126,6 +128,23 @@ pub async fn apply_registry_reconstruction_report(
     } else {
         Err(issues)
     }
+}
+
+/// Filters registry rows whose canonical project root no longer exists on
+/// disk, optionally scoped to roots under `prefix`. Shared by
+/// `tracedecay migrate registry-gc` and the post-update health pass so both
+/// agree on what counts as a GC candidate.
+pub fn stale_code_projects(
+    projects: Vec<CodeProjectRecord>,
+    prefix: Option<&Path>,
+) -> Vec<CodeProjectRecord> {
+    projects
+        .into_iter()
+        .filter(|project| {
+            prefix.is_none_or(|prefix| Path::new(&project.canonical_root).starts_with(prefix))
+        })
+        .filter(|project| !Path::new(&project.canonical_root).exists())
+        .collect()
 }
 
 pub fn scan_profile_store_manifests(
