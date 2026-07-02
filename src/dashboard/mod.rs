@@ -25,6 +25,7 @@ mod analytics_api;
 pub(crate) mod assets;
 mod automation_config_api;
 mod automation_fact_proposals_api;
+mod automation_jobs_api;
 mod automation_outcomes_api;
 mod automation_run_api;
 mod automation_run_service;
@@ -539,6 +540,20 @@ fn project_api_router() -> Router<DashboardState> {
         .route(
             "/api/automation/run/skill-writing",
             post(automation_run_api::skill_writing),
+        )
+        .route(
+            "/api/automation/jobs",
+            get(automation_jobs_api::list).post(automation_jobs_api::create),
+        )
+        .route(
+            "/api/automation/jobs/{id}",
+            get(automation_jobs_api::view)
+                .patch(automation_jobs_api::update)
+                .delete(automation_jobs_api::delete),
+        )
+        .route(
+            "/api/automation/jobs/{id}/run",
+            post(automation_jobs_api::run),
         )
         .route(
             "/api/automation/scheduler/status",

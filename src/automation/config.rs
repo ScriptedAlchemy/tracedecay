@@ -99,6 +99,11 @@ pub struct AutomationConfig {
     /// call with shared evidence instead of two sequential runs.
     #[serde(default = "default_true")]
     pub combine_due_tasks: bool,
+    /// Allows user-defined jobs to run their optional pre-run shell command.
+    /// Off by default: jobs with a command are refused until the operator
+    /// opts in.
+    #[serde(default)]
+    pub allow_job_commands: bool,
     #[serde(default)]
     pub tasks: AutomationTaskSet,
 }
@@ -118,6 +123,7 @@ impl Default for AutomationConfig {
             auto_apply_memory_ops: false,
             auto_enable_skills: false,
             combine_due_tasks: true,
+            allow_job_commands: false,
             tasks: AutomationTaskSet::default(),
         }
     }
@@ -205,6 +211,8 @@ pub struct AutomationConfigPatch {
     pub auto_enable_skills: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub combine_due_tasks: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_job_commands: Option<bool>,
     #[serde(default)]
     pub memory_curator: AutomationTaskPatch,
     #[serde(default)]
@@ -401,6 +409,9 @@ fn apply_patch(config: &mut AutomationConfig, patch: &AutomationConfigPatch) {
     if let Some(combine_due_tasks) = patch.combine_due_tasks {
         config.combine_due_tasks = combine_due_tasks;
     }
+    if let Some(allow_job_commands) = patch.allow_job_commands {
+        config.allow_job_commands = allow_job_commands;
+    }
     apply_task_patch(&mut config.tasks.memory_curator, &patch.memory_curator);
     apply_task_patch(
         &mut config.tasks.session_reflector,
@@ -449,6 +460,7 @@ fn merge_patch(config: &mut AutomationConfigPatch, patch: AutomationConfigPatch)
     );
     merge_optional_field(&mut config.auto_enable_skills, patch.auto_enable_skills);
     merge_optional_field(&mut config.combine_due_tasks, patch.combine_due_tasks);
+    merge_optional_field(&mut config.allow_job_commands, patch.allow_job_commands);
     merge_task_patch(&mut config.memory_curator, patch.memory_curator);
     merge_task_patch(&mut config.session_reflector, patch.session_reflector);
     merge_task_patch(&mut config.skill_writer, patch.skill_writer);

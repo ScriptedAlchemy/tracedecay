@@ -14,6 +14,7 @@ mod analytics;
 mod api;
 mod automation;
 mod automation_config;
+mod automation_jobs;
 mod automation_skills;
 mod code_diagnostics;
 mod graph;

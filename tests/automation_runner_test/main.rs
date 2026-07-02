@@ -17,6 +17,7 @@ mod support;
 mod backend;
 mod combined_review;
 mod config;
+mod jobs;
 mod memory_curator;
 mod run_ledger;
 mod runner;
