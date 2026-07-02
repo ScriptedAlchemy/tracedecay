@@ -419,9 +419,31 @@ fn cursor_plugin_hooks(raw: &str, tracedecay_bin: &str) -> Result<String> {
 /// standalone Commands surface. The `skills/tracedecay-*` entries are
 /// legacy dispatcher slugs renamed to
 /// verb-phrase slugs because Cursor displays the humanized slug as the skill
-/// title.
+/// title. The other `skills/*` entries are model-invoked workflow skills
+/// retired by the consolidated skill catalog.
 const LEGACY_PLUGIN_DIRS: &[&str] = &[
     "commands",
+    "skills/architecture-overview",
+    "skills/assessing-test-coverage",
+    "skills/atomic-code-edits",
+    "skills/auditing-code-safety",
+    "skills/cleaning-up-dead-code",
+    "skills/code-health-report",
+    "skills/cross-branch-investigation",
+    "skills/drafting-commit-and-pr",
+    "skills/exploring-types-and-traits",
+    "skills/finding-duplicate-logic",
+    "skills/finding-impacted-areas",
+    "skills/memorize-subject",
+    "skills/memorizing-subject",
+    "skills/porting-code",
+    "skills/project-status",
+    "skills/reading-code-cheaply",
+    "skills/refactoring-safely",
+    "skills/reviewing-a-diff",
+    "skills/running-impacted-tests",
+    "skills/searching-for-code",
+    "skills/tracking-session-health",
     "skills/tracedecay-arch",
     "skills/tracedecay-audit",
     "skills/tracedecay-branch",

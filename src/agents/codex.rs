@@ -711,7 +711,30 @@ fn remove_codex_managed_skill_overlay(install_dir: &Path) {
     std::fs::remove_dir_all(install_dir.join("skills/agent-managed")).ok();
 }
 
+const RETIRED_CODEX_PLUGIN_SKILL_DIRS: &[&str] = &[
+    "architecture-overview",
+    "assessing-test-coverage",
+    "atomic-code-edits",
+    "auditing-code-safety",
+    "cleaning-up-dead-code",
+    "code-health-report",
+    "cross-branch-investigation",
+    "drafting-commit-and-pr",
+    "exploring-types-and-traits",
+    "finding-duplicate-logic",
+    "finding-impacted-areas",
+    "porting-code",
+    "project-status",
+    "reading-code-cheaply",
+    "refactoring-safely",
+    "reviewing-a-diff",
+    "running-impacted-tests",
+    "searching-for-code",
+    "tracking-session-health",
+];
+
 fn remove_codex_plugin_managed_skills(install_dir: &Path, skills_dir: &Path) -> Result<()> {
+    remove_retired_codex_plugin_skill_dirs(skills_dir)?;
     let managed: HashSet<PathBuf> = codex_plugin_managed_paths(install_dir)
         .into_iter()
         .filter(|path| path.starts_with(skills_dir))
@@ -740,6 +763,34 @@ fn codex_skill_file_is_legacy_tracedecay_managed(path: &Path) -> bool {
             contents
                 .lines()
                 .any(|line| line.starts_with("name: tracedecay:"))
+        })
+}
+
+fn remove_retired_codex_plugin_skill_dirs(skills_dir: &Path) -> Result<()> {
+    for name in RETIRED_CODEX_PLUGIN_SKILL_DIRS {
+        let skill_dir = skills_dir.join(name);
+        if !codex_skill_dir_is_retired_managed(&skill_dir, name) {
+            continue;
+        }
+        std::fs::remove_dir_all(&skill_dir).map_err(|e| TraceDecayError::Config {
+            message: format!(
+                "failed to remove retired Codex skill {}: {e}",
+                skill_dir.display()
+            ),
+        })?;
+    }
+    Ok(())
+}
+
+fn codex_skill_dir_is_retired_managed(skill_dir: &Path, expected_name: &str) -> bool {
+    let skill_file = skill_dir.join("SKILL.md");
+    let expected_name_line = format!("name: {expected_name}");
+    skill_file.is_file()
+        && std::fs::read_to_string(&skill_file).is_ok_and(|contents| {
+            contents
+                .lines()
+                .map(str::trim)
+                .any(|line| line == expected_name_line)
         })
 }
 
