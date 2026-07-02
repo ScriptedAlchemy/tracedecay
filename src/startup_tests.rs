@@ -4,12 +4,10 @@ use super::{
         validate_hermes_project_root_flag,
     },
     is_local_install_command, should_skip_agent_install_maintenance,
-    should_skip_startup_maintenance,
-    update_cmd::run_update_steps,
-    Commands,
+    should_skip_startup_maintenance, silent_reinstall_action, Commands, SilentReinstallAction,
 };
-use std::cell::RefCell;
 use tempfile::TempDir;
+use tracedecay::user_config::UserConfig;
 
 #[test]
 fn doctor_skips_startup_maintenance() {
@@ -33,6 +31,9 @@ fn explicit_agent_config_commands_skip_startup_maintenance() {
     }));
     assert!(should_skip_startup_maintenance(&Commands::Reinstall));
     assert!(should_skip_startup_maintenance(&Commands::UpdatePlugin));
+    assert!(should_skip_startup_maintenance(&Commands::Upgrade {
+        no_heal: false
+    }));
     assert!(should_skip_startup_maintenance(&Commands::Update {
         no_heal: false
     }));
@@ -84,6 +85,9 @@ fn agent_install_maintenance_is_selective() {
     assert!(should_skip_agent_install_maintenance(
         &Commands::UpdatePlugin
     ));
+    assert!(should_skip_agent_install_maintenance(&Commands::Upgrade {
+        no_heal: false
+    }));
     assert!(should_skip_agent_install_maintenance(&Commands::Update {
         no_heal: false
     }));
@@ -128,43 +132,60 @@ fn agent_install_maintenance_is_selective() {
 }
 
 #[test]
-fn update_steps_run_post_update_after_upgrade() {
-    let calls = RefCell::new(Vec::new());
+fn silent_reinstall_runs_after_minor_bump_without_post_update() {
+    // An upgraded binary whose `post-update` never ran (or predates the
+    // marker advancement) still triggers the reinstall pass.
+    let config = UserConfig {
+        installed_agents: vec!["cursor".to_string()],
+        previous_version: "6.0.0".to_string(),
+        ..UserConfig::default()
+    };
 
-    run_update_steps(
-        || {
-            calls.borrow_mut().push("upgrade");
-            Ok(())
-        },
-        || {
-            calls.borrow_mut().push("post-update");
-            Ok(())
-        },
-    )
-    .expect("update steps should succeed");
-
-    assert_eq!(calls.into_inner(), vec!["upgrade", "post-update"]);
+    assert_eq!(
+        silent_reinstall_action(&config, "6.1.0"),
+        SilentReinstallAction::Reinstall
+    );
 }
 
 #[test]
-fn update_steps_stop_after_upgrade_failure() {
-    let calls = RefCell::new(Vec::new());
+fn post_update_full_reinstall_marker_advancement_suppresses_startup_reinstall() {
+    // `post-update` ran the full tracked-agent install pass (see
+    // `update_cmd::run_post_update_tasks`) and recorded it by advancing both
+    // markers; the next ordinary command must not repeat that work via the
+    // startup silent reinstall. The markers may only be advanced *after* the
+    // full install pass — advancing them for a plugin-artifact-only refresh
+    // would silently skip config-managed agents on minor/major bumps.
+    let running = "6.1.0";
+    let mut config = UserConfig {
+        installed_agents: vec!["cursor".to_string()],
+        previous_version: "6.0.0".to_string(),
+        ..UserConfig::default()
+    };
 
-    let result = run_update_steps(
-        || {
-            calls.borrow_mut().push("upgrade");
-            Err(tracedecay::errors::TraceDecayError::Config {
-                message: "upgrade failed".to_string(),
-            })
-        },
-        || {
-            calls.borrow_mut().push("post-update");
-            Ok(())
-        },
+    assert!(config.mark_version_installed(running));
+    assert_eq!(config.previous_version, running);
+    assert_eq!(config.last_installed_version, running);
+    assert_eq!(
+        silent_reinstall_action(&config, running),
+        SilentReinstallAction::Nothing
     );
+    // Idempotent: a second post-update run has nothing left to record.
+    assert!(!config.mark_version_installed(running));
+}
 
-    assert!(result.is_err());
-    assert_eq!(calls.into_inner(), vec!["upgrade"]);
+#[test]
+fn patch_bump_only_advances_the_marker() {
+    let config = UserConfig {
+        installed_agents: vec!["cursor".to_string()],
+        previous_version: "6.1.0".to_string(),
+        last_installed_version: "6.1.0".to_string(),
+        ..UserConfig::default()
+    };
+
+    assert_eq!(
+        silent_reinstall_action(&config, "6.1.1"),
+        SilentReinstallAction::AdvanceMarker
+    );
 }
 
 #[test]

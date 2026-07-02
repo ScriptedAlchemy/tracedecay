@@ -20,12 +20,6 @@ windows-memory-eval = { max-threads = 32 }
 windows-timing-sensitive = { max-threads = 32 }
 
 [[profile.ci.overrides]]
-filter = 'all()'
-platform = { host = 'cfg(windows)' }
-retries = 2
-flaky-result = 'pass'
-
-[[profile.ci.overrides]]
 filter = 'binary(=dashboard_api_test)'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-dashboard-server'

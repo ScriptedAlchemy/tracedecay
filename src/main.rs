@@ -292,18 +292,33 @@ fn run_startup_preamble(command: &Commands) {
     }
 }
 
-fn maybe_run_silent_reinstall(user_config: &mut tracedecay::user_config::UserConfig) {
-    // Silent reinstall: re-run install for every tracked agent so permissions,
-    // hooks, and MCP config stay in sync with the new binary.
-    //
-    // Two signals can trigger this:
+/// What startup maintenance should do about the version markers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SilentReinstallAction {
+    /// Re-run install for every tracked agent.
+    Reinstall,
+    /// Patch-only bump (or nothing to reinstall): just advance the marker.
+    AdvanceMarker,
+    /// Markers already match the running version — nothing to do.
+    Nothing,
+}
+
+fn silent_reinstall_action(
+    user_config: &tracedecay::user_config::UserConfig,
+    running: &str,
+) -> SilentReinstallAction {
+    // Two signals can trigger a reinstall:
     //   (a) `previous_version` (set by `tracedecay upgrade` / `channel switch`
     //       just before replacing the binary) differs from the running version
     //       AND the transition is a minor/major bump. Patch bumps are no-ops:
     //       we just advance `previous_version` and skip reinstall.
     //   (b) Fallback for external upgrades (`brew upgrade`, `cargo install`):
     //       the running version is newer than `last_installed_version`.
-    let running = env!("CARGO_PKG_VERSION");
+    //
+    // A successful `post-update` performs the same full tracked-agent
+    // install pass and then advances both markers (see
+    // `UserConfig::mark_version_installed`), so the next ordinary command
+    // does not repeat the reinstall it just performed.
     let previous_version = if user_config.previous_version.is_empty() {
         "6.0.0".to_string()
     } else {
@@ -319,36 +334,31 @@ fn maybe_run_silent_reinstall(user_config: &mut tracedecay::user_config::UserCon
     let needs_reinstall = transition_needs_reinstall || external_upgrade_needs_reinstall;
 
     if !user_config.installed_agents.is_empty() && !running.is_empty() && needs_reinstall {
-        if let (Some(home), Some(bin)) = (
-            tracedecay::agents::home_dir(),
-            tracedecay::agents::which_tracedecay(),
-        ) {
-            let mut all_ok = true;
-            for id in &user_config.installed_agents {
-                if let Ok(ag) = tracedecay::agents::get_integration(id) {
-                    let ctx = tracedecay::agents::InstallContext {
-                        home: home.clone(),
-                        tracedecay_bin: bin.clone(),
-                        tool_permissions: tracedecay::agents::expected_tool_perms(),
-                        profile: None,
-                        project_root: None,
-                        dashboard: true,
-                    };
-                    if ag.install(&ctx).is_err() {
-                        all_ok = false;
-                    }
-                }
-            }
-            if all_ok {
-                user_config.last_installed_version = running.to_string();
-                user_config.previous_version = running.to_string();
-                user_config.save();
-            }
-        }
+        SilentReinstallAction::Reinstall
     } else if upgrade_detected {
-        // Patch-only bump (or nothing to reinstall) — advance the marker so we
-        // don't keep re-checking on every subsequent startup.
-        user_config.previous_version = running.to_string();
+        SilentReinstallAction::AdvanceMarker
+    } else {
+        SilentReinstallAction::Nothing
+    }
+}
+
+fn maybe_run_silent_reinstall(user_config: &mut tracedecay::user_config::UserConfig) {
+    // Silent reinstall: re-run install for every tracked agent so permissions,
+    // hooks, and MCP config stay in sync with the new binary.
+    let running = env!("CARGO_PKG_VERSION");
+    match silent_reinstall_action(user_config, running) {
+        SilentReinstallAction::Reinstall => run_silent_reinstall(user_config, running),
+        SilentReinstallAction::AdvanceMarker => {
+            user_config.previous_version = running.to_string();
+            user_config.save();
+        }
+        SilentReinstallAction::Nothing => {}
+    }
+}
+
+fn run_silent_reinstall(user_config: &mut tracedecay::user_config::UserConfig, running: &str) {
+    if update_cmd::reinstall_tracked_agents(user_config) {
+        user_config.mark_version_installed(running);
         user_config.save();
     }
 }
@@ -667,8 +677,8 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                 print!("{}", tracedecay::daemon::service_status(&socket_path));
             }
         },
-        Commands::Upgrade => {
-            tracedecay::upgrade::run_upgrade()?;
+        Commands::Upgrade { no_heal } => {
+            update_cmd::run_upgrade_command(no_heal)?;
         }
         Commands::Update { no_heal } => {
             update_cmd::run_update_command(no_heal)?;
@@ -807,6 +817,7 @@ fn should_skip_startup_maintenance(command: &Commands) -> bool {
         Commands::Install { .. }
             | Commands::Reinstall
             | Commands::UpdatePlugin
+            | Commands::Upgrade { .. }
             | Commands::Update { .. }
             | Commands::PostUpdate { .. }
             | Commands::Uninstall { .. }
@@ -856,9 +867,11 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
     //     can blow that budget, so it must stay off `serve`.
     //   - `Install` / `Reinstall`: already perform installation — don't
     //     double-install as an implicit prelude to the explicit command.
-    //   - `UpdatePlugin` / `Update`: explicit maintenance paths that manage
-    //     plugin refresh themselves; an implicit silent reinstall beforehand
-    //     would rewrite configs and break the update-plugin contract.
+    //   - `UpdatePlugin` / `Upgrade` / `Update`: explicit maintenance paths
+    //     that manage plugin refresh themselves (upgrade/update re-exec the
+    //     new binary's `post-update`); an implicit silent reinstall beforehand
+    //     would rewrite configs with the OLD binary and break the
+    //     update-plugin contract.
     //   - `Uninstall`: about to remove agent configs — don't reinstall them
     //     first (per the original #84 intent).
     //   - `Doctor` / `Migrate`: read-only diagnostics — must not mutate agent
@@ -872,6 +885,7 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
             | Commands::Install { .. }
             | Commands::Reinstall
             | Commands::UpdatePlugin
+            | Commands::Upgrade { .. }
             | Commands::Update { .. }
             | Commands::PostUpdate { .. }
             | Commands::Uninstall { .. }

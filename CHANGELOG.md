@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`tracedecay doctor --agent cursor` now diagnoses dead Cursor MCP scopes** — best-effort scan of Cursor's recent MCP logs for tracedecay spawn failures (literal unexpanded `${workspaceFolder}` paths, `Connection failed: MCP error -32000`, degraded-mode notices) with concrete remediation ("toggle the MCP server in Cursor Settings → MCP or reload the window"), plus a plugin-bundle-version-vs-binary-version staleness check that points at `tracedecay update-plugin`.
 
+## [0.0.23](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.22...v0.0.23) - 2026-07-02
+
+### Other
+
+- Merge pull request #204 from ScriptedAlchemy/codex/winperf-flakes-20260702
+
 ## [0.0.22](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.21...v0.0.22) - 2026-07-02
 
 ### Other
