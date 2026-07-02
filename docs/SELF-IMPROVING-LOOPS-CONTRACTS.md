@@ -27,6 +27,12 @@ TraceDecay standalone automation is time-scheduled by the daemon, not by Codex n
 | `session_reflector` | Every 15 minutes, with a 5-minute cooldown | Validated accepted session facts auto-apply under the same memory auto-apply policy; otherwise they stay as dashboard fact proposals. |
 | `skill_writer` | Every 60 minutes, after a 15-minute idle window, with a 5-minute cooldown | Creates or updates managed skill drafts; skills are not auto-enabled while `auto_enable_skills=false`. |
 
+Scheduling is activity-coupled, not purely wall-clock. The scheduler reads the newest LCM session-message timestamp for the project store as its session-activity signal on every tick:
+
+- `min_idle_secs` is a true idle window: the task only runs after the project has been quiet (no LCM session ingest) for at least that long. A missing session store counts as idle.
+- `session_reflector` and `skill_writer` additionally require new session activity since their last successful run; when nothing new landed they skip with `no_new_session_activity` instead of re-reviewing the same transcripts. Because skips do not consume the interval clock, the task fires on the first tick after fresh activity lands (once the idle window is satisfied).
+- `memory_curator` reviews the fact store rather than session transcripts, so it keeps the plain interval/cooldown cadence.
+
 The daemon loop is the host for these jobs. It should not create Codex top-level chats for scheduler work, and it should not rely on Codex native recurring automations for liveness. Host backends provide the model call; TraceDecay owns evidence collection, validation, ledgers, apply policy, and scheduler state.
 
 ## Standalone And Delegated Modes

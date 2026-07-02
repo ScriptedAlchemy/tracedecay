@@ -163,21 +163,13 @@ async fn scheduler_skill_writer_respects_interval_gate() {
 }
 
 #[tokio::test]
-async fn scheduler_skill_writer_respects_idle_window_after_manual_run() {
+async fn scheduler_skill_writer_respects_idle_window_after_recent_session_activity() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     let mut config = scheduler_config(Some(1), None);
     config.tasks.skill_writer.min_idle_secs = Some(3600);
-    let mut record = scheduler_record_for(
-        "recent_manual_skill_writer_run",
-        AgentTaskKind::SkillWriter,
-        AutomationRunStatus::Succeeded,
-        current_timestamp() - 60,
-    );
-    record.trigger = AutomationTrigger::ManualCli;
-    append_run_record(&cg.store_layout().dashboard_root, &record)
-        .await
-        .unwrap();
+    // A session message landed 60s ago: the project is not idle yet.
+    seed_session_activity(&cg, current_timestamp() - 60).await;
     let backend = SkillJsonBackend::new(json!({"skills": []}));
 
     let run = run_skill_writer_with_backend(
@@ -198,6 +190,64 @@ async fn scheduler_skill_writer_respects_idle_window_after_manual_run() {
         run.ledger_record.error.as_deref(),
         Some("scheduler_idle_window_active")
     );
+}
+
+#[tokio::test]
+async fn scheduler_skill_writer_skips_without_new_session_activity_since_last_success() {
+    let temp = tempdir().unwrap();
+    let cg = init_project(temp.path()).await;
+    let config = scheduler_config(Some(1), None);
+    let now = current_timestamp();
+    // Activity landed, then a successful run consumed it.
+    seed_session_activity(&cg, now - 120).await;
+    append_run_record(
+        &cg.store_layout().dashboard_root,
+        &scheduler_record_for(
+            "previous_skill_writer_run",
+            AgentTaskKind::SkillWriter,
+            AutomationRunStatus::Succeeded,
+            now - 60,
+        ),
+    )
+    .await
+    .unwrap();
+    let backend = SkillJsonBackend::new(json!({"skills": []}));
+
+    let run = run_skill_writer_with_backend(
+        &cg,
+        &config,
+        &backend,
+        SkillWriterAutomationOptions {
+            trigger: AutomationTrigger::Scheduler,
+            ..SkillWriterAutomationOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(backend.calls(), 0);
+    assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
+    assert_eq!(
+        run.ledger_record.error.as_deref(),
+        Some("no_new_session_activity")
+    );
+
+    // New activity after the run: the very next tick is due again.
+    seed_session_activity(&cg, now - 30).await;
+    let run = run_skill_writer_with_backend(
+        &cg,
+        &config,
+        &backend,
+        SkillWriterAutomationOptions {
+            trigger: AutomationTrigger::Scheduler,
+            ..SkillWriterAutomationOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(backend.calls(), 1);
+    assert_ne!(run.ledger_record.status, AutomationRunStatus::Skipped);
 }
 
 #[tokio::test]
