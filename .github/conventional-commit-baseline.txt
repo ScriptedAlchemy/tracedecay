@@ -4,3 +4,4 @@
 035bb71cd9059b571e18bbd69059e6dbd80f2b80 # PR #100 split/profile-branch-foundation
 c4d4ce4c427988701cde38915f4f3a5b5fa7d52d # PR #101 split/mcp-tool-surface
 5b4eeb1b9d279bfe64f289a80292bfd83fd852a1 # PR #102 split/daemon-transport
+deb256e4276da2c7be8729a4db767e56ebffd4ca # PR #178 subject 86 chars; published before lint caught it, unrewritable without force-push
