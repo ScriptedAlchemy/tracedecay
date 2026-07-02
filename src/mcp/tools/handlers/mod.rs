@@ -176,6 +176,29 @@ pub async fn handle_tool_call_with_registry(
     global_db: Option<&GlobalDb>,
     allow_default_registry_fallback: bool,
 ) -> Result<ToolResult> {
+    handle_tool_call_with_registry_and_implicit_project(
+        cg,
+        tool_name,
+        args,
+        server_stats,
+        scope_prefix,
+        global_db,
+        allow_default_registry_fallback,
+        None,
+    )
+    .await
+}
+
+pub async fn handle_tool_call_with_registry_and_implicit_project(
+    cg: &TraceDecay,
+    tool_name: &str,
+    mut args: Value,
+    server_stats: Option<Value>,
+    scope_prefix: Option<&str>,
+    global_db: Option<&GlobalDb>,
+    allow_default_registry_fallback: bool,
+    implicit_project_path: Option<&Path>,
+) -> Result<ToolResult> {
     debug_assert!(
         !tool_name.is_empty(),
         "handle_tool_call called with empty tool_name"
@@ -192,6 +215,18 @@ pub async fn handle_tool_call_with_registry(
                 "{tool_name} is scoped to the active project and does not accept project selectors"
             ),
         });
+    }
+    if let Some(project_path) = implicit_project_path {
+        if tool_dispatches_registered_project_reader(tool_name)
+            && !rejected_tool_project_selector_present(tool_name, &args)
+        {
+            if let Some(map) = args.as_object_mut() {
+                map.insert(
+                    "project_path".to_string(),
+                    json!(project_path.to_string_lossy().to_string()),
+                );
+            }
+        }
     }
     let selected_cg = selected_registered_project_reader(
         tool_name,

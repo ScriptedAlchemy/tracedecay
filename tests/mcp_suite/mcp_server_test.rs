@@ -161,6 +161,94 @@ async fn test_initialize() {
     assert!(resp["result"]["serverInfo"]["version"].is_string());
 }
 
+#[tokio::test]
+async fn initialize_roots_route_registered_reader_tools_without_explicit_selector() {
+    let (_env, active_project) = crate::common::IsolatedEnv::acquire().await;
+    let target_project = active_project.with_file_name("target-project");
+
+    fs::create_dir_all(active_project.join("src")).unwrap();
+    fs::write(
+        active_project.join("src/active.rs"),
+        "pub fn active_marker() {}\n",
+    )
+    .unwrap();
+    fs::create_dir_all(target_project.join("src")).unwrap();
+    fs::write(
+        target_project.join("src/target.rs"),
+        "pub fn target_marker() {}\n",
+    )
+    .unwrap();
+
+    let active = crate::fixture::init_project_from_template(&active_project)
+        .await
+        .unwrap();
+    active.index_all().await.unwrap();
+    let target = crate::fixture::init_project_from_template(&target_project)
+        .await
+        .unwrap();
+    target.index_all().await.unwrap();
+
+    let registry = tracedecay::global_db::GlobalDb::open().await.unwrap();
+    registry
+        .upsert_code_project(
+            "proj_active",
+            active.project_root(),
+            None,
+            None,
+            Some("main"),
+        )
+        .await
+        .unwrap();
+    registry
+        .upsert_code_project(
+            "proj_target",
+            target.project_root(),
+            None,
+            None,
+            Some("main"),
+        )
+        .await
+        .unwrap();
+    let server = McpServer::new_with_dbs(active, None, None, Some(Arc::new(registry)), false).await;
+    let target_root_uri = format!("file://{}", target.project_root().display());
+
+    let responses = run_server_with_messages(
+        server,
+        vec![
+            jsonrpc_request(
+                json!(1),
+                "initialize",
+                json!({
+                    "clientInfo": {"name": "codex", "version": "test"},
+                    "roots": [{"uri": target_root_uri, "name": "target-project"}]
+                }),
+            ),
+            jsonrpc_request(
+                json!(2),
+                "tools/call",
+                json!({
+                    "name": "tracedecay_files",
+                    "arguments": {"format": "flat"}
+                }),
+            ),
+        ],
+    )
+    .await;
+
+    let files_response = response_with_id(&responses, json!(2));
+    let text = files_response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("files response text");
+    assert!(
+        text.contains("src/target.rs"),
+        "initialize root should route reader tools to target project, got {text}"
+    );
+    assert!(
+        !text.contains("src/active.rs"),
+        "implicit initialize-root routing should not read the active project: {text}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 2. test_initialized_notification
 // ---------------------------------------------------------------------------

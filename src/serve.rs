@@ -331,7 +331,7 @@ async fn read_first_non_empty_stdin_line() -> Option<String> {
     }
 }
 
-fn local_path_from_mcp_root_uri(uri: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn local_path_from_mcp_root_uri(uri: &str) -> Option<std::path::PathBuf> {
     let path = if let Some(rest) = uri.strip_prefix("file://") {
         if let Some(localhost_path) = rest.strip_prefix("localhost/") {
             format!("/{localhost_path}")
