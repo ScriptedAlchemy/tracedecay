@@ -1736,15 +1736,17 @@ mod tests {
         }
     }
 
-    /// The PostToolUse matcher is derived from the hook handler's tool list,
+    /// The `PostToolUse` matcher is derived from the hook handler's tool list,
     /// so the installed matcher can never accept tools the handler ignores.
     #[test]
     fn post_tool_use_matcher_comes_from_the_hook_handler_tool_list() {
-        let matcher = MANAGED_HOOKS
+        let Some(matcher) = MANAGED_HOOKS
             .iter()
             .find(|hook| hook.event == "PostToolUse")
             .and_then(ManagedHook::matcher_value)
-            .expect("PostToolUse must register a matcher");
+        else {
+            panic!("PostToolUse must register a matcher");
+        };
         assert_eq!(matcher, crate::hooks::claude_post_tool_use_matcher());
         assert!(matcher.contains("Edit") && matcher.contains("Bash"));
     }

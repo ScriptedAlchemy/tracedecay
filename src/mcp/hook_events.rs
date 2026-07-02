@@ -235,7 +235,7 @@ mod tests {
     }
 
     /// Regression: the receiver used to keep its own agent string match, so
-    /// the claude-keyed events added for Claude PostToolUse were silently
+    /// the claude-keyed events added for Claude `PostToolUse` were silently
     /// dropped. Every agent the send side can construct must parse here.
     #[test]
     fn accepts_every_constructible_hook_agent() {

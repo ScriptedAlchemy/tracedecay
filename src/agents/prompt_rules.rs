@@ -1,6 +1,6 @@
 //! Shared prompt-rules rendering and managed-block reconciliation.
 //!
-//! Copilot, Gemini, OpenCode, Kimi, and Vibe share the same marker-gated
+//! Copilot, Gemini, `OpenCode`, Kimi, and Vibe share the same marker-gated
 //! tracedecay rules block. Claude and Kiro keep host-specific text but reuse
 //! the block-splicing helpers here.
 
