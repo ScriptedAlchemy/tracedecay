@@ -24,7 +24,10 @@ async fn make_project() -> (TempDir, TraceDecay) {
 async fn make_memory_store() -> (Database, TempDir) {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join("tracedecay.db");
-    let (db, _) = Database::initialize(&db_path).await.unwrap();
+    // Template copy instead of Database::initialize: 23 tests in this module
+    // each need a fresh graph-schema store, and re-running the schema DDL per
+    // test is a large fixed cost on Windows CI.
+    let db = crate::common::open_graph_db_from_template(&db_path).await;
     (db, tmp)
 }
 
