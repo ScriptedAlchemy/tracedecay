@@ -153,8 +153,9 @@ fn plan_shell_hook_event(
     if !crate::hooks::cursor_shell_command_targets_project(command, cwd, &hook_project_root) {
         return HookEventPlan::Noop;
     }
+    let same_project = paths_same(&hook_project_root, project_root);
     let hook_current_branch;
-    let current_branch = if paths_same(&hook_project_root, project_root) {
+    let current_branch = if same_project {
         current_branch
     } else {
         hook_current_branch = crate::branch::current_branch(&hook_project_root);
@@ -175,7 +176,7 @@ fn plan_shell_hook_event(
             HookEventPlan::DebouncedIncrementalSync(event.agent)
         }
         crate::hooks::CursorShellSyncPlan::CurrentBranchSync(branch) => {
-            if paths_same(&hook_project_root, project_root) {
+            if same_project {
                 HookEventPlan::SyncCurrentBranch {
                     branch,
                     agent: event.agent,
@@ -238,7 +239,7 @@ fn read_marker_secs(path: &Path) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
 
     use serde_json::json;
@@ -280,8 +281,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("tempdir should canonicalize: {e}"))
     }
 
-    fn setup_linked_session_worktree() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf)
-    {
+    fn setup_linked_session_worktree() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let base = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir should create: {e}"));
         let base_root = git_test_root(base.path());
         let project_root = base_root.join("project");
