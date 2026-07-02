@@ -53,10 +53,6 @@ const SESSION_REPLAY_TAIL_TURNS: usize = 4;
 const SESSION_REPLAY_SNIPPET_CHARS: usize = 500;
 const SESSION_REPLAY_SUMMARY_NODES: usize = 3;
 const SESSION_REPLAY_SUMMARY_CHARS: usize = 700;
-/// How many sessions to scan when resolving the provider of an explicitly
-/// requested session id without a concrete provider filter.
-const SESSION_REPLAY_EXPLICIT_LOOKUP_LIMIT: usize = 100;
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionReflectorAutomationOptions {
     #[serde(default)]
@@ -1405,27 +1401,23 @@ async fn recent_session_replay_evidence(
         message: format!("failed to build {task_name} session replay evidence: {e}"),
     };
     let (session_selection, targets) = if let Some(session_id) = explicit_session_id {
-        let target_provider = match provider_filter {
-            Some(provider) => Some(provider.to_string()),
+        let providers = match provider_filter {
+            Some(provider) => vec![provider.to_string()],
             None => lcm_db
-                .lcm_recent_sessions(None, SESSION_REPLAY_EXPLICIT_LOOKUP_LIMIT)
+                .lcm_session_providers(session_id)
                 .await
-                .map_err(replay_error)?
-                .into_iter()
-                .find(|session| session.session_id == session_id)
-                .map(|session| session.provider),
+                .map_err(replay_error)?,
         };
-        let targets = target_provider
-            .map(|provider| {
-                vec![ReplaySessionTarget {
-                    provider,
-                    session_id: session_id.to_string(),
-                }]
+        let targets: Vec<ReplaySessionTarget> = providers
+            .into_iter()
+            .map(|provider| ReplaySessionTarget {
+                provider,
+                session_id: session_id.to_string(),
             })
-            .unwrap_or_default();
+            .collect();
         ("explicit_session_id", targets)
     } else {
-        let targets = lcm_db
+        let targets: Vec<ReplaySessionTarget> = lcm_db
             .lcm_recent_sessions(provider_filter, sessions_limit)
             .await
             .map_err(replay_error)?

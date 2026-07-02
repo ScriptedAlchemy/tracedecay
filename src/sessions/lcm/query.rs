@@ -197,6 +197,29 @@ pub(crate) async fn recent_sessions(
     Ok(sessions)
 }
 
+/// Lists providers that contain raw messages for an explicit session id,
+/// ordered by most recent activity.
+pub(crate) async fn session_providers(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Vec<String>, LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT provider
+             FROM lcm_raw_messages
+             WHERE session_id = ?1
+             GROUP BY provider
+             ORDER BY COALESCE(MAX(timestamp), MAX(store_id)) DESC, MAX(store_id) DESC",
+            params![session_id],
+        )
+        .await?;
+    let mut providers = Vec::new();
+    while let Some(row) = rows.next().await? {
+        providers.push(row.get(0)?);
+    }
+    Ok(providers)
+}
+
 /// Loads a bounded turn-ordered replay slice for one session: head turns,
 /// tail turns (deduplicated against the head), and top summary-DAG nodes.
 pub(crate) async fn session_replay_slice(

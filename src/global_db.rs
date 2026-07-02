@@ -2726,6 +2726,14 @@ impl GlobalDb {
         crate::sessions::lcm::query::recent_sessions(&self.conn, provider, limit).await
     }
 
+    /// Lists providers that have raw LCM messages for an explicit session id.
+    pub async fn lcm_session_providers(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<String>, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::query::session_providers(&self.conn, session_id).await
+    }
+
     /// Loads a bounded turn-ordered replay slice (head/tail turns plus top
     /// summary-DAG nodes) for one session.
     pub async fn lcm_session_replay_slice(

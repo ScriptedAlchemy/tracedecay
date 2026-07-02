@@ -2298,6 +2298,48 @@ async fn recent_sessions_orders_by_last_activity_with_provider_filter() {
 }
 
 #[tokio::test]
+async fn session_providers_finds_explicit_session_beyond_recent_limit() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let db_path = isolated_db_path(&tmp);
+    insert_raw_messages(
+        &db,
+        &db_path,
+        "codex",
+        "explicit-session",
+        &["older explicit turn".to_string()],
+    )
+    .await;
+    for idx in 0..105 {
+        insert_raw_messages(
+            &db,
+            &db_path,
+            "cursor",
+            &format!("newer-session-{idx:03}"),
+            &["newer turn".to_string()],
+        )
+        .await;
+    }
+
+    let recent = db
+        .lcm_recent_sessions(None, 100)
+        .await
+        .expect("recent sessions should load");
+    assert!(
+        recent
+            .iter()
+            .all(|session| session.session_id != "explicit-session"),
+        "fixture must place explicit session outside the bounded recent scan"
+    );
+
+    let providers = db
+        .lcm_session_providers("explicit-session")
+        .await
+        .expect("explicit session providers should load without recency limit");
+    assert_eq!(providers, vec!["codex"]);
+}
+
+#[tokio::test]
 async fn session_replay_slice_bounds_head_tail_and_summaries() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
