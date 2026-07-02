@@ -478,7 +478,7 @@ Regression coverage that should stay in the verification set:
   source expansion against a seeded session store.
 - `tests/dashboard_graph_api_test.rs` covers graph overview/search/detail,
   neighbors, subgraphs, and paths against a seeded code graph.
-- `tests/hermes_dashboard_test.rs::deployed_wrapper_preserves_canonical_api_proxy_surface`
+- `tests/hermes_suite/dashboard.rs::deployed_wrapper_preserves_canonical_api_proxy_surface`
   pins the Hermes wrapper route rewrite/query-preservation contract so the
   wrapper cannot silently drift from the canonical standalone server.
 
