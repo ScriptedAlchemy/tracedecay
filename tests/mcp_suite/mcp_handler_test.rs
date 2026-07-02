@@ -253,9 +253,13 @@ fn test_temp_dir() -> TestTempDir {
 
 struct TestProject {
     dir: Option<TestTempDir>,
-    _env_lock: MutexGuard<'static, ()>,
     _home_guard: HomeEnvGuard,
     _global_db_guard: GlobalDbEnvGuard,
+    // Field order is load-bearing: fields drop in declaration order, so the
+    // env lock must be declared last. Releasing it before the guards restore
+    // `HOME` / the global DB override would let the next waiting test install
+    // its own env, only for these guards to clobber it.
+    _env_lock: MutexGuard<'static, ()>,
 }
 
 impl std::ops::Deref for TestProject {
@@ -273,15 +277,19 @@ impl Drop for TestProject {
 }
 
 struct TestEnv {
-    _env_lock: MutexGuard<'static, ()>,
     _home_guard: HomeEnvGuard,
     _global_db_guard: GlobalDbEnvGuard,
+    // Drop order = declaration order: the env lock must outlive the guards
+    // above so their env restores happen while the lock is still held.
+    _env_lock: MutexGuard<'static, ()>,
 }
 
 struct CrossProjectMemoryEnv {
     _dir: TestTempDir,
-    _env_lock: MutexGuard<'static, ()>,
     _storage_guard: common::TraceDecayStorageEnvGuard,
+    // Drop order = declaration order: the env lock must outlive the storage
+    // guard above so its env restore happens while the lock is still held.
+    _env_lock: MutexGuard<'static, ()>,
 }
 
 struct TestTraceDecay {
