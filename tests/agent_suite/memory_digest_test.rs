@@ -4,19 +4,23 @@
 
 use serde_json::json;
 
+use tracedecay::automation::config::{save_project_config, AutomationConfigPatch};
 use tracedecay::automation::fact_proposals::{
     apply_fact_proposal, record_session_fact_proposals, FactProposalState,
 };
 use tracedecay::automation::memory_digest::{
     build_project_section, compose_digest_body, detect_injection_like, export_memory_digest,
     export_memory_digest_to_recorded_targets, load_memory_digest_snapshot,
-    memory_digest_export_enabled, refresh_project_memory_digest, remove_memory_digest_export,
-    select_digest_facts, sync_memory_digest_export, update_project_digest_section,
-    MemoryDigestOptions, MemoryDigestSnapshot, ProjectDigestSection, MEMORY_DIGEST_END,
-    MEMORY_DIGEST_START,
+    memory_digest_export_enabled, memory_digest_export_enabled_for_project,
+    refresh_memory_digest_after_memory_change_for_profile, refresh_project_memory_digest,
+    remove_memory_digest_export, select_digest_facts, sync_memory_digest_export,
+    update_project_digest_section, MemoryDigestOptions, MemoryDigestSnapshot, ProjectDigestSection,
+    MEMORY_DIGEST_END, MEMORY_DIGEST_START,
 };
 use tracedecay::automation::skill_targets::SkillInstallTarget;
+use tracedecay::global_db::GlobalDb;
 use tracedecay::memory::types::{FactRecord, MemoryCategory};
+use tracedecay::storage::default_profile_sharded_layout;
 
 fn fact(id: i64, content: &str, trust: f64, updated_at: i64) -> FactRecord {
     FactRecord {
@@ -265,6 +269,68 @@ async fn config_gate_disables_export_and_strips_previous_artifacts() {
             .unwrap()
     );
     assert!(!rule_path.exists());
+}
+
+#[tokio::test]
+async fn project_config_gate_disables_refresh_and_removes_existing_section() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let plugin_root = temp.path().join("cursor-plugin");
+    let project_root = temp.path().join("repo");
+    std::fs::create_dir_all(&plugin_root).unwrap();
+    std::fs::create_dir_all(&project_root).unwrap();
+
+    let layout = default_profile_sharded_layout(&project_root, &profile_root).unwrap();
+    save_project_config(
+        &layout.dashboard_root,
+        &AutomationConfigPatch {
+            export_memory_digest: Some(false),
+            ..AutomationConfigPatch::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        !memory_digest_export_enabled_for_project(&profile_root, &project_root)
+            .await
+            .unwrap()
+    );
+
+    update_project_digest_section(
+        &profile_root,
+        ProjectDigestSection {
+            project_key: GlobalDb::canonical_project_key(&project_root),
+            project_label: "repo".to_string(),
+            lines: vec!["- (decision, trust 0.90) Existing project fact".to_string()],
+            omitted_count: 0,
+            updated_at: 100,
+        },
+    )
+    .unwrap();
+    assert!(
+        sync_memory_digest_export(&profile_root, SkillInstallTarget::Cursor, &plugin_root).unwrap()
+    );
+    let rule_path = plugin_root.join("rules/tracedecay-memory-digest.mdc");
+    assert!(std::fs::read_to_string(&rule_path)
+        .unwrap()
+        .contains("Existing project fact"));
+
+    let db_path = temp.path().join("graph.db");
+    let db = crate::common::open_graph_db_from_template(&db_path).await;
+    let refreshed = refresh_memory_digest_after_memory_change_for_profile(
+        &profile_root,
+        db.conn(),
+        &project_root,
+    )
+    .await
+    .unwrap();
+    assert!(!refreshed);
+
+    let snapshot = load_memory_digest_snapshot(&profile_root).unwrap();
+    assert!(snapshot.projects.is_empty());
+    let rendered = std::fs::read_to_string(&rule_path).unwrap();
+    assert!(!rendered.contains("Existing project fact"));
+    assert!(rendered.contains("No durable facts exported yet"));
 }
 
 #[tokio::test]

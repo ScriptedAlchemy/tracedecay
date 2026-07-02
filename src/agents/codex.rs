@@ -495,7 +495,14 @@ fn install_codex_plugin_bundle(
     profile_home: &Path,
 ) -> Result<()> {
     write_codex_plugin_bundle_base(install_dir, tracedecay_bin, scope)?;
-    install_codex_managed_skill_overlay(profile_home, install_dir).map(|_| ())
+    install_codex_managed_skill_overlay(profile_home, install_dir)?;
+    let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(profile_home);
+    crate::automation::memory_digest::sync_memory_digest_export(
+        &profile_root,
+        crate::automation::skill_targets::SkillInstallTarget::Codex,
+        install_dir,
+    )?;
+    Ok(())
 }
 
 /// Export a complete shareable Codex plugin bundle with active managed skills.

@@ -3155,6 +3155,12 @@ async fn test_codex_install_exports_active_managed_skills() {
     let skill = std::fs::read_to_string(skill_path).unwrap();
     assert!(skill.contains("id: repo-hygiene"));
     assert!(skill.contains("Use Repo Hygiene for repeated workflows."));
+
+    let digest_skill_path =
+        codex_plugin_install_dir(home).join("skills/agent-managed-memory/SKILL.md");
+    let digest_skill = std::fs::read_to_string(digest_skill_path).unwrap();
+    assert!(digest_skill.contains("name: tracedecay-memory-digest"));
+    assert!(digest_skill.contains("No durable facts exported yet"));
 }
 
 #[tokio::test]
@@ -3195,6 +3201,13 @@ async fn test_codex_shareable_plugin_artifact_exports_bundle_and_managed_skills(
     let skill = std::fs::read_to_string(skill_path).unwrap();
     assert!(skill.contains("id: repo-hygiene"));
     assert!(skill.contains("Use Repo Hygiene for repeated workflows."));
+    assert!(
+        !summary
+            .output
+            .join("skills/agent-managed-memory/SKILL.md")
+            .exists(),
+        "shareable Codex plugin artifacts must not include a personal memory digest"
+    );
 }
 
 #[test]

@@ -35,12 +35,14 @@ use libsql::Connection;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+use crate::automation::config::AutomationConfig;
 use crate::automation::skill_targets::SkillInstallTarget;
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::hygiene::detect_secret_like;
 use crate::memory::store::MemoryStore;
 use crate::memory::types::{FactRecord, MemoryCategory};
 use crate::tracedecay::current_timestamp;
+use crate::user_config::UserConfig;
 
 pub const MEMORY_DIGEST_START: &str = "<!-- TRACEDECAY MEMORY DIGEST START -->";
 pub const MEMORY_DIGEST_END: &str = "<!-- TRACEDECAY MEMORY DIGEST END -->";
@@ -377,6 +379,23 @@ pub fn update_project_digest_section(
     Ok(snapshot)
 }
 
+/// Removes one project's section from the profile-level snapshot.
+pub fn remove_project_digest_section(
+    profile_root: &Path,
+    project_root: &Path,
+) -> Result<MemoryDigestSnapshot> {
+    let project_key = project_key_for_root(project_root);
+    let mut snapshot = load_memory_digest_snapshot(profile_root)?;
+    let before = snapshot.projects.len();
+    snapshot
+        .projects
+        .retain(|existing| existing.project_key != project_key);
+    if snapshot.projects.len() != before {
+        save_memory_digest_snapshot(profile_root, &snapshot)?;
+    }
+    Ok(snapshot)
+}
+
 fn load_digest_targets(profile_root: &Path) -> DigestTargetManifest {
     let path = digest_targets_path(profile_root);
     match fs::read(&path) {
@@ -435,18 +454,31 @@ fn unrecord_digest_target(
 /// in `profile_root` (the `TraceDecay` user data dir). Defaults to enabled when
 /// the file or field is missing or unreadable.
 pub fn memory_digest_export_enabled(profile_root: &Path) -> bool {
+    load_global_automation_config(profile_root).export_memory_digest
+}
+
+fn load_global_automation_config(profile_root: &Path) -> AutomationConfig {
     let path = profile_root.join("config.toml");
     let Ok(contents) = fs::read_to_string(&path) else {
-        return true;
+        return AutomationConfig::default();
     };
-    let Ok(value) = toml::from_str::<toml::Value>(&contents) else {
-        return true;
+    let Ok(config) = toml::from_str::<UserConfig>(&contents) else {
+        return AutomationConfig::default();
     };
-    value
-        .get("automation")
-        .and_then(|automation| automation.get("export_memory_digest"))
-        .and_then(toml::Value::as_bool)
-        .unwrap_or(true)
+    config.automation
+}
+
+/// Resolves the effective global+project memory-digest export gate for one
+/// project. Project sidecars can override the profile default.
+pub async fn memory_digest_export_enabled_for_project(
+    profile_root: &Path,
+    project_root: &Path,
+) -> Result<bool> {
+    let global = load_global_automation_config(profile_root);
+    let layout = crate::storage::resolve_layout(project_root, profile_root)?;
+    let project = crate::automation::config::load_project_config(&layout.dashboard_root).await?;
+    let effective = crate::automation::config::effective_config(&global, project.as_ref())?;
+    Ok(effective.export_memory_digest)
 }
 
 // ---------------------------------------------------------------------------
@@ -770,6 +802,30 @@ pub async fn refresh_project_memory_digest(
     Ok(())
 }
 
+/// Regenerates a project's digest section only when the project's effective
+/// automation config allows export. When disabled, any existing section for
+/// that project is removed and recorded host channels are refreshed so stale
+/// facts disappear from prompts.
+pub async fn refresh_memory_digest_after_memory_change_for_profile(
+    profile_root: &Path,
+    conn: &Connection,
+    project_root: &Path,
+) -> Result<bool> {
+    if !memory_digest_export_enabled_for_project(profile_root, project_root).await? {
+        remove_project_digest_section(profile_root, project_root)?;
+        export_memory_digest_to_recorded_targets(profile_root)?;
+        return Ok(false);
+    }
+    refresh_project_memory_digest(
+        profile_root,
+        conn,
+        project_root,
+        &MemoryDigestOptions::default(),
+    )
+    .await?;
+    Ok(true)
+}
+
 /// Non-fatal wrapper for memory-mutating apply paths: resolves the profile
 /// root from the environment, honors the config gate, and logs (rather than
 /// propagates) failures so digest refresh never breaks an apply.
@@ -778,16 +834,9 @@ pub async fn refresh_memory_digest_after_memory_change(conn: &Connection, projec
         return;
     };
     let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(&home);
-    if !memory_digest_export_enabled(&profile_root) {
-        return;
-    }
-    if let Err(err) = refresh_project_memory_digest(
-        &profile_root,
-        conn,
-        project_root,
-        &MemoryDigestOptions::default(),
-    )
-    .await
+    if let Err(err) =
+        refresh_memory_digest_after_memory_change_for_profile(&profile_root, conn, project_root)
+            .await
     {
         eprintln!("warning: memory digest refresh failed: {err}");
     }
