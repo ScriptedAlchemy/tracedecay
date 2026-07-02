@@ -6,7 +6,6 @@ use std::process::Command;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 use tempfile::TempDir;
-use tokio::sync::Mutex;
 use tracedecay::branch_meta::{self, BranchMeta};
 use tracedecay::config::{discover_project_root, get_config_path, load_config};
 use tracedecay::config::{TraceDecayConfig, USER_DATA_DIR_ENV};
@@ -25,7 +24,7 @@ use tracedecay::storage::{
 };
 use tracedecay::tracedecay::TraceDecay;
 
-static HOME_ENV_LOCK: Mutex<()> = Mutex::const_new(());
+use crate::support::HOME_ENV_LOCK;
 
 struct HomeGuard {
     previous_home: Option<OsString>,

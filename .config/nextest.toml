@@ -31,22 +31,22 @@ platform = { host = 'cfg(windows)' }
 test-group = 'windows-dashboard-server'
 
 [[profile.ci.overrides]]
-filter = 'binary(=agent_suite) | binary(=branch_db_safety_test) | (binary(=core_cli_suite) & test(/^cli_non_interactive_test::/)) | binary(=mcp_cli_serve_test)'
+filter = 'binary(=agent_suite) | (binary(=storage_suite) & test(/^branch_db_safety_test::/)) | (binary(=core_cli_suite) & test(/^cli_non_interactive_test::/)) | binary(=mcp_cli_serve_test)'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-tracedecay-init'
 
 [[profile.ci.overrides]]
-filter = '(binary(=automation_runner_test) & !test(~backend::)) | binary(=branch_drift_test) | (binary(=core_cli_suite) & test(/^(integration_test|regression_core_engine_test|tracedecay_test)::/))'
+filter = '(binary(=automation_runner_test) & !test(~backend::)) | (binary(=storage_suite) & test(/^branch_drift_test::/)) | (binary(=core_cli_suite) & test(/^(integration_test|regression_core_engine_test|tracedecay_test)::/))'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-init-heavy'
 
 [[profile.ci.overrides]]
-filter = 'binary(=storage_resolver_test) | binary(=profile_storage_migration_test) | (binary(=transcript_ingest_suite) & test(~cursor::))'
+filter = '(binary(=storage_suite) & (test(/^storage_resolver_test::/) | test(/^profile_storage_migration_test::/))) | (binary(=transcript_ingest_suite) & test(~cursor::))'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-profile-storage'
 
 [[profile.ci.overrides]]
-filter = 'binary(=session_suite) | (binary(=transcript_ingest_suite) & (test(~codex::) | test(~hermes::) | test(~cline_like::))) | binary(=corruption_test) | binary(=db_query_test) | binary(=mcp_handler_test) | binary(=mcp_server_test) | binary(=memory_test) | binary(=multi_mcp_coordination_test)'
+filter = 'binary(=session_suite) | (binary(=transcript_ingest_suite) & (test(~codex::) | test(~hermes::) | test(~cline_like::))) | (binary(=storage_suite) & (test(/^corruption_test::/) | test(/^db_query_test::/))) | binary(=mcp_handler_test) | binary(=mcp_server_test) | binary(=memory_test) | binary(=multi_mcp_coordination_test)'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-session-sqlite'
 

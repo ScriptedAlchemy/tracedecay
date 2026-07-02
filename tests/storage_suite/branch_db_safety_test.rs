@@ -1,15 +1,18 @@
-mod common;
-
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
-use common::IsolatedEnv;
+use crate::common::{self, IsolatedEnv};
 use tracedecay::branch::BranchAddOutcome;
 use tracedecay::branch_meta::load_branch_meta;
 use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::TraceDecay;
+
+// These tests resolve the profile layout from the live HOME without pinning
+// it, so under threaded `cargo test` they must not overlap with suite
+// modules whose guards mutate HOME/USERPROFILE mid-test.
+use crate::support::HOME_ENV_LOCK;
 
 fn git(project: &Path, args: &[&str]) {
     let output = Command::new("git")
@@ -129,6 +132,7 @@ fn assert_fallback_write_refused(operation: &str, err: impl std::fmt::Display) {
 
 #[tokio::test]
 async fn open_auto_tracks_untracked_branch_and_syncs_its_db() {
+    let _env_lock = HOME_ENV_LOCK.lock().await;
     let (_env, project, feature) = open_untracked_project().await;
 
     assert!(
@@ -158,6 +162,7 @@ async fn open_auto_tracks_untracked_branch_and_syncs_its_db() {
 
 #[tokio::test]
 async fn fallback_writes_are_refused_by_all_sync_entry_points() {
+    let _env_lock = HOME_ENV_LOCK.lock().await;
     let (_env, project, fallback) = open_detached_fallback_project().await;
 
     let err = fallback
@@ -196,6 +201,7 @@ async fn fallback_writes_are_refused_by_all_sync_entry_points() {
 
 #[tokio::test]
 async fn add_branch_tracking_copies_from_nearest_tracked_ancestor() {
+    let _env_lock = HOME_ENV_LOCK.lock().await;
     let (_env, project) = IsolatedEnv::acquire().await;
     let project = project.as_path();
 
@@ -274,6 +280,7 @@ async fn add_branch_tracking_copies_from_nearest_tracked_ancestor() {
 
 #[tokio::test]
 async fn add_branch_tracking_refuses_corrupt_metadata_without_overwriting() {
+    let _env_lock = HOME_ENV_LOCK.lock().await;
     let (_env, project) = IsolatedEnv::acquire().await;
     let project = project.as_path();
 
@@ -315,6 +322,7 @@ async fn add_branch_tracking_refuses_corrupt_metadata_without_overwriting() {
 
 #[test]
 fn cli_branch_add_refuses_corrupt_metadata_without_overwriting() {
+    let _env_lock = HOME_ENV_LOCK.blocking_lock();
     let (env, project) = IsolatedEnv::acquire_blocking();
     let project = project.as_path();
 
