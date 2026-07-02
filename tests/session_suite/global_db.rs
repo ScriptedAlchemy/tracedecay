@@ -4,11 +4,26 @@ use tracedecay::global_db::{AnalyticsEventInsert, AnalyticsEventQuery, GlobalDb}
 use tracedecay::sessions::lcm::LcmStorageKind;
 use tracedecay::sessions::{SessionRecord, SessionSearchScope};
 
-mod common;
-use common::{
+use crate::common::{
     global_message as sample_message, global_session as sample_session,
-    isolated_global_db_path as isolated_db_path, open_global_db as open_isolated_db,
+    isolated_global_db_path as isolated_db_path, write_empty_global_db_schema,
 };
+
+/// Opens the per-test global DB from the cached empty-schema template
+/// (mirrors `common::open_lcm_db`), skipping the full DDL + migration pass
+/// that `GlobalDb::open_at` pays on every fresh store. Tests that exercise
+/// schema upgrades build legacy DBs by hand and call `GlobalDb::open_at`
+/// directly, so they keep the real migration path.
+async fn open_isolated_db(tmp: &TempDir) -> GlobalDb {
+    let db_path = isolated_db_path(tmp);
+    if !db_path.exists() {
+        write_empty_global_db_schema(&db_path).await;
+        return GlobalDb::open_at_assuming_schema(&db_path)
+            .await
+            .expect("global db open");
+    }
+    GlobalDb::open_at(&db_path).await.expect("global db open")
+}
 
 fn sha256_hex(content: &str) -> String {
     let mut hasher = Sha256::new();
