@@ -14,6 +14,7 @@ mod swift_extractor;
 mod typescript_extractor;
 
 pub(crate) mod annotations;
+pub(crate) mod common;
 pub mod complexity;
 pub(crate) mod traversal;
 pub mod ts_provider;

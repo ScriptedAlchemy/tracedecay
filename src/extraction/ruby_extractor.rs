@@ -5,6 +5,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
+use crate::extraction::common::docstring_from_hash_comments;
 use crate::extraction::complexity::{count_complexity, RUBY_COMPLEXITY};
 use crate::types::{
     generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
@@ -587,25 +588,7 @@ impl RubyExtractor {
     /// Ruby uses comment lines (# ...) as documentation. We look for `comment`
     /// sibling nodes that immediately precede the given definition node.
     fn extract_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        // Look at the previous sibling nodes for consecutive comment lines.
-        let mut comments: Vec<String> = Vec::new();
-        let mut prev = node.prev_named_sibling();
-        while let Some(prev_node) = prev {
-            if prev_node.kind() == "comment" {
-                let text = state.node_text(prev_node);
-                let stripped = text.trim_start_matches('#').trim().to_string();
-                comments.push(stripped);
-                prev = prev_node.prev_named_sibling();
-            } else {
-                break;
-            }
-        }
-        if comments.is_empty() {
-            return None;
-        }
-        // Comments were collected in reverse order; reverse them back.
-        comments.reverse();
-        Some(comments.join("\n"))
+        docstring_from_hash_comments(&state.source, node)
     }
 
     /// Find the method name identifier in a singleton method.

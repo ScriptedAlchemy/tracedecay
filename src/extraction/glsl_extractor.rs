@@ -6,6 +6,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
+use crate::extraction::common::{clean_c_comment, docstring_from_preceding_comments};
 use crate::extraction::complexity::{count_complexity, C_COMPLEXITY};
 use crate::types::{
     generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
@@ -652,50 +653,7 @@ impl GlslExtractor {
     // -------------------------------------------------------
 
     fn extract_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        let mut comments = Vec::new();
-        let mut current = node.prev_named_sibling();
-        while let Some(sibling) = current {
-            if sibling.kind() == "comment" {
-                comments.push(state.node_text(sibling));
-                current = sibling.prev_named_sibling();
-            } else {
-                break;
-            }
-        }
-        if comments.is_empty() {
-            return None;
-        }
-        comments.reverse();
-        let cleaned: Vec<String> = comments.iter().map(|c| Self::clean_comment(c)).collect();
-        let result = cleaned.join("\n").trim().to_string();
-        if result.is_empty() {
-            None
-        } else {
-            Some(result)
-        }
-    }
-
-    fn clean_comment(comment: &str) -> String {
-        let trimmed = comment.trim();
-        if let Some(stripped) = trimmed.strip_prefix("//") {
-            stripped.strip_prefix(' ').unwrap_or(stripped).to_string()
-        } else if trimmed.starts_with("/*") && trimmed.ends_with("*/") {
-            let inner = &trimmed[2..trimmed.len() - 2];
-            inner
-                .lines()
-                .map(|line| {
-                    let l = line.trim();
-                    l.strip_prefix("* ")
-                        .or_else(|| l.strip_prefix('*'))
-                        .unwrap_or(l)
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-                .trim()
-                .to_string()
-        } else {
-            trimmed.to_string()
-        }
+        docstring_from_preceding_comments(&state.source, node, clean_c_comment)
     }
 
     // -------------------------------------------------------

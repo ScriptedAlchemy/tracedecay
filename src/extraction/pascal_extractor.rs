@@ -8,6 +8,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
+use crate::extraction::common::docstring_from_preceding_comments;
 use crate::extraction::complexity::{count_complexity, PASCAL_COMPLEXITY};
 use crate::types::{
     generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
@@ -1347,29 +1348,7 @@ impl PascalExtractor {
 
     /// Extract docstrings from preceding comment nodes.
     fn extract_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        let mut comments = Vec::new();
-        let mut current = node.prev_named_sibling();
-        while let Some(sibling) = current {
-            if sibling.kind() == "comment" {
-                let text = state.node_text(sibling);
-                comments.push(text);
-                current = sibling.prev_named_sibling();
-            } else {
-                break;
-            }
-        }
-        if comments.is_empty() {
-            return None;
-        }
-        // Comments are collected in reverse order (closest first).
-        comments.reverse();
-        let cleaned: Vec<String> = comments.iter().map(|c| Self::clean_comment(c)).collect();
-        let result = cleaned.join("\n").trim().to_string();
-        if result.is_empty() {
-            None
-        } else {
-            Some(result)
-        }
+        docstring_from_preceding_comments(&state.source, node, Self::clean_comment)
     }
 
     /// Strip comment markers from a single Pascal comment text.
