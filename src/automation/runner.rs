@@ -173,7 +173,7 @@ pub async fn run_session_reflector_with_backend(
     backend: &dyn AgentTaskBackend,
     options: SessionReflectorAutomationOptions,
 ) -> Result<SessionReflectorAutomationRun> {
-    let run = AgentTaskRunContext::new(
+    let mut run = AgentTaskRunContext::new(
         cg.store_layout().dashboard_root.clone(),
         options.run_id.clone(),
         "session_reflector",
@@ -429,7 +429,7 @@ pub async fn run_skill_writer_with_backend(
     backend: &dyn AgentTaskBackend,
     options: SkillWriterAutomationOptions,
 ) -> Result<SkillWriterAutomationRun> {
-    let run = AgentTaskRunContext::new(
+    let mut run = AgentTaskRunContext::new(
         cg.store_layout().dashboard_root.clone(),
         options.run_id.clone(),
         "skill_writer",

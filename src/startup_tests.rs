@@ -3,8 +3,10 @@ use super::{
         hermes_profile_targets, hermes_selected_profile_targets, validate_hermes_profile_flags,
         validate_hermes_project_root_flag,
     },
-    is_local_install_command, run_update_steps, should_skip_agent_install_maintenance,
-    should_skip_startup_maintenance, Commands,
+    is_local_install_command, should_skip_agent_install_maintenance,
+    should_skip_startup_maintenance,
+    update_cmd::run_update_steps,
+    Commands,
 };
 use std::cell::RefCell;
 use tempfile::TempDir;
@@ -31,8 +33,12 @@ fn explicit_agent_config_commands_skip_startup_maintenance() {
     }));
     assert!(should_skip_startup_maintenance(&Commands::Reinstall));
     assert!(should_skip_startup_maintenance(&Commands::UpdatePlugin));
-    assert!(should_skip_startup_maintenance(&Commands::Update));
-    assert!(should_skip_startup_maintenance(&Commands::PostUpdate));
+    assert!(should_skip_startup_maintenance(&Commands::Update {
+        no_heal: false
+    }));
+    assert!(should_skip_startup_maintenance(&Commands::PostUpdate {
+        no_heal: false
+    }));
     assert!(should_skip_startup_maintenance(&Commands::Uninstall {
         agent: Some("kiro".to_string()),
         profile: None,
@@ -78,8 +84,12 @@ fn agent_install_maintenance_is_selective() {
     assert!(should_skip_agent_install_maintenance(
         &Commands::UpdatePlugin
     ));
-    assert!(should_skip_agent_install_maintenance(&Commands::Update));
-    assert!(should_skip_agent_install_maintenance(&Commands::PostUpdate));
+    assert!(should_skip_agent_install_maintenance(&Commands::Update {
+        no_heal: false
+    }));
+    assert!(should_skip_agent_install_maintenance(
+        &Commands::PostUpdate { no_heal: false }
+    ));
     assert!(should_skip_agent_install_maintenance(&Commands::Tool {
         project: None,
         name: Some("message_search".to_string()),

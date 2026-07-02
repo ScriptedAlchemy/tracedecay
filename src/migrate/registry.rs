@@ -4,7 +4,9 @@ use std::path::{Component, Path, PathBuf};
 use serde::Serialize;
 
 use crate::branch_meta;
-use crate::global_db::{GlobalDb, GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert};
+use crate::global_db::{
+    CodeProjectRecord, GlobalDb, GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert,
+};
 use crate::storage::{
     read_store_manifest, validate_project_id, StorageMode, StoreKind, STORE_MANIFEST_FILENAME,
     STORE_MANIFEST_SCHEMA_VERSION,
@@ -126,6 +128,49 @@ pub async fn apply_registry_reconstruction_report(
     } else {
         Err(issues)
     }
+}
+
+/// How dead a registry row's project root must be before the row counts as
+/// stale. This is the single definition of both GC scopes, so a reader never
+/// has to reassemble the effective condition from scattered half-checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StaleRootScope {
+    /// Manual `tracedecay migrate registry-gc` scope: the canonical root is
+    /// gone (the user reviews candidates before applying).
+    CanonicalRootMissing,
+    /// Post-update auto-GC scope: both the canonical and display roots are
+    /// gone — stricter, because nobody reviews the deletion.
+    AllRootsMissing,
+}
+
+/// Returns true if the project's canonical or display root still exists.
+pub fn code_project_root_exists(project: &CodeProjectRecord) -> bool {
+    Path::new(&project.canonical_root).exists() || Path::new(&project.display_root).exists()
+}
+
+/// Filters registry rows that are stale under `scope`, restricted to
+/// canonical roots under one of `prefixes` (an empty slice means no
+/// restriction). Shared by `tracedecay migrate registry-gc` and the
+/// post-update health pass so both agree on what counts as a GC candidate.
+pub fn stale_code_projects<'a>(
+    projects: &'a [CodeProjectRecord],
+    prefixes: &[PathBuf],
+    scope: StaleRootScope,
+) -> Vec<&'a CodeProjectRecord> {
+    projects
+        .iter()
+        .filter(|project| {
+            let canonical_root = Path::new(&project.canonical_root);
+            prefixes.is_empty()
+                || prefixes
+                    .iter()
+                    .any(|prefix| canonical_root.starts_with(prefix))
+        })
+        .filter(|project| match scope {
+            StaleRootScope::CanonicalRootMissing => !Path::new(&project.canonical_root).exists(),
+            StaleRootScope::AllRootsMissing => !code_project_root_exists(project),
+        })
+        .collect()
 }
 
 pub fn scan_profile_store_manifests(

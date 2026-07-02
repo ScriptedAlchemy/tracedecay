@@ -59,7 +59,71 @@ impl Drop for EnvVarGuard {
 pub const GLOBAL_DB_ENV: &str = "TRACEDECAY_GLOBAL_DB";
 
 /// Serializes tests within one binary that mutate process-wide env vars.
+///
+/// Prefer [`IsolatedEnv`], which bundles this serialization with a throwaway
+/// home and [`TraceDecayStorageEnvGuard`]; reach for this raw lock only when
+/// a test needs finer-grained control over which env vars it swaps.
 pub static GLOBAL_DB_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Serializes [`IsolatedEnv`] users within one test binary: storage isolation
+/// swaps process-wide env vars (`HOME`, `TRACEDECAY_DATA_DIR`, ...), so tests
+/// must not overlap.
+static ISOLATED_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// The canonical way to isolate env-mutating tests: serializes tests within
+/// one binary and keeps every test's project registration, store manifests,
+/// and branch-meta writes inside a throwaway home instead of the developer's
+/// real `~/.tracedecay` profile store.
+///
+/// Construct via [`IsolatedEnv::acquire`] (async tests) or
+/// [`IsolatedEnv::acquire_blocking`] (sync tests); both return the guard plus
+/// a ready-made `project` directory inside the temp home.
+pub struct IsolatedEnv {
+    // Field order matters: fields drop in declaration order, so the lock must
+    // be declared last. Dropping it first would let the next waiting test
+    // install its own isolated env, only for `storage`'s restore to clobber it.
+    storage: TraceDecayStorageEnvGuard,
+    _dir: TempDir,
+    _env_lock: tokio::sync::MutexGuard<'static, ()>,
+}
+
+impl IsolatedEnv {
+    fn build(env_lock: tokio::sync::MutexGuard<'static, ()>) -> (Self, PathBuf) {
+        let dir = tempdir_or_panic();
+        let storage = TraceDecayStorageEnvGuard::for_tempdir(&dir);
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap_or_else(|err| {
+            panic!(
+                "failed to create isolated project directory '{}': {err}",
+                project.display()
+            )
+        });
+        (
+            Self {
+                storage,
+                _dir: dir,
+                _env_lock: env_lock,
+            },
+            project,
+        )
+    }
+
+    pub async fn acquire() -> (Self, PathBuf) {
+        Self::build(ISOLATED_ENV_LOCK.lock().await)
+    }
+
+    /// Sync counterpart of [`IsolatedEnv::acquire`] for plain `#[test]` fns.
+    ///
+    /// Warning: this uses `blocking_lock`, which panics if called from within
+    /// an async context — use [`IsolatedEnv::acquire`] there instead.
+    pub fn acquire_blocking() -> (Self, PathBuf) {
+        Self::build(ISOLATED_ENV_LOCK.blocking_lock())
+    }
+
+    pub fn home(&self) -> &Path {
+        self.storage.home()
+    }
+}
 
 /// Sets [`GLOBAL_DB_ENV`] to a test DB path for the guard's lifetime.
 pub struct GlobalDbEnvGuard {

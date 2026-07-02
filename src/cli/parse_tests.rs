@@ -134,11 +134,37 @@ fn update_upgrade_and_update_plugin_parse_to_distinct_commands() {
     let update_plugin =
         Cli::try_parse_from(["tracedecay", "update-plugin"]).expect("update-plugin should parse");
 
-    assert!(matches!(update.command, Some(Commands::Update)));
+    assert!(matches!(
+        update.command,
+        Some(Commands::Update { no_heal: false })
+    ));
     assert!(matches!(upgrade.command, Some(Commands::Upgrade)));
     assert!(matches!(
         update_plugin.command,
         Some(Commands::UpdatePlugin)
+    ));
+}
+
+#[test]
+fn update_and_post_update_parse_no_heal_flag() {
+    let update = Cli::try_parse_from(["tracedecay", "update", "--no-heal"])
+        .expect("update --no-heal should parse");
+    let post_update = Cli::try_parse_from(["tracedecay", "post-update", "--no-heal"])
+        .expect("post-update --no-heal should parse");
+    let post_update_default = Cli::try_parse_from(["tracedecay", "post-update"])
+        .expect("post-update should parse without --no-heal");
+
+    assert!(matches!(
+        update.command,
+        Some(Commands::Update { no_heal: true })
+    ));
+    assert!(matches!(
+        post_update.command,
+        Some(Commands::PostUpdate { no_heal: true })
+    ));
+    assert!(matches!(
+        post_update_default.command,
+        Some(Commands::PostUpdate { no_heal: false })
     ));
 }
 

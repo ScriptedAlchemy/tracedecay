@@ -270,10 +270,18 @@ pub enum Commands {
     /// Download and install the latest version from GitHub
     Upgrade,
     /// Refresh the tracedecay binary, generated plugins, and daemon
-    Update,
+    Update {
+        /// Skip the post-update health pass (safe repairs + doctor summary)
+        #[arg(long)]
+        no_heal: bool,
+    },
     /// Refresh plugins and daemon after the binary has been updated.
     #[command(name = "post-update", hide = true)]
-    PostUpdate,
+    PostUpdate {
+        /// Skip the post-update health pass (safe repairs + doctor summary)
+        #[arg(long)]
+        no_heal: bool,
+    },
     /// Show or switch the update channel (stable or beta)
     Channel {
         /// Target channel: "stable" or "beta" (omit to show current)

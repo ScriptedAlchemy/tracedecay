@@ -29,6 +29,12 @@ pub const SOCKET_ENV: &str = "TRACEDECAY_DAEMON_SOCKET";
 pub const HOOK_EVENT_METHOD: &str = "tracedecay/hookEvent";
 #[cfg(unix)]
 const HOOK_EVENT_NOTIFY_TIMEOUT: Duration = Duration::from_millis(750);
+/// Upper bound on graceful-shutdown persistence work (per-server token
+/// persistence and WAL checkpoints). Must stay comfortably below systemd's
+/// stop timeout (90s by default) so the daemon exits cleanly instead of
+/// being killed with `SIGKILL` mid-checkpoint.
+#[cfg(unix)]
+const DAEMON_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(45);
 
 mod service;
 pub use service::{
@@ -987,7 +993,27 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
     // will never be served.
     drop(listener);
     let _ = std::fs::remove_file(&socket_path);
-    engine.shutdown_all().await;
+    // Graceful shutdown persists tokens-saved counters and checkpoints WALs
+    // for every live project server sequentially; with many servers or large
+    // WALs that can exceed systemd's stop timeout, which then sends `SIGKILL`
+    // to the daemon. On timeout the shutdown future is dropped and we proceed
+    // to exit: the remaining persistence is best-effort and the database WAL
+    // keeps state crash-safe.
+    let completed = timeout(DAEMON_SHUTDOWN_DEADLINE, engine.shutdown_all())
+        .await
+        .is_ok();
+    if !completed {
+        log_daemon_event(
+            "daemon_shutdown",
+            &[
+                ("outcome", "timeout".to_string()),
+                (
+                    "deadline_secs",
+                    DAEMON_SHUTDOWN_DEADLINE.as_secs().to_string(),
+                ),
+            ],
+        );
+    }
     Ok(())
 }
 

@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 
 use crate::errors::Result;
 use crate::memory::retrieval::FactRetriever;
+use crate::memory::trust::{DEFAULT_TRUST, HIGH_TRUST_REPRESENTATIVE, LOW_TRUST_REPRESENTATIVE};
 use crate::memory::types::{AddFactRequest, MemoryCategory};
 use crate::tracedecay::TraceDecay;
 
@@ -129,12 +130,14 @@ async fn validate_fact_proposal(
             "entities must be an array of strings",
         ));
     };
-    let trust = match object.get("trust") {
-        Some(value) => match value.as_f64() {
-            Some(trust) if (0.0..=1.0).contains(&trust) => Some(trust),
-            _ => return Ok(rejected_fact(proposal, "trust must be between 0 and 1")),
-        },
-        None => return Ok(rejected_fact(proposal, "trust is required")),
+    let Some(trust) = object.get("trust") else {
+        return Ok(rejected_fact(proposal, "trust is required"));
+    };
+    let Some(trust) = proposal_trust_value(trust) else {
+        return Ok(rejected_fact(
+            proposal,
+            "trust must be a number between 0 and 1, or one of low, medium, high",
+        ));
     };
     if object.contains_key("confidence") {
         return Ok(rejected_fact(
@@ -204,7 +207,7 @@ async fn validate_fact_proposal(
         source: Some("session_reflector".to_string()),
         tags,
         entities,
-        trust,
+        trust: Some(trust),
         metadata: json!({
             "source": "session_reflector",
             "source_span": source_span,
@@ -227,6 +230,28 @@ async fn validate_fact_proposal(
             },
         },
     })))
+}
+
+/// Accepts numeric trust in `[0, 1]` plus the `low`/`medium`/`high` bucket
+/// labels models frequently emit despite the numeric prompt instruction.
+/// Buckets map to the representative scores defined next to
+/// [`crate::memory::trust::trust_bucket`], so they cannot drift out of their
+/// documented ranges.
+///
+/// Deliberate decision: the prompt forbids string labels, but they are
+/// accepted defensively rather than rejecting an otherwise valid fact. Note
+/// that the "high" representative can clear auto-apply thresholds when
+/// `auto_apply_memory_ops` is enabled — this is intentional.
+fn proposal_trust_value(value: &Value) -> Option<f64> {
+    if let Some(trust) = value.as_f64() {
+        return (0.0..=1.0).contains(&trust).then_some(trust);
+    }
+    match value.as_str()?.trim().to_ascii_lowercase().as_str() {
+        "low" => Some(LOW_TRUST_REPRESENTATIVE),
+        "medium" => Some(DEFAULT_TRUST),
+        "high" => Some(HIGH_TRUST_REPRESENTATIVE),
+        _ => None,
+    }
 }
 
 fn value_as_i64(value: &Value) -> Option<i64> {

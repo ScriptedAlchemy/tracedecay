@@ -94,10 +94,7 @@ fn hook_analytics_path(root: Option<&Path>) -> Option<PathBuf> {
 }
 
 fn append_private_jsonl(path: &Path, line: &str) {
-    let mut content = std::fs::read_to_string(path).unwrap_or_default();
-    content.push_str(line);
-    content.push('\n');
-    let _ = crate::storage::PrivateStoreIo::write_file(path, content.as_bytes());
+    let _ = crate::storage::PrivateStoreIo::append_line(path, line);
 }
 
 fn now_unix_millis() -> u64 {

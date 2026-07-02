@@ -352,16 +352,12 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
                     message: "could not open global DB for registry cleanup".to_string(),
                 })?;
             let projects = global_db.list_code_projects(usize::MAX).await;
-            let prefix_path = prefix.as_deref().map(PathBuf::from);
-            let stale: Vec<_> = projects
-                .into_iter()
-                .filter(|project| {
-                    prefix_path.as_ref().is_none_or(|prefix| {
-                        PathBuf::from(&project.canonical_root).starts_with(prefix)
-                    })
-                })
-                .filter(|project| !PathBuf::from(&project.canonical_root).exists())
-                .collect();
+            let prefixes: Vec<PathBuf> = prefix.iter().map(PathBuf::from).collect();
+            let stale = tracedecay::migrate::registry::stale_code_projects(
+                &projects,
+                &prefixes,
+                tracedecay::migrate::registry::StaleRootScope::CanonicalRootMissing,
+            );
             let deleted = if apply {
                 let project_ids: Vec<String> = stale
                     .iter()

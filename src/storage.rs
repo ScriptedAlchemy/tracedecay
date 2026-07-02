@@ -1,5 +1,5 @@
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -12,6 +12,9 @@ pub const ENROLLMENT_FILENAME: &str = "enrollment.json";
 pub const STORE_MANIFEST_FILENAME: &str = "store_manifest.json";
 pub const SESSIONS_DB_FILENAME: &str = "sessions.db";
 pub const BRANCH_META_FILENAME: &str = "branch-meta.json";
+/// Filename prefix for corrupt `branch-meta.json` files renamed out of the
+/// way by the post-update health pass (`branch-meta.json.corrupt-<timestamp>`).
+pub const BRANCH_META_QUARANTINE_PREFIX: &str = "branch-meta.json.corrupt-";
 pub const STORE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -459,8 +462,33 @@ impl PrivateStoreIo {
             Self::create_dir_all(parent)?;
         }
         reject_symlink_components(path, "private store file")?;
-        fs::write(path, contents)?;
+        Self::open_private(path, fs::OpenOptions::new().write(true).truncate(true))?
+            .write_all(contents)?;
         set_private_file_permissions(path)
+    }
+
+    /// Appends one line via a single `O_APPEND` write so concurrent hook
+    /// processes never interleave partial lines or lose each other's entries
+    /// the way read-modify-rewrite appends do.
+    pub fn append_line(path: &Path, line: &str) -> io::Result<()> {
+        if let Some(parent) = path.parent() {
+            Self::create_dir_all(parent)?;
+        }
+        reject_symlink_components(path, "private store file")?;
+        Self::open_private(path, fs::OpenOptions::new().append(true))?
+            .write_all(format!("{line}\n").as_bytes())?;
+        set_private_file_permissions(path)
+    }
+
+    /// Opens `path` for writing, creating it if missing with owner-only
+    /// permissions applied at create time (Unix), so a fresh file never
+    /// exists with umask-default permissions before the trailing
+    /// `set_private_file_permissions` call. Pre-existing files keep their
+    /// mode here and are tightened by that trailing call.
+    fn open_private(path: &Path, options: &mut fs::OpenOptions) -> io::Result<fs::File> {
+        options.create(true);
+        apply_private_create_mode(options);
+        options.open(path)
     }
 
     pub fn write_file_atomically(path: &Path, temp_path: &Path, contents: &[u8]) -> io::Result<()> {
@@ -701,6 +729,16 @@ fn set_private_file_permissions(path: &Path) -> std::io::Result<()> {
 
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
 }
+
+#[cfg(unix)]
+fn apply_private_create_mode(options: &mut fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.mode(0o600);
+}
+
+#[cfg(not(unix))]
+fn apply_private_create_mode(_options: &mut fs::OpenOptions) {}
 
 #[cfg(not(unix))]
 fn set_private_file_permissions(_path: &Path) -> std::io::Result<()> {
