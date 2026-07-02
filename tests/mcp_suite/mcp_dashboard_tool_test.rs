@@ -2,12 +2,10 @@
 //! Follows conventions from mcp_handler_test.rs: real TraceDecay + handle_tool_call,
 //! plus live HTTP probe of /api/capabilities on the returned URL.
 
-mod common;
-
 use std::fs;
 use std::time::Duration;
 
-use common::http_agent;
+use crate::common::http_agent;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tracedecay::mcp::handle_tool_call;
@@ -29,7 +27,9 @@ fn main() { println!("hi"); }
 "#,
     )
     .unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let cg = crate::fixture::init_project_from_template(project)
+        .await
+        .unwrap();
     cg.index_all().await.unwrap();
     (cg, dir)
 }

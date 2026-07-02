@@ -1,13 +1,9 @@
 //! Integration tests for the MCP server (`McpServer`) exercising the full
 //! JSON-RPC 2.0 protocol via `ChannelTransport`.
 //!
-//! Run with: `cargo test --features test-transport --test mcp_server_test`
+//! Run with: `cargo test --features test-transport --test mcp_suite`
 
-#![cfg(feature = "test-transport")]
-
-mod common;
-
-use common::EnvVarGuard;
+use crate::common::EnvVarGuard;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::PathBuf;
@@ -38,7 +34,9 @@ async fn setup_server() -> (Arc<McpServer>, TempDir) {
         "fn main() { let x = helper(); }\nfn helper() -> i32 { 42 }\n",
     )
     .unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let cg = crate::fixture::init_project_from_template(project)
+        .await
+        .unwrap();
     cg.index_all().await.unwrap();
     let server = McpServer::new(cg, None).await;
     (server, dir)
@@ -1936,7 +1934,9 @@ async fn setup_savings_project() -> (Arc<McpServer>, TempDir) {
         ));
     }
     fs::write(project.join("src/main.rs"), source).unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let cg = crate::fixture::init_project_from_template(project)
+        .await
+        .unwrap();
     cg.index_all().await.unwrap();
     let server = McpServer::new(cg, None).await;
     (server, dir)

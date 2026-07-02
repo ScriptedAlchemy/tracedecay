@@ -3,7 +3,8 @@
 //! Each test exercises a real `TraceDecay` instance with indexed test data,
 //! ensuring that the MCP dispatch layer formats results correctly.
 
-mod common;
+use crate::common;
+use crate::fixture;
 
 use std::ffi::OsString;
 use std::fs;
@@ -350,52 +351,18 @@ async fn setup_project() -> (TestTraceDecay, TestProject) {
     let home = project.join("home");
     let home_guard = HomeEnvGuard::set(&home);
     let global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
-    fs::create_dir_all(project.join("src")).unwrap();
 
-    fs::write(
-        project.join("src/main.rs"),
-        r#"
-use crate::utils::helper;
-mod utils;
-
-fn main() {
-    let result = helper();
-    println!("{}", result);
-}
-"#,
-    )
-    .unwrap();
-
-    fs::write(
-        project.join("src/utils.rs"),
-        r#"
-/// Returns a greeting string.
-pub fn helper() -> String {
-    format_greeting("world")
-}
-
-fn format_greeting(name: &str) -> String {
-    format!("Hello, {}!", name)
-}
-"#,
-    )
-    .unwrap();
-
-    // Test file so affected-tests can find something
-    fs::create_dir_all(project.join("tests")).unwrap();
-    fs::write(
-        project.join("tests/test_utils.rs"),
-        r#"
-use crate::utils::helper;
-
-#[test]
-fn test_helper() { assert!(!helper().is_empty()); }
-"#,
-    )
-    .unwrap();
-
-    let cg = TraceDecay::init(project).await.unwrap();
-    index_all_retrying_sync_lock(&cg).await;
+    // Fast path: seed the pre-indexed template store instead of paying
+    // schema creation + indexing in every test process.
+    let cg = match fixture::open_indexed_project_from_template(project).await {
+        Some(cg) => cg,
+        None => {
+            fixture::write_indexed_fixture_sources(project);
+            let cg = TraceDecay::init(project).await.unwrap();
+            index_all_retrying_sync_lock(&cg).await;
+            cg
+        }
+    };
     (
         TestTraceDecay::new(cg),
         TestProject {
@@ -416,7 +383,7 @@ async fn init_test_project(project: &Path) -> (TestTraceDecay, TestEnv) {
     let home = project.join("home");
     let home_guard = HomeEnvGuard::set(&home);
     let global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
-    let cg = TraceDecay::init(project).await.unwrap();
+    let cg = fixture::init_project_from_template(project).await.unwrap();
     (
         TestTraceDecay::new(cg),
         TestEnv {
@@ -466,8 +433,12 @@ async fn setup_cross_project_memory_projects(
     fs::write(active_project.join("src/lib.rs"), "pub fn active() {}\n").unwrap();
     fs::write(target_project.join("src/lib.rs"), "pub fn target() {}\n").unwrap();
 
-    let active = TraceDecay::init(&active_project).await.unwrap();
-    let target = TraceDecay::init(&target_project).await.unwrap();
+    let active = fixture::init_project_from_template(&active_project)
+        .await
+        .unwrap();
+    let target = fixture::init_project_from_template(&target_project)
+        .await
+        .unwrap();
 
     (
         TestTraceDecay::new(active),
@@ -575,7 +546,7 @@ fn integration_public_entry() {
     )
     .unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let cg = fixture::init_project_from_template(project).await.unwrap();
     cg.index_all().await.unwrap();
     (
         TestTraceDecay::new(cg),
@@ -664,7 +635,7 @@ fn main() {
     )
     .unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let cg = fixture::init_project_from_template(project).await.unwrap();
     cg.index_all().await.unwrap();
     (
         TestTraceDecay::new(cg),
@@ -971,7 +942,11 @@ async fn selected_project_read_skips_cache_write_for_read_only_store() {
         .upsert_code_project("proj_read", target_project, None, None, Some("main"))
         .await
         .unwrap();
-    let _target_cg = TestTraceDecay::new(TraceDecay::init(target_project).await.unwrap());
+    let _target_cg = TestTraceDecay::new(
+        fixture::init_project_from_template(target_project)
+            .await
+            .unwrap(),
+    );
 
     let read_args = json!({
         "project_id": "proj_read",
@@ -10865,7 +10840,7 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
     let home = dir.path().join("home");
     let _home_guard = HomeEnvGuard::set(&home);
     let _global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
-    let cg = TestTraceDecay::new(TraceDecay::init(&project).await.unwrap());
+    let cg = TestTraceDecay::new(fixture::init_project_from_template(&project).await.unwrap());
     let profile_root = tracedecay::storage::default_profile_root().unwrap();
 
     create_managed_skill_draft(
@@ -11056,7 +11031,7 @@ async fn hermes_skill_bridge_mcp_tool_reads_host_owned_profile_state() {
     let project = dir.path().join("repo");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
-    let cg = TestTraceDecay::new(TraceDecay::init(&project).await.unwrap());
+    let cg = TestTraceDecay::new(fixture::init_project_from_template(&project).await.unwrap());
 
     let hermes_home = dir.path().join("hermes");
     let skills_dir = hermes_home.join("skills");
