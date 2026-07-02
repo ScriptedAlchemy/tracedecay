@@ -200,3 +200,11 @@ opt-level = 2
 
 [profile.dev.package.regex-syntax]
 opt-level = 2
+
+# libsql 0.9.30 vendored with a one-line teardown fix (vendor/libsql):
+# upstream drops the local connection twice (tursodatabase/libsql#2251),
+# double-closing the sqlite3 handle. The use-after-free intermittently
+# aborts Windows test processes with STATUS_ACCESS_VIOLATION (0xc0000005).
+# Drop the patch once an upstream release makes `disconnect` idempotent.
+[patch.crates-io]
+libsql = { path = "vendor/libsql" }
