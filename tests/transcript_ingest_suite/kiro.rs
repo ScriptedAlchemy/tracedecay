@@ -3,14 +3,7 @@ use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::sessions::kiro::KiroSource;
 use tracedecay::sessions::source::ingest_source;
 
-fn setup(tmp: &TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
-    let home = tmp.path().join("home");
-    let project = tmp.path().join("project");
-    std::fs::create_dir_all(&project).unwrap();
-    std::fs::create_dir(project.join(".tracedecay")).unwrap();
-    std::fs::write(project.join(".tracedecay/tracedecay.db"), "").unwrap();
-    (home, project)
-}
+use crate::support::setup;
 
 fn encode_workspace_path(path: &std::path::Path) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

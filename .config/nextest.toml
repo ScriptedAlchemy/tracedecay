@@ -41,12 +41,12 @@ platform = { host = 'cfg(windows)' }
 test-group = 'windows-init-heavy'
 
 [[profile.ci.overrides]]
-filter = 'binary(=storage_resolver_test) | binary(=profile_storage_migration_test) | binary(=cursor_transcript_ingest_test)'
+filter = 'binary(=storage_resolver_test) | binary(=profile_storage_migration_test) | (binary(=transcript_ingest_suite) & test(~cursor::))'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-profile-storage'
 
 [[profile.ci.overrides]]
-filter = 'binary(=session_suite) | binary(=codex_transcript_ingest_test) | binary(=hermes_transcript_ingest_test) | binary(=cline_like_transcript_ingest_test) | binary(=corruption_test) | binary(=db_query_test) | binary(=mcp_handler_test) | binary(=mcp_server_test) | binary(=memory_test) | binary(=multi_mcp_coordination_test)'
+filter = 'binary(=session_suite) | (binary(=transcript_ingest_suite) & (test(~codex::) | test(~hermes::) | test(~cline_like::))) | binary(=corruption_test) | binary(=db_query_test) | binary(=mcp_handler_test) | binary(=mcp_server_test) | binary(=memory_test) | binary(=multi_mcp_coordination_test)'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-session-sqlite'
 

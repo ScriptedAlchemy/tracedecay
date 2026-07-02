@@ -15,12 +15,10 @@ use tracedecay::sessions::SessionRecord;
 
 const SESSION_ID: &str = "20260101_000000_abc123";
 
+/// Like [`crate::support::setup`], but returns the Hermes home
+/// (`<home>/.hermes`) instead of the plain test home.
 fn setup(tmp: &TempDir) -> (PathBuf, PathBuf) {
-    let home = tmp.path().join("home");
-    let project = tmp.path().join("project");
-    std::fs::create_dir_all(&project).unwrap();
-    std::fs::create_dir(project.join(".tracedecay")).unwrap();
-    std::fs::write(project.join(".tracedecay/tracedecay.db"), "").unwrap();
+    let (home, project) = crate::support::setup(tmp);
     (home.join(".hermes"), project)
 }
 
