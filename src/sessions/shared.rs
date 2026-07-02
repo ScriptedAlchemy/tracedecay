@@ -125,6 +125,32 @@ pub(crate) fn paths_equal(a: &Path, b: &Path) -> bool {
     }
 }
 
+pub(crate) fn path_belongs_to_project(path: &Path, project_root: &Path) -> bool {
+    if paths_equal(path, project_root) {
+        return true;
+    }
+
+    let path_worktree = crate::worktree::git_worktree_root(path);
+    let project_worktree = crate::worktree::git_worktree_root(project_root);
+    if let (Some(path_worktree), Some(project_worktree)) =
+        (path_worktree.as_ref(), project_worktree.as_ref())
+    {
+        if paths_equal(path_worktree, project_worktree) {
+            return true;
+        }
+        let path_common = crate::worktree::git_common_dir(path);
+        let project_common = crate::worktree::git_common_dir(project_root);
+        return path_common
+            .as_ref()
+            .zip(project_common.as_ref())
+            .is_some_and(|(path_common, project_common)| paths_equal(path_common, project_common));
+    }
+
+    crate::config::discover_project_root(path)
+        .as_ref()
+        .is_some_and(|discovered| paths_equal(discovered, project_root))
+}
+
 #[cfg(windows)]
 fn normalized_paths_equal(a: &Path, b: &Path) -> bool {
     fn normalize(path: &Path) -> String {

@@ -24,8 +24,8 @@ use std::time::UNIX_EPOCH;
 use serde_json::Value;
 
 use crate::sessions::shared::{
-    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools, paths_equal,
-    title_from_messages, StoredCursor, TranscriptIngestStats,
+    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
+    path_belongs_to_project, title_from_messages, StoredCursor, TranscriptIngestStats,
 };
 use crate::sessions::source::{
     collect_files_with_ext, read_changed_file, ParsedTranscript, SessionDraft, TranscriptSource,
@@ -203,7 +203,7 @@ fn collect_workspace_session_files(sessions_root: &Path, project_root: &Path) ->
         else {
             continue;
         };
-        if !paths_equal(&workspace, project_root) {
+        if !path_belongs_to_project(&workspace, project_root) {
             continue;
         }
         let Ok(session_entries) = std::fs::read_dir(&encoded_dir) else {
@@ -241,7 +241,7 @@ fn collect_agent_storage_files(
         let Some(workspace) = workspace_path_from_hash(workspace_storage_dir, &name) else {
             continue;
         };
-        if !paths_equal(&workspace, project_root) {
+        if !path_belongs_to_project(&workspace, project_root) {
             continue;
         }
         let mtime = entry
@@ -296,13 +296,13 @@ fn transcript_belongs_to_project(
     project_root: &Path,
 ) -> bool {
     if let Some(workspace) = workspace_from_sessions_path(path) {
-        return paths_equal(&workspace, project_root);
+        return path_belongs_to_project(&workspace, project_root);
     }
     let Some(hash) = workspace_hash_from_path(path) else {
         return false;
     };
     workspace_path_from_hash(workspace_storage_dir, &hash)
-        .is_some_and(|workspace| paths_equal(&workspace, project_root))
+        .is_some_and(|workspace| path_belongs_to_project(&workspace, project_root))
 }
 
 fn workspace_from_sessions_path(path: &Path) -> Option<PathBuf> {

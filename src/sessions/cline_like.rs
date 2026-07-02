@@ -21,8 +21,8 @@ use std::time::UNIX_EPOCH;
 use serde_json::{Map, Value};
 
 use crate::sessions::shared::{
-    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools, paths_equal,
-    title_from_messages, StoredCursor,
+    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
+    path_belongs_to_project, title_from_messages, StoredCursor,
 };
 use crate::sessions::source::{
     read_changed_with_companion, ParsedTranscript, SessionDraft, TranscriptSource,
@@ -273,7 +273,7 @@ fn read_task_metadata(task_dir: &Path) -> Option<Value> {
 fn metadata_belongs_to_project(metadata: &Value, project_root: &Path) -> bool {
     metadata_project_paths(metadata)
         .iter()
-        .any(|path| paths_equal(path, project_root))
+        .any(|path| path_belongs_to_project(path, project_root))
 }
 
 fn metadata_project_paths(value: &Value) -> Vec<PathBuf> {

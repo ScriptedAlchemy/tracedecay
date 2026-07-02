@@ -78,6 +78,8 @@ fn arguments_have_project_selector(arguments: &Value) -> bool {
 #[derive(Default)]
 struct ConnectionContext {
     hook_project_path: Option<String>,
+    hook_project_paths_by_session: HashMap<String, String>,
+    hook_project_paths_by_thread: HashMap<String, String>,
 }
 
 /// The steering instructions advertised from the `initialize` handshake of a
@@ -854,10 +856,31 @@ impl McpServer {
         event: &hook_events::HookEvent,
         connection: &mut ConnectionContext,
     ) {
-        connection.hook_project_path = match event.cwd.as_deref() {
+        let route_cwd = event
+            .route
+            .as_ref()
+            .and_then(|route| route.cwd.as_deref())
+            .or(event.cwd.as_deref());
+        let project_path = match route_cwd {
             Some(cwd) => self.registered_project_containing_path(cwd).await,
             None => None,
         };
+        connection.hook_project_path = project_path.clone();
+        let Some(project_path) = project_path else {
+            return;
+        };
+        if let Some(route) = event.route.as_ref() {
+            if let Some(session_id) = route.session_id.as_deref().filter(|id| !id.is_empty()) {
+                connection
+                    .hook_project_paths_by_session
+                    .insert(session_id.to_string(), project_path.clone());
+            }
+            if let Some(thread_id) = route.thread_id.as_deref().filter(|id| !id.is_empty()) {
+                connection
+                    .hook_project_paths_by_thread
+                    .insert(thread_id.to_string(), project_path);
+            }
+        }
     }
 
     async fn registered_project_containing_path(&self, cwd: &Path) -> Option<String> {
@@ -883,7 +906,7 @@ impl McpServer {
         {
             return arguments;
         }
-        let Some(project_path) = connection.hook_project_path.as_deref() else {
+        let Some(project_path) = hook_project_route_for_arguments(&arguments, connection) else {
             return arguments;
         };
         if let Some(map) = arguments.as_object_mut() {
@@ -2524,6 +2547,14 @@ impl McpServer {
 }
 
 fn mcp_analytics_session_id(arguments: &Value) -> Option<String> {
+    route_identity_from_arguments(arguments, &["session_id", "sessionId"])
+}
+
+fn mcp_route_thread_id(arguments: &Value) -> Option<String> {
+    route_identity_from_arguments(arguments, &["thread_id", "threadId"])
+}
+
+fn route_identity_from_arguments(arguments: &Value, keys: &[&str]) -> Option<String> {
     fn string_field(value: &Value, key: &str) -> Option<String> {
         value
             .get(key)
@@ -2536,9 +2567,24 @@ fn mcp_analytics_session_id(arguments: &Value) -> Option<String> {
     [Some(arguments), arguments.get("_meta")]
         .into_iter()
         .flatten()
-        .find_map(|value| {
-            string_field(value, "session_id").or_else(|| string_field(value, "sessionId"))
-        })
+        .find_map(|value| keys.iter().find_map(|key| string_field(value, key)))
+}
+
+fn hook_project_route_for_arguments<'a>(
+    arguments: &Value,
+    connection: &'a ConnectionContext,
+) -> Option<&'a str> {
+    if let Some(thread_id) = mcp_route_thread_id(arguments) {
+        if let Some(project_path) = connection.hook_project_paths_by_thread.get(&thread_id) {
+            return Some(project_path.as_str());
+        }
+    }
+    if let Some(session_id) = mcp_analytics_session_id(arguments) {
+        if let Some(project_path) = connection.hook_project_paths_by_session.get(&session_id) {
+            return Some(project_path.as_str());
+        }
+    }
+    connection.hook_project_path.as_deref()
 }
 
 fn json_rpc_request_id_string(id: &Value) -> Option<String> {
@@ -2552,7 +2598,11 @@ fn json_rpc_request_id_string(id: &Value) -> Option<String> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod staleness_banner_tests {
-    use super::{format_per_file_staleness_banner, humanize_age, needs_lazy_sync_before_dispatch};
+    use super::{
+        format_per_file_staleness_banner, hook_project_route_for_arguments, humanize_age,
+        needs_lazy_sync_before_dispatch, ConnectionContext, McpServer,
+    };
+    use serde_json::json;
     use std::fs;
     use tempfile::tempdir;
 
@@ -2625,5 +2675,80 @@ mod staleness_banner_tests {
                 "{tool} should still get the normal lazy freshness check"
             );
         }
+    }
+
+    #[test]
+    fn hook_project_route_prefers_thread_then_session_then_last_hook_path() {
+        let mut connection = ConnectionContext {
+            hook_project_path: Some("/repo/default".to_string()),
+            ..ConnectionContext::default()
+        };
+        connection
+            .hook_project_paths_by_session
+            .insert("session-a".to_string(), "/repo/session-a".to_string());
+        connection
+            .hook_project_paths_by_thread
+            .insert("thread-a".to_string(), "/repo/thread-a".to_string());
+
+        assert_eq!(
+            hook_project_route_for_arguments(
+                &json!({"session_id": "session-a", "thread_id": "thread-a"}),
+                &connection,
+            ),
+            Some("/repo/thread-a")
+        );
+        assert_eq!(
+            hook_project_route_for_arguments(&json!({"session_id": "session-a"}), &connection),
+            Some("/repo/session-a")
+        );
+        assert_eq!(
+            hook_project_route_for_arguments(&json!({"session_id": "unknown"}), &connection),
+            Some("/repo/default")
+        );
+    }
+
+    #[test]
+    fn hook_project_route_reads_thread_and_session_ids_from_meta() {
+        let mut connection = ConnectionContext::default();
+        connection
+            .hook_project_paths_by_session
+            .insert("session-meta".to_string(), "/repo/session-meta".to_string());
+        connection
+            .hook_project_paths_by_thread
+            .insert("thread-meta".to_string(), "/repo/thread-meta".to_string());
+
+        assert_eq!(
+            hook_project_route_for_arguments(
+                &json!({"_meta": {"sessionId": "session-meta", "threadId": "thread-meta"}}),
+                &connection,
+            ),
+            Some("/repo/thread-meta")
+        );
+    }
+
+    #[test]
+    fn apply_hook_project_route_injects_selector_without_overriding_explicit_selector() {
+        let mut connection = ConnectionContext::default();
+        connection
+            .hook_project_paths_by_session
+            .insert("session-a".to_string(), "/repo/session-a".to_string());
+
+        let routed = McpServer::apply_hook_project_route(
+            "tracedecay_context",
+            json!({"task": "inspect routing", "session_id": "session-a"}),
+            &connection,
+        );
+        assert_eq!(routed["project_selector"]["path"], "/repo/session-a");
+
+        let explicit = McpServer::apply_hook_project_route(
+            "tracedecay_context",
+            json!({
+                "task": "inspect routing",
+                "session_id": "session-a",
+                "project_selector": {"path": "/repo/explicit"},
+            }),
+            &connection,
+        );
+        assert_eq!(explicit["project_selector"]["path"], "/repo/explicit");
     }
 }

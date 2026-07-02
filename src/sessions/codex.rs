@@ -45,8 +45,8 @@ use serde_json::Value;
 
 use crate::accounting::parser::parse_timestamp;
 use crate::sessions::shared::{
-    append_tool_calls_metadata, content_storage_text_and_tools, paths_equal, title_from_messages,
-    StoredCursor,
+    append_tool_calls_metadata, content_storage_text_and_tools, path_belongs_to_project,
+    title_from_messages, StoredCursor,
 };
 use crate::sessions::source::{
     collect_files_with_ext, stream_new_jsonl, ParsedTranscript, SessionDraft, TranscriptSource,
@@ -123,7 +123,7 @@ impl TranscriptSource for CodexSource {
         // `session_meta` (line 1) is authoritative for cwd + session id; without
         // it we cannot safely attribute the rollout to a project, so skip.
         let meta = session_meta(path)?;
-        if !paths_equal(&meta.cwd, project_root) {
+        if !path_belongs_to_project(&meta.cwd, project_root) {
             return None;
         }
 

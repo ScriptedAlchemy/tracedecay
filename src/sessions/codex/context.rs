@@ -116,9 +116,13 @@ pub(super) fn session_metadata_json(meta: &CodexMeta) -> Option<String> {
             Value::String(agent_nickname.clone()),
         );
     }
-    metadata.insert(
-        "codex_session_cwd".to_string(),
-        Value::String(meta.cwd.to_string_lossy().to_string()),
+    append_location_metadata(
+        &mut metadata,
+        "codex_session_cwd",
+        "codex_session_worktree",
+        "codex_session_location_provenance",
+        Some(&meta.cwd),
+        "session_meta",
     );
     insert_git_metadata(&mut metadata, meta.git.as_ref());
     serde_json::to_string(&Value::Object(metadata)).ok()

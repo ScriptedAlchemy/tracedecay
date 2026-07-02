@@ -18,7 +18,7 @@ use serde_json::Value;
 use crate::accounting::parser::parse_timestamp;
 use crate::sessions::shared::{
     append_location_metadata, append_tool_calls_metadata, append_usage_metadata,
-    content_storage_text_and_tools, paths_equal, title_from_messages, StoredCursor,
+    content_storage_text_and_tools, path_belongs_to_project, title_from_messages, StoredCursor,
 };
 use crate::sessions::source::{
     collect_files_with_ext, stream_new_jsonl, ParsedTranscript, SessionDraft, TranscriptSource,
@@ -73,18 +73,15 @@ impl TranscriptSource for ClaudeSource {
         max_new_bytes: Option<u64>,
     ) -> Option<ParsedTranscript> {
         let subagent = claude_subagent_identity(path);
-        // Cheap project scoping: a transcript belongs to exactly one cwd. Claude
-        // subagent files in the verified nested layout may omit cwd, so fall
-        // back to the parent transcript's cwd when the path proves parentage.
+        // Cheap session scoping: the first/parent cwd describes where the
+        // session began, but individual Claude rows can carry their own cwd.
+        // Filter messages per row so sessions that cross worktrees are split
+        // into the right project stores without losing transcript truth.
         let session_cwd = transcript_cwd(path).or_else(|| {
             subagent
                 .as_ref()
                 .and_then(|info| transcript_cwd(&info.parent_transcript_path))
         });
-        match session_cwd.as_ref() {
-            Some(cwd) if paths_equal(cwd, project_root) => {}
-            _ => return None,
-        }
 
         let new = stream_new_jsonl(path, prev, max_new_bytes)?;
         let session_id = subagent.as_ref().map_or_else(
@@ -99,6 +96,13 @@ impl TranscriptSource for ClaudeSource {
 
         let mut messages = Vec::new();
         for line in &new.lines {
+            let line_cwd = record_cwd(&line.value).or_else(|| session_cwd.clone());
+            if !line_cwd
+                .as_deref()
+                .is_some_and(|cwd| path_belongs_to_project(cwd, project_root))
+            {
+                continue;
+            }
             if let Some(message) = message_from_line(
                 &line.value,
                 &session_id,
@@ -108,6 +112,9 @@ impl TranscriptSource for ClaudeSource {
             ) {
                 messages.push(message);
             }
+        }
+        if messages.is_empty() {
+            return None;
         }
 
         let project = project_root.to_string_lossy().to_string();
@@ -272,11 +279,7 @@ fn message_metadata(
         Value::String("claude_transcript".to_string()),
     );
     metadata.insert("raw_type".to_string(), Value::String(kind.to_string()));
-    let record_cwd = record
-        .get("cwd")
-        .and_then(Value::as_str)
-        .filter(|cwd| !cwd.is_empty())
-        .map(PathBuf::from);
+    let record_cwd = record_cwd(record);
     let (location_cwd, location_provenance) = if record_cwd.is_some() {
         (record_cwd.as_deref(), "transcript_record")
     } else {
@@ -295,4 +298,12 @@ fn message_metadata(
     // output_tokens, cache_creation_input_tokens, cache_read_input_tokens}`.
     append_usage_metadata(&mut metadata, &[message]);
     Value::Object(metadata)
+}
+
+fn record_cwd(record: &Value) -> Option<PathBuf> {
+    record
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|cwd| !cwd.is_empty())
+        .map(PathBuf::from)
 }

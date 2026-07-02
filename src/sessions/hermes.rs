@@ -33,8 +33,8 @@ use serde_json::{Map, Value};
 use crate::agents::hermes::read_config_pinned_project_root;
 use crate::global_db::{GlobalDb, ParseOffset, TranscriptBatch};
 use crate::sessions::shared::{
-    content_storage_text_and_tools, paths_equal, preview_title, read_new_rows, title_from_messages,
-    StoredCursor, TranscriptIngestStats,
+    content_storage_text_and_tools, path_belongs_to_project, paths_equal, preview_title,
+    read_new_rows, title_from_messages, StoredCursor, TranscriptIngestStats,
 };
 use crate::sessions::{SessionMessageRecord, SessionRecord};
 
@@ -116,7 +116,7 @@ fn pinned_state_dbs(
             let matches = match read_config_pinned_project_root(&profile_dir.join("config.yaml")) {
                 // An explicit pin (including the legacy home-equal pin)
                 // maps the profile to that project.
-                Some(pin) => paths_equal(Path::new(&pin), project_root),
+                Some(pin) => path_belongs_to_project(Path::new(&pin), project_root),
                 // Unpinned profiles map to their own home as the project
                 // identity in the unified user-level store.
                 None => paths_equal(&profile_dir, project_root),

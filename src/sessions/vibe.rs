@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::sessions::shared::{
-    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools, paths_equal,
-    title_from_messages, StoredCursor,
+    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
+    path_belongs_to_project, title_from_messages, StoredCursor,
 };
 use crate::sessions::source::{
     collect_files_with_ext, stream_new_jsonl, ParsedTranscript, SessionDraft, TranscriptSource,
@@ -77,7 +77,7 @@ impl TranscriptSource for VibeSource {
     ) -> Option<ParsedTranscript> {
         let meta_path = path.parent()?.join("meta.json");
         let meta = read_meta(&meta_path)?;
-        if !paths_equal(&meta.working_directory, project_root) {
+        if !path_belongs_to_project(&meta.working_directory, project_root) {
             return None;
         }
 

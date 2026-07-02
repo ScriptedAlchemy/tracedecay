@@ -24,6 +24,52 @@ fn write_jsonl(path: &std::path::Path, lines: &[serde_json::Value]) {
     .unwrap();
 }
 
+fn run_git(project: &std::path::Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(project)
+        .output()
+        .expect("git command should run");
+    assert!(
+        output.status.success(),
+        "git {:?} should succeed\nstdout:\n{}\nstderr:\n{}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn create_git_repo_with_linked_worktree(
+    project: &std::path::Path,
+    linked_worktree: &std::path::Path,
+) {
+    run_git(project, &["-c", "init.defaultBranch=main", "init"]);
+    std::fs::write(project.join("README.md"), "transcript location fixture\n").unwrap();
+    run_git(project, &["add", "README.md"]);
+    run_git(
+        project,
+        &[
+            "-c",
+            "user.name=TraceDecay Tests",
+            "-c",
+            "user.email=tests@example.invalid",
+            "commit",
+            "-m",
+            "init fixture repo",
+        ],
+    );
+    run_git(
+        project,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "linked-worktree",
+            linked_worktree.to_str().unwrap(),
+        ],
+    );
+}
+
 /// Writes a Codex rollout JSONL whose `session_meta.cwd` is `project`. Includes a
 /// `response_item` line that must be ignored (it duplicates the agent_message).
 fn write_codex_rollout(
@@ -1336,7 +1382,7 @@ async fn codex_messages_keep_turn_cwd_and_session_git_updates() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
     let linked_worktree = tmp.path().join("linked-worktree");
-    std::fs::create_dir_all(&linked_worktree).unwrap();
+    create_git_repo_with_linked_worktree(&project, &linked_worktree);
     let dir = home.join(".codex/sessions/2026/01/01");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("rollout-2026-01-01T00-00-00-branch-sess.jsonl");
@@ -1407,6 +1453,21 @@ async fn codex_messages_keep_turn_cwd_and_session_git_updates() {
         .search_session_messages("codex", None, "attribution", 10)
         .await;
     assert_eq!(hits.len(), 2);
+    let session_metadata: serde_json::Value =
+        serde_json::from_str(hits[0].session.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        session_metadata["codex_session_cwd"].as_str(),
+        Some(main_cwd.as_ref())
+    );
+    assert_eq!(
+        session_metadata["codex_session_worktree"].as_str(),
+        Some(main_cwd.as_ref())
+    );
+    assert_eq!(
+        session_metadata["codex_session_location_provenance"].as_str(),
+        Some("session_meta")
+    );
+    assert_eq!(session_metadata["codex_git_branch"], "main");
     let metadata_of = |needle: &str| -> serde_json::Value {
         let hit = hits
             .iter()
@@ -1417,6 +1478,7 @@ async fn codex_messages_keep_turn_cwd_and_session_git_updates() {
 
     let first = metadata_of("First branch");
     assert_eq!(first["codex_turn_cwd"], main_cwd.as_ref());
+    assert_eq!(first["codex_turn_worktree"], main_cwd.as_ref());
     assert_eq!(
         first["codex_turn_location_provenance"].as_str(),
         Some("codex_context")
@@ -1429,6 +1491,7 @@ async fn codex_messages_keep_turn_cwd_and_session_git_updates() {
 
     let second = metadata_of("Second branch");
     assert_eq!(second["codex_turn_cwd"], linked_cwd.as_ref());
+    assert_eq!(second["codex_turn_worktree"], linked_cwd.as_ref());
     assert_eq!(
         second["codex_turn_location_provenance"].as_str(),
         Some("codex_context")
@@ -1445,7 +1508,7 @@ async fn codex_incremental_ingest_reconstructs_prior_turn_cwd_and_git() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
     let linked_worktree = tmp.path().join("linked-worktree");
-    std::fs::create_dir_all(&linked_worktree).unwrap();
+    create_git_repo_with_linked_worktree(&project, &linked_worktree);
     let dir = home.join(".codex/sessions/2026/01/01");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("rollout-2026-01-01T00-00-00-branch-incremental.jsonl");
@@ -1529,6 +1592,7 @@ async fn codex_incremental_ingest_reconstructs_prior_turn_cwd_and_git() {
         Some("codex_context")
     );
     assert_eq!(metadata["codex_git_branch"], "feature/worktree");
+    assert_eq!(metadata["codex_turn_worktree"], linked_cwd.as_ref());
     assert_eq!(
         metadata["codex_git_commit_hash"],
         "2222222222222222222222222222222222222222"
