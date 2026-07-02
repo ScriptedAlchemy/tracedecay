@@ -6,6 +6,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 
 use crate::common::{canonical_existing_path, tracedecay_command_with_home};
+#[cfg(unix)]
+use crate::serve_harness::runtime_project_root;
+#[cfg(unix)]
+use crate::serve_harness::{canonical_path_string, run_serve_runtime};
+use crate::serve_harness::{
+    init_project_direct, init_project_under, init_project_with_file, profile_root,
+    register_global_project,
+};
 use libsql::Builder;
 use serde_json::{json, Value};
 #[cfg(unix)]
@@ -22,68 +30,15 @@ use tracedecay::automation::run_ledger::{
     AutomationRunStatus, AutomationTrigger,
 };
 use tracedecay::db::Database;
-use tracedecay::global_db::GlobalDb;
 use tracedecay::mcp::handle_tool_call;
 use tracedecay::serve;
 use tracedecay::storage::{
     default_profile_sharded_layout, write_enrollment_marker, EnrollmentMarker, StorageMode,
 };
-use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay::tracedecay::TraceDecay;
 
 #[cfg(unix)]
 static READ_ONLY_SERVE_ENV_LOCK: Mutex<()> = Mutex::const_new(());
-
-async fn init_project_with_file(home: &Path, contents: &str) -> TempDir {
-    let dir = TempDir::new().unwrap();
-    std::fs::create_dir_all(dir.path().join("src")).unwrap();
-    std::fs::write(dir.path().join("src/lib.rs"), contents).unwrap();
-    init_project_direct(home, dir.path()).await;
-    dir
-}
-
-async fn init_project_under(home: &Path, parent: &Path, name: &str, contents: &str) -> PathBuf {
-    let path = parent.join(name);
-    fs::create_dir_all(path.join("src")).unwrap();
-    fs::write(path.join("src/lib.rs"), contents).unwrap();
-    init_project_direct(home, &path).await;
-    path
-}
-
-async fn init_project_direct(home: &Path, project: &Path) {
-    let profile_root = profile_root(home);
-    let open_options = TraceDecayOpenOptions {
-        profile_root: Some(profile_root.clone()),
-        global_db_path: Some(profile_root.join("global.db")),
-    };
-    crate::fixture::init_project_from_template_with_options(project, open_options)
-        .await
-        .expect("tracedecay project should initialize");
-}
-
-async fn register_global_project(home: &Path, project: &Path) {
-    let home = canonical_existing_path(home);
-    let db_path = home.join(".tracedecay/global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    db.upsert(project, 0).await;
-    db.checkpoint().await;
-}
-
-fn runtime_project_root(stdout: &[u8], id: i64) -> String {
-    let stdout = String::from_utf8(stdout.to_vec()).unwrap();
-    let runtime_response: Value = stdout
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .find(|response| response.get("id") == Some(&json!(id)))
-        .unwrap_or_else(|| panic!("missing runtime response in stdout:\n{stdout}"));
-    let text = runtime_response["result"]["content"][0]["text"]
-        .as_str()
-        .expect("runtime tool should return text content");
-    let runtime: Value = serde_json::from_str(text).unwrap();
-    runtime["database"]["project_root"]
-        .as_str()
-        .expect("runtime should include database.project_root")
-        .to_string()
-}
 
 fn json_rpc_tool_payload(stdout: &[u8], id: i64) -> Value {
     let stdout_text = String::from_utf8(stdout.to_vec()).unwrap();
@@ -142,57 +97,17 @@ fn run_serve_runtime_with_initialize_root(
     root_uri: String,
     root_name: &str,
 ) -> Output {
-    let mut command = tracedecay_command_with_home(home);
-    command.arg("serve");
-    if let Some(path) = explicit_path {
-        command.arg("--path").arg(path);
-    }
-
-    let mut child = command
-        .current_dir(cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("tracedecay serve should start");
-
-    {
-        let stdin = child.stdin.as_mut().expect("stdin should be piped");
-        writeln!(
-            stdin,
-            "{}",
-            json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "roots": [{
-                        "uri": root_uri,
-                        "name": root_name
-                    }]
-                }
-            })
-        )
-        .unwrap();
-        writeln!(
-            stdin,
-            "{}",
-            json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/call",
-                "params": {
-                    "name": "tracedecay_runtime",
-                    "arguments": { "format": "json" }
-                }
-            })
-        )
-        .unwrap();
-    }
-
-    let output = child
-        .wait_with_output()
-        .expect("tracedecay serve should exit after stdin closes");
+    let output = run_serve_runtime(
+        home,
+        cwd,
+        explicit_path.map(Path::as_os_str),
+        json!({
+            "roots": [{
+                "uri": root_uri,
+                "name": root_name
+            }]
+        }),
+    );
     assert!(
         output.status.success(),
         "tracedecay serve failed\nstdout:\n{}\nstderr:\n{}",
@@ -200,17 +115,6 @@ fn run_serve_runtime_with_initialize_root(
         String::from_utf8_lossy(&output.stderr)
     );
     output
-}
-
-fn canonical_path_string(path: &Path) -> String {
-    path.canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf())
-        .to_string_lossy()
-        .into_owned()
-}
-
-fn profile_root(home: &Path) -> PathBuf {
-    canonical_existing_path(home).join(".tracedecay")
 }
 
 async fn set_user_version(db_path: &Path, version: u32) {

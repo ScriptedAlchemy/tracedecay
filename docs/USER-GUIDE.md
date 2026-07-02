@@ -301,7 +301,7 @@ Cursor install is plugin-based:
 
 - `tracedecay install --agent cursor` installs `cursor-plugin/` into `~/.cursor/plugins/local/tracedecay`.
 - `tracedecay install --local --agent cursor` installs the same user-local plugin without writing project Cursor config files.
-- The plugin MCP config runs `tracedecay serve --path ${workspaceFolder}`, so the server resolves the active workspace's project store instead of the plugin directory.
+- The plugin MCP config runs `tracedecay serve --path ${workspaceFolder}`, so the server resolves the active workspace's project store instead of the plugin directory. If a host spawns the server without expanding `${workspaceFolder}`, `serve` warns and falls back to project discovery where possible (details in the plugin's `README.md`).
 - Cursor install no longer writes `.cursor/mcp.json`, `.cursor/hooks.json`, `.cursor/rules/tracedecay.mdc`, or `.cursor/permissions.json`; approvals are left to Cursor approval/run-mode behavior.
 - The plugin bundles Cursor-specific, fail-open hooks. File and shell hooks notify the TraceDecay daemon; if no daemon is available they return success without indexing:
   - `sessionStart` injects context steering the Agent toward tracedecay MCP tools and reports index freshness (suggests `tracedecay init` when uninitialized).
