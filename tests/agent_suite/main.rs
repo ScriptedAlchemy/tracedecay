@@ -18,4 +18,5 @@ mod opencode_agent_test;
 mod plugin_skill_contract_test;
 mod skill_targets_test;
 mod skill_usage_test;
+mod tool_skill_coverage_test;
 mod update_plugin_test;

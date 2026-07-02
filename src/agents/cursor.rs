@@ -242,6 +242,10 @@ const EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
         include_str!("../../cursor-plugin/skills/fixing-build-and-type-errors/SKILL.md"),
     ),
     (
+        "skills/inspecting-managed-skills/SKILL.md",
+        include_str!("../../cursor-plugin/skills/inspecting-managed-skills/SKILL.md"),
+    ),
+    (
         "skills/memorize-subject/SKILL.md",
         include_str!("../../cursor-plugin/skills/memorize-subject/SKILL.md"),
     ),

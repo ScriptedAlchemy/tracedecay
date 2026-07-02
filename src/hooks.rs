@@ -1394,6 +1394,7 @@ pub const CURSOR_PLUGIN_SKILLS: &[&str] = &[
     "finding-duplicate-logic",
     "finding-impacted-areas",
     "fixing-build-and-type-errors",
+    "inspecting-managed-skills",
     "porting-code",
     "project-status",
     "reading-code-cheaply",

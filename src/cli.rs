@@ -1,11 +1,13 @@
 use clap::{builder::PossibleValuesParser, Parser, Subcommand};
 
 mod automation;
+mod help;
 pub use automation::{
     AutomationAction, AutomationConfigAction, AutomationConfigScope, AutomationFactsAction,
     AutomationRunAction, AutomationRunsAction, AutomationSkillsAction,
     AutomationSkillsInstallTarget,
 };
+use help::*;
 
 fn agent_value_parser() -> PossibleValuesParser {
     PossibleValuesParser::new(tracedecay::agents::available_integrations())
@@ -16,6 +18,7 @@ fn agent_value_parser() -> PossibleValuesParser {
 #[command(
     name = "tracedecay",
     about = "Code intelligence for 34 languages — semantic graph queries instead of file reads",
+    after_help = TOP_LEVEL_AFTER_HELP,
     version
 )]
 pub struct Cli {
@@ -27,6 +30,7 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Initialize a new TraceDecay project (full index)
+    #[command(long_about = INIT_LONG_ABOUT, after_help = INIT_AFTER_HELP)]
     Init {
         /// Project path (default: current directory)
         path: Option<String>,
@@ -38,6 +42,7 @@ pub enum Commands {
         include_folders: Vec<String>,
     },
     /// Incremental sync (project must already be initialized with `tracedecay init`)
+    #[command(long_about = SYNC_LONG_ABOUT, after_help = SYNC_AFTER_HELP)]
     Sync {
         /// Project path (default: current directory)
         path: Option<String>,
@@ -58,6 +63,7 @@ pub enum Commands {
         verbose: bool,
     },
     /// Show project statistics
+    #[command(long_about = STATUS_LONG_ABOUT, after_help = STATUS_AFTER_HELP)]
     Status {
         /// Project path (default: current directory)
         path: Option<String>,
@@ -82,13 +88,16 @@ pub enum Commands {
         runtime: bool,
     },
     /// Invoke an MCP tool from the CLI (e.g. `tracedecay tool search foo`).
-    ///
-    /// Run `tracedecay tool` (no name) to list every available tool.
-    /// Run `tracedecay tool <name> --help` to see that tool's parameters.
     //
     // `disable_help_flag = true` lets `-h`/`--help` flow through to our parser
     // so we can print the per-tool schema instead of clap's generic help.
-    #[command(disable_help_flag = true)]
+    // `main::render_dynamic_command_help` still renders this long help for a
+    // bare `tracedecay tool --help`.
+    #[command(
+        disable_help_flag = true,
+        long_about = TOOL_LONG_ABOUT,
+        after_help = TOOL_AFTER_HELP
+    )]
     Tool {
         /// Project root to open before dispatching the tool. Defaults to the
         /// nearest initialised project walking up from cwd.
@@ -104,12 +113,18 @@ pub enum Commands {
         args: Vec<String>,
     },
     /// Inspect language-server support for dashboard code diagnostics
+    #[command(long_about = LSP_LONG_ABOUT, after_help = LSP_AFTER_HELP)]
     Lsp {
         #[command(subcommand)]
         action: LspAction,
     },
     /// Configure agent integration (MCP server, permissions, hooks, prompt rules)
-    #[command(name = "install", visible_alias = "claude-install")]
+    #[command(
+        name = "install",
+        visible_alias = "claude-install",
+        long_about = INSTALL_LONG_ABOUT,
+        after_help = INSTALL_AFTER_HELP
+    )]
     Install {
         /// Agent to configure (auto-detects if omitted)
         #[arg(long, value_parser = agent_value_parser())]
@@ -144,6 +159,7 @@ pub enum Commands {
         auto_apply: bool,
     },
     /// Refresh settings for all already-installed agents
+    #[command(long_about = REINSTALL_LONG_ABOUT, after_help = REINSTALL_AFTER_HELP)]
     Reinstall,
     /// Refresh generated plugin code/assets for detected installs without
     /// touching agent config files.
@@ -155,10 +171,19 @@ pub enum Commands {
     /// files (Hermes config.yaml and its project_root pin, mcp.json, settings,
     /// prompt rules) are left byte-for-byte intact; use `tracedecay reinstall`
     /// to refresh those.
-    #[command(name = "update-plugin", visible_alias = "update-plugins")]
+    #[command(
+        name = "update-plugin",
+        visible_alias = "update-plugins",
+        after_help = UPDATE_PLUGIN_AFTER_HELP
+    )]
     UpdatePlugin,
     /// Remove agent integration (MCP server, permissions, hooks, prompt rules)
-    #[command(name = "uninstall", visible_alias = "claude-uninstall")]
+    #[command(
+        name = "uninstall",
+        visible_alias = "claude-uninstall",
+        long_about = UNINSTALL_LONG_ABOUT,
+        after_help = UNINSTALL_AFTER_HELP
+    )]
     Uninstall {
         /// Agent to remove (removes all if omitted)
         #[arg(long, value_parser = agent_value_parser())]
@@ -237,6 +262,7 @@ pub enum Commands {
     #[command(name = "hook-codex-post-compact", hide = true)]
     HookCodexPostCompact,
     /// Serve the local dashboard UI (holographic memory + LCM + code graph explorers)
+    #[command(long_about = DASHBOARD_LONG_ABOUT, after_help = DASHBOARD_AFTER_HELP)]
     Dashboard {
         /// Project path (default: current directory, with discovery)
         #[arg(short, long)]
@@ -252,6 +278,7 @@ pub enum Commands {
         open: bool,
     },
     /// Start MCP server over stdio
+    #[command(long_about = SERVE_LONG_ABOUT, after_help = SERVE_AFTER_HELP)]
     Serve {
         /// Project path
         #[arg(short, long)]
@@ -263,6 +290,7 @@ pub enum Commands {
         timings: bool,
     },
     /// Manage the long-running TraceDecay daemon used by MCP clients
+    #[command(long_about = DAEMON_LONG_ABOUT, after_help = DAEMON_AFTER_HELP)]
     Daemon {
         #[command(subcommand)]
         action: DaemonAction,
@@ -273,6 +301,7 @@ pub enum Commands {
     /// installed, also refreshes generated plugins and the daemon service and
     /// runs the post-update health pass on the new version. When already up
     /// to date it stops there — use `tracedecay update` to refresh regardless.
+    #[command(after_help = UPGRADE_AFTER_HELP)]
     Upgrade {
         /// Skip the post-update health pass (safe repairs + doctor summary)
         #[arg(long)]
@@ -283,6 +312,7 @@ pub enum Commands {
     /// Upgrades the binary first when a newer release exists, then always
     /// refreshes generated plugins and the daemon service and runs the
     /// post-update health pass — even when the binary was already current.
+    #[command(after_help = UPDATE_AFTER_HELP)]
     Update {
         /// Skip the post-update health pass (safe repairs + doctor summary)
         #[arg(long)]
@@ -296,32 +326,53 @@ pub enum Commands {
         no_heal: bool,
     },
     /// Show or switch the update channel (stable or beta)
+    #[command(long_about = CHANNEL_LONG_ABOUT, after_help = CHANNEL_AFTER_HELP)]
     Channel {
         /// Target channel: "stable" or "beta" (omit to show current)
         channel: Option<String>,
     },
     /// Show the resettable project-local token counter
-    #[command(name = "current-counter")]
+    #[command(
+        name = "current-counter",
+        long_about = CURRENT_COUNTER_LONG_ABOUT,
+        after_help = CURRENT_COUNTER_AFTER_HELP
+    )]
     CurrentCounter {
         /// Project path (default: current directory)
         #[arg(short, long)]
         path: Option<String>,
     },
     /// Reset the project-local token counter to zero
-    #[command(name = "reset-counter")]
+    #[command(
+        name = "reset-counter",
+        long_about = RESET_COUNTER_LONG_ABOUT,
+        after_help = RESET_COUNTER_AFTER_HELP
+    )]
     ResetCounter {
         /// Project path (default: current directory)
         #[arg(short, long)]
         path: Option<String>,
     },
     /// Disable uploading token counts to the worldwide counter
-    #[command(name = "disable-upload-counter")]
+    #[command(
+        name = "disable-upload-counter",
+        long_about = DISABLE_UPLOAD_COUNTER_LONG_ABOUT,
+        after_help = DISABLE_UPLOAD_COUNTER_AFTER_HELP
+    )]
     DisableUploadCounter,
     /// Enable uploading token counts to the worldwide counter
-    #[command(name = "enable-upload-counter")]
+    #[command(
+        name = "enable-upload-counter",
+        long_about = ENABLE_UPLOAD_COUNTER_LONG_ABOUT,
+        after_help = ENABLE_UPLOAD_COUNTER_AFTER_HELP
+    )]
     EnableUploadCounter,
     /// Show or change whether .gitignore rules are respected during indexing
-    #[command(name = "gitignore")]
+    #[command(
+        name = "gitignore",
+        long_about = GITIGNORE_LONG_ABOUT,
+        after_help = GITIGNORE_AFTER_HELP
+    )]
     Gitignore {
         /// Project path (default: current directory)
         #[arg(short, long)]
@@ -330,12 +381,14 @@ pub enum Commands {
         action: Option<String>,
     },
     /// Check tracedecay installation, configuration, and agent integration
+    #[command(long_about = DOCTOR_LONG_ABOUT, after_help = DOCTOR_AFTER_HELP)]
     Doctor {
         /// Check only this agent (default: all agents)
         #[arg(long, value_parser = agent_value_parser())]
         agent: Option<String>,
     },
     /// Token cost summary from Claude Code sessions
+    #[command(long_about = COST_LONG_ABOUT, after_help = COST_AFTER_HELP)]
     Cost {
         /// Time range: "today", "7d", "30d", "month", or "all"
         #[arg(default_value = "7d")]
@@ -351,6 +404,7 @@ pub enum Commands {
         export: Option<String>,
     },
     /// Run a reproducible retrieval benchmark against the current project.
+    #[command(long_about = BENCH_LONG_ABOUT, after_help = BENCH_AFTER_HELP)]
     Bench {
         /// Path to a TOML query file (defaults to the shipped default set).
         #[arg(long)]
@@ -366,6 +420,7 @@ pub enum Commands {
         max_nodes: usize,
     },
     /// Show token savings (and dollar estimates) recorded in the global ledger.
+    #[command(long_about = GAIN_LONG_ABOUT, after_help = GAIN_AFTER_HELP)]
     Gain {
         /// Show all projects (default: only the current project).
         #[arg(short, long)]
@@ -381,44 +436,53 @@ pub enum Commands {
         json: bool,
     },
     /// Live token savings monitor (global, all projects)
+    #[command(long_about = MONITOR_LONG_ABOUT, after_help = MONITOR_AFTER_HELP)]
     Monitor,
     /// Ingest and search local agent session transcripts
+    #[command(long_about = SESSIONS_LONG_ABOUT, after_help = SESSIONS_AFTER_HELP)]
     Sessions {
         #[command(subcommand)]
         action: SessionsAction,
     },
     /// Inspect registered TraceDecay projects from the global registry
+    #[command(long_about = PROJECTS_LONG_ABOUT, after_help = PROJECTS_AFTER_HELP)]
     Projects {
         #[command(subcommand)]
         action: ProjectsAction,
     },
     /// Manage multi-branch indexing
+    #[command(long_about = BRANCH_LONG_ABOUT, after_help = BRANCH_AFTER_HELP)]
     Branch {
         #[command(subcommand)]
         action: BranchAction,
     },
     /// Holographic memory maintenance (curation without the dashboard)
+    #[command(long_about = MEMORY_LONG_ABOUT, after_help = MEMORY_AFTER_HELP)]
     Memory {
         #[command(subcommand)]
         action: MemoryAction,
     },
     /// Self-improvement automation config and manual runs
+    #[command(long_about = AUTOMATION_LONG_ABOUT, after_help = AUTOMATION_AFTER_HELP)]
     Automation {
         #[command(subcommand)]
         action: AutomationAction,
     },
     /// Inspect stores before profile-storage migration
+    #[command(long_about = MIGRATE_LONG_ABOUT, after_help = MIGRATE_AFTER_HELP)]
     Migrate {
         #[command(subcommand)]
         action: MigrateAction,
     },
     /// Wipe local tracedecay DBs (current folder, parents, and children)
+    #[command(long_about = WIPE_LONG_ABOUT, after_help = WIPE_AFTER_HELP)]
     Wipe {
         /// Wipe ALL tracked projects so the global DB ends empty
         #[arg(short, long)]
         all: bool,
     },
     /// List tracedecay projects (current folder, parents, and children)
+    #[command(long_about = LIST_LONG_ABOUT, after_help = LIST_AFTER_HELP)]
     List {
         /// List ALL tracked projects from the global DB
         #[arg(short, long)]

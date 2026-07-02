@@ -278,6 +278,10 @@ const CODEX_EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
         include_str!("../../codex-plugin/skills/fixing-build-and-type-errors/SKILL.md"),
     ),
     (
+        "skills/inspecting-managed-skills/SKILL.md",
+        include_str!("../../codex-plugin/skills/inspecting-managed-skills/SKILL.md"),
+    ),
+    (
         "skills/porting-code/SKILL.md",
         include_str!("../../codex-plugin/skills/porting-code/SKILL.md"),
     ),
