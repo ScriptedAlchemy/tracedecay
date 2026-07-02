@@ -11,8 +11,8 @@ use crate::automation::backend::{task_key, AgentTaskKind};
 use crate::automation::config::{effective_config, load_project_config, AutomationConfig};
 use crate::automation::run_ledger::{load_run_records, AutomationRunLedgerRecord};
 use crate::automation::scheduler::{
-    load_scheduler_control, save_scheduler_control, schedule_decision, scheduler_control_path,
-    AutomationSchedulerControl,
+    load_scheduler_control, load_session_activity, save_scheduler_control, schedule_decision,
+    scheduler_control_path, AutomationSchedulerControl, SessionActivity,
 };
 use crate::automation::staged_notice::{count_pending_automation_output, AutomationPendingCounts};
 use crate::tracedecay::current_timestamp;
@@ -69,6 +69,8 @@ async fn scheduler_status_payload(state: &DashboardState) -> ApiResult {
         Err(_) => AutomationPendingCounts::default(),
     };
     let now = current_timestamp();
+    let activity =
+        load_session_activity(&state.store_root.join(crate::storage::SESSIONS_DB_FILENAME)).await;
     Ok(Json(json!({
         "status": scheduler_status_label(&effective, control.paused),
         "paused": control.paused,
@@ -77,6 +79,7 @@ async fn scheduler_status_payload(state: &DashboardState) -> ApiResult {
         "enabled": effective.enabled,
         "scheduler_tick_secs": effective.scheduler_tick_secs,
         "now": now,
+        "last_session_activity": activity.last_activity_secs,
         "project_config_path": crate::automation::config::project_config_path(&state.dashboard_root)
             .display()
             .to_string(),
@@ -84,9 +87,9 @@ async fn scheduler_status_payload(state: &DashboardState) -> ApiResult {
             .display()
             .to_string(),
         "tasks": [
-            task_status(&effective, control.paused, &records, now, AgentTaskKind::MemoryCurator),
-            task_status(&effective, control.paused, &records, now, AgentTaskKind::SessionReflector),
-            task_status(&effective, control.paused, &records, now, AgentTaskKind::SkillWriter),
+            task_status(&effective, control.paused, &records, activity, now, AgentTaskKind::MemoryCurator),
+            task_status(&effective, control.paused, &records, activity, now, AgentTaskKind::SessionReflector),
+            task_status(&effective, control.paused, &records, activity, now, AgentTaskKind::SkillWriter),
         ],
     })))
 }
@@ -95,13 +98,14 @@ fn task_status(
     config: &AutomationConfig,
     paused: bool,
     records: &[AutomationRunLedgerRecord],
+    activity: SessionActivity,
     now: i64,
     task: AgentTaskKind,
 ) -> Value {
     let decision = if paused {
         crate::automation::scheduler::AutomationScheduleDecision::skipped("scheduler_paused")
     } else {
-        schedule_decision(config, task, records, now)
+        schedule_decision(config, task, records, activity, now)
     };
     let latest_scheduler = records
         .iter()

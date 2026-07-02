@@ -629,6 +629,30 @@ pub(crate) async fn seed_search_underuse_session_evidence(cg: &TraceDecay) {
     assert!(db.upsert_session_message(&message).await);
 }
 
+/// Seeds one session message at `timestamp` so the scheduler observes LCM
+/// session activity at that instant.
+pub(crate) async fn seed_session_activity(cg: &TraceDecay, timestamp: i64) {
+    let db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
+        .await
+        .expect("session db open");
+    seed_session_message_in_db(
+        &db,
+        cg.project_root(),
+        SeedSessionMessage {
+            provider: "cursor",
+            session_id: "activity-fixture",
+            message_id: &format!("activity-fixture-message-{timestamp}"),
+            role: "user",
+            timestamp,
+            // Matches the default session_reflector and skill_writer grep
+            // queries so evidence-driven runs see this message as a hit.
+            text: "Remember this repeated workflow correction: prefer the skill tool pattern.",
+            source: None,
+        },
+    )
+    .await;
+}
+
 pub(crate) struct SeedSessionMessage<'a> {
     pub(crate) provider: &'a str,
     pub(crate) session_id: &'a str,

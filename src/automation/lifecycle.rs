@@ -16,7 +16,8 @@ use super::run_ledger::{
     AutomationTrigger,
 };
 use super::scheduler::{
-    schedule_decision, stale_lock_secs, AutomationScheduleDecision, AutomationTaskLock,
+    load_session_activity, schedule_decision, stale_lock_secs, AutomationScheduleDecision,
+    AutomationTaskLock,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::current_timestamp;
@@ -37,6 +38,9 @@ pub(crate) struct AgentTaskRunContext<'a> {
     pub(crate) run_id: String,
     pub(crate) trigger: AutomationTrigger,
     pub(crate) dashboard_root: PathBuf,
+    /// LCM sessions database for the project store; the scheduler gate reads
+    /// its newest message timestamp as the session-activity signal.
+    sessions_db_path: PathBuf,
     config: &'a AutomationConfig,
     task: AgentTaskKind,
     started_at: String,
@@ -50,6 +54,7 @@ pub(crate) struct AgentTaskRunContext<'a> {
 impl<'a> AgentTaskRunContext<'a> {
     pub(crate) fn new(
         dashboard_root: PathBuf,
+        sessions_db_path: PathBuf,
         run_id: Option<String>,
         run_id_prefix: &'static str,
         trigger: AutomationTrigger,
@@ -60,6 +65,7 @@ impl<'a> AgentTaskRunContext<'a> {
             run_id: run_id.unwrap_or_else(|| generated_run_id(run_id_prefix)),
             trigger,
             dashboard_root,
+            sessions_db_path,
             config,
             task,
             started_at: current_timestamp().to_string(),
@@ -72,8 +78,14 @@ impl<'a> AgentTaskRunContext<'a> {
     }
 
     pub(crate) async fn gate(&mut self) -> Result<SchedulerGate> {
-        let (gate, records) =
-            task_run_gate(self.config, &self.dashboard_root, self.task, self.trigger).await?;
+        let (gate, records) = task_run_gate(
+            self.config,
+            &self.dashboard_root,
+            &self.sessions_db_path,
+            self.task,
+            self.trigger,
+        )
+        .await?;
         self.ledger_records = records;
         Ok(gate)
     }
@@ -149,6 +161,7 @@ pub(crate) fn task_skip_reason(
 pub(crate) async fn scheduler_gate(
     config: &AutomationConfig,
     dashboard_root: &Path,
+    sessions_db_path: &Path,
     task: AgentTaskKind,
     trigger: AutomationTrigger,
 ) -> Result<(SchedulerGate, Option<Vec<AutomationRunLedgerRecord>>)> {
@@ -169,7 +182,8 @@ pub(crate) async fn scheduler_gate(
         return Ok((SchedulerGate::Skip("scheduler_lock_active"), Some(records)));
     };
 
-    let decision = schedule_decision(config, task, &records, now_secs);
+    let activity = load_session_activity(sessions_db_path).await;
+    let decision = schedule_decision(config, task, &records, activity, now_secs);
     if let Some(reason) = scheduler_skip_reason(&decision, task) {
         return Ok((SchedulerGate::Skip(reason), Some(records)));
     }
@@ -180,10 +194,12 @@ pub(crate) async fn scheduler_gate(
 pub(crate) async fn task_run_gate(
     config: &AutomationConfig,
     dashboard_root: &Path,
+    sessions_db_path: &Path,
     task: AgentTaskKind,
     trigger: AutomationTrigger,
 ) -> Result<(SchedulerGate, Option<Vec<AutomationRunLedgerRecord>>)> {
-    let (gate, records) = scheduler_gate(config, dashboard_root, task, trigger).await?;
+    let (gate, records) =
+        scheduler_gate(config, dashboard_root, sessions_db_path, task, trigger).await?;
     let gate = match gate {
         SchedulerGate::Skip(reason) => SchedulerGate::Skip(reason),
         SchedulerGate::Proceed(lock) => match task_skip_reason(config, task) {
@@ -695,6 +711,7 @@ mod tests {
         let config = AutomationConfig::default();
         let mut run = AgentTaskRunContext::new(
             dashboard_root.to_path_buf(),
+            dashboard_root.join("sessions.db"),
             Some(run_id.to_string()),
             "test",
             trigger,
@@ -825,6 +842,7 @@ mod tests {
         let config = scheduler_enabled_config();
         let mut run = AgentTaskRunContext::new(
             dashboard_root.to_path_buf(),
+            dashboard_root.join("sessions.db"),
             Some(run_id.to_string()),
             "test",
             AutomationTrigger::Scheduler,
