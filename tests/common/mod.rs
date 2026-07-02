@@ -79,9 +79,12 @@ static ISOLATED_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new
 /// [`IsolatedEnv::acquire_blocking`] (sync tests); both return the guard plus
 /// a ready-made `project` directory inside the temp home.
 pub struct IsolatedEnv {
-    _env_lock: tokio::sync::MutexGuard<'static, ()>,
+    // Field order matters: fields drop in declaration order, so the lock must
+    // be declared last. Dropping it first would let the next waiting test
+    // install its own isolated env, only for `storage`'s restore to clobber it.
     storage: TraceDecayStorageEnvGuard,
     _dir: TempDir,
+    _env_lock: tokio::sync::MutexGuard<'static, ()>,
 }
 
 impl IsolatedEnv {
@@ -97,9 +100,9 @@ impl IsolatedEnv {
         });
         (
             Self {
-                _env_lock: env_lock,
                 storage,
                 _dir: dir,
+                _env_lock: env_lock,
             },
             project,
         )
