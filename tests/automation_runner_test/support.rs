@@ -405,6 +405,7 @@ impl AgentTaskBackend for MalformedTextBackend {
             }
             AgentTaskKind::SkillWriter => ("skill_writer", "skill_writer:v2", "skills"),
             AgentTaskKind::CombinedReview => ("combined_review", "combined_review:v1", "facts"),
+            AgentTaskKind::UserJob => unreachable!("user jobs are not strict-JSON tasks"),
         };
         assert_request_contract(request, task_key, prompt_version, required_property);
         Ok(AgentTaskResponse {
@@ -954,6 +955,7 @@ pub(crate) fn test_task_key(task: AgentTaskKind) -> &'static str {
         AgentTaskKind::SessionReflector => "session_reflector",
         AgentTaskKind::SkillWriter => "skill_writer",
         AgentTaskKind::CombinedReview => "combined_review",
+        AgentTaskKind::UserJob => "user_job",
     }
 }
 
@@ -963,5 +965,6 @@ pub(crate) fn test_prompt_version(task: AgentTaskKind) -> &'static str {
         AgentTaskKind::SessionReflector => "session_reflector:v2",
         AgentTaskKind::SkillWriter => "skill_writer:v2",
         AgentTaskKind::CombinedReview => "combined_review:v1",
+        AgentTaskKind::UserJob => "user_job:v1",
     }
 }

@@ -1271,8 +1271,12 @@ impl DaemonEngine {
         if let Some(server) = servers.get(&key) {
             let server = Arc::clone(server);
             drop(servers);
-            self.ensure_automation_scheduler(key, canonical_project_path, handshake.clone())
-                .await;
+            Box::pin(self.ensure_automation_scheduler(
+                key,
+                canonical_project_path,
+                handshake.clone(),
+            ))
+            .await;
             return Ok(server);
         }
 
@@ -1293,7 +1297,7 @@ impl DaemonEngine {
         .await;
         servers.insert(key.clone(), Arc::clone(&server));
         drop(servers);
-        self.ensure_automation_scheduler(key, canonical_project_path, handshake.clone())
+        Box::pin(self.ensure_automation_scheduler(key, canonical_project_path, handshake.clone()))
             .await;
         Ok(server)
     }
@@ -1311,21 +1315,25 @@ impl DaemonEngine {
             }
         }
 
-        let scheduler_configured =
-            match automation_scheduler_configured_for_project(&project_path, &handshake).await {
-                Ok(configured) => configured,
-                Err(e) => {
-                    log_daemon_event(
-                        "scheduler_config",
-                        &[
-                            ("project", project_path.display().to_string()),
-                            ("outcome", "error".to_string()),
-                            ("error", e.to_string()),
-                        ],
-                    );
-                    false
-                }
-            };
+        let scheduler_configured = match Box::pin(automation_scheduler_configured_for_project(
+            &project_path,
+            &handshake,
+        ))
+        .await
+        {
+            Ok(configured) => configured,
+            Err(e) => {
+                log_daemon_event(
+                    "scheduler_config",
+                    &[
+                        ("project", project_path.display().to_string()),
+                        ("outcome", "error".to_string()),
+                        ("error", e.to_string()),
+                    ],
+                );
+                false
+            }
+        };
         if scheduler_configured {
             self.start_automation_scheduler(key, project_path, handshake)
                 .await;
@@ -1470,7 +1478,7 @@ async fn run_automation_scheduler_tick(
         return Ok(());
     }
     let config = effective_automation_config_for_project(&cg, &handshake.client_identity).await?;
-    if !automation_scheduler_configured(&config) {
+    if !automation_scheduler_has_work(&cg, &config).await {
         log_daemon_event(
             "scheduler_tick",
             &[
@@ -1607,6 +1615,15 @@ async fn run_automation_scheduler_tick(
     if any_succeeded {
         log_automation_staged_if_pending(project_path, &cg.store_layout().dashboard_root).await;
     }
+    run_user_jobs_scheduler_pass(
+        project_path,
+        &handshake.client_identity.profile_root,
+        &cg,
+        &config,
+        &backend,
+        &mut first_error,
+    )
+    .await;
     match first_error {
         Some(err) => Err(err),
         None => Ok(()),
@@ -1632,7 +1649,7 @@ async fn automation_scheduler_configured_for_project(
 ) -> Result<bool> {
     let cg = open_existing_project_with_options(project_path, handshake.open_options()).await?;
     let config = effective_automation_config_for_project(&cg, &handshake.client_identity).await?;
-    Ok(automation_scheduler_configured(&config))
+    Ok(automation_scheduler_has_work(&cg, &config).await)
 }
 
 #[cfg(unix)]
@@ -1670,9 +1687,92 @@ fn automation_scheduler_configured(config: &crate::automation::config::Automatio
         match parse_schedule(task.schedule.as_deref()) {
             Ok(AutomationSchedule::Manual) | Err(_) => false,
             Ok(AutomationSchedule::ConfiguredInterval) => task.interval_secs.is_some(),
-            Ok(AutomationSchedule::Interval { .. }) => true,
+            Ok(AutomationSchedule::Interval { .. } | AutomationSchedule::Cron(_)) => true,
         }
     })
+}
+
+/// True when the scheduler loop has anything to do for this project: a
+/// scheduled fixed task or a schedulable user-defined job.
+#[cfg(unix)]
+async fn automation_scheduler_has_work(
+    cg: &crate::tracedecay::TraceDecay,
+    config: &crate::automation::config::AutomationConfig,
+) -> bool {
+    use crate::automation::config::{AutomationBackend, AutomationHostMode};
+
+    if automation_scheduler_configured(config) {
+        return true;
+    }
+    if !config.enabled
+        || config.host_mode == AutomationHostMode::DelegatedHost
+        || config.backend != AutomationBackend::CodexAppServer
+    {
+        return false;
+    }
+    crate::automation::jobs::jobs_configured_for_scheduler(&cg.store_layout().dashboard_root).await
+}
+
+/// Ticks every schedulable user-defined job with the same lock/cooldown
+/// discipline as the fixed tasks (enforced inside the job runner).
+#[cfg(unix)]
+async fn run_user_jobs_scheduler_pass(
+    project_path: &Path,
+    profile_root: &Path,
+    cg: &crate::tracedecay::TraceDecay,
+    config: &crate::automation::config::AutomationConfig,
+    backend: &crate::automation::backend::CodexAppServerBackend,
+    first_error: &mut Option<TraceDecayError>,
+) {
+    let dashboard_root = cg.store_layout().dashboard_root.clone();
+    let jobs = match crate::automation::jobs::load_jobs(&dashboard_root).await {
+        Ok(jobs) => jobs,
+        Err(e) => {
+            log_daemon_event(
+                "scheduler_user_jobs",
+                &[
+                    ("project", project_path.display().to_string()),
+                    ("outcome", "error".to_string()),
+                    ("error", e.to_string()),
+                ],
+            );
+            first_error.get_or_insert(e);
+            return;
+        }
+    };
+    for job in jobs
+        .iter()
+        .filter(|job| crate::automation::jobs::job_is_schedulable(job))
+    {
+        log_scheduler_task_start(
+            project_path,
+            crate::automation::backend::AgentTaskKind::UserJob,
+        );
+        match crate::automation::jobs::run_user_job_with_backend(
+            &dashboard_root,
+            config,
+            backend,
+            job,
+            crate::automation::jobs::UserJobRunOptions {
+                trigger: crate::automation::run_ledger::AutomationTrigger::Scheduler,
+                profile_root: Some(profile_root.to_path_buf()),
+                project_root: Some(project_path.to_path_buf()),
+                ..crate::automation::jobs::UserJobRunOptions::default()
+            },
+        )
+        .await
+        {
+            Ok(run) => log_daemon_scheduler_record(project_path, &run.ledger_record),
+            Err(e) => {
+                log_scheduler_task_error(
+                    project_path,
+                    crate::automation::backend::AgentTaskKind::UserJob,
+                    &e,
+                );
+                first_error.get_or_insert(e);
+            }
+        }
+    }
 }
 
 #[cfg(unix)]
