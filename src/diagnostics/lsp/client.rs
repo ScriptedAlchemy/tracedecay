@@ -144,8 +144,8 @@ impl StdioLspClient {
         }) {
             let _ = child.start_kill();
             let _ = child.wait().await;
+            let _ = stderr_task.await;
             let stderr = captured_stderr(&stderr_capture).await;
-            stderr_task.abort();
             return Err(enrich_start_error(command, err, &stderr));
         }
         write_message_with_timeout(

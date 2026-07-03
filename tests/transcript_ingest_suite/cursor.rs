@@ -13,7 +13,7 @@ use tracedecay::sessions::source::ingest_source;
 use tracedecay::sessions::SessionSearchScope;
 
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK};
-use crate::support::{init_project, init_project_at};
+use crate::support::{assert_metadata_path_eq, init_git_repo, init_project, init_project_at};
 
 fn cursor_event(project: &std::path::Path, transcript: &std::path::Path) -> serde_json::Value {
     serde_json::json!({
@@ -168,6 +168,7 @@ async fn cursor_transcript_ingest_populates_searchable_messages() {
     std::fs::create_dir_all(&project).unwrap();
     std::fs::create_dir(project.join(".tracedecay")).unwrap();
     std::fs::write(project.join(".tracedecay/tracedecay.db"), "").unwrap();
+    init_git_repo(&project);
 
     let transcript = tmp.path().join("cursor-session.jsonl");
     std::fs::write(
@@ -209,12 +210,31 @@ async fn cursor_transcript_ingest_populates_searchable_messages() {
     assert!(results
         .iter()
         .any(|hit| hit.message.tool_names.as_deref() == Some("tracedecay_context")));
+    let session_metadata: serde_json::Value =
+        serde_json::from_str(results[0].session.metadata_json.as_deref().unwrap()).unwrap();
+    assert_metadata_path_eq(&session_metadata["cursor_event_cwd"], &project);
+    assert_metadata_path_eq(&session_metadata["cursor_event_worktree"], &project);
+    assert_eq!(
+        session_metadata["cursor_event_location_provenance"].as_str(),
+        Some("hook_event")
+    );
+    assert!(session_metadata.get("cursor_event_git_branch").is_none());
+    let message_metadata: serde_json::Value =
+        serde_json::from_str(results[0].message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_metadata_path_eq(&message_metadata["cursor_event_cwd"], &project);
+    assert_metadata_path_eq(&message_metadata["cursor_event_worktree"], &project);
+    assert_eq!(
+        message_metadata["cursor_event_location_provenance"].as_str(),
+        Some("hook_event")
+    );
+    assert!(message_metadata.get("cursor_event_git_branch").is_none());
 }
 
 #[tokio::test]
 async fn cursor_transcript_ingest_reads_nested_dispatch_tool_input_model() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
+    init_git_repo(&project);
 
     let transcript = tmp.path().join("cursor-session.jsonl");
     std::fs::write(
@@ -228,7 +248,8 @@ async fn cursor_transcript_ingest_reads_nested_dispatch_tool_input_model() {
     let event = serde_json::json!({
         "session_id": "cursor-session",
         "transcript_path": transcript,
-        "workspace_roots": [project]
+        "workspace_roots": [project],
+        "cwd": project
     });
 
     let stats = ingest_cursor_transcript_event(&event.to_string(), &db).await;
@@ -256,6 +277,20 @@ async fn cursor_transcript_ingest_reads_nested_dispatch_tool_input_model() {
         dispatch_models.get("cursor-session:tool_dispatch:call-b"),
         Some(&"claude-opus-4-8-thinking-max".to_string())
     );
+    for hit in results
+        .iter()
+        .filter(|hit| hit.message.kind.as_deref() == Some("tool_dispatch"))
+    {
+        let metadata: serde_json::Value =
+            serde_json::from_str(hit.message.metadata_json.as_deref().unwrap()).unwrap();
+        assert_metadata_path_eq(&metadata["cursor_event_cwd"], &project);
+        assert_metadata_path_eq(&metadata["cursor_event_worktree"], &project);
+        assert_eq!(
+            metadata["cursor_event_location_provenance"].as_str(),
+            Some("hook_event")
+        );
+        assert!(metadata.get("cursor_event_git_branch").is_none());
+    }
 }
 
 #[tokio::test]
@@ -910,6 +945,15 @@ async fn cursor_sweep_ingests_historical_transcripts() {
         .search_session_messages("cursor", None, "orchard catchup", 10)
         .await;
     assert_eq!(hits.len(), 2);
+    for hit in &hits {
+        let metadata: serde_json::Value =
+            serde_json::from_str(hit.message.metadata_json.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            metadata["cursor_event_location_provenance"].as_str(),
+            Some("sweep_project_root")
+        );
+        assert!(metadata.get("cursor_event_git_branch").is_none());
+    }
 }
 
 #[tokio::test]

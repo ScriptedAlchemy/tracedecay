@@ -6,6 +6,7 @@
 
 pub(crate) mod degraded;
 pub(crate) mod hook_events;
+pub(crate) mod project_route;
 /// MCP server implementation.
 pub mod response_handles;
 pub mod server;
