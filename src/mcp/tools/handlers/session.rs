@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
@@ -114,12 +115,12 @@ fn append_message_search_hit(md: &mut Md, hit: &Value) {
 
     let mut header = format!("**{role}** · {provider} · score {score:.1}");
     if let Some(ts) = timestamp {
-        header.push_str(&format!(" · t={ts}"));
+        let _ = write!(header, " · t={ts}");
     }
     md.bullet(&header);
     let mut locator = format!("session `{session_id}`");
     if let Some(title) = title {
-        locator.push_str(&format!(" — {title}"));
+        let _ = write!(locator, " — {title}");
     }
     md.line(&format!("  {locator}"));
     let text = message
@@ -133,7 +134,7 @@ fn append_message_search_hit(md: &mut Md, hit: &Value) {
 }
 
 /// Best-effort single-line plain-text snippet from a stored message body.
-/// Message text is frequently itself JSON (tool_use / tool_result blocks), so
+/// Message text is frequently itself JSON (`tool_use` / `tool_result` blocks), so
 /// pull the human-readable fields out rather than showing an escaped blob.
 fn message_text_snippet(text: &str, max_chars: usize) -> String {
     let readable = readable_message_text(text, max_chars.saturating_mul(8));
@@ -171,7 +172,6 @@ fn collect_readable_text(value: &Value, out: &mut String, budget: usize) {
             }
             out.push_str(s);
         }
-        Value::String(_) => {}
         Value::Array(arr) => {
             for item in arr {
                 collect_readable_text(item, out, budget);
@@ -269,11 +269,7 @@ fn registry_session_db_candidates(
     Ok(candidates)
 }
 
-fn lcm_preflight_tool_json(
-    project_root: Option<&Path>,
-    args: &Value,
-    value: &Value,
-) -> ToolResult {
+fn lcm_preflight_tool_json(project_root: Option<&Path>, args: &Value, value: &Value) -> ToolResult {
     if !render::wants_json(args) {
         // Markdown default: route through the normal renderer so an oversized
         // preflight payload is truncated *with* a retrieval handle. Passing the
@@ -575,7 +571,12 @@ fn bounded_lcm_expand_query_floor_text(
 
     // Drop the unbounded arrays entirely; the synthesis prompt below tells the
     // bridge the context was elided and pagination/node ids are recoverable.
-    for key in ["context_blocks", "matches", "node_ids", "context_pagination"] {
+    for key in [
+        "context_blocks",
+        "matches",
+        "node_ids",
+        "context_pagination",
+    ] {
         object.insert(key.to_string(), json!([]));
         object.insert(format!("{key}_truncated_for_mcp"), json!(true));
     }
@@ -604,10 +605,7 @@ fn bounded_lcm_expand_query_floor_text(
     if let Some(record) = &handle {
         object.insert("response_handle".to_string(), json!(record.handle));
         object.insert("retrieve_tool".to_string(), json!(RESPONSE_RETRIEVE_TOOL));
-        object.insert(
-            "retrieve_expires_at".to_string(),
-            json!(record.expires_at),
-        );
+        object.insert("retrieve_expires_at".to_string(), json!(record.expires_at));
         object.insert(
             "retrieve_instruction".to_string(),
             json!(format!(
@@ -631,7 +629,7 @@ fn bounded_lcm_expand_query_floor_text(
             "needs_synthesis": value
                 .get("needs_synthesis")
                 .cloned()
-                .unwrap_or_else(|| json!(true)),
+                .unwrap_or(json!(true)),
             "context_blocks": [],
             "matches": [],
             "mcp_response_truncated": true,
@@ -2375,10 +2373,10 @@ mod tests {
                     "session_id": "sess-abc-123",
                     "message_id": "msg-1",
                     "role": "assistant",
-                    "timestamp": 1783117588,
+                    "timestamp": 1_783_117_588,
                     "text": "[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_x\",\"content\":\"the database backup completed successfully at 03:00 UTC\"}]",
                     "source_path": "/home/zack/.claude/projects/x/sess-abc-123.jsonl",
-                    "source_offset": 1676581,
+                    "source_offset": 1_676_581,
                     "metadata_json": "{\"raw_type\":\"assistant\"}",
                 },
             }],
@@ -2439,7 +2437,8 @@ mod tests {
 
     #[test]
     fn message_text_snippet_extracts_readable_content_from_json() {
-        let text = "[{\"type\":\"tool_result\",\"content\":\"hello world\",\"tool_use_id\":\"toolu_1\"}]";
+        let text =
+            "[{\"type\":\"tool_result\",\"content\":\"hello world\",\"tool_use_id\":\"toolu_1\"}]";
         let snippet = message_text_snippet(text, 240);
         assert_eq!(snippet, "hello world");
         assert!(!snippet.contains("tool_use_id"));
@@ -2456,10 +2455,7 @@ mod tests {
     #[test]
     fn message_text_snippet_plain_text_is_collapsed() {
         let text = "line one\n\n   line two\ttabbed";
-        assert_eq!(
-            message_text_snippet(text, 240),
-            "line one line two tabbed"
-        );
+        assert_eq!(message_text_snippet(text, 240), "line one line two tabbed");
     }
 
     #[test]
