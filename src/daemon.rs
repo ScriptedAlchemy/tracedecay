@@ -3344,7 +3344,8 @@ mod tests {
                         "arguments": {
                             "provider": "cursor",
                             "storage_scope": "hermes_profile",
-                            "hermes_home": hermes_home
+                            "hermes_home": hermes_home,
+                            "format": "json"
                         }
                     }
                 }))

@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
+use super::super::render;
 use super::super::ToolResult;
 
 fn missing_required_param(name: &str) -> TraceDecayError {
@@ -28,11 +29,18 @@ fn required_array<'a>(args: &'a Value, name: &str) -> Result<&'a [Value]> {
         .ok_or_else(|| missing_required_param(name))
 }
 
-fn text_tool_result<T: Serialize>(result: &T, touched_files: Vec<String>) -> ToolResult {
+fn text_tool_result<T: Serialize>(
+    cg: &TraceDecay,
+    args: &Value,
+    result: &T,
+    touched_files: Vec<String>,
+) -> ToolResult {
+    let value = serde_json::to_value(result).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), args, &value, || {
+        render::generic_md(&value)
+    });
     ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": serde_json::to_string(result).unwrap_or_default() }]
-        }),
+        json!({ "content": [{ "type": "text", "text": text }] }),
         touched_files,
     )
 }
@@ -44,7 +52,7 @@ pub(super) async fn handle_str_replace(cg: &TraceDecay, args: Value) -> Result<T
 
     let result = cg.str_replace(path, old_str, new_str).await?;
     let touched_files = vec![result.file_path.clone()];
-    Ok(text_tool_result(&result, touched_files))
+    Ok(text_tool_result(cg, &args, &result, touched_files))
 }
 
 pub(super) async fn handle_multi_str_replace(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
@@ -72,7 +80,7 @@ pub(super) async fn handle_multi_str_replace(cg: &TraceDecay, args: Value) -> Re
 
     let result = cg.multi_str_replace(path, &parsed_replacements).await?;
     let touched_files = vec![result.file_path.clone()];
-    Ok(text_tool_result(&result, touched_files))
+    Ok(text_tool_result(cg, &args, &result, touched_files))
 }
 
 pub(super) async fn handle_insert_at(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
@@ -84,7 +92,7 @@ pub(super) async fn handle_insert_at(cg: &TraceDecay, args: Value) -> Result<Too
 
     let result = cg.insert_at(path, anchor, content, before).await?;
     let touched_files = vec![result.file_path.clone()];
-    Ok(text_tool_result(&result, touched_files))
+    Ok(text_tool_result(cg, &args, &result, touched_files))
 }
 
 pub(super) async fn handle_replace_symbol(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
@@ -97,7 +105,7 @@ pub(super) async fn handle_replace_symbol(cg: &TraceDecay, args: Value) -> Resul
     } else {
         vec![]
     };
-    Ok(text_tool_result(&result, touched_files))
+    Ok(text_tool_result(cg, &args, &result, touched_files))
 }
 
 pub(super) async fn handle_insert_at_symbol(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
@@ -114,7 +122,7 @@ pub(super) async fn handle_insert_at_symbol(cg: &TraceDecay, args: Value) -> Res
     } else {
         vec![]
     };
-    Ok(text_tool_result(&result, touched_files))
+    Ok(text_tool_result(cg, &args, &result, touched_files))
 }
 
 pub(super) async fn handle_ast_grep_rewrite(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
@@ -128,5 +136,5 @@ pub(super) async fn handle_ast_grep_rewrite(cg: &TraceDecay, args: Value) -> Res
     } else {
         vec![]
     };
-    Ok(text_tool_result(&result, touched_files))
+    Ok(text_tool_result(cg, &args, &result, touched_files))
 }

@@ -439,9 +439,42 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_redundancy",
     // memory
     "tracedecay_memory_status",
+    "tracedecay_fact_store",
+    "tracedecay_fact_feedback",
     // workflow
     "tracedecay_diagnose",
     "tracedecay_run_affected_tests",
+    // session / LCM
+    "tracedecay_message_search",
+    "tracedecay_lcm_status",
+    "tracedecay_lcm_doctor",
+    "tracedecay_lcm_load_session",
+    "tracedecay_lcm_grep",
+    "tracedecay_lcm_describe",
+    "tracedecay_lcm_expand",
+    "tracedecay_lcm_expand_query",
+    "tracedecay_lcm_session_boundary",
+    "tracedecay_lcm_preflight",
+    "tracedecay_lcm_compress",
+    // skills
+    "tracedecay_skill_list",
+    "tracedecay_skill_view",
+    "tracedecay_automation_run_artifact_view",
+    "tracedecay_hermes_skill_bridge",
+    // edit
+    "tracedecay_str_replace",
+    "tracedecay_multi_str_replace",
+    "tracedecay_insert_at",
+    "tracedecay_insert_at_symbol",
+    "tracedecay_replace_symbol",
+    "tracedecay_ast_grep_rewrite",
+    // git & info
+    "tracedecay_branch_list",
+    "tracedecay_active_project",
+    "tracedecay_storage_status",
+    // misc
+    "tracedecay_dashboard",
+    "tracedecay_retrieve",
 ];
 
 pub fn format_capable_tool_names() -> &'static [&'static str] {
@@ -1823,8 +1856,8 @@ fn def_dsm() -> ToolDefinition {
                 },
                 "format": {
                     "type": "string",
-                    "enum": ["stats", "clusters", "matrix"],
-                    "description": "Output format (default: stats)"
+                    "enum": ["stats", "clusters", "matrix", "json"],
+                    "description": "Data shape rendered as markdown: stats, clusters, or matrix (default: stats). Pass 'json' for compact machine-readable JSON of the default stats shape."
                 },
                 "max_files": {
                     "type": "number",

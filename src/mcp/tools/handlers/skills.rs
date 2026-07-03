@@ -20,6 +20,8 @@ use crate::errors::{Result, TraceDecayError};
 use crate::mcp::tools::ToolResult;
 use crate::tracedecay::TraceDecay;
 
+use super::super::render;
+
 const SKILL_ANALYTICS_IMPORT_LIMIT: usize = 10_000;
 const STALE_SKILL_AFTER_SECS: i64 = 60 * 60 * 24 * 90;
 
@@ -29,10 +31,12 @@ fn config_error(message: impl Into<String>) -> TraceDecayError {
     }
 }
 
-fn tool_json(value: &Value) -> ToolResult {
-    let formatted = serde_json::to_string_pretty(value).unwrap_or_default();
+fn tool_json(cg: &TraceDecay, args: &Value, value: &Value) -> ToolResult {
+    let text = render::finalize(Some(cg.project_root()), args, value, || {
+        render::generic_md(value)
+    });
     ToolResult::new(
-        json!({ "content": [{ "type": "text", "text": formatted }] }),
+        json!({ "content": [{ "type": "text", "text": text }] }),
         vec![],
     )
 }
@@ -138,7 +142,7 @@ pub(super) async fn handle_skill_list(cg: &TraceDecay, args: Value) -> Result<To
             })
             .collect::<Vec<_>>(),
     });
-    Ok(tool_json(&payload))
+    Ok(tool_json(cg, &args, &payload))
 }
 
 pub(super) async fn handle_skill_view(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
@@ -199,7 +203,7 @@ pub(super) async fn handle_skill_view(cg: &TraceDecay, args: Value) -> Result<To
         "improvement_recommendation": improvement_recommendation,
         "support_files_included": include_support_files,
     });
-    Ok(tool_json(&payload))
+    Ok(tool_json(cg, &args, &payload))
 }
 
 pub(super) async fn handle_automation_run_artifact_view(
@@ -228,7 +232,7 @@ pub(super) async fn handle_automation_run_artifact_view(
         "artifact": artifact,
         "payload": payload,
     });
-    Ok(tool_json(&payload))
+    Ok(tool_json(cg, &args, &payload))
 }
 
 async fn sync_project_skill_analytics(cg: &TraceDecay, profile_root: &Path) -> Result<()> {
@@ -243,7 +247,7 @@ async fn sync_project_skill_analytics(cg: &TraceDecay, profile_root: &Path) -> R
     .map(|_| ())
 }
 
-pub(super) fn handle_hermes_skill_bridge(_cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
+pub(super) fn handle_hermes_skill_bridge(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
     let hermes_home = required_str(args, "hermes_home")?;
     let snapshot = load_hermes_skill_bridge(
         Path::new(hermes_home),
@@ -256,5 +260,5 @@ pub(super) fn handle_hermes_skill_bridge(_cg: &TraceDecay, args: &Value) -> Resu
         "status": "ok",
         "bridge": snapshot,
     });
-    Ok(tool_json(&payload))
+    Ok(tool_json(cg, args, &payload))
 }

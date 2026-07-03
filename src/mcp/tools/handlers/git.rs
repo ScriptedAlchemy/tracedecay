@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde_json::{json, Value};
 
-use super::super::render::{self, truncated_json_envelope_with_handle};
+use super::super::render;
 use super::super::ToolResult;
 use super::support::unique_file_paths;
 use crate::errors::{Result, TraceDecayError};
@@ -18,11 +18,7 @@ struct GitFileChange {
     status: &'static str,
 }
 
-fn project_response_text(cg: &TraceDecay, text: &str) -> String {
-    truncated_json_envelope_with_handle(Some(cg.project_root()), text)
-}
-
-fn git_error_result(cg: &TraceDecay, operation: &str, message: &str) -> ToolResult {
+fn git_error_result(cg: &TraceDecay, args: &Value, operation: &str, message: &str) -> ToolResult {
     let output = json!({
         "error": {
             "kind": "git",
@@ -30,10 +26,12 @@ fn git_error_result(cg: &TraceDecay, operation: &str, message: &str) -> ToolResu
             "message": message,
         }
     });
-    let formatted = serde_json::to_string(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), args, &output, || {
+        render::generic_md(&output)
+    });
     ToolResult::new(
         json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         vec![],
     )
@@ -598,7 +596,7 @@ pub(super) async fn handle_changelog(cg: &TraceDecay, args: Value) -> Result<Too
     let changes = match git_diff_file_changes(cg.project_root(), from_ref, to_ref) {
         Ok(files) => files,
         Err(e) => {
-            return Ok(git_error_result(cg, "diff", &e));
+            return Ok(git_error_result(cg, &args, "diff", &e));
         }
     };
     let changed_files: Vec<String> = changes.iter().map(|change| change.path.clone()).collect();
@@ -678,7 +676,7 @@ pub(super) async fn handle_commit_context(cg: &TraceDecay, args: Value) -> Resul
     let changed_files = match git_changed_files(cg.project_root(), staged_only) {
         Ok(files) => files,
         Err(e) => {
-            return Ok(git_error_result(cg, "status", &e));
+            return Ok(git_error_result(cg, &args, "status", &e));
         }
     };
 
@@ -775,7 +773,7 @@ pub(super) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<To
     let changes = match git_diff_file_changes(cg.project_root(), base, head) {
         Ok(files) => files,
         Err(e) => {
-            return Ok(git_error_result(cg, "diff", &e));
+            return Ok(git_error_result(cg, &args, "diff", &e));
         }
     };
     let changed_files: Vec<String> = changes.iter().map(|change| change.path.clone()).collect();
@@ -901,7 +899,7 @@ pub(super) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<To
 // ── Cross-branch tools ─────────────────────────────────────────────────
 
 /// Handles `tracedecay_branch_list` tool calls.
-pub(super) fn handle_branch_list(cg: &TraceDecay) -> ToolResult {
+pub(super) fn handle_branch_list(cg: &TraceDecay, args: &Value) -> ToolResult {
     let diagnostics = cg.branch_diagnostics();
     let mut result = serde_json::to_value(&diagnostics).unwrap_or(json!({}));
     if let Some(object) = result.as_object_mut() {
@@ -911,10 +909,12 @@ pub(super) fn handle_branch_list(cg: &TraceDecay) -> ToolResult {
         );
     }
 
-    let output = serde_json::to_string(&result).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), args, &result, || {
+        render::generic_md(&result)
+    });
     ToolResult::new(
         json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &output) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         vec![],
     )

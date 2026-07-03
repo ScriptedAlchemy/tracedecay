@@ -1230,6 +1230,7 @@ assert argv[1:6] == ["tool", "--project", "/tmp/project", "tracedecay_lcm_prefli
 args_index = argv.index("--args")
 args = json.loads(argv[args_index + 1])
 assert args == {
+    "format": "json",
     "project_root": "/tmp/project",
     "provider": "cursor",
     "fresh_tail_count": 64,
@@ -1315,6 +1316,7 @@ assert argv[0] == plugin.tools.TRACEDECAY_BIN
 assert argv[1:6] == ["tool", "--project", "/tmp/project", "tracedecay_lcm_session_boundary", "--json"]
 args = json.loads(argv[argv.index("--args") + 1])
 assert args == {
+    "format": "json",
     "project_root": "/tmp/project",
     "provider": "cursor",
     "session_id": "session-b",
@@ -1423,6 +1425,7 @@ else:
     args = json.loads(args_ref)
 # expanduser matches the plugin's fallback byte-for-byte on Windows too.
 assert args == {
+    "format": "json",
     "project_root": "/tmp/project",
     "response_handle_project_root": "/tmp/project",
     "provider": "cursor",

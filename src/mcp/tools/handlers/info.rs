@@ -13,13 +13,9 @@ use crate::storage::{ProjectPath, StorageMode, StoreKind};
 use crate::tracedecay::{BranchDiagnostics, TraceDecay};
 use crate::types::{NodeKind, Visibility};
 
-use super::super::render::{self, truncate_response, truncated_json_envelope_with_handle, Md};
+use super::super::render::{self, Md};
 use super::super::ToolResult;
 use super::support::{effective_path, filter_by_scope, require_node_id, unique_file_paths};
-
-fn project_response_text(cg: &TraceDecay, text: &str) -> String {
-    truncated_json_envelope_with_handle(Some(cg.project_root()), text)
-}
 
 /// Handles `tracedecay_status` tool calls.
 pub(super) async fn handle_status(
@@ -254,15 +250,18 @@ fn store_kind_name(kind: &StoreKind) -> &'static str {
 /// Handles `tracedecay_active_project` tool calls.
 pub(super) fn handle_active_project(
     cg: &TraceDecay,
+    args: &Value,
     server_stats: Option<Value>,
     scope_prefix: Option<&str>,
 ) -> ToolResult {
     let branch = cg.branch_diagnostics();
     let output = active_project_context(cg, &branch, server_stats, scope_prefix);
-    let formatted = serde_json::to_string(&output).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), args, &output, || {
+        render::generic_md(&output)
+    });
     ToolResult::new(
         json!({
-            "content": [{ "type": "text", "text": project_response_text(cg, &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         vec![],
     )
@@ -633,7 +632,7 @@ pub(super) async fn handle_files(
 
     Ok(ToolResult::new(
         json!({
-            "content": [{ "type": "text", "text": truncate_response(&output) }]
+            "content": [{ "type": "text", "text": render::truncate_text_with_handle(Some(cg.project_root()), &output) }]
         }),
         touched_files,
     ))
@@ -1536,7 +1535,7 @@ pub(super) async fn handle_type_hierarchy(cg: &TraceDecay, args: Value) -> Resul
 
     let touched_files = unique_file_paths(all_files.iter().map(std::string::String::as_str));
     Ok(ToolResult::new(
-        json!({"content": [{"type": "text", "text": truncate_response(&output)}]}),
+        json!({"content": [{"type": "text", "text": render::truncate_text_with_handle(Some(cg.project_root()), &output)}]}),
         touched_files,
     ))
 }

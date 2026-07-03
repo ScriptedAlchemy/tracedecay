@@ -87,7 +87,7 @@ async fn tracedecay_dashboard_tool_starts_and_returns_url_and_serves_capabilitie
     let res = handle_tool_call(
         &cg,
         "tracedecay_dashboard",
-        json!({ "host": "127.0.0.1", "port": 0 }),
+        json!({ "host": "127.0.0.1", "port": 0, "format": "json" }),
         None,
         None,
     )

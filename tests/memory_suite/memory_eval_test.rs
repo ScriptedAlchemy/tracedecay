@@ -637,6 +637,7 @@ fn run_search(fixture: &Fixture, query: &str, limit: usize) -> Vec<SearchResultR
         "action": "search",
         "query": query,
         "limit": limit,
+        "format": "json",
     });
     let output = run_ok(
         fixture,

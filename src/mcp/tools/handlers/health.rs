@@ -25,7 +25,7 @@ use crate::graph::queries::GraphQueryManager;
 use crate::tracedecay::TraceDecay;
 use crate::types::{EdgeKind, NodeKind};
 
-use super::super::render::{self, truncated_json_envelope_with_handle};
+use super::super::render;
 use super::super::ToolResult;
 use super::support::{effective_path, unique_file_paths};
 
@@ -621,13 +621,15 @@ pub(super) async fn handle_dsm(
         }
     };
 
-    // `dsm` owns its `format` argument (stats/clusters/list/matrix) for data
-    // shaping, so it stays compact JSON rather than routing through the
-    // markdown/json `render::finalize` selector.
-    let formatted = serde_json::to_string(&output).unwrap_or_default();
+    // `dsm` overloads `format`: stats/clusters/matrix pick the data shape and
+    // render as markdown; "json" falls through to the default (stats) shape
+    // and `render::finalize` emits it as compact JSON.
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+        render::generic_md(&output)
+    });
     Ok(ToolResult::new(
         json!({
-            "content": [{ "type": "text", "text": truncated_json_envelope_with_handle(Some(cg.project_root()), &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         vec![],
     ))

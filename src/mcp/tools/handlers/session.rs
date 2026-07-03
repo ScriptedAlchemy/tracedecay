@@ -1,13 +1,17 @@
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
 use serde_json::{json, Map, Value};
 
-use super::super::render::truncated_json_envelope_with_handle;
+use super::super::render::{self, truncated_json_envelope_with_handle, Md};
 use super::support::{profile_root_for_global_db, project_registry_context, safe_profile_relpath};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::{GlobalDb, ProjectRegistryContext};
+use crate::mcp::response_handles::{
+    observe_response_truncation, store_response_handle, RESPONSE_RETRIEVE_TOOL,
+};
 use crate::mcp::tools::{ToolResult, MAX_RESPONSE_CHARS};
 use crate::sessions::cursor::HermesProfileDbReadOnly;
 use crate::sessions::lcm::compression_decision::{self, AssemblyCapInput};
@@ -18,7 +22,7 @@ use crate::sessions::lcm::{
     LcmSummarizerMode, LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT,
 };
 use crate::sessions::{ProviderScope, SessionSearchScope};
-use crate::tracedecay::TraceDecay;
+use crate::tracedecay::{current_timestamp, TraceDecay};
 
 const DEFAULT_LCM_CONTENT_LIMIT: usize = 4096;
 const DEFAULT_LCM_EXPAND_QUERY_CONTEXT_LIMIT: usize = 32_000;
@@ -31,17 +35,158 @@ const MAX_LCM_EXPAND_QUERY_QUERY_CHARS: usize = 1_024;
 const MAX_LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_CHARS: usize = 1_024;
 const MAX_LCM_EXPAND_QUERY_SYNTHESIS_PROMPT_CHARS: usize = 2_048;
 
-fn tool_json(project_root: Option<&Path>, value: &Value) -> ToolResult {
-    let formatted = serde_json::to_string(value).unwrap_or_default();
-    let text = if formatted.len() <= MAX_RESPONSE_CHARS {
-        formatted
-    } else {
-        truncated_json_envelope_with_handle(project_root, &formatted)
-    };
+fn tool_json(project_root: Option<&Path>, args: &Value, value: &Value) -> ToolResult {
+    tool_json_with_md(project_root, args, value, || render::generic_md(value))
+}
+
+/// Like [`tool_json`] but renders the markdown (default-format) body with a
+/// caller-supplied closure instead of the generic key/value renderer. The
+/// `format:"json"` path is unaffected — it always serializes `value` compactly.
+fn tool_json_with_md<F: FnOnce() -> String>(
+    project_root: Option<&Path>,
+    args: &Value,
+    value: &Value,
+    md: F,
+) -> ToolResult {
+    let text = render::finalize(project_root, args, value, md);
     ToolResult::new(
         json!({ "content": [{ "type": "text", "text": text }] }),
         Vec::new(),
     )
+}
+
+const MESSAGE_SEARCH_SNIPPET_CHARS: usize = 240;
+
+/// Renders `tracedecay_message_search` results as compact markdown. Each hit
+/// shows provider, session (id + title), role, timestamp, and score with a
+/// plain-text snippet of the message body — deliberately dropping the raw
+/// `metadata_json`, `source_path`, and `transcript_path` blobs that the generic
+/// renderer would dump verbatim into table cells. Pass `format:"json"` to get
+/// the full structured records.
+fn render_message_search_md(value: &Value) -> String {
+    let mut md = Md::new();
+    md.heading(2, "Transcript Search");
+    for key in ["query", "provider", "scope"] {
+        let field = render::field_str(value, key);
+        if !field.is_empty() {
+            md.field(key, field);
+        }
+    }
+    md.field("count", &render::field_i64(value, "count").to_string());
+    let results = value.get("results").and_then(Value::as_array);
+    match results {
+        Some(results) if !results.is_empty() => {
+            md.blank();
+            for hit in results {
+                append_message_search_hit(&mut md, hit);
+            }
+        }
+        _ => {
+            md.blank().empty_note("No matching messages.");
+        }
+    }
+    md.render()
+}
+
+fn append_message_search_hit(md: &mut Md, hit: &Value) {
+    let session = hit.get("session");
+    let message = hit.get("message");
+    let provider = message
+        .and_then(|m| m.get("provider"))
+        .or_else(|| session.and_then(|s| s.get("provider")))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let role = message
+        .and_then(|m| m.get("role"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let score = hit.get("score").and_then(Value::as_f64).unwrap_or(0.0);
+    let session_id = session
+        .and_then(|s| s.get("session_id"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let title = session
+        .and_then(|s| s.get("title"))
+        .and_then(Value::as_str)
+        .filter(|title| !title.is_empty());
+    let timestamp = message
+        .and_then(|m| m.get("timestamp"))
+        .and_then(Value::as_i64);
+
+    let mut header = format!("**{role}** · {provider} · score {score:.1}");
+    if let Some(ts) = timestamp {
+        let _ = write!(header, " · t={ts}");
+    }
+    md.bullet(&header);
+    let mut locator = format!("session `{session_id}`");
+    if let Some(title) = title {
+        let _ = write!(locator, " — {title}");
+    }
+    md.line(&format!("  {locator}"));
+    let text = message
+        .and_then(|m| m.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let snippet = message_text_snippet(text, MESSAGE_SEARCH_SNIPPET_CHARS);
+    if !snippet.is_empty() {
+        md.line(&format!("  {snippet}"));
+    }
+}
+
+/// Best-effort single-line plain-text snippet from a stored message body.
+/// Message text is frequently itself JSON (`tool_use` / `tool_result` blocks), so
+/// pull the human-readable fields out rather than showing an escaped blob.
+fn message_text_snippet(text: &str, max_chars: usize) -> String {
+    let readable = readable_message_text(text, max_chars.saturating_mul(8));
+    let collapsed = readable.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (snippet, truncated) = truncate_chars(&collapsed, max_chars);
+    if truncated {
+        format!("{snippet}…")
+    } else {
+        snippet
+    }
+}
+
+fn readable_message_text(text: &str, budget: usize) -> String {
+    let trimmed = text.trim_start();
+    if trimmed.starts_with('[') || trimmed.starts_with('{') {
+        if let Ok(value) = serde_json::from_str::<Value>(text) {
+            let mut out = String::new();
+            collect_readable_text(&value, &mut out, budget);
+            if !out.trim().is_empty() {
+                return out;
+            }
+        }
+    }
+    text.to_string()
+}
+
+fn collect_readable_text(value: &Value, out: &mut String, budget: usize) {
+    if out.len() >= budget {
+        return;
+    }
+    match value {
+        Value::String(s) if !s.is_empty() => {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(s);
+        }
+        Value::Array(arr) => {
+            for item in arr {
+                collect_readable_text(item, out, budget);
+            }
+        }
+        Value::Object(map) => {
+            // Prefer human-facing fields; ignore ids, kinds, and metadata blobs.
+            for key in ["text", "content", "thinking", "input"] {
+                if let Some(field) = map.get(key) {
+                    collect_readable_text(field, out, budget);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -124,14 +269,22 @@ fn registry_session_db_candidates(
     Ok(candidates)
 }
 
-fn lcm_preflight_tool_json(value: &Value) -> ToolResult {
+fn lcm_preflight_tool_json(project_root: Option<&Path>, args: &Value, value: &Value) -> ToolResult {
+    if !render::wants_json(args) {
+        // Markdown default: route through the normal renderer so an oversized
+        // preflight payload is truncated *with* a retrieval handle. Passing the
+        // project root is what lets `truncated_markdown_with_handle` store the
+        // full body — without it the truncation would be irreversible.
+        return tool_json(project_root, args, value);
+    }
     let formatted = serde_json::to_string(value).unwrap_or_default();
     let text = if formatted.len() <= MAX_RESPONSE_CHARS {
         formatted
     } else {
+        let started = std::time::Instant::now();
         let compact = compact_lcm_preflight_payload(value, formatted.len(), 8, 512);
         let compact_text = serde_json::to_string(&compact).unwrap_or_default();
-        if compact_text.len() <= MAX_RESPONSE_CHARS {
+        let text = if compact_text.len() <= MAX_RESPONSE_CHARS {
             compact_text
         } else {
             let minimal = compact_lcm_preflight_payload(value, formatted.len(), 4, 256);
@@ -142,7 +295,19 @@ fn lcm_preflight_tool_json(value: &Value) -> ToolResult {
                 let floor = compact_lcm_preflight_payload(value, formatted.len(), 1, 64);
                 bounded_lcm_contract_text(&floor)
             }
-        }
+        };
+        // Contract-preserving compaction drops data without storing a handle,
+        // so record it as an irreversible truncation for telemetry parity with
+        // the render-layer truncation paths.
+        observe_response_truncation(
+            formatted.len(),
+            text.len(),
+            false,
+            current_timestamp(),
+            "compacted_no_handle",
+            started.elapsed(),
+        );
+        text
     };
     ToolResult::new(
         json!({ "content": [{ "type": "text", "text": text }] }),
@@ -273,7 +438,14 @@ fn lcm_response_handle_root(project_root: Option<&Path>, args: &Value) -> Option
     None
 }
 
-fn lcm_expand_query_tool_json(project_root: Option<&Path>, value: &Value) -> ToolResult {
+fn lcm_expand_query_tool_json(
+    project_root: Option<&Path>,
+    args: &Value,
+    value: &Value,
+) -> ToolResult {
+    if !render::wants_json(args) {
+        return tool_json(project_root, args, value);
+    }
     let formatted = serde_json::to_string(value).unwrap_or_default();
     let needs_synthesis = value
         .get("needs_synthesis")
@@ -282,25 +454,49 @@ fn lcm_expand_query_tool_json(project_root: Option<&Path>, value: &Value) -> Too
     let text = if formatted.len() <= MAX_RESPONSE_CHARS {
         formatted
     } else if needs_synthesis {
+        let started = std::time::Instant::now();
         let compact =
             compact_lcm_expand_query_payload(value, formatted.len(), CompactTier::Standard);
-        let text = serde_json::to_string(&compact).unwrap_or_default();
-        if text.len() <= MAX_RESPONSE_CHARS {
-            text
+        let compact_text = serde_json::to_string(&compact).unwrap_or_default();
+        let (text, handle_status) = if compact_text.len() <= MAX_RESPONSE_CHARS {
+            (compact_text, "compacted_no_handle")
         } else {
             let fallback = compact_lcm_expand_query_payload(
                 value,
                 formatted.len(),
                 CompactTier::Minimal {
-                    compact_chars: text.len(),
+                    compact_chars: compact_text.len(),
                 },
             );
-            serde_json::to_string(&fallback).unwrap_or_default()
-        }
+            let fallback_text = serde_json::to_string(&fallback).unwrap_or_default();
+            if fallback_text.len() <= MAX_RESPONSE_CHARS {
+                (fallback_text, "compacted_no_handle")
+            } else {
+                // Even the Minimal tier overflowed (e.g. oversized cloned
+                // pagination or match metadata). Enforce a hard floor that
+                // stays valid JSON and keeps the Hermes synthesis contract
+                // keys, storing the full payload behind a handle when we can.
+                bounded_lcm_expand_query_floor_text(project_root, value, &formatted)
+            }
+        };
+        // The synthesis contract path shrinks the payload in place instead of
+        // going through the render-layer envelope, so record the truncation
+        // explicitly. It is reversible only when the floor stored a handle.
+        observe_response_truncation(
+            formatted.len(),
+            text.len(),
+            handle_status == "stored",
+            current_timestamp(),
+            handle_status,
+            started.elapsed(),
+        );
+        text
     } else {
         truncated_json_envelope_with_handle(project_root, &formatted)
     };
-    let text = if text.len() <= MAX_RESPONSE_CHARS || needs_synthesis {
+    // Safety net: every branch above is already bounded (the floor guarantees
+    // it for needs_synthesis), but never emit an unbounded body regardless.
+    let text = if text.len() <= MAX_RESPONSE_CHARS {
         text
     } else {
         truncated_json_envelope_with_handle(project_root, &text)
@@ -308,6 +504,141 @@ fn lcm_expand_query_tool_json(project_root: Option<&Path>, value: &Value) -> Too
     ToolResult::new(
         json!({ "content": [{ "type": "text", "text": text }] }),
         Vec::new(),
+    )
+}
+
+/// Hard floor for a `needs_synthesis` expand-query payload that is still over
+/// [`MAX_RESPONSE_CHARS`] after [`CompactTier::Minimal`] compaction. Emits a
+/// bounded JSON object that preserves the Hermes bridge synthesis contract
+/// (`status`, `needs_synthesis`, `synthesis_prompt`, bounded scalars) while
+/// dropping the unbounded arrays (`context_blocks`, `matches`, `node_ids`,
+/// `context_pagination`). When a project root is available the full original
+/// payload is stored behind a retrieval handle so nothing is lost; the handle
+/// is surfaced as `response_handle` (a key the Hermes plugin recognizes).
+///
+/// Returns the serialized text plus the telemetry handle status
+/// (`"stored"` when the full payload was cached, `"compacted_no_handle"`
+/// otherwise).
+fn bounded_lcm_expand_query_floor_text(
+    project_root: Option<&Path>,
+    value: &Value,
+    formatted: &str,
+) -> (String, &'static str) {
+    const FLOOR_SCALAR_CHARS: usize = 512;
+    const FLOOR_AUX_JSON_CHARS: usize = 2_048;
+
+    let handle = project_root
+        .and_then(|root| store_response_handle(root, formatted, current_timestamp()).ok());
+    let handle_status: &'static str = if handle.is_some() {
+        "stored"
+    } else {
+        "compacted_no_handle"
+    };
+
+    let mut object = Map::new();
+    for key in [
+        "status",
+        "provider",
+        "session_id",
+        "storage_scope",
+        "answer",
+    ] {
+        insert_bounded_scalar_field(&mut object, value, key, FLOOR_SCALAR_CHARS);
+    }
+    for key in [
+        "needs_synthesis",
+        "max_tokens",
+        "context_max_tokens",
+        "context_budget",
+        "context_truncated",
+    ] {
+        if let Some(field) = value.get(key) {
+            object.insert(key.to_string(), field.clone());
+        }
+    }
+    insert_bounded_text_field(&mut object, value, "prompt", FLOOR_SCALAR_CHARS);
+    insert_bounded_text_field(&mut object, value, "query", FLOOR_SCALAR_CHARS);
+    // Contract-adjacent recovery metadata survives only when it is itself
+    // small; anything larger is recoverable via the response handle.
+    for key in ["context_recovery_hint", "summary_request"] {
+        if let Some(field) = value.get(key) {
+            let serialized_len = serde_json::to_string(field).map_or(usize::MAX, |s| s.len());
+            if serialized_len <= FLOOR_AUX_JSON_CHARS {
+                object.insert(key.to_string(), field.clone());
+            }
+        }
+    }
+
+    // Drop the unbounded arrays entirely; the synthesis prompt below tells the
+    // bridge the context was elided and pagination/node ids are recoverable.
+    for key in [
+        "context_blocks",
+        "matches",
+        "node_ids",
+        "context_pagination",
+    ] {
+        object.insert(key.to_string(), json!([]));
+        object.insert(format!("{key}_truncated_for_mcp"), json!(true));
+    }
+    object.insert(
+        "synthesis_prompt".to_string(),
+        compact_synthesis_prompt_with_limits(
+            value,
+            &json!([]),
+            FLOOR_SCALAR_CHARS,
+            FLOOR_SCALAR_CHARS,
+        ),
+    );
+
+    object.insert("mcp_response_truncated".to_string(), json!(true));
+    object.insert("contract_truncated".to_string(), json!(true));
+    object.insert(
+        "mcp_original_response_chars".to_string(),
+        json!(formatted.len()),
+    );
+    object.insert(
+        "mcp_truncation_reason".to_string(),
+        json!(
+            "expand-query response exceeded the minimal synthesis contract budget; unbounded context arrays were dropped"
+        ),
+    );
+    if let Some(record) = &handle {
+        object.insert("response_handle".to_string(), json!(record.handle));
+        object.insert("retrieve_tool".to_string(), json!(RESPONSE_RETRIEVE_TOOL));
+        object.insert("retrieve_expires_at".to_string(), json!(record.expires_at));
+        object.insert(
+            "retrieve_instruction".to_string(),
+            json!(format!(
+                "The full expand-query response ({} chars) was stored locally and expires at {}. Call `{RESPONSE_RETRIEVE_TOOL}` with handle `{}` to recover the dropped context_blocks, matches, node_ids, and context_pagination.",
+                formatted.len(),
+                record.expires_at,
+                record.handle
+            )),
+        );
+    }
+
+    let text = serde_json::to_string(&Value::Object(object)).unwrap_or_default();
+    if text.len() <= MAX_RESPONSE_CHARS {
+        return (text, handle_status);
+    }
+    // Absolute floor: every retained field above is bounded, so this branch is
+    // effectively unreachable, but never emit an unbounded body.
+    (
+        serde_json::to_string(&json!({
+            "status": value.get("status").cloned().unwrap_or_else(|| json!("ok")),
+            "needs_synthesis": value
+                .get("needs_synthesis")
+                .cloned()
+                .unwrap_or(json!(true)),
+            "context_blocks": [],
+            "matches": [],
+            "mcp_response_truncated": true,
+            "contract_truncated": true,
+            "mcp_truncation_reason":
+                "expand-query response exceeded the minimum synthesis contract budget",
+        }))
+        .unwrap_or_default(),
+        handle_status,
     )
 }
 
@@ -989,9 +1320,10 @@ fn lcm_error(err: crate::sessions::lcm::LcmError) -> TraceDecayError {
     }
 }
 
-fn lcm_unavailable() -> ToolResult {
+fn lcm_unavailable(args: &Value) -> ToolResult {
     tool_json(
         None,
+        args,
         &json!({
             "status": "unavailable",
             "message": "could not open active project tracedecay session database",
@@ -1004,9 +1336,10 @@ fn lcm_unavailable() -> ToolResult {
 /// so callers can tell "no data yet" apart from "open failed".
 /// The `store_exists: false` field is the machine-readable discriminator;
 /// other fields are backward-compatible additions.
-fn lcm_not_yet_ingested(storage_scope: &str) -> ToolResult {
+fn lcm_not_yet_ingested(args: &Value, storage_scope: &str) -> ToolResult {
     tool_json(
         None,
+        args,
         &json!({
             "status": "not_ingested",
             "store_exists": false,
@@ -1016,9 +1349,14 @@ fn lcm_not_yet_ingested(storage_scope: &str) -> ToolResult {
     )
 }
 
-fn lcm_scoped_unavailable(storage_scope: &str, message: impl Into<String>) -> ToolResult {
+fn lcm_scoped_unavailable(
+    args: &Value,
+    storage_scope: &str,
+    message: impl Into<String>,
+) -> ToolResult {
     tool_json(
         None,
+        args,
         &json!({
             "status": "unavailable",
             "storage_scope": storage_scope,
@@ -1027,8 +1365,9 @@ fn lcm_scoped_unavailable(storage_scope: &str, message: impl Into<String>) -> To
     )
 }
 
-fn lcm_storage_scope_unavailable(storage_scope: &str) -> ToolResult {
+fn lcm_storage_scope_unavailable(args: &Value, storage_scope: &str) -> ToolResult {
     lcm_scoped_unavailable(
+        args,
         storage_scope,
         format!(
             "{storage_scope} LCM status storage is not available from the active project handler"
@@ -1036,8 +1375,9 @@ fn lcm_storage_scope_unavailable(storage_scope: &str) -> ToolResult {
     )
 }
 
-fn project_local_storage_without_project() -> ToolResult {
+fn project_local_storage_without_project(args: &Value) -> ToolResult {
     lcm_scoped_unavailable(
+        args,
         "project_local",
         "project_local LCM storage requires an initialized TraceDecay project root",
     )
@@ -1103,19 +1443,21 @@ enum LcmStorageResolution {
     Unavailable(ToolResult),
 }
 
-fn invalid_hermes_profile_home(message: impl Into<String>) -> ToolResult {
-    lcm_scoped_unavailable("hermes_profile", message)
+fn invalid_hermes_profile_home(args: &Value, message: impl Into<String>) -> ToolResult {
+    lcm_scoped_unavailable(args, "hermes_profile", message)
 }
 
 fn hermes_profile_home(args: &Value) -> std::result::Result<PathBuf, ToolResult> {
     let Some(hermes_home) = string_arg(args, "hermes_home") else {
         return Err(invalid_hermes_profile_home(
+            args,
             "hermes_profile LCM storage requires an explicit absolute hermes_home",
         ));
     };
     let path = PathBuf::from(hermes_home);
     if !path.is_absolute() {
         return Err(invalid_hermes_profile_home(
+            args,
             "hermes_profile LCM storage requires an absolute hermes_home",
         ));
     }
@@ -1124,20 +1466,27 @@ fn hermes_profile_home(args: &Value) -> std::result::Result<PathBuf, ToolResult>
         .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
     {
         return Err(invalid_hermes_profile_home(
+            args,
             "hermes_profile LCM storage requires a normalized absolute hermes_home",
         ));
     }
     let Ok(canonical) = std::fs::canonicalize(&path) else {
-        return Err(invalid_hermes_profile_home(format!(
-            "hermes_home does not exist or is not a directory: {}",
-            path.display()
-        )));
+        return Err(invalid_hermes_profile_home(
+            args,
+            format!(
+                "hermes_home does not exist or is not a directory: {}",
+                path.display()
+            ),
+        ));
     };
     if !canonical.is_dir() {
-        return Err(invalid_hermes_profile_home(format!(
-            "hermes_home does not exist or is not a directory: {}",
-            path.display()
-        )));
+        return Err(invalid_hermes_profile_home(
+            args,
+            format!(
+                "hermes_home does not exist or is not a directory: {}",
+                path.display()
+            ),
+        ));
     }
     Ok(canonical)
 }
@@ -1194,17 +1543,24 @@ async fn open_lcm_storage(
     match storage_scope {
         "project_local" => {
             if context.project_root.is_none() {
-                return LcmStorageResolution::Unavailable(project_local_storage_without_project());
+                return LcmStorageResolution::Unavailable(project_local_storage_without_project(
+                    args,
+                ));
             }
             let Some(db_path) = context.project_session_db_path else {
-                return LcmStorageResolution::Unavailable(project_local_storage_without_project());
+                return LcmStorageResolution::Unavailable(project_local_storage_without_project(
+                    args,
+                ));
             };
             let db_path = db_path.to_path_buf();
             if mode == LcmOpenMode::ReadOnlyOrMissing && !db_path.is_file() {
-                return LcmStorageResolution::Unavailable(lcm_not_yet_ingested("project_local"));
+                return LcmStorageResolution::Unavailable(lcm_not_yet_ingested(
+                    args,
+                    "project_local",
+                ));
             }
             let Some(db) = open_lcm_db_at(&db_path, mode).await else {
-                return LcmStorageResolution::Unavailable(lcm_unavailable());
+                return LcmStorageResolution::Unavailable(lcm_unavailable(args));
             };
             available_lcm_storage(db, "project_local")
         }
@@ -1221,7 +1577,7 @@ async fn open_lcm_storage(
                         Ok(db_path) => db_path,
                         Err(message) => {
                             return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
-                                message,
+                                args, message,
                             ));
                         }
                     }
@@ -1234,9 +1590,9 @@ async fn open_lcm_storage(
                         HermesProfileDbReadOnly::NotIngested(db_path) => {
                             return LcmStorageResolution::Unavailable(match mode {
                                 LcmOpenMode::ReadOnlyOrMissing => {
-                                    lcm_not_yet_ingested("hermes_profile")
+                                    lcm_not_yet_ingested(args, "hermes_profile")
                                 }
-                                _ => invalid_hermes_profile_home(format!(
+                                _ => invalid_hermes_profile_home(args, format!(
                                     "hermes_profile LCM storage requires an existing session database: {}",
                                     db_path.display()
                                 )),
@@ -1244,7 +1600,7 @@ async fn open_lcm_storage(
                         }
                         HermesProfileDbReadOnly::ConfigError(msg) => {
                             return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
-                                msg,
+                                args, msg,
                             ));
                         }
                     }
@@ -1252,12 +1608,13 @@ async fn open_lcm_storage(
             };
             let Some(db) = open_lcm_db_at(&db_path, mode).await else {
                 return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
+                    args,
                     "could not open hermes_profile tracedecay session database",
                 ));
             };
             available_lcm_storage(db, "hermes_profile")
         }
-        other => LcmStorageResolution::Unavailable(lcm_storage_scope_unavailable(other)),
+        other => LcmStorageResolution::Unavailable(lcm_storage_scope_unavailable(args, other)),
     }
 }
 
@@ -1434,6 +1791,7 @@ pub(super) async fn handle_message_search(
     else {
         return Ok(tool_json(
             Some(cg.project_root()),
+            &args,
             &json!({
                 "status": "unavailable",
                 "message": "could not resolve selected project tracedecay session database",
@@ -1445,6 +1803,7 @@ pub(super) async fn handle_message_search(
     let Some(db) = open_session_db_with_cached_ensure(&db_path).await else {
         return Ok(tool_json(
             Some(cg.project_root()),
+            &args,
             &json!({
                 "status": "unavailable",
                 "message": "could not open selected project tracedecay session database",
@@ -1483,28 +1842,31 @@ pub(super) async fn handle_message_search(
         .await
     };
 
-    Ok(tool_json(
+    let payload = json!({
+        "status": "ok",
+        "provider": requested_provider.unwrap_or("all"),
+        "requested_provider": requested_provider,
+        "selected_project_root": target_root,
+        "project_key": project_key,
+        "parent_session_id": parent_session_id,
+        "include_subagents": include_subagents,
+        "catch_up": catch_up,
+        "catch_up_performed": catch_up_performed,
+        "catch_up_provider": provider_scope.response_label(),
+        "scope": match scope {
+            SessionSearchScope::All => "all",
+            SessionSearchScope::ParentsOnly => "parents_only",
+            SessionSearchScope::SubagentsOnly => "subagents_only",
+        },
+        "query": query,
+        "count": results.len(),
+        "results": results,
+    });
+    Ok(tool_json_with_md(
         Some(&target_root),
-        &json!({
-            "status": "ok",
-            "provider": requested_provider.unwrap_or("all"),
-            "requested_provider": requested_provider,
-            "selected_project_root": target_root,
-            "project_key": project_key,
-            "parent_session_id": parent_session_id,
-            "include_subagents": include_subagents,
-            "catch_up": catch_up,
-            "catch_up_performed": catch_up_performed,
-            "catch_up_provider": provider_scope.response_label(),
-            "scope": match scope {
-                SessionSearchScope::All => "all",
-                SessionSearchScope::ParentsOnly => "parents_only",
-                SessionSearchScope::SubagentsOnly => "subagents_only",
-            },
-            "query": query,
-            "count": results.len(),
-            "results": results,
-        }),
+        &args,
+        &payload,
+        || render_message_search_md(&payload),
     ))
 }
 
@@ -1525,6 +1887,7 @@ pub(super) async fn handle_lcm_status(
     status.storage_scope = Some(storage.scope.to_string());
     Ok(tool_json(
         context.project_root,
+        &args,
         &json!({
             "status": "ok",
             "provider": provider,
@@ -1548,6 +1911,7 @@ pub(super) async fn handle_lcm_doctor(
     if mode == "clean" && apply && !clean_apply_enabled {
         return Ok(tool_json(
             context.project_root,
+            &args,
             &json!({
                 "status": "denied",
                 "provider": provider,
@@ -1575,6 +1939,7 @@ pub(super) async fn handle_lcm_doctor(
     if mode == "gc" && apply && !gc_apply_enabled {
         return Ok(tool_json(
             context.project_root,
+            &args,
             &json!({
                 "status": "denied",
                 "provider": provider,
@@ -1627,7 +1992,7 @@ pub(super) async fn handle_lcm_doctor(
             );
         }
     }
-    Ok(tool_json(context.project_root, &payload))
+    Ok(tool_json(context.project_root, &args, &payload))
 }
 
 pub(super) async fn handle_lcm_load_session(
@@ -1676,7 +2041,7 @@ pub(super) async fn handle_lcm_load_session(
             );
         }
     }
-    Ok(tool_json(context.project_root, &payload))
+    Ok(tool_json(context.project_root, &args, &payload))
 }
 
 pub(super) async fn handle_lcm_grep(
@@ -1711,6 +2076,7 @@ pub(super) async fn handle_lcm_grep(
         .map_err(lcm_error)?;
     Ok(tool_json(
         context.project_root,
+        &args,
         &json!({
             "status": "ok",
             "provider": provider,
@@ -1743,6 +2109,7 @@ pub(super) async fn handle_lcm_describe(
         .map_err(lcm_error)?;
     Ok(tool_json(
         context.project_root,
+        &args,
         &json!({
             "status": "ok",
             "provider": provider,
@@ -1774,6 +2141,7 @@ pub(super) async fn handle_lcm_expand(
         .map_err(lcm_error)?;
     Ok(tool_json(
         context.project_root,
+        &args,
         &json!({
             "status": "ok",
             "provider": provider,
@@ -1833,7 +2201,11 @@ pub(super) async fn handle_lcm_expand_query(
         object.insert("session_id".to_string(), json!(session_id));
         object.insert("storage_scope".to_string(), json!(storage.scope));
     }
-    Ok(lcm_expand_query_tool_json(context.project_root, &payload))
+    Ok(lcm_expand_query_tool_json(
+        context.project_root,
+        &args,
+        &payload,
+    ))
 }
 
 pub(super) async fn handle_lcm_session_boundary(
@@ -1857,6 +2229,7 @@ pub(super) async fn handle_lcm_session_boundary(
         .map_err(lcm_error)?;
     Ok(tool_json(
         context.project_root,
+        &args,
         &json!({
             "status": response.status,
             "provider": provider,
@@ -1898,14 +2271,18 @@ pub(super) async fn handle_lcm_preflight(
         })
         .await
         .map_err(lcm_error)?;
-    Ok(lcm_preflight_tool_json(&json!({
-        "status": response.status,
-        "provider": provider,
-        "session_id": session_id,
-        "should_compress": response.should_compress,
-        "reason": response.reason,
-        "replay_messages": response.replay_messages,
-    })))
+    Ok(lcm_preflight_tool_json(
+        context.project_root,
+        &args,
+        &json!({
+            "status": response.status,
+            "provider": provider,
+            "session_id": session_id,
+            "should_compress": response.should_compress,
+            "reason": response.reason,
+            "replay_messages": response.replay_messages,
+        }),
+    ))
 }
 
 pub(super) async fn handle_lcm_compress(
@@ -1948,6 +2325,7 @@ pub(super) async fn handle_lcm_compress(
         .map_err(lcm_error)?;
     Ok(tool_json(
         response_handle_root.as_deref(),
+        &args,
         &json!({
             "status": response.status,
             "provider": provider,
@@ -1966,4 +2344,306 @@ pub(super) async fn handle_lcm_compress(
             "summary_request": response.summary_request,
         }),
     ))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn sample_message_search_payload() -> Value {
+        json!({
+            "status": "ok",
+            "provider": "all",
+            "query": "database backup",
+            "scope": "all",
+            "count": 1,
+            "results": [{
+                "score": 18.42,
+                "session": {
+                    "provider": "claude",
+                    "session_id": "sess-abc-123",
+                    "title": "Investigate backup failure",
+                    "transcript_path": "/home/zack/.claude/projects/x/sess-abc-123.jsonl",
+                    "metadata_json": "{\"claude_session_cwd\":\"/home/zack/proj\",\"secret\":\"do-not-leak\"}",
+                    "project_path": "/home/zack/proj",
+                },
+                "message": {
+                    "provider": "claude",
+                    "session_id": "sess-abc-123",
+                    "message_id": "msg-1",
+                    "role": "assistant",
+                    "timestamp": 1_783_117_588,
+                    "text": "[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_x\",\"content\":\"the database backup completed successfully at 03:00 UTC\"}]",
+                    "source_path": "/home/zack/.claude/projects/x/sess-abc-123.jsonl",
+                    "source_offset": 1_676_581,
+                    "metadata_json": "{\"raw_type\":\"assistant\"}",
+                },
+            }],
+        })
+    }
+
+    #[test]
+    fn message_search_markdown_drops_raw_json_blobs() {
+        let payload = sample_message_search_payload();
+        let md = render_message_search_md(&payload);
+
+        // Human-facing fields are present.
+        assert!(md.contains("## Transcript Search"), "{md}");
+        assert!(md.contains("**query:** database backup"), "{md}");
+        assert!(md.contains("**assistant**"), "{md}");
+        assert!(md.contains("session `sess-abc-123`"), "{md}");
+        assert!(md.contains("Investigate backup failure"), "{md}");
+        assert!(md.contains("score 18.4"), "{md}");
+        assert!(md.contains("t=1783117588"), "{md}");
+        // The readable content is surfaced without the surrounding JSON block.
+        assert!(
+            md.contains("the database backup completed successfully"),
+            "{md}"
+        );
+
+        // None of the raw record blobs leak into the default output.
+        for forbidden in [
+            "metadata_json",
+            "transcript_path",
+            "source_path",
+            "source_offset",
+            "do-not-leak",
+            "tool_use_id",
+            "claude_session_cwd",
+        ] {
+            assert!(
+                !md.contains(forbidden),
+                "default markdown must not embed `{forbidden}`:\n{md}"
+            );
+        }
+        // And it must not be a JSON document.
+        assert!(serde_json::from_str::<Value>(&md).is_err(), "{md}");
+    }
+
+    #[test]
+    fn message_search_markdown_handles_empty_results() {
+        let payload = json!({
+            "status": "ok",
+            "query": "nothing matches",
+            "count": 0,
+            "results": [],
+        });
+        let md = render_message_search_md(&payload);
+        assert!(md.contains("## Transcript Search"), "{md}");
+        assert!(md.contains("**count:** 0"), "{md}");
+        assert!(md.contains("No matching messages."), "{md}");
+    }
+
+    #[test]
+    fn message_text_snippet_extracts_readable_content_from_json() {
+        let text =
+            "[{\"type\":\"tool_result\",\"content\":\"hello world\",\"tool_use_id\":\"toolu_1\"}]";
+        let snippet = message_text_snippet(text, 240);
+        assert_eq!(snippet, "hello world");
+        assert!(!snippet.contains("tool_use_id"));
+    }
+
+    #[test]
+    fn message_text_snippet_falls_back_to_raw_and_truncates() {
+        let text = "x".repeat(500);
+        let snippet = message_text_snippet(&text, 240);
+        assert!(snippet.ends_with('…'));
+        assert_eq!(snippet.chars().count(), 241); // 240 chars + ellipsis
+    }
+
+    #[test]
+    fn message_text_snippet_plain_text_is_collapsed() {
+        let text = "line one\n\n   line two\ttabbed";
+        assert_eq!(message_text_snippet(text, 240), "line one line two tabbed");
+    }
+
+    #[test]
+    fn lcm_preflight_markdown_truncation_stores_retrieval_handle() {
+        // Regression: the markdown-default preflight path must thread the
+        // project root so an oversized payload truncates *with* a recoverable
+        // handle rather than an irreversible clip.
+        let dir = tempfile::TempDir::new().unwrap();
+        // Oversize the payload the way a real preflight does — via a large
+        // replay_messages array (what the compaction tiers actually target).
+        let replay: Vec<Value> = (0..200)
+            .map(|i| json!({"role": "user", "content": format!("message {i} {}", "y".repeat(200))}))
+            .collect();
+        let payload = json!({
+            "status": "ok",
+            "provider": "claude",
+            "session_id": "s1",
+            "should_compress": false,
+            "reason": "no_compression_needed",
+            "replay_messages": replay,
+        });
+
+        // Markdown default (no `format` arg): must produce the readable
+        // truncation envelope with a stored handle.
+        let result = lcm_preflight_tool_json(Some(dir.path()), &json!({}), &payload);
+        let text = result.value["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("# Truncated Response"), "{text}");
+        assert!(text.contains("Full response stored locally"), "{text}");
+        assert!(text.contains("tracedecay_retrieve"), "{text}");
+        assert!(
+            serde_json::from_str::<Value>(text).is_err(),
+            "markdown truncation must not be a JSON envelope: {text}"
+        );
+
+        // `format:"json"` still yields the compact Hermes bridge contract.
+        let json_result =
+            lcm_preflight_tool_json(Some(dir.path()), &json!({"format": "json"}), &payload);
+        let json_text = json_result.value["content"][0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(json_text).unwrap();
+        assert_eq!(parsed["status"], "ok");
+        assert_eq!(parsed["should_compress"], false);
+    }
+
+    /// Builds an expand-query payload that overflows even the `Minimal`
+    /// compaction tier: `Minimal` clones `context_pagination` items whole (up
+    /// to 10) and `matches` metadata fields verbatim, so oversized entries
+    /// there survive both compaction passes and force the bounded floor.
+    fn oversized_needs_synthesis_expand_query_payload() -> Value {
+        let context_blocks: Vec<Value> = (0..60)
+            .map(|i| {
+                json!({
+                    "kind": "raw_message",
+                    "node_id": format!("node-{i}"),
+                    "content": "c".repeat(2_000),
+                })
+            })
+            .collect();
+        let matches: Vec<Value> = (0..40)
+            .map(|i| {
+                json!({
+                    "kind": "match",
+                    "node_id": format!("match-{i}-{}", "m".repeat(1_500)),
+                    "snippet": "s".repeat(600),
+                })
+            })
+            .collect();
+        let context_pagination: Vec<Value> = (0..10)
+            .map(|i| json!({ "cursor": format!("{i}-{}", "p".repeat(4_000)) }))
+            .collect();
+        json!({
+            "status": "ok",
+            "provider": "claude",
+            "session_id": "s1",
+            "storage_scope": "project",
+            "needs_synthesis": true,
+            "prompt": "What changed in the auth flow?",
+            "context_blocks": context_blocks,
+            "matches": matches,
+            "node_ids": (0..30).map(|i| format!("n{i}")).collect::<Vec<_>>(),
+            "context_pagination": context_pagination,
+        })
+    }
+
+    #[test]
+    fn lcm_expand_query_needs_synthesis_floor_is_bounded_valid_json() {
+        // Regression (S3): a needs_synthesis payload that is still over budget
+        // after Minimal compaction must NOT be emitted unbounded. The floor
+        // must stay within MAX_RESPONSE_CHARS, remain valid JSON, and keep the
+        // Hermes synthesis contract keys — with a retrieval handle when a
+        // project root is available.
+        let dir = tempfile::TempDir::new().unwrap();
+        let payload = oversized_needs_synthesis_expand_query_payload();
+
+        // Sanity: this payload really does defeat both compaction tiers.
+        let minimal = compact_lcm_expand_query_payload(
+            &payload,
+            serde_json::to_string(&payload).unwrap().len(),
+            CompactTier::Minimal { compact_chars: 0 },
+        );
+        assert!(
+            serde_json::to_string(&minimal).unwrap().len() > MAX_RESPONSE_CHARS,
+            "test payload must overflow the Minimal tier to exercise the floor"
+        );
+
+        let result =
+            lcm_expand_query_tool_json(Some(dir.path()), &json!({"format": "json"}), &payload);
+        let text = result.value["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.len() <= MAX_RESPONSE_CHARS,
+            "floor must bound the response: {} chars",
+            text.len()
+        );
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(parsed["needs_synthesis"], true);
+        assert_eq!(parsed["status"], "ok");
+        assert_eq!(parsed["mcp_response_truncated"], true);
+        assert_eq!(parsed["contract_truncated"], true);
+        // The synthesis contract survives: the bridge can still synthesize.
+        assert!(parsed["synthesis_prompt"]["user"].as_str().is_some());
+        assert!(parsed["synthesis_prompt"]["system"].as_str().is_some());
+        // Unbounded arrays are dropped but flagged.
+        assert_eq!(parsed["context_blocks"], json!([]));
+        assert_eq!(parsed["context_blocks_truncated_for_mcp"], true);
+        assert_eq!(parsed["matches_truncated_for_mcp"], true);
+        // Nothing is lost: the full payload is stored behind a handle.
+        let handle = parsed["response_handle"].as_str().unwrap();
+        assert!(handle.starts_with("rh_"), "{handle}");
+        assert_eq!(parsed["retrieve_tool"], "tracedecay_retrieve");
+    }
+
+    #[test]
+    fn lcm_expand_query_needs_synthesis_floor_is_bounded_without_project_root() {
+        // Even when no project root is available (no handle storage), the
+        // floor must still emit bounded, contract-preserving JSON.
+        let payload = oversized_needs_synthesis_expand_query_payload();
+        let result = lcm_expand_query_tool_json(None, &json!({"format": "json"}), &payload);
+        let text = result.value["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.len() <= MAX_RESPONSE_CHARS,
+            "floor must bound the response: {} chars",
+            text.len()
+        );
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(parsed["needs_synthesis"], true);
+        assert_eq!(parsed["mcp_response_truncated"], true);
+        assert!(parsed.get("response_handle").is_none());
+    }
+
+    #[test]
+    fn lcm_expand_query_in_budget_and_synthesis_compaction_paths_unchanged() {
+        // In-budget payloads pass through verbatim.
+        let small = json!({
+            "status": "ok",
+            "needs_synthesis": true,
+            "prompt": "q",
+            "context_blocks": [],
+        });
+        let result = lcm_expand_query_tool_json(None, &json!({"format": "json"}), &small);
+        let text = result.value["content"][0]["text"].as_str().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(text).unwrap(),
+            small,
+            "in-budget payload must be emitted verbatim"
+        );
+
+        // Oversized-but-compactable synthesis payloads still use the tiers
+        // (no floor markers, no handle keys).
+        let blocks: Vec<Value> = (0..40)
+            .map(|i| json!({"kind": "raw_message", "node_id": format!("n{i}"), "content": "c".repeat(1_000)}))
+            .collect();
+        let compactable = json!({
+            "status": "ok",
+            "needs_synthesis": true,
+            "prompt": "q",
+            "context_blocks": blocks,
+        });
+        let result = lcm_expand_query_tool_json(None, &json!({"format": "json"}), &compactable);
+        let text = result.value["content"][0]["text"].as_str().unwrap();
+        assert!(text.len() <= MAX_RESPONSE_CHARS);
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(parsed["needs_synthesis"], true);
+        assert!(
+            parsed.get("response_handle").is_none(),
+            "tier compaction must not reach the handle-storing floor"
+        );
+        assert!(
+            !parsed["context_blocks"].as_array().unwrap().is_empty(),
+            "tier compaction keeps bounded context blocks"
+        );
+    }
 }
