@@ -120,27 +120,18 @@ impl AgentIntegration for CodexIntegration {
             }
         }
 
-        if !refreshed.is_empty() {
-            if legacy_config_install {
-                sweep_legacy_global_codex_config(&ctx.home);
+        if refreshed.is_empty() {
+            if !codex_plugin_manifest_path(&ctx.home).exists() && !legacy_config_install {
+                return Ok(UpdatePluginOutcome::NotInstalled);
             }
-            return Ok(UpdatePluginOutcome::Refreshed(refreshed));
+            install_codex_personal_bootstrap(&ctx.home, &ctx.tracedecay_bin)?;
+            refreshed.push(plugin_dir);
         }
 
-        let target = if codex_plugin_manifest_path(&ctx.home).exists() || legacy_config_install {
-            Some(plugin_dir.clone())
-        } else {
-            None
-        };
-
-        let Some(target) = target else {
-            return Ok(UpdatePluginOutcome::NotInstalled);
-        };
-        install_codex_personal_bootstrap(&ctx.home, &ctx.tracedecay_bin)?;
         if legacy_config_install {
             sweep_legacy_global_codex_config(&ctx.home);
         }
-        Ok(UpdatePluginOutcome::Refreshed(vec![target]))
+        Ok(UpdatePluginOutcome::Refreshed(refreshed))
     }
 
     fn export_managed_skills(
@@ -1228,7 +1219,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
     doctor_check_hooks(
         dc,
         &plugin_dir.join("hooks/hooks.json"),
-        Some(&home.join(".codex/config.toml")),
+        &home.join(".codex/config.toml"),
     );
 
     doctor_check_marketplace_entry(
@@ -1320,13 +1311,13 @@ fn doctor_check_plugin_dir(dc: &mut DoctorCounters, plugin_dir: &Path, config_pa
         ));
     }
     if let Some(config_path) = config_path {
-        doctor_check_hooks(dc, &plugin_dir.join("hooks/hooks.json"), Some(config_path));
+        doctor_check_hooks(dc, &plugin_dir.join("hooks/hooks.json"), config_path);
     }
 }
 
 /// Check hooks.json registers the tracedecay lifecycle hooks, and report Codex
-/// hook trust state when the user-level config is available.
-fn doctor_check_hooks(dc: &mut DoctorCounters, hooks_path: &Path, config_path: Option<&Path>) {
+/// hook trust state from the user-level config.
+fn doctor_check_hooks(dc: &mut DoctorCounters, hooks_path: &Path, config_path: &Path) {
     if !hooks_path.exists() {
         dc.warn(&format!(
             "{} not found — run `tracedecay install --agent codex` to add lifecycle hooks",
@@ -1341,34 +1332,35 @@ fn doctor_check_hooks(dc: &mut DoctorCounters, hooks_path: &Path, config_path: O
             (!codex_hook_present(&hooks, hook.event, hook.subcommand)).then_some(hook.event)
         })
         .collect();
-    if missing.is_empty() {
-        dc.pass(&format!(
-            "All {} Codex lifecycle hooks registered in {}",
-            CODEX_MANAGED_HOOKS.len(),
-            hooks_path.display()
-        ));
-        match config_path.and_then(|path| load_toml_file(path).ok().map(|config| (path, config))) {
-            Some((path, config)) => match codex_plugin_hook_trust_state(&config) {
-                CodexHookTrustState::Trusted => dc.info(&format!(
-                    "Codex hook trust entries recorded in {}",
-                    path.display()
-                )),
-                CodexHookTrustState::Missing(missing) => dc.info(&format!(
-                    "Codex skips new/changed command hooks until trusted — missing trust for {} in {}; run `/hooks` in Codex",
-                    missing.join(", "),
-                    path.display()
-                )),
-            },
-            None => dc.info(
-                "Codex skips new/changed command hooks until trusted — run `/hooks` in Codex to trust the tracedecay hooks",
-            ),
-        }
-    } else {
+    if !missing.is_empty() {
         dc.warn(&format!(
             "tracedecay hook(s) missing for {} in {} — run `tracedecay install --agent codex`",
             missing.join(", "),
             hooks_path.display(),
         ));
+        return;
+    }
+
+    dc.pass(&format!(
+        "All {} Codex lifecycle hooks registered in {}",
+        CODEX_MANAGED_HOOKS.len(),
+        hooks_path.display()
+    ));
+    match load_toml_file(config_path) {
+        Ok(config) => match codex_plugin_hook_trust_state(&config) {
+            CodexHookTrustState::Trusted => dc.info(&format!(
+                "Codex hook trust entries recorded in {}",
+                config_path.display()
+            )),
+            CodexHookTrustState::Missing(missing) => dc.info(&format!(
+                "Codex skips new/changed command hooks until trusted — missing trust for {} in {}; run `/hooks` in Codex",
+                missing.join(", "),
+                config_path.display()
+            )),
+        },
+        Err(_) => dc.info(
+            "Codex skips new/changed command hooks until trusted — run `/hooks` in Codex to trust the tracedecay hooks",
+        ),
     }
 }
 
