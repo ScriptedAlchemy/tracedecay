@@ -39,15 +39,22 @@ job); layer 6 covers what can't live in the Rust test harness.
 ### 1. Schema validation (cargo test)
 
 JSON artifacts in the bundles are validated against vendored JSON Schemas in
-`tests/fixtures/cursor-schemas/`:
+`tests/fixtures/cursor-schemas/` (Cursor/Codex shapes) and
+`tests/fixtures/claude-schemas/` (Claude Code shapes):
 
 | Artifact | Schema | Test |
 |---|---|---|
-| `plugin/.cursor-plugin/plugin.json` | `plugin.schema.json` | `tests/agent_suite/plugin_manifest_schema_test.rs` |
-| `plugin/.codex-plugin/plugin.json` | `plugin.schema.json` + `interface` extension | `tests/agent_suite/plugin_manifest_schema_test.rs` |
-| `plugin/.claude-plugin/marketplace.json` | `marketplace.schema.json` | vendored for refresh parity |
-| `plugin/mcp-cursor.json` (deploys as `mcp.json`) | `mcp.schema.json` | `tests/agent_suite/plugin_config_schema_test.rs` |
-| `plugin/hooks/hooks-cursor.json` and `plugin/hooks/hooks-codex.json` | `hooks.schema.json` | `tests/agent_suite/plugin_config_schema_test.rs` |
+| `plugin/.cursor-plugin/plugin.json` | `cursor-schemas/plugin.schema.json` | `tests/agent_suite/plugin_manifest_schema_test.rs` |
+| `plugin/.codex-plugin/plugin.json` | `cursor-schemas/plugin.schema.json` + `interface` extension | `tests/agent_suite/plugin_manifest_schema_test.rs` |
+| `plugin/.claude-plugin/plugin.json` | `claude-schemas/plugin.schema.json` | `tests/agent_suite/claude_plugin_schema_test.rs` |
+| `plugin/.claude-plugin/marketplace.json` | `claude-schemas/marketplace.schema.json` | `tests/agent_suite/claude_plugin_schema_test.rs` |
+| `plugin/mcp-cursor.json` (deploys as `mcp.json`) | `cursor-schemas/mcp.schema.json` | `tests/agent_suite/plugin_config_schema_test.rs` |
+| `plugin/hooks/hooks-cursor.json` and `plugin/hooks/hooks-codex.json` | `cursor-schemas/hooks.schema.json` | `tests/agent_suite/plugin_config_schema_test.rs` |
+| `plugin/hooks/hooks-claude.json` | `claude-schemas/hooks.schema.json` | `tests/agent_suite/claude_plugin_schema_test.rs` |
+
+(The Cursor `marketplace.schema.json` stays vendored for refresh parity; the
+Claude marketplace uses its own schema above because Claude entries carry
+fields — `category`, `homepage` — that Cursor's marketplace schema rejects.)
 
 The tests use the `jsonschema` crate (dev-dependency only, no network
 resolvers — the schemas are self-contained draft-07, and the shipped binary

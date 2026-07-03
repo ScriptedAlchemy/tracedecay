@@ -401,6 +401,23 @@ Examples:
 Related: tracedecay tool message_search (MCP twin), tracedecay tool
 lcm_grep (scoped/time-filtered recall), tracedecay memory.";
 
+pub(crate) const ANALYTICS_LONG_ABOUT: &str = "\
+Answers adoption and telemetry-health questions from the durable \
+analytics_events store: how often tracedecay MCP tools are called, which \
+hooks fire per provider, and where hook telemetry files live. `diagnostics` \
+imports any new hook-log rows first and prints the same summary the \
+dashboard serves; `sync` runs only the import.";
+
+pub(crate) const ANALYTICS_AFTER_HELP: &str = "\
+Examples:
+  tracedecay analytics diagnostics               Adoption summary (this project)
+  tracedecay analytics diagnostics --all         Every project
+  tracedecay analytics diagnostics --no-sync     Read-only, skip the import
+  tracedecay analytics sync                      Import hook logs only
+
+Related: tracedecay doctor (hook/MCP install health), tracedecay gain
+(token savings), tracedecay sessions search (transcript evidence).";
+
 pub(crate) const PROJECTS_LONG_ABOUT: &str = "\
 Queries the global registry of every initialised tracedecay project on this \
 machine: list, search by id/path/alias/remote/branch, or resolve one \

@@ -1,0 +1,88 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://anthropic.com/schemas/claude-code/marketplace.json",
+  "title": "Claude Code Plugin Marketplace",
+  "description": "Schema for .claude-plugin/marketplace.json — a Claude Code plugin marketplace index. Anthropic does not publish a standalone machine-readable schema (marketplace.json files reference https://anthropic.com/claude-code/marketplace.schema.json, which is not served), so this is derived from the Claude Code plugin marketplaces reference (https://docs.anthropic.com/en/docs/claude-code/plugin-marketplaces — marketplace.json fields) as of 2026-07-03. A Claude Code release adding new fields requires re-vendoring.",
+  "type": "object",
+  "required": ["name", "plugins"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$",
+      "description": "Marketplace identifier: lowercase kebab-case."
+    },
+    "owner": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "email": { "type": "string" },
+        "url": { "type": "string" }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Arbitrary marketplace metadata (description, version, ...)."
+    },
+    "plugins": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/pluginEntry" }
+    }
+  },
+  "$defs": {
+    "pluginEntry": {
+      "type": "object",
+      "required": ["name", "source"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$",
+          "description": "Plugin identifier matching the plugin's own plugin.json name."
+        },
+        "source": {
+          "description": "Where to fetch the plugin: a relative path, or a source object (git/github/url).",
+          "oneOf": [
+            { "type": "string", "minLength": 1 },
+            { "type": "object" }
+          ]
+        },
+        "description": { "type": "string" },
+        "version": { "type": "string" },
+        "author": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": { "type": "string", "minLength": 1 },
+            "email": { "type": "string" },
+            "url": { "type": "string" }
+          }
+        },
+        "homepage": { "type": "string" },
+        "repository": { "type": "string" },
+        "license": { "type": "string" },
+        "keywords": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "category": { "type": "string" },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "strict": { "type": "boolean" },
+        "commands": { "type": ["string", "array"], "items": { "type": "string" } },
+        "agents": { "type": ["string", "array"], "items": { "type": "string" } },
+        "skills": { "type": ["string", "array"], "items": { "type": "string" } },
+        "hooks": { "type": ["string", "object"] },
+        "mcpServers": { "type": ["string", "object"] }
+      }
+    }
+  }
+}

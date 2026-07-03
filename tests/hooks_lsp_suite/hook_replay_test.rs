@@ -1,0 +1,338 @@
+//! End-to-end hook replay: drives every provider's hook subcommands through
+//! the real binary with representative event payloads, then asserts the full
+//! telemetry wiring — each invocation records an attributed
+//! `hook_analytics.jsonl` row in the project store, and `tracedecay analytics
+//! sync` bridges those rows into the durable `analytics_events` table.
+//!
+//! Uses only child-process env (no process-global mutation), so it does not
+//! need `GLOBAL_DB_ENV_LOCK`.
+
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use std::io::Write as _;
+use std::path::Path;
+use std::process::{Command, Stdio};
+
+use serde_json::{json, Value};
+use tracedecay::global_db::{AnalyticsEventQuery, GlobalDb};
+use tracedecay::storage::{
+    profile_sharded_data_root, write_enrollment_marker, EnrollmentMarker, StorageMode,
+};
+
+use crate::common::tracedecay_command_with_home;
+
+const REPLAY_PROJECT_ID: &str = "proj_hook_replay";
+
+struct Replay {
+    subcommand: &'static str,
+    agent: &'static str,
+    hook_name: &'static str,
+    /// JSON piped to stdin; `None` for the legacy Claude `preToolUse` contract
+    /// which reads `TOOL_INPUT` from the environment instead.
+    stdin: Option<Value>,
+    tool_input_env: Option<Value>,
+}
+
+fn replays(root: &str) -> Vec<Replay> {
+    vec![
+        Replay {
+            subcommand: "hook-claude-session-start",
+            agent: "claude",
+            hook_name: "SessionStart",
+            stdin: Some(json!({
+                "session_id": "claude-s1",
+                "cwd": root,
+                "hook_event_name": "SessionStart",
+                "source": "startup",
+            })),
+            tool_input_env: None,
+        },
+        Replay {
+            subcommand: "hook-claude-post-tool-use",
+            agent: "claude",
+            hook_name: "PostToolUse",
+            stdin: Some(json!({
+                "session_id": "claude-s1",
+                "cwd": root,
+                "tool_name": "Edit",
+                "tool_input": { "file_path": format!("{root}/src/lib.rs") },
+            })),
+            tool_input_env: None,
+        },
+        Replay {
+            subcommand: "hook-pre-tool-use",
+            agent: "claude",
+            hook_name: "preToolUse",
+            stdin: None,
+            tool_input_env: Some(json!({
+                "session_id": "claude-s1",
+                "subagent_type": "general-purpose",
+                "prompt": "implement the parser",
+            })),
+        },
+        Replay {
+            subcommand: "hook-codex-session-start",
+            agent: "codex",
+            hook_name: "SessionStart",
+            stdin: Some(json!({ "session_id": "codex-s1", "cwd": root })),
+            tool_input_env: None,
+        },
+        Replay {
+            subcommand: "hook-codex-user-prompt-submit",
+            agent: "codex",
+            hook_name: "UserPromptSubmit",
+            stdin: Some(json!({
+                "session_id": "codex-s1",
+                "cwd": root,
+                "prompt": "fix the failing test",
+            })),
+            tool_input_env: None,
+        },
+        Replay {
+            subcommand: "hook-codex-post-tool-use",
+            agent: "codex",
+            hook_name: "PostToolUse",
+            stdin: Some(json!({
+                "session_id": "codex-s1",
+                "cwd": root,
+                "tool_name": "shell",
+                "command": "cargo build",
+            })),
+            tool_input_env: None,
+        },
+        Replay {
+            subcommand: "hook-cursor-session-start",
+            agent: "cursor",
+            hook_name: "sessionStart",
+            stdin: Some(json!({ "conversation_id": "cursor-s1", "cwd": root })),
+            tool_input_env: None,
+        },
+        Replay {
+            subcommand: "hook-cursor-post-tool-use",
+            agent: "cursor",
+            hook_name: "postToolUse",
+            stdin: Some(json!({
+                "conversation_id": "cursor-s1",
+                "cwd": root,
+                "hook_event_name": "postToolUse",
+                "tool_name": "Read",
+            })),
+            tool_input_env: None,
+        },
+        Replay {
+            subcommand: "hook-cursor-stop",
+            agent: "cursor",
+            hook_name: "stop",
+            stdin: Some(json!({ "conversation_id": "cursor-s1", "cwd": root })),
+            tool_input_env: None,
+        },
+        Replay {
+            subcommand: "hook-kiro-pre-tool-use",
+            agent: "kiro",
+            hook_name: "preToolUse",
+            stdin: Some(json!({
+                "session_id": "kiro-s1",
+                "cwd": root,
+                "tool_name": "fsWrite",
+            })),
+            tool_input_env: None,
+        },
+        Replay {
+            subcommand: "hook-kiro-prompt-submit",
+            agent: "kiro",
+            hook_name: "userPromptSubmit",
+            stdin: Some(json!({
+                "session_id": "kiro-s1",
+                "cwd": root,
+                "prompt": "add a feature",
+            })),
+            tool_input_env: None,
+        },
+        Replay {
+            subcommand: "hook-kiro-post-tool-use",
+            agent: "kiro",
+            hook_name: "postToolUse",
+            stdin: Some(json!({
+                "session_id": "kiro-s1",
+                "cwd": root,
+                "tool_name": "fsWrite",
+                "file_path": format!("{root}/src/lib.rs"),
+            })),
+            tool_input_env: None,
+        },
+    ]
+}
+
+fn run_replay(home: &Path, project_root: &Path, replay: &Replay) {
+    let mut command: Command = {
+        let mut c = tracedecay_command_with_home(home);
+        c.arg(replay.subcommand)
+            .current_dir(project_root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        c
+    };
+    if let Some(tool_input) = &replay.tool_input_env {
+        command.env("TOOL_INPUT", tool_input.to_string());
+    }
+    let mut child = command
+        .spawn()
+        .unwrap_or_else(|e| panic!("spawn {}: {e}", replay.subcommand));
+    {
+        let mut stdin = child.stdin.take().expect("child stdin");
+        if let Some(event) = &replay.stdin {
+            stdin.write_all(event.to_string().as_bytes()).unwrap();
+        }
+        // Drop closes stdin so stdin-reading handlers see EOF.
+    }
+    let output = child.wait_with_output().expect("hook child output");
+    assert!(
+        output.status.success(),
+        "{} exited with {:?}\nstdout: {}\nstderr: {}",
+        replay.subcommand,
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+fn read_jsonl_rows(path: &Path) -> Vec<Value> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect()
+}
+
+fn str_field<'a>(row: &'a Value, key: &str) -> &'a str {
+    row.get(key).and_then(Value::as_str).unwrap_or_default()
+}
+
+/// Strips Windows' verbatim `\\?\` prefix: attribution resolved from a hook
+/// process's `current_dir()` is non-verbatim while `canonicalize()` yields
+/// the extended-length form, and the two must compare equal.
+fn normalize_path_text(path: &str) -> String {
+    path.strip_prefix(r"\\?\").unwrap_or(path).to_string()
+}
+
+#[tokio::test]
+async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_events() {
+    let home = tempfile::TempDir::new().expect("temp home");
+    let home_root = home.path().canonicalize().expect("canonical home");
+    let project_root = home_root.join("project");
+    std::fs::create_dir_all(project_root.join("src")).unwrap();
+    std::fs::write(project_root.join("Cargo.toml"), "[package]\n").unwrap();
+    write_enrollment_marker(
+        &project_root,
+        &EnrollmentMarker {
+            project_id: REPLAY_PROJECT_ID.to_string(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    let root_str = project_root.display().to_string();
+
+    let replays = replays(&root_str);
+    for replay in &replays {
+        run_replay(&home_root, &project_root, replay);
+    }
+
+    // Every replay resolved a project root, so every row must land in the
+    // project store file with `project_root` attribution (the user-level
+    // fallback file stays empty).
+    let profile_root = home_root.join(".tracedecay");
+    let store_rows = read_jsonl_rows(
+        &profile_sharded_data_root(&profile_root, REPLAY_PROJECT_ID).join("hook_analytics.jsonl"),
+    );
+    let hook_invoked: Vec<&Value> = store_rows
+        .iter()
+        .filter(|row| str_field(row, "event") == "hook_invoked")
+        .collect();
+    for replay in &replays {
+        let matched: Vec<&&Value> = hook_invoked
+            .iter()
+            .filter(|row| {
+                str_field(row, "agent") == replay.agent
+                    && str_field(row, "hook_name") == replay.hook_name
+            })
+            .collect();
+        assert_eq!(
+            matched.len(),
+            1,
+            "expected exactly one {}/{} row, got {} (all rows: {:?})",
+            replay.agent,
+            replay.hook_name,
+            matched.len(),
+            hook_invoked
+        );
+        assert_eq!(
+            normalize_path_text(str_field(matched[0], "project_root")),
+            normalize_path_text(&root_str),
+            "{}/{} row must carry project attribution",
+            replay.agent,
+            replay.hook_name
+        );
+    }
+    let fallback_rows = read_jsonl_rows(&profile_root.join("hook_analytics.jsonl"));
+    assert!(
+        fallback_rows.is_empty(),
+        "attributed hooks must not spill into the user-level fallback file: {fallback_rows:?}"
+    );
+
+    // Bridge: `analytics sync` imports the JSONL rows into the durable table.
+    let sync = tracedecay_command_with_home(&home_root)
+        .args(["analytics", "sync"])
+        .current_dir(&project_root)
+        .output()
+        .expect("analytics sync output");
+    assert!(
+        sync.status.success(),
+        "analytics sync failed: {}",
+        String::from_utf8_lossy(&sync.stderr)
+    );
+
+    let global_db = GlobalDb::open_at(&profile_root.join("global.db"))
+        .await
+        .expect("open replay global db");
+    let events = global_db
+        .query_analytics_events(&AnalyticsEventQuery {
+            provider: None,
+            project_id: None,
+            session_id: None,
+            event_kind: Some("hook_invoked".to_string()),
+            limit: 1000,
+        })
+        .await
+        .expect("query analytics events");
+    assert_eq!(
+        events.len(),
+        replays.len(),
+        "every replayed hook must bridge into analytics_events"
+    );
+    let canonical_project = GlobalDb::canonical_project_key(&project_root);
+    for replay in &replays {
+        let provider = format!("hook_{}", replay.agent);
+        let event = events
+            .iter()
+            .find(|event| {
+                event.provider == provider && event.hook_name.as_deref() == Some(replay.hook_name)
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "no analytics event for {provider}/{}; got {:?}",
+                    replay.hook_name,
+                    events
+                        .iter()
+                        .map(|event| (event.provider.clone(), event.hook_name.clone()))
+                        .collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(
+            event.project_id, canonical_project,
+            "{provider}/{} must be attributed to the replay project",
+            replay.hook_name
+        );
+    }
+}

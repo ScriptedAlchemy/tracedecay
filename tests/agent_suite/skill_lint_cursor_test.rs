@@ -1,4 +1,4 @@
-//! Cursor-specific lint for the composed Cursor skill set (the 16 shared
+//! Cursor-specific lint for the composed Cursor skill set (the 17 shared
 //! model-invocable skills from `plugin/skills/`) plus the Cursor native slash
 //! commands (`plugin/overlays/cursor/commands/`), ported from
 //! community/official skill linters so enforcement runs offline inside
@@ -46,7 +46,7 @@ use tempfile::TempDir;
 /// Cursor's native slash commands (the 13 `tracedecay-*` workflow commands).
 const CURSOR_COMMAND_ROOT: &str = "plugin/overlays/cursor/commands";
 
-/// Stages the Cursor skill *source* set into a temp dir: the 16 shared
+/// Stages the Cursor skill *source* set into a temp dir: the 17 shared
 /// model-invocable skills from `plugin/skills/` (all non-`tracedecay-*` slugs).
 /// This is exactly the skill set Cursor deploys — the `tracedecay-*` workflow
 /// slugs are native commands there (see [`command_slugs`]), not skills.

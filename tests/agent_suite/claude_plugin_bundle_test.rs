@@ -29,16 +29,17 @@ fn bundle_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin")
 }
 
-/// The 29 skills the bundle ships (also the codex skill set): the 12
+/// The 30 skills the bundle ships (also the codex skill set): the 13
 /// foundational model-invocable skills (recalling+curating-project-memory
 /// merged into `project-memory`), the 4 memory skills, plus the 13
 /// `tracedecay-*` workflow skills, kept in sync across every skill-bundling
 /// surface.
 const EXPECTED_SKILLS: &[&str] = &[
-    // 12 foundational (recalling+curating-project-memory merged into
+    // 13 foundational (recalling+curating-project-memory merged into
     // project-memory)
     "assessing-impact",
     "code-health",
+    "diagnosing-analytics",
     "editing-safely",
     "exploring-code",
     "fixing-build-and-type-errors",

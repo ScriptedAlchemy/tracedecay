@@ -1589,7 +1589,7 @@ mod tests {
             .collect();
 
         let skills = plugin_subdir_names("skills");
-        assert_eq!(skills.len(), 29, "expected 29 shared skill dirs");
+        assert_eq!(skills.len(), 30, "expected 30 shared skill dirs");
         // Every file under plugin/skills/ (SKILL.md *and* any support files) is
         // deployed — the recursive embed leaves nothing on disk unwired.
         let skills_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/skills");

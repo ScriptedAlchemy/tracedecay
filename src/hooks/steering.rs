@@ -10,6 +10,7 @@ use super::now_unix_secs;
 pub const CURSOR_PLUGIN_SKILLS: &[&str] = &[
     "assessing-impact",
     "code-health",
+    "diagnosing-analytics",
     "editing-safely",
     "exploring-code",
     "fixing-build-and-type-errors",

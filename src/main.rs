@@ -648,6 +648,14 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
         Commands::Sessions { action } => {
             sessions_cmd::handle_sessions_action(action).await?;
         }
+        Commands::Analytics { action } => match action {
+            AnalyticsAction::Diagnostics { all, no_sync } => {
+                tracedecay::analytics_bridge::run_analytics_diagnostics(all, no_sync).await?;
+            }
+            AnalyticsAction::Sync => {
+                tracedecay::analytics_bridge::run_analytics_sync().await?;
+            }
+        },
         Commands::Projects { action } => {
             project_cmd::handle_projects_action(action).await?;
         }
@@ -721,6 +729,7 @@ fn should_skip_startup_maintenance(command: &Commands) -> bool {
             | Commands::Uninstall { .. }
             | Commands::Lsp { .. }
             | Commands::Doctor { .. }
+            | Commands::Analytics { .. }
             | Commands::Migrate { .. }
             | Commands::Projects { .. }
             | Commands::HookPreToolUse
@@ -791,6 +800,7 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
             | Commands::Uninstall { .. }
             | Commands::Lsp { .. }
             | Commands::Doctor { .. }
+            | Commands::Analytics { .. }
             | Commands::Migrate { .. }
             | Commands::Projects { .. }
             | Commands::Tool { .. }

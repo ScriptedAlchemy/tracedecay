@@ -918,3 +918,69 @@ async fn session_ingest_health_reports_pending_transcript_backlog() {
         "the newest recorded ingest mtime should be reported"
     );
 }
+
+#[tokio::test]
+async fn hook_analytics_import_is_incremental_and_idempotent() {
+    use tracedecay::analytics_bridge::{import_hook_analytics, HookImportSource};
+
+    let tmp = TempDir::new().unwrap();
+    let db = open_isolated_db(&tmp).await;
+    let jsonl = tmp.path().join("hook_analytics.jsonl");
+    std::fs::write(
+        &jsonl,
+        concat!(
+            r#"{"agent":"claude","event":"hook_invoked","hook_name":"preToolUse","session_id":"s1","ts_unix_ms":1783000000000}"#,
+            "\n",
+            r#"{"agent":"codex","event":"hint_emitted","category":"search","ts_unix_ms":1783000001000}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let sources = vec![HookImportSource {
+        path: jsonl.clone(),
+        default_project_root: Some(tmp.path().to_path_buf()),
+    }];
+
+    let outcome = import_hook_analytics(&db, &sources).await;
+    assert_eq!(outcome.imported(), 2);
+    assert!(outcome.sources[0].error.is_none());
+
+    // Re-running without new rows imports nothing.
+    let outcome = import_hook_analytics(&db, &sources).await;
+    assert_eq!(outcome.imported(), 0);
+
+    // Appending one complete row plus a partial trailing line imports only
+    // the complete row; the partial tail stays unconsumed for the next run.
+    let mut text = std::fs::read_to_string(&jsonl).unwrap();
+    text.push_str(
+        r#"{"agent":"cursor","event":"hook_invoked","hook_name":"postToolUse","ts_unix_ms":1783000002000}"#,
+    );
+    text.push('\n');
+    text.push_str(r#"{"agent":"kiro","event":"hook_invo"#);
+    std::fs::write(&jsonl, text).unwrap();
+    let outcome = import_hook_analytics(&db, &sources).await;
+    assert_eq!(outcome.imported(), 1);
+
+    let events = db
+        .query_analytics_events(&AnalyticsEventQuery {
+            provider: None,
+            project_id: None,
+            session_id: None,
+            event_kind: None,
+            limit: 100,
+        })
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 3);
+    let providers: Vec<&str> = events.iter().map(|event| event.provider.as_str()).collect();
+    assert!(providers.contains(&"hook_claude"));
+    assert!(providers.contains(&"hook_codex"));
+    assert!(providers.contains(&"hook_cursor"));
+    let expected_project = GlobalDb::canonical_project_key(tmp.path());
+    assert!(
+        events
+            .iter()
+            .all(|event| event.project_id == expected_project),
+        "unattributed rows should fall back to the source's default project"
+    );
+}
