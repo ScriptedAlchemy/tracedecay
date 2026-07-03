@@ -355,7 +355,7 @@ fn claude_bundle_ships_exactly_the_expected_skills() {
     assert_eq!(
         sorted_subdir_names(&skills_root),
         expected,
-        "claude-plugin/skills must contain exactly the expected 26 skill directories"
+        "claude-plugin/skills must contain exactly the expected 29 skill directories"
     );
 }
 

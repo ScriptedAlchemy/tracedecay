@@ -247,6 +247,17 @@ fn shared_skill_bodies_follow_the_intersection_body_rules() {
             }
         }
 
+        // The first content line after the frontmatter must be that H1: a
+        // single plain-title H1 opens the body (restores the retired
+        // `cursor_skill_bodies_follow_heading_conventions` check).
+        match skill.body.lines().find(|line| !line.trim().is_empty()) {
+            Some(first) if first.starts_with("# ") => {}
+            Some(first) => violations.push(format!(
+                "{at}: body must open with a plain-title H1 (`# …`), found {first:?}"
+            )),
+            None => {} // empty-body already flagged by the hygiene test
+        }
+
         // No skipped heading levels.
         let mut prev = 0usize;
         for (level, text) in &headings {

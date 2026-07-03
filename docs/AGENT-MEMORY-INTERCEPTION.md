@@ -10,6 +10,16 @@ instead of — or layered on top of — each agent's native memory mechanism.
 All file paths below were verified on this machine (Codex CLI 0.142.4, Cursor
 with hooks + plugins, tracedecay plugin v0.0.23 installed for both agents).
 
+> **Note (as of 2026-07-03):** the per-host `cursor-plugin/` / `codex-plugin/`
+> source trees have since collapsed into a single shared `plugin/` tree, so
+> skill/command/agent sources now live under `plugin/skills/…`,
+> `plugin/commands/…`, and `plugin/agents/…` (Cursor-only surfaces under
+> `plugin/overlays/cursor/…`). The `recalling-project-memory` and
+> `curating-project-memory` skills were also merged into a single
+> `project-memory` skill. References below to the old paths/slugs are retained
+> as historical design context; the current locations are the shared-tree
+> equivalents.
+
 ---
 
 ## 1. How Codex reads memory today
@@ -171,9 +181,9 @@ to `~/.cursor/plugins/local/tracedecay/`:
   `src/hooks/`).
 - **`rules/tracedecay.mdc`** — always-applied rule; its **Recall** bullet
   steers models to `tracedecay_message_search` / `tracedecay_fact_store`
-  search and the `recalling-project-memory` skill.
-- **`skills/`** — 25+ workflow skills incl. `recalling-project-memory`,
-  `curating-project-memory`, `recalling-session-context`; plus an
+  search and the `project-memory` skill.
+- **`skills/`** — 25+ workflow skills incl. `project-memory` (the merged
+  recall+curate memory skill) and `recalling-session-context`; plus an
   agent-managed skill overlay (`install_cursor_managed_skill_overlay`).
 - **`agents/`** — `code-explorer`, `code-health-auditor`, `session-historian`
   subagent definitions.
@@ -277,9 +287,9 @@ surfaces on a schedule," which design D reuses for memory.
 | --- | --- | --- |
 | Facts stored | ✅ fact store (9 facts here) + LCM transcripts | same store |
 | Model *can* recall | ✅ MCP `tracedecay_fact_store` search + skill | ✅ same |
-| Model is *told* to recall | ⚠️ soft steering in SessionStart/UserPromptSubmit context; `recalling-project-memory` skill matches only when the model thinks "recall" | ⚠️ one Recall bullet in `tracedecay.mdc`; same skill-match dependency |
+| Model is *told* to recall | ⚠️ soft steering in SessionStart/UserPromptSubmit context; `project-memory` skill matches only when the model thinks "recall" | ⚠️ one Recall bullet in `tracedecay.mdc`; same skill-match dependency |
 | Facts *pushed* into context | ❌ none — hook context is index status + hints only | ❌ none |
-| Automatic storage | ⚠️ session_reflector exists but disabled by default; skills say "add facts **only when the user asks**" (`recalling-project-memory` guardrail) | same |
+| Automatic storage | ⚠️ session_reflector exists but disabled by default; skills say "add facts **only when the user asks**" (`project-memory` guardrail) | same |
 | Native memory overlap | ⚠️ Codex memories **on** (`features.memories=true`), learning from the same threads in parallel | Unknown toggle state; server-side, uninspectable |
 
 The delta is precisely: **nothing proactively retrieves facts at
@@ -323,7 +333,7 @@ Implementation pointers: `src/hooks/codex.rs`, `src/hooks/cursor.rs`,
 `src/memory/retrieval.rs` (`FactRetriever::search/probe`), analytics via
 `record_hint_analytics` so injection quality is measurable. No plugin schema
 change; hook hashes change → users re-trust via `/hooks` (already documented
-in `codex-plugin/README.md`).
+in the Codex plugin README).
 
 ### B. Cursor session-start injection + a materialized memory rule — **do with A**
 
@@ -359,11 +369,10 @@ doctor checks cover it.
 
 *Effort: XS. Effect: medium. Risk: memory spam (mitigated by write-time dedupe).*
 
-Today `recalling-project-memory`'s guardrail says add facts "**only when the
+Today `project-memory`'s guardrail says add facts "**only when the
 user asks**" — the opposite of agent-memory behavior. Change the instruction
-(rule Recall bullet + skill in `cursor-plugin/rules/tracedecay.mdc`,
-`cursor-plugin/skills/recalling-project-memory/SKILL.md`, codex-plugin
-mirrors) to:
+(rule Recall bullet in `plugin/overlays/cursor/rules/tracedecay.mdc` + the
+`plugin/skills/project-memory/SKILL.md` skill, shared across every host) to:
 
 - *Recall:* "before starting non-trivial work, search `tracedecay_fact_store`
   for prior decisions" (currently phrased as fallback, not default).
@@ -458,7 +467,7 @@ alongside D and reusing the managed-file conventions from the skill overlay.
    analytics.
 2. **B2 + C** (materialized Cursor memory rule + proactive storage wording) —
    one PR in `src/agents/cursor.rs` embedded files + plugin rule/skill text
-   (mirrored in `codex-plugin/` skill text).
+   (shared skill text under `plugin/skills/`).
 3. **D** (reflector enablement UX) — config/doctor/dashboard nudge.
 4. **E** (coexistence policy + optional Codex-memories harvest importer).
 5. **F** (generalized AGENTS.md materialization across all 15 agent
