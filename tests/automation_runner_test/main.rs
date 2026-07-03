@@ -23,3 +23,4 @@ mod runner;
 mod scheduler;
 mod session_reflector;
 mod skill_writer;
+mod skill_writer_consolidation;
