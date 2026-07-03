@@ -73,7 +73,25 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - uses: ./.github/actions/setup-linux-mold
+      # Inline instead of ./.github/actions/setup-linux-mold: this workflow
+      # can be dispatched with an old release_tag, and the checkout above
+      # replaces the workspace with that tag, which may predate the local
+      # action. make-default symlinks ld to mold, which works on this
+      # runner's GCC 11 (unlike -fuse-ld=mold, which needs GCC 12+).
+      - name: Install mold
+        if: runner.os == 'Linux'
+        uses: rui314/setup-mold@v1
+        with:
+          mold-version: 2.41.0
+          make-default: true
+
+      - name: Verify mold is the default linker
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mold --version
+          ld --version | head -n 1 | grep -i mold
 
       - name: Use lld-link
         if: runner.os == 'Windows'
