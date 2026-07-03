@@ -498,12 +498,14 @@ async fn broker_drops_lsp_client_after_partial_diagnostics_frame_timeout() {
 }
 
 #[tokio::test]
-async fn stdio_client_fails_when_a_document_never_publishes_diagnostics() {
+async fn stdio_client_fails_when_no_document_publishes_diagnostics() {
+    // Preserve the #237 behavior: a genuine timeout where NOTHING arrived is
+    // still an error and must not be recorded as a complete (empty) refresh.
     let temp = tempfile::tempdir().unwrap();
-    let script_path = temp.path().join("one_document_lsp.py");
+    let script_path = temp.path().join("silent_lsp.py");
     std::fs::write(
         &script_path,
-        fake_lsp_script_with_preamble("", FIRST_URI_ONLY_DIAGNOSTIC_PUBLISH),
+        fake_lsp_script_with_preamble("", NEVER_PUBLISH),
     )
     .unwrap();
 
@@ -518,12 +520,45 @@ async fn stdio_client_fails_when_a_document_never_publishes_diagnostics() {
         std::time::Duration::from_millis(50),
     )
     .await
-    .expect_err("missing publishDiagnostics for one document should fail the refresh");
+    .expect_err("a batch with zero publishes should fail as a timeout");
 
     assert!(
         err.to_string().contains("timed out"),
         "unexpected error: {err}"
     );
+}
+
+#[tokio::test]
+async fn stdio_client_returns_diagnostics_for_suppress_empty_servers() {
+    // A server that only publishes for files WITH problems (never an empty
+    // publish for clean files) produces a "partial" batch: `first.fake` reports
+    // an error, `second.fake` (clean) never publishes. The refresh must return
+    // the real diagnostics for the file that responded rather than dropping the
+    // whole batch as a timeout.
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("one_document_lsp.py");
+    std::fs::write(
+        &script_path,
+        fake_lsp_script_with_preamble("", FIRST_URI_ONLY_DIAGNOSTIC_PUBLISH),
+    )
+    .unwrap();
+
+    let diagnostics = lsp::client::collect_document_diagnostics(
+        python_command(),
+        &[script_path.display().to_string()],
+        temp.path(),
+        vec![
+            fake_document(FAKE_LANGUAGE, "src/first.fake", "let nope"),
+            fake_document(FAKE_LANGUAGE, "src/second.fake", "let clean"),
+        ],
+        std::time::Duration::from_millis(50),
+    )
+    .await
+    .expect("diagnostics from the responding file should be returned, not dropped");
+
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].file, "src/first.fake");
+    assert_eq!(diagnostics[0].message, "first file error");
 }
 
 #[tokio::test]
@@ -1107,6 +1142,10 @@ const PARTIAL_DIAGNOSTIC_PUBLISH: &str = r#"        sys.stdout.buffer.write(b"Co
         sys.stdout.buffer.flush()
         import time
         time.sleep(60)
+"#;
+
+const NEVER_PUBLISH: &str = r#"        _ = uri
+        pass
 "#;
 
 const FIRST_URI_ONLY_DIAGNOSTIC_PUBLISH: &str = r#"        if uri.endswith("/first.fake"):

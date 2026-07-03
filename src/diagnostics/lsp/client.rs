@@ -254,7 +254,16 @@ impl StdioLspClient {
                     .collect(),
             );
         }
-        if diagnostics_by_uri.len() < uri_to_document.len() {
+        // Servers that publish empty diagnostics for clean files (rust-analyzer,
+        // tsserver) will produce one `publishDiagnostics` per requested URI, so a
+        // fully complete batch has `diagnostics_by_uri.len() == uri_to_document.len()`.
+        // Servers that suppress empty publishes (only publishing for files WITH
+        // problems) never emit for clean files, so those batches look "partial"
+        // even though every dirty file reported. To avoid dropping real results in
+        // that case, only treat the batch as a genuine timeout when NOTHING arrived
+        // (matching the #237 behavior of not recording a genuine timeout as
+        // complete); otherwise return the diagnostics that were actually published.
+        if diagnostics_by_uri.is_empty() && !uri_to_document.is_empty() {
             return Err(refresh_timed_out(timeouts));
         }
         Ok(diagnostics_by_uri.into_values().flatten().collect())
