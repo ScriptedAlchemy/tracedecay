@@ -72,6 +72,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: ./.github/actions/setup-linux-mold
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -303,6 +305,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+
+      - uses: ./.github/actions/setup-linux-mold
+
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
@@ -376,6 +381,8 @@ jobs:
           sha256sum -c /tmp/dashboard-dist.sha
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: ./.github/actions/setup-linux-mold
 
       - name: Install ast-grep
         run: |
@@ -455,6 +462,8 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: ./.github/actions/setup-linux-mold
 
       - name: Install ast-grep
         run: |

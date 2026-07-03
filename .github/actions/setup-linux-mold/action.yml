@@ -1,0 +1,25 @@
+name: Setup Linux mold linker
+description: Install mold and make it the default linker for Linux Rust builds.
+
+runs:
+  using: composite
+  steps:
+    # make-default symlinks /usr/bin/ld to mold, which works on any GCC.
+    # Passing -fuse-ld=mold via RUSTFLAGS instead would break on the
+    # ubuntu-22.04 release runners: GCC only accepts that value from
+    # GCC 12 onward. It also leaves RUSTFLAGS (and rust-cache keys)
+    # untouched.
+    - name: Install mold
+      if: runner.os == 'Linux'
+      uses: rui314/setup-mold@v1
+      with:
+        mold-version: 2.41.0
+        make-default: true
+
+    - name: Verify mold is the default linker
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        set -euo pipefail
+        mold --version
+        ld --version | head -n 1 | grep -i mold

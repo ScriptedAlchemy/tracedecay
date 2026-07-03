@@ -64,6 +64,8 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - uses: ./.github/actions/setup-linux-mold
+
       - name: Use lld-link
         if: runner.os == 'Windows'
         shell: pwsh
