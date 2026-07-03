@@ -744,7 +744,7 @@ mod tests {
         assert_usage_event(
             &events,
             UsageKind::Skill,
-            "tracedecay:curating-project-memory",
+            "tracedecay:project-memory",
             UsageCategory::TraceDecayWorkflowSkill,
         );
         assert_usage_event(

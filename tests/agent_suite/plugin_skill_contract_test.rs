@@ -1,12 +1,13 @@
 //! Contract tests for the shared plugin skills: frontmatter schema per host,
 //! plus the shared skill-creator design-advice checks.
 //!
-//! The three host bundles now share one `plugin/` tree. Codex deploys all 30
+//! The three host bundles now share one `plugin/` tree. Codex deploys all 29
 //! skills from `plugin/skills/` (canonical, model-invocable form). Cursor
-//! deploys the 17 shared skills from `plugin/skills/` plus the 13 dispatcher
-//! slugs in their Cursor overlay form from `plugin/overlays/cursor/skills/`.
-//! Each host's deployed skill *source* set is staged into a temp dir below so
-//! the contract and byte-copy checks run over exactly what that host installs.
+//! deploys only the 16 shared model-invocable skills from `plugin/skills/`
+//! (the `tracedecay-*` workflow slugs are native commands on Cursor, not
+//! skills). Each host's deployed skill *source* set is staged into a temp dir
+//! below so the contract and byte-copy checks run over exactly what that host
+//! installs.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -21,21 +22,12 @@ use tempfile::TempDir;
 use tracedecay::agents::{expected_tool_perms, get_integration, InstallContext};
 use tracedecay::config::USER_DATA_DIR_ENV;
 
-/// Codex deploys every skill under `plugin/skills/` (all 30, canonical form).
+/// Codex deploys every skill under `plugin/skills/` (all 29, canonical form).
 const CODEX_SKILL_ROOT: &str = "plugin/skills";
-/// Cursor's dispatcher overlay (13 `tracedecay-*` slugs in slash-dispatcher
-/// form). Cursor deploys these *in place of* the canonical dispatcher form.
-const CURSOR_OVERLAY_SKILL_ROOT: &str = "plugin/overlays/cursor/skills";
-// Size budgets: the 500-line body cap and the "concise, trigger-first
-// description" rule come from Anthropic's skill-creator design advice. The
-// numeric description and metadata caps are house budgets chosen when these
-// bundles were written: one description stays scannable at roughly two
-// sentences (320 chars / 45 words), and a bundle's preloaded name+description
-// metadata stays under 6,000 chars (~1.5k tokens) so skill discovery never
-// crowds an agent host's context window.
-const MAX_SKILL_MD_LINES: usize = 500;
-const MAX_DESCRIPTION_CHARS: usize = 320;
-const MAX_DESCRIPTION_WORDS: usize = 45;
+// Metadata budget: a bundle's preloaded name+description metadata stays under
+// 6,000 chars (~1.5k tokens) so skill discovery never crowds an agent host's
+// context window. The per-skill size budgets (500-line body, 320-char /
+// 45-word description) now live in shared_skill_contract_test.rs.
 const MAX_BUNDLED_SKILL_METADATA_CHARS: usize = 6_000;
 const CODEX_QUICK_VALIDATE_ALLOWED_FRONTMATTER: &[&str] = &[
     "allowed-tools",
@@ -122,8 +114,14 @@ fn generated_cursor_plugin_skills_are_byte_copies_of_the_source_bundle() {
     assert_skill_trees_byte_identical(source_root, &installed_root);
 }
 
+/// The per-file design rules (trigger-first / length / word / 500-line /
+/// no-`## When to Use` / supported-file layout) now live once in
+/// `shared_skill_contract_test.rs` over the single `plugin/skills/` tree, which
+/// is the same set Codex ships and a superset of Cursor's. This test keeps only
+/// what is NOT in that intersection contract: the aggregate metadata budget and
+/// the optional `agents/openai.yaml` marketplace contract.
 #[test]
-fn produced_plugin_skills_follow_skill_creator_design_advice() {
+fn produced_plugin_skills_meet_the_metadata_budget_and_openai_contract() {
     let codex_skills = load_skill_docs(CODEX_SKILL_ROOT);
     let cursor_staged = staged_cursor_skill_source();
     let cursor_skills = load_skill_docs_from(cursor_staged.path());
@@ -134,37 +132,7 @@ fn produced_plugin_skills_follow_skill_creator_design_advice() {
     });
 
     for skill in codex_skills.iter().chain(cursor_skills.iter()) {
-        let description = required_scalar_field(skill, "description");
-        assert!(
-            has_trigger_language(description),
-            "{} description must include trigger language because agents only see metadata before loading the body",
-            skill.path.display()
-        );
-        assert!(
-            description.len() <= MAX_DESCRIPTION_CHARS,
-            "{} description is too long for the shared skills metadata budget",
-            skill.path.display()
-        );
-        assert!(
-            description.split_whitespace().count() <= MAX_DESCRIPTION_WORDS,
-            "{} description has too many words for the shared skills metadata budget",
-            skill.path.display()
-        );
-
-        let line_count = skill.raw.lines().count();
-        assert!(
-            line_count <= MAX_SKILL_MD_LINES,
-            "{} has {line_count} lines; split details into direct references before exceeding {MAX_SKILL_MD_LINES}",
-            skill.path.display()
-        );
-        assert!(
-            !skill.raw.to_ascii_lowercase().contains("\n## when to use"),
-            "{} must keep trigger guidance in description metadata, not a body-only When to Use section",
-            skill.path.display()
-        );
-
         let skill_dir = skill.path.parent().expect("skill path has parent");
-        assert_skill_tree_uses_supported_files(skill_dir);
         assert_openai_yaml_contract_if_present(skill_dir);
     }
 }
@@ -192,23 +160,18 @@ fn install_ctx(home: &Path) -> InstallContext {
     }
 }
 
-/// Stages the composed Cursor skill *source* tree into a temp dir: the shared
-/// model-invocable skills from `plugin/skills/` (all non-`tracedecay-*` slugs)
-/// plus the 13 Cursor dispatcher overlays. This mirrors exactly what Cursor
-/// deploys — the canonical `tracedecay-*` bodies never reach Cursor.
+/// Stages the Cursor skill *source* tree into a temp dir: the 17 shared
+/// model-invocable skills from `plugin/skills/` (all non-`tracedecay-*` slugs).
+/// This mirrors exactly what Cursor deploys — the `tracedecay-*` workflow slugs
+/// are native commands on Cursor, not skills.
 fn staged_cursor_skill_source() -> TempDir {
     let staged = TempDir::new().expect("temp cursor skill source");
     let shared = repo_path("plugin/skills");
     for name in skill_dir_names(&shared) {
         if name.starts_with("tracedecay-") {
-            // Cursor ships the overlay form of these, added below.
             continue;
         }
         copy_dir(&shared.join(&name), &staged.path().join(&name));
-    }
-    let overlay = repo_path(CURSOR_OVERLAY_SKILL_ROOT);
-    for name in skill_dir_names(&overlay) {
-        copy_dir(&overlay.join(&name), &staged.path().join(&name));
     }
     staged
 }
@@ -423,49 +386,8 @@ fn assert_scalar(field: &str, value: &str, path: &Path) {
     );
 }
 
-/// Agents choose skills from metadata alone, so each description must carry
-/// an imperative "Use ..." trigger sentence: either leading the description
-/// or following a short capability summary (e.g. "Find code by concept ...
-/// Use when searching the codebase").
-fn has_trigger_language(description: &str) -> bool {
-    description.starts_with("Use ") || description.contains(". Use ")
-}
-
 fn is_cursor_explicit_invoke_only(skill: &SkillDoc) -> bool {
     scalar_field(skill, "disable-model-invocation") == Some("true")
-}
-
-fn assert_skill_tree_uses_supported_files(skill_dir: &Path) {
-    let allowed_resource_dirs = ["agents", "scripts", "references", "assets"];
-    let forbidden_doc_files = [
-        "README.md",
-        "CHANGELOG.md",
-        "INSTALLATION_GUIDE.md",
-        "QUICK_REFERENCE.md",
-    ];
-    for relative in relative_files_under(skill_dir) {
-        let first = relative
-            .components()
-            .next()
-            .and_then(|component| component.as_os_str().to_str())
-            .expect("relative component");
-        let file_name = relative
-            .file_name()
-            .and_then(|name| name.to_str())
-            .expect("skill file name should be utf-8");
-        assert!(
-            !forbidden_doc_files.contains(&file_name),
-            "{} contains auxiliary documentation file {}; keep skill folders lean",
-            skill_dir.display(),
-            file_name
-        );
-        assert!(
-            relative == Path::new("SKILL.md") || allowed_resource_dirs.contains(&first),
-            "{} contains unsupported top-level entry {}",
-            skill_dir.display(),
-            relative.display()
-        );
-    }
 }
 
 fn assert_openai_yaml_contract_if_present(skill_dir: &Path) {

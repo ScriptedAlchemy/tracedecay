@@ -23,6 +23,7 @@ mod plugin_manifest_schema_test;
 mod plugin_skill_contract_test;
 mod plugin_validation_support;
 mod prompt_rules_parity_test;
+mod shared_skill_contract_test;
 mod skill_lint_claude_test;
 mod skill_lint_cursor_test;
 mod skill_targets_test;

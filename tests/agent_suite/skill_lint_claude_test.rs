@@ -1,9 +1,11 @@
-//! Claude Code / Agent Skills portability lint for the shared skill
-//! collections (`plugin/skills/` and the Cursor dispatcher overlay at
-//! `plugin/overlays/cursor/skills/`).
+//! Claude Code / Agent Skills portability lint for the shared skill collection
+//! (`plugin/skills/`).
 //!
 //! These tests keep the shared skills close to Claude Code's documented skill
-//! rules so a Claude bundle can reuse them without a rewrite.
+//! rules so a Claude bundle can reuse them without a rewrite. The Cursor
+//! workflow slugs are native `commands/` on Cursor now (not
+//! `disable-model-invocation` skills), so the whole shared skill set is
+//! strictly Agent-Skills-spec conformant.
 //!
 //! Rule sources (fetched 2026-07-02):
 //! - Claude Code skills reference (frontmatter field table, 1,536-char
@@ -21,28 +23,16 @@
 //!   `skills/<name>/SKILL.md`, with `license` and `version` frontmatter in
 //!   shipping skills.
 //!
-//! Cross-ecosystem conflicts (documented skips, not failures): Cursor requires
-//! `disable-model-invocation: true` on command-style skills. Claude Code
-//! supports that field natively, but the strict Agent Skills open spec (and
-//! Anthropic's `quick_validate.py` packaging validator) rejects it. See
-//! [`CROSS_ECOSYSTEM_CONFLICT_FIELDS`] and the compatibility matrix in
-//! `docs/PLUGIN-VALIDATION.md` (layer 5).
-
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use tracedecay::automation::skill_frontmatter::SkillFrontmatterValue;
 
 use crate::plugin_validation_support::{is_kebab_case_skill_name, load_skill_docs, SkillDoc};
 
-/// The full shared skill surface: the 30 canonical model-invocable skills
-/// (`plugin/skills`, the set Codex/Claude ship) plus the 13 Cursor dispatcher
-/// overlays (`disable-model-invocation: true`, the form Cursor ships).
-const SKILL_ROOTS: &[&str] = &["plugin/skills", CURSOR_OVERLAY_SKILL_ROOT];
-/// The Codex/Claude canonical skill set — must be strictly Agent-Skills-spec
-/// conformant (no `disable-model-invocation`, no Cursor-only keys).
-const CANONICAL_SKILL_ROOT: &str = "plugin/skills";
-/// The Cursor dispatcher overlay carrying the cross-ecosystem conflict fields.
-const CURSOR_OVERLAY_SKILL_ROOT: &str = "plugin/overlays/cursor/skills";
+/// The full shared skill surface: the 29 canonical model-invocable skills
+/// (`plugin/skills`) that every host ships. Cursor's workflow slugs are native
+/// commands, not skills, so there is no dispatcher overlay left to lint here.
+const SKILL_ROOTS: &[&str] = &["plugin/skills"];
 
 /// Frontmatter fields Claude Code recognizes, per the field table at
 /// code.claude.com/docs/en/skills, plus the Agent Skills open-spec fields
@@ -82,17 +72,6 @@ const AGENT_SKILLS_SPEC_ALLOWED_FRONTMATTER: &[&str] = &[
     "metadata",
     "name",
 ];
-
-/// Fields our bundles use that the strict open spec rejects, kept anyway
-/// because a host ecosystem requires them. Each entry is a documented skip:
-/// the spec-conformance test tolerates exactly these fields and nothing else.
-///
-/// - `disable-model-invocation`: Cursor command-style skills (the
-///   `/tracedecay-*` commands) must set this to stay
-///   manual-only. Claude Code documents and supports the same field, so a
-///   future claude-plugin bundle can carry it unchanged; only spec-strict
-///   packagers (`quick_validate.py`, the Claude API skill upload) reject it.
-const CROSS_ECOSYSTEM_CONFLICT_FIELDS: &[&str] = &["disable-model-invocation"];
 
 /// platform.claude.com: skill names uploaded to the Claude API cannot contain
 /// the reserved words "anthropic" or "claude".
@@ -203,63 +182,27 @@ fn bundled_skill_descriptions_satisfy_claude_description_rules() {
     }
 }
 
-/// Strict Agent Skills spec conformance with documented skips.
+/// Strict Agent Skills spec conformance.
 ///
-/// Every field outside the open-spec whitelist must be one of the known
-/// cross-ecosystem conflicts in [`CROSS_ECOSYSTEM_CONFLICT_FIELDS`]; anything
-/// else is a new portability regression and fails. The Codex bundle must be
-/// fully spec-clean because Codex's own validator is the spec whitelist.
+/// The whole shared skill set must stay strictly Agent-Skills-spec conformant:
+/// every frontmatter key must be in the open-spec whitelist. Codex validates
+/// with the spec whitelist, so any extra key is a portability regression.
 #[test]
-fn open_spec_conflicts_are_limited_to_documented_cursor_requirements() {
+fn shared_skills_stay_strictly_agent_skills_spec_conformant() {
     for root in SKILL_ROOTS {
-        let is_codex_bundle = *root == CANONICAL_SKILL_ROOT;
         for skill in load_skill_docs(root) {
             let extras = skill
                 .frontmatter
                 .keys()
                 .filter(|key| !AGENT_SKILLS_SPEC_ALLOWED_FRONTMATTER.contains(&key.as_str()))
                 .collect::<Vec<_>>();
-
-            if is_codex_bundle {
-                assert!(
-                    extras.is_empty(),
-                    "{} must stay strictly Agent-Skills-spec conformant (Codex \
-                     validates with the spec whitelist) but uses {extras:?}",
-                    skill.path.display()
-                );
-                continue;
-            }
-
-            let undocumented = extras
-                .iter()
-                .filter(|key| !CROSS_ECOSYSTEM_CONFLICT_FIELDS.contains(&key.as_str()))
-                .collect::<Vec<_>>();
             assert!(
-                undocumented.is_empty(),
-                "{} uses spec-nonconformant frontmatter {undocumented:?} that is \
-                 not a documented cross-ecosystem conflict; either drop the field \
-                 or document it in CROSS_ECOSYSTEM_CONFLICT_FIELDS and \
-                 docs/PLUGIN-VALIDATION.md",
+                extras.is_empty(),
+                "{} must stay strictly Agent-Skills-spec conformant (Codex \
+                 validates with the spec whitelist) but uses {extras:?}",
                 skill.path.display()
             );
         }
-    }
-}
-
-/// The documented skips must stay real: if the Cursor bundle stops using a
-/// conflict field, the allowlist entry (and the notes matrix) is stale.
-#[test]
-fn documented_conflict_fields_are_actually_used_by_the_cursor_bundle() {
-    let cursor_skills = load_skill_docs(CURSOR_OVERLAY_SKILL_ROOT);
-    for field in CROSS_ECOSYSTEM_CONFLICT_FIELDS {
-        assert!(
-            cursor_skills
-                .iter()
-                .any(|skill| skill.frontmatter.contains_key(*field)),
-            "documented conflict field {field:?} is no longer used by any Cursor \
-             skill; remove it from CROSS_ECOSYSTEM_CONFLICT_FIELDS and update \
-             docs/PLUGIN-VALIDATION.md"
-        );
     }
 }
 

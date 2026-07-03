@@ -1,13 +1,13 @@
 ---
 name: storing-project-memory
-description: 'Use when writing a durable fact to tracedecay memory — persisting a decision, preference, correction, pitfall, or entity relation, and handling near-duplicate/conflict/secret write diffs. For cleanup see curating-project-memory.'
+description: 'Use when writing a durable fact to tracedecay memory — persisting a decision, preference, correction, pitfall, or entity relation, and handling near-duplicate/conflict/secret write diffs. For cleanup see project-memory.'
 ---
 
 # Storing project memory
 
 This skill owns the **write path** into holographic memory: turning a durable
 decision or fact into a stored `tracedecay_fact_store` record. It is the
-narrow "add/update/relate" counterpart to `tracedecay:curating-project-memory`
+narrow "add/update/relate" counterpart to `tracedecay:project-memory`
 (dedup, merge, delete, whole-subject memorization) and
 `tracedecay:retrieving-project-memory` (read/reason). Store proactively
 whenever a durable decision, user preference, correction, or pitfall surfaces —
@@ -55,7 +55,7 @@ Every `action: "add"` returns `diff` / `closest_fact_id` / `similarity` /
   `closest_fact_id` rather than storing a second copy.
 - `possible_conflict` — a negation/state-change cue suggests supersession;
   confirm which fact is current before leaving both in place (hand off to
-  `tracedecay:curating-project-memory` if a merge/delete is needed).
+  `tracedecay:project-memory` if a merge/delete is needed).
 - `rejected_secret_like` — credential-like content was **NOT** stored. Never
   rephrase or obfuscate a rejected secret to bypass the filter.
 
@@ -63,7 +63,7 @@ Every `action: "add"` returns `diff` / `closest_fact_id` / `similarity` /
 
 - `search` is read-only; `add`, `update`, and `relate` **mutate** memory state.
   `search`/`probe`/`related`/`reason` may update access/retrieval counters.
-- Deletion is permanent and lives in `tracedecay:curating-project-memory`, not
+- Deletion is permanent and lives in `tracedecay:project-memory`, not
   here — prefer update/relate over creating removable clutter.
 - Never store secrets, credentials, keys, or PII; rely on the built-in
   `rejected_secret_like` filter as a backstop, not a first line.
@@ -72,7 +72,7 @@ Every `action: "add"` returns `diff` / `closest_fact_id` / `similarity` /
 
 ## Handoff
 
-- Dedup, merge, delete, or memorize a whole subject → `tracedecay:curating-project-memory`.
+- Dedup, merge, delete, or memorize a whole subject → `tracedecay:project-memory`.
 - Read, probe, or reason over stored facts → `tracedecay:retrieving-project-memory`.
 
 ## Output

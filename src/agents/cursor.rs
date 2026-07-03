@@ -302,53 +302,6 @@ fn cursor_plugin_hooks(raw: &str, tracedecay_bin: &str) -> Result<String> {
     Ok(format!("{}\n", serde_json::to_string_pretty(&hooks)?))
 }
 
-/// Bundle directories shipped by older tracedecay plugin versions that no
-/// longer exist in the current bundle. Swept during replace/uninstall so
-/// upgrades don't strand stale surfaces (managed-path removal only covers
-/// files the *current* bundle ships). `commands/` was migrated to slash
-/// skills (`disable-model-invocation: true`) when Cursor deprecated the
-/// standalone Commands surface. The `skills/tracedecay-*` entries are
-/// legacy dispatcher slugs renamed to
-/// verb-phrase slugs because Cursor displays the humanized slug as the skill
-/// title. The other `skills/*` entries are model-invoked workflow skills
-/// retired by the consolidated skill catalog.
-const LEGACY_PLUGIN_DIRS: &[&str] = &[
-    "commands",
-    "skills/architecture-overview",
-    "skills/assessing-test-coverage",
-    "skills/atomic-code-edits",
-    "skills/auditing-code-safety",
-    "skills/cleaning-up-dead-code",
-    "skills/code-health-report",
-    "skills/cross-branch-investigation",
-    "skills/drafting-commit-and-pr",
-    "skills/exploring-types-and-traits",
-    "skills/finding-duplicate-logic",
-    "skills/finding-impacted-areas",
-    "skills/memorize-subject",
-    "skills/memorizing-subject",
-    "skills/porting-code",
-    "skills/project-status",
-    "skills/reading-code-cheaply",
-    "skills/refactoring-safely",
-    "skills/reviewing-a-diff",
-    "skills/running-impacted-tests",
-    "skills/searching-for-code",
-    "skills/tracking-session-health",
-    "skills/tracedecay-arch",
-    "skills/tracedecay-audit",
-    "skills/tracedecay-branch",
-    "skills/tracedecay-clean",
-    "skills/tracedecay-commit",
-    "skills/tracedecay-diagnose",
-    "skills/tracedecay-health",
-    "skills/tracedecay-impact",
-    "skills/tracedecay-port",
-    "skills/tracedecay-recall",
-    "skills/tracedecay-review",
-    "skills/tracedecay-test",
-];
-
 fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
     let Ok(metadata) = std::fs::symlink_metadata(install_dir) else {
         return Ok(());
@@ -375,15 +328,13 @@ fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
             ),
         });
     }
-    // The directory is tracedecay-owned: sweep bundle dirs that older versions
-    // shipped, so they don't count as "unmanaged" leftovers below and linger
-    // across upgrades.
-    for legacy in LEGACY_PLUGIN_DIRS {
-        let path = install_dir.join(legacy);
-        if path.is_dir() && cursor_legacy_plugin_dir_is_tracedecay_owned(legacy, &path) {
-            std::fs::remove_dir_all(&path).ok();
-        }
-    }
+    // The directory is tracedecay-owned. Sweep every skill dir the *current*
+    // bundle no longer ships (retired dispatcher/workflow/memory skills), then
+    // remove the managed skill overlay. Deriving the keep-set from the live
+    // bundle means a newly retired skill is swept automatically — no
+    // hand-maintained legacy list to fall out of date. User-added files
+    // outside `skills/` (and any non-tracedecay skill dir) are preserved.
+    sweep_retired_bundle_skill_dirs(install_dir);
     remove_cursor_managed_skill_overlay(install_dir);
     if cursor_plugin_dir_has_only_managed_files(install_dir) {
         std::fs::remove_dir_all(install_dir).map_err(|e| TraceDecayError::Config {
@@ -401,16 +352,50 @@ fn remove_cursor_managed_skill_overlay(install_dir: &Path) {
     std::fs::remove_dir_all(install_dir.join("skills/agent-managed")).ok();
 }
 
-fn cursor_legacy_plugin_dir_is_tracedecay_owned(relative: &str, path: &Path) -> bool {
-    if !relative.starts_with("skills/") {
-        return true;
+/// Remove every `skills/<dir>` under the tracedecay plugin dir that the current
+/// bundle does not ship. The keep-set is derived from the live embedded bundle,
+/// so any retired skill (dispatcher, workflow, or merged-away memory skill) is
+/// swept on upgrade without a hand-maintained legacy list. The `agent-managed`
+/// overlay is preserved here (removed separately) and never counted as retired.
+///
+/// Only tracedecay-owned skill dirs are swept: a same-name user-authored skill
+/// whose `SKILL.md` carries no tracedecay marker is left untouched, so an
+/// upgrade never deletes a user's private workflow that happens to collide with
+/// a retired bundle slug.
+fn sweep_retired_bundle_skill_dirs(install_dir: &Path) {
+    let skills_root = install_dir.join("skills");
+    let Ok(entries) = std::fs::read_dir(&skills_root) else {
+        return;
+    };
+    let shipped: std::collections::BTreeSet<String> = embedded_plugin_files()
+        .into_iter()
+        .filter_map(|(relative, _)| {
+            relative
+                .strip_prefix("skills/")
+                .and_then(|rest| rest.split('/').next())
+                .map(str::to_string)
+        })
+        .collect();
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // The managed overlay is handled separately; never treat it as retired.
+        if name == "agent-managed" || shipped.contains(&name) {
+            continue;
+        }
+        // Preserve user-authored skills that reuse a retired slug: only sweep a
+        // non-shipped dir that is demonstrably tracedecay-owned.
+        if !skill_file_has_tracedecay_marker(&entry.path().join("SKILL.md")) {
+            continue;
+        }
+        std::fs::remove_dir_all(entry.path()).ok();
     }
-    if relative.starts_with("skills/tracedecay-") {
-        return true;
-    }
-    skill_file_has_tracedecay_marker(&path.join("SKILL.md"))
 }
 
+/// True when a Cursor `SKILL.md` carries a tracedecay authorship marker, marking
+/// the skill dir as tracedecay-owned (and therefore safe to sweep when retired).
 fn skill_file_has_tracedecay_marker(skill_file: &Path) -> bool {
     std::fs::read_to_string(skill_file).is_ok_and(|contents| {
         contents.lines().map(str::trim).any(|line| {
@@ -483,8 +468,8 @@ fn legacy_project_cursor_has_tracedecay(cursor_dir: &Path) -> bool {
 /// `tracedecay install --local` wrote the MCP server entry, lifecycle hooks,
 /// and the steering rule into `<project>/.cursor/`; the user-level plugin
 /// owns all three surfaces now. This is the project-level counterpart of the
-/// [`LEGACY_PLUGIN_DIRS`] sweep: detection-gated so projects without legacy
-/// artifacts are untouched, and only tracedecay-owned entries are removed —
+/// user-level plugin-dir clean replace: detection-gated so projects without
+/// legacy artifacts are untouched, and only tracedecay-owned entries are removed —
 /// user-authored config (other MCP servers, custom hooks and rules, and
 /// `permissions.json` allowlists, which the plugin README still recommends
 /// per-repo) is preserved.
@@ -931,10 +916,18 @@ mod tests {
         subdir_names(&plugin_source_root().join("skills"))
     }
 
-    /// Directory names under `plugin/overlays/cursor/skills/` (the Cursor
-    /// dispatcher overlay slugs).
-    fn cursor_overlay_dispatcher_dirs() -> Vec<String> {
-        subdir_names(&plugin_source_root().join("overlays/cursor/skills"))
+    /// File names under `plugin/overlays/cursor/commands/` (the Cursor native
+    /// slash-command markdown files).
+    fn cursor_command_files() -> Vec<String> {
+        let root = plugin_source_root().join("overlays/cursor/commands");
+        let mut names: Vec<String> = std::fs::read_dir(&root)
+            .expect("plugin cursor commands dir should be readable")
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|t| t.is_file()))
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
     }
 
     fn subdir_names(root: &Path) -> Vec<String> {
@@ -946,6 +939,21 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    /// Every file under a single skill dir, relative to it, forward-slashed.
+    fn skill_dir_tree_files(skill_dir: &Path) -> Vec<String> {
+        let mut files: Vec<String> = collect_regular_files(skill_dir)
+            .expect("skill dir readable")
+            .into_iter()
+            .filter_map(|path| {
+                path.strip_prefix(skill_dir)
+                    .ok()
+                    .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+            })
+            .collect();
+        files.sort();
+        files
     }
 
     /// The doctor's expected-hooks list is parsed from the embedded bundle
@@ -986,8 +994,8 @@ mod tests {
         assert!(install_dir.join("hooks/hooks.json").exists());
         assert!(install_dir.join("rules/tracedecay.mdc").exists());
 
-        // A representative skill, the agent, and a dispatcher skill also ship,
-        // so released installs are no longer missing the bundle that the
+        // A representative skill, the agent, and a native slash command also
+        // ship, so released installs are no longer missing the bundle that the
         // symlink path provides.
         assert!(
             install_dir.join("skills/exploring-code/SKILL.md").exists(),
@@ -999,13 +1007,17 @@ mod tests {
         );
         assert!(
             install_dir
+                .join("commands/tracedecay-map-architecture.md")
+                .exists(),
+            "a representative native slash command should be embedded"
+        );
+        // Cursor no longer ships the `tracedecay-*` dispatcher *skills* — those
+        // slugs are native commands now.
+        assert!(
+            !install_dir
                 .join("skills/tracedecay-map-architecture/SKILL.md")
                 .exists(),
-            "a representative slash-dispatcher skill should be embedded"
-        );
-        assert!(
-            !install_dir.join("commands").exists(),
-            "the deprecated commands surface must not ship"
+            "the retired dispatcher skill must not ship"
         );
 
         // Every embedded file is also a managed path so uninstall can clean it.
@@ -1019,10 +1031,11 @@ mod tests {
     }
 
     /// The Cursor deploy set (composed from the shared `plugin/` tree) must
-    /// cover every shared model-invocable skill, every dispatcher slug in its
-    /// Cursor overlay form, and Cursor's manifest/rules/agents — with no
-    /// on-disk skill left unwired. The source paths under `plugin/` differ from
-    /// the deploy paths, so this checks the *composition*, not a raw dir walk.
+    /// cover every shared *model-invocable* skill (all non-`tracedecay-*`
+    /// slugs), every native slash command, and Cursor's manifest/rules/agents —
+    /// with no on-disk skill left unwired. The source paths under `plugin/`
+    /// differ from the deploy paths, so this checks the *composition*, not a raw
+    /// dir walk.
     #[test]
     fn embedded_file_list_covers_the_whole_source_bundle() {
         let deploy: std::collections::BTreeSet<String> = embedded_plugin_files()
@@ -1030,20 +1043,35 @@ mod tests {
             .map(|(relative, _)| relative.to_string())
             .collect();
 
-        // Every shared skill dir on disk must be deployed by Cursor.
+        // Every file under each shared model-invocable skill dir (SKILL.md and
+        // any support files) must be deployed by Cursor. The `tracedecay-*`
+        // dispatcher skills are NOT shipped to Cursor — they are native commands
+        // there.
+        let skills_root = plugin_source_root().join("skills");
         for skill in shared_skill_dirs() {
-            let expected = format!("skills/{skill}/SKILL.md");
-            assert!(
-                deploy.contains(&expected),
-                "Cursor deploy set is missing shared skill {expected}"
-            );
+            let skill_dir = skills_root.join(&skill);
+            if skill.starts_with("tracedecay-") {
+                let dispatcher = format!("skills/{skill}/SKILL.md");
+                assert!(
+                    !deploy.contains(&dispatcher),
+                    "Cursor deploy set must NOT ship dispatcher skill {dispatcher}"
+                );
+                continue;
+            }
+            for relative in skill_dir_tree_files(&skill_dir) {
+                let expected = format!("skills/{skill}/{relative}");
+                assert!(
+                    deploy.contains(&expected),
+                    "Cursor deploy set is missing skill file {expected}"
+                );
+            }
         }
-        // Every Cursor dispatcher overlay must be deployed.
-        for skill in cursor_overlay_dispatcher_dirs() {
-            let expected = format!("skills/{skill}/SKILL.md");
+        // Every Cursor native slash command must be deployed.
+        for command in cursor_command_files() {
+            let expected = format!("commands/{command}");
             assert!(
                 deploy.contains(&expected),
-                "Cursor deploy set is missing dispatcher overlay {expected}"
+                "Cursor deploy set is missing native command {expected}"
             );
         }
         // Cursor's manifest surfaces.
@@ -1054,13 +1082,23 @@ mod tests {
             "README.md",
             "rules/tracedecay.mdc",
             "rules/tracedecay-memory.mdc",
-            "agents/code-explorer.md",
-            "agents/code-health-auditor.md",
-            "agents/session-historian.md",
         ] {
             assert!(
                 deploy.contains(expected),
                 "Cursor deploy set is missing {expected}"
+            );
+        }
+
+        // Every agent in the Cursor agent overlay on disk is deployed —
+        // dir-walk rather than hardcode, so a future overlay agent that is not
+        // wired into Cursor's deploy set is caught here.
+        let agents_root = plugin_source_root().join("overlays/cursor/agents");
+        for entry in std::fs::read_dir(&agents_root).expect("cursor agent overlay readable") {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            let expected = format!("agents/{name}");
+            assert!(
+                deploy.contains(&expected),
+                "Cursor deploy set is missing agent {expected}"
             );
         }
     }
@@ -1239,26 +1277,37 @@ mod tests {
         );
     }
 
-    /// Upgrading over an older install must sweep bundle directories the
-    /// current bundle no longer ships (the deprecated `commands/` surface),
-    /// instead of stranding them as unmanaged leftovers forever.
+    /// Upgrading over an install that shipped the `tracedecay-*` dispatcher
+    /// *skills* (now re-expressed as native `commands/` slash commands) must
+    /// sweep those retired skill dirs instead of stranding them as unmanaged
+    /// leftovers, so Cursor does not list both the retired dispatcher skill and
+    /// the new native command.
     #[test]
-    fn reinstall_sweeps_legacy_commands_dir() {
+    fn reinstall_sweeps_retired_dispatcher_skill_dirs() {
         let tmp = TempDir::new().unwrap();
         let install_dir = tmp.path().join("tracedecay");
         write_embedded_plugin(&install_dir, "tracedecay").expect("embedded install should succeed");
-        // Simulate a pre-migration install that shipped commands/.
-        std::fs::create_dir_all(install_dir.join("commands")).unwrap();
+        // Simulate a pre-migration install that shipped the dispatcher skill.
+        std::fs::create_dir_all(install_dir.join("skills/tracedecay-review-diff")).unwrap();
         std::fs::write(
-            install_dir.join("commands/tracedecay-arch.md"),
-            "legacy command",
+            install_dir.join("skills/tracedecay-review-diff/SKILL.md"),
+            "---\nname: tracedecay-review-diff\n---\nApply the `tracedecay:reviewing-changes` skill.\n",
+        )
+        .unwrap();
+        // Also simulate a released install that still ships one of the retired
+        // memory skills merged into `project-memory`; the clean replace must
+        // sweep it too.
+        std::fs::create_dir_all(install_dir.join("skills/recalling-project-memory")).unwrap();
+        std::fs::write(
+            install_dir.join("skills/recalling-project-memory/SKILL.md"),
+            "---\nname: recalling-project-memory\n---\nRecall facts with `tracedecay_fact_store`.\n",
         )
         .unwrap();
 
         remove_cursor_plugin_install(&install_dir).expect("replace should succeed");
         assert!(
             !install_dir.exists(),
-            "legacy commands/ must be swept so the tracedecay-only dir is fully removed"
+            "retired dispatcher skill dirs must be swept so the tracedecay-only dir is fully removed"
         );
     }
 
@@ -1275,7 +1324,7 @@ mod tests {
         std::fs::create_dir_all(install_dir.join("skills/tracedecay-arch")).unwrap();
         std::fs::write(
             install_dir.join("skills/tracedecay-arch/SKILL.md"),
-            "legacy dispatcher skill",
+            "---\nname: tracedecay-arch\n---\nApply the `tracedecay:code-health` skill.\n",
         )
         .unwrap();
 
@@ -1283,6 +1332,57 @@ mod tests {
         assert!(
             !install_dir.exists(),
             "pre-rename dispatcher skill dirs must be swept so the tracedecay-only dir is fully removed"
+        );
+    }
+
+    /// A reinstall must be a CLEAN REPLACE of the tracedecay-owned dir: a stale
+    /// file the current bundle no longer ships is gone afterward, while the
+    /// fresh bundle is present. Exercises the full write → remove → write path.
+    #[test]
+    fn reinstall_is_a_clean_replace_dropping_stale_files() {
+        let tmp = TempDir::new().unwrap();
+        let install_dir = tmp.path().join("tracedecay");
+        write_embedded_plugin(&install_dir, "tracedecay").expect("first install should succeed");
+        // A stale skill dir the current bundle does not ship.
+        std::fs::create_dir_all(install_dir.join("skills/totally-retired-skill")).unwrap();
+        std::fs::write(
+            install_dir.join("skills/totally-retired-skill/SKILL.md"),
+            "---\nname: totally-retired-skill\n---\nRun `tracedecay_search` first.\n",
+        )
+        .unwrap();
+
+        // A clean replace: remove the owned dir, then write the fresh bundle.
+        remove_cursor_plugin_install(&install_dir).expect("clean replace should succeed");
+        write_embedded_plugin(&install_dir, "tracedecay").expect("re-install should succeed");
+
+        assert!(
+            !install_dir.join("skills/totally-retired-skill").exists(),
+            "a stale skill dir must be gone after a clean-replace reinstall"
+        );
+        assert!(
+            install_dir.join("skills/exploring-code/SKILL.md").exists(),
+            "the current bundle must be present after reinstall"
+        );
+    }
+
+    /// The clean replace must refuse to delete a directory tracedecay does not
+    /// own (no tracedecay plugin manifest), so it never nukes an unrelated dir.
+    #[test]
+    fn clean_replace_refuses_unmanaged_dir() {
+        let tmp = TempDir::new().unwrap();
+        let install_dir = tmp.path().join("tracedecay");
+        std::fs::create_dir_all(&install_dir).unwrap();
+        std::fs::write(install_dir.join("user-file.txt"), "not tracedecay").unwrap();
+
+        let err = remove_cursor_plugin_install(&install_dir)
+            .expect_err("must refuse an unmanaged directory");
+        assert!(
+            err.to_string().contains("unmanaged"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            install_dir.join("user-file.txt").exists(),
+            "an unmanaged dir must be left untouched"
         );
     }
 

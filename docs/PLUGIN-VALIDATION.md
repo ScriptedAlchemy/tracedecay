@@ -7,11 +7,14 @@
 > `plugin/.claude-plugin/`; per-host hooks are `plugin/hooks/hooks-<host>.json`;
 > MCP configs are `plugin/.mcp.json` (Claude/Codex) and `plugin/mcp-cursor.json`
 > (Cursor, deployed as `mcp.json`); READMEs are `plugin/README-<host>.md`; and
-> Cursor's 13 slash dispatchers live as an overlay at
-> `plugin/overlays/cursor/skills/`. The composed per-host deploy set is owned by
-> `src/agents/plugin_bundle.rs`. Each host still installs a byte-identical tree
-> to before. Sections below that describe cross-bundle *parity/mirroring* are
-> historical — with one shared tree there is nothing to keep in sync.
+> Cursor's 13 workflow slugs ship as native Cursor 1.6+ slash commands
+> (`plugin/overlays/cursor/commands/*.md`, deployed to `commands/` and declared
+> by the manifest's `commands` key), *not* as `disable-model-invocation`
+> dispatcher skills. Cursor's shared skill set is therefore the 17 canonical
+> model-invocable skills, byte-identical to Claude/Codex. The composed per-host
+> deploy set is owned by `src/agents/plugin_bundle.rs`. Sections below that
+> describe cross-bundle *parity/mirroring* are historical — with one shared tree
+> there is nothing to keep in sync.
 
 How the bundled agent plugins (shared `plugin/` tree) and their
 skills are validated, where each check runs, and how to extend the system
@@ -72,39 +75,52 @@ schema plus exactly that one extra key, derived in the test.
 
 ### 2. Skill contract tests (cargo test)
 
-`tests/agent_suite/plugin_skill_contract_test.rs` enforces the per-host skill
-contract over every `SKILL.md` in both bundles:
+There is one shared `plugin/skills/` tree, so the generic per-file contract is
+validated **once** by `tests/agent_suite/shared_skill_contract_test.rs` against
+the **intersection contract** — the rules a `SKILL.md` must satisfy to install
+cleanly on Claude, Codex, *and* Cursor:
 
-- **Frontmatter allowlists per host.** Codex skills may only use the keys
-  accepted by Codex's `quick_validate.py` (`name`, `description`,
-  `allowed-tools`, `license`, `metadata`); Cursor skills additionally allow
-  `disable-model-invocation`. `name` and `description` are required
-  everywhere.
-- **Size budgets.** Skill bodies stay under 500 lines; descriptions stay under
-  320 characters / 45 words; a bundle's total preloaded name+description
-  metadata stays under 6,000 characters so skill discovery never crowds the
-  host's context window.
-- **Trigger-first descriptions.** Every description must contain trigger
-  language ("Use when …"), because hosts only show agents the metadata before
-  the body is loaded. A body-only "When to Use" section is rejected.
-- **Supported resource layout.** A skill directory may only contain
-  `SKILL.md` plus the supported resource directories (`agents/`, `scripts/`,
-  `references/`, `assets/`).
-- **Byte-copy install parity.** Installing the Cursor or Codex integration
-  into a temp home must produce a byte-identical copy of the source skill
-  tree — this catches install-time mutation and missing `include_str!`
-  registrations (see [Adding a skill](#adding-a-skill-correctly)).
+- **Intersection frontmatter whitelist.** Keys ⊆ `{name, description,
+  allowed-tools, license, metadata}` (the keys every host's validator accepts).
+  `name` matches the directory (kebab-case, ≤64 chars, no reserved
+  `claude`/`anthropic` prefix); `name` and `description` are required. A
+  Cursor-only key (`disable-model-invocation`/`paths`) would break Codex/Claude,
+  so it fails here — that surface belongs in the native commands overlay.
+- **Description budget.** 50–320 characters, ≤45 words, trigger-first ("Use
+  …"), ends with a period, no angle brackets, unique across the set.
+- **Body rules.** Exactly one plain-title H1 (never `# /slug`), no skipped
+  heading levels, no body-only `## When to Use` section, ≤500 lines.
+- **Hygiene + layout.** No BOM/CRLF/tabs/trailing whitespace, one trailing
+  newline, balanced fences, non-empty body; a skill dir holds only `SKILL.md`
+  plus the supported resource dirs (`agents/`, `scripts/`, `references/`,
+  `assets/`) and no auxiliary docs (`README.md`, `CHANGELOG.md`, …).
 
-On top of the shared contract, `tests/agent_suite/skill_lint_cursor_test.rs` lints the
-Cursor bundle with rules adapted from community SKILL.md linters (skillmark,
+The same test validates the host-extra surfaces **separately**: the Cursor
+native commands (`plugin/overlays/cursor/commands/*.md`, each a `# /slug` H1
+matching its file name) and the Cursor agent overlay.
+
+`tests/agent_suite/plugin_skill_contract_test.rs` now owns only what is *not*
+in the intersection: the aggregate 6,000-char metadata budget, the optional
+`agents/openai.yaml` marketplace contract, the per-host frontmatter allowances
+(Codex `quick_validate.py`; Cursor's `disable-model-invocation`/`paths`), and
+**byte-copy install parity** (installing the Cursor or Codex integration into a
+temp home must produce a byte-identical copy of the source skill tree — catches
+install-time mutation and missing embeds; see
+[Adding a skill](#adding-a-skill-correctly)).
+
+`tests/agent_suite/skill_lint_cursor_test.rs` keeps only the Cursor-specific
+reference-integrity rules (skill/tool/link resolution, `paths` glob scoping) and
+the native-command lint, adapted from community SKILL.md linters (skillmark,
 skilldoctor, skillkit) and Cursor's skills docs:
 
 - **File hygiene:** no BOM, CRLF, tabs, or trailing whitespace; exactly one
   trailing newline; balanced code fences; no placeholder text; non-empty
   body.
-- **Heading conventions:** exactly one H1; no skipped heading levels; a
-  slash-form H1 (`# /slug`) must match the skill `name` and requires
-  `disable-model-invocation: true`.
+- **Heading conventions:** exactly one H1; no skipped heading levels;
+  model-invocable skills use a plain-title H1 (never the slash form). The
+  Cursor native commands (`plugin/overlays/cursor/commands/*.md`) are linted
+  separately: each must open with a `# /slug` H1 matching its file name and
+  reference only bundled skills and live MCP tools.
 - **Name/description quality:** no reserved `claude`/`anthropic` prefixes;
   descriptions ≥ 50 chars, unique across the bundle, ending in terminal
   punctuation, with no angle brackets.
@@ -261,31 +277,35 @@ official schema rejects.)
 
 ## Adding a skill correctly
 
-1. **Create the Cursor source skill:** a new directory
-   `cursor-plugin/skills/<skill-name>/SKILL.md` with `name` and `description`
+There is now one shared skill tree; there is no per-bundle mirroring to
+maintain, and skill files are embedded **recursively** by `build.rs` — you do
+not hand-register `include_str!` entries.
+
+1. **Create the source skill:** a new directory
+   `plugin/skills/<skill-name>/SKILL.md` with `name` and `description`
    frontmatter. Keep the description trigger-first ("Use when …"), under 320
    characters and 45 words; keep the body under 500 lines. Use only allowed
-   frontmatter keys (see layer 2 above). Slash-command skills set
-   `disable-model-invocation: true` and use a `tracedecay-<verb-phrase>` slug.
-2. **Register the embed:** add the file to the `EMBEDDED_PLUGIN_FILES`
-   `include_str!` list in `src/agents/cursor.rs`, and — if the skill is
-   model-invocable — to `hooks::CURSOR_PLUGIN_SKILLS` in `src/hooks.rs`. The
-   byte-copy parity test fails if the installed bundle and the source tree
-   diverge.
-3. **Mirror to Codex (if model-invocable):** add the skill to
-   `codex-plugin/skills/` and to the `include_str!` list in
-   `src/agents/codex.rs`. Keep it byte-identical to the Cursor source unless
-   you add an entry to the divergence allowlist in
-   `codex_skills_match_the_cursor_source_for_parity` with a reason.
-4. **Watch the metadata budget:** the summed name+description metadata per
-   bundle must stay under 6,000 characters. If your addition tips it over,
-   tighten descriptions rather than raising the budget.
-5. **Run the checks:**
+   frontmatter keys (see layer 2 above). A skill directory may additionally
+   carry `scripts/`, `references/`, and `assets/` support files — these are
+   embedded automatically by the recursive `build.rs` codegen
+   (`GENERATED_SKILL_FILES`), so no table edit is needed.
+2. **Wire it into the model-invocable index (if model-invocable):** add the
+   slug to `hooks::CURSOR_PLUGIN_SKILLS` in `src/hooks/steering.rs`. Workflow
+   dispatch that should be explicit-invoke lives as a Cursor native command
+   under `plugin/overlays/cursor/commands/<slug>.md`, not as a skill.
+3. **Watch the metadata budget:** the summed name+description metadata must
+   stay under 6,000 characters. If your addition tips it over, tighten
+   descriptions rather than raising the budget.
+4. **Run the checks:**
 
    ```bash
    cargo nextest run -E 'binary(=agent_suite)'
-   cargo nextest run codex_skills_match_the_cursor_source_for_parity
+   cargo test --lib covers_the_whole_source_bundle
    ```
+
+   The recursive-embed coverage tests fail if any file under
+   `plugin/skills/` is not embedded, and the byte-copy install tests fail if
+   the installed tree diverges from the source.
 
 ---
 
@@ -327,12 +347,11 @@ To ship a bundle for another agent host (the way `codex-plugin/` mirrors
 |---|---|---|
 | Plugin manifest schema + component paths | `tests/agent_suite/plugin_manifest_schema_test.rs` + `tests/fixtures/cursor-schemas/` | `cargo test` (and thereby CI) |
 | mcp.json / hooks.json schema validation | `tests/agent_suite/plugin_config_schema_test.rs` | `cargo test` |
-| Skill frontmatter contract + size budgets | `tests/agent_suite/plugin_skill_contract_test.rs` | `cargo test` |
-| Install byte-copy parity | `tests/agent_suite/plugin_skill_contract_test.rs` | `cargo test` |
-| Cursor→Codex skill parity | `src/agents/codex.rs` unit tests | `cargo test` |
-| Cross-bundle disk-level sync | `tests/agent_suite/plugin_bundle_sync_test.rs` | `cargo test` |
+| Unified intersection skill contract (frontmatter/description/body/hygiene/layout) + Cursor commands + agent overlay | `tests/agent_suite/shared_skill_contract_test.rs` | `cargo test` |
+| Metadata budget + openai.yaml + per-host frontmatter + install byte-copy parity | `tests/agent_suite/plugin_skill_contract_test.rs` | `cargo test` |
+| Recursive-embed coverage (skill tree fully embedded) | `src/agents/{claude,codex,cursor,plugin_bundle}.rs` unit tests | `cargo test` |
 | Manifest path + rendered output | `tests/agent_suite/agent_test.rs`, `tests/agent_suite/update_plugin_test.rs` | `cargo test` |
-| Cursor skill lint rules | `tests/agent_suite/skill_lint_cursor_test.rs` | `cargo test` |
+| Cursor reference-integrity + native-command lint | `tests/agent_suite/skill_lint_cursor_test.rs` | `cargo test` |
 | Claude Code portability rules | `tests/agent_suite/skill_lint_claude_test.rs` | `cargo test` |
 | Schema-validation workflow (ajv) | `.github/workflows/plugin-validation.yml` | CI only |
 | MCP conformance smoke | `scripts/mcp-conformance-smoke.sh` | manual + CI (`plugin-validation.yml`) |

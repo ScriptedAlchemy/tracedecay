@@ -29,20 +29,21 @@ fn bundle_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin")
 }
 
-/// The 30 skills the bundle ships (also the codex-plugin skill set): the 13
-/// foundational model-invocable skills, the 4 memory skills, plus the 13
+/// The 29 skills the bundle ships (also the codex skill set): the 12
+/// foundational model-invocable skills (recalling+curating-project-memory
+/// merged into `project-memory`), the 4 memory skills, plus the 13
 /// `tracedecay-*` workflow skills, kept in sync across every skill-bundling
 /// surface.
 const EXPECTED_SKILLS: &[&str] = &[
-    // 13 foundational
+    // 12 foundational (recalling+curating-project-memory merged into
+    // project-memory)
     "assessing-impact",
     "code-health",
-    "curating-project-memory",
     "editing-safely",
     "exploring-code",
     "fixing-build-and-type-errors",
     "inspecting-managed-skills",
-    "recalling-project-memory",
+    "project-memory",
     "recalling-session-context",
     "reviewing-changes",
     "tracing-functions",
@@ -354,7 +355,7 @@ fn claude_bundle_ships_exactly_the_expected_skills() {
     assert_eq!(
         sorted_subdir_names(&skills_root),
         expected,
-        "claude-plugin/skills must contain exactly the expected 26 skill directories"
+        "claude-plugin/skills must contain exactly the expected 29 skill directories"
     );
 }
 

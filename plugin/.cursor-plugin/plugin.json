@@ -21,6 +21,7 @@
   "rules": [
     "rules/tracedecay.mdc"
   ],
+  "commands": "commands/",
   "skills": "skills/",
   "agents": "agents/"
 }

@@ -8,24 +8,23 @@ use serde_json::Value;
 
 use super::now_unix_secs;
 
-/// Model-invocable skills shipped in the tracedecay Cursor plugin's `skills/`
-/// directory (slash dispatchers with `disable-model-invocation: true` — the 13
-/// `tracedecay-*` workflow dispatchers — are excluded). This covers the 13
-/// foundational skills plus the 4 memory skills (`managing-session-context`,
-/// `retrieving-cached-context`, `retrieving-project-memory`,
-/// `storing-project-memory`), which are canonical model-invocable skills. Kept
-/// as one constant so the session steering context and the bundle coverage
-/// test in `agents::cursor` stay in sync.
+/// Model-invocable skills that Cursor ships in its `skills/` directory. The 13
+/// `tracedecay-*` workflow slugs are native Cursor commands (not skills), so
+/// they are excluded. This covers the foundational skills plus the memory
+/// skills (`project-memory` — the merged recall+curate skill —
+/// `managing-session-context`, `retrieving-cached-context`,
+/// `retrieving-project-memory`, `storing-project-memory`). Kept as one constant
+/// so the session steering context and the bundle coverage test in
+/// `agents::cursor` stay in sync.
 pub const CURSOR_PLUGIN_SKILLS: &[&str] = &[
     "assessing-impact",
     "code-health",
-    "curating-project-memory",
     "editing-safely",
     "exploring-code",
     "fixing-build-and-type-errors",
     "inspecting-managed-skills",
     "managing-session-context",
-    "recalling-project-memory",
+    "project-memory",
     "recalling-session-context",
     "retrieving-cached-context",
     "retrieving-project-memory",

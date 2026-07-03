@@ -1,6 +1,6 @@
 ---
 name: retrieving-project-memory
-description: 'Use when querying or reasoning over stored tracedecay memory facts — searching, probing by entity, multi-fact reasoning, or fetching a fact with trust history. For recall framing see recalling-project-memory.'
+description: 'Use when querying or reasoning over stored tracedecay memory facts — searching, probing by entity, multi-fact reasoning, or fetching a fact with trust history. For recall framing see project-memory.'
 ---
 
 # Retrieving project memory
@@ -8,7 +8,7 @@ description: 'Use when querying or reasoning over stored tracedecay memory facts
 This skill owns the **read/reason mechanics** of the holographic fact store:
 the exact `tracedecay_fact_store` retrieval actions plus
 `tracedecay_memory_status`. It is the mechanical counterpart to
-`tracedecay:recalling-project-memory` (which frames memory recall around a task
+`tracedecay:project-memory` (which frames memory recall around a task
 or decision and starts from transcripts). When the question is "what does the
 fact store know about X and how do the facts relate," start here.
 
@@ -58,9 +58,8 @@ supported for these actions.
 
 ## Handoff
 
-- Task/decision recall that should start from transcripts → `tracedecay:recalling-project-memory`.
+- Task/decision recall that should start from transcripts, or fixing stale/contradictory/duplicate facts → `tracedecay:project-memory`.
 - Persisting a new durable fact → `tracedecay:storing-project-memory`.
-- Fixing stale/contradictory/duplicate facts → `tracedecay:curating-project-memory`.
 
 ## Output
 

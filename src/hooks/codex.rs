@@ -32,7 +32,7 @@ whole-file reads, `tracedecay:tracing-functions` with `tracedecay_find_exact_sym
 `tracedecay_callers`, and `tracedecay_callees` when asked to trace functions, find callers, \
 or inspect setup/helper/fixture dependencies, `tracedecay:assessing-impact` with \
 `tracedecay_affected` and `tracedecay_test_map` before guessing affected tests, \
-`tracedecay:recalling-project-memory` when project decisions/preferences matter, and \
+`tracedecay:project-memory` when project decisions/preferences matter, and \
 `tracedecay:recalling-session-context` with `tracedecay_message_search`, \
 `tracedecay_lcm_expand_query`, and `tracedecay_lcm_describe` when prior conversation context \
 may be missing.";

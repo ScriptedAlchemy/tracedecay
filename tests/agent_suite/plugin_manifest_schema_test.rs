@@ -118,6 +118,7 @@ fn cursor_bundle_manifest_matches_the_official_cursor_plugin_schema() {
         ("mcp-cursor.json", "mcp.json"),
         ("hooks/hooks-cursor.json", "hooks/hooks.json"),
         ("rules", "rules"),
+        ("overlays/cursor/commands", "commands"),
         ("skills", "skills"),
         ("agents", "agents"),
     ]);
