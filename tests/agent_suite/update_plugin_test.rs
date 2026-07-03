@@ -589,7 +589,7 @@ fn codex_uninstall_removes_repo_local_bundle_from_project_root() {
 }
 
 #[test]
-fn codex_update_plugin_reports_config_only_for_legacy_config_only_install() {
+fn codex_update_plugin_migrates_legacy_config_only_install_to_plugin() {
     let home = TempDir::new().unwrap();
     let project_root = home.path().join("workspace");
     let codex_dir = home.path().join(".codex");
@@ -605,9 +605,13 @@ fn codex_update_plugin_reports_config_only_for_legacy_config_only_install() {
     let outcome = codex
         .update_plugin(&ctx_with_project(home.path(), NEW_BIN, &project_root))
         .unwrap();
-    assert!(matches!(outcome, UpdatePluginOutcome::ConfigOnly));
+    let UpdatePluginOutcome::Refreshed(paths) = outcome else {
+        panic!("expected codex update_plugin to migrate legacy config to plugin");
+    };
+    assert_eq!(paths, vec![home.path().join("plugins/tracedecay")]);
     assert_eq!(bytes(&codex_dir.join("config.toml")), before);
-    assert!(!home.path().join("plugins/tracedecay").exists());
+    assert_codex_bundle_contains_bin(&home.path().join("plugins/tracedecay"), NEW_BIN);
+    assert_codex_marketplace_entry(&codex_marketplace_path(home.path()), "./plugins/tracedecay");
 }
 
 #[test]

@@ -20,8 +20,8 @@ use crate::errors::{Result, TraceDecayError};
 
 use super::{
     load_json_file, load_json_file_strict, load_toml_file, safe_write_json_file,
-    safe_write_text_file, tool_names, write_toml_file, AgentIntegration, DoctorCounters,
-    HealthcheckContext, InstallContext, InstallScope, UpdatePluginOutcome,
+    safe_write_text_file, write_toml_file, AgentIntegration, DoctorCounters, HealthcheckContext,
+    InstallContext, InstallScope, UpdatePluginOutcome,
 };
 
 /// `OpenAI` Codex CLI agent.
@@ -125,10 +125,10 @@ impl AgentIntegration for CodexIntegration {
             return Ok(UpdatePluginOutcome::Refreshed(refreshed));
         }
 
-        let target = if codex_plugin_manifest_path(&ctx.home).exists() {
+        let target = if codex_plugin_manifest_path(&ctx.home).exists()
+            || codex_legacy_config_has_tracedecay(&ctx.home)
+        {
             Some(plugin_dir.clone())
-        } else if Self::has_legacy_config_install(&ctx.home) {
-            return Ok(UpdatePluginOutcome::ConfigOnly);
         } else {
             None
         };
@@ -191,10 +191,13 @@ impl AgentIntegration for CodexIntegration {
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mCodex CLI integration\x1b[0m");
-        let local_codex_dir = ctx.project_path.join(".codex");
         let local_plugin_dir = codex_repo_plugin_install_dir(&ctx.project_path);
         if local_plugin_dir.join(".codex-plugin/plugin.json").exists() {
-            doctor_check_plugin_dir(dc, &local_plugin_dir);
+            doctor_check_plugin_dir(
+                dc,
+                &local_plugin_dir,
+                Some(&ctx.home.join(".codex/config.toml")),
+            );
             doctor_check_marketplace_entry(
                 dc,
                 &codex_repo_marketplace_path(&ctx.project_path),
@@ -202,12 +205,6 @@ impl AgentIntegration for CodexIntegration {
                 "./plugins/tracedecay",
                 "tracedecay install --local --agent codex",
             );
-        } else if local_codex_dir.join("config.toml").exists()
-            || local_codex_dir.join("hooks.json").exists()
-        {
-            doctor_check_config(dc, &local_codex_dir.join("config.toml"));
-            doctor_check_prompt_file(dc, &ctx.project_path.join("AGENTS.md"));
-            doctor_check_hooks(dc, &local_codex_dir.join("hooks.json"));
         } else {
             doctor_check_plugin(dc, &ctx.home);
         }
@@ -228,29 +225,21 @@ impl AgentIntegration for CodexIntegration {
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
-        if !codex_plugin_cached_install_dirs(home).is_empty()
+        !codex_plugin_cached_install_dirs(home).is_empty()
             || codex_plugin_manifest_path(home).exists()
-        {
-            return true;
-        }
-        Self::has_legacy_config_install(home)
     }
 }
 
-impl CodexIntegration {
-    fn has_legacy_config_install(home: &Path) -> bool {
-        let config = home.join(".codex").join("config.toml");
-        if !config.exists() {
-            return false;
-        }
-        // If the file is unparseable, conservatively report "not installed"
-        // so the caller treats it like a fresh install path.
-        super::load_toml_file(&config).is_ok_and(|toml| {
-            toml.get("mcp_servers")
-                .and_then(|v| v.get("tracedecay"))
-                .is_some()
-        })
+fn codex_legacy_config_has_tracedecay(home: &Path) -> bool {
+    let config = home.join(".codex").join("config.toml");
+    if !config.exists() {
+        return false;
     }
+    super::load_toml_file(&config).is_ok_and(|toml| {
+        toml.get("mcp_servers")
+            .and_then(|v| v.get("tracedecay"))
+            .is_some()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -576,6 +565,60 @@ const CODEX_MANAGED_HOOKS: &[CodexManagedHook] = &[
 /// Subcommands from older bundles that uninstall must also strip even though
 /// the current bundle no longer registers them.
 const CODEX_LEGACY_HOOK_SUBCOMMANDS: &[&str] = &["hook-codex-pre-tool-use"];
+
+#[derive(Debug, PartialEq, Eq)]
+enum CodexHookTrustState {
+    Trusted,
+    Missing(Vec<String>),
+}
+
+fn codex_hook_state_event_key(event: &str) -> String {
+    let mut key = String::new();
+    for (index, ch) in event.chars().enumerate() {
+        if ch.is_ascii_uppercase() && index > 0 {
+            key.push('_');
+        }
+        key.push(ch.to_ascii_lowercase());
+    }
+    key
+}
+
+fn codex_plugin_hook_trust_state(config: &toml::Value) -> CodexHookTrustState {
+    let Some(state) = config
+        .get("hooks")
+        .and_then(|hooks| hooks.get("state"))
+        .and_then(|state| state.as_table())
+    else {
+        return CodexHookTrustState::Missing(
+            CODEX_MANAGED_HOOKS
+                .iter()
+                .map(|hook| codex_hook_state_event_key(hook.event))
+                .collect(),
+        );
+    };
+
+    let missing: Vec<String> = CODEX_MANAGED_HOOKS
+        .iter()
+        .map(|hook| codex_hook_state_event_key(hook.event))
+        .filter(|event_key| {
+            let suffix = format!(":hooks/hooks.json:{event_key}:0:0");
+            !state.iter().any(|(key, entry)| {
+                key.starts_with("tracedecay@")
+                    && key.ends_with(&suffix)
+                    && entry
+                        .get("trusted_hash")
+                        .and_then(|hash| hash.as_str())
+                        .is_some_and(|hash| hash.starts_with("sha256:"))
+            })
+        })
+        .collect();
+
+    if missing.is_empty() {
+        CodexHookTrustState::Trusted
+    } else {
+        CodexHookTrustState::Missing(missing)
+    }
+}
 
 fn codex_plugin_hooks(raw: &str, tracedecay_bin: &str) -> Result<String> {
     let mut hooks: serde_json::Value = serde_json::from_str(raw)?;
@@ -1121,7 +1164,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
     let cached_dirs = codex_plugin_cached_install_dirs(home);
     if !cached_dirs.is_empty() {
         for plugin_dir in cached_dirs {
-            doctor_check_plugin_dir(dc, &plugin_dir);
+            doctor_check_plugin_dir(dc, &plugin_dir, Some(&home.join(".codex/config.toml")));
         }
         return;
     }
@@ -1129,17 +1172,10 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
     let plugin_dir = codex_plugin_install_dir(home);
     let manifest_path = plugin_dir.join(".codex-plugin/plugin.json");
     if !manifest_path.exists() {
-        if CodexIntegration::has_legacy_config_install(home) {
-            doctor_check_config(dc, &home.join(".codex/config.toml"));
-            dc.warn(
-                "Codex uses a legacy config-managed tracedecay install — run `tracedecay install --agent codex` to install the Codex plugin bundle",
-            );
-        } else {
-            dc.warn(&format!(
-                "{} not found — run `tracedecay install --agent codex` if you use Codex CLI",
-                manifest_path.display()
-            ));
-        }
+        dc.warn(&format!(
+            "{} not found — run `tracedecay install --agent codex` or `tracedecay update-plugin` to install the Codex plugin bundle",
+            manifest_path.display()
+        ));
         return;
     }
 
@@ -1181,7 +1217,11 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
             mcp_path.display()
         ));
     }
-    doctor_check_hooks(dc, &plugin_dir.join("hooks/hooks.json"));
+    doctor_check_hooks(
+        dc,
+        &plugin_dir.join("hooks/hooks.json"),
+        Some(&home.join(".codex/config.toml")),
+    );
 
     doctor_check_marketplace_entry(
         dc,
@@ -1231,7 +1271,7 @@ fn doctor_check_marketplace_entry(
     }
 }
 
-fn doctor_check_plugin_dir(dc: &mut DoctorCounters, plugin_dir: &Path) {
+fn doctor_check_plugin_dir(dc: &mut DoctorCounters, plugin_dir: &Path, config_path: Option<&Path>) {
     let manifest_path = plugin_dir.join(".codex-plugin/plugin.json");
     let manifest = load_json_file(&manifest_path);
     if manifest.get("name").and_then(|value| value.as_str()) == Some("tracedecay") {
@@ -1271,95 +1311,12 @@ fn doctor_check_plugin_dir(dc: &mut DoctorCounters, plugin_dir: &Path) {
             mcp_path.display()
         ));
     }
-    doctor_check_hooks(dc, &plugin_dir.join("hooks/hooks.json"));
+    doctor_check_hooks(dc, &plugin_dir.join("hooks/hooks.json"), config_path);
 }
 
-/// Check config.toml has tracedecay registered.
-fn doctor_check_config(dc: &mut DoctorCounters, config_path: &Path) {
-    if !config_path.exists() {
-        dc.warn(&format!(
-            "{} not found — run `tracedecay install --agent codex` if you use Codex CLI",
-            config_path.display()
-        ));
-        return;
-    }
-
-    let config = match load_toml_file(config_path) {
-        Ok(c) => c,
-        Err(e) => {
-            dc.fail(&format!("{e}"));
-            return;
-        }
-    };
-    let has_server = config
-        .get("mcp_servers")
-        .and_then(|v| v.get("tracedecay"))
-        .and_then(|v| v.as_table())
-        .is_some();
-
-    if !has_server {
-        dc.fail(&format!(
-            "MCP server NOT registered in {} — run `tracedecay install --agent codex`",
-            config_path.display()
-        ));
-        return;
-    }
-    dc.pass(&format!(
-        "MCP server registered in {}",
-        config_path.display()
-    ));
-
-    // Check tool auto-approval
-    let tools = config
-        .get("mcp_servers")
-        .and_then(|v| v.get("tracedecay"))
-        .and_then(|v| v.get("tools"))
-        .and_then(|v| v.as_table());
-
-    let auto_count = tools.map_or(0, |t| {
-        t.values()
-            .filter(|v| v.get("approval_mode").and_then(|m| m.as_str()) == Some("auto"))
-            .count()
-    });
-
-    let tools = tool_names();
-    let tools_len = tools.len();
-    if auto_count >= tools_len {
-        dc.pass(&format!("All {tools_len} tools set to auto-approve"));
-    } else if auto_count > 0 {
-        dc.warn(&format!(
-            "{auto_count}/{tools_len} tools auto-approved — run `tracedecay install --agent codex` to update"
-        ));
-    } else {
-        dc.warn("No tools auto-approved — Codex will prompt for each tool call");
-    }
-}
-
-/// Check AGENTS.md contains tracedecay rules.
-fn doctor_check_prompt_file(dc: &mut DoctorCounters, agents_md: &Path) {
-    if agents_md.exists() {
-        let has_rules = std::fs::read_to_string(agents_md)
-            .unwrap_or_default()
-            .contains("tracedecay");
-        if has_rules {
-            dc.pass(&format!(
-                "AGENTS.md contains tracedecay rules in {}",
-                agents_md.display()
-            ));
-        } else {
-            dc.fail(&format!(
-                "AGENTS.md missing tracedecay rules in {} — run `tracedecay install --local --agent codex` or `tracedecay install --agent codex`",
-                agents_md.display()
-            ));
-        }
-    } else {
-        dc.warn(&format!("{} does not exist", agents_md.display()));
-    }
-}
-
-/// Check hooks.json registers the tracedecay lifecycle hooks, and remind the
-/// user that Codex requires trusting them via `/hooks` before they run.
-fn doctor_check_hooks(dc: &mut DoctorCounters, hooks_path: &Path) {
+/// Check hooks.json registers the tracedecay lifecycle hooks, and report Codex
+/// hook trust state when the user-level config is available.
+fn doctor_check_hooks(dc: &mut DoctorCounters, hooks_path: &Path, config_path: Option<&Path>) {
     if !hooks_path.exists() {
         dc.warn(&format!(
             "{} not found — run `tracedecay install --agent codex` to add lifecycle hooks",
@@ -1380,9 +1337,22 @@ fn doctor_check_hooks(dc: &mut DoctorCounters, hooks_path: &Path) {
             CODEX_MANAGED_HOOKS.len(),
             hooks_path.display()
         ));
-        dc.info(
-            "Codex skips new/changed command hooks until trusted — run `/hooks` in Codex to trust the tracedecay hooks",
-        );
+        match config_path.and_then(|path| load_toml_file(path).ok().map(|config| (path, config))) {
+            Some((path, config)) => match codex_plugin_hook_trust_state(&config) {
+                CodexHookTrustState::Trusted => dc.info(&format!(
+                    "Codex hook trust entries recorded in {}",
+                    path.display()
+                )),
+                CodexHookTrustState::Missing(missing) => dc.info(&format!(
+                    "Codex skips new/changed command hooks until trusted — missing trust for {} in {}; run `/hooks` in Codex",
+                    missing.join(", "),
+                    path.display()
+                )),
+            },
+            None => dc.info(
+                "Codex skips new/changed command hooks until trusted — run `/hooks` in Codex to trust the tracedecay hooks",
+            ),
+        }
     } else {
         dc.warn(&format!(
             "tracedecay hook(s) missing for {} in {} — run `tracedecay install --local --agent codex` or `tracedecay install --agent codex`",
@@ -1476,6 +1446,57 @@ mod tests {
             "[features]\nmemories = false\n"
         )));
         assert!(!codex_native_memories_injection_enabled(&parse("")));
+    }
+
+    #[test]
+    fn codex_hook_trust_state_reports_all_trusted_entries() {
+        let config = r#"
+[hooks.state]
+
+[hooks.state."tracedecay@personal:hooks/hooks.json:post_tool_use:0:0"]
+trusted_hash = "sha256:post"
+
+[hooks.state."tracedecay@personal:hooks/hooks.json:session_start:0:0"]
+trusted_hash = "sha256:session"
+
+[hooks.state."tracedecay@personal:hooks/hooks.json:user_prompt_submit:0:0"]
+trusted_hash = "sha256:prompt"
+
+[hooks.state."tracedecay@personal:hooks/hooks.json:subagent_start:0:0"]
+trusted_hash = "sha256:subagent"
+
+[hooks.state."tracedecay@personal:hooks/hooks.json:post_compact:0:0"]
+trusted_hash = "sha256:compact"
+"#;
+        let config = toml::from_str::<toml::Value>(config).unwrap();
+
+        assert_eq!(
+            codex_plugin_hook_trust_state(&config),
+            CodexHookTrustState::Trusted
+        );
+    }
+
+    #[test]
+    fn codex_hook_trust_state_reports_missing_entries() {
+        let config = toml::from_str::<toml::Value>(
+            r#"
+[hooks.state]
+
+[hooks.state."tracedecay@personal:hooks/hooks.json:post_tool_use:0:0"]
+trusted_hash = "sha256:post"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            codex_plugin_hook_trust_state(&config),
+            CodexHookTrustState::Missing(vec![
+                "session_start".to_string(),
+                "user_prompt_submit".to_string(),
+                "subagent_start".to_string(),
+                "post_compact".to_string(),
+            ])
+        );
     }
 
     #[test]
