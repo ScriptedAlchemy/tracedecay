@@ -1330,12 +1330,16 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
     .await;
 
     // Nested-object parser style.
-    assert_schema_requires(&tools, "tracedecay_lcm_expand", &["session_id", "target"]);
+    assert_schema_requires(
+        &tools,
+        "tracedecay_lcm_expand",
+        &["provider", "session_id", "target"],
+    );
     assert_nested_schema_requires(&tools, "tracedecay_lcm_expand", &["target"], &["kind"]);
     expect_missing_argument_error(
         &cg,
         "tracedecay_lcm_expand",
-        json!({ "session_id": "session-1", "target": {} }),
+        json!({ "provider": "cursor", "session_id": "session-1", "target": {} }),
         "target.kind must be one of raw_message, summary_node, external_payload",
     )
     .await;
@@ -1443,6 +1447,10 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         .find(|tool| tool.name == "tracedecay_lcm_load_session")
         .expect("tracedecay_lcm_load_session definition");
     assert_eq!(load.input_schema["required"], json!(["session_id"]));
+    assert!(load.input_schema["properties"]["provider"]["description"]
+        .as_str()
+        .unwrap()
+        .contains("across all providers"));
     assert!(load.input_schema["properties"]
         .get("content_limit")
         .is_some());
@@ -1482,7 +1490,7 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         .expect("tracedecay_lcm_expand definition");
     assert_eq!(
         expand.input_schema["required"],
-        json!(["session_id", "target"])
+        json!(["provider", "session_id", "target"])
     );
     assert!(expand.input_schema["properties"].get("target").is_some());
     assert_eq!(
@@ -4365,6 +4373,7 @@ async fn lcm_project_root_storage_arg_is_not_rejected_as_selector() {
         &cg,
         "tracedecay_lcm_preflight",
         json!({
+            "provider": "cursor",
             "session_id": "stock-check-session",
             "project_root": project_root,
             "messages": [
@@ -4393,6 +4402,7 @@ async fn lcm_project_path_selector_is_rejected_before_dispatch() {
         &cg,
         "tracedecay_lcm_preflight",
         json!({
+            "provider": "cursor",
             "session_id": "stock-check-session",
             "project_path": project_path,
             "messages": [
@@ -8975,16 +8985,40 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     let scoped_default_provider_grep_payload: Value =
         serde_json::from_str(extract_text(&scoped_default_provider_grep.value)).unwrap();
     assert_eq!(scoped_default_provider_grep_payload["status"], "ok");
-    assert_eq!(scoped_default_provider_grep_payload["provider"], "cursor");
-    assert_eq!(scoped_default_provider_grep_payload["count"], 1);
+    assert_eq!(scoped_default_provider_grep_payload["provider"], "all");
+    assert_eq!(scoped_default_provider_grep_payload["count"], 2);
     assert_eq!(
         scoped_default_provider_grep_payload["hits"][0]["provider"],
-        "cursor"
+        "codex"
     );
     assert_eq!(
-        scoped_default_provider_grep_payload["hits"][0]["message_id"],
-        "cursor-provider-local-message"
+        scoped_default_provider_grep_payload["hits"][1]["provider"],
+        "cursor"
     );
+
+    let provider_local_load = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_load_session",
+        json!({
+            "session_id": "provider-local-session",
+            "limit": 5
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let provider_local_load_payload: Value =
+        serde_json::from_str(extract_text(&provider_local_load.value)).unwrap();
+    assert_eq!(provider_local_load_payload["status"], "ok");
+    assert_eq!(provider_local_load_payload["provider"], "all");
+    let loaded_providers = provider_local_load_payload["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|message| message["provider"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(loaded_providers, vec!["cursor", "codex"]);
 
     let described = handle_tool_call(
         &cg,
@@ -13522,15 +13556,15 @@ async fn lcm_read_only_tools_return_not_ingested_without_creating_sessions_db() 
         ),
         (
             "tracedecay_lcm_describe",
-            json!({"session_id": "ghost-session"}),
+            json!({"provider": "cursor", "session_id": "ghost-session"}),
         ),
         (
             "tracedecay_lcm_expand",
-            json!({"session_id": "ghost-session", "target": {"kind": "raw_message", "store_id": 1}}),
+            json!({"provider": "cursor", "session_id": "ghost-session", "target": {"kind": "raw_message", "store_id": 1}}),
         ),
         (
             "tracedecay_lcm_expand_query",
-            json!({"session_id": "ghost-session", "prompt": "anything"}),
+            json!({"provider": "cursor", "session_id": "ghost-session", "prompt": "anything"}),
         ),
     ] {
         let result = handle_tool_call(&cg, tool, args.clone(), None, None)
@@ -13583,6 +13617,7 @@ async fn lcm_expand_query_context_max_tokens_is_independent_of_max_tokens() {
         "tracedecay_lcm_expand_query",
         json!({
             "session_id": "test-session",
+            "provider": "cursor",
             "prompt": "what did we discuss?",
             "max_tokens": 500,
             "context_max_tokens": 48000,

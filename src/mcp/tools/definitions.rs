@@ -2392,7 +2392,7 @@ fn def_lcm_status() -> ToolDefinition {
             "properties": {
                 "provider": {
                     "type": "string",
-                    "description": "Provider id to inspect (default: cursor)."
+                    "description": "Optional provider id. Omit or use 'all' to inspect all providers."
                 },
                 "session_id": {
                     "type": "string",
@@ -2420,7 +2420,7 @@ fn def_lcm_doctor() -> ToolDefinition {
             "properties": {
                 "provider": {
                     "type": "string",
-                    "description": "Provider id to inspect (default: cursor)."
+                    "description": "Specific provider id to inspect or repair. Required; 'all' is not accepted for this lifecycle tool."
                 },
                 "session_id": {
                     "type": "string",
@@ -2463,7 +2463,8 @@ fn def_lcm_doctor() -> ToolDefinition {
                 "storage_scope": lcm_storage_scope_schema(),
                 "hermes_home": lcm_hermes_home_schema()
             },
-            "allOf": lcm_storage_scope_requires_hermes_home()
+            "allOf": lcm_storage_scope_requires_hermes_home(),
+            "required": ["provider"]
         }),
     )
 }
@@ -2478,7 +2479,7 @@ fn def_lcm_load_session() -> ToolDefinition {
             "properties": {
                 "provider": {
                     "type": "string",
-                    "description": "Provider id, default cursor."
+                    "description": "Optional provider id. Omit or use 'all' to load messages for this session id across all providers."
                 },
                 "session_id": {
                     "type": "string",
@@ -2616,7 +2617,7 @@ fn def_lcm_describe() -> ToolDefinition {
             "properties": {
                 "provider": {
                     "type": "string",
-                    "description": "Provider id, default cursor."
+                    "description": "Specific provider id. Required because describe targets are provider-local."
                 },
                 "session_id": {
                     "type": "string",
@@ -2644,7 +2645,7 @@ fn def_lcm_describe() -> ToolDefinition {
                 "hermes_home": lcm_hermes_home_schema()
             },
             "allOf": lcm_storage_scope_requires_hermes_home(),
-            "required": ["session_id"]
+            "required": ["provider", "session_id"]
         }),
     )
 }
@@ -2659,7 +2660,7 @@ fn def_lcm_expand() -> ToolDefinition {
             "properties": {
                 "provider": {
                     "type": "string",
-                    "description": "Provider id, default cursor."
+                    "description": "Specific provider id. Required because expansion targets are provider-local."
                 },
                 "session_id": {
                     "type": "string",
@@ -2714,7 +2715,7 @@ fn def_lcm_expand() -> ToolDefinition {
                 "hermes_home": lcm_hermes_home_schema()
             },
             "allOf": lcm_storage_scope_requires_hermes_home(),
-            "required": ["session_id", "target"]
+            "required": ["provider", "session_id", "target"]
         }),
     )
 }
@@ -2729,7 +2730,7 @@ fn def_lcm_expand_query() -> ToolDefinition {
             "properties": {
                 "provider": {
                     "type": "string",
-                    "description": "Provider id, default cursor."
+                    "description": "Specific provider id. Required because retrieval context is provider-local."
                 },
                 "session_id": {
                     "type": "string",
@@ -2775,7 +2776,7 @@ fn def_lcm_expand_query() -> ToolDefinition {
                 "hermes_home": lcm_hermes_home_schema()
             },
             "allOf": lcm_storage_scope_requires_hermes_home(),
-            "required": ["session_id", "prompt"]
+            "required": ["provider", "session_id", "prompt"]
         }),
     )
 }
@@ -2790,7 +2791,7 @@ fn def_lcm_preflight() -> ToolDefinition {
             "properties": {
                 "provider": {
                     "type": "string",
-                    "description": "Provider id, default cursor."
+                    "description": "Specific provider id. Required for compression lifecycle operations."
                 },
                 "session_id": {
                     "type": "string",
@@ -2865,7 +2866,8 @@ fn def_lcm_preflight() -> ToolDefinition {
                 "storage_scope": lcm_storage_scope_schema(),
                 "hermes_home": lcm_hermes_home_schema()
             },
-            "allOf": lcm_storage_scope_requires_hermes_home()
+            "allOf": lcm_storage_scope_requires_hermes_home(),
+            "required": ["provider", "session_id"]
         }),
     )
 }
@@ -2880,7 +2882,7 @@ fn def_lcm_compress() -> ToolDefinition {
             "properties": {
                 "provider": {
                     "type": "string",
-                    "description": "Provider id, default cursor."
+                    "description": "Specific provider id. Required for compression lifecycle operations."
                 },
                 "session_id": {
                     "type": "string",
@@ -2978,7 +2980,7 @@ fn def_lcm_compress() -> ToolDefinition {
                 "hermes_home": lcm_hermes_home_schema()
             },
             "allOf": lcm_storage_scope_requires_hermes_home(),
-            "required": ["session_id"]
+            "required": ["provider", "session_id"]
         }),
     )
 }
@@ -2993,7 +2995,7 @@ fn def_lcm_session_boundary() -> ToolDefinition {
             "properties": {
                 "provider": {
                     "type": "string",
-                    "description": "Provider id, default cursor."
+                    "description": "Specific provider id. Required for compression lifecycle operations."
                 },
                 "session_id": {
                     "type": "string",
@@ -3015,7 +3017,7 @@ fn def_lcm_session_boundary() -> ToolDefinition {
                 "hermes_home": lcm_hermes_home_schema()
             },
             "allOf": lcm_storage_scope_requires_hermes_home(),
-            "required": ["session_id"]
+            "required": ["provider", "session_id"]
         }),
     )
 }

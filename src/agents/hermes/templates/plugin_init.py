@@ -296,6 +296,18 @@ MESSAGE_DEPENDENT_TOOLS = frozenset((
     "tracedecay_lcm_preflight",
 ))
 
+STANDARD_HERMES_LCM_PROVIDER = "cursor"
+
+LCM_PROVIDER_LOCAL_TOOL_NAMES = frozenset((
+    "tracedecay_lcm_compress",
+    "tracedecay_lcm_describe",
+    "tracedecay_lcm_doctor",
+    "tracedecay_lcm_expand",
+    "tracedecay_lcm_expand_query",
+    "tracedecay_lcm_preflight",
+    "tracedecay_lcm_session_boundary",
+))
+
 # Direct duplicates of the memory provider's own tool surface
 # (fact_store / fact_feedback / memory_status). Skipped at register() time
 # when tracedecay is the active memory.provider so the same store is not
@@ -1858,7 +1870,9 @@ def _synthesize_expand_query_payload(retrieval, agent=None, **kwargs):
 def _handle_lcm_expand_query(args, **kwargs) -> str:
     kwargs = dict(kwargs)
     agent = kwargs.pop("agent", None)
-    retrieval = call_tracedecay_json("tracedecay_lcm_expand_query", args or {}, **kwargs)
+    args = dict(args or {})
+    args.setdefault("provider", STANDARD_HERMES_LCM_PROVIDER)
+    retrieval = call_tracedecay_json("tracedecay_lcm_expand_query", args, **kwargs)
     payload = _synthesize_expand_query_payload(retrieval, agent=agent, **kwargs)
     return json.dumps(payload)
 
@@ -2219,6 +2233,7 @@ class TraceDecayContextEngine(ContextEngine):
             return
         args = _storage_args(self.project_root, self.hermes_home)
         args.update({
+            "provider": STANDARD_HERMES_LCM_PROVIDER,
             "session_id": session_id,
             "old_session_id": old_session_id,
             "boundary_reason": boundary_reason,
@@ -2261,6 +2276,7 @@ class TraceDecayContextEngine(ContextEngine):
             )
         )
         args.update({
+            "provider": STANDARD_HERMES_LCM_PROVIDER,
             "session_id": self.active_session_id,
             "messages": messages,
             "current_tokens": current_tokens,
@@ -2469,6 +2485,8 @@ class TraceDecayContextEngine(ContextEngine):
         storage_args = _storage_args(self.project_root, self.hermes_home)
         for key, value in storage_args.items():
             tool_args.setdefault(key, value)
+        if tracedecay_name in LCM_PROVIDER_LOCAL_TOOL_NAMES:
+            tool_args.setdefault("provider", STANDARD_HERMES_LCM_PROVIDER)
         if tracedecay_name == "tracedecay_lcm_compress" and self.project_root:
             tool_args.setdefault("response_handle_project_root", self.project_root)
         if native_name in ("lcm_status", "lcm_doctor"):
@@ -2485,6 +2503,7 @@ class TraceDecayContextEngine(ContextEngine):
     def expand_query(self, prompt, query=None, node_ids=None, **kwargs):
         kwargs = dict(kwargs)
         args = self._tool_args(kwargs.pop("session_id", None))
+        args["provider"] = STANDARD_HERMES_LCM_PROVIDER
         args["prompt"] = prompt
         if query is not None:
             args["query"] = query
@@ -2903,6 +2922,7 @@ class TraceDecayContextEngine(ContextEngine):
             )
         )
         args.update({
+            "provider": STANDARD_HERMES_LCM_PROVIDER,
             "messages": messages,
             "current_tokens": current_tokens,
             "focus_topic": focus_topic,
@@ -3199,7 +3219,11 @@ class TracedecayMemoryProvider(MemoryProvider):
                 role = str(entry.get("role") or "user")
                 entry["id"] = f"tracedecay_sync_{batch_id}_{timestamp_ns}_{idx}_{role}"
         args = _storage_args(self.project_root, self.hermes_home)
-        args.update({"session_id": sid, "messages": turn_messages})
+        args.update({
+            "provider": STANDARD_HERMES_LCM_PROVIDER,
+            "session_id": sid,
+            "messages": turn_messages,
+        })
         try:
             tools.call_tracedecay_tool(
                 "tracedecay_lcm_preflight",
