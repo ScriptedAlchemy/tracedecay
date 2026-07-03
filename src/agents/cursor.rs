@@ -1291,7 +1291,7 @@ mod tests {
         std::fs::create_dir_all(install_dir.join("skills/tracedecay-review-diff")).unwrap();
         std::fs::write(
             install_dir.join("skills/tracedecay-review-diff/SKILL.md"),
-            "retired dispatcher skill",
+            "---\nname: tracedecay-review-diff\n---\nApply the `tracedecay:reviewing-changes` skill.\n",
         )
         .unwrap();
         // Also simulate a released install that still ships one of the retired
@@ -1300,7 +1300,7 @@ mod tests {
         std::fs::create_dir_all(install_dir.join("skills/recalling-project-memory")).unwrap();
         std::fs::write(
             install_dir.join("skills/recalling-project-memory/SKILL.md"),
-            "retired memory skill",
+            "---\nname: recalling-project-memory\n---\nRecall facts with `tracedecay_fact_store`.\n",
         )
         .unwrap();
 
@@ -1324,7 +1324,7 @@ mod tests {
         std::fs::create_dir_all(install_dir.join("skills/tracedecay-arch")).unwrap();
         std::fs::write(
             install_dir.join("skills/tracedecay-arch/SKILL.md"),
-            "legacy dispatcher skill",
+            "---\nname: tracedecay-arch\n---\nApply the `tracedecay:code-health` skill.\n",
         )
         .unwrap();
 
@@ -1347,7 +1347,7 @@ mod tests {
         std::fs::create_dir_all(install_dir.join("skills/totally-retired-skill")).unwrap();
         std::fs::write(
             install_dir.join("skills/totally-retired-skill/SKILL.md"),
-            "stale skill not in the current bundle",
+            "---\nname: totally-retired-skill\n---\nRun `tracedecay_search` first.\n",
         )
         .unwrap();
 
