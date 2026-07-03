@@ -53,6 +53,10 @@ where
 
 /// Truncates a string to the maximum response character limit, appending
 /// a truncation notice if necessary.
+///
+/// Legacy, irreversible truncation: no retrieval handle is stored. Prefer
+/// [`truncate_text_with_handle`] for plain-text tool output.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn truncate_response(s: &str) -> String {
     debug_assert!(!s.is_empty(), "truncate_response called with empty string");
     if s.len() <= MAX_RESPONSE_CHARS {
@@ -154,6 +158,14 @@ pub(super) fn truncated_json_envelope_with_handle(
         }
         end = end.saturating_sub(1024);
     }
+}
+
+/// Reversible truncation for plain-text tool output. Returns `text` unchanged
+/// when it fits within [`MAX_RESPONSE_CHARS`]; otherwise stores the full text
+/// via the response-handle machinery and returns the readable markdown
+/// truncation envelope (preview plus `rh_` retrieval handle).
+pub(super) fn truncate_text_with_handle(project_root: Option<&Path>, text: &str) -> String {
+    truncated_markdown_with_handle(project_root, text)
 }
 
 fn truncated_markdown_with_handle(project_root: Option<&Path>, text: &str) -> String {
@@ -635,6 +647,33 @@ mod tests {
             ResponseHandleLookup::Found(record) => assert_eq!(record.content, long),
             other => panic!("stored markdown response should be retrievable, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn truncate_text_with_handle_returns_short_text_unchanged() {
+        let short = "hello world";
+        assert_eq!(truncate_text_with_handle(None, short), short);
+    }
+
+    #[test]
+    fn truncate_text_with_handle_stores_reversible_envelope() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let long = "- indexed file entry\n".repeat(3_000);
+
+        let result = truncate_text_with_handle(Some(dir.path()), &long);
+
+        assert!(result.len() <= MAX_RESPONSE_CHARS);
+        assert!(result.starts_with("# Truncated Response"));
+        assert!(result.contains("## Preview"));
+        assert!(result.contains("tracedecay_retrieve"));
+        let Some(handle) = result
+            .split("handle `")
+            .nth(1)
+            .and_then(|tail| tail.split('`').next())
+        else {
+            panic!("truncate_text_with_handle envelope should include handle");
+        };
+        assert!(handle.starts_with("rh_"));
     }
 
     #[test]

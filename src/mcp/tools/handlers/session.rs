@@ -8,6 +8,9 @@ use super::super::render::{self, truncated_json_envelope_with_handle, Md};
 use super::support::{profile_root_for_global_db, project_registry_context, safe_profile_relpath};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::{GlobalDb, ProjectRegistryContext};
+use crate::mcp::response_handles::{
+    observe_response_truncation, store_response_handle, RESPONSE_RETRIEVE_TOOL,
+};
 use crate::mcp::tools::{ToolResult, MAX_RESPONSE_CHARS};
 use crate::sessions::cursor::HermesProfileDbReadOnly;
 use crate::sessions::lcm::compression_decision::{self, AssemblyCapInput};
@@ -18,7 +21,7 @@ use crate::sessions::lcm::{
     LcmSummarizerMode, LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT,
 };
 use crate::sessions::{ProviderScope, SessionSearchScope};
-use crate::tracedecay::TraceDecay;
+use crate::tracedecay::{current_timestamp, TraceDecay};
 
 const DEFAULT_LCM_CONTENT_LIMIT: usize = 4096;
 const DEFAULT_LCM_EXPAND_QUERY_CONTEXT_LIMIT: usize = 32_000;
@@ -52,7 +55,6 @@ fn tool_json_with_md<F: FnOnce() -> String>(
 }
 
 const MESSAGE_SEARCH_SNIPPET_CHARS: usize = 240;
-const LCM_GREP_SNIPPET_CHARS: usize = 240;
 
 /// Renders `tracedecay_message_search` results as compact markdown. Each hit
 /// shows provider, session (id + title), role, timestamp, and score with a
@@ -283,9 +285,10 @@ fn lcm_preflight_tool_json(
     let text = if formatted.len() <= MAX_RESPONSE_CHARS {
         formatted
     } else {
+        let started = std::time::Instant::now();
         let compact = compact_lcm_preflight_payload(value, formatted.len(), 8, 512);
         let compact_text = serde_json::to_string(&compact).unwrap_or_default();
-        if compact_text.len() <= MAX_RESPONSE_CHARS {
+        let text = if compact_text.len() <= MAX_RESPONSE_CHARS {
             compact_text
         } else {
             let minimal = compact_lcm_preflight_payload(value, formatted.len(), 4, 256);
@@ -296,7 +299,19 @@ fn lcm_preflight_tool_json(
                 let floor = compact_lcm_preflight_payload(value, formatted.len(), 1, 64);
                 bounded_lcm_contract_text(&floor)
             }
-        }
+        };
+        // Contract-preserving compaction drops data without storing a handle,
+        // so record it as an irreversible truncation for telemetry parity with
+        // the render-layer truncation paths.
+        observe_response_truncation(
+            formatted.len(),
+            text.len(),
+            false,
+            current_timestamp(),
+            "compacted_no_handle",
+            started.elapsed(),
+        );
+        text
     };
     ToolResult::new(
         json!({ "content": [{ "type": "text", "text": text }] }),
@@ -443,25 +458,49 @@ fn lcm_expand_query_tool_json(
     let text = if formatted.len() <= MAX_RESPONSE_CHARS {
         formatted
     } else if needs_synthesis {
+        let started = std::time::Instant::now();
         let compact =
             compact_lcm_expand_query_payload(value, formatted.len(), CompactTier::Standard);
-        let text = serde_json::to_string(&compact).unwrap_or_default();
-        if text.len() <= MAX_RESPONSE_CHARS {
-            text
+        let compact_text = serde_json::to_string(&compact).unwrap_or_default();
+        let (text, handle_status) = if compact_text.len() <= MAX_RESPONSE_CHARS {
+            (compact_text, "compacted_no_handle")
         } else {
             let fallback = compact_lcm_expand_query_payload(
                 value,
                 formatted.len(),
                 CompactTier::Minimal {
-                    compact_chars: text.len(),
+                    compact_chars: compact_text.len(),
                 },
             );
-            serde_json::to_string(&fallback).unwrap_or_default()
-        }
+            let fallback_text = serde_json::to_string(&fallback).unwrap_or_default();
+            if fallback_text.len() <= MAX_RESPONSE_CHARS {
+                (fallback_text, "compacted_no_handle")
+            } else {
+                // Even the Minimal tier overflowed (e.g. oversized cloned
+                // pagination or match metadata). Enforce a hard floor that
+                // stays valid JSON and keeps the Hermes synthesis contract
+                // keys, storing the full payload behind a handle when we can.
+                bounded_lcm_expand_query_floor_text(project_root, value, &formatted)
+            }
+        };
+        // The synthesis contract path shrinks the payload in place instead of
+        // going through the render-layer envelope, so record the truncation
+        // explicitly. It is reversible only when the floor stored a handle.
+        observe_response_truncation(
+            formatted.len(),
+            text.len(),
+            handle_status == "stored",
+            current_timestamp(),
+            handle_status,
+            started.elapsed(),
+        );
+        text
     } else {
         truncated_json_envelope_with_handle(project_root, &formatted)
     };
-    let text = if text.len() <= MAX_RESPONSE_CHARS || needs_synthesis {
+    // Safety net: every branch above is already bounded (the floor guarantees
+    // it for needs_synthesis), but never emit an unbounded body regardless.
+    let text = if text.len() <= MAX_RESPONSE_CHARS {
         text
     } else {
         truncated_json_envelope_with_handle(project_root, &text)
@@ -469,6 +508,139 @@ fn lcm_expand_query_tool_json(
     ToolResult::new(
         json!({ "content": [{ "type": "text", "text": text }] }),
         Vec::new(),
+    )
+}
+
+/// Hard floor for a `needs_synthesis` expand-query payload that is still over
+/// [`MAX_RESPONSE_CHARS`] after [`CompactTier::Minimal`] compaction. Emits a
+/// bounded JSON object that preserves the Hermes bridge synthesis contract
+/// (`status`, `needs_synthesis`, `synthesis_prompt`, bounded scalars) while
+/// dropping the unbounded arrays (`context_blocks`, `matches`, `node_ids`,
+/// `context_pagination`). When a project root is available the full original
+/// payload is stored behind a retrieval handle so nothing is lost; the handle
+/// is surfaced as `response_handle` (a key the Hermes plugin recognizes).
+///
+/// Returns the serialized text plus the telemetry handle status
+/// (`"stored"` when the full payload was cached, `"compacted_no_handle"`
+/// otherwise).
+fn bounded_lcm_expand_query_floor_text(
+    project_root: Option<&Path>,
+    value: &Value,
+    formatted: &str,
+) -> (String, &'static str) {
+    const FLOOR_SCALAR_CHARS: usize = 512;
+    const FLOOR_AUX_JSON_CHARS: usize = 2_048;
+
+    let handle = project_root
+        .and_then(|root| store_response_handle(root, formatted, current_timestamp()).ok());
+    let handle_status: &'static str = if handle.is_some() {
+        "stored"
+    } else {
+        "compacted_no_handle"
+    };
+
+    let mut object = Map::new();
+    for key in [
+        "status",
+        "provider",
+        "session_id",
+        "storage_scope",
+        "answer",
+    ] {
+        insert_bounded_scalar_field(&mut object, value, key, FLOOR_SCALAR_CHARS);
+    }
+    for key in [
+        "needs_synthesis",
+        "max_tokens",
+        "context_max_tokens",
+        "context_budget",
+        "context_truncated",
+    ] {
+        if let Some(field) = value.get(key) {
+            object.insert(key.to_string(), field.clone());
+        }
+    }
+    insert_bounded_text_field(&mut object, value, "prompt", FLOOR_SCALAR_CHARS);
+    insert_bounded_text_field(&mut object, value, "query", FLOOR_SCALAR_CHARS);
+    // Contract-adjacent recovery metadata survives only when it is itself
+    // small; anything larger is recoverable via the response handle.
+    for key in ["context_recovery_hint", "summary_request"] {
+        if let Some(field) = value.get(key) {
+            let serialized_len = serde_json::to_string(field).map_or(usize::MAX, |s| s.len());
+            if serialized_len <= FLOOR_AUX_JSON_CHARS {
+                object.insert(key.to_string(), field.clone());
+            }
+        }
+    }
+
+    // Drop the unbounded arrays entirely; the synthesis prompt below tells the
+    // bridge the context was elided and pagination/node ids are recoverable.
+    for key in ["context_blocks", "matches", "node_ids", "context_pagination"] {
+        object.insert(key.to_string(), json!([]));
+        object.insert(format!("{key}_truncated_for_mcp"), json!(true));
+    }
+    object.insert(
+        "synthesis_prompt".to_string(),
+        compact_synthesis_prompt_with_limits(
+            value,
+            &json!([]),
+            FLOOR_SCALAR_CHARS,
+            FLOOR_SCALAR_CHARS,
+        ),
+    );
+
+    object.insert("mcp_response_truncated".to_string(), json!(true));
+    object.insert("contract_truncated".to_string(), json!(true));
+    object.insert(
+        "mcp_original_response_chars".to_string(),
+        json!(formatted.len()),
+    );
+    object.insert(
+        "mcp_truncation_reason".to_string(),
+        json!(
+            "expand-query response exceeded the minimal synthesis contract budget; unbounded context arrays were dropped"
+        ),
+    );
+    if let Some(record) = &handle {
+        object.insert("response_handle".to_string(), json!(record.handle));
+        object.insert("retrieve_tool".to_string(), json!(RESPONSE_RETRIEVE_TOOL));
+        object.insert(
+            "retrieve_expires_at".to_string(),
+            json!(record.expires_at),
+        );
+        object.insert(
+            "retrieve_instruction".to_string(),
+            json!(format!(
+                "The full expand-query response ({} chars) was stored locally and expires at {}. Call `{RESPONSE_RETRIEVE_TOOL}` with handle `{}` to recover the dropped context_blocks, matches, node_ids, and context_pagination.",
+                formatted.len(),
+                record.expires_at,
+                record.handle
+            )),
+        );
+    }
+
+    let text = serde_json::to_string(&Value::Object(object)).unwrap_or_default();
+    if text.len() <= MAX_RESPONSE_CHARS {
+        return (text, handle_status);
+    }
+    // Absolute floor: every retained field above is bounded, so this branch is
+    // effectively unreachable, but never emit an unbounded body.
+    (
+        serde_json::to_string(&json!({
+            "status": value.get("status").cloned().unwrap_or_else(|| json!("ok")),
+            "needs_synthesis": value
+                .get("needs_synthesis")
+                .cloned()
+                .unwrap_or_else(|| json!(true)),
+            "context_blocks": [],
+            "matches": [],
+            "mcp_response_truncated": true,
+            "contract_truncated": true,
+            "mcp_truncation_reason":
+                "expand-query response exceeded the minimum synthesis contract budget",
+        }))
+        .unwrap_or_default(),
+        handle_status,
     )
 }
 
@@ -2329,5 +2501,153 @@ mod tests {
         let parsed: Value = serde_json::from_str(json_text).unwrap();
         assert_eq!(parsed["status"], "ok");
         assert_eq!(parsed["should_compress"], false);
+    }
+
+    /// Builds an expand-query payload that overflows even the `Minimal`
+    /// compaction tier: `Minimal` clones `context_pagination` items whole (up
+    /// to 10) and `matches` metadata fields verbatim, so oversized entries
+    /// there survive both compaction passes and force the bounded floor.
+    fn oversized_needs_synthesis_expand_query_payload() -> Value {
+        let context_blocks: Vec<Value> = (0..60)
+            .map(|i| {
+                json!({
+                    "kind": "raw_message",
+                    "node_id": format!("node-{i}"),
+                    "content": "c".repeat(2_000),
+                })
+            })
+            .collect();
+        let matches: Vec<Value> = (0..40)
+            .map(|i| {
+                json!({
+                    "kind": "match",
+                    "node_id": format!("match-{i}-{}", "m".repeat(1_500)),
+                    "snippet": "s".repeat(600),
+                })
+            })
+            .collect();
+        let context_pagination: Vec<Value> = (0..10)
+            .map(|i| json!({ "cursor": format!("{i}-{}", "p".repeat(4_000)) }))
+            .collect();
+        json!({
+            "status": "ok",
+            "provider": "claude",
+            "session_id": "s1",
+            "storage_scope": "project",
+            "needs_synthesis": true,
+            "prompt": "What changed in the auth flow?",
+            "context_blocks": context_blocks,
+            "matches": matches,
+            "node_ids": (0..30).map(|i| format!("n{i}")).collect::<Vec<_>>(),
+            "context_pagination": context_pagination,
+        })
+    }
+
+    #[test]
+    fn lcm_expand_query_needs_synthesis_floor_is_bounded_valid_json() {
+        // Regression (S3): a needs_synthesis payload that is still over budget
+        // after Minimal compaction must NOT be emitted unbounded. The floor
+        // must stay within MAX_RESPONSE_CHARS, remain valid JSON, and keep the
+        // Hermes synthesis contract keys — with a retrieval handle when a
+        // project root is available.
+        let dir = tempfile::TempDir::new().unwrap();
+        let payload = oversized_needs_synthesis_expand_query_payload();
+
+        // Sanity: this payload really does defeat both compaction tiers.
+        let minimal = compact_lcm_expand_query_payload(
+            &payload,
+            serde_json::to_string(&payload).unwrap().len(),
+            CompactTier::Minimal { compact_chars: 0 },
+        );
+        assert!(
+            serde_json::to_string(&minimal).unwrap().len() > MAX_RESPONSE_CHARS,
+            "test payload must overflow the Minimal tier to exercise the floor"
+        );
+
+        let result =
+            lcm_expand_query_tool_json(Some(dir.path()), &json!({"format": "json"}), &payload);
+        let text = result.value["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.len() <= MAX_RESPONSE_CHARS,
+            "floor must bound the response: {} chars",
+            text.len()
+        );
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(parsed["needs_synthesis"], true);
+        assert_eq!(parsed["status"], "ok");
+        assert_eq!(parsed["mcp_response_truncated"], true);
+        assert_eq!(parsed["contract_truncated"], true);
+        // The synthesis contract survives: the bridge can still synthesize.
+        assert!(parsed["synthesis_prompt"]["user"].as_str().is_some());
+        assert!(parsed["synthesis_prompt"]["system"].as_str().is_some());
+        // Unbounded arrays are dropped but flagged.
+        assert_eq!(parsed["context_blocks"], json!([]));
+        assert_eq!(parsed["context_blocks_truncated_for_mcp"], true);
+        assert_eq!(parsed["matches_truncated_for_mcp"], true);
+        // Nothing is lost: the full payload is stored behind a handle.
+        let handle = parsed["response_handle"].as_str().unwrap();
+        assert!(handle.starts_with("rh_"), "{handle}");
+        assert_eq!(parsed["retrieve_tool"], "tracedecay_retrieve");
+    }
+
+    #[test]
+    fn lcm_expand_query_needs_synthesis_floor_is_bounded_without_project_root() {
+        // Even when no project root is available (no handle storage), the
+        // floor must still emit bounded, contract-preserving JSON.
+        let payload = oversized_needs_synthesis_expand_query_payload();
+        let result = lcm_expand_query_tool_json(None, &json!({"format": "json"}), &payload);
+        let text = result.value["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.len() <= MAX_RESPONSE_CHARS,
+            "floor must bound the response: {} chars",
+            text.len()
+        );
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(parsed["needs_synthesis"], true);
+        assert_eq!(parsed["mcp_response_truncated"], true);
+        assert!(parsed.get("response_handle").is_none());
+    }
+
+    #[test]
+    fn lcm_expand_query_in_budget_and_synthesis_compaction_paths_unchanged() {
+        // In-budget payloads pass through verbatim.
+        let small = json!({
+            "status": "ok",
+            "needs_synthesis": true,
+            "prompt": "q",
+            "context_blocks": [],
+        });
+        let result = lcm_expand_query_tool_json(None, &json!({"format": "json"}), &small);
+        let text = result.value["content"][0]["text"].as_str().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(text).unwrap(),
+            small,
+            "in-budget payload must be emitted verbatim"
+        );
+
+        // Oversized-but-compactable synthesis payloads still use the tiers
+        // (no floor markers, no handle keys).
+        let blocks: Vec<Value> = (0..40)
+            .map(|i| json!({"kind": "raw_message", "node_id": format!("n{i}"), "content": "c".repeat(1_000)}))
+            .collect();
+        let compactable = json!({
+            "status": "ok",
+            "needs_synthesis": true,
+            "prompt": "q",
+            "context_blocks": blocks,
+        });
+        let result = lcm_expand_query_tool_json(None, &json!({"format": "json"}), &compactable);
+        let text = result.value["content"][0]["text"].as_str().unwrap();
+        assert!(text.len() <= MAX_RESPONSE_CHARS);
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(parsed["needs_synthesis"], true);
+        assert!(
+            parsed.get("response_handle").is_none(),
+            "tier compaction must not reach the handle-storing floor"
+        );
+        assert!(
+            !parsed["context_blocks"].as_array().unwrap().is_empty(),
+            "tier compaction keeps bounded context blocks"
+        );
     }
 }
