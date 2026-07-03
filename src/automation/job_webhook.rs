@@ -249,26 +249,48 @@ fn read_status<R: Read>(reader: &mut R) -> Result<u16> {
     let mut bytes = Vec::new();
     let mut buf = [0_u8; 512];
     loop {
-        let n = reader.read(&mut buf).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to read webhook response: {e}"),
-        })?;
-        if n == 0 {
-            break;
-        }
-        bytes.extend_from_slice(&buf[..n]);
-        if bytes.windows(4).any(|window| window == b"\r\n\r\n") || bytes.len() > 8192 {
-            break;
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                bytes.extend_from_slice(&buf[..n]);
+                if bytes.windows(4).any(|window| window == b"\r\n\r\n") || bytes.len() > 8192 {
+                    break;
+                }
+            }
+            // A server that sends its full response and then closes abruptly can
+            // surface the close as a read error before we observe the end of the
+            // headers — e.g. a Windows peer resets the connection (os error
+            // 10053) right after `write_all`. If a complete status line already
+            // arrived the delivery succeeded, so parse what we have rather than
+            // discarding it; only propagate the error when no status was read.
+            Err(e) => {
+                if parse_status_line(&bytes).is_some() {
+                    break;
+                }
+                return Err(TraceDecayError::Config {
+                    message: format!("failed to read webhook response: {e}"),
+                });
+            }
         }
     }
-    let header = String::from_utf8_lossy(&bytes);
+    parse_status_line(&bytes).ok_or_else(|| TraceDecayError::Config {
+        message: "webhook response did not include an HTTP status".to_string(),
+    })
+}
+
+/// Parses the numeric HTTP status from a (possibly partial) response head.
+/// Returns `None` until a terminated status line has arrived so a truncated
+/// first line is never mistaken for a status code.
+fn parse_status_line(bytes: &[u8]) -> Option<u16> {
+    if !bytes.contains(&b'\n') {
+        return None;
+    }
+    let header = String::from_utf8_lossy(bytes);
     header
         .lines()
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|status| status.parse::<u16>().ok())
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "webhook response did not include an HTTP status".to_string(),
-        })
 }
 
 fn request_target(url: &Url) -> String {
@@ -329,6 +351,50 @@ mod tests {
     use std::sync::mpsc;
     use std::thread;
 
+    /// A reader that yields a canned buffer once, then fails every subsequent
+    /// read with `ConnectionAborted` — models a peer that sends its full
+    /// response and then resets the socket (Windows os error 10053).
+    struct ResetAfterResponse {
+        response: Vec<u8>,
+        sent: bool,
+    }
+
+    impl Read for ResetAfterResponse {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.sent {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionAborted,
+                    "connection aborted",
+                ));
+            }
+            self.sent = true;
+            let n = self.response.len().min(buf.len());
+            buf[..n].copy_from_slice(&self.response[..n]);
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn read_status_accepts_a_complete_response_before_a_connection_reset() {
+        let mut reader = ResetAfterResponse {
+            response: b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n".to_vec(),
+            sent: false,
+        };
+        // The trailing `\r\n\r\n` never arrives before the reset, so the loop
+        // hits the read error — but a full status line was already received.
+        assert_eq!(read_status(&mut reader).unwrap(), 202);
+    }
+
+    #[test]
+    fn read_status_propagates_a_reset_with_no_status_line() {
+        // `sent: true` makes the very first read fail, so no bytes arrive.
+        let mut reader = ResetAfterResponse {
+            response: Vec::new(),
+            sent: true,
+        };
+        assert!(read_status(&mut reader).is_err());
+    }
+
     #[test]
     fn ipv6_embedded_ipv4_targets_are_blocked() -> std::result::Result<(), std::net::AddrParseError>
     {
@@ -374,6 +440,14 @@ mod tests {
             }
             let _ = tx.send((peer, String::from_utf8_lossy(&request).to_string()));
             let _ = stream.write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n");
+            let _ = stream.flush();
+            // Close gracefully: signal end-of-response with a half-close and let
+            // the client read the full response before the socket is dropped. A
+            // bare drop can send an RST on some platforms (Windows os error
+            // 10053), aborting the client mid-read.
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+            let mut drain = [0_u8; 64];
+            while stream.read(&mut drain).map(|n| n > 0).unwrap_or(false) {}
         });
 
         let url = Url::parse("http://webhook.example.test/hook?token=abc")?;
