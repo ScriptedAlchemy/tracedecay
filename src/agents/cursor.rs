@@ -1292,26 +1292,28 @@ mod tests {
         );
     }
 
-    /// Upgrading over an older install must sweep bundle directories the
-    /// current bundle no longer ships (the deprecated `commands/` surface),
-    /// instead of stranding them as unmanaged leftovers forever.
+    /// Upgrading over an install that shipped the `tracedecay-*` dispatcher
+    /// *skills* (now re-expressed as native `commands/` slash commands) must
+    /// sweep those retired skill dirs instead of stranding them as unmanaged
+    /// leftovers, so Cursor does not list both the retired dispatcher skill and
+    /// the new native command.
     #[test]
-    fn reinstall_sweeps_legacy_commands_dir() {
+    fn reinstall_sweeps_retired_dispatcher_skill_dirs() {
         let tmp = TempDir::new().unwrap();
         let install_dir = tmp.path().join("tracedecay");
         write_embedded_plugin(&install_dir, "tracedecay").expect("embedded install should succeed");
-        // Simulate a pre-migration install that shipped commands/.
-        std::fs::create_dir_all(install_dir.join("commands")).unwrap();
+        // Simulate a pre-migration install that shipped the dispatcher skill.
+        std::fs::create_dir_all(install_dir.join("skills/tracedecay-review-diff")).unwrap();
         std::fs::write(
-            install_dir.join("commands/tracedecay-arch.md"),
-            "legacy command",
+            install_dir.join("skills/tracedecay-review-diff/SKILL.md"),
+            "retired dispatcher skill",
         )
         .unwrap();
 
         remove_cursor_plugin_install(&install_dir).expect("replace should succeed");
         assert!(
             !install_dir.exists(),
-            "legacy commands/ must be swept so the tracedecay-only dir is fully removed"
+            "retired dispatcher skill dirs must be swept so the tracedecay-only dir is fully removed"
         );
     }
 
