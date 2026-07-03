@@ -292,6 +292,13 @@ fn known_marketplaces_path(home: &Path) -> PathBuf {
 /// Returns the deploy dir.
 fn deploy_plugin_bundle(home: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
     let deploy_dir = plugin_deploy_dir(home);
+    // Clean-replace: wipe the tracedecay-owned deploy dir before writing the
+    // fresh bundle, so a file the bundle no longer ships (e.g. a retired skill
+    // dir) does not linger across upgrades. Only remove a directory we
+    // exclusively own — confirmed by the deployed marketplace/plugin manifest
+    // naming tracedecay — so an unrelated dir squatting on the path is never
+    // nuked.
+    clean_replace_owned_deploy_dir(&deploy_dir)?;
     for (relative, contents) in claude_embedded_plugin_files() {
         let rendered = render_plugin_file(relative, contents, tracedecay_bin)?;
         safe_write_text_file(&deploy_dir.join(relative), &rendered, None)?;
@@ -303,6 +310,40 @@ fn deploy_plugin_bundle(home: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
     Ok(deploy_dir)
 }
 
+/// True when a deployed marketplace dir is tracedecay-owned: its plugin or
+/// marketplace manifest names the tracedecay plugin. A fresh (missing) dir is
+/// trivially safe to write into.
+fn deploy_dir_is_tracedecay(deploy_dir: &Path) -> bool {
+    let names_tracedecay = |manifest: &Path| {
+        load_json_file(manifest)
+            .get("name")
+            .and_then(|v| v.as_str())
+            == Some("tracedecay")
+    };
+    names_tracedecay(&deploy_dir.join(".claude-plugin/plugin.json"))
+        || names_tracedecay(&deploy_dir.join(".claude-plugin/marketplace.json"))
+}
+
+/// Remove the tracedecay-owned deploy dir so the next write is a clean replace.
+/// No-op when the dir is missing. Refuses (errors) when the dir exists but is
+/// not tracedecay-owned, so an unrelated directory is never deleted.
+fn clean_replace_owned_deploy_dir(deploy_dir: &Path) -> Result<()> {
+    if !deploy_dir.exists() {
+        return Ok(());
+    }
+    if !deploy_dir_is_tracedecay(deploy_dir) {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "refusing to replace non-tracedecay plugin directory {}",
+                deploy_dir.display()
+            ),
+        });
+    }
+    std::fs::remove_dir_all(deploy_dir).map_err(|e| TraceDecayError::Config {
+        message: format!("failed to remove {}: {e}", deploy_dir.display()),
+    })
+}
+
 /// Apply per-file deploy-time substitutions:
 /// - `plugin.json`: stamp `version` from the crate version.
 /// - `.mcp.json`: set the server `command` to the absolute binary path.
@@ -311,8 +352,40 @@ fn render_plugin_file(relative: &str, contents: &str, tracedecay_bin: &str) -> R
     match relative {
         ".claude-plugin/plugin.json" => stamp_plugin_version(contents),
         ".mcp.json" => set_mcp_command(contents, tracedecay_bin),
-        "hooks/hooks.json" => Ok(contents.replace(TRACEDECAY_BIN_PLACEHOLDER, tracedecay_bin)),
+        "hooks/hooks.json" => set_hook_commands(contents, tracedecay_bin),
         _ => Ok(contents.to_string()),
+    }
+}
+
+/// Replace the `__TRACEDECAY_BIN__` placeholder in every hook `command` field
+/// via serde, so a binary path containing a JSON-special character (`"`, a
+/// control char) is escaped instead of producing invalid JSON. Mirrors
+/// [`set_mcp_command`]'s parse/set/re-serialize approach.
+fn set_hook_commands(raw: &str, tracedecay_bin: &str) -> Result<String> {
+    let mut hooks: serde_json::Value = serde_json::from_str(raw)?;
+    if let Some(events) = hooks.get_mut("hooks").and_then(|v| v.as_object_mut()) {
+        for entries in events.values_mut().filter_map(|v| v.as_array_mut()) {
+            for entry in entries {
+                if let Some(inner) = entry.get_mut("hooks").and_then(|v| v.as_array_mut()) {
+                    for handler in inner {
+                        substitute_command_placeholder(handler, tracedecay_bin);
+                    }
+                }
+                // Also handle the flat schema where the entry itself carries a
+                // `command` field.
+                substitute_command_placeholder(entry, tracedecay_bin);
+            }
+        }
+    }
+    Ok(format!("{}\n", serde_json::to_string_pretty(&hooks)?))
+}
+
+/// Set `value["command"]` to `tracedecay_bin` when it is exactly the
+/// placeholder string. Assigning a `serde_json::Value` string escapes any
+/// JSON-special characters on re-serialization.
+fn substitute_command_placeholder(value: &mut serde_json::Value, tracedecay_bin: &str) {
+    if value.get("command").and_then(|c| c.as_str()) == Some(TRACEDECAY_BIN_PLACEHOLDER) {
+        value["command"] = json!(tracedecay_bin);
     }
 }
 
@@ -407,6 +480,12 @@ fn unregister_marketplace(home: &Path) -> Result<()> {
 /// Merge `enabledPlugins.tracedecay@tracedecay = true` into settings,
 /// preserving existing keys. Idempotent.
 fn enable_plugin(settings: &mut serde_json::Value) {
+    // `Value`'s `IndexMut<&str>` panics if the parent is a non-object,
+    // non-null value (e.g. a user `settings.json` with `"enabledPlugins": "x"`).
+    // Coerce it to an object first, mirroring the `register_marketplace` guard.
+    if !settings["enabledPlugins"].is_object() && !settings["enabledPlugins"].is_null() {
+        settings["enabledPlugins"] = json!({});
+    }
     settings["enabledPlugins"][PLUGIN_IDENTIFIER] = json!(true);
     eprintln!("\x1b[32m✔\x1b[0m Enabled plugin {PLUGIN_IDENTIFIER}");
 }
@@ -649,6 +728,12 @@ fn install_permissions(settings: &mut serde_json::Value, tool_permissions: &[Str
     }
     allow.sort();
     allow.dedup();
+    // Coerce a non-object `permissions` parent (e.g. a user `settings.json`
+    // with `"permissions": []`) to an object before indexing, so the
+    // assignment below never panics on `Value`'s `IndexMut`.
+    if !settings["permissions"].is_object() && !settings["permissions"].is_null() {
+        settings["permissions"] = json!({});
+    }
     settings["permissions"]["allow"] =
         serde_json::Value::Array(allow.into_iter().map(serde_json::Value::String).collect());
     eprintln!("\x1b[32m✔\x1b[0m Added tool permissions");
@@ -656,6 +741,12 @@ fn install_permissions(settings: &mut serde_json::Value, tool_permissions: &[Str
 
 /// Marker heading of the tracedecay-managed CLAUDE.md rules block.
 const CLAUDE_MD_MARKER: &str = "## MANDATORY: No Explore Agents When Tracedecay Is Available";
+/// The one `## ` sub-heading the managed block owns (see
+/// [`claude_md_rules_text`]). The block range extends across exactly this
+/// heading — never any arbitrary line containing "tracedecay", which would
+/// wrongly absorb a user's own `## …tracedecay…` heading on uninstall.
+const CLAUDE_MD_OWNED_SUBHEADING: &str =
+    "## When you spawn an Explore agent in a tracedecay-enabled project";
 /// Display-case marker written by older versions.
 const CLAUDE_MD_DISPLAY_MARKER: &str =
     "## MANDATORY: No Explore Agents When TraceDecay Is Available";
@@ -697,7 +788,11 @@ fn claude_md_rules_block_range(contents: &str, markers: &[&str]) -> Option<std::
                     let abs = search_from + pos;
                     let heading_start = abs + 1; // skip the leading '\n'
                     let heading_line = contents[heading_start..].lines().next().unwrap_or("");
-                    if heading_line.contains("tracedecay") {
+                    // Only extend across the block's KNOWN owned sub-heading.
+                    // Matching any line merely containing "tracedecay" would
+                    // absorb (and delete) a user's own `## …tracedecay…`
+                    // heading placed after the block.
+                    if heading_line.trim_end() == CLAUDE_MD_OWNED_SUBHEADING {
                         search_from = heading_start + heading_line.len();
                     } else {
                         break abs;
@@ -1516,13 +1611,23 @@ mod tests {
             ".mcp.json",
             "hooks/hooks.json",
             "README.md",
-            "agents/code-explorer.md",
-            "agents/code-health-auditor.md",
-            "agents/session-historian.md",
         ] {
             assert!(
                 deploy.contains(expected),
                 "Claude deploy set is missing {expected}"
+            );
+        }
+
+        // Every agent on disk under plugin/agents is deployed — dir-walk rather
+        // than hardcode, so a future agent added to the shared source tree but
+        // not wired into Claude's deploy set is caught here.
+        let agents_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/agents");
+        for entry in std::fs::read_dir(&agents_root).expect("plugin/agents readable") {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            let expected = format!("agents/{name}");
+            assert!(
+                deploy.contains(&expected),
+                "Claude deploy set is missing agent {expected}"
             );
         }
 
@@ -1567,6 +1672,81 @@ mod tests {
         assert_eq!(
             mcp["mcpServers"]["tracedecay"]["command"].as_str().unwrap(),
             "/abs/bin/tracedecay"
+        );
+    }
+
+    /// A binary path carrying a JSON-special char must be escaped via serde so
+    /// the deployed hooks.json stays valid JSON (regression: a raw
+    /// `str::replace` into the JSON text produced invalid output).
+    #[test]
+    fn deploy_escapes_special_chars_in_binary_path() {
+        let home = tempfile::tempdir().unwrap();
+        let weird_bin = "/opt/td \"quote\"/tracedecay";
+        let deploy_dir = deploy_plugin_bundle(home.path(), weird_bin).unwrap();
+
+        let hooks_raw = std::fs::read_to_string(deploy_dir.join("hooks/hooks.json")).unwrap();
+        // Must parse — a raw replace would have produced invalid JSON here.
+        let hooks: serde_json::Value = serde_json::from_str(&hooks_raw)
+            .expect("hooks.json must stay valid JSON after binary-path substitution");
+        assert!(
+            !hooks_raw.contains(TRACEDECAY_BIN_PLACEHOLDER),
+            "placeholder must be fully substituted"
+        );
+        let command = hooks["hooks"]["Stop"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert_eq!(command, weird_bin, "command must be the exact binary path");
+    }
+
+    /// Redeploy must be a CLEAN REPLACE of the owned marketplace dir: a stale
+    /// file the current bundle no longer ships (e.g. a retired skill dir) is
+    /// gone after a redeploy, while the fresh bundle is present.
+    #[test]
+    fn deploy_is_a_clean_replace_dropping_stale_files() {
+        let home = tempfile::tempdir().unwrap();
+        let deploy_dir = deploy_plugin_bundle(home.path(), "/bin/tracedecay").unwrap();
+        // A stale skill dir the current bundle does not ship.
+        let stale = deploy_dir.join("skills/totally-retired-skill");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("SKILL.md"), "stale skill").unwrap();
+
+        // Redeploy (the install/update path).
+        deploy_plugin_bundle(home.path(), "/bin/tracedecay").unwrap();
+
+        assert!(
+            !stale.exists(),
+            "a stale skill dir must be gone after a clean-replace redeploy"
+        );
+        assert!(
+            deploy_dir.join(".claude-plugin/plugin.json").exists(),
+            "the fresh bundle must be present after redeploy"
+        );
+    }
+
+    /// The clean replace must refuse to delete a marketplace dir tracedecay
+    /// does not own (no tracedecay plugin/marketplace manifest), so an
+    /// unrelated dir squatting on the path is never nuked.
+    #[test]
+    fn deploy_refuses_to_replace_non_tracedecay_dir() {
+        let home = tempfile::tempdir().unwrap();
+        let deploy_dir = plugin_deploy_dir(home.path());
+        std::fs::create_dir_all(deploy_dir.join(".claude-plugin")).unwrap();
+        std::fs::write(
+            deploy_dir.join(".claude-plugin/plugin.json"),
+            r#"{"name":"someone-elses-plugin"}"#,
+        )
+        .unwrap();
+        std::fs::write(deploy_dir.join("user-file.txt"), "keep me").unwrap();
+
+        let err = deploy_plugin_bundle(home.path(), "/bin/tracedecay")
+            .expect_err("must refuse a non-tracedecay dir");
+        assert!(
+            err.to_string().contains("non-tracedecay"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            deploy_dir.join("user-file.txt").exists(),
+            "an unowned dir must be left untouched"
         );
     }
 
@@ -1617,6 +1797,52 @@ mod tests {
         assert_eq!(
             known["tracedecay"]["source"]["source"].as_str().unwrap(),
             "directory"
+        );
+    }
+
+    /// A settings.json whose `enabledPlugins`/`permissions` parents are the
+    /// wrong JSON type (a string / an array) must not panic install — the
+    /// guards coerce them to objects. Regression for `Value`'s `IndexMut`
+    /// panicking on a non-object parent.
+    #[test]
+    fn install_handles_malformed_settings_parents() {
+        let home = tempfile::tempdir().unwrap();
+        let claude_dir = home.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::write(
+            claude_dir.join("settings.json"),
+            r#"{"enabledPlugins":"nope","permissions":[]}"#,
+        )
+        .unwrap();
+
+        ClaudeIntegration
+            .install(&install_ctx(home.path()))
+            .expect("install must handle malformed settings parents gracefully");
+
+        let settings: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(claude_dir.join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(settings["enabledPlugins"][PLUGIN_IDENTIFIER], json!(true));
+        assert!(settings["permissions"]["allow"].is_array());
+    }
+
+    /// `enable_plugin` guards a non-object `enabledPlugins` parent.
+    #[test]
+    fn enable_plugin_coerces_non_object_parent() {
+        let mut settings = json!({ "enabledPlugins": "garbage" });
+        enable_plugin(&mut settings);
+        assert_eq!(settings["enabledPlugins"][PLUGIN_IDENTIFIER], json!(true));
+    }
+
+    /// `install_permissions` guards a non-object `permissions` parent.
+    #[test]
+    fn install_permissions_coerces_non_object_parent() {
+        let mut settings = json!({ "permissions": [] });
+        install_permissions(&mut settings, &["mcp__tracedecay__search".to_string()]);
+        assert_eq!(
+            settings["permissions"]["allow"],
+            json!(["mcp__tracedecay__search"])
         );
     }
 
@@ -1709,6 +1935,39 @@ mod tests {
         let after_second = std::fs::read_to_string(home.path().join(".claude.json")).ok();
         assert_eq!(after_first, after_second);
         assert!(!config_managed_mcp_present(home.path()));
+    }
+
+    /// The managed-block range must extend across only its own owned
+    /// sub-heading, not a user's own `## …tracedecay…` heading placed after
+    /// the block — otherwise uninstall would swallow the user's section.
+    #[test]
+    fn uninstall_preserves_user_tracedecay_heading_after_block() {
+        let home = tempfile::tempdir().unwrap();
+        let claude_md = home.path().join("CLAUDE.md");
+        install_claude_md_rules(&claude_md).unwrap();
+
+        // Append a user-authored heading whose text contains "tracedecay".
+        let user_section =
+            "\n## Using tracedecay in CI\n\nRun `tracedecay serve` in the pipeline.\n";
+        let mut contents = std::fs::read_to_string(&claude_md).unwrap();
+        contents.push_str(user_section);
+        std::fs::write(&claude_md, &contents).unwrap();
+
+        uninstall_claude_md_rules(&claude_md);
+
+        let after = std::fs::read_to_string(&claude_md).unwrap();
+        assert!(
+            after.contains("## Using tracedecay in CI"),
+            "the user's own tracedecay heading must survive uninstall"
+        );
+        assert!(
+            after.contains("Run `tracedecay serve` in the pipeline."),
+            "the user's own section body must survive uninstall"
+        );
+        assert!(
+            !after.contains(CLAUDE_MD_MARKER),
+            "the managed block itself must be removed"
+        );
     }
 
     #[test]
