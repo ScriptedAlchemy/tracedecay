@@ -505,15 +505,15 @@ fn write_codex_plugin_files(
 }
 
 fn codex_plugin_manifest(raw: &str) -> Result<String> {
-    let mut manifest: serde_json::Value = serde_json::from_str(raw)?;
-    manifest["version"] = json!(env!("CARGO_PKG_VERSION"));
-    Ok(format!("{}\n", serde_json::to_string_pretty(&manifest)?))
+    super::plugin_bundle::stamp_manifest_version(raw)
 }
 
 fn codex_plugin_mcp(raw: &str, tracedecay_bin: &str, scope: InstallScope) -> Result<String> {
-    let mut mcp: serde_json::Value = serde_json::from_str(raw)?;
+    // Reuse the shared command rewrite, then layer Codex's scope-specific
+    // args/env on top of the result.
+    let stamped = super::plugin_bundle::set_mcp_command(raw, tracedecay_bin)?;
+    let mut mcp: serde_json::Value = serde_json::from_str(&stamped)?;
     let server = &mut mcp["mcpServers"]["tracedecay"];
-    server["command"] = json!(tracedecay_bin);
     match scope {
         InstallScope::Global => {
             server["args"] = json!(["serve"]);

@@ -36,6 +36,26 @@
 //! Composed per-host view = `GENERATED_SKILL_FILES` (recursively embedded from
 //! `plugin/skills/`, filtered per host) ∪ `<HOST>_MANIFEST_FILES` and extras.
 
+use crate::errors::Result;
+
+/// Stamp the plugin manifest `version` field with the crate version, returning
+/// pretty-printed JSON with a trailing newline. Shared by every host installer
+/// (Claude/Cursor/Codex), which all render the same manifest round-trip.
+pub(crate) fn stamp_manifest_version(raw: &str) -> Result<String> {
+    let mut manifest: serde_json::Value = serde_json::from_str(raw)?;
+    manifest["version"] = serde_json::json!(env!("CARGO_PKG_VERSION"));
+    Ok(format!("{}\n", serde_json::to_string_pretty(&manifest)?))
+}
+
+/// Point the MCP config's `mcpServers.tracedecay.command` at the resolved
+/// binary path, returning pretty-printed JSON with a trailing newline. Claude
+/// and Cursor use this directly; Codex layers scope-specific args/env on top.
+pub(crate) fn set_mcp_command(raw: &str, bin: &str) -> Result<String> {
+    let mut mcp: serde_json::Value = serde_json::from_str(raw)?;
+    mcp["mcpServers"]["tracedecay"]["command"] = serde_json::json!(bin);
+    Ok(format!("{}\n", serde_json::to_string_pretty(&mcp)?))
+}
+
 /// One embedded plugin file: `relative` is its deploy path (unchanged from the
 /// legacy per-host bundles), `contents` is embedded from the shared `plugin/`
 /// tree at compile time.

@@ -269,15 +269,11 @@ fn write_embedded_plugin(install_dir: &Path, tracedecay_bin: &str) -> Result<()>
 }
 
 fn cursor_plugin_manifest(raw: &str) -> Result<String> {
-    let mut manifest: serde_json::Value = serde_json::from_str(raw)?;
-    manifest["version"] = json!(env!("CARGO_PKG_VERSION"));
-    Ok(format!("{}\n", serde_json::to_string_pretty(&manifest)?))
+    super::plugin_bundle::stamp_manifest_version(raw)
 }
 
 fn cursor_plugin_mcp(raw: &str, tracedecay_bin: &str) -> Result<String> {
-    let mut mcp: serde_json::Value = serde_json::from_str(raw)?;
-    mcp["mcpServers"]["tracedecay"]["command"] = json!(tracedecay_bin);
-    Ok(format!("{}\n", serde_json::to_string_pretty(&mcp)?))
+    super::plugin_bundle::set_mcp_command(raw, tracedecay_bin)
 }
 
 fn cursor_plugin_hooks(raw: &str, tracedecay_bin: &str) -> Result<String> {
@@ -397,15 +393,8 @@ fn sweep_retired_bundle_skill_dirs(install_dir: &Path) {
 /// True when a Cursor `SKILL.md` carries a tracedecay authorship marker, marking
 /// the skill dir as tracedecay-owned (and therefore safe to sweep when retired).
 fn skill_file_has_tracedecay_marker(skill_file: &Path) -> bool {
-    std::fs::read_to_string(skill_file).is_ok_and(|contents| {
-        contents.lines().map(str::trim).any(|line| {
-            line.starts_with("name: tracedecay:")
-                || line.starts_with("description: TraceDecay ")
-                || line.contains("TraceDecay MCP")
-                || line.contains("tracedecay_")
-                || line.contains("`tracedecay:")
-        })
-    })
+    std::fs::read_to_string(skill_file)
+        .is_ok_and(|contents| super::skill_contents_have_tracedecay_marker(&contents))
 }
 
 fn cursor_plugin_dir_is_tracedecay(install_dir: &Path) -> bool {
@@ -417,7 +406,7 @@ fn cursor_plugin_dir_is_tracedecay(install_dir: &Path) -> bool {
 }
 
 fn cursor_plugin_dir_has_only_managed_files(install_dir: &Path) -> bool {
-    let Ok(entries) = collect_regular_files(install_dir) else {
+    let Ok(entries) = super::collect_regular_files(install_dir) else {
         return false;
     };
     let managed = cursor_plugin_managed_paths(install_dir);
@@ -431,25 +420,6 @@ fn cursor_plugin_managed_paths(install_dir: &Path) -> Vec<PathBuf> {
         .collect();
     paths.push(install_dir.join("rules/tracedecay-memory-digest.mdc"));
     paths
-}
-
-fn collect_regular_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    collect_regular_files_inner(root, &mut out)?;
-    Ok(out)
-}
-
-fn collect_regular_files_inner(root: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(root)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            collect_regular_files_inner(&entry.path(), out)?;
-        } else if file_type.is_file() {
-            out.push(entry.path());
-        }
-    }
-    Ok(())
 }
 
 fn legacy_mcp_has_tracedecay(mcp_path: &Path) -> bool {
@@ -943,7 +913,7 @@ mod tests {
 
     /// Every file under a single skill dir, relative to it, forward-slashed.
     fn skill_dir_tree_files(skill_dir: &Path) -> Vec<String> {
-        let mut files: Vec<String> = collect_regular_files(skill_dir)
+        let mut files: Vec<String> = crate::agents::collect_regular_files(skill_dir)
             .expect("skill dir readable")
             .into_iter()
             .filter_map(|path| {
@@ -1491,7 +1461,7 @@ mod tests {
             std::fs::read_to_string(cursor_dir.join("rules/tracedecay.mdc")).unwrap(),
             rule
         );
-        let mut files = collect_regular_files(&cursor_dir).unwrap();
+        let mut files = crate::agents::collect_regular_files(&cursor_dir).unwrap();
         files.sort();
         assert_eq!(
             files,
