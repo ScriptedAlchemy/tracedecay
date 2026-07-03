@@ -161,14 +161,8 @@ async fn claude_transcript_populates_searchable_messages() {
     assert!(user_metadata.get("usage").is_none());
     let session_metadata: serde_json::Value =
         serde_json::from_str(results[0].session.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(
-        session_metadata["claude_session_cwd"].as_str(),
-        Some(project.to_string_lossy().as_ref())
-    );
-    assert_eq!(
-        session_metadata["claude_session_worktree"].as_str(),
-        Some(project.to_string_lossy().as_ref())
-    );
+    assert_metadata_path_eq(&session_metadata["claude_session_cwd"], &project);
+    assert_metadata_path_eq(&session_metadata["claude_session_worktree"], &project);
     assert_eq!(
         session_metadata["claude_session_location_provenance"].as_str(),
         Some("transcript_session")
