@@ -6,7 +6,14 @@ TraceDecay plugins (`~/.cursor/plugins/local/tracedecay/`, `~/.codex/…`), the
 repo sources (`cursor-plugin/`, `codex-plugin/`, `src/hooks/`,
 `src/mcp/tools/definitions.rs`), and TraceDecay's own analytics
 (`http://127.0.0.1:7341/api/plugins/analytics/*`,
-`~/.tracedecay/projects/proj_b4a8bbe4953823c4/hook_analytics.jsonl`).*
+`~/.tracedecay/projects/proj_<local-id>/hook_analytics.jsonl`).*
+
+> **Status (2026-07-03):** the P1 catalog consolidation recommended in §6 --
+> including the new `using-tracedecay` skill — was implemented by
+> [PR #225](https://github.com/ScriptedAlchemy/tracedecay/pull/225) the day
+> after this snapshot. Skill names, directory counts, and the
+> `memorize-subject` duplication described below refer to the
+> pre-restructure catalog.
 
 ## TL;DR
 
@@ -168,7 +175,7 @@ Two structural notes:
 ## 3. The measured usage picture
 
 All numbers from the live dashboard (`/api/plugins/analytics/*`) and
-`hook_analytics.jsonl` for project `proj_b4a8bbe4953823c4`, sampled 2026-07-02.
+`hook_analytics.jsonl` for project `proj_<local-id>`, sampled 2026-07-02.
 
 ### 3.1 MCP tool distribution: TraceDecay is used as a file reader
 

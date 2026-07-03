@@ -126,9 +126,12 @@ impl TranscriptSource for ClaudeSource {
                 messages.push(message);
             }
         }
-        if messages.is_empty() {
-            return None;
-        }
+        // No early return when `messages` is empty: this source scans every
+        // ~/.claude/projects slug and relies on the per-row cwd filter above,
+        // so transcripts belonging to other projects legitimately parse to
+        // zero messages. Returning the (empty) transcript lets `ingest_one`
+        // persist the advanced cursor; returning `None` would pin the cursor
+        // at 0 and re-read + re-filter the whole file on every sweep.
 
         let project = project_root.to_string_lossy().to_string();
         let draft = SessionDraft {
