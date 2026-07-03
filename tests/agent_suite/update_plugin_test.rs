@@ -599,8 +599,6 @@ fn codex_update_plugin_migrates_legacy_config_only_install_to_plugin() {
         "[mcp_servers.tracedecay]\ncommand = \"/old/bin/tracedecay\"\nargs = [\"serve\"]\n",
     )
     .unwrap();
-    let before = bytes(&codex_dir.join("config.toml"));
-
     let codex = get_integration("codex").unwrap();
     let outcome = codex
         .update_plugin(&ctx_with_project(home.path(), NEW_BIN, &project_root))
@@ -609,7 +607,10 @@ fn codex_update_plugin_migrates_legacy_config_only_install_to_plugin() {
         panic!("expected codex update_plugin to migrate legacy config to plugin");
     };
     assert_eq!(paths, vec![home.path().join("plugins/tracedecay")]);
-    assert_eq!(bytes(&codex_dir.join("config.toml")), before);
+    assert!(
+        !codex_dir.join("config.toml").exists(),
+        "Codex update-plugin should remove the migrated legacy config-managed install"
+    );
     assert_codex_bundle_contains_bin(&home.path().join("plugins/tracedecay"), NEW_BIN);
     assert_codex_marketplace_entry(&codex_marketplace_path(home.path()), "./plugins/tracedecay");
 }

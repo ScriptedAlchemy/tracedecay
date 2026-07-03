@@ -125,9 +125,8 @@ impl AgentIntegration for CodexIntegration {
             return Ok(UpdatePluginOutcome::Refreshed(refreshed));
         }
 
-        let target = if codex_plugin_manifest_path(&ctx.home).exists()
-            || codex_legacy_config_has_tracedecay(&ctx.home)
-        {
+        let legacy_config_install = codex_legacy_config_has_tracedecay(&ctx.home);
+        let target = if codex_plugin_manifest_path(&ctx.home).exists() || legacy_config_install {
             Some(plugin_dir.clone())
         } else {
             None
@@ -137,6 +136,9 @@ impl AgentIntegration for CodexIntegration {
             return Ok(UpdatePluginOutcome::NotInstalled);
         };
         install_codex_personal_bootstrap(&ctx.home, &ctx.tracedecay_bin)?;
+        if legacy_config_install {
+            sweep_legacy_global_codex_config(&ctx.home);
+        }
         Ok(UpdatePluginOutcome::Refreshed(vec![target]))
     }
 
@@ -193,11 +195,7 @@ impl AgentIntegration for CodexIntegration {
         eprintln!("\n\x1b[1mCodex CLI integration\x1b[0m");
         let local_plugin_dir = codex_repo_plugin_install_dir(&ctx.project_path);
         if local_plugin_dir.join(".codex-plugin/plugin.json").exists() {
-            doctor_check_plugin_dir(
-                dc,
-                &local_plugin_dir,
-                Some(&ctx.home.join(".codex/config.toml")),
-            );
+            doctor_check_plugin_dir(dc, &local_plugin_dir, None);
             doctor_check_marketplace_entry(
                 dc,
                 &codex_repo_marketplace_path(&ctx.project_path),
@@ -483,8 +481,9 @@ fn write_codex_plugin_files(
 ) -> Result<()> {
     for (relative, contents) in codex_embedded_plugin_files() {
         let rendered = match relative {
-            ".codex-plugin/plugin.json" => codex_plugin_manifest(contents)?,
+            ".codex-plugin/plugin.json" => codex_plugin_manifest(contents, scope)?,
             ".mcp.json" => codex_plugin_mcp(contents, tracedecay_bin, scope)?,
+            "hooks/hooks.json" if scope == InstallScope::ProjectLocal => continue,
             "hooks/hooks.json" => codex_plugin_hooks(contents, tracedecay_bin)?,
             _ => contents.to_string(),
         };
@@ -493,8 +492,17 @@ fn write_codex_plugin_files(
     Ok(())
 }
 
-fn codex_plugin_manifest(raw: &str) -> Result<String> {
-    super::plugin_bundle::stamp_manifest_version(raw)
+fn codex_plugin_manifest(raw: &str, scope: InstallScope) -> Result<String> {
+    let stamped = super::plugin_bundle::stamp_manifest_version(raw)?;
+    if scope != InstallScope::ProjectLocal {
+        return Ok(stamped);
+    }
+
+    let mut manifest: serde_json::Value = serde_json::from_str(&stamped)?;
+    if let Some(object) = manifest.as_object_mut() {
+        object.remove("hooks");
+    }
+    Ok(format!("{}\n", serde_json::to_string_pretty(&manifest)?))
 }
 
 fn codex_plugin_mcp(raw: &str, tracedecay_bin: &str, scope: InstallScope) -> Result<String> {
@@ -1311,7 +1319,9 @@ fn doctor_check_plugin_dir(dc: &mut DoctorCounters, plugin_dir: &Path, config_pa
             mcp_path.display()
         ));
     }
-    doctor_check_hooks(dc, &plugin_dir.join("hooks/hooks.json"), config_path);
+    if let Some(config_path) = config_path {
+        doctor_check_hooks(dc, &plugin_dir.join("hooks/hooks.json"), Some(config_path));
+    }
 }
 
 /// Check hooks.json registers the tracedecay lifecycle hooks, and report Codex

@@ -389,7 +389,7 @@ fn assert_codex_plugin_bundle(
     plugin_dir: &Path,
     expected_command: &str,
     expected_args: serde_json::Value,
-    expected_global_env: bool,
+    expected_global_bundle: bool,
 ) {
     let manifest = read_json(&plugin_dir.join(".codex-plugin/plugin.json"));
     assert_eq!(manifest["name"], "tracedecay");
@@ -397,14 +397,21 @@ fn assert_codex_plugin_bundle(
     assert_eq!(manifest["license"], "MIT");
     assert_eq!(manifest["skills"], "./skills/");
     assert_eq!(manifest["mcpServers"], "./.mcp.json");
-    assert_eq!(manifest["hooks"], "./hooks/hooks.json");
+    if expected_global_bundle {
+        assert_eq!(manifest["hooks"], "./hooks/hooks.json");
+    } else {
+        assert!(
+            manifest.get("hooks").is_none(),
+            "repo-local Codex plugin should not declare lifecycle hooks"
+        );
+    }
 
     let mcp = read_json(&plugin_dir.join(".mcp.json"));
     let server = &mcp["mcpServers"]["tracedecay"];
     assert_eq!(server["type"], "stdio");
     assert_eq!(server["command"], expected_command);
     assert_eq!(server["args"], expected_args);
-    if expected_global_env {
+    if expected_global_bundle {
         assert_eq!(server["env"]["TRACEDECAY_ENABLE_GLOBAL_DB"], "1");
     } else {
         assert!(
@@ -413,14 +420,22 @@ fn assert_codex_plugin_bundle(
         );
     }
 
-    let hooks = read_json(&plugin_dir.join("hooks/hooks.json"));
-    assert_codex_hooks_registered(&hooks);
-    assert_command_contains_expected_bin(
-        &hooks,
-        "SessionStart",
-        "hook-codex-session-start",
-        expected_command,
-    );
+    let hooks_path = plugin_dir.join("hooks/hooks.json");
+    if expected_global_bundle {
+        let hooks = read_json(&hooks_path);
+        assert_codex_hooks_registered(&hooks);
+        assert_command_contains_expected_bin(
+            &hooks,
+            "SessionStart",
+            "hook-codex-session-start",
+            expected_command,
+        );
+    } else {
+        assert!(
+            !hooks_path.exists(),
+            "repo-local Codex plugin should not ship lifecycle hooks"
+        );
+    }
 
     let skill = std::fs::read_to_string(plugin_dir.join("skills/exploring-code/SKILL.md"))
         .expect("Codex plugin should ship tracedecay steering skills");
@@ -3463,7 +3478,7 @@ fn test_codex_local_install_creates_repo_plugin_bundle_and_marketplace() {
     );
     assert!(
         !project.path().join(".codex/hooks.json").exists(),
-        "local Codex install should bundle hooks in the repo plugin"
+        "local Codex install should not write project Codex hooks"
     );
     assert!(
         !project.path().join("AGENTS.md").exists(),
@@ -3628,7 +3643,7 @@ fn test_codex_global_install_bundles_hooks_in_plugin() {
 }
 
 #[test]
-fn test_codex_local_install_bundles_hooks_in_plugin() {
+fn test_codex_local_install_does_not_bundle_hooks() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
 
@@ -3636,14 +3651,9 @@ fn test_codex_local_install_bundles_hooks_in_plugin() {
 
     let hooks_path = codex_project_plugin_install_dir(project.path()).join("hooks/hooks.json");
     assert!(
-        hooks_path.exists(),
-        "local Codex install should bundle hooks in the repo plugin"
+        !hooks_path.exists(),
+        "local Codex install should not bundle project-local hooks"
     );
-    let hooks = read_json(&hooks_path);
-    assert_codex_hooks_registered(&hooks);
-    // Local install must use the resolved absolute tracedecay binary path.
-    assert_command_contains_bin(&hooks, "SessionStart", "hook-codex-session-start");
-
     assert!(
         !home.path().join(".codex/hooks.json").exists(),
         "local install must not write the global Codex hooks config"
@@ -3652,11 +3662,6 @@ fn test_codex_local_install_bundles_hooks_in_plugin() {
         !project.path().join(".codex/hooks.json").exists(),
         "local install must not write project Codex hooks config"
     );
-}
-
-fn assert_command_contains_bin(hooks: &serde_json::Value, event: &str, needle: &str) {
-    let expected = expected_tracedecay_bin();
-    assert_command_contains_expected_bin(hooks, event, needle, &expected);
 }
 
 fn assert_command_contains_expected_bin(
