@@ -143,7 +143,9 @@ pub(super) fn truncated_json_envelope_with_handle(
             observe_response_truncation(
                 formatted.len(),
                 text.len(),
-                true,
+                // Reversible only when the full body was actually stored; a
+                // failed/absent handle means the preview is all that survives.
+                handle.record.is_some(),
                 now,
                 truncation_handle_status(project_root, &handle),
                 started.elapsed(),

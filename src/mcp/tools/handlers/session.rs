@@ -4,7 +4,7 @@ use std::sync::{LazyLock, Mutex};
 
 use serde_json::{json, Map, Value};
 
-use super::super::render::{self, truncated_json_envelope_with_handle};
+use super::super::render::{self, truncated_json_envelope_with_handle, Md};
 use super::support::{profile_root_for_global_db, project_registry_context, safe_profile_relpath};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::{GlobalDb, ProjectRegistryContext};
@@ -32,11 +32,159 @@ const MAX_LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_CHARS: usize = 1_024;
 const MAX_LCM_EXPAND_QUERY_SYNTHESIS_PROMPT_CHARS: usize = 2_048;
 
 fn tool_json(project_root: Option<&Path>, args: &Value, value: &Value) -> ToolResult {
-    let text = render::finalize(project_root, args, value, || render::generic_md(value));
+    tool_json_with_md(project_root, args, value, || render::generic_md(value))
+}
+
+/// Like [`tool_json`] but renders the markdown (default-format) body with a
+/// caller-supplied closure instead of the generic key/value renderer. The
+/// `format:"json"` path is unaffected — it always serializes `value` compactly.
+fn tool_json_with_md<F: FnOnce() -> String>(
+    project_root: Option<&Path>,
+    args: &Value,
+    value: &Value,
+    md: F,
+) -> ToolResult {
+    let text = render::finalize(project_root, args, value, md);
     ToolResult::new(
         json!({ "content": [{ "type": "text", "text": text }] }),
         Vec::new(),
     )
+}
+
+const MESSAGE_SEARCH_SNIPPET_CHARS: usize = 240;
+const LCM_GREP_SNIPPET_CHARS: usize = 240;
+
+/// Renders `tracedecay_message_search` results as compact markdown. Each hit
+/// shows provider, session (id + title), role, timestamp, and score with a
+/// plain-text snippet of the message body — deliberately dropping the raw
+/// `metadata_json`, `source_path`, and `transcript_path` blobs that the generic
+/// renderer would dump verbatim into table cells. Pass `format:"json"` to get
+/// the full structured records.
+fn render_message_search_md(value: &Value) -> String {
+    let mut md = Md::new();
+    md.heading(2, "Transcript Search");
+    for key in ["query", "provider", "scope"] {
+        let field = render::field_str(value, key);
+        if !field.is_empty() {
+            md.field(key, field);
+        }
+    }
+    md.field("count", &render::field_i64(value, "count").to_string());
+    let results = value.get("results").and_then(Value::as_array);
+    match results {
+        Some(results) if !results.is_empty() => {
+            md.blank();
+            for hit in results {
+                append_message_search_hit(&mut md, hit);
+            }
+        }
+        _ => {
+            md.blank().empty_note("No matching messages.");
+        }
+    }
+    md.render()
+}
+
+fn append_message_search_hit(md: &mut Md, hit: &Value) {
+    let session = hit.get("session");
+    let message = hit.get("message");
+    let provider = message
+        .and_then(|m| m.get("provider"))
+        .or_else(|| session.and_then(|s| s.get("provider")))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let role = message
+        .and_then(|m| m.get("role"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let score = hit.get("score").and_then(Value::as_f64).unwrap_or(0.0);
+    let session_id = session
+        .and_then(|s| s.get("session_id"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let title = session
+        .and_then(|s| s.get("title"))
+        .and_then(Value::as_str)
+        .filter(|title| !title.is_empty());
+    let timestamp = message
+        .and_then(|m| m.get("timestamp"))
+        .and_then(Value::as_i64);
+
+    let mut header = format!("**{role}** · {provider} · score {score:.1}");
+    if let Some(ts) = timestamp {
+        header.push_str(&format!(" · t={ts}"));
+    }
+    md.bullet(&header);
+    let mut locator = format!("session `{session_id}`");
+    if let Some(title) = title {
+        locator.push_str(&format!(" — {title}"));
+    }
+    md.line(&format!("  {locator}"));
+    let text = message
+        .and_then(|m| m.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let snippet = message_text_snippet(text, MESSAGE_SEARCH_SNIPPET_CHARS);
+    if !snippet.is_empty() {
+        md.line(&format!("  {snippet}"));
+    }
+}
+
+/// Best-effort single-line plain-text snippet from a stored message body.
+/// Message text is frequently itself JSON (tool_use / tool_result blocks), so
+/// pull the human-readable fields out rather than showing an escaped blob.
+fn message_text_snippet(text: &str, max_chars: usize) -> String {
+    let readable = readable_message_text(text, max_chars.saturating_mul(8));
+    let collapsed = readable.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (snippet, truncated) = truncate_chars(&collapsed, max_chars);
+    if truncated {
+        format!("{snippet}…")
+    } else {
+        snippet
+    }
+}
+
+fn readable_message_text(text: &str, budget: usize) -> String {
+    let trimmed = text.trim_start();
+    if trimmed.starts_with('[') || trimmed.starts_with('{') {
+        if let Ok(value) = serde_json::from_str::<Value>(text) {
+            let mut out = String::new();
+            collect_readable_text(&value, &mut out, budget);
+            if !out.trim().is_empty() {
+                return out;
+            }
+        }
+    }
+    text.to_string()
+}
+
+fn collect_readable_text(value: &Value, out: &mut String, budget: usize) {
+    if out.len() >= budget {
+        return;
+    }
+    match value {
+        Value::String(s) if !s.is_empty() => {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(s);
+        }
+        Value::String(_) => {}
+        Value::Array(arr) => {
+            for item in arr {
+                collect_readable_text(item, out, budget);
+            }
+        }
+        Value::Object(map) => {
+            // Prefer human-facing fields; ignore ids, kinds, and metadata blobs.
+            for key in ["text", "content", "thinking", "input"] {
+                if let Some(field) = map.get(key) {
+                    collect_readable_text(field, out, budget);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -119,9 +267,17 @@ fn registry_session_db_candidates(
     Ok(candidates)
 }
 
-fn lcm_preflight_tool_json(args: &Value, value: &Value) -> ToolResult {
+fn lcm_preflight_tool_json(
+    project_root: Option<&Path>,
+    args: &Value,
+    value: &Value,
+) -> ToolResult {
     if !render::wants_json(args) {
-        return tool_json(None, args, value);
+        // Markdown default: route through the normal renderer so an oversized
+        // preflight payload is truncated *with* a retrieval handle. Passing the
+        // project root is what lets `truncated_markdown_with_handle` store the
+        // full body — without it the truncation would be irreversible.
+        return tool_json(project_root, args, value);
     }
     let formatted = serde_json::to_string(value).unwrap_or_default();
     let text = if formatted.len() <= MAX_RESPONSE_CHARS {
@@ -1516,29 +1672,31 @@ pub(super) async fn handle_message_search(
         .await
     };
 
-    Ok(tool_json(
+    let payload = json!({
+        "status": "ok",
+        "provider": requested_provider.unwrap_or("all"),
+        "requested_provider": requested_provider,
+        "selected_project_root": target_root,
+        "project_key": project_key,
+        "parent_session_id": parent_session_id,
+        "include_subagents": include_subagents,
+        "catch_up": catch_up,
+        "catch_up_performed": catch_up_performed,
+        "catch_up_provider": provider_scope.response_label(),
+        "scope": match scope {
+            SessionSearchScope::All => "all",
+            SessionSearchScope::ParentsOnly => "parents_only",
+            SessionSearchScope::SubagentsOnly => "subagents_only",
+        },
+        "query": query,
+        "count": results.len(),
+        "results": results,
+    });
+    Ok(tool_json_with_md(
         Some(&target_root),
         &args,
-        &json!({
-            "status": "ok",
-            "provider": requested_provider.unwrap_or("all"),
-            "requested_provider": requested_provider,
-            "selected_project_root": target_root,
-            "project_key": project_key,
-            "parent_session_id": parent_session_id,
-            "include_subagents": include_subagents,
-            "catch_up": catch_up,
-            "catch_up_performed": catch_up_performed,
-            "catch_up_provider": provider_scope.response_label(),
-            "scope": match scope {
-                SessionSearchScope::All => "all",
-                SessionSearchScope::ParentsOnly => "parents_only",
-                SessionSearchScope::SubagentsOnly => "subagents_only",
-            },
-            "query": query,
-            "count": results.len(),
-            "results": results,
-        }),
+        &payload,
+        || render_message_search_md(&payload),
     ))
 }
 
@@ -1944,6 +2102,7 @@ pub(super) async fn handle_lcm_preflight(
         .await
         .map_err(lcm_error)?;
     Ok(lcm_preflight_tool_json(
+        context.project_root,
         &args,
         &json!({
             "status": response.status,
@@ -2015,4 +2174,160 @@ pub(super) async fn handle_lcm_compress(
             "summary_request": response.summary_request,
         }),
     ))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn sample_message_search_payload() -> Value {
+        json!({
+            "status": "ok",
+            "provider": "all",
+            "query": "database backup",
+            "scope": "all",
+            "count": 1,
+            "results": [{
+                "score": 18.42,
+                "session": {
+                    "provider": "claude",
+                    "session_id": "sess-abc-123",
+                    "title": "Investigate backup failure",
+                    "transcript_path": "/home/zack/.claude/projects/x/sess-abc-123.jsonl",
+                    "metadata_json": "{\"claude_session_cwd\":\"/home/zack/proj\",\"secret\":\"do-not-leak\"}",
+                    "project_path": "/home/zack/proj",
+                },
+                "message": {
+                    "provider": "claude",
+                    "session_id": "sess-abc-123",
+                    "message_id": "msg-1",
+                    "role": "assistant",
+                    "timestamp": 1783117588,
+                    "text": "[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_x\",\"content\":\"the database backup completed successfully at 03:00 UTC\"}]",
+                    "source_path": "/home/zack/.claude/projects/x/sess-abc-123.jsonl",
+                    "source_offset": 1676581,
+                    "metadata_json": "{\"raw_type\":\"assistant\"}",
+                },
+            }],
+        })
+    }
+
+    #[test]
+    fn message_search_markdown_drops_raw_json_blobs() {
+        let payload = sample_message_search_payload();
+        let md = render_message_search_md(&payload);
+
+        // Human-facing fields are present.
+        assert!(md.contains("## Transcript Search"), "{md}");
+        assert!(md.contains("**query:** database backup"), "{md}");
+        assert!(md.contains("**assistant**"), "{md}");
+        assert!(md.contains("session `sess-abc-123`"), "{md}");
+        assert!(md.contains("Investigate backup failure"), "{md}");
+        assert!(md.contains("score 18.4"), "{md}");
+        assert!(md.contains("t=1783117588"), "{md}");
+        // The readable content is surfaced without the surrounding JSON block.
+        assert!(
+            md.contains("the database backup completed successfully"),
+            "{md}"
+        );
+
+        // None of the raw record blobs leak into the default output.
+        for forbidden in [
+            "metadata_json",
+            "transcript_path",
+            "source_path",
+            "source_offset",
+            "do-not-leak",
+            "tool_use_id",
+            "claude_session_cwd",
+        ] {
+            assert!(
+                !md.contains(forbidden),
+                "default markdown must not embed `{forbidden}`:\n{md}"
+            );
+        }
+        // And it must not be a JSON document.
+        assert!(serde_json::from_str::<Value>(&md).is_err(), "{md}");
+    }
+
+    #[test]
+    fn message_search_markdown_handles_empty_results() {
+        let payload = json!({
+            "status": "ok",
+            "query": "nothing matches",
+            "count": 0,
+            "results": [],
+        });
+        let md = render_message_search_md(&payload);
+        assert!(md.contains("## Transcript Search"), "{md}");
+        assert!(md.contains("**count:** 0"), "{md}");
+        assert!(md.contains("No matching messages."), "{md}");
+    }
+
+    #[test]
+    fn message_text_snippet_extracts_readable_content_from_json() {
+        let text = "[{\"type\":\"tool_result\",\"content\":\"hello world\",\"tool_use_id\":\"toolu_1\"}]";
+        let snippet = message_text_snippet(text, 240);
+        assert_eq!(snippet, "hello world");
+        assert!(!snippet.contains("tool_use_id"));
+    }
+
+    #[test]
+    fn message_text_snippet_falls_back_to_raw_and_truncates() {
+        let text = "x".repeat(500);
+        let snippet = message_text_snippet(&text, 240);
+        assert!(snippet.ends_with('…'));
+        assert_eq!(snippet.chars().count(), 241); // 240 chars + ellipsis
+    }
+
+    #[test]
+    fn message_text_snippet_plain_text_is_collapsed() {
+        let text = "line one\n\n   line two\ttabbed";
+        assert_eq!(
+            message_text_snippet(text, 240),
+            "line one line two tabbed"
+        );
+    }
+
+    #[test]
+    fn lcm_preflight_markdown_truncation_stores_retrieval_handle() {
+        // Regression: the markdown-default preflight path must thread the
+        // project root so an oversized payload truncates *with* a recoverable
+        // handle rather than an irreversible clip.
+        let dir = tempfile::TempDir::new().unwrap();
+        // Oversize the payload the way a real preflight does — via a large
+        // replay_messages array (what the compaction tiers actually target).
+        let replay: Vec<Value> = (0..200)
+            .map(|i| json!({"role": "user", "content": format!("message {i} {}", "y".repeat(200))}))
+            .collect();
+        let payload = json!({
+            "status": "ok",
+            "provider": "claude",
+            "session_id": "s1",
+            "should_compress": false,
+            "reason": "no_compression_needed",
+            "replay_messages": replay,
+        });
+
+        // Markdown default (no `format` arg): must produce the readable
+        // truncation envelope with a stored handle.
+        let result = lcm_preflight_tool_json(Some(dir.path()), &json!({}), &payload);
+        let text = result.value["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("# Truncated Response"), "{text}");
+        assert!(text.contains("Full response stored locally"), "{text}");
+        assert!(text.contains("tracedecay_retrieve"), "{text}");
+        assert!(
+            serde_json::from_str::<Value>(text).is_err(),
+            "markdown truncation must not be a JSON envelope: {text}"
+        );
+
+        // `format:"json"` still yields the compact Hermes bridge contract.
+        let json_result =
+            lcm_preflight_tool_json(Some(dir.path()), &json!({"format": "json"}), &payload);
+        let json_text = json_result.value["content"][0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(json_text).unwrap();
+        assert_eq!(parsed["status"], "ok");
+        assert_eq!(parsed["should_compress"], false);
+    }
 }
