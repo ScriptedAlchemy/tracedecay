@@ -48,8 +48,8 @@ pub(crate) fn set_mcp_command(raw: &str, bin: &str) -> Result<String> {
     Ok(format!("{}\n", serde_json::to_string_pretty(&mcp)?))
 }
 
-/// One embedded plugin file: `relative` is its deploy path; `contents` is
-/// embedded from the shared `plugin/` tree at compile time.
+/// One embedded plugin file: `relative` is its deploy path; `contents` may come
+/// from a different source path in the shared `plugin/` tree.
 #[derive(Clone, Copy)]
 pub struct PluginFile {
     pub relative: &'static str,
@@ -65,7 +65,7 @@ macro_rules! plugin_file {
     };
 }
 
-// Every file under `plugin/skills/`, embedded recursively by `build.rs`.
+// Every file under `plugin/skills/`, including support files, embedded by build.rs.
 include!(concat!(env!("OUT_DIR"), "/plugin_bundle_generated.rs"));
 
 /// Prefix of the dispatcher skills that Cursor does **not** deploy (they are

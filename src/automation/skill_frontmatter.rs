@@ -1,14 +1,14 @@
 //! Parser for the `SKILL.md` frontmatter subset used by plugin and managed
-//! skills.
+//! skills: fenced `key: value` scalars plus indented block values.
 
 use std::collections::BTreeMap;
 
 use crate::errors::{Result, TraceDecayError};
 
-/// One frontmatter value.
+/// One parsed frontmatter value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkillFrontmatterValue {
-    /// Inline scalar with outer quotes stripped.
+    /// Inline scalar with one level of YAML quotes stripped.
     Scalar(String),
     /// Trimmed block lines under a key with no inline value.
     Block(Vec<String>),
@@ -22,7 +22,7 @@ impl SkillFrontmatterValue {
         }
     }
 
-    /// Returns unquoted `- item` block entries.
+    /// Returns unquoted `- item` entries when every block line is a list item.
     pub fn as_list_items(&self) -> Option<Vec<String>> {
         match self {
             Self::Scalar(_) => None,
@@ -42,7 +42,7 @@ impl SkillFrontmatterValue {
     }
 }
 
-/// Parses the leading `---`-fenced frontmatter of a `SKILL.md` document.
+/// Parses leading `---`-fenced frontmatter, normalizing LF and CRLF input.
 pub fn parse_skill_frontmatter(contents: &str) -> Result<BTreeMap<String, SkillFrontmatterValue>> {
     let mut lines = contents.lines();
     if lines.next().map(str::trim_end) != Some("---") {
@@ -106,7 +106,7 @@ pub fn parse_skill_frontmatter(contents: &str) -> Result<BTreeMap<String, SkillF
     Ok(fields)
 }
 
-/// Strips one level of YAML quoting.
+/// Strips one level of YAML quoting, including YAML `''` single-quote escaping.
 fn unquote_scalar(value: &str) -> String {
     if let Some(inner) = value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')) {
         inner.replace("''", "'")
