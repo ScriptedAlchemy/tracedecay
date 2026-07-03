@@ -201,6 +201,37 @@ fn partial_reinstall_failure_leaves_startup_reinstall_pending() {
 }
 
 #[test]
+fn no_reinstall_marker_advancement_suppresses_startup_reinstall() {
+    // `--no-reinstall` must be a durable opt-out for the running version, not a
+    // one-command deferral: `run_post_update_tasks` advances both markers on the
+    // skip path (without running the reinstall). This proves the effect — after
+    // the markers advance, the next ordinary command's startup silent reinstall
+    // returns `Nothing`, so it does NOT immediately undo the skip and reinstall
+    // every agent anyway.
+    let running = "6.1.0";
+    let mut config = UserConfig {
+        installed_agents: vec!["cursor".to_string()],
+        previous_version: "6.0.0".to_string(),
+        ..UserConfig::default()
+    };
+
+    // Pre-condition: without advancing markers the startup path WOULD reinstall.
+    assert_eq!(
+        silent_reinstall_action(&config, running),
+        SilentReinstallAction::Reinstall
+    );
+
+    // The `--no-reinstall` path advances the markers instead of reinstalling.
+    assert!(config.mark_version_installed(running));
+
+    assert_eq!(
+        silent_reinstall_action(&config, running),
+        SilentReinstallAction::Nothing,
+        "after --no-reinstall advances the markers, startup must not re-fire the reinstall"
+    );
+}
+
+#[test]
 fn patch_bump_only_advances_the_marker() {
     let config = UserConfig {
         installed_agents: vec!["cursor".to_string()],

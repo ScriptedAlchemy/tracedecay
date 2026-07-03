@@ -16,8 +16,12 @@ fn make_install_ctx(home: &Path) -> InstallContext {
     }
 }
 
+/// Idempotency + unknown-key preservation for the Claude `.claude.json` case
+/// specifically: a repeated `ClaudeIntegration.install` leaves that file
+/// byte-identical and keeps user-owned keys/MCP entries intact. Other agents
+/// (and Claude's `settings.json`) are not exercised here.
 #[test]
-fn upgrade_refresh_is_idempotent_and_preserves_unknown_keys() {
+fn claude_json_upgrade_refresh_is_idempotent_and_preserves_unknown_keys() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let ctx = make_install_ctx(home);

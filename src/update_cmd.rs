@@ -322,6 +322,15 @@ pub(crate) async fn run_post_update_tasks(
 
     if no_reinstall {
         eprintln!("Skipping agent integration refresh (--no-reinstall).");
+        // `--no-reinstall` is a durable opt-out for THIS version, not a
+        // one-command deferral: advance the version markers so the startup
+        // silent reinstall (`silent_reinstall_action`) does not immediately
+        // undo the skip on the next ordinary command and reinstall everything
+        // anyway. The next real upgrade re-arms the reinstall as usual.
+        let mut config = UserConfig::load();
+        if config.mark_version_installed(env!("CARGO_PKG_VERSION")) {
+            config.save();
+        }
         return Ok(());
     }
 
@@ -446,13 +455,33 @@ mod tests {
             "tracedecay",
         )
         .await;
-        match partition_reinstall_results(results) {
-            ReinstallOutcome::PartialFailure { failed } => {
-                assert_eq!(failed, vec!["unknown-agent".to_string()]);
-            }
-            ReinstallOutcome::AllOk => panic!("unknown tracked agent id must fail reinstall"),
-        }
+        // Skipped, not failed: the unknown id is absent from the results.
+        assert!(
+            results.is_empty(),
+            "unknown tracked agent id must be skipped, not reported: {:?}",
+            results.iter().map(|(id, _)| id).collect::<Vec<_>>()
+        );
+        assert!(
+            matches!(
+                partition_reinstall_results(results),
+                ReinstallOutcome::AllOk
+            ),
+            "an unknown id must not prevent AllOk / marker advancement"
+        );
         Ok(())
+    }
+
+    /// A genuine `install()` failure (as opposed to an unresolvable id) is a
+    /// real failure: it stays in the results and yields PartialFailure so the
+    /// version markers do NOT advance and the work is retried.
+    #[test]
+    fn real_install_failure_yields_partial_failure() {
+        match partition_reinstall_results(vec![ok("claude"), err("cursor")]) {
+            ReinstallOutcome::PartialFailure { failed } => {
+                assert_eq!(failed, vec!["cursor".to_string()]);
+            }
+            ReinstallOutcome::AllOk => panic!("a real install() failure must gate markers"),
+        }
     }
 
     /// Markers advance only when every tracked agent reinstalled (AllOk).
