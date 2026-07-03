@@ -94,9 +94,7 @@ impl TranscriptSource for KiroSource {
         project_root: &Path,
         _max_new_bytes: Option<u64>,
     ) -> Option<ParsedTranscript> {
-        let Some(location_cwd) = transcript_location_path(path, &self.workspace_storage_dir) else {
-            return None;
-        };
+        let location_cwd = transcript_location_path(path, &self.workspace_storage_dir)?;
         if !path_belongs_to_project(&location_cwd, project_root) {
             return None;
         }

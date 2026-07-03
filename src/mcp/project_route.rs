@@ -13,7 +13,7 @@ pub(crate) struct HookProjectRouteCache {
 }
 
 impl HookProjectRouteCache {
-    pub(crate) fn route_cwd<'a>(event: &'a hook_events::HookEvent) -> Option<&'a std::path::Path> {
+    pub(crate) fn route_cwd(event: &hook_events::HookEvent) -> Option<&std::path::Path> {
         event
             .route
             .as_ref()

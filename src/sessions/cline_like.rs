@@ -121,9 +121,7 @@ impl TranscriptSource for ClineLikeSource {
         let ui_path = task_dir.join("ui_messages.json");
         let changed = read_changed_with_companion(path, &ui_path, prev)?;
         let metadata = read_task_metadata(task_dir)?;
-        let Some(location_cwd) = metadata_project_location(&metadata, project_root) else {
-            return None;
-        };
+        let location_cwd = metadata_project_location(&metadata, project_root)?;
 
         let document: Value = match serde_json::from_str(&changed.contents) {
             Ok(document) => document,
