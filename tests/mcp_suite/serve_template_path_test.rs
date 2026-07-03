@@ -76,11 +76,12 @@ async fn literal_workspace_folder_path_from_home_cwd_serves_via_discovery() {
 /// syntax) must get the same tolerance as `${workspaceFolder}`.
 #[tokio::test]
 async fn literal_template_variant_paths_fall_back_to_discovery() {
+    let home = TempDir::new().unwrap();
+    let project =
+        init_project_with_file(home.path(), "pub fn template_variant_marker() {}\n").await;
+    register_global_project(home.path(), project.path()).await;
+
     for path_arg in ["${workspaceRoot}", "${workspaceFolder:-/tmp/never-used}"] {
-        let home = TempDir::new().unwrap();
-        let project =
-            init_project_with_file(home.path(), "pub fn template_variant_marker() {}\n").await;
-        register_global_project(home.path(), project.path()).await;
         let cwd = TempDir::new().unwrap();
 
         let output = run_serve_runtime_with_path_arg(home.path(), cwd.path(), path_arg);
