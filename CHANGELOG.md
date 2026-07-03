@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.24](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.23...v0.0.24) - 2026-07-03
+
+### Added
+
+- inject fact-store memory into Codex and Cursor hook context ([#229](https://github.com/ScriptedAlchemy/tracedecay/pull/229))
+- *(automation)* combined reflector+skill scheduler pass (Hermes G9/R7)
+- *(cli)* enforce MCP tool CLI/skill parity and rich subcommand help
+
+### Fixed
+
+- *(lcm)* default transcript reads to all providers
+- *(sessions)* advance Claude cursor for filtered transcripts ([#241](https://github.com/ScriptedAlchemy/tracedecay/pull/241))
+- *(lcm)* run DB-side GC phases when the payload dir is missing
+- *(sessions)* preserve worktree routing metadata
+- *(ci)* harden cross-worktree provenance tests
+- *(sessions)* route cross-worktree provenance
+- *(sessions)* preserve transcript location metadata
+- *(codex)* preserve branch context in transcript metadata
+- *(agents)* require tracedecay local exports
+- *(lsp)* bound diagnostics refresh hangs
+- *(sessions)* normalize activity timestamps
+- satisfy clippy pedantic lints in windows read retry
+- *(sync)* retry transient Windows file locks in read_source_file
+
+### Other
+
+- *(mcp)* isolate dashboard fixture storage
+- Merge remote-tracking branch 'origin/master' into codex/export-approved-skills
+- Merge remote-tracking branch 'origin/master' into codex/hermes-parity-r9-user-jobs
+- Merge remote-tracking branch 'origin/master' into codex/skill-adoption-babysit
+- Merge remote-tracking branch 'origin/master' into codex/hermes-parity-r8-memory-digest
+- Merge remote-tracking branch 'origin/master' into codex/mcp-connection-root-routing
+- Merge remote-tracking branch 'origin/master' into codex/hook-session-route
+- *(sessions)* clarify activity timestamp units
+- Merge pull request #218 from ScriptedAlchemy/codex/activity-coupled-triggering
+- Merge pull request #226 from ScriptedAlchemy/codex/hermes-parity-r10-outcomes
+- Merge pull request #213 from ScriptedAlchemy/codex/tool-skill-cli-parity
+- *(cli)* trim tool help test commentary
+
 ### Added
 
 - Claude Code installs now register `SessionStart` and `PostToolUse` lifecycle hooks, matching the freshness/steering coverage Cursor, Codex, and Kiro already had: `SessionStart` reports index freshness and injects the LCM context-recovery hint after compaction; `PostToolUse` notifies the daemon for targeted incremental sync after edits and shell commands. Existing installs pick the hooks up via the post-upgrade backfill or `tracedecay doctor`.
