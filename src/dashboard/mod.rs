@@ -349,11 +349,76 @@ pub async fn run_until_shutdown<F>(
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    let state = build_state(cg).await;
-    if state.lcm_scope != "global" {
-        spawn_session_catch_up_ingest(state.project_root.clone());
+    run_until_shutdown_inner(
+        cg,
+        host,
+        port,
+        shutdown,
+        DashboardRunOptions::production(open),
+    )
+    .await
+}
+
+#[doc(hidden)]
+pub async fn run_until_shutdown_for_tests<F>(
+    cg: &TraceDecay,
+    host: &str,
+    port: u16,
+    shutdown: F,
+) -> Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    run_until_shutdown_inner(cg, host, port, shutdown, DashboardRunOptions::test()).await
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DashboardRunOptions {
+    open: bool,
+    repair_memory_on_startup: bool,
+    warm_token_counts: bool,
+    start_session_catch_up: bool,
+}
+
+impl DashboardRunOptions {
+    fn production(open: bool) -> Self {
+        Self {
+            open,
+            repair_memory_on_startup: true,
+            warm_token_counts: true,
+            start_session_catch_up: true,
+        }
     }
 
+    fn test() -> Self {
+        Self {
+            open: false,
+            repair_memory_on_startup: false,
+            warm_token_counts: false,
+            start_session_catch_up: false,
+        }
+    }
+}
+
+async fn run_until_shutdown_inner<F>(
+    cg: &TraceDecay,
+    host: &str,
+    port: u16,
+    shutdown: F,
+    options: DashboardRunOptions,
+) -> Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let state = build_state_inner(
+        cg,
+        options.repair_memory_on_startup,
+        options.warm_token_counts,
+    )
+    .await;
+    if options.start_session_catch_up && state.lcm_scope != "global" {
+        spawn_session_catch_up_ingest(state.project_root.clone());
+    }
     let app = router(state);
     let (listener, addr) = bind_dashboard(host, port).await?;
 
@@ -363,7 +428,7 @@ where
     eprintln!("Serving project {}", cg.project_root().display());
     eprintln!("Press Ctrl+C to stop.");
 
-    if open {
+    if options.open {
         match open::that(&url) {
             Ok(()) => eprintln!("Opened dashboard in default browser: {url}"),
             Err(e) => eprintln!("Warning: could not open browser for {url}: {e}"),

@@ -1,5 +1,6 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::LazyLock;
 
 use crate::common::{write_pyyaml_shim, EnvVarGuard, PYYAML_FALLBACK_PRELUDE};
 use sha2::{Digest, Sha256};
@@ -285,8 +286,25 @@ for _name in ("tools.py", "schemas.py", "__init__.py"):
     )
 }
 
+fn python_command() -> Command {
+    static PYTHON: LazyLock<PathBuf> = LazyLock::new(|| {
+        if cfg!(windows) {
+            for var in ["Python_ROOT_DIR", "pythonLocation"] {
+                if let Some(root) = std::env::var_os(var) {
+                    let exe = Path::new(&root).join("python.exe");
+                    if exe.is_file() {
+                        return exe;
+                    }
+                }
+            }
+        }
+        PathBuf::from("python3")
+    });
+    Command::new(&*PYTHON)
+}
+
 fn assert_python_compiles(paths: &[&Path]) {
-    let output = Command::new("python3")
+    let output = python_command()
         .arg("-m")
         .arg("py_compile")
         .args(paths)
@@ -1301,7 +1319,7 @@ assert payload["stderr"].endswith("...<truncated>")
     )
     .unwrap();
 
-    let output = Command::new("python3")
+    let output = python_command()
         .arg(&script)
         .arg(plugin_dir.join("tools.py"))
         .arg(tracedecay_bin)
@@ -1532,7 +1550,7 @@ assert collector.provider.name == "tracedecay"
     )
     .unwrap();
 
-    let output = Command::new("python3")
+    let output = python_command()
         .arg(&script)
         .arg(plugin_dir)
         .output()
@@ -1693,7 +1711,7 @@ assert "memory_status" in [schema["name"] for schema in provider.get_tool_schema
     )
     .unwrap();
 
-    let mut check = Command::new("python3");
+    let mut check = python_command();
     check
         .arg(&script)
         .arg(hermes_home)
@@ -1917,7 +1935,7 @@ assert fallback.name == "tracedecay"
     )
     .unwrap();
 
-    let output = Command::new("python3")
+    let output = python_command()
         .arg(&script)
         .arg(plugin_dir)
         .output()
@@ -6052,7 +6070,7 @@ assert other_engine.project_root is None
     )
     .unwrap();
 
-    let mut check = Command::new("python3");
+    let mut check = python_command();
     check
         .arg(&script)
         .arg(&plugin_dir)
