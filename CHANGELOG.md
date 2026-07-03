@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.25](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.24...v0.0.25) - 2026-07-03
+
+### Added
+
+- *(plugin)* embed skill trees recursively + ship first support files
+- *(hooks)* inject adoption contract on Claude and Kiro
+- *(claude)* ship a Claude Code plugin bundle + sync skills
+
+### Fixed
+
+- *(build)* fail codegen clearly on a non-UTF-8 support file
+- *(kiro)* recognize the legacy steering marker on lifecycle ops
+- *(cursor)* sweep retired skills from the live bundle
+- *(claude)* escape hook path, settings guards, clean replace
+- *(plugin)* retarget cursor legacy-sweep test at retired skills
+- *(skills)* scope legacy-block fallback to single-host uninstall
+- *(skills)* remove staged overlay dir on failed swap
+- *(lsp)* return diagnostics for suppress-empty servers
+- *(jobs)* block IPv4-mapped/embedded IPv6 webhook SSRF targets
+- address Claude review findings
+- *(lsp)* relax initialize timeout floor
+
+### Other
+
+- dedup installer helpers and simplify marked-block splicing ([#254](https://github.com/ScriptedAlchemy/tracedecay/pull/254))
+- *(git)* resolve git binary once via cached git_program() ([#253](https://github.com/ScriptedAlchemy/tracedecay/pull/253))
+- *(hooks)* make hook_events git spawns resilient under load
+- *(cursor)* seed retired-skill sweep tests with tracedecay markers
+- *(plugin)* merge memory skills + split message_search lanes
+- *(plugin)* re-express cursor dispatchers as native slash commands
+- *(plugin)* collapse host bundles into one plugin/ tree
+- speed up slow junit cases
+
 ## [0.0.24](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.23...v0.0.24) - 2026-07-03
 
 ### Added
