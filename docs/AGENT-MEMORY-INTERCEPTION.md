@@ -91,7 +91,7 @@ hashes recorded under `[hooks.state]` in `config.toml`):
 **Key asymmetry vs Cursor:** Codex's `UserPromptSubmit` hook receives the
 prompt text *and* can inject `additionalContext` — a true per-prompt memory
 recall channel. TraceDecay already exploits this channel for tool-routing
-hints (`src/hooks.rs::hook_codex_user_prompt_submit` →
+hints (`src/hooks/codex.rs::hook_codex_user_prompt_submit` →
 `codex_user_prompt_submit_context_for_event` →
 `codex_additional_context_json("UserPromptSubmit", …)`), just not for facts.
 
@@ -138,7 +138,7 @@ cursor.com/docs/hooks): `sessionStart`/`sessionEnd`, `preToolUse`/`postToolUse`/
 `afterAgentResponse`/`afterAgentThought`, `workspaceOpen`.
 
 Context-injection capability per event (verified against docs + forum + the
-comment in `src/hooks.rs::hook_cursor_before_submit_prompt`):
+comment in `src/hooks/cursor.rs::hook_cursor_before_submit_prompt`):
 
 | Event | Injection field | Notes |
 | --- | --- | --- |
@@ -168,7 +168,7 @@ to `~/.cursor/plugins/local/tracedecay/`:
   `postToolUse`, `afterFileEdit`, `afterShellExecution`, `preCompact`,
   `sessionEnd`, `stop`, `workspaceOpen`, each shelling to
   `tracedecay hook-cursor-*` (dispatch: `src/hook_cmd.rs`, impls:
-  `src/hooks.rs`).
+  `src/hooks/`).
 - **`rules/tracedecay.mdc`** — always-applied rule; its **Recall** bullet
   steers models to `tracedecay_message_search` / `tracedecay_fact_store`
   search and the `recalling-project-memory` skill.
@@ -182,8 +182,8 @@ What the hooks currently do (all fail-open):
 
 - `sessionStart` (`hook_cursor_session_start`) — catch-up transcript ingest,
   then emits `additional_context` built by `build_cursor_session_context`
-  (`src/hooks.rs:1416`): **index status + skill list + tokens-saved counter.
-  No facts.** Sets `TRACEDECAY_PROJECT_ROOT` env.
+  (`src/hooks/steering.rs`): **index status + skill list + tokens-saved
+  counter. No facts.** Sets `TRACEDECAY_PROJECT_ROOT` env.
 - `beforeSubmitPrompt` — hot transcript ingest only; emits
   `{"continue": true}` (no context possible, see §2.3).
 - `postToolUse` — tool-routing hints via `additional_context`
@@ -298,11 +298,11 @@ Ranked by effect ÷ effort. A + B are the core; C–F layer on.
 
 *Effort: S–M. Effect: high. Risk: low (fail-open, additive).*
 
-Codex is the easy win because `UserPromptSubmit` carries the prompt text and
-honors `hookSpecificOutput.additionalContext`, and the hook binary *is*
+Codex is the lowest-effort path because `UserPromptSubmit` carries the prompt
+text and honors `hookSpecificOutput.additionalContext`, and the hook binary is
 `tracedecay` with in-process store access (no MCP hop, fits the 5s timeout).
 
-- `SessionStart`: in `codex_session_context_for_event` (`src/hooks.rs:624`),
+- `SessionStart`: in `codex_session_context_for_event` (`src/hooks/codex.rs`),
   after workspace status, run `FactRetriever::search`/`list` for the top-K
   high-trust project facts (e.g. K=8, `min_trust` 0.6, category-diverse,
   newest-first tiebreak) and append a compact `## Project memory` block with
@@ -310,7 +310,7 @@ honors `hookSpecificOutput.additionalContext`, and the hook binary *is*
   update"). Reuse the token-budget discipline the context builders already
   have.
 - `UserPromptSubmit`: in `codex_user_prompt_submit_context_for_event`
-  (`src/hooks.rs:1738`), embed the prompt (`prompt_like_text`) via the
+  (`src/hooks/codex.rs`), embed the prompt (`prompt_like_text`) via the
   existing HRR encoder and inject only facts above a similarity × trust
   threshold, deduped per session the same way tool hints are deduped
   (`deduped_codex_hint` pattern, `remember_hint_in_process`). Empty result →
@@ -318,7 +318,8 @@ honors `hookSpecificOutput.additionalContext`, and the hook binary *is*
 - `SubagentStart`: optionally include the same session-start block so
   subagents inherit memory.
 
-Implementation pointers: `src/hooks.rs` (context builders above),
+Implementation pointers: `src/hooks/codex.rs`, `src/hooks/cursor.rs`,
+`src/hooks/steering.rs`, and shared helpers in `src/hooks/mod.rs`,
 `src/memory/retrieval.rs` (`FactRetriever::search/probe`), analytics via
 `record_hint_analytics` so injection quality is measurable. No plugin schema
 change; hook hashes change → users re-trust via `/hooks` (already documented
@@ -333,7 +334,8 @@ channels that exist:
 
 1. **`sessionStart.additional_context`** — extend
    `build_cursor_session_context` / `cursor_session_context_for_root`
-   (`src/hooks.rs:1416,610`) with the same top-K fact block as design A.
+   (`src/hooks/steering.rs`, `src/hooks/cursor.rs`) with the same top-K fact
+   block as design A.
    Cheap, but treat as best-effort given the open forum bugs about dropped
    `additional_context`.
 2. **Materialized always-applied memory rule** — generate
@@ -348,7 +350,7 @@ channels that exist:
 
 Implementation pointers: rule generation next to
 `cursor_plugin_manifest`/`write_embedded_plugin` (`src/agents/cursor.rs:404`),
-refresh in `hook_cursor_workspace_open` (`src/hooks.rs:666`); mark the file
+refresh in `hook_cursor_workspace_open` (`src/hooks/cursor.rs`); mark the file
 managed the same way the skill overlay marks generated skills
 (`managed_skill_format.rs`) so uninstall (`remove_cursor_plugin_install`) and
 doctor checks cover it.
@@ -370,8 +372,8 @@ mirrors) to:
   calibrated trust" — the add-path already defends against junk
   (near_duplicate / possible_conflict / secret rejection, §3.3).
 
-This is exactly Cursor's own hybrid design (sidecar + tool calls), with the
-tool-call half pointed at TraceDecay.
+This mirrors Cursor's hybrid design (sidecar + tool calls), with the tool-call
+half pointed at TraceDecay.
 
 ### D. Enable the reflection loop (sidecar-equivalent storage) — **medium**
 
@@ -451,7 +453,7 @@ alongside D and reusing the managed-file conventions from the skill overlay.
 
 ## 6. Recommended sequence
 
-1. **A + B1** (hook-based injection, both agents) — one PR in `src/hooks.rs`
+1. **A + B1** (hook-based injection, both agents) — one PR across `src/hooks/`
    + `src/memory/retrieval.rs` helpers; measurable via existing hook
    analytics.
 2. **B2 + C** (materialized Cursor memory rule + proactive storage wording) —
