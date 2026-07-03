@@ -71,7 +71,50 @@ impl EvidenceCitationSet {
                 }
             }
         }
+        citations.collect_replay_slices(evidence);
         citations
+    }
+
+    /// Registers the session-replay evidence channel (`recent_session_slices`)
+    /// so facts can cite turns and summary nodes surfaced by replay even when
+    /// they did not match the keyword grep.
+    fn collect_replay_slices(&mut self, evidence: &Value) {
+        for session in evidence
+            .pointer("/recent_session_slices/sessions")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(session_id) = session.get("session_id").and_then(Value::as_str) else {
+                continue;
+            };
+            for slice_key in ["head", "tail"] {
+                for message in session
+                    .get(slice_key)
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(message_id) = message.get("message_id").and_then(Value::as_str) {
+                        self.raw_messages
+                            .insert((session_id.to_string(), message_id.to_string()));
+                    }
+                    if let Some(store_id) = message.get("store_id").and_then(value_as_i64) {
+                        self.raw_store_ids.insert(store_id);
+                    }
+                }
+            }
+            for node in session
+                .get("summary_nodes")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if let Some(node_id) = node.get("node_id").and_then(Value::as_str) {
+                    self.summary_nodes.insert(node_id.to_string());
+                }
+            }
+        }
     }
 
     fn contains(&self, source_span: &Value) -> bool {

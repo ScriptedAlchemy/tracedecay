@@ -176,6 +176,36 @@ pub async fn handle_tool_call_with_registry(
     global_db: Option<&GlobalDb>,
     allow_default_registry_fallback: bool,
 ) -> Result<ToolResult> {
+    handle_tool_call_with_registry_and_implicit_project(
+        cg,
+        tool_name,
+        args,
+        server_stats,
+        scope_prefix,
+        ToolCallRegistryOptions {
+            global_db,
+            allow_default_registry_fallback,
+            implicit_project_path: None,
+        },
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+pub struct ToolCallRegistryOptions<'a> {
+    pub global_db: Option<&'a GlobalDb>,
+    pub allow_default_registry_fallback: bool,
+    pub implicit_project_path: Option<&'a Path>,
+}
+
+pub async fn handle_tool_call_with_registry_and_implicit_project(
+    cg: &TraceDecay,
+    tool_name: &str,
+    mut args: Value,
+    server_stats: Option<Value>,
+    scope_prefix: Option<&str>,
+    options: ToolCallRegistryOptions<'_>,
+) -> Result<ToolResult> {
     debug_assert!(
         !tool_name.is_empty(),
         "handle_tool_call called with empty tool_name"
@@ -193,11 +223,23 @@ pub async fn handle_tool_call_with_registry(
             ),
         });
     }
+    if let Some(project_path) = options.implicit_project_path {
+        if tool_dispatches_registered_project_reader(tool_name)
+            && !rejected_tool_project_selector_present(tool_name, &args)
+        {
+            if let Some(map) = args.as_object_mut() {
+                map.insert(
+                    "project_path".to_string(),
+                    json!(project_path.to_string_lossy().to_string()),
+                );
+            }
+        }
+    }
     let selected_cg = selected_registered_project_reader(
         tool_name,
         &args,
-        global_db,
-        allow_default_registry_fallback,
+        options.global_db,
+        options.allow_default_registry_fallback,
     )
     .await?;
     let selected_scope_prefix = if selected_cg.is_some() {
@@ -220,13 +262,29 @@ pub async fn handle_tool_call_with_registry(
         }
         "tracedecay_storage_status" => info::handle_storage_status(cg, args, scope_prefix).await,
         "tracedecay_project_list" => {
-            info::handle_project_list(args, global_db, allow_default_registry_fallback).await
+            info::handle_project_list(
+                args,
+                options.global_db,
+                options.allow_default_registry_fallback,
+            )
+            .await
         }
         "tracedecay_project_search" => {
-            info::handle_project_search(args, global_db, allow_default_registry_fallback).await
+            info::handle_project_search(
+                args,
+                options.global_db,
+                options.allow_default_registry_fallback,
+            )
+            .await
         }
         "tracedecay_project_context" => {
-            info::handle_project_context(cg, args, global_db, allow_default_registry_fallback).await
+            info::handle_project_context(
+                cg,
+                args,
+                options.global_db,
+                options.allow_default_registry_fallback,
+            )
+            .await
         }
         "tracedecay_files" => info::handle_files(cg, args, selected_scope_prefix).await,
         "tracedecay_affected" => git::handle_affected(cg, args).await,
@@ -309,11 +367,23 @@ pub async fn handle_tool_call_with_registry(
         "tracedecay_run_affected_tests" => workflow::handle_run_affected_tests(cg, args).await,
         "tracedecay_derives" => graph::handle_derives(cg, args).await,
         "tracedecay_fact_store" => {
-            memory::handle_fact_store(cg, args, global_db, allow_default_registry_fallback).await
+            memory::handle_fact_store(
+                cg,
+                args,
+                options.global_db,
+                options.allow_default_registry_fallback,
+            )
+            .await
         }
         "tracedecay_fact_feedback" => memory::handle_fact_feedback(cg, args).await,
         "tracedecay_memory_status" => {
-            memory::handle_memory_status(cg, args, global_db, allow_default_registry_fallback).await
+            memory::handle_memory_status(
+                cg,
+                args,
+                options.global_db,
+                options.allow_default_registry_fallback,
+            )
+            .await
         }
         "tracedecay_automation_run_artifact_view" => {
             skills::handle_automation_run_artifact_view(cg, args).await
@@ -323,8 +393,13 @@ pub async fn handle_tool_call_with_registry(
         "tracedecay_hermes_skill_bridge" => skills::handle_hermes_skill_bridge(cg, &args),
         "tracedecay_dashboard" => dashboard::handle_dashboard(cg, args).await,
         "tracedecay_message_search" => {
-            session::handle_message_search(cg, args, global_db, allow_default_registry_fallback)
-                .await
+            session::handle_message_search(
+                cg,
+                args,
+                options.global_db,
+                options.allow_default_registry_fallback,
+            )
+            .await
         }
         "tracedecay_lcm_status" => {
             session::handle_lcm_status(session::LcmHandlerContext::active(cg), args).await

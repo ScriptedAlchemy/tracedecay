@@ -1,18 +1,24 @@
 ---
-description: Prefer tracedecay MCP tools for exploration, reading, editing, and recall
+description: Use tracedecay MCP tools and workflow skills before native search, broad reads, editing, and recall
 alwaysApply: true
 ---
 
-# Prefer tracedecay MCP tools
+# Use tracedecay before native code tools
 
-- **Explore:** for codebase exploration, symbol lookup, call graphs, impact analysis, and affected files, use the tracedecay MCP tools first — `tracedecay_context` is the default starting point before Grep/Glob/semantic search when the session has a resolved active project.
-- **Storage:** for "which project/store is active?" questions, use `tracedecay_active_project` or `tracedecay_storage_status` instead of inferring from repo-local marker files or direct DB paths.
-- **Read:** before reading a whole file, follow `tracedecay:reading-code-cheaply` — `tracedecay_outline` (table of contents), `tracedecay_body` (one symbol's source), or `tracedecay_read` (`mode: "lines"` slices). Full-file Read is the fallback, not the default.
-- **Write:** before adding a new helper/util, run the `tracedecay:finding-duplicate-logic` pre-write probe — it may already exist.
-- **Edit:** for anchored or structural source edits, follow the `tracedecay:atomic-code-edits` skill (`tracedecay_str_replace`, `tracedecay_replace_symbol`, `tracedecay_ast_grep_rewrite`, …) — the graph re-indexes itself after each write.
-- **Recall:** for prior decisions or past conversations, use `tracedecay_message_search` / `tracedecay_fact_store` search (skills: `tracedecay:recalling-project-memory`, `tracedecay:recalling-session-context`); for updating, deleting, or curating stored facts, use `tracedecay:curating-project-memory`.
-- **Memory:** when a durable decision, user preference, correction, or pitfall surfaces, store it proactively with `tracedecay_fact_store` (action "add") with calibrated trust — do not wait to be asked. Do NOT store secrets/credentials, transient errors, environment-specific failures, one-off narratives, or task progress.
-- **Truncated MCP responses:** if a tracedecay response has `truncated: true` plus `handle`, narrow the query first when that answers the task; if the omitted details are needed, call `tracedecay_retrieve` with the `handle` instead of guessing or re-running a broad query.
-- **MCP errors/timeouts:** if a tracedecay MCP call errors, times out, or the server is disconnected, every tool is also available as a shell command — `tracedecay tool <name> --key value` (`tracedecay tool` lists all tools, `tracedecay tool <name> --help` shows parameters; see `tracedecay:using-the-cli`). Do not query `.tracedecay` databases directly and do not abandon tracedecay because the MCP transport failed.
-- Every common workflow has a `tracedecay:*` skill (searching-for-code, tracing-functions, finding-impacted-areas, running-impacted-tests, reviewing-a-diff, code-health-report, …) — reach for the matching skill before improvising.
-- Fall back to plain file reads, search, or shell only when tracedecay cannot answer or has already pinpointed the exact files.
+If the workspace is indexed, TraceDecay is the first stop for codebase questions. Treat this as a procedure, not a preference:
+
+- **Starting a task or code question:** invoke `tracedecay:using-tracedecay` and follow its moment table before the first Grep/Glob/Read.
+- **About to Grep/Glob/codebase-search for a symbol or concept:** call `tracedecay_search` or `tracedecay_context` first, then follow `tracedecay:exploring-code`.
+- **About to open or Read a source file:** use `tracedecay_outline`, `tracedecay_body`, or `tracedecay_read` slices first. Full-file Read is the fallback, not the default.
+- **Asked about callers, callees, dependencies, or blast radius:** use `tracedecay:tracing-functions` or `tracedecay:assessing-impact` before guessing.
+- **About to add a helper or edit source:** use `tracedecay:editing-safely` for duplicate probes, refactor recon, and anchored edits.
+- **Reviewing a diff, auditing risk, or drafting change text:** use `tracedecay:reviewing-changes`.
+- **Architecture, health, status, config, TODOs, runtime:** use `tracedecay:code-health`.
+- **Prior decisions or past conversations:** use `tracedecay:recalling-project-memory` / `tracedecay:recalling-session-context`; mutate facts only through `tracedecay:curating-project-memory`.
+- **Durable memory:** when a durable decision, user preference, correction, or pitfall surfaces, store it proactively with `tracedecay_fact_store` (action "add") with calibrated trust. Do not store secrets/credentials, transient errors, environment-specific failures, one-off narratives, or task progress.
+- **Active project/store questions:** use `tracedecay_active_project` or `tracedecay_storage_status` for resolved active project routing instead of inferring from marker files or direct DB paths.
+- **Truncated MCP responses:** if a response has `truncated: true` plus `handle`, narrow the query first; call `tracedecay_retrieve` only when omitted details are needed.
+- **MCP errors/timeouts:** use the CLI fallback (`tracedecay tool <name> --key value`; see `tracedecay:using-the-cli`) instead of querying `.tracedecay` databases directly or abandoning tracedecay.
+- Fall back to plain file reads, search, or shell only for non-indexed content or after tracedecay has pinpointed the exact files.
+
+Red flags: "Grep is faster", "I'll just read the whole file", "this is a simple lookup", "I already know the codebase", or "I'll use the skill after exploring" are rationalizations. Stop and use the matching TraceDecay workflow first.

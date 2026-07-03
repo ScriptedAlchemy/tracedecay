@@ -126,6 +126,42 @@ impl AgentIntegration for ClaudeIntegration {
         doctor_check_local_config(dc, &ctx.project_path);
     }
 
+    fn export_managed_skills(
+        &self,
+        home: &Path,
+        profile_root: &Path,
+    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+        let claude_md_path = home.join(".claude").join("CLAUDE.md");
+        if !self.has_tracedecay(home) || !claude_md_path.exists() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![
+            crate::automation::skill_targets::install_managed_skills(
+                profile_root,
+                crate::automation::skill_targets::SkillInstallTarget::Claude,
+                &claude_md_path,
+            )?,
+        ])
+    }
+
+    fn export_managed_skills_local(
+        &self,
+        project_root: &Path,
+        profile_root: &Path,
+    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+        let claude_md_path = project_root.join(".claude").join("CLAUDE.md");
+        if !local_mcp_has_tracedecay(project_root) || !claude_md_path.exists() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![
+            crate::automation::skill_targets::install_managed_skills(
+                profile_root,
+                crate::automation::skill_targets::SkillInstallTarget::Claude,
+                &claude_md_path,
+            )?,
+        ])
+    }
+
     fn is_detected(&self, home: &Path) -> bool {
         home.join(".claude").is_dir()
     }
@@ -144,6 +180,17 @@ impl AgentIntegration for ClaudeIntegration {
             .and_then(|v| v.get("tracedecay"))
             .is_some()
     }
+}
+
+fn local_mcp_has_tracedecay(project_root: &Path) -> bool {
+    let mcp_path = project_root.join(".mcp.json");
+    if !mcp_path.exists() {
+        return false;
+    }
+    let json = super::load_json_file(&mcp_path);
+    json.get("mcpServers")
+        .and_then(|servers| servers.get("tracedecay"))
+        .is_some()
 }
 
 // ---------------------------------------------------------------------------

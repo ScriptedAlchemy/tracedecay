@@ -13,33 +13,33 @@ use super::now_unix_secs;
 /// true` are excluded). Kept as one constant so the session steering context
 /// and the bundle coverage test in `agents::cursor` stay in sync.
 pub const CURSOR_PLUGIN_SKILLS: &[&str] = &[
-    "architecture-overview",
-    "assessing-test-coverage",
-    "atomic-code-edits",
-    "auditing-code-safety",
-    "cleaning-up-dead-code",
-    "code-health-report",
-    "cross-branch-investigation",
+    "assessing-impact",
+    "code-health",
     "curating-project-memory",
-    "drafting-commit-and-pr",
-    "exploring-types-and-traits",
-    "finding-duplicate-logic",
-    "finding-impacted-areas",
+    "editing-safely",
+    "exploring-code",
     "fixing-build-and-type-errors",
     "inspecting-managed-skills",
-    "porting-code",
-    "project-status",
-    "reading-code-cheaply",
     "recalling-project-memory",
     "recalling-session-context",
-    "refactoring-safely",
-    "reviewing-a-diff",
-    "running-impacted-tests",
-    "searching-for-code",
+    "reviewing-changes",
     "tracing-functions",
-    "tracking-session-health",
     "using-the-cli",
+    "using-tracedecay",
 ];
+
+const TRACEDECAY_BOOTSTRAP_SKILL: &str =
+    include_str!("../../cursor-plugin/skills/using-tracedecay/SKILL.md");
+
+fn append_tracedecay_bootstrap_context(s: &mut String) {
+    s.push_str(
+        "<EXTREMELY_IMPORTANT>\n\
+         This project has TraceDecay code-graph support. Below is the full `tracedecay:using-tracedecay` \
+         skill; follow it before native search or broad file reads.\n\n",
+    );
+    s.push_str(TRACEDECAY_BOOTSTRAP_SKILL);
+    s.push_str("\n</EXTREMELY_IMPORTANT>\n");
+}
 
 pub(super) const COMPACTION_CONTEXT_RECOVERY_HINT: &str = "Context was just compacted. If important prior-session context seems missing, query TraceDecay session context before assuming the compacted summary is complete. Start with `tracedecay_message_search` or `tracedecay_lcm_expand_query`; use `tracedecay_lcm_describe` and `tracedecay_lcm_expand` when you need the summary DAG sources.";
 
@@ -56,9 +56,10 @@ pub fn build_cursor_session_context(
 ) -> String {
     let mut s = index_status_line(initialized, staleness_hint);
     if initialized {
+        append_tracedecay_bootstrap_context(&mut s);
         s.push_str("Workflow skills: tracedecay:");
         s.push_str(&CURSOR_PLUGIN_SKILLS.join(", "));
-        s.push_str(" — each maps a common workflow to the right tracedecay tools.\n");
+        s.push_str(" — each maps a common workflow stage to the right tracedecay tools.\n");
         if let Some(saved) = tokens_saved.filter(|saved| *saved > 0) {
             s.push_str("Tokens saved by tracedecay this session: ");
             s.push_str(&saved.to_string());
@@ -122,13 +123,19 @@ pub fn build_codex_session_context_for_workspace(
     let mut s = String::new();
     match status {
         HookWorkspaceStatus::Initialized | HookWorkspaceStatus::UnindexedProject => {
+            if matches!(status, HookWorkspaceStatus::Initialized) {
+                append_tracedecay_bootstrap_context(&mut s);
+            } else {
+                s.push_str(
+                    "After initialization, use tracedecay MCP tools (tracedecay_context, \
+                     tracedecay_search, tracedecay_callers, tracedecay_callees, \
+                     tracedecay_impact, tracedecay_files, tracedecay_affected) before broad \
+                     file reads or shell search for codebase exploration, symbol lookup, call \
+                     graphs, and impact analysis.\n",
+                );
+            }
             s.push_str(
-                "tracedecay is available via MCP. Prefer tracedecay MCP tools \
-                 (tracedecay_context, tracedecay_search, tracedecay_callers, tracedecay_callees, \
-                 tracedecay_impact, tracedecay_files, tracedecay_affected) over broad file reads \
-                 or shell search for codebase exploration, symbol lookup, call graphs, and \
-                 impact analysis. Fall back to file reads only when tracedecay cannot answer.\n\
-                 If an MCP call errors, times out, or the server is disconnected, every tool \
+                "If a tracedecay MCP call errors, times out, or the server is disconnected, every tool \
                  is also a shell command: `tracedecay tool <name> --key value` (`tracedecay \
                  tool` lists tools, `tracedecay tool <name> --help` shows parameters). Use \
                  that CLI instead of querying .tracedecay databases directly or abandoning \

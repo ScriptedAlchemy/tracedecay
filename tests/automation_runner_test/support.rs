@@ -405,6 +405,7 @@ impl AgentTaskBackend for MalformedTextBackend {
             }
             AgentTaskKind::SkillWriter => ("skill_writer", "skill_writer:v2", "skills"),
             AgentTaskKind::CombinedReview => ("combined_review", "combined_review:v1", "facts"),
+            AgentTaskKind::UserJob => unreachable!("user jobs are not strict-JSON tasks"),
         };
         assert_request_contract(request, task_key, prompt_version, required_property);
         Ok(AgentTaskResponse {
@@ -544,6 +545,8 @@ impl AgentTaskBackend for InspectSessionEvidenceBackend {
         assert_eq!(evidence["role"], json!("assistant"));
         assert_eq!(evidence["start_time"], json!(1_715_100_000_i64));
         assert_eq!(evidence["end_time"], json!(1_715_100_010_i64));
+        assert_eq!(evidence["evidence_mode"], json!("grep_only"));
+        assert_eq!(evidence["recent_session_slices"], json!(null));
         let hits = evidence["hits"].as_array().expect("hits array");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0]["session_id"], json!("hermes-reflect-1"));
@@ -556,6 +559,120 @@ impl AgentTaskBackend for InspectSessionEvidenceBackend {
             task: request.task,
             output_text: json!({"facts": []}).to_string(),
             output_json: Some(json!({"facts": []})),
+            model: Some("fixture-model".to_string()),
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+        })
+    }
+}
+
+/// Asserts the session reflector received session-replay evidence for one
+/// recently active session (with no keyword grep hits) and replies with the
+/// configured facts output.
+pub(crate) struct SessionReplayEvidenceBackend {
+    output: Value,
+    expected_session_id: &'static str,
+    expected_message_id: &'static str,
+}
+
+impl SessionReplayEvidenceBackend {
+    pub(crate) fn new(
+        output: Value,
+        expected_session_id: &'static str,
+        expected_message_id: &'static str,
+    ) -> Self {
+        Self {
+            output,
+            expected_session_id,
+            expected_message_id,
+        }
+    }
+}
+
+impl AgentTaskBackend for SessionReplayEvidenceBackend {
+    fn run_task(
+        &self,
+        request: &AgentTaskRequest,
+    ) -> tracedecay::errors::Result<AgentTaskResponse> {
+        assert_eq!(request.task, AgentTaskKind::SessionReflector);
+        assert_request_contract(
+            request,
+            "session_reflector",
+            "session_reflector:v2",
+            "facts",
+        );
+        let evidence = &request.context["session_reflection_evidence"];
+        assert_eq!(evidence["evidence_mode"], json!("session_replay_with_grep"));
+        assert_eq!(evidence["hits"], json!([]));
+        let slices = &evidence["recent_session_slices"];
+        assert_eq!(slices["mode"], json!("recent_sessions"));
+        assert_eq!(slices["session_selection"], json!("recent_activity"));
+        assert_eq!(slices["bounds"]["head_turns"], json!(4));
+        assert_eq!(slices["bounds"]["tail_turns"], json!(4));
+        let sessions = slices["sessions"].as_array().expect("replay sessions");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0]["session_id"],
+            json!(self.expected_session_id),
+            "replay slice should target the recently active session"
+        );
+        let head = sessions[0]["head"].as_array().expect("head turns");
+        assert!(
+            head.iter()
+                .any(|message| message["message_id"] == json!(self.expected_message_id)),
+            "replayed head turns should include the seeded message"
+        );
+        Ok(AgentTaskResponse {
+            run_id: request.run_id.clone(),
+            task: request.task,
+            output_text: self.output.to_string(),
+            output_json: Some(self.output.clone()),
+            model: Some("fixture-model".to_string()),
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+        })
+    }
+}
+
+/// Asserts the skill writer received session-replay evidence (with no
+/// keyword grep hits) and replies with an empty skills array.
+pub(crate) struct SkillWriterReplayEvidenceBackend {
+    expected_session_id: &'static str,
+}
+
+impl SkillWriterReplayEvidenceBackend {
+    pub(crate) fn new(expected_session_id: &'static str) -> Self {
+        Self {
+            expected_session_id,
+        }
+    }
+}
+
+impl AgentTaskBackend for SkillWriterReplayEvidenceBackend {
+    fn run_task(
+        &self,
+        request: &AgentTaskRequest,
+    ) -> tracedecay::errors::Result<AgentTaskResponse> {
+        assert_eq!(request.task, AgentTaskKind::SkillWriter);
+        assert_request_contract(request, "skill_writer", "skill_writer:v2", "skills");
+        let evidence = &request.context["skill_writer_evidence"];
+        assert_eq!(evidence["evidence_mode"], json!("session_replay_with_grep"));
+        assert_eq!(evidence["hits"], json!([]));
+        let slices = &evidence["recent_session_slices"];
+        assert_eq!(slices["mode"], json!("recent_sessions"));
+        assert_eq!(slices["session_selection"], json!("recent_activity"));
+        let sessions = slices["sessions"].as_array().expect("replay sessions");
+        assert!(
+            sessions
+                .iter()
+                .any(|session| session["session_id"] == json!(self.expected_session_id)),
+            "replay slices should include the recently active session"
+        );
+        Ok(AgentTaskResponse {
+            run_id: request.run_id.clone(),
+            task: request.task,
+            output_text: json!({"skills": []}).to_string(),
+            output_json: Some(json!({"skills": []})),
             model: Some("fixture-model".to_string()),
             input_tokens: Some(10),
             output_tokens: Some(20),
@@ -954,6 +1071,7 @@ pub(crate) fn test_task_key(task: AgentTaskKind) -> &'static str {
         AgentTaskKind::SessionReflector => "session_reflector",
         AgentTaskKind::SkillWriter => "skill_writer",
         AgentTaskKind::CombinedReview => "combined_review",
+        AgentTaskKind::UserJob => "user_job",
     }
 }
 
@@ -963,5 +1081,6 @@ pub(crate) fn test_prompt_version(task: AgentTaskKind) -> &'static str {
         AgentTaskKind::SessionReflector => "session_reflector:v2",
         AgentTaskKind::SkillWriter => "skill_writer:v2",
         AgentTaskKind::CombinedReview => "combined_review:v1",
+        AgentTaskKind::UserJob => "user_job:v1",
     }
 }

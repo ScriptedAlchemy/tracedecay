@@ -34,6 +34,7 @@ include = [
     "/dashboard/graph/dist/**",
     "/dashboard/code-diagnostics/dist/**",
     "/dashboard/savings/dist/**",
+    "/dashboard/settings/dist/**",
     "/dashboard/hermes-wrapper/manifest.json",
     "/dashboard/hermes-wrapper/plugin_api.py",
     "/dashboard/hermes-wrapper/src/**",

@@ -85,7 +85,14 @@ pub(crate) async fn apply(
     )
     .await
     {
-        Ok(proposal) => (StatusCode::OK, Json(proposal_payload(&proposal))),
+        Ok(proposal) => {
+            crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
+                &state.mem_conn,
+                &state.project_root,
+            )
+            .await;
+            (StatusCode::OK, Json(proposal_payload(&proposal)))
+        }
         Err(err) => (
             StatusCode::BAD_REQUEST,
             Json(http_detail(&format!(

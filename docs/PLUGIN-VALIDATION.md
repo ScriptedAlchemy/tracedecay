@@ -65,8 +65,8 @@ contract over every `SKILL.md` in both bundles:
 - **Frontmatter allowlists per host.** Codex skills may only use the keys
   accepted by Codex's `quick_validate.py` (`name`, `description`,
   `allowed-tools`, `license`, `metadata`); Cursor skills additionally allow
-  `disable-model-invocation` and `paths`. `name` and `description` are
-  required everywhere.
+  `disable-model-invocation`. `name` and `description` are required
+  everywhere.
 - **Size budgets.** Skill bodies stay under 500 lines; descriptions stay under
   320 characters / 45 words; a bundle's total preloaded name+description
   metadata stays under 6,000 characters so skill discovery never crowds the
@@ -108,11 +108,8 @@ the Cursor skills, embedded via `include_str!` in `src/agents/codex.rs` and
 checked by the unit test `codex_skills_match_the_cursor_source_for_parity`:
 every model-invocable Cursor skill (the `hooks::CURSOR_PLUGIN_SKILLS` list in
 `src/hooks.rs`) must exist in the Codex bundle, and content divergence is
-only allowed through explicit per-skill allowlists in that test (used for
-host-specific wording — currently the `curating-project-memory` body and the
-`running-impacted-tests` frontmatter). Cursor-only skills — the
-`tracedecay-*` slash dispatchers and the `memorize-subject` /
-`memorizing-subject` pair — are exempt from mirroring.
+only allowed through explicit per-skill allowlists in that test. Cursor-only
+skills — the `tracedecay-*` slash dispatchers — are exempt from mirroring.
 
 Practical consequence: **never edit a `codex-plugin/skills/*/SKILL.md` by
 hand.** Edit the Cursor source and propagate, or the parity test fails.
@@ -174,12 +171,12 @@ to Claude-Code-documented fields, kebab-case `name` matching the directory
 `description` + `when_to_use` ≤ 1,536 chars — Claude Code truncates listings
 beyond that), and the shared 6,000-char per-bundle metadata budget.
 
-Two Cursor-required fields conflict with the strict Agent Skills open spec —
-`disable-model-invocation` and `paths`. Claude Code itself supports both, so
-they are *documented skips* (`CROSS_ECOSYSTEM_CONFLICT_FIELDS` in the test),
-with a stale-allowlist guard that fails if a documented conflict field stops
-being used. Any *new* nonconformant field fails the strict-spec test, and the
-Codex bundle must stay 100% spec-clean.
+One Cursor-required field conflicts with the strict Agent Skills open spec —
+`disable-model-invocation`. Claude Code itself supports it, so it is a
+*documented skip* (`CROSS_ECOSYSTEM_CONFLICT_FIELDS` in the test), with a
+stale-allowlist guard that fails if a documented conflict field stops being
+used. Any *new* nonconformant field fails the strict-spec test, and the Codex
+bundle must stay 100% spec-clean.
 
 ### 6. Checks outside the Rust test harness
 

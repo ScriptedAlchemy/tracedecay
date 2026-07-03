@@ -26,6 +26,99 @@ pub enum AutomationSchedule {
     Manual,
     ConfiguredInterval,
     Interval { every_secs: u64 },
+    Cron(CronSchedule),
+}
+
+/// Parsed standard 5-field cron expression (minute hour day-of-month month
+/// day-of-week), evaluated against the wall clock in UTC. Fields are stored
+/// as allow-bitmasks. Numeric values only (no JAN/MON aliases); day-of-week
+/// accepts 0-7 with both 0 and 7 meaning Sunday. Day-of-month and
+/// day-of-week combine with vixie-cron OR semantics when both are
+/// restricted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CronSchedule {
+    minutes: u64,
+    hours: u32,
+    days_of_month: u32,
+    months: u16,
+    days_of_week: u8,
+    dom_is_wildcard: bool,
+    dow_is_wildcard: bool,
+}
+
+/// How far back [`CronSchedule::previous_occurrence`] searches for a match.
+/// A year plus a day covers every satisfiable standard cron expression.
+const CRON_LOOKBACK_DAYS: i64 = 367;
+
+impl CronSchedule {
+    /// Returns whether the UTC minute containing `now_secs` matches.
+    pub fn matches(&self, now_secs: i64) -> bool {
+        let days = now_secs.div_euclid(86_400);
+        let secs_of_day = now_secs.rem_euclid(86_400);
+        let minute = (secs_of_day / 60 % 60) as u32;
+        let hour = (secs_of_day / 3_600) as u32;
+        self.minutes & (1 << minute) != 0 && self.hours & (1 << hour) != 0 && self.day_matches(days)
+    }
+
+    /// Returns the start (unix seconds, UTC) of the most recent matching
+    /// minute at or before `now_secs`, searching back one year.
+    pub fn previous_occurrence(&self, now_secs: i64) -> Option<i64> {
+        let now_minute = now_secs - now_secs.rem_euclid(60);
+        let now_days = now_secs.div_euclid(86_400);
+        for day_offset in 0..CRON_LOOKBACK_DAYS {
+            let days = now_days - day_offset;
+            if !self.day_matches(days) {
+                continue;
+            }
+            let day_start = days * 86_400;
+            for hour in (0..24u32).rev() {
+                if self.hours & (1 << hour) == 0 {
+                    continue;
+                }
+                for minute in (0..60u32).rev() {
+                    if self.minutes & (1 << minute) == 0 {
+                        continue;
+                    }
+                    let candidate = day_start + i64::from(hour) * 3_600 + i64::from(minute) * 60;
+                    if candidate <= now_minute {
+                        return Some(candidate);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn day_matches(&self, days_since_epoch: i64) -> bool {
+        let (_, month, day) = civil_from_days(days_since_epoch);
+        if self.months & (1 << month) == 0 {
+            return false;
+        }
+        // Sunday = 0; 1970-01-01 (day 0) was a Thursday (4).
+        let weekday = ((days_since_epoch + 4).rem_euclid(7)) as u32;
+        let dom_ok = self.days_of_month & (1 << day) != 0;
+        let dow_ok = self.days_of_week & (1 << weekday) != 0;
+        match (self.dom_is_wildcard, self.dow_is_wildcard) {
+            // vixie cron: when both fields are restricted, either may match.
+            (false, false) => dom_ok || dow_ok,
+            _ => dom_ok && dow_ok,
+        }
+    }
+}
+
+/// Converts days since the unix epoch to (year, month 1-12, day 1-31) using
+/// Howard Hinnant's civil-from-days algorithm.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+    (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
 /// Most recent LCM session ingest activity for the project, in unix seconds.
@@ -52,9 +145,9 @@ impl SessionActivity {
 
 /// Reads the session-activity signal from the LCM sessions database.
 ///
-/// This is a single indexed `ORDER BY timestamp DESC LIMIT 1` lookup against
-/// the read-only store, so it is cheap and race-safe to call from every
-/// scheduler tick; concurrent ingest writers only ever move the value forward.
+/// This reads from the read-only store using bounded indexed timestamp lookups,
+/// so it is cheap and race-safe to call from every scheduler tick; concurrent
+/// ingest writers only ever move the value forward.
 pub async fn load_session_activity(sessions_db_path: &Path) -> SessionActivity {
     let Some(db) = GlobalDb::open_read_only_at(sessions_db_path).await else {
         return SessionActivity::none();
@@ -153,6 +246,18 @@ impl AutomationTaskLock {
         stale_after_secs: Option<u64>,
         now_secs: i64,
     ) -> Result<Option<Self>> {
+        Self::try_acquire_keyed(dashboard_root, task_key(task), stale_after_secs, now_secs).await
+    }
+
+    /// Acquires a lock under an arbitrary key. User-defined jobs lock per
+    /// job (`user_job_<id>`) so concurrent jobs never serialize on the shared
+    /// fixed-task lock name.
+    pub async fn try_acquire_keyed(
+        dashboard_root: &Path,
+        key: &str,
+        stale_after_secs: Option<u64>,
+        now_secs: i64,
+    ) -> Result<Option<Self>> {
         let lock_dir = dashboard_root.join("automation_locks");
         tokio::fs::create_dir_all(&lock_dir)
             .await
@@ -162,7 +267,7 @@ impl AutomationTaskLock {
                     lock_dir.display()
                 ),
             })?;
-        let path = lock_dir.join(format!("{}.lock", task_key(task)));
+        let path = lock_dir.join(format!("{key}.lock"));
         for attempt in 0..2 {
             match create_lock_file(&path, now_secs).await {
                 Ok(()) => return Ok(Some(Self { path })),
@@ -229,16 +334,17 @@ pub fn schedule_decision(
     let Ok(schedule) = parse_schedule(task_config.schedule.as_deref()) else {
         return AutomationScheduleDecision::skipped("scheduler_schedule_invalid");
     };
-    let interval_secs = match schedule {
+    let (interval_secs, cron) = match schedule {
         AutomationSchedule::Manual => {
             return AutomationScheduleDecision::skipped("scheduler_schedule_manual")
         }
-        AutomationSchedule::ConfiguredInterval => task_config.interval_secs,
-        AutomationSchedule::Interval { every_secs } => Some(every_secs),
+        AutomationSchedule::ConfiguredInterval => (task_config.interval_secs, None),
+        AutomationSchedule::Interval { every_secs } => (Some(every_secs), None),
+        AutomationSchedule::Cron(cron) => (None, Some(cron)),
     };
-    let Some(interval_secs) = interval_secs else {
+    if interval_secs.is_none() && cron.is_none() {
         return AutomationScheduleDecision::skipped("scheduler_schedule_manual");
-    };
+    }
 
     // `min_idle_secs` is a true idle window: the project must have been quiet
     // (no LCM session ingest activity) for at least this long. An unknown
@@ -272,8 +378,19 @@ pub fn schedule_decision(
             }
             return AutomationScheduleDecision::due();
         }
-        if elapsed_secs(completed_at, now_secs) < interval_secs {
-            return AutomationScheduleDecision::skipped("scheduler_interval_not_elapsed");
+        if let Some(interval_secs) = interval_secs {
+            if elapsed_secs(completed_at, now_secs) < interval_secs {
+                return AutomationScheduleDecision::skipped("scheduler_interval_not_elapsed");
+            }
+        }
+        if let Some(cron) = cron {
+            if !cron_is_due(&cron, Some(completed_at), now_secs) {
+                return AutomationScheduleDecision::skipped("scheduler_cron_not_due");
+            }
+        }
+    } else if let Some(cron) = cron {
+        if !cron_is_due(&cron, None, now_secs) {
+            return AutomationScheduleDecision::skipped("scheduler_cron_not_due");
         }
     }
 
@@ -303,7 +420,16 @@ fn task_consumes_session_evidence(task: AgentTaskKind) -> bool {
         AgentTaskKind::SessionReflector
         | AgentTaskKind::SkillWriter
         | AgentTaskKind::CombinedReview => true,
-        AgentTaskKind::MemoryCurator => false,
+        AgentTaskKind::MemoryCurator | AgentTaskKind::UserJob => false,
+    }
+}
+
+/// A cron schedule is due when a matching wall-clock minute has occurred
+/// since the last completed run (or at all, when there is no prior run).
+pub fn cron_is_due(cron: &CronSchedule, last_completed_at: Option<i64>, now_secs: i64) -> bool {
+    match cron.previous_occurrence(now_secs) {
+        Some(occurrence) => last_completed_at.is_none_or(|completed| occurrence > completed),
+        None => false,
     }
 }
 
@@ -343,6 +469,10 @@ pub fn parse_schedule(schedule: Option<&str>) -> Result<AutomationSchedule> {
         _ => {}
     }
 
+    if normalized.split_whitespace().count() == 5 {
+        return parse_cron_expression(&normalized);
+    }
+
     let duration = normalized
         .strip_prefix("every ")
         .or_else(|| normalized.strip_prefix("every:"))
@@ -364,6 +494,18 @@ pub fn parse_schedule(schedule: Option<&str>) -> Result<AutomationSchedule> {
     Ok(AutomationSchedule::Interval { every_secs })
 }
 
+/// User jobs carry their own schedule/enabled state (see
+/// `automation::jobs`), so the fixed-task config lookup falls back to a
+/// disabled default that makes the fixed-task gates skip them.
+const USER_JOB_TASK_CONFIG: AutomationTaskConfig = AutomationTaskConfig {
+    enabled: false,
+    schedule: None,
+    interval_secs: None,
+    cooldown_secs: None,
+    min_idle_secs: None,
+    stale_lock_secs: None,
+};
+
 fn task_config(config: &AutomationConfig, task: AgentTaskKind) -> Option<&AutomationTaskConfig> {
     match task {
         AgentTaskKind::MemoryCurator => Some(&config.tasks.memory_curator),
@@ -372,6 +514,98 @@ fn task_config(config: &AutomationConfig, task: AgentTaskKind) -> Option<&Automa
         // The combined review has no schedule of its own; it is dispatched
         // when the two per-task schedules are both due in the same tick.
         AgentTaskKind::CombinedReview => None,
+        AgentTaskKind::UserJob => Some(&USER_JOB_TASK_CONFIG),
+    }
+}
+
+fn parse_cron_expression(raw: &str) -> Result<AutomationSchedule> {
+    let fields: Vec<&str> = raw.split_whitespace().collect();
+    let [minute, hour, dom, month, dow] = fields.as_slice() else {
+        return Err(cron_error(raw, "expected 5 fields"));
+    };
+    let minutes = parse_cron_field(minute, 0, 59, raw)?.0;
+    let hours = parse_cron_field(hour, 0, 23, raw)?.0 as u32;
+    let (dom_bits, dom_is_wildcard) = parse_cron_field(dom, 1, 31, raw)?;
+    let (month_bits, _) = parse_cron_field(month, 1, 12, raw)?;
+    let (dow_bits_raw, dow_is_wildcard) = parse_cron_field(dow, 0, 7, raw)?;
+    // Fold day-of-week 7 (Sunday) onto 0.
+    let mut days_of_week = (dow_bits_raw & 0x7f) as u8;
+    if dow_bits_raw & (1 << 7) != 0 {
+        days_of_week |= 1;
+    }
+    Ok(AutomationSchedule::Cron(CronSchedule {
+        minutes,
+        hours,
+        days_of_month: dom_bits as u32,
+        months: month_bits as u16,
+        days_of_week,
+        dom_is_wildcard,
+        dow_is_wildcard,
+    }))
+}
+
+/// Parses one cron field into an allow-bitmask; returns the mask and whether
+/// the field was an unrestricted wildcard (`*` or `*/1`).
+fn parse_cron_field(field: &str, min: u32, max: u32, raw: &str) -> Result<(u64, bool)> {
+    let mut bits = 0u64;
+    for part in field.split(',') {
+        let (range, step) = match part.split_once('/') {
+            Some((range, step)) => {
+                let step = step
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|step| *step > 0)
+                    .ok_or_else(|| cron_error(raw, "step must be a positive integer"))?;
+                (range, step)
+            }
+            None => (part, 1),
+        };
+        let (start, end) = if range == "*" {
+            (min, max)
+        } else if let Some((start, end)) = range.split_once('-') {
+            let start = parse_cron_value(start, min, max, raw)?;
+            let end = parse_cron_value(end, min, max, raw)?;
+            if start > end {
+                return Err(cron_error(raw, "range start exceeds range end"));
+            }
+            (start, end)
+        } else {
+            let value = parse_cron_value(range, min, max, raw)?;
+            (value, value)
+        };
+        let mut value = start;
+        while value <= end {
+            bits |= 1 << value;
+            value += step;
+        }
+    }
+    if bits == 0 {
+        return Err(cron_error(raw, "field selects no values"));
+    }
+    let wildcard = bits == full_cron_field_mask(min, max);
+    Ok((bits, wildcard))
+}
+
+fn full_cron_field_mask(min: u32, max: u32) -> u64 {
+    (min..=max).fold(0, |bits, value| bits | (1 << value))
+}
+
+fn parse_cron_value(value: &str, min: u32, max: u32, raw: &str) -> Result<u32> {
+    let parsed = value
+        .parse::<u32>()
+        .map_err(|_| cron_error(raw, "values must be integers"))?;
+    if parsed < min || parsed > max {
+        return Err(cron_error(
+            raw,
+            &format!("value {parsed} is outside {min}-{max}"),
+        ));
+    }
+    Ok(parsed)
+}
+
+fn cron_error(raw: &str, detail: &str) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!("invalid cron schedule '{raw}': {detail}"),
     }
 }
 

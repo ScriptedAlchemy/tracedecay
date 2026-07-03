@@ -180,6 +180,61 @@ impl AgentIntegration for CopilotIntegration {
 
         vscode_has_tracedecay || insiders_has_tracedecay || cli_has_tracedecay
     }
+
+    fn export_managed_skills(
+        &self,
+        home: &Path,
+        profile_root: &Path,
+    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+        if !self.has_tracedecay(home) {
+            return Ok(Vec::new());
+        }
+        let prompt_paths = [
+            super::vscode_data_dir(home).join("User/prompts/copilot-instructions.md"),
+            super::vscode_insiders_data_dir(home).join("User/prompts/copilot-instructions.md"),
+            super::copilot_cli_dir(home).join("copilot-instructions.md"),
+        ];
+        prompt_paths
+            .iter()
+            .filter(|path| path.exists())
+            .map(|path| {
+                crate::automation::skill_targets::install_managed_skills(
+                    profile_root,
+                    crate::automation::skill_targets::SkillInstallTarget::Agents,
+                    path,
+                )
+            })
+            .collect()
+    }
+
+    fn export_managed_skills_local(
+        &self,
+        project_root: &Path,
+        profile_root: &Path,
+    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+        let instructions = project_root.join(".github/copilot-instructions.md");
+        if !workspace_mcp_has_tracedecay(project_root) || !instructions.exists() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![
+            crate::automation::skill_targets::install_managed_skills(
+                profile_root,
+                crate::automation::skill_targets::SkillInstallTarget::Agents,
+                &instructions,
+            )?,
+        ])
+    }
+}
+
+fn workspace_mcp_has_tracedecay(project_root: &Path) -> bool {
+    let settings_path = project_root.join(".vscode/mcp.json");
+    if !settings_path.exists() {
+        return false;
+    }
+    let json = load_jsonc_file(&settings_path);
+    json.get("servers")
+        .and_then(|servers| servers.get("tracedecay"))
+        .is_some()
 }
 
 /// Register MCP server in VS Code settings.json.

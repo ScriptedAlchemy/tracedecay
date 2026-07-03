@@ -22,6 +22,9 @@ pub enum AgentTaskKind {
     /// response must carry both a `facts` and a `skills` array; each array is
     /// validated and applied by the existing per-task pipelines.
     CombinedReview,
+    /// User-defined scheduled job (Hermes cron parity). The backend response
+    /// is plain content to deliver, not a structured proposal set.
+    UserJob,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -210,7 +213,9 @@ pub fn agent_task_contract(task: AgentTaskKind) -> AgentTaskContract {
         task_key: task_key(task).to_string(),
         prompt_version: prompt_version(task).to_string(),
         response_schema: response_schema(task),
-        strict_json: true,
+        // User jobs deliver free-form content, so their output is not forced
+        // through the strict-JSON extraction path.
+        strict_json: task != AgentTaskKind::UserJob,
     }
 }
 
@@ -220,6 +225,7 @@ pub fn task_key(task: AgentTaskKind) -> &'static str {
         AgentTaskKind::SessionReflector => "session_reflector",
         AgentTaskKind::SkillWriter => "skill_writer",
         AgentTaskKind::CombinedReview => "combined_review",
+        AgentTaskKind::UserJob => "user_job",
     }
 }
 
@@ -229,6 +235,7 @@ pub fn prompt_version(task: AgentTaskKind) -> &'static str {
         AgentTaskKind::SessionReflector => "session_reflector:v2",
         AgentTaskKind::SkillWriter => "skill_writer:v2",
         AgentTaskKind::CombinedReview => "combined_review:v1",
+        AgentTaskKind::UserJob => "user_job:v1",
     }
 }
 
@@ -238,6 +245,10 @@ fn response_schema(task: AgentTaskKind) -> Value {
         AgentTaskKind::SessionReflector => json_schema_for_array_properties(&["facts"]),
         AgentTaskKind::SkillWriter => json_schema_for_array_properties(&["skills"]),
         AgentTaskKind::CombinedReview => json_schema_for_array_properties(&["facts", "skills"]),
+        AgentTaskKind::UserJob => serde_json::json!({
+            "type": "object",
+            "additionalProperties": true
+        }),
     }
 }
 

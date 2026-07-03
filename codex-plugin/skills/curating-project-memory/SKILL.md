@@ -7,7 +7,7 @@ description: 'Use when reviewing, updating, merging, deleting, pruning, or repai
 
 Destructive curation is a parent-agent responsibility. Use subagents only for scoped inspection or recommendation work, with explicit project selectors and non-overlapping ownership; do not delegate delete/apply/merge/retention actions to subagents. TraceDecay should progressively expose registered-project selectors in its own MCP and CLI surfaces, so this skill documents the workflow rather than being the sole routing mechanism.
 
-This skill owns memory lifecycle changes. For read-only recall, start with `tracedecay:recalling-project-memory`. For autonomous curation, begin read-only, gather evidence, propose a mutation plan, then write only narrow durable changes. The installed Codex plugin ships this skill as the required operator runbook, so follow the workflow below without depending on external `docs/` files.
+This skill owns memory lifecycle changes. For read-only recall, start with `tracedecay:recalling-project-memory`. For autonomous curation, begin read-only, gather evidence, propose a mutation plan, then write only narrow durable changes. The installed plugin ships this skill as the required operator runbook, so follow the workflow below without depending on external `docs/` files.
 
 ## Workflow
 
@@ -17,7 +17,7 @@ This skill owns memory lifecycle changes. For read-only recall, start with `trac
 4. **Inventory candidates:** group facts into add, update, merge/dedupe, stale, contradiction, secret-like, transient, supersession, and possible hard-delete buckets. Keep fact ids, source/provenance, trust, tags, entities, evidence links, and counterevidence with each candidate.
 5. **Research gaps:** use TraceDecay graph/search plus LCM/session/message tools to mine past sessions, raw messages, summary DAGs, branch/PR context, docs, and tests. For multi-step evidence gathering, scoped subagents may research bounded read-only questions only; the parent agent is the sole memory writer and must review raw findings before trusting them.
 6. **Propose changes:** summarize durable additions, stale-fact updates, trust/tag/source changes, dedupe merges, and delete candidates. Prefer update/merge over removal when useful provenance should survive.
-7. **Apply narrowly:** add/update only facts supported by evidence. Use `/curate/apply` or `tracedecay memory curate --llm-ops <file> --apply` only for reviewed operations. Require explicit approval immediately before every `action: "remove"`, dashboard hard delete, or merge loser removal, showing fact id, content/source summary, reason, and permanent-delete warning.
+7. **Apply narrowly:** add/update only facts supported by evidence. Use `POST /api/plugins/holographic/curate/apply` or `tracedecay memory curate --llm-ops <file> --apply` only for reviewed operations. Require explicit approval immediately before every `action: "remove"`, dashboard hard delete, or merge loser removal, showing fact id, content/source summary, reason, and permanent-delete warning.
 8. **Verify read-only:** re-run search/list/probe/related/contradict/get as appropriate, inspect apply results/oplog when used, and report final facts changed, skipped, or still needing human judgment.
 
 ## Guardrails
@@ -25,7 +25,7 @@ This skill owns memory lifecycle changes. For read-only recall, start with `trac
 - `get` and `contradict` are non-destructive recall. Search/list/probe/related/reason are read-mostly but can update access/retrieval counters. Add/update/remove, feedback, memory status repair, and dashboard start/stop mutate state or launch a local process; respect host approval/run-mode.
 - Deletion is permanent: there is no archive, soft-delete, restore, or undo path. Prefer update/merge when useful provenance should survive; delete only approved stale, duplicate, wrong, secret-like, or user-requested facts.
 - Never store secrets, credentials, API keys, or PII. Do not lower trust merely because a fact is old; cite the newer evidence or contradiction.
-- Dashboard curation can apply hard deletes. Use preview/dry-run first when available and surface high-risk delete/merge operations before applying them. `POST /api/plugins/holographic/curate` with `dry_run=false` applies deterministic duplicate deletion; `/curate/apply` applies explicit delete/merge ops.
+- Dashboard curation can apply hard deletes. Use preview/dry-run first when available and surface high-risk delete/merge operations before applying them. `POST /api/plugins/holographic/curate` with `dry_run=false` applies deterministic duplicate deletion; `POST /api/plugins/holographic/curate/apply` applies explicit delete/merge ops.
 - Do not let subagents call add/update/remove/feedback tools, apply curation ops, start dashboard mutation flows, or run memory health repair. Ask them for cited evidence, candidate facts, suspected duplicates, and stale/conflicting claims, then perform parent-agent validation before writing.
 - Default autonomous grooming output is report-only. If a tool or dashboard action mutates unexpectedly, disclose it and verify state before continuing.
 - Hygiene candidates (`secret_like`, `transient`, `supersession`) are review evidence, not deterministic apply operations.
@@ -36,7 +36,7 @@ This skill owns memory lifecycle changes. For read-only recall, start with `trac
 Before any mutation, produce a compact report with these sections:
 
 - `scope`: project root/store, tool/API used, dry-run timestamp, and whether memory health repair or dashboard start/stop was invoked.
-- `native_plan`: `mode`, `provider`, `coverage`, `counts`, action count, and hygiene-candidate counts from `tracedecay memory curate` or `/curate`.
+- `native_plan`: `mode`, `provider`, `coverage`, `counts`, action count, and hygiene-candidate counts from `tracedecay memory curate` or `POST /api/plugins/holographic/curate`.
 - `adds`: candidate durable facts with source spans, category, entities, trust, and duplicate-search result.
 - `updates`: fact ids, old/new summary, evidence, confidence, and why update beats add.
 - `merges`: winner/loser ids, similarity evidence, retained provenance, optional `merged_content`, and why separate facts are redundant.
@@ -65,7 +65,7 @@ Use only when the user explicitly asks to memorize or remember a subject, code a
 ## Handoff
 
 - Need raw session messages or summary-DAG replay -> `tracedecay:recalling-session-context`.
-- Need only index/server status, not memory mutation -> `tracedecay:project-status`.
+- Need only index/server status, not memory mutation -> `tracedecay:code-health`.
 
 ## Output
 

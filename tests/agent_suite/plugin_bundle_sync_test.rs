@@ -25,7 +25,7 @@ use std::path::Path;
 
 use tracedecay::hooks::CURSOR_PLUGIN_SKILLS;
 
-use crate::common::{relative_files_under, repo_path};
+use crate::plugin_validation_support::{relative_files_under, repo_path};
 
 /// One shipped plugin source bundle, rooted at the repo top level.
 struct Bundle {
@@ -135,70 +135,35 @@ enum SkillSyncRule {
         bundles: &'static [&'static str],
         reason: &'static str,
     },
-    /// Shipped in every bundle, but the SKILL.md bodies are intentionally
-    /// host-specific (they must actually differ, so a healed divergence
-    /// fails until the exception is removed).
-    DivergentBody { reason: &'static str },
-    /// Shipped in every bundle with byte-identical bodies after the YAML
-    /// frontmatter; only the frontmatter may (and must) differ.
-    DivergentFrontmatter { reason: &'static str },
 }
 
 /// Documented exceptions to "every skill ships in every bundle,
 /// byte-identical". Skills absent from this table get the strict default.
-/// These entries mirror the allowlists in `src/agents/codex.rs`
-/// (`CODEX_SKILL_BODY_DIVERGENCES` / `CODEX_SKILL_FRONTMATTER_DIVERGENCES`);
-/// keep the reasons in step when editing either side.
-const SKILL_SYNC_EXCEPTIONS: &[(&[&str], SkillSyncRule)] = &[
-    (
-        &["memorize-subject", "memorizing-subject"],
-        SkillSyncRule::OnlyIn {
-            bundles: &["cursor"],
-            reason: "explicit-invoke (disable-model-invocation: true) memory workflows; \
-                     Codex has no explicit-invoke surface, and its \
-                     curating-project-memory copy inlines the guardrails instead",
-        },
-    ),
-    (
-        &[
-            "tracedecay-audit-safety",
-            "tracedecay-check-health",
-            "tracedecay-clean-dead-code",
-            "tracedecay-compare-branches",
-            "tracedecay-curate-memory",
-            "tracedecay-draft-commit",
-            "tracedecay-find-impact",
-            "tracedecay-fix-build",
-            "tracedecay-map-architecture",
-            "tracedecay-port-code",
-            "tracedecay-recall-memory",
-            "tracedecay-review-diff",
-            "tracedecay-test-changes",
-        ],
-        SkillSyncRule::OnlyIn {
-            bundles: &["cursor"],
-            reason: "Cursor-only slash dispatchers (disable-model-invocation: true) that \
+/// Keep entries narrow: this table is for real host-surface differences such
+/// as Cursor-only slash dispatchers, not for stale historical divergences.
+const SKILL_SYNC_EXCEPTIONS: &[(&[&str], SkillSyncRule)] = &[(
+    &[
+        "tracedecay-audit-safety",
+        "tracedecay-check-health",
+        "tracedecay-clean-dead-code",
+        "tracedecay-compare-branches",
+        "tracedecay-curate-memory",
+        "tracedecay-draft-commit",
+        "tracedecay-find-impact",
+        "tracedecay-fix-build",
+        "tracedecay-map-architecture",
+        "tracedecay-port-code",
+        "tracedecay-recall-memory",
+        "tracedecay-review-diff",
+        "tracedecay-test-changes",
+    ],
+    SkillSyncRule::OnlyIn {
+        bundles: &["cursor"],
+        reason: "Cursor-only slash dispatchers (disable-model-invocation: true) that \
                      hand off to the shared workflow skills; Codex auto-discovers the \
                      workflow skills directly",
-        },
-    ),
-    (
-        &["curating-project-memory"],
-        SkillSyncRule::DivergentBody {
-            reason: "the Cursor source hands the add-a-subject flow to the \
-                     memorizing-subject skill, which Codex does not ship; the Codex copy \
-                     inlines that flow's guardrails instead of pointing at an absent skill",
-        },
-    ),
-    (
-        &["running-impacted-tests"],
-        SkillSyncRule::DivergentFrontmatter {
-            reason: "Cursor keeps `paths` frontmatter so the host can path-scope the \
-                     skill; Codex must omit that key to satisfy the Codex skill-creator \
-                     quick_validate.py schema",
-        },
-    ),
-];
+    },
+)];
 
 #[test]
 fn bundle_top_level_entries_match_the_sync_manifest() {
@@ -245,9 +210,7 @@ fn skills_are_synced_across_bundles_or_declared_exceptions() {
                      in {shipped_in:?}; fix the bundles or the exception"
                 );
             }
-            Some(SkillSyncRule::DivergentBody { .. })
-            | Some(SkillSyncRule::DivergentFrontmatter { .. })
-            | None => {
+            None => {
                 assert_eq!(
                     shipped_in, &every_bundle,
                     "skill `{skill}` must ship in every bundle (or be declared OnlyIn in \
@@ -299,9 +262,7 @@ fn every_sync_exception_documents_a_reason() {
     }
     for (skills, rule) in SKILL_SYNC_EXCEPTIONS {
         let reason = match rule {
-            SkillSyncRule::OnlyIn { reason, .. }
-            | SkillSyncRule::DivergentBody { reason }
-            | SkillSyncRule::DivergentFrontmatter { reason } => reason,
+            SkillSyncRule::OnlyIn { reason, .. } => reason,
         };
         assert!(
             !reason.trim().is_empty(),
@@ -340,7 +301,6 @@ fn assert_only_in_lists_name_real_bundles() {
             SkillSyncRule::OnlyIn { bundles, .. } => {
                 check(format!("SKILL_SYNC_EXCEPTIONS entry {skills:?}"), bundles);
             }
-            SkillSyncRule::DivergentBody { .. } | SkillSyncRule::DivergentFrontmatter { .. } => {}
         }
     }
 }
@@ -453,37 +413,6 @@ fn assert_skill_md_synced(
                 reference_file.display()
             );
         }
-        Some(SkillSyncRule::DivergentBody { .. }) => {
-            assert!(
-                read_bytes(bundle_file) != read_bytes(reference_file),
-                "{} no longer diverges from {}; remove `{skill}` from \
-                 SKILL_SYNC_EXCEPTIONS so full parity is enforced again",
-                bundle_file.display(),
-                reference_file.display()
-            );
-        }
-        Some(SkillSyncRule::DivergentFrontmatter { .. }) => {
-            let reference_doc = read_text(reference_file);
-            let bundle_doc = read_text(bundle_file);
-            let (reference_frontmatter, reference_body) =
-                split_frontmatter(reference_file, &reference_doc);
-            let (bundle_frontmatter, bundle_body) = split_frontmatter(bundle_file, &bundle_doc);
-            assert_eq!(
-                bundle_body,
-                reference_body,
-                "{} body (after frontmatter) must mirror {}",
-                bundle_file.display(),
-                reference_file.display()
-            );
-            assert_ne!(
-                bundle_frontmatter,
-                reference_frontmatter,
-                "{} frontmatter no longer diverges from {}; remove `{skill}` from \
-                 SKILL_SYNC_EXCEPTIONS so full parity is enforced again",
-                bundle_file.display(),
-                reference_file.display()
-            );
-        }
         Some(SkillSyncRule::OnlyIn { .. }) => {
             unreachable!("OnlyIn skills are never content-compared across bundles")
         }
@@ -492,29 +421,4 @@ fn assert_skill_md_synced(
 
 fn read_bytes(path: &Path) -> Vec<u8> {
     std::fs::read(path).unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()))
-}
-
-fn read_text(path: &Path) -> String {
-    std::fs::read_to_string(path)
-        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()))
-}
-
-/// Splits a skill document into (frontmatter lines, body lines). Line-based
-/// so CRLF checkouts compare like LF ones.
-fn split_frontmatter<'doc>(path: &Path, contents: &'doc str) -> (Vec<&'doc str>, Vec<&'doc str>) {
-    let mut lines = contents.lines();
-    assert_eq!(
-        lines.next().map(str::trim),
-        Some("---"),
-        "{} must open with YAML frontmatter",
-        path.display()
-    );
-    let mut frontmatter = Vec::new();
-    for line in lines.by_ref() {
-        if line.trim() == "---" {
-            return (frontmatter, lines.collect());
-        }
-        frontmatter.push(line);
-    }
-    panic!("{} never closes its YAML frontmatter", path.display());
 }

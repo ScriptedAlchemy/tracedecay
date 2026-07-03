@@ -11,6 +11,7 @@ import { SchedulerStatusSection } from "./SchedulerStatusSection";
 import { SnapshotsSection } from "./SnapshotsSection";
 import type { AutomationRunTask } from "./automationTasks";
 import type { ConfigFieldErrors, SecondsField, TaskField } from "./configTypes";
+import type { ManagedSkillExportsResult } from "./useManagedSkills";
 import type {
   AutomationSchedulerStatusResponse,
   AutomationTaskConfig,
@@ -64,6 +65,7 @@ interface CurationHistoryPanelProps {
   managedSkillsLoading: boolean;
   managedSkillsError: string;
   managedSkillActioning: string | null;
+  managedSkillExports: ManagedSkillExportsResult | null;
   configDraft: MemoryAutomationConfig | null;
   configLoading: boolean;
   configSaving: boolean;
@@ -137,6 +139,7 @@ export function CurationHistoryPanel({
   managedSkillsLoading,
   managedSkillsError,
   managedSkillActioning,
+  managedSkillExports,
   configDraft,
   configLoading,
   configSaving,
@@ -267,6 +270,7 @@ export function CurationHistoryPanel({
             loading={managedSkillsLoading}
             error={managedSkillsError}
             actioning={managedSkillActioning}
+            exportsResult={managedSkillExports}
             onRefresh={() => loadManagedSkills(true)}
             onLoadSkill={loadManagedSkill}
             onAction={runManagedSkillAction}

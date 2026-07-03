@@ -17,7 +17,9 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
-use crate::common::{assert_schema_valid, compile_schema, read_json_file, repo_path};
+use crate::plugin_validation_support::{
+    assert_schema_valid, compile_schema, read_json_file, repo_path,
+};
 
 const PLUGIN_SCHEMA: &str = include_str!("../fixtures/cursor-schemas/plugin.schema.json");
 

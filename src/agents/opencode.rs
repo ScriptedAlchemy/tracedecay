@@ -103,6 +103,53 @@ impl AgentIntegration for OpenCodeIntegration {
         let mcp = json.get("mcp");
         mcp.and_then(|v| v.get("tracedecay")).is_some()
     }
+
+    fn export_managed_skills(
+        &self,
+        home: &Path,
+        profile_root: &Path,
+    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+        let prompt_path = opencode_prompt_path(home);
+        if !self.has_tracedecay(home) || !prompt_path.exists() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![
+            crate::automation::skill_targets::install_managed_skills(
+                profile_root,
+                crate::automation::skill_targets::SkillInstallTarget::OpenCode,
+                &prompt_path,
+            )?,
+        ])
+    }
+
+    fn export_managed_skills_local(
+        &self,
+        project_root: &Path,
+        profile_root: &Path,
+    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+        let agents_md = project_root.join("AGENTS.md");
+        if !local_config_has_tracedecay(project_root) || !agents_md.exists() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![
+            crate::automation::skill_targets::install_managed_skills(
+                profile_root,
+                crate::automation::skill_targets::SkillInstallTarget::OpenCode,
+                &agents_md,
+            )?,
+        ])
+    }
+}
+
+fn local_config_has_tracedecay(project_root: &Path) -> bool {
+    let config_path = project_root.join("opencode.json");
+    if !config_path.exists() {
+        return false;
+    }
+    let json = super::load_json_file(&config_path);
+    json.get("mcp")
+        .and_then(|servers| servers.get("tracedecay"))
+        .is_some()
 }
 
 // ---------------------------------------------------------------------------

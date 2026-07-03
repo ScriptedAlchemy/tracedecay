@@ -32,7 +32,7 @@ use regex::Regex;
 use tracedecay::automation::skill_frontmatter::SkillFrontmatterValue;
 use tracedecay::mcp::get_tool_definitions;
 
-use crate::common::{load_skill_docs, SkillDoc};
+use crate::plugin_validation_support::{load_skill_docs, SkillDoc};
 
 const CURSOR_SKILL_ROOT: &str = "cursor-plugin/skills";
 

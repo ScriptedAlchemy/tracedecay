@@ -21,10 +21,9 @@
 //!   shipping skills.
 //!
 //! Cross-ecosystem conflicts (documented skips, not failures): Cursor requires
-//! `disable-model-invocation: true` on command-style skills and uses `paths`
-//! for path-scoped activation. Claude Code supports both fields natively, but
-//! the strict Agent Skills open spec (and Anthropic's `quick_validate.py`
-//! packaging validator) rejects them. See
+//! `disable-model-invocation: true` on command-style skills. Claude Code
+//! supports that field natively, but the strict Agent Skills open spec (and
+//! Anthropic's `quick_validate.py` packaging validator) rejects it. See
 //! [`CROSS_ECOSYSTEM_CONFLICT_FIELDS`] and the compatibility matrix in
 //! `docs/PLUGIN-VALIDATION.md` (layer 5).
 
@@ -32,7 +31,7 @@
 
 use tracedecay::automation::skill_frontmatter::SkillFrontmatterValue;
 
-use crate::common::{is_kebab_case_skill_name, load_skill_docs, SkillDoc};
+use crate::plugin_validation_support::{is_kebab_case_skill_name, load_skill_docs, SkillDoc};
 
 const SKILL_ROOTS: &[&str] = &["cursor-plugin/skills", "codex-plugin/skills"];
 
@@ -80,13 +79,11 @@ const AGENT_SKILLS_SPEC_ALLOWED_FRONTMATTER: &[&str] = &[
 /// the spec-conformance test tolerates exactly these fields and nothing else.
 ///
 /// - `disable-model-invocation`: Cursor command-style skills (the
-///   `/tracedecay-*` commands and `/memorize-subject`) must set this to stay
+///   `/tracedecay-*` commands) must set this to stay
 ///   manual-only. Claude Code documents and supports the same field, so a
 ///   future claude-plugin bundle can carry it unchanged; only spec-strict
 ///   packagers (`quick_validate.py`, the Claude API skill upload) reject it.
-/// - `paths`: Cursor path-scoped activation on `running-impacted-tests`.
-///   Claude Code supports `paths` with the same glob semantics.
-const CROSS_ECOSYSTEM_CONFLICT_FIELDS: &[&str] = &["disable-model-invocation", "paths"];
+const CROSS_ECOSYSTEM_CONFLICT_FIELDS: &[&str] = &["disable-model-invocation"];
 
 /// platform.claude.com: skill names uploaded to the Claude API cannot contain
 /// the reserved words "anthropic" or "claude".
