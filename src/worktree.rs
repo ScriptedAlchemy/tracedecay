@@ -178,7 +178,7 @@ fn git_command() -> Command {
 
 #[cfg(not(test))]
 fn git_command() -> Command {
-    Command::new("git")
+    Command::new(crate::git::git_program())
 }
 
 fn git_output(dir: &Path, args: &[&str]) -> Option<String> {

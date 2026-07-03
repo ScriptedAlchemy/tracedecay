@@ -39,6 +39,7 @@ pub mod errors;
 pub mod external_tools;
 pub mod extraction;
 pub mod extraction_worker;
+pub mod git;
 pub mod global_db;
 pub mod graph;
 pub mod hooks;

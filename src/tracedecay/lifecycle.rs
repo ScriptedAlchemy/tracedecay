@@ -856,7 +856,7 @@ fn git_remote_url(project_root: &Path) -> Option<String> {
 }
 
 fn git_output(project_root: &Path, args: &[&str]) -> Option<String> {
-    let output = std::process::Command::new("git")
+    let output = std::process::Command::new(crate::git::git_program())
         .args(args)
         .current_dir(project_root)
         .output()

@@ -302,7 +302,7 @@ fn is_ignored_by_git(project_path: &Path, git_config_global: Option<&Path>) -> O
             .and_then(|path| is_ignored_by_explicit_global_excludes(project_path, path))
     };
     let dir_name = active_data_dir_name(project_path);
-    let mut command = Command::new("git");
+    let mut command = Command::new(crate::git::git_program());
     command
         .arg("-C")
         .arg(project_path)
