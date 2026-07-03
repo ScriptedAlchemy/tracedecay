@@ -16,6 +16,20 @@ use tracedecay::storage::{
     default_profile_project_id, write_enrollment_marker, EnrollmentMarker, StorageMode,
 };
 
+/// Bound for waits that depend on spawning and running the real `tracedecay`
+/// CLI as a child process: connecting to the fake daemon socket and forwarding
+/// the observed request back to the test thread. Under nextest's
+/// process-per-test parallelism the fork/exec + init of that child can be
+/// scheduled slowly on a loaded runner, so a 2s bound false-fires. This is a
+/// generous ceiling that still fails fast on a genuine hang (the CLI normally
+/// connects in well under a second).
+const CLI_ROUNDTRIP_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Bound for local, in-process readiness signals (a spawned thread binding a
+/// socket and sending on an mpsc channel). These do not spawn external
+/// processes, but the thread can still be scheduled slowly under load.
+const LOCAL_READY_TIMEOUT: Duration = Duration::from_secs(10);
+
 fn init_project_with_cli(home: &Path, project: &Path) {
     std::fs::create_dir_all(project.join("src")).unwrap();
     std::fs::write(
@@ -41,11 +55,29 @@ fn init_project_with_cli(home: &Path, project: &Path) {
 }
 
 fn git(project: &Path, args: &[&str]) {
-    let output = std::process::Command::new("git")
-        .args(args)
-        .current_dir(project)
-        .output()
-        .expect("git should run");
+    let git = crate::common::git_program();
+    // Retry a transient spawn ENOENT under heavy parallel load.
+    let mut last_err: Option<std::io::Error> = None;
+    let mut output = None;
+    for attempt in 0..5 {
+        match std::process::Command::new(&git)
+            .args(args)
+            .current_dir(project)
+            .output()
+        {
+            Ok(out) => {
+                output = Some(out);
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && attempt < 4 => {
+                last_err = Some(e);
+                std::thread::sleep(Duration::from_millis(20 * (attempt + 1)));
+            }
+            Err(e) => panic!("git {args:?} should run (program {git:?}): {e}"),
+        }
+    }
+    let output =
+        output.unwrap_or_else(|| panic!("git {args:?} should run after retries: {last_err:?}"));
     assert!(
         output.status.success(),
         "git {:?} failed\nstdout:\n{}\nstderr:\n{}",
@@ -154,7 +186,7 @@ fn spawn_sentinel_daemon_with_notification(
             .expect("set listener nonblocking");
         ready_tx.send(()).expect("notify fake daemon readiness");
 
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + CLI_ROUNDTRIP_TIMEOUT;
         let (stream, _) = loop {
             match listener.accept() {
                 Ok(accepted) => break accepted,
@@ -171,7 +203,7 @@ fn spawn_sentinel_daemon_with_notification(
             .set_nonblocking(false)
             .expect("set accepted stream blocking");
         stream
-            .set_write_timeout(Some(Duration::from_secs(2)))
+            .set_write_timeout(Some(CLI_ROUNDTRIP_TIMEOUT))
             .expect("write timeout");
 
         let mut reader = BufReader::new(stream.try_clone().expect("clone fake daemon stream"));
@@ -228,7 +260,7 @@ fn spawn_sentinel_daemon_with_notification(
     });
 
     ready_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(LOCAL_READY_TIMEOUT)
         .expect("fake daemon should become ready");
     request_rx
 }
@@ -245,7 +277,7 @@ fn spawn_hook_event_daemon(socket_path: PathBuf) -> mpsc::Receiver<Value> {
             .expect("set listener nonblocking");
         ready_tx.send(()).expect("notify fake daemon readiness");
 
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + CLI_ROUNDTRIP_TIMEOUT;
         let (stream, _) = loop {
             match listener.accept() {
                 Ok(accepted) => break accepted,
@@ -292,7 +324,7 @@ fn spawn_hook_event_daemon(socket_path: PathBuf) -> mpsc::Receiver<Value> {
     });
 
     ready_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(LOCAL_READY_TIMEOUT)
         .expect("fake daemon should become ready");
     request_rx
 }
@@ -342,7 +374,7 @@ fn assert_hook_notification(
     );
 
     let request = observed_request
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(CLI_ROUNDTRIP_TIMEOUT)
         .expect("fake daemon should receive hook event");
     assert_eq!(request["params"]["agent"], expected_agent);
     assert_eq!(request["params"]["event"], expected_event);
@@ -592,7 +624,7 @@ fn tool_cli_invokes_mcp_tool_through_daemon_socket() {
         "tool CLI should print daemon response, got:\n{stdout}"
     );
     observed_request
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(CLI_ROUNDTRIP_TIMEOUT)
         .expect("fake daemon should receive tools/call request");
 }
 
@@ -635,7 +667,7 @@ fn tool_cli_skips_daemon_notifications_until_matching_response() {
         "tool CLI should print daemon response after notification, got:\n{stdout}"
     );
     observed_request
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(CLI_ROUNDTRIP_TIMEOUT)
         .expect("fake daemon should receive tools/call request");
 }
 
@@ -690,7 +722,7 @@ fn profile_scoped_tool_cli_invokes_daemon_without_project_handshake() {
         "tool CLI should print daemon response, got:\n{stdout}"
     );
     let request = observed_request
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(CLI_ROUNDTRIP_TIMEOUT)
         .expect("fake daemon should receive profile-scoped tools/call request");
     assert_eq!(
         request["params"]["arguments"]["storage_scope"],
@@ -786,7 +818,7 @@ fn first_touch_store_tool_cli_invokes_daemon_with_init_permission() {
         "tool CLI should print daemon response, got:\n{stdout}"
     );
     let request = observed_request
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(CLI_ROUNDTRIP_TIMEOUT)
         .expect("fake daemon should receive first-touch tools/call request");
     assert_eq!(request["params"]["arguments"]["action"], "add");
 }
