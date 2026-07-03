@@ -1,7 +1,6 @@
-import { Button } from "../sdk";
-import { Spinner } from "../Spinner";
 import { AutomationConfigSection } from "./AutomationConfigSection";
 import { AutomationRunsSection } from "./AutomationRunsSection";
+import { CurationTabPanel } from "./CurationTabPanel";
 import { SchedulerStatusSection } from "./SchedulerStatusSection";
 import type { AutomationRunTask } from "./automationTasks";
 import type { ConfigFieldErrors, SecondsField, TaskField } from "./configTypes";
@@ -45,7 +44,10 @@ interface CurationAutomationPanelProps {
   automationTaskCanRun: (task: AutomationRunTask) => boolean;
   automationTaskTitle: (task: AutomationRunTask) => string;
   automationTaskLabel: (task: AutomationRunTask) => string;
-  taskFieldError: (task: AutomationRunTask, field: TaskField) => string | undefined;
+  taskFieldError: (
+    task: AutomationRunTask,
+    field: TaskField,
+  ) => string | undefined;
   loadStatus: () => void;
   loadAutomationRuns: () => void;
   loadSchedulerStatus: (force?: boolean) => void;
@@ -53,8 +55,15 @@ interface CurationAutomationPanelProps {
   runAutomationTask: (task: AutomationRunTask) => void;
   setSchedulerPaused: (paused: boolean) => void;
   updateConfigDraft: (patch: MemoryAutomationConfigPatch) => void;
-  updateConfigTaskDraft: (task: AutomationRunTask, patch: Partial<AutomationTaskConfig>) => void;
-  updateTaskSeconds: (task: AutomationRunTask, key: SecondsField, value: string) => void;
+  updateConfigTaskDraft: (
+    task: AutomationRunTask,
+    patch: Partial<AutomationTaskConfig>,
+  ) => void;
+  updateTaskSeconds: (
+    task: AutomationRunTask,
+    key: SecondsField,
+    value: string,
+  ) => void;
   resetConfigDraft: () => void;
   resetConfigToDefaults: () => Promise<void>;
   saveConfigDraft: () => Promise<void>;
@@ -104,39 +113,18 @@ export function CurationAutomationPanel({
   saveConfigDraft,
 }: CurationAutomationPanelProps) {
   return (
-    <div
-      role="tabpanel"
-      id="curation-panel-automation"
-      aria-labelledby="curation-tab-automation"
-      className="flex flex-1 min-h-0 flex-col gap-3 overflow-y-auto overflow-x-hidden pr-1"
+    <CurationTabPanel
+      tab="automation"
+      title="Automation"
+      subtitle="Scheduler, task config, manual runs, and the run ledger."
+      refreshing={statusLoading}
+      onRefresh={() => {
+        loadStatus();
+        loadSchedulerStatus(true);
+        loadAutomationRuns();
+      }}
+      error={statusError}
     >
-      <div className="flex min-w-0 items-center justify-between gap-2 shrink-0">
-        <div className="min-w-0">
-          <div className="text-xs font-medium text-foreground">Automation</div>
-          <div className="text-[11px] text-text-tertiary">
-            Scheduler, task config, manual runs, and the run ledger.
-          </div>
-        </div>
-        <Button
-          size="xs"
-          ghost
-          disabled={statusLoading}
-          onClick={() => {
-            loadStatus();
-            loadSchedulerStatus(true);
-            loadAutomationRuns();
-          }}
-          className="shrink-0 gap-2"
-        >
-          {statusLoading ? <Spinner /> : null}
-          Refresh
-        </Button>
-      </div>
-      {statusError ? (
-        <div className="border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive shrink-0">
-          {statusError}
-        </div>
-      ) : null}
       <SchedulerStatusSection
         status={schedulerStatus}
         loading={schedulerStatusLoading}
@@ -179,6 +167,6 @@ export function CurationAutomationPanel({
         artifactError={automationRunArtifactError}
         onLoadArtifact={loadAutomationRunArtifact}
       />
-    </div>
+    </CurationTabPanel>
   );
 }

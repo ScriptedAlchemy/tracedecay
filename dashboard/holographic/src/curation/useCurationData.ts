@@ -13,7 +13,8 @@ import { useAutomationRuns } from "./useAutomationRuns";
 import { useFactProposals } from "./useFactProposals";
 import { useManagedSkills } from "./useManagedSkills";
 
-export type CurationTab = "plan" | "automation" | "proposals" | "history" | "activity";
+export type CurationTab =
+  "plan" | "automation" | "proposals" | "history" | "activity";
 
 export type CurationApi = Pick<
   typeof defaultApi,
@@ -66,7 +67,9 @@ export function useCurationData({
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [error, setError] = useState("");
   const [activeTab, setActiveTab] = useState<CurationTab>("plan");
-  const [status, setStatus] = useState<MemoryCuratorStatusResponse | null>(null);
+  const [status, setStatus] = useState<MemoryCuratorStatusResponse | null>(
+    null,
+  );
   const [statusLoading, setStatusLoading] = useState(false);
   const [statusError, setStatusError] = useState("");
   const [oplog, setOplog] = useState<MemoryOplogEvent[]>([]);
@@ -124,18 +127,21 @@ export function useCurationData({
   const previewLoadSeq = useRef(0);
   const panelRef = useRef<HTMLDivElement>(null);
 
-  const applySavedPreview = useCallback((
-    savedReport: MemoryCurateResponse,
-    savedAt?: string | null,
-    stale = false,
-    staleReason = "",
-  ) => {
-    previewSavedAtRef.current = savedAt ?? null;
-    setReport(savedReport);
-    setPreviewSavedAt(savedAt ?? null);
-    setPreviewStale(stale);
-    setPreviewStaleReason(staleReason);
-  }, []);
+  const applySavedPreview = useCallback(
+    (
+      savedReport: MemoryCurateResponse,
+      savedAt?: string | null,
+      stale = false,
+      staleReason = "",
+    ) => {
+      previewSavedAtRef.current = savedAt ?? null;
+      setReport(savedReport);
+      setPreviewSavedAt(savedAt ?? null);
+      setPreviewStale(stale);
+      setPreviewStaleReason(staleReason);
+    },
+    [],
+  );
 
   const clearSavedPreview = useCallback(() => {
     previewSavedAtRef.current = null;
@@ -145,54 +151,66 @@ export function useCurationData({
     setPreviewStaleReason("");
   }, []);
 
-  const setMemoryPreviewFromRun = useCallback((nextReport: MemoryCurateResponse) => {
-    setReport(nextReport);
-    setPreviewSavedAt(null);
-    setPreviewStale(false);
-    setPreviewStaleReason("");
-  }, []);
+  const setMemoryPreviewFromRun = useCallback(
+    (nextReport: MemoryCurateResponse) => {
+      setReport(nextReport);
+      setPreviewSavedAt(null);
+      setPreviewStale(false);
+      setPreviewStaleReason("");
+    },
+    [],
+  );
 
-  const loadSavedPreview = useCallback((force = false) => {
-    const ticket = ++previewLoadSeq.current;
-    return api
-      .getMemoryCuratorPreview()
-      .then((response) => {
-        if (ticket !== previewLoadSeq.current) return response;
-        if (response.report && (force || response.saved_at !== previewSavedAtRef.current)) {
-          applySavedPreview(
-            response.report,
-            response.saved_at ?? null,
-            Boolean(response.stale),
-            response.stale_reason || "",
-          );
-        } else if (!response.report && !loading && !applying) {
-          clearSavedPreview();
-        }
-        return response;
-      })
-      .catch(() => {});
-  }, [api, applySavedPreview, applying, clearSavedPreview, loading]);
+  const loadSavedPreview = useCallback(
+    (force = false) => {
+      const ticket = ++previewLoadSeq.current;
+      return api
+        .getMemoryCuratorPreview()
+        .then((response) => {
+          if (ticket !== previewLoadSeq.current) return response;
+          if (
+            response.report &&
+            (force || response.saved_at !== previewSavedAtRef.current)
+          ) {
+            applySavedPreview(
+              response.report,
+              response.saved_at ?? null,
+              Boolean(response.stale),
+              response.stale_reason || "",
+            );
+          } else if (!response.report && !loading && !applying) {
+            clearSavedPreview();
+          }
+          return response;
+        })
+        .catch(() => {});
+    },
+    [api, applySavedPreview, applying, clearSavedPreview, loading],
+  );
 
-  const loadActivity = useCallback((showSpinner = false) => {
-    if (showSpinner) setActivityLoading(true);
-    setActivityError("");
-    api
-      .getMemoryCuratorActivity({ limit: 120 })
-      .then((response) => {
-        const events = response.events || [];
-        setActivity(events);
-        const latestFinish = [...events]
-          .reverse()
-          .find((event) => event.phase === "finish" && !event.synthetic);
-        if (latestFinish?.dry_run) {
-          loadSavedPreview(false);
-        }
-      })
-      .catch((err) => setActivityError(errorMessage(err)))
-      .finally(() => {
-        if (showSpinner) setActivityLoading(false);
-      });
-  }, [api, loadSavedPreview]);
+  const loadActivity = useCallback(
+    (showSpinner = false) => {
+      if (showSpinner) setActivityLoading(true);
+      setActivityError("");
+      api
+        .getMemoryCuratorActivity({ limit: 120 })
+        .then((response) => {
+          const events = response.events || [];
+          setActivity(events);
+          const latestFinish = [...events]
+            .reverse()
+            .find((event) => event.phase === "finish" && !event.synthetic);
+          if (latestFinish?.dry_run) {
+            loadSavedPreview(false);
+          }
+        })
+        .catch((err) => setActivityError(errorMessage(err)))
+        .finally(() => {
+          if (showSpinner) setActivityLoading(false);
+        });
+    },
+    [api, loadSavedPreview],
+  );
 
   const loadStatus = useCallback(() => {
     setStatusLoading(true);
@@ -331,13 +349,6 @@ export function useCurationData({
     }
   }, [activeTab, loadFactProposals, loadManagedSkills]);
 
-  // Load once on mount so the Proposals tab badge shows pending counts
-  // before the tab is first opened.
-  useEffect(() => {
-    void Promise.allSettled([loadFactProposals(), loadManagedSkills()]);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   useEffect(() => {
     if (activeTab === "activity" && activity.length === 0) {
       loadActivity(true);
@@ -346,10 +357,13 @@ export function useCurationData({
 
   useEffect(() => {
     if (activeTab !== "activity" && !loading && !applying) return undefined;
-    const interval = window.setInterval(() => {
-      if (panelRef.current?.offsetParent === null) return;
-      loadActivity(false);
-    }, loading || applying ? pollFastMs : pollIdleMs);
+    const interval = window.setInterval(
+      () => {
+        if (panelRef.current?.offsetParent === null) return;
+        loadActivity(false);
+      },
+      loading || applying ? pollFastMs : pollIdleMs,
+    );
     return () => window.clearInterval(interval);
   }, [activeTab, applying, loadActivity, loading, pollFastMs, pollIdleMs]);
 

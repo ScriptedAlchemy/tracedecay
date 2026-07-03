@@ -850,11 +850,6 @@ describe("useCurationData", () => {
           count: 1,
           limit: 50,
         })
-        .mockResolvedValueOnce({
-          proposals: [pendingProposal],
-          count: 1,
-          limit: 50,
-        })
         .mockResolvedValue({
           proposals: [appliedProposal],
           count: 1,

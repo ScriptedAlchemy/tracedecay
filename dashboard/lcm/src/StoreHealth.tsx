@@ -80,7 +80,9 @@ function gcPhaseSummary(report: GcReport | null): string {
   ];
   for (const [name, phase] of phases) {
     if (phase && phase.count) {
-      parts.push(`${name}=${fmtInt(phase.count)}${phase.bytes ? ` (${fmtBytes(phase.bytes)})` : ""}`);
+      parts.push(
+        `${name}=${fmtInt(phase.count)}${phase.bytes ? ` (${fmtBytes(phase.bytes)})` : ""}`,
+      );
     }
   }
   if (report.deferred && report.deferred.count) {
@@ -93,72 +95,87 @@ export function StoreHealthCard(): React.ReactElement {
   const [health, setHealth] = useState<PayloadHealthResponse | null>(null);
   const [healthLoading, setHealthLoading] = useState(false);
   const [healthError, setHealthError] = useState("");
-  const [reloadToken, setReloadToken] = useState(0);
 
   const [gcPreview, setGcPreview] = useState<GcResponse | null>(null);
   const [gcApplied, setGcApplied] = useState<GcResponse | null>(null);
   const [gcBusy, setGcBusy] = useState(false);
   const [gcError, setGcError] = useState("");
 
-  useEffect(function () {
-    let active = true;
+  const refresh = useCallback(function () {
     setHealthLoading(true);
     setHealthError("");
-    fetchJSON<PayloadHealthResponse>(`${API}/payloads/health`).then(function (json) {
-      if (active) setHealth(json);
-    }).catch(function (err) {
-      if (active) setHealthError(friendlyError(err));
-    }).finally(function () {
-      if (active) setHealthLoading(false);
-    });
-    return function () { active = false; };
-  }, [reloadToken]);
-
-  const refresh = useCallback(function () {
-    setReloadToken(function (n) { return n + 1; });
+    fetchJSON<PayloadHealthResponse>(`${API}/payloads/health`)
+      .then(function (json) {
+        setHealth(json);
+      })
+      .catch(function (err) {
+        setHealthError(friendlyError(err));
+      })
+      .finally(function () {
+        setHealthLoading(false);
+      });
   }, []);
+
+  useEffect(
+    function () {
+      refresh();
+    },
+    [refresh],
+  );
 
   const runPreview = useCallback(function () {
     setGcBusy(true);
     setGcError("");
     setGcApplied(null);
-    fetchJSON<GcResponse>(`${API}/payloads/gc`).then(function (json) {
-      setGcPreview(json);
-    }).catch(function (err) {
-      setGcPreview(null);
-      setGcError(friendlyError(err));
-    }).finally(function () {
-      setGcBusy(false);
-    });
+    fetchJSON<GcResponse>(`${API}/payloads/gc`)
+      .then(function (json) {
+        setGcPreview(json);
+      })
+      .catch(function (err) {
+        setGcPreview(null);
+        setGcError(friendlyError(err));
+      })
+      .finally(function () {
+        setGcBusy(false);
+      });
   }, []);
 
-  const runApply = useCallback(function () {
-    if (!gcPreview || !gcPreview.dry_run_token) return;
-    setGcBusy(true);
-    setGcError("");
-    fetchJSON<GcResponse>(`${API}/payloads/gc`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        provider: gcPreview.provider,
-        session_id: gcPreview.session_id || "",
-        confirm: true,
-        dry_run_token: gcPreview.dry_run_token,
-      }),
-    }).then(function (json: GcResponse) {
-      setGcApplied(json);
-      setGcPreview(null);
-      refresh();
-    }).catch(function (err) {
-      setGcError(friendlyError(err));
-    }).finally(function () {
-      setGcBusy(false);
-    });
-  }, [gcPreview, refresh]);
+  const runApply = useCallback(
+    function () {
+      if (!gcPreview || !gcPreview.dry_run_token) return;
+      setGcBusy(true);
+      setGcError("");
+      fetchJSON<GcResponse>(`${API}/payloads/gc`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider: gcPreview.provider,
+          session_id: gcPreview.session_id || "",
+          confirm: true,
+          dry_run_token: gcPreview.dry_run_token,
+        }),
+      })
+        .then(function (json: GcResponse) {
+          setGcApplied(json);
+          setGcPreview(null);
+          refresh();
+        })
+        .catch(function (err) {
+          setGcError(friendlyError(err));
+        })
+        .finally(function () {
+          setGcBusy(false);
+        });
+    },
+    [gcPreview, refresh],
+  );
 
   const payload = (health && health.payload_health) || null;
   const previewReport = gcPreview && gcPreview.gc_report;
   const appliedReport = gcApplied && gcApplied.gc_report;
+  const appliedTotals: GcTotals | null = appliedReport
+    ? (appliedReport.totals ?? {})
+    : null;
   const attentionCount = payload
     ? (Number(payload.missing_count) || 0) +
       (Number(payload.missing_placeholder_file_count) || 0) +
@@ -186,36 +203,47 @@ export function StoreHealthCard(): React.ReactElement {
           </button>
         </div>
       </div>
-      {healthError
-        ? <ErrorPanel error={healthError} onRetry={refresh} className="hermes-lcm-error" />
-        : null}
-      {!payload && healthLoading
-        ? <SkeletonLines count={3} widths={["90%", "75%", "60%"]} />
-        : null}
+      {healthError ? (
+        <ErrorPanel
+          error={healthError}
+          onRetry={refresh}
+          className="hermes-lcm-error"
+        />
+      ) : null}
+      {!payload && healthLoading ? (
+        <SkeletonLines count={3} widths={["90%", "75%", "60%"]} />
+      ) : null}
       {payload ? (
         <>
           <div className="hermes-lcm-row-meta hermes-lcm-storehealth-stats">
             <span className="hermes-lcm-pill">
-              {fmtInt(payload.externalized_count)} externalized · {fmtBytes(payload.total_bytes)}
+              {fmtInt(payload.externalized_count)} externalized ·{" "}
+              {fmtBytes(payload.total_bytes)}
             </span>
             <span className="hermes-lcm-pill">
               reclaimable {fmtBytes(payload.reclaimable_bytes_after_grace)}
             </span>
             {payload.orphan_file_count ? (
               <span className="hermes-lcm-pill">
-                {fmtInt(payload.orphan_file_count)} orphan files · {fmtBytes(payload.orphan_file_bytes)}
+                {fmtInt(payload.orphan_file_count)} orphan files ·{" "}
+                {fmtBytes(payload.orphan_file_bytes)}
               </span>
             ) : null}
             {payload.missing_count ? (
-              <span className="hermes-lcm-pill">{fmtInt(payload.missing_count)} missing payloads</span>
+              <span className="hermes-lcm-pill">
+                {fmtInt(payload.missing_count)} missing payloads
+              </span>
             ) : null}
             {payload.missing_placeholder_file_count ? (
               <span className="hermes-lcm-pill">
-                {fmtInt(payload.missing_placeholder_file_count)} missing placeholder refs
+                {fmtInt(payload.missing_placeholder_file_count)} missing
+                placeholder refs
               </span>
             ) : null}
             {payload.tombstoned_count ? (
-              <span className="hermes-lcm-pill">{fmtInt(payload.tombstoned_count)} tombstoned</span>
+              <span className="hermes-lcm-pill">
+                {fmtInt(payload.tombstoned_count)} tombstoned
+              </span>
             ) : null}
           </div>
           <div className="hermes-lcm-row-meta hermes-lcm-storehealth-actions">
@@ -231,7 +259,11 @@ export function StoreHealthCard(): React.ReactElement {
               type="button"
               className="hermes-lcm-btn"
               disabled={gcBusy || !gcPreview || !gcPreview.dry_run_token}
-              title={gcPreview ? "Apply the previewed GC (deletes unreferenced payload files)" : "Run a preview first"}
+              title={
+                gcPreview
+                  ? "Apply the previewed GC (deletes unreferenced payload files)"
+                  : "Run a preview first"
+              }
               onClick={runApply}
             >
               Apply GC
@@ -242,24 +274,32 @@ export function StoreHealthCard(): React.ReactElement {
                 {payload.last_gc_status ? ` · ${payload.last_gc_status}` : ""}
               </span>
             ) : (
-              <span className="hermes-lcm-dim">GC has never run for this store</span>
+              <span className="hermes-lcm-dim">
+                GC has never run for this store
+              </span>
             )}
             {attentionCount === 0 && !gcPreview && !gcApplied ? (
               <span className="hermes-lcm-dim">nothing needs attention</span>
             ) : null}
           </div>
-          {gcError ? <ErrorPanel error={gcError} className="hermes-lcm-error" /> : null}
+          {gcError ? (
+            <ErrorPanel error={gcError} className="hermes-lcm-error" />
+          ) : null}
           {previewReport ? (
             <div className="hermes-lcm-dim hermes-lcm-storehealth-report">
               dry run: {gcPhaseSummary(previewReport)}
             </div>
           ) : null}
-          {appliedReport ? (
+          {appliedTotals ? (
             <div className="hermes-lcm-dim hermes-lcm-storehealth-report">
-              applied: removed {fmtInt(appliedReport.totals && appliedReport.totals.files)} files
-              {" · "}{fmtBytes(appliedReport.totals && appliedReport.totals.bytes)} reclaimed
-              {" · "}{fmtInt(appliedReport.totals && appliedReport.totals.rows_deleted)} rows deleted
-              {" · "}{fmtInt(appliedReport.totals && appliedReport.totals.placeholders_rewritten)} placeholders rewritten
+              applied: removed {fmtInt(appliedTotals.files)} files
+              {" · "}
+              {fmtBytes(appliedTotals.bytes)} reclaimed
+              {" · "}
+              {fmtInt(appliedTotals.rows_deleted)} rows deleted
+              {" · "}
+              {fmtInt(appliedTotals.placeholders_rewritten)} placeholders
+              rewritten
             </div>
           ) : null}
         </>

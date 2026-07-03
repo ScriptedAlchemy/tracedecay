@@ -1,5 +1,4 @@
-import { Button } from "../sdk";
-import { Spinner } from "../Spinner";
+import { CurationTabPanel } from "./CurationTabPanel";
 import { CurrentPreviewSection } from "./CurrentPreviewSection";
 import { MemoryOperationsSection } from "./MemoryOperationsSection";
 import { RunHistorySection } from "./RunHistorySection";
@@ -46,40 +45,17 @@ export function CurationHistoryPanel({
   loadOplog,
 }: CurationHistoryPanelProps) {
   return (
-    <div
-      role="tabpanel"
-      id="curation-panel-history"
-      aria-labelledby="curation-tab-history"
-      className="flex flex-1 min-h-0 flex-col gap-3 overflow-y-auto overflow-x-hidden pr-1"
+    <CurationTabPanel
+      tab="history"
+      title="Curator History"
+      subtitle="Run history, recent snapshots, and the memory operation log."
+      refreshing={statusLoading}
+      onRefresh={() => {
+        loadStatus();
+        loadOplog();
+      }}
+      error={statusError}
     >
-      <div className="flex min-w-0 items-center justify-between gap-2 shrink-0">
-        <div className="min-w-0">
-          <div className="text-xs font-medium text-foreground">
-            Curator History
-          </div>
-          <div className="text-[11px] text-text-tertiary">
-            Run history, recent snapshots, and the memory operation log.
-          </div>
-        </div>
-        <Button
-          size="xs"
-          ghost
-          disabled={statusLoading}
-          onClick={() => {
-            loadStatus();
-            loadOplog();
-          }}
-          className="shrink-0 gap-2"
-        >
-          {statusLoading ? <Spinner /> : null}
-          Refresh
-        </Button>
-      </div>
-      {statusError ? (
-        <div className="border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive shrink-0">
-          {statusError}
-        </div>
-      ) : null}
       {status ? (
         <>
           <RunHistorySection status={status} />
@@ -97,6 +73,6 @@ export function CurationHistoryPanel({
         diagnosticCounts={diagnosticCounts}
         isPlan={isPlan}
       />
-    </div>
+    </CurationTabPanel>
   );
 }

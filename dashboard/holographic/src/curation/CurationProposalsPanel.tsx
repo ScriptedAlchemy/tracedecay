@@ -1,5 +1,4 @@
-import { Button } from "../sdk";
-import { Spinner } from "../Spinner";
+import { CurationTabPanel } from "./CurationTabPanel";
 import { FactProposalsSection } from "./FactProposalsSection";
 import { ManagedSkillsSection } from "./ManagedSkillsSection";
 import type {
@@ -29,7 +28,10 @@ interface CurationProposalsPanelProps {
   loadFactProposals: (force?: boolean) => void;
   loadManagedSkills: (force?: boolean) => void;
   loadManagedSkill: (skillId: string) => void;
-  runFactProposalAction: (action: "apply" | "reject", proposalId: string) => void;
+  runFactProposalAction: (
+    action: "apply" | "reject",
+    proposalId: string,
+  ) => void;
   runManagedSkillAction: (action: string, skillId: string) => void;
 }
 
@@ -54,35 +56,12 @@ export function CurationProposalsPanel({
   runFactProposalAction,
   runManagedSkillAction,
 }: CurationProposalsPanelProps) {
-  const refreshing = factProposalsLoading || managedSkillsLoading;
   return (
-    <div
-      role="tabpanel"
-      id="curation-panel-proposals"
-      aria-labelledby="curation-tab-proposals"
-      className="flex flex-1 min-h-0 flex-col gap-3 overflow-y-auto overflow-x-hidden pr-1"
+    <CurationTabPanel
+      tab="proposals"
+      title="Proposals"
+      subtitle="Facts and skills the automation loops staged for your approval."
     >
-      <div className="flex min-w-0 items-center justify-between gap-2 shrink-0">
-        <div className="min-w-0">
-          <div className="text-xs font-medium text-foreground">Proposals</div>
-          <div className="text-[11px] text-text-tertiary">
-            Facts and skills the automation loops staged for your approval.
-          </div>
-        </div>
-        <Button
-          size="xs"
-          ghost
-          disabled={refreshing}
-          onClick={() => {
-            loadFactProposals(true);
-            loadManagedSkills(true);
-          }}
-          className="shrink-0 gap-2"
-        >
-          {refreshing ? <Spinner /> : null}
-          Refresh
-        </Button>
-      </div>
       <FactProposalsSection
         proposals={factProposals}
         loading={factProposalsLoading}
@@ -106,6 +85,6 @@ export function CurationProposalsPanel({
         onLoadSkill={loadManagedSkill}
         onAction={runManagedSkillAction}
       />
-    </div>
+    </CurationTabPanel>
   );
 }

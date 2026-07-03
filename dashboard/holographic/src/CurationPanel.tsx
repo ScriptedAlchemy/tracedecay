@@ -8,22 +8,21 @@ import {
 } from "lucide-react";
 import { Button, Card, CardContent, CardHeader, CardTitle } from "./sdk";
 import { Spinner } from "./Spinner";
-import {
-  countLabel,
-  formatHistoryTime,
-} from "./curation/format";
+import { countLabel, formatHistoryTime } from "./curation/format";
 import { groupActions } from "./curation/risk";
 import { ActivityScroller } from "./curation/ActivityScroller";
 import { ActionReviewGroup } from "./curation/ActionReviewGroup";
-import {
-  useCurationData,
-  type CurationTab,
-} from "./curation/useCurationData";
+import { useCurationData, type CurationTab } from "./curation/useCurationData";
+import { usePendingAutomationCounts } from "./curation/usePendingAutomationCounts";
+import { api } from "./api";
 import { CurationAutomationPanel } from "./curation/CurationAutomationPanel";
 import { CurationProposalsPanel } from "./curation/CurationProposalsPanel";
 import { CurationHistoryPanel } from "./curation/CurationHistoryPanel";
 import { InlineConfirm } from "./curation/InlineConfirm";
-import { isActiveAutomationStatus, type AutomationRunTask } from "./curation/automationTasks";
+import {
+  isActiveAutomationStatus,
+  type AutomationRunTask,
+} from "./curation/automationTasks";
 import type { SecondsField, TaskField } from "./curation/configTypes";
 
 const DIAGNOSTIC_COUNT_KEYS = new Set([
@@ -122,7 +121,9 @@ export default function CurationPanel({
   const actions = report?.actions ?? [];
   const counts: Record<string, number> = report?.counts ?? {};
   const isPlan = report?.dry_run ?? true;
-  const shownCounts: Record<string, number> = isPlan ? counts : (report?.applied_counts ?? counts);
+  const shownCounts: Record<string, number> = isPlan
+    ? counts
+    : (report?.applied_counts ?? counts);
   const actionCounts = Object.entries(shownCounts).filter(
     ([key]) => !DIAGNOSTIC_COUNT_KEYS.has(key),
   );
@@ -130,7 +131,9 @@ export default function CurationPanel({
     DIAGNOSTIC_COUNT_KEYS.has(key),
   );
   const actionGroups = groupActions(actions);
-  const nonEmptyActionGroups = actionGroups.filter((group) => group.actions.length > 0);
+  const nonEmptyActionGroups = actionGroups.filter(
+    (group) => group.actions.length > 0,
+  );
   const backendAvailability = configResponse?.backend_availability;
   const backendUnavailable =
     !configDirty &&
@@ -149,7 +152,8 @@ export default function CurationPanel({
     !automationRunActioning;
   const activeAutomationStatus = (task: AutomationRunTask) =>
     automationRuns.find(
-      (record) => record.task === task && isActiveAutomationStatus(record.status),
+      (record) =>
+        record.task === task && isActiveAutomationStatus(record.status),
     )?.status;
   const automationRunTitle = configDirty
     ? "Save automation config before running"
@@ -185,15 +189,12 @@ export default function CurationPanel({
       [key]: value ? Math.max(1, Number(value) || 1) : null,
     });
   };
-  const taskFieldError = (
-    task: AutomationRunTask,
-    field: TaskField,
-  ) => configFieldErrors[`${task}.${field}`];
+  const taskFieldError = (task: AutomationRunTask, field: TaskField) =>
+    configFieldErrors[`${task}.${field}`];
   const planLabel = actions.length ? `Plan ${actions.length}` : "Plan";
-  const confirmGroupCounts = nonEmptyActionGroups.map((group) => [
-    group.label,
-    group.actions.length,
-  ] as const);
+  const confirmGroupCounts = nonEmptyActionGroups.map(
+    (group) => [group.label, group.actions.length] as const,
+  );
   const selectedUsage = selectedManagedSkill
     ? managedSkillUsage[selectedManagedSkill.metadata.id]
     : null;
@@ -203,9 +204,9 @@ export default function CurationPanel({
   const selectedImprovementRecommendation = selectedManagedSkill
     ? managedSkillImprovementRecommendations[selectedManagedSkill.metadata.id]
     : null;
-  const pendingProposalCount =
-    factProposals.filter((proposal) => proposal.state === "pending_approval").length +
-    managedSkills.filter((skill) => skill.metadata.state === "pending_approval").length;
+  // Same server-side count the outer Curation tab badge uses, so the two
+  // badges can't disagree and no proposal/skill lists need loading up front.
+  const pendingProposalCount = usePendingAutomationCounts(api);
   const proposalsLabel = pendingProposalCount
     ? `Proposals ${pendingProposalCount}`
     : "Proposals";
@@ -225,7 +226,13 @@ export default function CurationPanel({
           Curation
         </CardTitle>
         <div className="flex items-center gap-2 shrink-0">
-          <Button size="sm" ghost disabled={loading} onClick={preview} className="gap-2">
+          <Button
+            size="sm"
+            ghost
+            disabled={loading}
+            onClick={preview}
+            className="gap-2"
+          >
             {loading ? <Spinner /> : null}
             Preview
           </Button>
@@ -298,7 +305,8 @@ export default function CurationPanel({
             )}
             {previewStale ? (
               <div className="border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning shrink-0">
-                {previewStaleReason || "This saved preview is stale because the memory store changed."}
+                {previewStaleReason ||
+                  "This saved preview is stale because the memory store changed."}
               </div>
             ) : null}
 
@@ -318,16 +326,22 @@ export default function CurationPanel({
                   <>
                     <span className="text-text-tertiary">· signals</span>
                     {diagnosticCounts.map(([k, v]) => (
-                      <span key={k} className="font-mono-ui whitespace-nowrap text-text-tertiary">
+                      <span
+                        key={k}
+                        className="font-mono-ui whitespace-nowrap text-text-tertiary"
+                      >
                         {countLabel(k)}={v}
                       </span>
                     ))}
                   </>
                 ) : null}
-                <span className="text-text-tertiary whitespace-nowrap">· llm_calls={report.llm_calls}</span>
+                <span className="text-text-tertiary whitespace-nowrap">
+                  · llm_calls={report.llm_calls}
+                </span>
                 {report.coverage ? (
                   <span className="text-text-tertiary whitespace-nowrap">
-                    · scanned={report.coverage.scanned}/{report.coverage.active_total}
+                    · scanned={report.coverage.scanned}/
+                    {report.coverage.active_total}
                     {report.coverage.due_remaining
                       ? ` · due=${report.coverage.due_remaining}`
                       : ""}
@@ -335,7 +349,8 @@ export default function CurationPanel({
                 ) : null}
                 {report.coverage?.entity_total != null ? (
                   <span className="text-text-tertiary whitespace-nowrap">
-                    · entities={report.coverage.entities_scanned ?? 0}/{report.coverage.entity_total}
+                    · entities={report.coverage.entities_scanned ?? 0}/
+                    {report.coverage.entity_total}
                     {report.coverage.entity_scan_remaining
                       ? ` · entity_due=${report.coverage.entity_scan_remaining}`
                       : ""}
@@ -347,7 +362,9 @@ export default function CurationPanel({
                   </span>
                 ) : null}
                 {!isPlan && report.skipped_actions ? (
-                  <span className="text-warning whitespace-nowrap">· skipped={report.skipped_actions}</span>
+                  <span className="text-warning whitespace-nowrap">
+                    · skipped={report.skipped_actions}
+                  </span>
                 ) : null}
               </div>
             )}
@@ -360,7 +377,8 @@ export default function CurationPanel({
 
             {!report && !loading && (
               <p className="text-xs text-text-tertiary shrink-0">
-                Click <span className="text-text-secondary">Preview</span> to see proposed maintenance actions.
+                Click <span className="text-text-secondary">Preview</span> to
+                see proposed maintenance actions.
               </p>
             )}
 
@@ -476,7 +494,9 @@ export default function CurationPanel({
             selectedManagedSkill={selectedManagedSkill}
             selectedUsage={selectedUsage}
             selectedRecommendation={selectedRecommendation}
-            selectedImprovementRecommendation={selectedImprovementRecommendation}
+            selectedImprovementRecommendation={
+              selectedImprovementRecommendation
+            }
             managedSkillsLoading={managedSkillsLoading}
             managedSkillsError={managedSkillsError}
             managedSkillActioning={managedSkillActioning}
@@ -526,9 +546,14 @@ export default function CurationPanel({
           ) : (
             <div className="grid grid-cols-2 gap-x-3 gap-y-1">
               {confirmGroupCounts.map(([label, count]) => (
-                <div key={label} className="flex items-center justify-between gap-2">
+                <div
+                  key={label}
+                  className="flex items-center justify-between gap-2"
+                >
                   <span className="text-text-tertiary">{label}</span>
-                  <span className="font-mono-ui text-text-secondary">{count}</span>
+                  <span className="font-mono-ui text-text-secondary">
+                    {count}
+                  </span>
                 </div>
               ))}
             </div>

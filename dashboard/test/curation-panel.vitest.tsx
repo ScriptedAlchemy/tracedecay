@@ -4,7 +4,9 @@ import { describe, expect, it, vi } from "vitest";
 import CurationPanel from "../holographic/src/CurationPanel";
 
 const apiMock = vi.hoisted(() => ({
-  getMemoryCuratorPreview: vi.fn().mockResolvedValue({ report: null, saved_at: null }),
+  getMemoryCuratorPreview: vi
+    .fn()
+    .mockResolvedValue({ report: null, saved_at: null }),
   getMemoryCuratorActivity: vi.fn().mockResolvedValue({ events: [] }),
   getMemoryCuratorStatus: vi.fn().mockResolvedValue({
     provider: "tracedecay",
@@ -57,9 +59,18 @@ const apiMock = vi.hoisted(() => ({
         auto_apply_memory_ops: patch.auto_apply_memory_ops ?? false,
         auto_enable_skills: patch.auto_enable_skills ?? false,
         tasks: {
-          memory_curator: patch.memory_curator ?? { enabled: false, schedule: null },
-          session_reflector: patch.session_reflector ?? { enabled: false, schedule: null },
-          skill_writer: patch.skill_writer ?? { enabled: false, schedule: null },
+          memory_curator: patch.memory_curator ?? {
+            enabled: false,
+            schedule: null,
+          },
+          session_reflector: patch.session_reflector ?? {
+            enabled: false,
+            schedule: null,
+          },
+          skill_writer: patch.skill_writer ?? {
+            enabled: false,
+            schedule: null,
+          },
         },
       },
       backend_availability: {
@@ -107,7 +118,11 @@ const apiMock = vi.hoisted(() => ({
     tasks: [
       { task: "memory_curator", due: true, skip_reason: null },
       { task: "session_reflector", due: false, skip_reason: "task_disabled" },
-      { task: "skill_writer", due: false, skip_reason: "scheduler_schedule_manual" },
+      {
+        task: "skill_writer",
+        due: false,
+        skip_reason: "scheduler_schedule_manual",
+      },
     ],
   }),
   pauseAutomationScheduler: vi.fn().mockResolvedValue({
@@ -298,7 +313,8 @@ const apiMock = vi.hoisted(() => ({
         skill_id: "repo-hygiene",
         improvement: true,
         recommendation: "patch_review",
-        reason: "repeated patches suggest the skill instructions may still be unstable",
+        reason:
+          "repeated patches suggest the skill instructions may still be unstable",
         priority: "medium",
         evidence: ["patches=2"],
       },
@@ -357,7 +373,8 @@ const apiMock = vi.hoisted(() => ({
       skill_id: "repo-hygiene",
       improvement: true,
       recommendation: "patch_review",
-      reason: "repeated patches suggest the skill instructions may still be unstable",
+      reason:
+        "repeated patches suggest the skill instructions may still be unstable",
       priority: "medium",
       evidence: ["patches=2"],
     },
@@ -387,7 +404,11 @@ const apiMock = vi.hoisted(() => ({
       {
         agent: "claude",
         exports: [
-          { target: "claude", output: "/home/user/.claude/CLAUDE.md", exported_count: 1 },
+          {
+            target: "claude",
+            output: "/home/user/.claude/CLAUDE.md",
+            exported_count: 1,
+          },
         ],
       },
       { agent: "cursor", exports: [], error: "permission denied" },
@@ -462,20 +483,14 @@ vi.mock("../holographic/src/api", () => ({
   api: apiMock,
 }));
 
-function renderAutomationPanel() {
+function openTab(name: RegExp) {
   render(<CurationPanel />);
-  fireEvent.click(screen.getByRole("tab", { name: /automation/i }));
+  fireEvent.click(screen.getByRole("tab", { name }));
 }
 
-function renderProposalsPanel() {
-  render(<CurationPanel />);
-  fireEvent.click(screen.getByRole("tab", { name: /proposals/i }));
-}
-
-function renderHistoryPanel() {
-  render(<CurationPanel />);
-  fireEvent.click(screen.getByRole("tab", { name: /history/i }));
-}
+const renderAutomationPanel = () => openTab(/automation/i);
+const renderProposalsPanel = () => openTab(/proposals/i);
+const renderHistoryPanel = () => openTab(/history/i);
 
 describe("CurationPanel", () => {
   it("keeps inactive curation tabs keyboard reachable", () => {
@@ -498,7 +513,9 @@ describe("CurationPanel", () => {
 
     const maxTokens = await screen.findByLabelText("Max tokens");
     const temperature = await screen.findByLabelText("Temperature");
-    const schedulerTick = await screen.findByLabelText("Scheduler tick seconds");
+    const schedulerTick = await screen.findByLabelText(
+      "Scheduler tick seconds",
+    );
 
     fireEvent.change(maxTokens, { target: { value: "4096" } });
     fireEvent.change(temperature, { target: { value: "0.2" } });
@@ -565,7 +582,8 @@ describe("CurationPanel", () => {
         backend: "codex_app_server",
         available: false,
         executable: "/missing/codex",
-        reason: "codex app-server backend executable '/missing/codex' was not found",
+        reason:
+          "codex app-server backend executable '/missing/codex' was not found",
       },
     });
 
@@ -579,39 +597,37 @@ describe("CurationPanel", () => {
 
   it("renders automation config validation errors inline", async () => {
     apiMock.patchMemoryAutomationConfig.mockRejectedValueOnce(
-      Object.assign(
-        new Error("automation config validation failed"),
-        {
-          body: {
-            validation_errors: [
-              {
-                field: "timeout_secs",
-                message: "automation timeout_secs must be greater than zero",
-              },
-              {
-                field: "backend",
-                message: "automation backend is not selectable",
-              },
-              {
-                field: "host_mode",
-                message: "automation host_mode is invalid",
-              },
-              {
-                field: "memory_curator.schedule",
-                message: "memory curator schedule is invalid",
-              },
-              {
-                field: "session_reflector.interval_secs",
-                message: "session reflector interval_secs must be greater than zero",
-              },
-              {
-                field: "skill_writer.stale_lock_secs",
-                message: "skill writer stale_lock_secs must be greater than zero",
-              },
-            ],
-          },
+      Object.assign(new Error("automation config validation failed"), {
+        body: {
+          validation_errors: [
+            {
+              field: "timeout_secs",
+              message: "automation timeout_secs must be greater than zero",
+            },
+            {
+              field: "backend",
+              message: "automation backend is not selectable",
+            },
+            {
+              field: "host_mode",
+              message: "automation host_mode is invalid",
+            },
+            {
+              field: "memory_curator.schedule",
+              message: "memory curator schedule is invalid",
+            },
+            {
+              field: "session_reflector.interval_secs",
+              message:
+                "session reflector interval_secs must be greater than zero",
+            },
+            {
+              field: "skill_writer.stale_lock_secs",
+              message: "skill writer stale_lock_secs must be greater than zero",
+            },
+          ],
         },
-      ),
+      }),
     );
 
     renderAutomationPanel();
@@ -620,23 +636,41 @@ describe("CurationPanel", () => {
     fireEvent.change(timeoutInput, { target: { value: "0" } });
     fireEvent.click(screen.getByRole("button", { name: /save config/i }));
 
-    expect(await screen.findByText("automation config validation failed")).toBeTruthy();
-    expect(await screen.findByText("automation timeout_secs must be greater than zero")).toBeTruthy();
-    expect(await screen.findByText("automation backend is not selectable")).toBeTruthy();
-    expect(await screen.findByText("automation host_mode is invalid")).toBeTruthy();
-    expect(await screen.findByText("memory curator schedule is invalid")).toBeTruthy();
     expect(
-      await screen.findByText("session reflector interval_secs must be greater than zero"),
+      await screen.findByText("automation config validation failed"),
     ).toBeTruthy();
     expect(
-      await screen.findByText("skill writer stale_lock_secs must be greater than zero"),
+      await screen.findByText(
+        "automation timeout_secs must be greater than zero",
+      ),
+    ).toBeTruthy();
+    expect(
+      await screen.findByText("automation backend is not selectable"),
+    ).toBeTruthy();
+    expect(
+      await screen.findByText("automation host_mode is invalid"),
+    ).toBeTruthy();
+    expect(
+      await screen.findByText("memory curator schedule is invalid"),
+    ).toBeTruthy();
+    expect(
+      await screen.findByText(
+        "session reflector interval_secs must be greater than zero",
+      ),
+    ).toBeTruthy();
+    expect(
+      await screen.findByText(
+        "skill writer stale_lock_secs must be greater than zero",
+      ),
     ).toBeTruthy();
   });
 
   it("does not offer the unimplemented external command backend", async () => {
     renderAutomationPanel();
 
-    const backend = (await screen.findByLabelText("Backend")) as HTMLSelectElement;
+    const backend = (await screen.findByLabelText(
+      "Backend",
+    )) as HTMLSelectElement;
     const values = Array.from(backend.options).map((option) => option.value);
     expect(values).toEqual(["disabled", "codex_app_server"]);
   });
@@ -645,13 +679,19 @@ describe("CurationPanel", () => {
     renderAutomationPanel();
 
     await waitFor(() => {
-      expect(apiMock.getMemoryAutomationRuns).toHaveBeenCalledWith({ limit: 20 });
+      expect(apiMock.getMemoryAutomationRuns).toHaveBeenCalledWith({
+        limit: 20,
+      });
     });
     expect(await screen.findByText("Automation runs")).toBeTruthy();
     expect(
-      screen.getAllByText(/memory_curator · dashboard · codex_app_server\/gpt-test/).length,
+      screen.getAllByText(
+        /memory_curator · dashboard · codex_app_server\/gpt-test/,
+      ).length,
     ).toBeGreaterThan(0);
-    expect(screen.getAllByText(/automation_disabled/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/automation_disabled/).length).toBeGreaterThan(
+      0,
+    );
 
     fireEvent.click(screen.getByRole("button", { name: /codex_handoff/i }));
 
@@ -720,7 +760,9 @@ describe("CurationPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: /apply fact/i }));
 
     await waitFor(() => {
-      expect(apiMock.applyFactProposal).toHaveBeenCalledWith("prop-dashboard-1");
+      expect(apiMock.applyFactProposal).toHaveBeenCalledWith(
+        "prop-dashboard-1",
+      );
     });
   });
 
@@ -732,7 +774,9 @@ describe("CurationPanel", () => {
     });
     expect(await screen.findByText("Managed skills")).toBeTruthy();
     expect(screen.getAllByText("Repo Hygiene").length).toBeGreaterThan(0);
-    expect(screen.getByText(/Use focused checks before broad suites/)).toBeTruthy();
+    expect(
+      screen.getByText(/Use focused checks before broad suites/),
+    ).toBeTruthy();
     expect(screen.getByText("uses=1")).toBeTruthy();
     expect(screen.getByText(/recent or meaningful activity/)).toBeTruthy();
     expect(screen.getByText("patch_review")).toBeTruthy();
@@ -745,7 +789,9 @@ describe("CurationPanel", () => {
       expect(apiMock.approveManagedSkill).toHaveBeenCalledWith("repo-hygiene");
     });
 
-    expect(await screen.findByText(/agent exports · after approve/)).toBeTruthy();
+    expect(
+      await screen.findByText(/agent exports · after approve/),
+    ).toBeTruthy();
     expect(screen.getByText(/1 skill\(s\) deployed/)).toBeTruthy();
     expect(screen.getByText(/export failed: permission denied/)).toBeTruthy();
   });
