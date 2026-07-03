@@ -90,10 +90,11 @@ impl HookProjectRouteCache {
         self.project_path.as_deref()
     }
 
-    pub(crate) fn refresh_from_shared(&mut self, shared: &HookProjectRouteCache) {
-        let local_project_path = self.project_path.clone();
-        self.clone_from(shared);
-        self.project_path = local_project_path;
+    /// Overwrite every field except `project_path` from an already-cloned
+    /// shared snapshot, taking ownership so no second deep clone is needed.
+    fn refresh_from_owned(&mut self, mut shared: HookProjectRouteCache) {
+        shared.project_path = self.project_path.take();
+        *self = shared;
     }
 
     fn insert_session_route(&mut self, session_id: String, project_path: String) {
@@ -187,6 +188,17 @@ impl SharedHookProjectRouteCache {
             cache.project_path = None;
             shared.clone_from(&cache);
         }
+    }
+
+    /// Refresh `target` from the shared cache with a single deep clone taken
+    /// under the lock, preserving `target`'s local `project_path`.
+    pub(crate) fn refresh_into(&self, target: &mut HookProjectRouteCache) {
+        let cloned = self
+            .inner
+            .lock()
+            .map(|cache| cache.clone())
+            .unwrap_or_default();
+        target.refresh_from_owned(cloned);
     }
 }
 

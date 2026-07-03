@@ -817,6 +817,40 @@ or the server is disconnected, every tool is also available as a shell command: 
 `tracedecay tool <name> --help` shows parameters). Fall back to that CLI instead of \
 querying `.tracedecay` databases directly or abandoning tracedecay.";
 
+/// True when a `SKILL.md`'s contents carry a tracedecay authorship marker,
+/// marking the skill dir as tracedecay-owned (and therefore safe to sweep when
+/// retired). Shared by the Cursor and Codex plugin-dir sweeps.
+pub(crate) fn skill_contents_have_tracedecay_marker(contents: &str) -> bool {
+    contents.lines().map(str::trim).any(|line| {
+        line.starts_with("name: tracedecay:")
+            || line.starts_with("description: TraceDecay ")
+            || line.contains("TraceDecay MCP")
+            || line.contains("tracedecay_")
+            || line.contains("`tracedecay:")
+    })
+}
+
+/// Recursively collect every regular file under `root` (following the same
+/// hand-rolled walk both the Cursor and Codex installers rely on).
+pub(crate) fn collect_regular_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    collect_regular_files_inner(root, &mut out)?;
+    Ok(out)
+}
+
+fn collect_regular_files_inner(root: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_regular_files_inner(&entry.path(), out)?;
+        } else if file_type.is_file() {
+            out.push(entry.path());
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn hook_command(tracedecay_bin: &str, subcommand: &str) -> String {
     hook_command_for_platform(tracedecay_bin, subcommand, cfg!(windows))
 }

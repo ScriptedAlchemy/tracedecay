@@ -524,7 +524,10 @@ fn file_uri(path: &Path) -> String {
     file_uri_from_path_text(&absolute.to_string_lossy())
 }
 
-fn file_uri_from_path_text(path: &str) -> String {
+/// Build a `file://` URI from raw path text, normalizing `\` to `/` and
+/// percent-encoding. Handles POSIX paths, Windows drive paths (`C:/…`), and UNC
+/// (`//server/share`) prefixes. Shared with the Kiro installer.
+pub(crate) fn file_uri_from_path_text(path: &str) -> String {
     let normalized = path.replace('\\', "/");
     let encoded = percent_encode_file_uri_path(&normalized);
     if normalized.starts_with("//") {

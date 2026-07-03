@@ -391,17 +391,13 @@ fn substitute_command_placeholder(value: &mut serde_json::Value, tracedecay_bin:
 
 /// Stamp the plugin manifest `version` with the crate version.
 fn stamp_plugin_version(raw: &str) -> Result<String> {
-    let mut manifest: serde_json::Value = serde_json::from_str(raw)?;
-    manifest["version"] = json!(env!("CARGO_PKG_VERSION"));
-    Ok(format!("{}\n", serde_json::to_string_pretty(&manifest)?))
+    super::plugin_bundle::stamp_manifest_version(raw)
 }
 
 /// Set the plugin `.mcp.json` server command to the resolved absolute binary
 /// path, so the plugin does not rely on `tracedecay` being on PATH.
 fn set_mcp_command(raw: &str, tracedecay_bin: &str) -> Result<String> {
-    let mut mcp: serde_json::Value = serde_json::from_str(raw)?;
-    mcp["mcpServers"]["tracedecay"]["command"] = json!(tracedecay_bin);
-    Ok(format!("{}\n", serde_json::to_string_pretty(&mcp)?))
+    super::plugin_bundle::set_mcp_command(raw, tracedecay_bin)
 }
 
 /// Remove the deployed bundle dir (idempotent; only touches the tracedecay
