@@ -31,6 +31,12 @@ use super::{
 pub struct KiroIntegration;
 
 const PROMPT_MARKER: &str = "## TraceDecay: mandatory tool routing";
+/// Heading an older tracedecay version wrote for the same steering block. An
+/// existing install carries this marker (with the same [`PROMPT_END_MARKER`]),
+/// so install/uninstall/doctor must recognize it too — otherwise a reinstall
+/// appends the new block and strands the old one (duplicate steering), and
+/// uninstall never removes it.
+const PROMPT_MARKER_LEGACY: &str = "## Prefer tracedecay MCP tools";
 const PROMPT_END_MARKER: &str = "<!-- tracedecay:kiro:end -->";
 const KIRO_AGENT_NAME: &str = "tracedecay";
 const OWNED_AGENT_DESCRIPTION: &str =
@@ -557,7 +563,7 @@ fn install_steering_rules(path: &Path) -> Result<()> {
         eprintln!("  Kiro steering already contains tracedecay rules, skipping");
         return Ok(());
     }
-    if existing.contains(PROMPT_MARKER) {
+    if contains_prompt_marker(&existing) {
         if let Some(range) = tracedecay_prompt_block_range(&existing) {
             let mut new_contents = String::with_capacity(existing.len() + block.len());
             new_contents.push_str(&existing[..range.start]);
@@ -572,10 +578,16 @@ fn install_steering_rules(path: &Path) -> Result<()> {
             );
             return Ok(());
         }
-        // Legacy block without the owned end marker: fall back to the
-        // heading-based strip the other hosts use, then append fresh rules.
+        // Marker present but no owned end marker: fall back to the heading-based
+        // strip the other hosts use (trying both the current and legacy
+        // heading), then append fresh rules.
+        let marker = if existing.contains(PROMPT_MARKER) {
+            PROMPT_MARKER
+        } else {
+            PROMPT_MARKER_LEGACY
+        };
         let stripped =
-            super::prompt_rules::strip_heading_block(&existing, PROMPT_MARKER).unwrap_or_default();
+            super::prompt_rules::strip_heading_block(&existing, marker).unwrap_or_default();
         return super::prompt_rules::write_refreshed(path, &stripped, &block);
     }
     if let Some(parent) = path.parent() {
@@ -700,7 +712,7 @@ fn remove_steering_rules(path: &Path) {
     let Ok(contents) = std::fs::read_to_string(path) else {
         return;
     };
-    if !contents.contains(PROMPT_MARKER) {
+    if !contains_prompt_marker(&contents) {
         eprintln!("  Kiro steering does not contain tracedecay rules, skipping");
         return;
     }
@@ -810,8 +822,21 @@ fn is_owned_agent_config(config: &serde_json::Value) -> bool {
             == Some(OWNED_AGENT_DESCRIPTION)
 }
 
+/// True when the steering file carries either the current or the legacy
+/// tracedecay block marker.
+fn contains_prompt_marker(contents: &str) -> bool {
+    contents.contains(PROMPT_MARKER) || contents.contains(PROMPT_MARKER_LEGACY)
+}
+
+/// Byte range of the tracedecay steering block, starting at whichever marker
+/// (current or legacy) appears first and running to the owned end marker. The
+/// legacy block carries the same [`PROMPT_END_MARKER`], so a legacy install is
+/// spliced/removed in place exactly like a current one.
 fn tracedecay_prompt_block_range(contents: &str) -> Option<Range<usize>> {
-    let start = contents.find(PROMPT_MARKER)?;
+    let start = [PROMPT_MARKER, PROMPT_MARKER_LEGACY]
+        .iter()
+        .filter_map(|marker| contents.find(marker))
+        .min()?;
     let marker = PROMPT_END_MARKER;
     let end_marker = contents[start..].find(marker)?;
     let end = start + end_marker + marker.len();
@@ -955,7 +980,7 @@ fn doctor_check_steering(dc: &mut DoctorCounters, home: &Path) {
         return;
     }
     let contents = std::fs::read_to_string(&path).unwrap_or_default();
-    if !contents.contains(PROMPT_MARKER) {
+    if !contains_prompt_marker(&contents) {
         dc.fail(
             "Kiro global tracedecay.md missing tracedecay rules -- run `tracedecay install --agent kiro`",
         );

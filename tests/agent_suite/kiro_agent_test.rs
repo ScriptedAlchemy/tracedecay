@@ -371,6 +371,85 @@ fn test_uninstall_preserves_user_steering_after_tracedecay_block() {
     assert!(!uninstalled.contains("## TraceDecay: mandatory tool routing"));
 }
 
+/// An existing install seeded with the OLD steering marker (`## Prefer
+/// tracedecay MCP tools`, carrying the same owned end marker) must be REPLACED
+/// by install (net one block, no duplicate steering) and fully REMOVED by
+/// uninstall. Without legacy-marker fallback the old block is invisible:
+/// reinstall appends the new block leaving the old one, and uninstall never
+/// removes it.
+#[test]
+fn test_install_replaces_legacy_marker_block_and_uninstall_removes_it() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let ctx = make_ctx(home);
+
+    let steering_path = home.join(".kiro/steering/tracedecay.md");
+    std::fs::create_dir_all(steering_path.parent().unwrap()).unwrap();
+    // A legacy block: old heading + the owned end marker.
+    let legacy_block = "## Prefer tracedecay MCP tools\n\n\
+        Old steering text from a released version.\n\n\
+        <!-- tracedecay:kiro:end -->\n";
+    std::fs::write(&steering_path, legacy_block).unwrap();
+
+    KiroIntegration.install(&ctx).unwrap();
+
+    let installed = std::fs::read_to_string(&steering_path).unwrap();
+    // The new block is present, and the legacy heading is gone (replaced, not
+    // appended alongside).
+    assert!(
+        installed.contains("## TraceDecay: mandatory tool routing"),
+        "install must write the current steering block"
+    );
+    assert!(
+        !installed.contains("## Prefer tracedecay MCP tools"),
+        "install must replace the legacy marker block, not leave it stranded"
+    );
+    assert!(
+        !installed.contains("Old steering text from a released version."),
+        "legacy block body must be gone"
+    );
+    // Exactly one end marker => exactly one block.
+    assert_eq!(
+        installed.matches("<!-- tracedecay:kiro:end -->").count(),
+        1,
+        "there must be exactly one steering block after install"
+    );
+
+    KiroIntegration.uninstall(&ctx).unwrap();
+    assert!(
+        !steering_path.exists(),
+        "uninstall must remove the steering file when only the tracedecay block remained"
+    );
+}
+
+/// A legacy-marker block with a user's own heading appended after it must be
+/// removed by uninstall while preserving the user content.
+#[test]
+fn test_uninstall_removes_legacy_marker_block_preserving_user_content() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let ctx = make_ctx(home);
+
+    let steering_path = home.join(".kiro/steering/tracedecay.md");
+    std::fs::create_dir_all(steering_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &steering_path,
+        "## Prefer tracedecay MCP tools\n\n\
+         Old steering text.\n\n\
+         <!-- tracedecay:kiro:end -->\n\n\
+         ## My own guidance\n\nKeep this.\n",
+    )
+    .unwrap();
+
+    KiroIntegration.uninstall(&ctx).unwrap();
+
+    let after = std::fs::read_to_string(&steering_path).unwrap();
+    assert!(after.contains("## My own guidance"));
+    assert!(after.contains("Keep this."));
+    assert!(!after.contains("## Prefer tracedecay MCP tools"));
+    assert!(!after.contains("Old steering text."));
+}
+
 #[test]
 fn test_uninstall_removes_tracedecay_and_preserves_other_mcp_servers() {
     let dir = TempDir::new().unwrap();
