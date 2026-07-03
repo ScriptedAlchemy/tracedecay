@@ -339,6 +339,17 @@ fn collect_files_relative(root: &Path) -> Vec<String> {
     files
 }
 
+/// True when `path` is a readable UTF-8 text file. Used to fail the skill
+/// bundle codegen early with a clear message when a binary support file would
+/// otherwise break `include_str!` with an opaque compile error.
+fn is_probably_utf8_text(path: &Path) -> bool {
+    match fs::read(path) {
+        Ok(bytes) => std::str::from_utf8(&bytes).is_ok(),
+        // Unreadable files fall through to include_str!'s own error.
+        Err(_) => true,
+    }
+}
+
 /// Generates `$OUT_DIR/plugin_bundle_generated.rs`: a recursive manifest of
 /// every file under `plugin/skills/` (SKILL.md *and* any `references/`,
 /// `scripts/`, `assets/` support files), embedded via `include_str!` at compile
@@ -367,6 +378,21 @@ fn generate_skill_bundle() {
         // rerun on each individual file so edits re-trigger codegen even if the
         // directory mtime does not change.
         println!("cargo::rerun-if-changed=plugin/skills/{relative}");
+        // Every embedded file goes through `include_str!`, which only accepts
+        // UTF-8. A binary support file (e.g. `assets/*.png`) would otherwise
+        // fail to compile with an opaque "stream did not contain valid UTF-8"
+        // error pointing at the generated file, not the offending asset. Guard
+        // it here with a clear message; binary support files are not embeddable
+        // yet (add `include_bytes!` handling when that becomes a requirement).
+        let abs = skills_root.join(&relative);
+        if !is_probably_utf8_text(&abs) {
+            panic!(
+                "plugin/skills/{relative} is not a UTF-8 text file. The skill bundle codegen \
+                 embeds every file via include_str!, so binary support files (e.g. images) are \
+                 not embeddable yet. Remove the binary file or add include_bytes! support to \
+                 build.rs (generate_skill_bundle)."
+            );
+        }
         let deploy = format!("skills/{relative}");
         let source = format!("skills/{relative}");
         code.push_str(&format!(
