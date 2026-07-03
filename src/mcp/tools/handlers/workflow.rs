@@ -227,18 +227,18 @@ pub(super) async fn handle_run_affected_tests(cg: &TraceDecay, args: Value) -> R
     let project_root = cg.project_root().to_path_buf();
 
     // 1) Resolve changed paths — explicit list, or fall back to `git diff`.
-    let changed_paths = match resolve_changed_paths(&project_root, run_args.explicit_paths).await {
+    let changed_paths = match resolve_changed_paths(&args, &project_root, run_args.explicit_paths).await {
         Ok(paths) => paths,
         Err(result) => return Ok(result),
     };
     if changed_paths.is_empty() {
-        return Ok(empty_result("no changed files detected"));
+        return Ok(empty_result(&args, "no changed files detected"));
     }
 
     let test_targets = collect_affected_test_targets(cg, &changed_paths).await?;
 
     if test_targets.is_empty() {
-        return Ok(empty_result(&format!(
+        return Ok(empty_result(&args, &format!(
             "no tests cover the changed paths ({} file(s))",
             changed_paths.len()
         )));
@@ -255,6 +255,7 @@ pub(super) async fn handle_run_affected_tests(cg: &TraceDecay, args: Value) -> R
         Ok(Ok(o)) => o,
         Ok(Err(e)) => {
             return Ok(error_result(
+                &args,
                 "cargo",
                 "test",
                 &format!("failed to spawn cargo test: {e}"),
@@ -262,6 +263,7 @@ pub(super) async fn handle_run_affected_tests(cg: &TraceDecay, args: Value) -> R
         }
         Err(_) => {
             return Ok(error_result(
+                &args,
                 "cargo",
                 "test",
                 &format!("cargo test timed out after {}s", run_args.timeout_secs),
@@ -296,6 +298,7 @@ pub(super) async fn handle_run_affected_tests(cg: &TraceDecay, args: Value) -> R
 }
 
 async fn resolve_changed_paths(
+    args: &Value,
     project_root: &Path,
     explicit_paths: Option<Vec<String>>,
 ) -> std::result::Result<Vec<String>, ToolResult> {
@@ -303,7 +306,7 @@ async fn resolve_changed_paths(
         Some(paths) => Ok(paths),
         None => git_changed_paths(project_root)
             .await
-            .map_err(|message| error_result("git", "diff", &message)),
+            .map_err(|message| error_result(args, "git", "diff", &message)),
     }
 }
 
@@ -485,30 +488,34 @@ fn covered_source_ids(name: &str, selected_targets: &[TestTarget]) -> Vec<String
 }
 
 /// Wraps a short status message in a normal `ToolResult`.
-fn empty_result(message: &str) -> ToolResult {
+fn empty_result(args: &Value, message: &str) -> ToolResult {
+    let value = json!({
+        "passed": 0, "failed": 0, "results": [], "note": message
+    });
+    let text = render::finalize(None, args, &value, || render::generic_md(&value));
     ToolResult::new(
         json!({
-            "content": [{ "type": "text", "text": serde_json::to_string(&json!({
-                "passed": 0, "failed": 0, "results": [], "note": message
-            })).unwrap_or_default() }]
+            "content": [{ "type": "text", "text": text }]
         }),
         vec![],
     )
 }
 
-fn error_result(kind: &str, operation: &str, message: &str) -> ToolResult {
+fn error_result(args: &Value, kind: &str, operation: &str, message: &str) -> ToolResult {
+    let value = json!({
+        "passed": 0,
+        "failed": 0,
+        "results": [],
+        "error": {
+            "kind": kind,
+            "operation": operation,
+            "message": message,
+        }
+    });
+    let text = render::finalize(None, args, &value, || render::generic_md(&value));
     ToolResult::new(
         json!({
-            "content": [{ "type": "text", "text": serde_json::to_string(&json!({
-                "passed": 0,
-                "failed": 0,
-                "results": [],
-                "error": {
-                    "kind": kind,
-                    "operation": operation,
-                    "message": message,
-                }
-            })).unwrap_or_default() }]
+            "content": [{ "type": "text", "text": text }]
         }),
         vec![],
     )

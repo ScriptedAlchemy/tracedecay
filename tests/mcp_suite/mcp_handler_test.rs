@@ -1107,7 +1107,7 @@ fn active_project_and_storage_status_tools_are_advertised_readonly() {
         assert!(
             tool.input_schema["properties"]
                 .as_object()
-                .is_some_and(|properties| properties.is_empty()),
+                .is_some_and(|properties| properties.keys().all(|key| key == "format")),
             "{name} should not require callers to pass resolver internals"
         );
         assert_eq!(
@@ -1122,6 +1122,26 @@ fn active_project_and_storage_status_tools_are_advertised_readonly() {
             "{name} description must not hardcode the repo-local graph DB path"
         );
     }
+}
+
+#[tokio::test]
+async fn active_project_tool_defaults_to_markdown() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    // Call the crate dispatch directly: the test-local wrapper injects
+    // format:"json", and this test asserts the true default.
+    let result =
+        tracedecay::mcp::handle_tool_call(&cg, "tracedecay_active_project", json!({}), None, None)
+            .await
+            .unwrap();
+    let text = extract_text(&result.value);
+    assert!(
+        serde_json::from_str::<Value>(text).is_err(),
+        "default active_project output should be markdown, got: {text}"
+    );
+    assert!(
+        text.contains("**project_root:**"),
+        "markdown field missing: {text}"
+    );
 }
 
 #[tokio::test]
@@ -5418,6 +5438,26 @@ async fn test_dsm_stats() {
     .await
     .unwrap();
     let text = extract_text(&result.value);
+    // Shape values (stats/clusters/matrix) render as markdown by default.
+    assert!(
+        text.contains("**files:**"),
+        "files field should exist, got: {}",
+        text
+    );
+    assert!(
+        text.contains("**density:**"),
+        "density field should exist, got: {}",
+        text
+    );
+}
+
+#[tokio::test]
+async fn test_dsm_json_returns_stats_shape() {
+    let (cg, _dir) = setup_project().await;
+    let result = handle_tool_call(&cg, "tracedecay_dsm", json!({ "format": "json" }), None, None)
+        .await
+        .unwrap();
+    let text = extract_text(&result.value);
     let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
     assert!(
         parsed.get("files").is_some(),
@@ -5443,10 +5483,9 @@ async fn test_dsm_clusters() {
     .await
     .unwrap();
     let text = extract_text(&result.value);
-    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
     assert!(
-        parsed.get("clusters").is_some(),
-        "clusters array should exist, got: {}",
+        text.contains("## clusters") || text.contains("**clusters:**"),
+        "clusters section should exist, got: {}",
         text
     );
 }
@@ -10773,7 +10812,7 @@ async fn lcm_status_cli_bridge_accepts_json_args() {
             "tracedecay_lcm_status",
             "--json",
             "--args",
-            r#"{"provider":"cursor"}"#,
+            r#"{"provider":"cursor","format":"json"}"#,
         ])
         .output()
         .unwrap();
@@ -10821,6 +10860,7 @@ async fn lcm_status_cli_profile_scope_dispatches_without_initialized_project() {
         "session_id": "lcm-cli-profile",
         "storage_scope": "hermes_profile",
         "hermes_home": hermes_home.path(),
+        "format": "json",
     })
     .to_string();
     let _daemon = common::spawn_tracedecay_daemon(home.path());

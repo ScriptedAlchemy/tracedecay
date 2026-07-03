@@ -29,6 +29,7 @@ use crate::mcp::response_handles::{retrieve_response_handle, ResponseHandleLooku
 use crate::tracedecay::current_timestamp;
 use crate::tracedecay::TraceDecay;
 
+use super::render;
 use super::dispatch_policy::{
     tool_accepts_registered_project_selector, tool_dispatches_registered_project_reader,
 };
@@ -110,14 +111,36 @@ fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
                         .to_string(),
             })?;
     let payload = match retrieve_response_handle(cg.project_root(), handle, current_timestamp())? {
-        ResponseHandleLookup::Found(record) => json!({
-            "handle": record.handle,
-            "expired": false,
-            "original_chars": record.original_chars(),
-            "created_at": record.created_at,
-            "expires_at": record.expires_at,
-            "content": record.content,
-        }),
+        ResponseHandleLookup::Found(record) => {
+            // Retrieval never truncates: the stored content is by definition
+            // larger than the response cap, so neither output path may route
+            // through the truncating envelope again. Markdown (default)
+            // returns the stored text verbatim under a small header; JSON
+            // serializes the payload directly.
+            let text = if render::wants_json(args) {
+                serde_json::to_string(&json!({
+                    "handle": record.handle,
+                    "expired": false,
+                    "original_chars": record.original_chars(),
+                    "created_at": record.created_at,
+                    "expires_at": record.expires_at,
+                    "content": record.content,
+                }))
+                .unwrap_or_default()
+            } else {
+                format!(
+                    "## Retrieved Response\n**handle:** `{}` ({} chars, expires at {})\n\n{}",
+                    record.handle,
+                    record.original_chars(),
+                    record.expires_at,
+                    record.content,
+                )
+            };
+            return Ok(ToolResult::new(
+                json!({ "content": [{ "type": "text", "text": text }] }),
+                Vec::new(),
+            ));
+        }
         ResponseHandleLookup::Missing => json!({
             "handle": handle,
             "expired": true,
@@ -144,9 +167,11 @@ fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
             "expires_at": expires_at,
         }),
     };
-    let formatted = serde_json::to_string(&payload).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), args, &payload, || {
+        render::generic_md(&payload)
+    });
     Ok(ToolResult::new(
-        json!({ "content": [{ "type": "text", "text": formatted }] }),
+        json!({ "content": [{ "type": "text", "text": text }] }),
         Vec::new(),
     ))
 }
@@ -258,7 +283,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         "tracedecay_node" => graph::handle_node(cg, args).await,
         "tracedecay_status" => info::handle_status(cg, args, server_stats, scope_prefix).await,
         "tracedecay_active_project" => {
-            Ok(info::handle_active_project(cg, server_stats, scope_prefix))
+            Ok(info::handle_active_project(cg, &args, server_stats, scope_prefix))
         }
         "tracedecay_storage_status" => info::handle_storage_status(cg, args, scope_prefix).await,
         "tracedecay_project_list" => {
@@ -319,7 +344,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         "tracedecay_type_hierarchy" => info::handle_type_hierarchy(cg, args).await,
         "tracedecay_branch_search" => git::handle_branch_search(cg, args).await,
         "tracedecay_branch_diff" => git::handle_branch_diff(cg, args).await,
-        "tracedecay_branch_list" => Ok(git::handle_branch_list(cg)),
+        "tracedecay_branch_list" => Ok(git::handle_branch_list(cg, &args)),
         "tracedecay_str_replace" => edit::handle_str_replace(cg, args).await,
         "tracedecay_multi_str_replace" => edit::handle_multi_str_replace(cg, args).await,
         "tracedecay_insert_at" => edit::handle_insert_at(cg, args).await,
@@ -956,7 +981,8 @@ mod tests {
             "tracedecay_retrieve",
             json!({
                 "handle": handle,
-                "project_id": target.store_layout().identity.project_id.as_deref().unwrap()
+                "project_id": target.store_layout().identity.project_id.as_deref().unwrap(),
+                "format": "json"
             }),
             None,
             None,

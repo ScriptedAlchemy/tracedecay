@@ -4,7 +4,7 @@ use std::sync::{LazyLock, Mutex};
 
 use serde_json::{json, Map, Value};
 
-use super::super::render::truncated_json_envelope_with_handle;
+use super::super::render::{self, truncated_json_envelope_with_handle};
 use super::support::{profile_root_for_global_db, project_registry_context, safe_profile_relpath};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::{GlobalDb, ProjectRegistryContext};
@@ -31,13 +31,8 @@ const MAX_LCM_EXPAND_QUERY_QUERY_CHARS: usize = 1_024;
 const MAX_LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_CHARS: usize = 1_024;
 const MAX_LCM_EXPAND_QUERY_SYNTHESIS_PROMPT_CHARS: usize = 2_048;
 
-fn tool_json(project_root: Option<&Path>, value: &Value) -> ToolResult {
-    let formatted = serde_json::to_string(value).unwrap_or_default();
-    let text = if formatted.len() <= MAX_RESPONSE_CHARS {
-        formatted
-    } else {
-        truncated_json_envelope_with_handle(project_root, &formatted)
-    };
+fn tool_json(project_root: Option<&Path>, args: &Value, value: &Value) -> ToolResult {
+    let text = render::finalize(project_root, args, value, || render::generic_md(value));
     ToolResult::new(
         json!({ "content": [{ "type": "text", "text": text }] }),
         Vec::new(),
@@ -124,7 +119,10 @@ fn registry_session_db_candidates(
     Ok(candidates)
 }
 
-fn lcm_preflight_tool_json(value: &Value) -> ToolResult {
+fn lcm_preflight_tool_json(args: &Value, value: &Value) -> ToolResult {
+    if !render::wants_json(args) {
+        return tool_json(None, args, value);
+    }
     let formatted = serde_json::to_string(value).unwrap_or_default();
     let text = if formatted.len() <= MAX_RESPONSE_CHARS {
         formatted
@@ -273,7 +271,14 @@ fn lcm_response_handle_root(project_root: Option<&Path>, args: &Value) -> Option
     None
 }
 
-fn lcm_expand_query_tool_json(project_root: Option<&Path>, value: &Value) -> ToolResult {
+fn lcm_expand_query_tool_json(
+    project_root: Option<&Path>,
+    args: &Value,
+    value: &Value,
+) -> ToolResult {
+    if !render::wants_json(args) {
+        return tool_json(project_root, args, value);
+    }
     let formatted = serde_json::to_string(value).unwrap_or_default();
     let needs_synthesis = value
         .get("needs_synthesis")
@@ -989,9 +994,10 @@ fn lcm_error(err: crate::sessions::lcm::LcmError) -> TraceDecayError {
     }
 }
 
-fn lcm_unavailable() -> ToolResult {
+fn lcm_unavailable(args: &Value) -> ToolResult {
     tool_json(
         None,
+        args,
         &json!({
             "status": "unavailable",
             "message": "could not open active project tracedecay session database",
@@ -1004,9 +1010,10 @@ fn lcm_unavailable() -> ToolResult {
 /// so callers can tell "no data yet" apart from "open failed".
 /// The `store_exists: false` field is the machine-readable discriminator;
 /// other fields are backward-compatible additions.
-fn lcm_not_yet_ingested(storage_scope: &str) -> ToolResult {
+fn lcm_not_yet_ingested(args: &Value, storage_scope: &str) -> ToolResult {
     tool_json(
         None,
+        args,
         &json!({
             "status": "not_ingested",
             "store_exists": false,
@@ -1016,9 +1023,10 @@ fn lcm_not_yet_ingested(storage_scope: &str) -> ToolResult {
     )
 }
 
-fn lcm_scoped_unavailable(storage_scope: &str, message: impl Into<String>) -> ToolResult {
+fn lcm_scoped_unavailable(args: &Value, storage_scope: &str, message: impl Into<String>) -> ToolResult {
     tool_json(
         None,
+        args,
         &json!({
             "status": "unavailable",
             "storage_scope": storage_scope,
@@ -1027,8 +1035,9 @@ fn lcm_scoped_unavailable(storage_scope: &str, message: impl Into<String>) -> To
     )
 }
 
-fn lcm_storage_scope_unavailable(storage_scope: &str) -> ToolResult {
+fn lcm_storage_scope_unavailable(args: &Value, storage_scope: &str) -> ToolResult {
     lcm_scoped_unavailable(
+        args,
         storage_scope,
         format!(
             "{storage_scope} LCM status storage is not available from the active project handler"
@@ -1036,8 +1045,9 @@ fn lcm_storage_scope_unavailable(storage_scope: &str) -> ToolResult {
     )
 }
 
-fn project_local_storage_without_project() -> ToolResult {
+fn project_local_storage_without_project(args: &Value) -> ToolResult {
     lcm_scoped_unavailable(
+        args,
         "project_local",
         "project_local LCM storage requires an initialized TraceDecay project root",
     )
@@ -1103,19 +1113,21 @@ enum LcmStorageResolution {
     Unavailable(ToolResult),
 }
 
-fn invalid_hermes_profile_home(message: impl Into<String>) -> ToolResult {
-    lcm_scoped_unavailable("hermes_profile", message)
+fn invalid_hermes_profile_home(args: &Value, message: impl Into<String>) -> ToolResult {
+    lcm_scoped_unavailable(args, "hermes_profile", message)
 }
 
 fn hermes_profile_home(args: &Value) -> std::result::Result<PathBuf, ToolResult> {
     let Some(hermes_home) = string_arg(args, "hermes_home") else {
         return Err(invalid_hermes_profile_home(
+            args,
             "hermes_profile LCM storage requires an explicit absolute hermes_home",
         ));
     };
     let path = PathBuf::from(hermes_home);
     if !path.is_absolute() {
         return Err(invalid_hermes_profile_home(
+            args,
             "hermes_profile LCM storage requires an absolute hermes_home",
         ));
     }
@@ -1124,20 +1136,27 @@ fn hermes_profile_home(args: &Value) -> std::result::Result<PathBuf, ToolResult>
         .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
     {
         return Err(invalid_hermes_profile_home(
+            args,
             "hermes_profile LCM storage requires a normalized absolute hermes_home",
         ));
     }
     let Ok(canonical) = std::fs::canonicalize(&path) else {
-        return Err(invalid_hermes_profile_home(format!(
-            "hermes_home does not exist or is not a directory: {}",
-            path.display()
-        )));
+        return Err(invalid_hermes_profile_home(
+            args,
+            format!(
+                "hermes_home does not exist or is not a directory: {}",
+                path.display()
+            ),
+        ));
     };
     if !canonical.is_dir() {
-        return Err(invalid_hermes_profile_home(format!(
-            "hermes_home does not exist or is not a directory: {}",
-            path.display()
-        )));
+        return Err(invalid_hermes_profile_home(
+            args,
+            format!(
+                "hermes_home does not exist or is not a directory: {}",
+                path.display()
+            ),
+        ));
     }
     Ok(canonical)
 }
@@ -1194,17 +1213,24 @@ async fn open_lcm_storage(
     match storage_scope {
         "project_local" => {
             if context.project_root.is_none() {
-                return LcmStorageResolution::Unavailable(project_local_storage_without_project());
+                return LcmStorageResolution::Unavailable(project_local_storage_without_project(
+                    args,
+                ));
             }
             let Some(db_path) = context.project_session_db_path else {
-                return LcmStorageResolution::Unavailable(project_local_storage_without_project());
+                return LcmStorageResolution::Unavailable(project_local_storage_without_project(
+                    args,
+                ));
             };
             let db_path = db_path.to_path_buf();
             if mode == LcmOpenMode::ReadOnlyOrMissing && !db_path.is_file() {
-                return LcmStorageResolution::Unavailable(lcm_not_yet_ingested("project_local"));
+                return LcmStorageResolution::Unavailable(lcm_not_yet_ingested(
+                    args,
+                    "project_local",
+                ));
             }
             let Some(db) = open_lcm_db_at(&db_path, mode).await else {
-                return LcmStorageResolution::Unavailable(lcm_unavailable());
+                return LcmStorageResolution::Unavailable(lcm_unavailable(args));
             };
             available_lcm_storage(db, "project_local")
         }
@@ -1221,7 +1247,7 @@ async fn open_lcm_storage(
                         Ok(db_path) => db_path,
                         Err(message) => {
                             return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
-                                message,
+                                args, message,
                             ));
                         }
                     }
@@ -1234,9 +1260,9 @@ async fn open_lcm_storage(
                         HermesProfileDbReadOnly::NotIngested(db_path) => {
                             return LcmStorageResolution::Unavailable(match mode {
                                 LcmOpenMode::ReadOnlyOrMissing => {
-                                    lcm_not_yet_ingested("hermes_profile")
+                                    lcm_not_yet_ingested(args, "hermes_profile")
                                 }
-                                _ => invalid_hermes_profile_home(format!(
+                                _ => invalid_hermes_profile_home(args, format!(
                                     "hermes_profile LCM storage requires an existing session database: {}",
                                     db_path.display()
                                 )),
@@ -1244,7 +1270,7 @@ async fn open_lcm_storage(
                         }
                         HermesProfileDbReadOnly::ConfigError(msg) => {
                             return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
-                                msg,
+                                args, msg,
                             ));
                         }
                     }
@@ -1252,12 +1278,13 @@ async fn open_lcm_storage(
             };
             let Some(db) = open_lcm_db_at(&db_path, mode).await else {
                 return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
+                    args,
                     "could not open hermes_profile tracedecay session database",
                 ));
             };
             available_lcm_storage(db, "hermes_profile")
         }
-        other => LcmStorageResolution::Unavailable(lcm_storage_scope_unavailable(other)),
+        other => LcmStorageResolution::Unavailable(lcm_storage_scope_unavailable(args, other)),
     }
 }
 
@@ -1434,6 +1461,7 @@ pub(super) async fn handle_message_search(
     else {
         return Ok(tool_json(
             Some(cg.project_root()),
+            &args,
             &json!({
                 "status": "unavailable",
                 "message": "could not resolve selected project tracedecay session database",
@@ -1445,6 +1473,7 @@ pub(super) async fn handle_message_search(
     let Some(db) = open_session_db_with_cached_ensure(&db_path).await else {
         return Ok(tool_json(
             Some(cg.project_root()),
+            &args,
             &json!({
                 "status": "unavailable",
                 "message": "could not open selected project tracedecay session database",
@@ -1485,6 +1514,7 @@ pub(super) async fn handle_message_search(
 
     Ok(tool_json(
         Some(&target_root),
+        &args,
         &json!({
             "status": "ok",
             "provider": requested_provider.unwrap_or("all"),
@@ -1525,6 +1555,7 @@ pub(super) async fn handle_lcm_status(
     status.storage_scope = Some(storage.scope.to_string());
     Ok(tool_json(
         context.project_root,
+        &args,
         &json!({
             "status": "ok",
             "provider": provider,
@@ -1548,6 +1579,7 @@ pub(super) async fn handle_lcm_doctor(
     if mode == "clean" && apply && !clean_apply_enabled {
         return Ok(tool_json(
             context.project_root,
+            &args,
             &json!({
                 "status": "denied",
                 "provider": provider,
@@ -1575,6 +1607,7 @@ pub(super) async fn handle_lcm_doctor(
     if mode == "gc" && apply && !gc_apply_enabled {
         return Ok(tool_json(
             context.project_root,
+            &args,
             &json!({
                 "status": "denied",
                 "provider": provider,
@@ -1627,7 +1660,7 @@ pub(super) async fn handle_lcm_doctor(
             );
         }
     }
-    Ok(tool_json(context.project_root, &payload))
+    Ok(tool_json(context.project_root, &args, &payload))
 }
 
 pub(super) async fn handle_lcm_load_session(
@@ -1676,7 +1709,7 @@ pub(super) async fn handle_lcm_load_session(
             );
         }
     }
-    Ok(tool_json(context.project_root, &payload))
+    Ok(tool_json(context.project_root, &args, &payload))
 }
 
 pub(super) async fn handle_lcm_grep(
@@ -1711,6 +1744,7 @@ pub(super) async fn handle_lcm_grep(
         .map_err(lcm_error)?;
     Ok(tool_json(
         context.project_root,
+        &args,
         &json!({
             "status": "ok",
             "provider": provider,
@@ -1743,6 +1777,7 @@ pub(super) async fn handle_lcm_describe(
         .map_err(lcm_error)?;
     Ok(tool_json(
         context.project_root,
+        &args,
         &json!({
             "status": "ok",
             "provider": provider,
@@ -1774,6 +1809,7 @@ pub(super) async fn handle_lcm_expand(
         .map_err(lcm_error)?;
     Ok(tool_json(
         context.project_root,
+        &args,
         &json!({
             "status": "ok",
             "provider": provider,
@@ -1833,7 +1869,11 @@ pub(super) async fn handle_lcm_expand_query(
         object.insert("session_id".to_string(), json!(session_id));
         object.insert("storage_scope".to_string(), json!(storage.scope));
     }
-    Ok(lcm_expand_query_tool_json(context.project_root, &payload))
+    Ok(lcm_expand_query_tool_json(
+        context.project_root,
+        &args,
+        &payload,
+    ))
 }
 
 pub(super) async fn handle_lcm_session_boundary(
@@ -1857,6 +1897,7 @@ pub(super) async fn handle_lcm_session_boundary(
         .map_err(lcm_error)?;
     Ok(tool_json(
         context.project_root,
+        &args,
         &json!({
             "status": response.status,
             "provider": provider,
@@ -1898,14 +1939,17 @@ pub(super) async fn handle_lcm_preflight(
         })
         .await
         .map_err(lcm_error)?;
-    Ok(lcm_preflight_tool_json(&json!({
-        "status": response.status,
-        "provider": provider,
-        "session_id": session_id,
-        "should_compress": response.should_compress,
-        "reason": response.reason,
-        "replay_messages": response.replay_messages,
-    })))
+    Ok(lcm_preflight_tool_json(
+        &args,
+        &json!({
+            "status": response.status,
+            "provider": provider,
+            "session_id": session_id,
+            "should_compress": response.should_compress,
+            "reason": response.reason,
+            "replay_messages": response.replay_messages,
+        }),
+    ))
 }
 
 pub(super) async fn handle_lcm_compress(
@@ -1948,6 +1992,7 @@ pub(super) async fn handle_lcm_compress(
         .map_err(lcm_error)?;
     Ok(tool_json(
         response_handle_root.as_deref(),
+        &args,
         &json!({
             "status": response.status,
             "provider": provider,

@@ -295,7 +295,7 @@ async fn serve_stdio_smokes_managed_skill_list_and_view() {
                 "method": "tools/call",
                 "params": {
                     "name": "tracedecay_skill_list",
-                    "arguments": { "state": "active" }
+                    "arguments": { "state": "active", "format": "json" }
                 }
             })
         )
@@ -311,7 +311,8 @@ async fn serve_stdio_smokes_managed_skill_list_and_view() {
                     "name": "tracedecay_skill_view",
                     "arguments": {
                         "id": "active-stdio-skill",
-                        "include_support_files": false
+                        "include_support_files": false,
+                        "format": "json"
                     }
                 }
             })
@@ -442,7 +443,8 @@ async fn serve_stdio_smokes_automation_run_artifact_view() {
                     "name": "tracedecay_automation_run_artifact_view",
                     "arguments": {
                         "run_id": run_id,
-                        "kind": "codex_handoff"
+                        "kind": "codex_handoff",
+                        "format": "json"
                     }
                 }
             })

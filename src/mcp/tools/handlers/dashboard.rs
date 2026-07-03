@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
-use super::super::render::truncated_json_envelope_with_handle;
+use super::super::render;
 use super::super::ToolResult;
 
 use crate::dashboard::{bind_dashboard, build_state, router, DEFAULT_PORT};
@@ -43,11 +43,13 @@ fn validate_mcp_dashboard_host(host: &str) -> Result<&str> {
     })
 }
 
-fn dashboard_tool_result(cg: &TraceDecay, payload: &Value) -> ToolResult {
-    let formatted = serde_json::to_string(payload).unwrap_or_default();
+fn dashboard_tool_result(cg: &TraceDecay, args: &Value, payload: &Value) -> ToolResult {
+    let text = render::finalize(Some(cg.project_root()), args, payload, || {
+        render::generic_md(payload)
+    });
     ToolResult::new(
         json!({
-            "content": [{ "type": "text", "text": truncated_json_envelope_with_handle(Some(cg.project_root()), &formatted) }]
+            "content": [{ "type": "text", "text": text }]
         }),
         vec![],
     )
@@ -70,7 +72,7 @@ pub(super) async fn handle_dashboard(cg: &TraceDecay, args: Value) -> Result<Too
             } else {
                 json!({ "status": "not_running" })
             };
-            Ok(dashboard_tool_result(cg, &payload))
+            Ok(dashboard_tool_result(cg, &args, &payload))
         }
         "start" | "" => {
             let host = args
@@ -93,6 +95,7 @@ pub(super) async fn handle_dashboard(cg: &TraceDecay, args: Value) -> Result<Too
                 // already running — idempotent return
                 return Ok(dashboard_tool_result(
                     cg,
+                    &args,
                     &json!({
                         "status": "already_running",
                         "url": handle.url
@@ -127,6 +130,7 @@ pub(super) async fn handle_dashboard(cg: &TraceDecay, args: Value) -> Result<Too
 
             Ok(dashboard_tool_result(
                 cg,
+                &args,
                 &json!({
                     "status": "started",
                     "url": url,

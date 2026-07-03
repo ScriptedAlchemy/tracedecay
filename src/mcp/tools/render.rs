@@ -27,6 +27,11 @@ fn parse_format(args: &Value) -> OutputFormat {
     }
 }
 
+/// True when the caller explicitly opted into JSON output via `format: "json"`.
+pub(super) fn wants_json(args: &Value) -> bool {
+    parse_format(args) == OutputFormat::Json
+}
+
 pub(super) fn finalize<F>(project_root: Option<&Path>, args: &Value, value: &Value, md: F) -> String
 where
     F: FnOnce() -> String,
