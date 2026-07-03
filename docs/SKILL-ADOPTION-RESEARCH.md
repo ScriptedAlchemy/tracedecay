@@ -3,7 +3,7 @@
 *Research date: 2026-07-02. Read-only study of the local superpowers plugin
 (`~/.cursor/plugins/cache/cursor-public/superpowers/b7a8f76…/`), the installed
 TraceDecay plugins (`~/.cursor/plugins/local/tracedecay/`, `~/.codex/…`), the
-repo sources (`cursor-plugin/`, `codex-plugin/`, `src/hooks.rs`,
+repo sources (`cursor-plugin/`, `codex-plugin/`, `src/hooks/`,
 `src/mcp/tools/definitions.rs`), and TraceDecay's own analytics
 (`http://127.0.0.1:7341/api/plugins/analytics/*`,
 `~/.tracedecay/projects/proj_b4a8bbe4953823c4/hook_analytics.jsonl`).*
@@ -46,7 +46,8 @@ correlated usage**.
 So every session begins with the full bootstrap skill already in context — the
 model never has to *decide* to read it. Contrast: TraceDecay's Cursor
 session-start context is (by design, see the doc comment on
-`build_cursor_session_context` in `src/hooks.rs`) "intentionally lean":
+`build_cursor_session_context` in `src/hooks/steering.rs`) "intentionally
+lean":
 
 > `tracedecay index status: initialized.\nWorkflow skills: tracedecay:architecture-overview, …`
 > *(a comma-separated list of 25 names, no instructions)*
@@ -143,16 +144,16 @@ deliberate design choice preventing ad-hoc work.
 | Layer | Mechanism | Character |
 |---|---|---|
 | Always-applied rule | `cursor-plugin/rules/tracedecay.mdc` | ~15 bullet points of routing advice; "prefer/first/fallback" phrasing; no decision procedure, no counters to rationalization |
-| Session start (Cursor) | `build_cursor_session_context` in `src/hooks.rs` | Index status line + bare list of 25 skill names + tokens-saved counter. Doc comment says steering is deliberately left to the rule |
-| Session start (Codex) | `build_codex_session_context` in `src/hooks.rs` | One paragraph: "Prefer tracedecay MCP tools … over broad file reads"; CLI fallback note; index status |
-| Mid-session hints | `postToolUse` hook → `cursor_post_tool_use_decision` → `deduped_project_hint` (`src/hooks.rs`), dedupe in `src/hooks/tool_hints.rs` | Fires after Grep/Read/etc., but deduped to **once per (session, category) forever** (`ToolHintDedupe::should_emit` is a plain `HashSet::insert`) |
+| Session start (Cursor) | `build_cursor_session_context` in `src/hooks/steering.rs` | Index status line + bare list of 25 skill names + tokens-saved counter. Doc comment says steering is deliberately left to the rule |
+| Session start (Codex) | `build_codex_session_context_for_workspace` in `src/hooks/steering.rs` | One paragraph: "Prefer tracedecay MCP tools … over broad file reads"; CLI fallback note; index status |
+| Mid-session hints | `postToolUse` hook → `cursor_post_tool_use_decision` (`src/hooks/cursor.rs`) → `deduped_project_hint` (`src/hooks/mod.rs`), dedupe in `src/hooks/tool_hints.rs` | Fires after Grep/Read/etc., but deduped to **once per (session, category) forever** (`ToolHintDedupe::should_emit` is a plain `HashSet::insert`) |
 | Skills | `cursor-plugin/skills/` (40 dirs installed: 23 model-invocable + 15 `tracedecay-*` slash-command variants with `disable-model-invocation: true` + a `memorize-subject`/`memorizing-subject` near-duplicate pair); `codex-plugin/skills/` (25) | Descriptions are actually good "Use when…" trigger form; the problem is volume and overlap, not phrasing |
 | MCP tool descriptions | `src/mcp/tools/definitions.rs` (68+ tools) | Capability descriptions ("Search for symbols … by name or keyword"), not invocation triggers; only `tracedecay_outline` and `tracedecay_context` carry usage steering (the latter a *budget cap*, i.e. anti-usage steering) |
 
 Two structural notes:
 
 - The Cursor `beforeSubmitPrompt` hook **cannot inject context** (per the
-  comment at `src/hooks.rs:351`, only `user_message` is available on that
+  comment at `src/hooks/cursor.rs`, only `user_message` is available on that
   event), so per-prompt re-steering à la Codex's `UserPromptSubmit` is not
   available on Cursor — which makes sessionStart and postToolUse the only
   injection points, and both are currently minimal.
@@ -269,7 +270,7 @@ uses". `tracedecay_skill_list` was called 3 times ever;
    and default to the native tools they were RL-trained on. Superpowers shows
    that mandate framing + rationalization counters materially change this.
 2. **The session-start slot is spent on status, not behavior.** The lean
-   injection was a deliberate token economy (`src/hooks.rs:1413`), but it
+   injection was a deliberate token economy (`src/hooks/steering.rs`), but it
    delegates all steering to a rule that sits among *dozens* of other
    always-applied rules and skill listings, with no priority claim.
 3. **The mid-session correction loop is mostly inactive.** Once-per-session-per-category
@@ -295,7 +296,7 @@ uses". `tracedecay_skill_list` was called 3 times ever;
 ## 6. Recommendations (prioritized)
 
 ### P0 — Inject a behavioral contract at session start
-*Files: `src/hooks.rs` (`build_cursor_session_context`,
+*Files: `src/hooks/steering.rs` (`build_cursor_session_context`,
 `build_codex_session_context_for_workspace`, `CURSOR_PLUGIN_SKILLS`);
 new skill `cursor-plugin/skills/using-tracedecay/SKILL.md` (mirror in
 `codex-plugin/skills/`).*
@@ -326,7 +327,7 @@ Index status: {status}. Tokens saved this session: {n}.
 Keep it under ~40 lines; the token cost is what buys reliability.
 
 ### P0 — Resurrect the hint loop
-*Files: `src/hooks/tool_hints.rs` (`should_emit`), `src/hooks.rs`
+*Files: `src/hooks/tool_hints.rs` (`should_emit`), `src/hooks/mod.rs`
 (`deduped_project_hint`), `src/mcp/tool_analytics.rs` +
 `src/dashboard/analytics_api.rs` for telemetry.*
 
@@ -350,7 +351,7 @@ CLI-fallback and truncation-handle bullets (those are good).
 
 ### P1 — Consolidate the skill catalog to ~10 workflow-stage skills
 *Files: `cursor-plugin/skills/`, `codex-plugin/skills/`,
-`CURSOR_PLUGIN_SKILLS` in `src/hooks.rs`,
+`CURSOR_PLUGIN_SKILLS` in `src/hooks/steering.rs`,
 `tests/agent_suite/plugin_skill_contract_test.rs`.*
 
 Merge along workflow stages, mirroring superpowers' shape: **explore**

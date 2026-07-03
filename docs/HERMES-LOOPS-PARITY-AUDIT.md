@@ -3,7 +3,7 @@
 Status: comparison audit, July 2026. Hermes agent codebase examined at
 `/home/zack/projects/hermes-agent` (registered tracedecay project
 "hermes-agent"). TraceDecay side examined at HEAD of
-`feat/dashboard-ux-improvements`.
+the current TraceDecay worktree after dashboard automation work landed.
 
 This audit compares Hermes's self-improvement machinery (background review,
 memory writing, skill writing, curator, cron) against TraceDecay's automation
