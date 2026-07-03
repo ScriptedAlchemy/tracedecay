@@ -57,14 +57,7 @@ impl Drop for HomeEnvGuard {
 }
 
 fn canonical_temp_path(path: &Path) -> PathBuf {
-    #[cfg(windows)]
-    {
-        path.to_path_buf()
-    }
-    #[cfg(not(windows))]
-    {
-        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-    }
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn git_output(project: &Path, args: &[&str]) -> Output {

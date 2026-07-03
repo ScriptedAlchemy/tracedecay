@@ -1601,8 +1601,8 @@ mod tests {
     /// `disable-model-invocation` surface), so the Codex bundle ships exactly
     /// the *model-invocable* Cursor skills — the same set the Cursor plugin
     /// advertises via [`crate::hooks::CURSOR_PLUGIN_SKILLS`]. The Cursor-only
-    /// slash dispatchers (`tracedecay-*`) and explicit-invoke memory skills are
-    /// intentionally not mirrored: their workflows are covered by these skills.
+    /// slash dispatchers (`tracedecay-*`) are intentionally not mirrored:
+    /// their workflows are covered by these skills.
     #[test]
     fn codex_bundle_ships_exactly_the_model_invocable_cursor_skills() {
         let mut shipped: Vec<String> = CODEX_EMBEDDED_PLUGIN_FILES
