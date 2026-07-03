@@ -250,6 +250,26 @@ fn read_json(path: &Path) -> serde_json::Value {
     .unwrap_or_else(|e| panic!("failed to parse JSON {}: {e}", path.display()))
 }
 
+fn seed_memory_digest_target(
+    profile_root: &Path,
+    target: tracedecay::automation::skill_targets::SkillInstallTarget,
+    output: &Path,
+) {
+    let path = profile_root.join("agent_managed/memory_digest_targets.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        path,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "targets": [{
+                "target": target,
+                "output": output,
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
 fn expected_tracedecay_bin() -> String {
     let path_match = std::env::var_os("PATH").and_then(|path| {
         std::env::split_paths(&path).find_map(|dir| {
@@ -3203,9 +3223,10 @@ async fn test_codex_install_exports_active_managed_skills() {
 
     let digest_skill_path =
         codex_plugin_install_dir(home).join("skills/agent-managed-memory/SKILL.md");
-    let digest_skill = std::fs::read_to_string(digest_skill_path).unwrap();
-    assert!(digest_skill.contains("name: tracedecay-memory-digest"));
-    assert!(digest_skill.contains("No durable facts exported yet"));
+    assert!(
+        !digest_skill_path.exists(),
+        "Codex memory digest is delivered through hook additionalContext, not a duplicate skill"
+    );
 }
 
 #[tokio::test]
@@ -3410,6 +3431,32 @@ fn test_codex_local_install_creates_repo_plugin_bundle_and_marketplace() {
         !project.path().join("AGENTS.md").exists(),
         "local Codex install should use plugin skills, not write project AGENTS.md"
     );
+}
+
+#[test]
+fn test_codex_local_install_does_not_export_personal_memory_digest_into_repo() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+
+    assert_local_install_success("codex", project.path(), home.path());
+
+    let digest_skill_path = codex_project_plugin_install_dir(project.path())
+        .join("skills/agent-managed-memory/SKILL.md");
+    assert!(
+        !digest_skill_path.exists(),
+        "project-local Codex install must not export the personal memory digest into the repo"
+    );
+
+    let targets_path = home
+        .path()
+        .join(".tracedecay/agent_managed/memory_digest_targets.json");
+    if targets_path.exists() {
+        let targets = std::fs::read_to_string(&targets_path).unwrap();
+        assert!(
+            !targets.contains(&project.path().display().to_string()),
+            "project-local Codex install must not record repo-tree digest targets"
+        );
+    }
 }
 
 #[test]
@@ -4045,6 +4092,37 @@ fn test_claude_install_then_uninstall() {
 }
 
 #[test]
+fn test_claude_uninstall_unrecords_memory_digest_target() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let profile_root = home.join(".tracedecay");
+    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
+    let ctx = make_install_ctx(home);
+    let claude_md = home.join(".claude/CLAUDE.md");
+
+    ClaudeIntegration.install(&ctx).unwrap();
+    assert!(
+        std::fs::read_to_string(&claude_md)
+            .unwrap()
+            .contains(tracedecay::automation::memory_digest::MEMORY_DIGEST_START),
+        "install should seed the prompt-index memory digest block"
+    );
+
+    ClaudeIntegration.uninstall(&ctx).unwrap();
+
+    std::fs::create_dir_all(claude_md.parent().unwrap()).unwrap();
+    std::fs::write(&claude_md, "# Claude rules\n").unwrap();
+    tracedecay::automation::memory_digest::export_memory_digest_to_recorded_targets(&profile_root)
+        .unwrap();
+    assert!(
+        !std::fs::read_to_string(&claude_md)
+            .unwrap()
+            .contains(tracedecay::automation::memory_digest::MEMORY_DIGEST_START),
+        "Claude uninstall must unrecord memory digest targets so refresh cannot recreate them"
+    );
+}
+
+#[test]
 fn test_gemini_install_then_uninstall() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
@@ -4091,6 +4169,14 @@ fn test_codex_install_then_uninstall() {
     let plugin_dir = codex_plugin_install_dir(home);
     assert!(plugin_dir.exists());
     assert_codex_personal_marketplace_entry(home);
+    let legacy_digest = plugin_dir.join("skills/agent-managed-memory/SKILL.md");
+    std::fs::create_dir_all(legacy_digest.parent().unwrap()).unwrap();
+    std::fs::write(&legacy_digest, "legacy digest").unwrap();
+    seed_memory_digest_target(
+        &home.join(".tracedecay"),
+        tracedecay::automation::skill_targets::SkillInstallTarget::Codex,
+        &plugin_dir,
+    );
 
     CodexIntegration.uninstall(&ctx).unwrap();
 
@@ -4114,6 +4200,55 @@ fn test_codex_install_then_uninstall() {
             "AGENTS.md should not have tracedecay rules after uninstall"
         );
     }
+
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    tracedecay::automation::memory_digest::export_memory_digest_to_recorded_targets(
+        &home.join(".tracedecay"),
+    )
+    .unwrap();
+    assert!(
+        !plugin_dir
+            .join("skills/agent-managed-memory/SKILL.md")
+            .exists(),
+        "Codex uninstall must unrecord memory digest targets so refresh cannot recreate them"
+    );
+}
+
+#[test]
+fn test_codex_local_uninstall_unrecords_legacy_repo_memory_digest_target() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let mut ctx = make_install_ctx(home.path());
+    ctx.project_root = Some(project.path().to_path_buf());
+    let profile_root = home.path().join(".tracedecay");
+    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
+
+    CodexIntegration
+        .install_local(&ctx, project.path())
+        .unwrap();
+
+    let plugin_dir = codex_project_plugin_install_dir(project.path());
+    let legacy_digest = plugin_dir.join("skills/agent-managed-memory/SKILL.md");
+    std::fs::create_dir_all(legacy_digest.parent().unwrap()).unwrap();
+    std::fs::write(&legacy_digest, "legacy digest").unwrap();
+    seed_memory_digest_target(
+        &profile_root,
+        tracedecay::automation::skill_targets::SkillInstallTarget::Codex,
+        &plugin_dir,
+    );
+    assert!(legacy_digest.exists());
+
+    CodexIntegration.uninstall(&ctx).unwrap();
+
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    tracedecay::automation::memory_digest::export_memory_digest_to_recorded_targets(&profile_root)
+        .unwrap();
+    assert!(
+        !plugin_dir
+            .join("skills/agent-managed-memory/SKILL.md")
+            .exists(),
+        "project-local Codex uninstall must unrecord legacy repo-tree memory digest targets"
+    );
 }
 
 #[test]
@@ -4545,12 +4680,29 @@ fn test_cursor_install_then_uninstall() {
     CursorIntegration.install(&ctx).unwrap();
     let plugin_dir = cursor_plugin_install_dir(home);
     assert!(plugin_dir.exists());
+    let legacy_digest = plugin_dir.join("rules/tracedecay-memory-digest.mdc");
+    std::fs::create_dir_all(legacy_digest.parent().unwrap()).unwrap();
+    std::fs::write(&legacy_digest, "legacy digest").unwrap();
+    seed_memory_digest_target(
+        &home.join(".tracedecay"),
+        tracedecay::automation::skill_targets::SkillInstallTarget::Cursor,
+        &plugin_dir,
+    );
 
     CursorIntegration.uninstall(&ctx).unwrap();
 
     assert!(
         !plugin_dir.exists(),
         "Cursor uninstall should remove the local plugin install"
+    );
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    tracedecay::automation::memory_digest::export_memory_digest_to_recorded_targets(
+        &home.join(".tracedecay"),
+    )
+    .unwrap();
+    assert!(
+        !legacy_digest.exists(),
+        "Cursor uninstall must unrecord legacy memory digest targets"
     );
 }
 

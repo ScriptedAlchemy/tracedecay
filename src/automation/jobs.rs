@@ -14,6 +14,7 @@
 //! schedule or mutate other jobs, and context gathered from skills or the
 //! pre-run command is framed as untrusted data in the prompt.
 
+use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
@@ -26,6 +27,7 @@ use super::backend::{
     AgentTaskResponse,
 };
 use super::config::{AutomationBackend, AutomationConfig, AutomationHostMode};
+use super::job_webhook;
 use super::lifecycle::generated_run_id;
 use super::managed_skills::load_managed_skill;
 use super::run_ledger::{
@@ -103,6 +105,8 @@ pub struct AutomationJob {
     pub created_at: i64,
     #[serde(default)]
     pub updated_at: i64,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -110,6 +114,12 @@ struct AutomationJobsFile {
     schema_version: u32,
     #[serde(default)]
     jobs: Vec<AutomationJob>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct AutomationJobsRawFile {
+    #[serde(default)]
+    jobs: Vec<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -161,11 +171,24 @@ fn job_lock_key(job_id: &str) -> String {
 pub async fn load_jobs(dashboard_root: &Path) -> Result<Vec<AutomationJob>> {
     let path = jobs_path(dashboard_root);
     match tokio::fs::read(&path).await {
-        Ok(bytes) => serde_json::from_slice::<AutomationJobsFile>(&bytes)
-            .map(|file| file.jobs)
-            .map_err(|e| TraceDecayError::Config {
-                message: format!("failed to parse automation jobs '{}': {e}", path.display()),
-            }),
+        Ok(bytes) => {
+            let file = serde_json::from_slice::<AutomationJobsRawFile>(&bytes).map_err(|e| {
+                TraceDecayError::Config {
+                    message: format!("failed to parse automation jobs '{}': {e}", path.display()),
+                }
+            })?;
+            let mut loaded = Vec::with_capacity(file.jobs.len());
+            for (index, entry) in file.jobs.into_iter().enumerate() {
+                match serde_json::from_value::<AutomationJob>(entry) {
+                    Ok(job) => loaded.push(job),
+                    Err(e) => eprintln!(
+                        "[tracedecay] skipped corrupt automation job entry {index} in '{}': {e}",
+                        path.display()
+                    ),
+                }
+            }
+            Ok(loaded)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(e) => Err(TraceDecayError::Config {
             message: format!("failed to read automation jobs '{}': {e}", path.display()),
@@ -240,9 +263,7 @@ pub fn validate_job(job: &AutomationJob) -> Result<()> {
         }
         JobDelivery::File { path: None } => {}
         JobDelivery::Webhook { url } => {
-            if !(url.starts_with("http://") || url.starts_with("https://")) {
-                return job_error("job webhook delivery url must start with http:// or https://");
-            }
+            job_webhook::validate_url(url)?;
         }
     }
     Ok(())
@@ -430,34 +451,41 @@ pub async fn run_user_job_with_backend(
         return ctx.skipped(reason, None).await;
     }
 
-    let mut scheduler_records = None;
-    let _lock = if trigger == AutomationTrigger::Scheduler {
-        let now_secs = current_timestamp();
-        let records = load_run_records(dashboard_root, JOB_LEDGER_LOOKBACK).await?;
-        let lock = AutomationTaskLock::try_acquire_keyed(
-            dashboard_root,
-            &job_lock_key(&job.id),
-            Some(DEFAULT_JOB_STALE_LOCK_SECS),
-            now_secs,
-        )
-        .await?;
-        let decision = job_schedule_decision(job, &records, now_secs);
-        scheduler_records = Some(records);
-        let Some(lock) = lock else {
-            return ctx
-                .skipped("scheduler_lock_active", scheduler_records.as_deref())
-                .await;
+    let scheduler_records = if trigger == AutomationTrigger::Scheduler {
+        Some(load_run_records(dashboard_root, JOB_LEDGER_LOOKBACK).await?)
+    } else {
+        None
+    };
+    let now_secs = current_timestamp();
+    let Some(_lock) = AutomationTaskLock::try_acquire_keyed(
+        dashboard_root,
+        &job_lock_key(&job.id),
+        Some(DEFAULT_JOB_STALE_LOCK_SECS),
+        now_secs,
+    )
+    .await?
+    else {
+        let reason = if trigger == AutomationTrigger::Scheduler {
+            "scheduler_lock_active"
+        } else {
+            "job_lock_active"
         };
+        return ctx.skipped(reason, scheduler_records.as_deref()).await;
+    };
+
+    if trigger == AutomationTrigger::Scheduler {
+        let now_secs = current_timestamp();
+        let decision = job_schedule_decision(
+            job,
+            scheduler_records.as_deref().unwrap_or_default(),
+            now_secs,
+        );
         if let Some(reason) = decision {
             return ctx.skipped(reason, scheduler_records.as_deref()).await;
         }
-        Some(lock)
-    } else {
-        if !job.enabled {
-            return ctx.skipped("user_job_disabled", None).await;
-        }
-        None
-    };
+    } else if !job.enabled {
+        return ctx.skipped("user_job_disabled", None).await;
+    }
 
     if job.pre_run_command.is_some() && !config.allow_job_commands {
         return ctx
@@ -855,17 +883,14 @@ async fn deliver_job_output(
                 "model": response.model,
                 "completed_at": current_timestamp(),
             });
-            let url_owned = url.clone();
+            let report_url = url.clone();
+            let post_url = url.clone();
             let status = tokio::task::spawn_blocking(move || {
-                let agent =
-                    crate::cloud::agent_with_timeout(Duration::from_secs(WEBHOOK_TIMEOUT_SECS));
-                agent
-                    .post(&url_owned)
-                    .send_json(&payload)
-                    .map(|response| response.status().as_u16())
-                    .map_err(|e| TraceDecayError::Config {
-                        message: format!("webhook POST failed: {e}"),
-                    })
+                job_webhook::post_json_url(
+                    &post_url,
+                    &payload,
+                    Duration::from_secs(WEBHOOK_TIMEOUT_SECS),
+                )
             })
             .await
             .map_err(|e| TraceDecayError::Config {
@@ -873,7 +898,7 @@ async fn deliver_job_output(
             })??;
             Ok(json!({
                 "mode": "webhook",
-                "url": url,
+                "url": report_url,
                 "status": status,
             }))
         }

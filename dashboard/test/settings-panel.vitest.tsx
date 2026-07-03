@@ -146,12 +146,7 @@ describe("SettingsPanel", () => {
 
     await waitFor(() => expect(apiMock.patchProject).toHaveBeenCalledTimes(1));
     expect(apiMock.patchProject).toHaveBeenCalledWith({
-      include: [".github/**"],
       exclude: ["target/**", "dist/**"],
-      max_file_size: 1048576,
-      extract_docstrings: true,
-      track_call_sites: true,
-      git_ignore: true,
     });
 
     await waitFor(() =>
@@ -205,9 +200,7 @@ describe("SettingsPanel", () => {
 
     await waitFor(() => expect(apiMock.patchUser).toHaveBeenCalledTimes(1));
     expect(apiMock.patchUser).toHaveBeenCalledWith({
-      upload_enabled: true,
       watcher_debounce: "15s",
-      extraction_timeout_secs: 60,
     });
 
     await waitFor(() =>

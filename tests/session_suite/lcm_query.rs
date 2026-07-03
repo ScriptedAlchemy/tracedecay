@@ -2298,6 +2298,49 @@ async fn recent_sessions_orders_by_last_activity_with_provider_filter() {
 }
 
 #[tokio::test]
+async fn recent_sessions_uses_store_order_for_null_timestamp_activity() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let db_path = isolated_db_path(&tmp);
+
+    insert_raw_messages(
+        &db,
+        &db_path,
+        "cursor",
+        "timestamped-session",
+        &["has an epoch timestamp".to_string()],
+    )
+    .await;
+
+    let session = sample_session("cursor", "null-timestamp-session");
+    let mut message = raw_message(
+        "cursor",
+        "null-timestamp-message-001",
+        "null-timestamp-session",
+        1,
+        "ingested later without source timestamp",
+    );
+    message.timestamp = None;
+    assert!(
+        db.upsert_transcript_batch(
+            &session,
+            &[message],
+            "session-lcm-query-cursor-null-timestamp-session.jsonl",
+            ParseOffset::default(),
+        )
+        .await
+    );
+
+    let sessions = db
+        .lcm_recent_sessions(None, 1)
+        .await
+        .expect("recent sessions should load");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].session_id, "null-timestamp-session");
+    assert_eq!(sessions[0].last_timestamp, None);
+}
+
+#[tokio::test]
 async fn session_providers_finds_explicit_session_beyond_recent_limit() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;

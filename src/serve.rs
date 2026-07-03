@@ -448,7 +448,7 @@ pub async fn run_serve(path_arg: Option<String>, timings: bool) -> Result<()> {
             transport.push_replay(pending_line);
             let scope_prefix = serve_scope_prefix(original_cwd.as_deref(), cg.project_root());
             let server = crate::mcp::McpServer::new(*cg, scope_prefix).await;
-            server.run(&mut transport).await
+            Box::pin(server.run(&mut transport)).await
         }
     }
 }
@@ -475,11 +475,12 @@ async fn serve_resolved_project(
         crate::daemon::proxy_stdio_to_daemon(&socket_path, &handshake, peeked_line).await
     } else {
         let server = crate::mcp::McpServer::new(cg, handshake.scope_prefix.clone()).await;
+        server.set_initialize_root_routing_enabled(allow_initialize_root_routing);
         let mut transport = ReplayTransport::new(StdioTransport::new());
         if let Some(line) = peeked_line {
             transport.push_replay(line);
         }
-        server.run(&mut transport).await
+        Box::pin(server.run(&mut transport)).await
     }
 }
 
@@ -551,7 +552,10 @@ pub async fn resolve_serve_startup(path_arg: Option<String>) -> ServeStartup {
             return ServeStartup::Ready {
                 cg: Box::new(cg),
                 peeked_line,
-                allow_initialize_root_routing: false,
+                allow_initialize_root_routing: allow_initialize_root_routing_for_startup(
+                    resolver.explicit_path,
+                    ServeProjectResolutionOrigin::StartupPath,
+                ),
             };
         }
         Err(e) => e,
@@ -574,7 +578,10 @@ pub async fn resolve_serve_startup(path_arg: Option<String>) -> ServeStartup {
         Ok((cg, origin)) => ServeStartup::Ready {
             cg: Box::new(cg),
             peeked_line,
-            allow_initialize_root_routing: origin == ServeProjectResolutionOrigin::InitializeRoots,
+            allow_initialize_root_routing: allow_initialize_root_routing_for_startup(
+                resolver.explicit_path,
+                origin,
+            ),
         },
         Err(error) => ServeStartup::Degraded {
             resolver,
@@ -606,6 +613,17 @@ enum ServeProjectResolutionOrigin {
     FreshCwd,
     InitializeRoots,
     GlobalDb,
+}
+
+fn allow_initialize_root_routing_for_startup(
+    explicit_path: bool,
+    origin: ServeProjectResolutionOrigin,
+) -> bool {
+    !explicit_path
+        && matches!(
+            origin,
+            ServeProjectResolutionOrigin::InitializeRoots | ServeProjectResolutionOrigin::GlobalDb
+        )
 }
 
 impl ServeProjectResolver {
@@ -899,5 +917,25 @@ mod tests {
             sanitize_serve_path_arg(Some("${workspaceFolder}/nested".to_string())),
             None
         );
+    }
+
+    #[test]
+    fn initialize_root_routing_is_only_enabled_after_non_cwd_startup_resolution() {
+        assert!(!allow_initialize_root_routing_for_startup(
+            false,
+            ServeProjectResolutionOrigin::StartupPath
+        ));
+        assert!(!allow_initialize_root_routing_for_startup(
+            false,
+            ServeProjectResolutionOrigin::FreshCwd
+        ));
+        assert!(allow_initialize_root_routing_for_startup(
+            false,
+            ServeProjectResolutionOrigin::InitializeRoots
+        ));
+        assert!(!allow_initialize_root_routing_for_startup(
+            true,
+            ServeProjectResolutionOrigin::StartupPath
+        ));
     }
 }

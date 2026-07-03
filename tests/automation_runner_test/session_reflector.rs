@@ -812,6 +812,96 @@ async fn session_reflector_skips_when_replay_disabled_and_no_grep_hits() {
     );
 }
 
+struct NoSummaryReplayBackend;
+
+impl AgentTaskBackend for NoSummaryReplayBackend {
+    fn run_task(
+        &self,
+        request: &AgentTaskRequest,
+    ) -> tracedecay::errors::Result<AgentTaskResponse> {
+        assert_eq!(request.task, AgentTaskKind::SessionReflector);
+        let evidence = &request.context["session_reflection_evidence"];
+        assert_eq!(evidence["include_summaries"], json!(false));
+        assert_eq!(evidence["evidence_mode"], json!("session_replay_with_grep"));
+        let sessions = evidence["recent_session_slices"]["sessions"]
+            .as_array()
+            .expect("replay sessions should be present");
+        assert_eq!(sessions.len(), 1);
+        assert!(
+            sessions[0]["summary_nodes"]
+                .as_array()
+                .expect("summary nodes array")
+                .is_empty(),
+            "include_summaries=false must suppress replay summary nodes"
+        );
+        Ok(AgentTaskResponse {
+            run_id: request.run_id.clone(),
+            task: request.task,
+            output_text: json!({"facts": []}).to_string(),
+            output_json: Some(json!({"facts": []})),
+            model: Some("fixture-model".to_string()),
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+        })
+    }
+}
+
+#[tokio::test]
+async fn session_reflector_replay_respects_include_summaries_false() {
+    let temp = tempdir().unwrap();
+    let cg = init_project(temp.path()).await;
+    seed_session_evidence(&cg).await;
+    let db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
+        .await
+        .expect("session db open");
+    db.lcm_insert_summary_node(tracedecay::sessions::lcm::LcmSummaryNodeDraft {
+        provider: "cursor".to_string(),
+        conversation_id: "session-reflect-1".to_string(),
+        session_id: "session-reflect-1".to_string(),
+        depth: 1,
+        summary_text: "summary that should not be replayed when summaries are disabled".to_string(),
+        source_refs: Vec::new(),
+        source_token_count: 10,
+        summary_token_count: 5,
+        source_time_start: Some(1_715_000_001),
+        source_time_end: Some(1_715_000_001),
+        expand_hint: None,
+        metadata_json: None,
+    })
+    .await
+    .expect("summary fixture should insert");
+    let config = AutomationConfig {
+        enabled: true,
+        backend: AutomationBackend::CodexAppServer,
+        host_mode: AutomationHostMode::Standalone,
+        tasks: AutomationTaskSet {
+            session_reflector: AutomationTaskConfig {
+                enabled: true,
+                schedule: Some("manual".to_string()),
+                ..AutomationTaskConfig::default()
+            },
+            ..AutomationTaskSet::default()
+        },
+        ..AutomationConfig::default()
+    };
+
+    let run = run_session_reflector_with_backend(
+        &cg,
+        &config,
+        &NoSummaryReplayBackend,
+        SessionReflectorAutomationOptions {
+            query: "does-not-match-any-grep-hit".to_string(),
+            include_summaries: false,
+            include_recent_sessions: true,
+            ..SessionReflectorAutomationOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
+}
+
 #[tokio::test]
 async fn session_reflector_runner_ledgers_malformed_backend_output() {
     let temp = tempdir().unwrap();

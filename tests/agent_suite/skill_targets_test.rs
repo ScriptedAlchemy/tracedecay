@@ -5,12 +5,12 @@ use tracedecay::agents::{export_managed_skills_to_agent_hosts, export_managed_sk
 use tracedecay::automation::hermes_bridge::{load_hermes_skill_bridge, HermesSkillBridgeOptions};
 use tracedecay::automation::managed_skills::{
     approve_managed_skill, create_managed_skill_draft, default_managed_skill_targets,
-    disable_managed_skill, ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource,
-    ManagedSupportFile,
+    disable_managed_skill, load_managed_skill, managed_skill_dir, ManagedSkillDraft,
+    ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
 };
 use tracedecay::automation::skill_targets::{
     export_native_skill_overlay, export_prompt_skill_index, install_managed_skills,
-    SkillInstallTarget,
+    remove_prompt_skill_index_for_target, SkillInstallTarget,
 };
 
 fn draft(id: &str, title: &str) -> ManagedSkillDraft {
@@ -281,8 +281,182 @@ async fn prompt_index_preserves_user_content_and_routes_full_body_through_mcp() 
         export_prompt_skill_index(&profile_root, SkillInstallTarget::Claude, &prompt_path).unwrap();
     assert_eq!(second.exported_count, 1);
     let second = std::fs::read_to_string(&prompt_path).unwrap();
-    assert_eq!(second.matches("TRACEDECAY MANAGED SKILLS START").count(), 1);
+    assert_eq!(second.matches("TRACEDECAY MANAGED SKILLS START").count(), 2);
+    assert!(second.contains("TRACEDECAY MANAGED SKILLS START agents"));
+    assert!(second.contains("TRACEDECAY MANAGED SKILLS START claude"));
     assert!(second.contains("This Claude index lists"));
+}
+
+#[tokio::test]
+async fn prompt_index_keeps_separate_sections_for_shared_agents_md_hosts() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let agents_md = temp.path().join("AGENTS.md");
+
+    create_managed_skill_draft(
+        &profile_root,
+        targeted_draft(
+            "opencode-only",
+            "OpenCode only",
+            vec![SkillInstallTarget::OpenCode],
+        ),
+    )
+    .await
+    .unwrap();
+    approve_managed_skill(&profile_root, "opencode-only")
+        .await
+        .unwrap();
+    create_managed_skill_draft(
+        &profile_root,
+        targeted_draft("kimi-only", "Kimi only", vec![SkillInstallTarget::Kimi]),
+    )
+    .await
+    .unwrap();
+    approve_managed_skill(&profile_root, "kimi-only")
+        .await
+        .unwrap();
+
+    export_prompt_skill_index(&profile_root, SkillInstallTarget::OpenCode, &agents_md).unwrap();
+    export_prompt_skill_index(&profile_root, SkillInstallTarget::Kimi, &agents_md).unwrap();
+
+    let prompt = std::fs::read_to_string(&agents_md).unwrap();
+    assert!(prompt.contains("TRACEDECAY MANAGED SKILLS START opencode"));
+    assert!(prompt.contains("TRACEDECAY MANAGED SKILLS START kimi"));
+    assert!(prompt.contains("This OpenCode index lists"));
+    assert!(prompt.contains("This Kimi index lists"));
+    assert!(prompt.contains("`opencode-only`"));
+    assert!(prompt.contains("`kimi-only`"));
+}
+
+#[tokio::test]
+async fn uninstall_preserves_legacy_block_on_shared_file_mid_migration() {
+    // A shared AGENTS.md mid-migration: host A migrated to a slugged `claude`
+    // block, host B is still using the legacy unslugged block. Uninstalling a
+    // third target (`agents`, which has no slugged block here) must NOT fall
+    // back to deleting the legacy block, since another host's slugged block is
+    // present the legacy block cannot be assumed to be ours.
+    let temp = tempfile::tempdir().unwrap();
+    let agents_md = temp.path().join("AGENTS.md");
+    let contents = concat!(
+        "# Shared prompt\n\n",
+        "<!-- TRACEDECAY MANAGED SKILLS START claude -->\n",
+        "Claude host index.\n",
+        "<!-- TRACEDECAY MANAGED SKILLS END claude -->\n\n",
+        "<!-- TRACEDECAY MANAGED SKILLS START -->\n",
+        "Legacy host B index.\n",
+        "<!-- TRACEDECAY MANAGED SKILLS END -->\n",
+    );
+    std::fs::write(&agents_md, contents).unwrap();
+
+    remove_prompt_skill_index_for_target(&agents_md, SkillInstallTarget::Agents).unwrap();
+
+    let after = std::fs::read_to_string(&agents_md).unwrap();
+    assert!(
+        after.contains("Legacy host B index."),
+        "legacy block belonging to another host must be preserved: {after}"
+    );
+    assert!(
+        after.contains("<!-- TRACEDECAY MANAGED SKILLS START -->"),
+        "legacy markers must be preserved: {after}"
+    );
+    assert!(
+        after.contains("<!-- TRACEDECAY MANAGED SKILLS START claude -->"),
+        "unrelated slugged block must be preserved: {after}"
+    );
+}
+
+#[tokio::test]
+async fn uninstall_removes_own_slugged_block_on_shared_file() {
+    // Uninstalling a target with its own slugged block removes only that block
+    // and leaves the legacy block for a still-migrating host untouched.
+    let temp = tempfile::tempdir().unwrap();
+    let agents_md = temp.path().join("AGENTS.md");
+    let contents = concat!(
+        "# Shared prompt\n\n",
+        "<!-- TRACEDECAY MANAGED SKILLS START claude -->\n",
+        "Claude host index.\n",
+        "<!-- TRACEDECAY MANAGED SKILLS END claude -->\n\n",
+        "<!-- TRACEDECAY MANAGED SKILLS START -->\n",
+        "Legacy host B index.\n",
+        "<!-- TRACEDECAY MANAGED SKILLS END -->\n",
+    );
+    std::fs::write(&agents_md, contents).unwrap();
+
+    remove_prompt_skill_index_for_target(&agents_md, SkillInstallTarget::Claude).unwrap();
+
+    let after = std::fs::read_to_string(&agents_md).unwrap();
+    assert!(
+        !after.contains("Claude host index."),
+        "own block removed: {after}"
+    );
+    assert!(
+        after.contains("Legacy host B index."),
+        "legacy block preserved: {after}"
+    );
+}
+
+#[tokio::test]
+async fn uninstall_removes_legacy_block_when_no_slugged_blocks_remain() {
+    // When only a legacy unslugged block exists (no other host has migrated),
+    // per-target uninstall may safely reclaim it.
+    let temp = tempfile::tempdir().unwrap();
+    let agents_md = temp.path().join("AGENTS.md");
+    let contents = concat!(
+        "# Shared prompt\n\n",
+        "<!-- TRACEDECAY MANAGED SKILLS START -->\n",
+        "Legacy index.\n",
+        "<!-- TRACEDECAY MANAGED SKILLS END -->\n",
+    );
+    std::fs::write(&agents_md, contents).unwrap();
+
+    remove_prompt_skill_index_for_target(&agents_md, SkillInstallTarget::Agents).unwrap();
+
+    let after = std::fs::read_to_string(&agents_md).unwrap();
+    assert!(
+        !after.contains("Legacy index."),
+        "legacy block removed: {after}"
+    );
+}
+
+#[tokio::test]
+async fn native_overlay_keeps_previous_export_when_rebuild_fails() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let plugin_root = temp.path().join("cursor-plugin");
+
+    create_managed_skill_draft(&profile_root, draft("repo-hygiene", "Repository hygiene"))
+        .await
+        .unwrap();
+    approve_managed_skill(&profile_root, "repo-hygiene")
+        .await
+        .unwrap();
+    export_native_skill_overlay(&profile_root, SkillInstallTarget::Cursor, &plugin_root).unwrap();
+
+    let previous_skill = plugin_root.join("skills/agent-managed/repo-hygiene/SKILL.md");
+    assert!(previous_skill.is_file());
+
+    let mut corrupted = load_managed_skill(&profile_root, "repo-hygiene")
+        .await
+        .unwrap();
+    corrupted.support_files.push(ManagedSupportFile {
+        path: std::path::PathBuf::from("../escape.md"),
+        bytes: b"escape".to_vec(),
+    });
+    let skill_dir = managed_skill_dir(&profile_root, "repo-hygiene").unwrap();
+    std::fs::write(
+        skill_dir.join("skill.json"),
+        serde_json::to_vec_pretty(&corrupted).unwrap(),
+    )
+    .unwrap();
+
+    let err = export_native_skill_overlay(&profile_root, SkillInstallTarget::Cursor, &plugin_root)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("unsafe support path"));
+    assert!(
+        previous_skill.is_file(),
+        "failed rebuild must preserve the last complete overlay"
+    );
 }
 
 /// Fakes a Claude Code global install under `home`: the tracedecay MCP

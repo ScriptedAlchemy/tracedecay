@@ -27,6 +27,7 @@ pub mod zed;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Serialize;
 
@@ -66,9 +67,18 @@ pub(crate) fn install_managed_skill_prompt_index(
     Ok(())
 }
 
-pub(crate) fn remove_managed_skill_prompt_index(prompt_path: &Path) -> Result<()> {
-    crate::automation::skill_targets::remove_prompt_skill_index(prompt_path)?;
-    crate::automation::memory_digest::remove_memory_digest_prompt_block(prompt_path)
+pub(crate) fn remove_managed_skill_prompt_index(
+    profile_home: &Path,
+    prompt_path: &Path,
+    target: crate::automation::skill_targets::SkillInstallTarget,
+) -> Result<()> {
+    let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(profile_home);
+    crate::automation::skill_targets::remove_prompt_skill_index_for_target(prompt_path, target)?;
+    crate::automation::memory_digest::remove_memory_digest_export(
+        &profile_root,
+        target,
+        prompt_path,
+    )
 }
 
 /// Per-agent outcome of a managed-skill export refresh, keyed by agent id.
@@ -651,13 +661,23 @@ pub fn safe_write_json_file(
 /// plain text rather than structured JSON. The target is not opened for writing
 /// until the final rename, so a failed write leaves the original untouched.
 pub fn safe_write_text_file(path: &Path, contents: &str, backup: Option<&Path>) -> Result<()> {
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| TraceDecayError::Config {
             message: format!("cannot create directory {}: {e}", parent.display()),
         })?;
     }
 
-    let new_path = PathBuf::from(format!("{}.new", path.display()));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("file");
+    let unique = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let new_name = format!(".{file_name}.{}.{}.new", std::process::id(), unique);
+    let new_path = path
+        .parent()
+        .map_or_else(|| PathBuf::from(&new_name), |parent| parent.join(&new_name));
     if let Err(e) = std::fs::write(&new_path, contents) {
         std::fs::remove_file(&new_path).ok();
         return Err(TraceDecayError::Config {

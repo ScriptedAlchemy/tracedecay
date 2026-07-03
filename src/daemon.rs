@@ -808,30 +808,35 @@ pub async fn proxy_transport_to_daemon(
 ) -> Result<()> {
     let mut routed_handshake = handshake.clone();
     if let Some(line) = replay_line {
-        update_proxy_handshake_from_initialize(&mut routed_handshake, &line).await;
+        update_proxy_handshake_from_initialize(handshake, &mut routed_handshake, &line).await;
         proxy_request_line_to_daemon(socket_path, &routed_handshake, &line, transport).await?;
     }
 
     while let Some(line) = transport.read_line().await? {
-        update_proxy_handshake_from_initialize(&mut routed_handshake, &line).await;
+        update_proxy_handshake_from_initialize(handshake, &mut routed_handshake, &line).await;
         proxy_request_line_to_daemon(socket_path, &routed_handshake, &line, transport).await?;
     }
     Ok(())
 }
 
 #[cfg(unix)]
-async fn update_proxy_handshake_from_initialize(handshake: &mut DaemonHandshake, line: &str) {
-    if !handshake.allow_initialize_root_routing {
-        return;
-    }
+async fn update_proxy_handshake_from_initialize(
+    base_handshake: &DaemonHandshake,
+    handshake: &mut DaemonHandshake,
+    line: &str,
+) {
     let Ok(request) = serde_json::from_str::<JsonRpcRequest>(line.trim()) else {
         return;
     };
     if request.method != "initialize" {
         return;
     }
+    *handshake = base_handshake.clone();
+    if !base_handshake.allow_initialize_root_routing {
+        return;
+    }
     let Some(registry) =
-        crate::global_db::GlobalDb::open_at(&handshake.client_identity.global_db_path).await
+        crate::global_db::GlobalDb::open_at(&base_handshake.client_identity.global_db_path).await
     else {
         return;
     };
@@ -843,7 +848,7 @@ async fn update_proxy_handshake_from_initialize(handshake: &mut DaemonHandshake,
     else {
         return;
     };
-    if handshake.project_path.as_deref() != Some(project_path.as_path()) {
+    if base_handshake.project_path.as_deref() != Some(project_path.as_path()) {
         handshake.scope_prefix = None;
     }
     handshake.project_path = Some(project_path);
@@ -1791,9 +1796,7 @@ async fn serve_socket_client(stream: tokio::net::UnixStream, engine: DaemonEngin
                 return Err(e);
             }
         };
-        server
-            .run_connection_with_timings(&mut transport, handshake.timings)
-            .await?;
+        Box::pin(server.run_connection_with_timings(&mut transport, handshake.timings)).await?;
     } else {
         serve_projectless_client(&mut transport, &handshake.client_identity).await?;
     }
@@ -2214,6 +2217,84 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn initialize_root_routing_replaces_cached_project_and_scope() {
+        let profile = TempDir::new().expect("profile temp dir");
+        let project_a = TempDir::new().expect("project a temp dir");
+        let project_b = TempDir::new().expect("project b temp dir");
+        let project_a = project_a.path().canonicalize().expect("project a path");
+        let project_b = project_b.path().canonicalize().expect("project b path");
+        let global_db_path = profile.path().join("global.db");
+        let registry = crate::global_db::GlobalDb::open_at(&global_db_path)
+            .await
+            .expect("open registry");
+        registry
+            .upsert_code_project("project-a", &project_a, None, None, None)
+            .await
+            .expect("register project a");
+        registry
+            .upsert_code_project("project-b", &project_b, None, None, None)
+            .await
+            .expect("register project b");
+        drop(registry);
+
+        let mut base_handshake = test_handshake_defaults();
+        base_handshake.project_path = Some(project_a.clone());
+        base_handshake.scope_prefix = Some("src".to_string());
+        base_handshake.allow_initialize_root_routing = true;
+        base_handshake.client_identity = test_client_identity_for(profile.path().to_path_buf());
+        base_handshake.client_identity.global_db_path = global_db_path;
+        let mut routed_handshake = base_handshake.clone();
+
+        let line = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "roots": [{
+                    "uri": project_b.to_string_lossy(),
+                    "name": "project-b"
+                }]
+            }
+        })
+        .to_string();
+
+        super::update_proxy_handshake_from_initialize(
+            &base_handshake,
+            &mut routed_handshake,
+            &line,
+        )
+        .await;
+
+        assert_eq!(
+            routed_handshake.project_path.as_deref(),
+            Some(project_b.as_path())
+        );
+        assert_eq!(routed_handshake.scope_prefix, None);
+
+        let rerun_without_roots = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "initialize",
+            "params": {}
+        })
+        .to_string();
+        super::update_proxy_handshake_from_initialize(
+            &base_handshake,
+            &mut routed_handshake,
+            &rerun_without_roots,
+        )
+        .await;
+
+        assert_eq!(
+            routed_handshake.project_path.as_deref(),
+            Some(project_a.as_path()),
+            "reinitialize without a route must not keep the previous routed project"
+        );
+        assert_eq!(routed_handshake.scope_prefix.as_deref(), Some("src"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn serve_proxies_when_socket_already_exists() {
         let dir = TempDir::new().expect("temp dir");
         let socket = dir.path().join("daemon.sock");
@@ -2377,7 +2458,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn proxy_transport_carries_initialize_root_into_followup_handshake() {
+    async fn proxy_transport_carries_initialize_root_and_resets_on_reinitialize() {
         let dir = TempDir::new().expect("temp dir");
         let temp_root = dir.path().canonicalize().expect("canonical temp dir");
         let active_root = temp_root.join("active");
@@ -2424,7 +2505,7 @@ mod tests {
         let engine = super::DaemonEngine::default();
         let accept_task = tokio::spawn(async move {
             let mut tasks = Vec::new();
-            for _ in 0..2 {
+            for _ in 0..4 {
                 let (stream, _addr) = listener.accept().await.expect("accept daemon client");
                 let engine = engine.clone();
                 tasks.push(tokio::spawn(async move {
@@ -2467,6 +2548,33 @@ mod tests {
                 .expect("tools/call json"),
             )
             .expect("send tools/call");
+        sender
+            .send(
+                serde_json::to_string(&json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "initialize",
+                    "params": {
+                        "clientInfo": {"name": "codex", "version": "test"}
+                    }
+                }))
+                .expect("reinitialize json"),
+            )
+            .expect("send reinitialize");
+        sender
+            .send(
+                serde_json::to_string(&json!({
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "tracedecay_files",
+                        "arguments": {"format": "flat"}
+                    }
+                }))
+                .expect("post-reinitialize tools/call json"),
+            )
+            .expect("send post-reinitialize tools/call");
         drop(sender);
 
         let handshake = DaemonHandshake {
@@ -2500,6 +2608,22 @@ mod tests {
         assert!(
             !text.contains("src/active.rs"),
             "daemon proxy should not keep using the original handshake project: {text}"
+        );
+        let post_reinitialize_response = responses
+            .iter()
+            .map(|line| serde_json::from_str::<Value>(line.trim()).expect("response json"))
+            .find(|response| response["id"] == json!(4))
+            .expect("post-reinitialize files response");
+        let text = post_reinitialize_response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("post-reinitialize files text");
+        assert!(
+            text.contains("src/active.rs"),
+            "reinitialize without roots should reset proxy routing to the base handshake, got {text}"
+        );
+        assert!(
+            !text.contains("src/target.rs"),
+            "stale initialize-root routing should not survive reinitialize: {text}"
         );
 
         accept_task.await.expect("daemon accept task");

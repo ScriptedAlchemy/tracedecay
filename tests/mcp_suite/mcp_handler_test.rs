@@ -6165,6 +6165,85 @@ async fn memory_fact_store_add_search_update_remove_and_wrappers() {
 }
 
 #[tokio::test]
+async fn memory_fact_store_mutations_refresh_recorded_digest_exports() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let profile_root = tracedecay::storage::default_profile_root().unwrap();
+    let prompt_path = cg.project_root().join("CLAUDE.md");
+    tracedecay::automation::memory_digest::sync_memory_digest_export(
+        &profile_root,
+        tracedecay::automation::skill_targets::SkillInstallTarget::Claude,
+        &prompt_path,
+    )
+    .unwrap();
+    assert!(fs::read_to_string(&prompt_path)
+        .unwrap()
+        .contains("No durable facts exported yet"));
+
+    let added = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": "Refresh exported digest after MCP fact add",
+            "category": "decision",
+            "trust": 0.9
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
+    let fact_id = added["fact"]["fact_id"].as_i64().unwrap();
+    assert!(fs::read_to_string(&prompt_path)
+        .unwrap()
+        .contains("Refresh exported digest after MCP fact add"));
+
+    handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "update",
+            "fact_id": fact_id,
+            "content": "Refresh exported digest after MCP fact update"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let rendered = fs::read_to_string(&prompt_path).unwrap();
+    assert!(rendered.contains("Refresh exported digest after MCP fact update"));
+    assert!(!rendered.contains("Refresh exported digest after MCP fact add"));
+
+    handle_tool_call(
+        &cg,
+        "tracedecay_fact_feedback",
+        json!({"fact_id": fact_id, "unhelpful": true}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(fs::read_to_string(&prompt_path)
+        .unwrap()
+        .contains("trust 0.80"));
+
+    handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({"action": "remove", "fact_id": fact_id}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let rendered = fs::read_to_string(&prompt_path).unwrap();
+    assert!(!rendered.contains("Refresh exported digest after MCP fact update"));
+    assert!(rendered.contains("No durable facts exported yet"));
+}
+
+#[tokio::test]
 async fn memory_fact_store_project_selector_targets_registered_project() {
     let (active, target, _env) = setup_cross_project_memory_projects().await;
     let target_project_id = target

@@ -155,20 +155,18 @@ fn section_render_flattens_whitespace_and_reports_omissions() {
 }
 
 #[tokio::test]
-async fn cursor_overlay_write_update_and_removal() {
+async fn prompt_index_write_update_and_removal() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
-    let plugin_root = temp.path().join("cursor-plugin");
-    std::fs::create_dir_all(&plugin_root).unwrap();
+    let prompt_path = temp.path().join("CLAUDE.md");
 
-    // Empty snapshot exports a placeholder rule so later refreshes have a
+    // Empty snapshot exports a placeholder block so later refreshes have a
     // channel to update.
     let summary =
-        export_memory_digest(&profile_root, SkillInstallTarget::Cursor, &plugin_root).unwrap();
+        export_memory_digest(&profile_root, SkillInstallTarget::Claude, &prompt_path).unwrap();
     assert_eq!(summary.fact_count, 0);
-    let rule_path = plugin_root.join("rules/tracedecay-memory-digest.mdc");
-    let rendered = std::fs::read_to_string(&rule_path).unwrap();
-    assert!(rendered.contains("alwaysApply: true"));
+    let rendered = std::fs::read_to_string(&prompt_path).unwrap();
+    assert!(rendered.contains(MEMORY_DIGEST_START));
     assert!(rendered.contains("No durable facts exported yet"));
 
     update_project_digest_section(
@@ -181,33 +179,55 @@ async fn cursor_overlay_write_update_and_removal() {
         ),
     )
     .unwrap();
-    export_memory_digest(&profile_root, SkillInstallTarget::Cursor, &plugin_root).unwrap();
-    let rendered = std::fs::read_to_string(&rule_path).unwrap();
+    export_memory_digest(&profile_root, SkillInstallTarget::Claude, &prompt_path).unwrap();
+    let rendered = std::fs::read_to_string(&prompt_path).unwrap();
     assert!(rendered.contains("Use pnpm for installs"));
     assert!(rendered.contains("trust 0.90"));
 
-    remove_memory_digest_export(&profile_root, SkillInstallTarget::Cursor, &plugin_root).unwrap();
-    assert!(!rule_path.exists());
+    remove_memory_digest_export(&profile_root, SkillInstallTarget::Claude, &prompt_path).unwrap();
+    assert!(!prompt_path.exists());
     // Removal also unrecords the target: refresh must not re-create it.
     export_memory_digest_to_recorded_targets(&profile_root).unwrap();
-    assert!(!rule_path.exists());
+    assert!(!prompt_path.exists());
 }
 
-#[tokio::test]
-async fn codex_overlay_uses_skill_package_and_prunes_on_removal() {
+#[test]
+fn native_cursor_codex_digest_channels_are_deduped_to_host_memory_injection() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
-    let plugin_root = temp.path().join("codex-plugin");
-    std::fs::create_dir_all(&plugin_root).unwrap();
 
-    export_memory_digest(&profile_root, SkillInstallTarget::Codex, &plugin_root).unwrap();
-    let skill_path = plugin_root.join("skills/agent-managed-memory/SKILL.md");
-    let rendered = std::fs::read_to_string(&skill_path).unwrap();
-    assert!(rendered.contains("name: tracedecay-memory-digest"));
+    for (target, legacy_relative) in [
+        (
+            SkillInstallTarget::Cursor,
+            "rules/tracedecay-memory-digest.mdc",
+        ),
+        (
+            SkillInstallTarget::Codex,
+            "skills/agent-managed-memory/SKILL.md",
+        ),
+    ] {
+        let plugin_root = temp
+            .path()
+            .join(format!("plugin-{}", target.prompt_label().to_lowercase()));
+        let legacy_path = plugin_root.join(legacy_relative);
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        std::fs::write(&legacy_path, "legacy digest").unwrap();
 
-    remove_memory_digest_export(&profile_root, SkillInstallTarget::Codex, &plugin_root).unwrap();
-    assert!(!skill_path.exists());
-    assert!(!plugin_root.join("skills/agent-managed-memory").exists());
+        assert!(
+            !sync_memory_digest_export(&profile_root, target, &plugin_root).unwrap(),
+            "native Cursor/Codex digest export is superseded by host memory injection"
+        );
+        assert!(
+            !legacy_path.exists(),
+            "superseded native digest artifact should be removed for {target:?}"
+        );
+        std::fs::create_dir_all(&plugin_root).unwrap();
+        export_memory_digest_to_recorded_targets(&profile_root).unwrap();
+        assert!(
+            !legacy_path.exists(),
+            "superseded native digest target should not be recorded for {target:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -248,15 +268,13 @@ async fn config_gate_disables_export_and_strips_previous_artifacts() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     std::fs::create_dir_all(&profile_root).unwrap();
-    let plugin_root = temp.path().join("cursor-plugin");
-    std::fs::create_dir_all(&plugin_root).unwrap();
-    let rule_path = plugin_root.join("rules/tracedecay-memory-digest.mdc");
+    let prompt_path = temp.path().join("CLAUDE.md");
 
     assert!(memory_digest_export_enabled(&profile_root));
     assert!(
-        sync_memory_digest_export(&profile_root, SkillInstallTarget::Cursor, &plugin_root).unwrap()
+        sync_memory_digest_export(&profile_root, SkillInstallTarget::Claude, &prompt_path).unwrap()
     );
-    assert!(rule_path.exists());
+    assert!(prompt_path.exists());
 
     std::fs::write(
         profile_root.join("config.toml"),
@@ -265,19 +283,18 @@ async fn config_gate_disables_export_and_strips_previous_artifacts() {
     .unwrap();
     assert!(!memory_digest_export_enabled(&profile_root));
     assert!(
-        !sync_memory_digest_export(&profile_root, SkillInstallTarget::Cursor, &plugin_root)
+        !sync_memory_digest_export(&profile_root, SkillInstallTarget::Claude, &prompt_path)
             .unwrap()
     );
-    assert!(!rule_path.exists());
+    assert!(!prompt_path.exists());
 }
 
 #[tokio::test]
 async fn project_config_gate_disables_refresh_and_removes_existing_section() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
-    let plugin_root = temp.path().join("cursor-plugin");
+    let prompt_path = temp.path().join("CLAUDE.md");
     let project_root = temp.path().join("repo");
-    std::fs::create_dir_all(&plugin_root).unwrap();
     std::fs::create_dir_all(&project_root).unwrap();
 
     let layout = default_profile_sharded_layout(&project_root, &profile_root).unwrap();
@@ -308,10 +325,9 @@ async fn project_config_gate_disables_refresh_and_removes_existing_section() {
     )
     .unwrap();
     assert!(
-        sync_memory_digest_export(&profile_root, SkillInstallTarget::Cursor, &plugin_root).unwrap()
+        sync_memory_digest_export(&profile_root, SkillInstallTarget::Claude, &prompt_path).unwrap()
     );
-    let rule_path = plugin_root.join("rules/tracedecay-memory-digest.mdc");
-    assert!(std::fs::read_to_string(&rule_path)
+    assert!(std::fs::read_to_string(&prompt_path)
         .unwrap()
         .contains("Existing project fact"));
 
@@ -328,7 +344,7 @@ async fn project_config_gate_disables_refresh_and_removes_existing_section() {
 
     let snapshot = load_memory_digest_snapshot(&profile_root).unwrap();
     assert!(snapshot.projects.is_empty());
-    let rendered = std::fs::read_to_string(&rule_path).unwrap();
+    let rendered = std::fs::read_to_string(&prompt_path).unwrap();
     assert!(!rendered.contains("Existing project fact"));
     assert!(rendered.contains("No durable facts exported yet"));
 }
@@ -337,16 +353,14 @@ async fn project_config_gate_disables_refresh_and_removes_existing_section() {
 async fn fact_proposal_apply_then_refresh_regenerates_recorded_overlays() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
-    let plugin_root = temp.path().join("cursor-plugin");
-    std::fs::create_dir_all(&plugin_root).unwrap();
+    let prompt_path = temp.path().join("CLAUDE.md");
     let dashboard_root = temp.path().join("dashboard");
     let project_root = temp.path().join("repo");
     std::fs::create_dir_all(&project_root).unwrap();
 
-    // Install-time export records the overlay as a refresh target.
-    sync_memory_digest_export(&profile_root, SkillInstallTarget::Cursor, &plugin_root).unwrap();
-    let rule_path = plugin_root.join("rules/tracedecay-memory-digest.mdc");
-    assert!(std::fs::read_to_string(&rule_path)
+    // Install-time export records the prompt index as a refresh target.
+    sync_memory_digest_export(&profile_root, SkillInstallTarget::Claude, &prompt_path).unwrap();
+    assert!(std::fs::read_to_string(&prompt_path)
         .unwrap()
         .contains("No durable facts exported yet"));
 
@@ -394,7 +408,7 @@ async fn fact_proposal_apply_then_refresh_regenerates_recorded_overlays() {
     let snapshot = load_memory_digest_snapshot(&profile_root).unwrap();
     assert_eq!(snapshot.projects.len(), 1);
     assert_eq!(snapshot.projects[0].project_label, "repo");
-    let rendered = std::fs::read_to_string(&rule_path).unwrap();
+    let rendered = std::fs::read_to_string(&prompt_path).unwrap();
     assert!(rendered.contains("Always run cargo nextest instead of cargo test"));
     assert!(rendered.contains("## repo"));
 }

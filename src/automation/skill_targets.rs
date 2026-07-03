@@ -1,9 +1,11 @@
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::agents::safe_write_text_file;
 use crate::automation::managed_skills::{
     managed_skill_root, validate_managed_support_files, ManagedSkill, ManagedSkillState,
     ManagedSupportFile,
@@ -15,6 +17,17 @@ const NATIVE_NAMESPACE_DIR: &str = "agent-managed";
 const NATIVE_MANIFEST_FILE: &str = ".tracedecay-managed-skills.json";
 const PROMPT_INDEX_START: &str = "<!-- TRACEDECAY MANAGED SKILLS START -->";
 const PROMPT_INDEX_END: &str = "<!-- TRACEDECAY MANAGED SKILLS END -->";
+
+const ALL_SKILL_INSTALL_TARGETS: [SkillInstallTarget; 8] = [
+    SkillInstallTarget::Cursor,
+    SkillInstallTarget::Codex,
+    SkillInstallTarget::Claude,
+    SkillInstallTarget::Agents,
+    SkillInstallTarget::OpenCode,
+    SkillInstallTarget::Kimi,
+    SkillInstallTarget::Kiro,
+    SkillInstallTarget::Hermes,
+];
 
 pub use crate::automation::managed_skills::SkillInstallTarget;
 
@@ -75,10 +88,10 @@ pub fn export_native_skill_overlay(
 
     let skills = load_active_managed_skills_for_target(profile_root, target)?;
     let overlay_root = plugin_root.join("skills").join(NATIVE_NAMESPACE_DIR);
-    if overlay_root.exists() {
-        fs::remove_dir_all(&overlay_root)?;
-    }
     if skills.is_empty() {
+        if overlay_root.exists() {
+            fs::remove_dir_all(&overlay_root)?;
+        }
         return Ok(SkillInstallSummary {
             target,
             output: plugin_root.to_path_buf(),
@@ -86,35 +99,55 @@ pub fn export_native_skill_overlay(
             exported: Vec::new(),
         });
     }
-    fs::create_dir_all(&overlay_root)?;
-
-    let mut exported = Vec::new();
     for skill in &skills {
         validate_managed_support_files(&skill.support_files)?;
-        let package_dir = overlay_root.join(&skill.metadata.id);
-        fs::create_dir_all(&package_dir)?;
-        let skill_path = package_dir.join("SKILL.md");
-        fs::write(&skill_path, skill.render_skill_markdown())?;
-        for support in &skill.support_files {
-            write_support_file(&package_dir, support)?;
-        }
-        exported.push(SkillExportEntry {
-            id: skill.metadata.id.clone(),
-            title: skill.metadata.title.clone(),
-            checksum: skill.metadata.checksum.clone(),
-            path: skill_path,
-        });
     }
 
-    let manifest = NativeSkillManifest {
-        version: 1,
-        target,
-        exported: exported.clone(),
-    };
-    fs::write(
-        overlay_root.join(NATIVE_MANIFEST_FILE),
-        serde_json::to_vec_pretty(&manifest)?,
-    )?;
+    let stage_root = unique_overlay_sibling(&overlay_root, "tmp");
+    if stage_root.exists() {
+        fs::remove_dir_all(&stage_root)?;
+    }
+    fs::create_dir_all(&stage_root)?;
+    let mut exported = Vec::new();
+    let write_result = (|| -> Result<()> {
+        for skill in &skills {
+            let package_dir = stage_root.join(&skill.metadata.id);
+            fs::create_dir_all(&package_dir)?;
+            let skill_path = package_dir.join("SKILL.md");
+            fs::write(&skill_path, skill.render_skill_markdown())?;
+            for support in &skill.support_files {
+                write_support_file(&package_dir, support)?;
+            }
+            exported.push(SkillExportEntry {
+                id: skill.metadata.id.clone(),
+                title: skill.metadata.title.clone(),
+                checksum: skill.metadata.checksum.clone(),
+                path: skill_path,
+            });
+        }
+
+        let manifest = NativeSkillManifest {
+            version: 1,
+            target,
+            exported: exported.clone(),
+        };
+        fs::write(
+            stage_root.join(NATIVE_MANIFEST_FILE),
+            serde_json::to_vec_pretty(&manifest)?,
+        )?;
+        Ok(())
+    })();
+    if let Err(err) = write_result {
+        fs::remove_dir_all(&stage_root).ok();
+        return Err(err);
+    }
+
+    swap_overlay_dirs(&overlay_root, &stage_root)?;
+    for entry in &mut exported {
+        if let Ok(relative) = entry.path.strip_prefix(&stage_root) {
+            entry.path = overlay_root.join(relative);
+        }
+    }
 
     Ok(SkillInstallSummary {
         target,
@@ -139,17 +172,17 @@ pub fn export_prompt_skill_index(
         Err(err) => return Err(err.into()),
     };
     let updated = if skills.is_empty() {
-        remove_marked_block(&existing)?
+        remove_marked_block_for_target(&existing, target)?
     } else {
         let block = render_prompt_index_block(target, &skills);
-        replace_or_append_marked_block(&existing, &block)?
+        replace_or_append_marked_block(&existing, target, &block)?
     };
 
     if updated != existing {
         if let Some(parent) = prompt_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(prompt_path, updated)?;
+        safe_write_text_file(prompt_path, &updated, None)?;
     }
 
     let exported = skills
@@ -171,19 +204,36 @@ pub fn export_prompt_skill_index(
 }
 
 pub fn remove_prompt_skill_index(prompt_path: &Path) -> Result<()> {
+    remove_prompt_skill_indexes(prompt_path, None)
+}
+
+pub fn remove_prompt_skill_index_for_target(
+    prompt_path: &Path,
+    target: SkillInstallTarget,
+) -> Result<()> {
+    remove_prompt_skill_indexes(prompt_path, Some(target))
+}
+
+fn remove_prompt_skill_indexes(
+    prompt_path: &Path,
+    target: Option<SkillInstallTarget>,
+) -> Result<()> {
     let existing = match fs::read_to_string(prompt_path) {
         Ok(contents) => contents,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(err) => return Err(err.into()),
     };
-    let updated = remove_marked_block(&existing)?;
+    let updated = match target {
+        Some(target) => remove_marked_block_for_target(&existing, target)?,
+        None => remove_all_marked_blocks(&existing)?,
+    };
     if updated == existing {
         return Ok(());
     }
     if updated.trim().is_empty() {
         fs::remove_file(prompt_path)?;
     } else {
-        fs::write(prompt_path, updated)?;
+        safe_write_text_file(prompt_path, &updated, None)?;
     }
     Ok(())
 }
@@ -222,7 +272,8 @@ pub fn load_active_managed_skills_for_target(
 
 fn render_prompt_index_block(target: SkillInstallTarget, skills: &[ManagedSkill]) -> String {
     let mut block = String::new();
-    block.push_str(PROMPT_INDEX_START);
+    let (start, end) = prompt_index_markers(target);
+    block.push_str(&start);
     block.push('\n');
     block.push_str("## TraceDecay managed skills\n\n");
     let _ = write!(
@@ -243,65 +294,185 @@ fn render_prompt_index_block(target: SkillInstallTarget, skills: &[ManagedSkill]
         }
     }
 
-    block.push_str(PROMPT_INDEX_END);
+    block.push_str(&end);
     block.push('\n');
     block
 }
 
-fn replace_or_append_marked_block(existing: &str, block: &str) -> Result<String> {
-    match (
-        existing.find(PROMPT_INDEX_START),
-        existing.find(PROMPT_INDEX_END),
-    ) {
-        (Some(start), Some(end)) if start <= end => {
-            let end = end + PROMPT_INDEX_END.len();
-            let mut updated = String::new();
-            updated.push_str(existing[..start].trim_end());
-            updated.push_str("\n\n");
-            updated.push_str(block.trim_end());
-            updated.push_str("\n\n");
-            updated.push_str(existing[end..].trim_start());
-            if !updated.ends_with('\n') {
-                updated.push('\n');
-            }
-            Ok(updated)
+fn replace_or_append_marked_block(
+    existing: &str,
+    target: SkillInstallTarget,
+    block: &str,
+) -> Result<String> {
+    let (start_marker, end_marker) = prompt_index_markers(target);
+    if let Some((start, end)) = marked_block_range(existing, &start_marker, &end_marker)? {
+        let mut updated = String::new();
+        updated.push_str(existing[..start].trim_end());
+        updated.push_str("\n\n");
+        updated.push_str(block.trim_end());
+        updated.push_str("\n\n");
+        updated.push_str(existing[end..].trim_start());
+        if !updated.ends_with('\n') {
+            updated.push('\n');
         }
-        (None, None) => {
-            let mut updated = String::new();
-            updated.push_str(existing.trim_end());
-            if !updated.is_empty() {
-                updated.push_str("\n\n");
-            }
-            updated.push_str(block);
-            Ok(updated)
+        Ok(updated)
+    } else if let Some((start, end)) =
+        marked_block_range(existing, PROMPT_INDEX_START, PROMPT_INDEX_END)?
+    {
+        let mut updated = String::new();
+        updated.push_str(existing[..start].trim_end());
+        updated.push_str("\n\n");
+        updated.push_str(block.trim_end());
+        updated.push_str("\n\n");
+        updated.push_str(existing[end..].trim_start());
+        if !updated.ends_with('\n') {
+            updated.push('\n');
         }
+        Ok(updated)
+    } else {
+        let mut updated = String::new();
+        updated.push_str(existing.trim_end());
+        if !updated.is_empty() {
+            updated.push_str("\n\n");
+        }
+        updated.push_str(block);
+        Ok(updated)
+    }
+}
+
+fn remove_marked_block_for_target(existing: &str, target: SkillInstallTarget) -> Result<String> {
+    let (start_marker, end_marker) = prompt_index_markers(target);
+    if let Some((start, end)) = marked_block_range(existing, &start_marker, &end_marker)? {
+        return Ok(remove_range(existing, start, end));
+    }
+    // Legacy fallback: older installs wrote an unslugged block. Only claim it as
+    // this target's when NO other target's slugged block is present. On a shared
+    // file mid-migration (one host slugged, another still legacy-unslugged),
+    // removing the legacy block here would delete the other host's block, so
+    // leave it untouched and let the remove-all path handle it instead.
+    if !has_other_slugged_block(existing, target) {
+        if let Some((start, end)) =
+            marked_block_range(existing, PROMPT_INDEX_START, PROMPT_INDEX_END)?
+        {
+            return Ok(remove_range(existing, start, end));
+        }
+    }
+    Ok(existing.to_string())
+}
+
+/// True when the file contains a slugged managed-skill block belonging to a
+/// target other than `target`.
+fn has_other_slugged_block(existing: &str, target: SkillInstallTarget) -> bool {
+    ALL_SKILL_INSTALL_TARGETS
+        .iter()
+        .copied()
+        .filter(|candidate| *candidate != target)
+        .any(|candidate| existing.contains(&prompt_index_markers(candidate).0))
+}
+
+fn remove_all_marked_blocks(existing: &str) -> Result<String> {
+    let mut updated = existing.to_string();
+    for target in [
+        SkillInstallTarget::Claude,
+        SkillInstallTarget::Agents,
+        SkillInstallTarget::OpenCode,
+        SkillInstallTarget::Kimi,
+        SkillInstallTarget::Kiro,
+    ] {
+        updated = remove_marked_block_for_target(&updated, target)?;
+    }
+    if let Some((start, end)) = marked_block_range(&updated, PROMPT_INDEX_START, PROMPT_INDEX_END)?
+    {
+        updated = remove_range(&updated, start, end);
+    }
+    Ok(updated)
+}
+
+fn marked_block_range(
+    existing: &str,
+    start_marker: &str,
+    end_marker: &str,
+) -> Result<Option<(usize, usize)>> {
+    match (existing.find(start_marker), existing.find(end_marker)) {
+        (Some(start), Some(end)) if start <= end => Ok(Some((start, end + end_marker.len()))),
+        (None, None) => Ok(None),
         _ => Err(config_error(
             "managed skill prompt index markers are unbalanced".to_string(),
         )),
     }
 }
 
-fn remove_marked_block(existing: &str) -> Result<String> {
-    match (
-        existing.find(PROMPT_INDEX_START),
-        existing.find(PROMPT_INDEX_END),
-    ) {
-        (Some(start), Some(end)) if start <= end => {
-            let end = end + PROMPT_INDEX_END.len();
-            let mut updated = String::new();
-            updated.push_str(existing[..start].trim_end());
-            updated.push_str("\n\n");
-            updated.push_str(existing[end..].trim_start());
-            if !updated.trim().is_empty() && !updated.ends_with('\n') {
-                updated.push('\n');
-            }
-            Ok(updated)
-        }
-        (None, None) => Ok(existing.to_string()),
-        _ => Err(config_error(
-            "managed skill prompt index markers are unbalanced".to_string(),
-        )),
+fn remove_range(existing: &str, start: usize, end: usize) -> String {
+    let mut updated = String::new();
+    updated.push_str(existing[..start].trim_end());
+    updated.push_str("\n\n");
+    updated.push_str(existing[end..].trim_start());
+    if !updated.trim().is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
     }
+    updated
+}
+
+fn prompt_index_markers(target: SkillInstallTarget) -> (String, String) {
+    let slug = target_marker_slug(target);
+    (
+        format!("<!-- TRACEDECAY MANAGED SKILLS START {slug} -->"),
+        format!("<!-- TRACEDECAY MANAGED SKILLS END {slug} -->"),
+    )
+}
+
+fn target_marker_slug(target: SkillInstallTarget) -> &'static str {
+    match target {
+        SkillInstallTarget::Cursor => "cursor",
+        SkillInstallTarget::Codex => "codex",
+        SkillInstallTarget::Claude => "claude",
+        SkillInstallTarget::Agents => "agents",
+        SkillInstallTarget::OpenCode => "opencode",
+        SkillInstallTarget::Kimi => "kimi",
+        SkillInstallTarget::Kiro => "kiro",
+        SkillInstallTarget::Hermes => "hermes",
+    }
+}
+
+fn unique_overlay_sibling(overlay_root: &Path, suffix: &str) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    overlay_root.with_file_name(format!(
+        ".{NATIVE_NAMESPACE_DIR}.{suffix}-{}-{nonce}",
+        std::process::id()
+    ))
+}
+
+fn swap_overlay_dirs(overlay_root: &Path, stage_root: &Path) -> Result<()> {
+    let backup_root = unique_overlay_sibling(overlay_root, "previous");
+    if backup_root.exists() {
+        fs::remove_dir_all(&backup_root)?;
+    }
+    if overlay_root.exists() {
+        fs::rename(overlay_root, &backup_root)?;
+    }
+    if let Err(err) = fs::rename(stage_root, overlay_root) {
+        // Remove the staged directory so a failed swap does not orphan a
+        // `.tracedecay-managed.tmp-<pid>-<nonce>` sibling on every retry.
+        fs::remove_dir_all(stage_root).ok();
+        if backup_root.exists() {
+            if let Err(restore_err) = fs::rename(&backup_root, overlay_root) {
+                tracing::warn!(
+                    backup = %backup_root.display(),
+                    overlay = %overlay_root.display(),
+                    error = %restore_err,
+                    "failed to restore managed skill overlay backup; previous content remains at backup path"
+                );
+            }
+        }
+        return Err(err.into());
+    }
+    if backup_root.exists() {
+        fs::remove_dir_all(backup_root)?;
+    }
+    Ok(())
 }
 
 fn write_support_file(package_dir: &Path, support: &ManagedSupportFile) -> Result<()> {

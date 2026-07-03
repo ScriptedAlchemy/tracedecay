@@ -149,24 +149,25 @@ impl PreparedRefresh {
         let timeouts = LspRefreshTimeouts::from_diagnostics_quiet_window(diagnostics_quiet_timeout);
         for batch in self.batches {
             let mut client_slot = batch.client.lock().await;
-            let client = match client_slot.as_mut() {
+            let mut client = match client_slot.take() {
                 Some(client) => client,
-                None => client_slot.insert(
-                    StdioLspClient::start_with_timeouts(
-                        &self.command,
-                        &self.args,
-                        &batch.workspace_root,
-                        timeouts,
-                    )
-                    .await
-                    .map_err(|err| RefreshFailure::crashed(&err))?,
-                ),
+                None => StdioLspClient::start_with_timeouts(
+                    &self.command,
+                    &self.args,
+                    &batch.workspace_root,
+                    timeouts,
+                )
+                .await
+                .map_err(|err| RefreshFailure::crashed(&err))?,
             };
             match client
                 .collect_document_diagnostics(&self.project_root, batch.documents, timeouts)
                 .await
             {
-                Ok(mut batch_diagnostics) => diagnostics.append(&mut batch_diagnostics),
+                Ok(mut batch_diagnostics) => {
+                    *client_slot = Some(client);
+                    diagnostics.append(&mut batch_diagnostics);
+                }
                 Err(err) => {
                     *client_slot = None;
                     return Err(RefreshFailure::crashed(&err));

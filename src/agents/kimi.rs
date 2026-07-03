@@ -77,7 +77,11 @@ impl AgentIntegration for KimiIntegration {
         uninstall_mcp_server(&mcp_path);
 
         let agents_md = kimi_dir.join("AGENTS.md");
-        super::remove_managed_skill_prompt_index(&agents_md)?;
+        super::remove_managed_skill_prompt_index(
+            &ctx.home,
+            &agents_md,
+            crate::automation::skill_targets::SkillInstallTarget::Kimi,
+        )?;
         uninstall_prompt_rules(&agents_md);
 
         eprintln!();

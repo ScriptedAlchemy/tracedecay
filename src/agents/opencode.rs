@@ -71,7 +71,11 @@ impl AgentIntegration for OpenCodeIntegration {
         uninstall_mcp_server(&config_path);
 
         let global_prompt = opencode_prompt_path(&ctx.home);
-        super::remove_managed_skill_prompt_index(&global_prompt)?;
+        super::remove_managed_skill_prompt_index(
+            &ctx.home,
+            &global_prompt,
+            crate::automation::skill_targets::SkillInstallTarget::OpenCode,
+        )?;
         uninstall_prompt_rules(&global_prompt);
 
         eprintln!();

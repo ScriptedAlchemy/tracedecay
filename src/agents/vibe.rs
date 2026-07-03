@@ -101,7 +101,11 @@ impl AgentIntegration for VibeIntegration {
         let config_path = vibe_config_path(&ctx.home);
         uninstall_mcp_server(&config_path);
         let prompt_path = vibe_prompt_path(&ctx.home);
-        super::remove_managed_skill_prompt_index(&prompt_path)?;
+        super::remove_managed_skill_prompt_index(
+            &ctx.home,
+            &prompt_path,
+            crate::automation::skill_targets::SkillInstallTarget::Agents,
+        )?;
         uninstall_prompt_rules(&prompt_path);
 
         eprintln!();

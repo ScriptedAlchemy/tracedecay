@@ -85,15 +85,22 @@ pub(super) fn traces_payload(ctx: &ArtifactPayloadContext<'_>) -> Value {
 /// `skill_writer_evidence`), so traces distinguish session-replay-backed runs
 /// from grep-only runs. Null for tasks without a mode label.
 fn context_evidence_mode(context: &Value) -> Value {
-    context
+    let modes = context
         .as_object()
-        .and_then(|object| {
+        .map(|object| {
             object
                 .values()
-                .find_map(|value| value.get("evidence_mode").filter(|mode| mode.is_string()))
+                .filter_map(|value| value.get("evidence_mode").and_then(Value::as_str))
+                .collect::<Vec<_>>()
         })
-        .cloned()
-        .unwrap_or(Value::Null)
+        .unwrap_or_default();
+    if modes.contains(&"session_replay_with_grep") {
+        json!("session_replay_with_grep")
+    } else if modes.contains(&"grep_only") {
+        json!("grep_only")
+    } else {
+        Value::Null
+    }
 }
 
 pub(super) fn feedback_payload(ctx: &ArtifactPayloadContext<'_>, trace_ref: &Value) -> Value {
@@ -546,6 +553,38 @@ mod tests {
         // The validation-replay definitions must stay outcome-free so the
         // replay gate semantics are unchanged.
         assert_eq!(evals.count, 0);
+    }
+
+    #[test]
+    fn traces_payload_prefers_replay_backed_evidence_mode_over_key_order() {
+        let (mut request, response, record) = payload_fixture();
+        request.context = json!({
+            "aaa_grep_only_evidence": {
+                "evidence_mode": "grep_only",
+            },
+            "zzz_replay_evidence": {
+                "evidence_mode": "session_replay_with_grep",
+            },
+        });
+        let outcomes = AutomationOutcomesSnapshot::default();
+        let ctx = ArtifactPayloadContext {
+            run_id: "run-outcomes",
+            task: AgentTaskKind::CombinedReview,
+            task_key: "combined_review",
+            prompt_version: "combined_review:v1",
+            policy: artifact_policy(AgentTaskKind::CombinedReview),
+            request: &request,
+            response: &response,
+            record: &record,
+            outcomes: &outcomes,
+        };
+
+        let payload = traces_payload(&ctx);
+
+        assert_eq!(
+            payload.pointer("/evidence_mode").unwrap(),
+            &json!("session_replay_with_grep")
+        );
     }
 
     #[test]

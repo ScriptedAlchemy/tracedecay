@@ -162,41 +162,63 @@ async fn refresh_one_reconciled(
         .write()
         .await
         .prepare_refresh(language, documents);
+    let mut progress_recorded_in_task = false;
     let refresh_ok = match prepared {
         Ok(Some(prepared)) => {
-            let completed = prepared.collect_diagnostics(Duration::from_secs(5)).await;
-            let refresh_ok = completed.is_ok();
-            state
-                .code_diagnostics
-                .write()
-                .await
-                .finish_refresh(completed)
-                .ok();
-            refresh_ok
+            progress_recorded_in_task = true;
+            let state_for_refresh = state.clone();
+            let language_for_refresh = language.to_string();
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            tokio::spawn(async move {
+                let completed = prepared.collect_diagnostics(Duration::from_secs(5)).await;
+                let refresh_ok = completed.is_ok();
+                {
+                    let mut broker = state_for_refresh.code_diagnostics.write().await;
+                    let _ = broker.finish_refresh(completed);
+                    let snapshot = broker.snapshot();
+                    let files_with_diagnostics =
+                        files_with_diagnostics(&snapshot, &language_for_refresh);
+                    broker.record_backfill_progress(
+                        &language_for_refresh,
+                        document_count,
+                        document_count,
+                        files_with_diagnostics,
+                        refresh_ok.then(crate::tracedecay::current_timestamp),
+                    );
+                }
+                let _ = tx.send(refresh_ok);
+            });
+            rx.await.unwrap_or(false)
         }
         Ok(None) => true,
         Err(_) => false,
     };
-    let snapshot = state.code_diagnostics.read().await.snapshot();
-    let files_with_diagnostics = snapshot
+    if !progress_recorded_in_task {
+        let snapshot = state.code_diagnostics.read().await.snapshot();
+        let files_with_diagnostics = files_with_diagnostics(&snapshot, language);
+        state
+            .code_diagnostics
+            .write()
+            .await
+            .record_backfill_progress(
+                language,
+                document_count,
+                document_count,
+                files_with_diagnostics,
+                refresh_ok.then(crate::tracedecay::current_timestamp),
+            );
+    }
+    Ok(())
+}
+
+fn files_with_diagnostics(snapshot: &DiagnosticsSnapshot, language: &str) -> usize {
+    snapshot
         .diagnostics
         .iter()
         .filter(|diagnostic| diagnostic.language == language)
         .map(|diagnostic| diagnostic.file.as_str())
         .collect::<BTreeSet<_>>()
-        .len();
-    state
-        .code_diagnostics
-        .write()
-        .await
-        .record_backfill_progress(
-            language,
-            document_count,
-            document_count,
-            files_with_diagnostics,
-            refresh_ok.then(crate::tracedecay::current_timestamp),
-        );
-    Ok(())
+        .len()
 }
 
 fn maybe_spawn_idle_backfill(state: &DashboardState, snapshot: &DiagnosticsSnapshot) {

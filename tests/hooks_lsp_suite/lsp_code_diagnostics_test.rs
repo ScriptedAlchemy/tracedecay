@@ -10,7 +10,7 @@ const FAKE_PATH: &str = "src/lib.fake";
 // to cover a didOpen -> publishDiagnostics round trip against an
 // already-initialized fake server.
 const FAKE_LSP_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(150);
-const OUTER_ASYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+const OUTER_ASYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
 
 #[test]
 fn builtin_registry_advertises_phase_one_setup_contract() {
@@ -296,7 +296,7 @@ sys.stderr.flush()
         .refresh_documents(
             FAKE_LANGUAGE,
             vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
-            std::time::Duration::from_millis(50),
+            std::time::Duration::from_millis(500),
         )
         .await
         .unwrap_err();
@@ -429,6 +429,38 @@ async fn stdio_client_bounds_lsp_document_write_hangs() {
 }
 
 #[tokio::test]
+async fn stdio_client_allows_slow_but_progressing_document_writes() {
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("slow_reader_lsp.py");
+    std::fs::write(
+        &script_path,
+        fake_lsp_script_that_reads_large_messages_slowly(),
+    )
+    .unwrap();
+
+    let diagnostics = tokio::time::timeout(
+        OUTER_ASYNC_TIMEOUT,
+        lsp::client::collect_document_diagnostics(
+            python_command(),
+            &[script_path.display().to_string()],
+            temp.path(),
+            vec![fake_document(
+                FAKE_LANGUAGE,
+                FAKE_PATH,
+                &"let nope\n".repeat(80_000),
+            )],
+            std::time::Duration::from_millis(500),
+        ),
+    )
+    .await
+    .expect("slow progressing write should stay bounded")
+    .expect("slow progressing write should not crash the client");
+
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].message, "fake type error");
+}
+
+#[tokio::test]
 async fn broker_drops_lsp_client_after_partial_diagnostics_frame_timeout() {
     let temp = tempfile::tempdir().unwrap();
     let script_path = temp.path().join("partial_frame_lsp.py");
@@ -459,6 +491,114 @@ async fn broker_drops_lsp_client_after_partial_diagnostics_frame_timeout() {
         )
         .await
         .unwrap();
+
+    let snapshot = broker.snapshot();
+    assert_engine_state(&snapshot, FAKE_LANGUAGE, lsp::broker::EngineState::Ready);
+    assert_eq!(snapshot.summary.total_errors, 1);
+}
+
+#[tokio::test]
+async fn stdio_client_fails_when_no_document_publishes_diagnostics() {
+    // Preserve the #237 behavior: a genuine timeout where NOTHING arrived is
+    // still an error and must not be recorded as a complete (empty) refresh.
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("silent_lsp.py");
+    std::fs::write(
+        &script_path,
+        fake_lsp_script_with_preamble("", NEVER_PUBLISH),
+    )
+    .unwrap();
+
+    let err = lsp::client::collect_document_diagnostics(
+        python_command(),
+        &[script_path.display().to_string()],
+        temp.path(),
+        vec![
+            fake_document(FAKE_LANGUAGE, "src/first.fake", "let nope"),
+            fake_document(FAKE_LANGUAGE, "src/second.fake", "let clean"),
+        ],
+        std::time::Duration::from_millis(50),
+    )
+    .await
+    .expect_err("a batch with zero publishes should fail as a timeout");
+
+    assert!(
+        err.to_string().contains("timed out"),
+        "unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
+async fn stdio_client_returns_diagnostics_for_suppress_empty_servers() {
+    // A server that only publishes for files WITH problems (never an empty
+    // publish for clean files) produces a "partial" batch: `first.fake` reports
+    // an error, `second.fake` (clean) never publishes. The refresh must return
+    // the real diagnostics for the file that responded rather than dropping the
+    // whole batch as a timeout.
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("one_document_lsp.py");
+    std::fs::write(
+        &script_path,
+        fake_lsp_script_with_preamble("", FIRST_URI_ONLY_DIAGNOSTIC_PUBLISH),
+    )
+    .unwrap();
+
+    let diagnostics = lsp::client::collect_document_diagnostics(
+        python_command(),
+        &[script_path.display().to_string()],
+        temp.path(),
+        vec![
+            fake_document(FAKE_LANGUAGE, "src/first.fake", "let nope"),
+            fake_document(FAKE_LANGUAGE, "src/second.fake", "let clean"),
+        ],
+        std::time::Duration::from_millis(50),
+    )
+    .await
+    .expect("diagnostics from the responding file should be returned, not dropped");
+
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].file, "src/first.fake");
+    assert_eq!(diagnostics[0].message, "first file error");
+}
+
+#[tokio::test]
+async fn broker_cancels_partial_refresh_without_poisoning_warm_client() {
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("cancel_partial_lsp.py");
+    std::fs::write(&script_path, fake_lsp_script_with_partial_publish()).unwrap();
+    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
+        temp.path(),
+        vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
+    );
+    let prepared = broker
+        .prepare_refresh(
+            FAKE_LANGUAGE,
+            vec![fake_document(
+                FAKE_LANGUAGE,
+                "src/canceled.fake",
+                "let nope",
+            )],
+        )
+        .unwrap()
+        .expect("refresh should prepare");
+    let handle = tokio::spawn(async move {
+        prepared
+            .collect_diagnostics(std::time::Duration::from_millis(500))
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    handle.abort();
+    let _ = handle.await;
+
+    std::fs::write(&script_path, fake_lsp_script()).unwrap();
+    broker
+        .refresh_documents(
+            FAKE_LANGUAGE,
+            vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
+            FAKE_LSP_TIMEOUT,
+        )
+        .await
+        .expect("next refresh should start a clean client and recover");
 
     let snapshot = broker.snapshot();
     assert_engine_state(&snapshot, FAKE_LANGUAGE, lsp::broker::EngineState::Ready);
@@ -853,6 +993,63 @@ time.sleep(60)
 "#
 }
 
+fn fake_lsp_script_that_reads_large_messages_slowly() -> &'static str {
+    r#"
+import json
+import sys
+import time
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        name, value = line.decode("ascii").split(":", 1)
+        headers[name.lower()] = value.strip()
+    length = int(headers["content-length"])
+    remaining = length
+    chunks = []
+    while remaining:
+        chunk = sys.stdin.buffer.read(min(4096, remaining))
+        if not chunk:
+            return None
+        chunks.append(chunk)
+        remaining -= len(chunk)
+        time.sleep(0.00075)
+    return json.loads(b"".join(chunks).decode("utf-8"))
+
+def send(payload):
+    body = json.dumps(payload).encode("utf-8")
+    sys.stdout.buffer.write(b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n\r\n" + body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    if message.get("method") == "initialize":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"capabilities": {"textDocumentSync": 1}}})
+    elif message.get("method") == "textDocument/didChange":
+        uri = message["params"]["textDocument"]["uri"]
+        send({
+            "jsonrpc": "2.0",
+            "method": "textDocument/publishDiagnostics",
+            "params": {
+                "uri": uri,
+                "diagnostics": [{
+                    "range": {"start": {"line": 0, "character": 4}, "end": {"line": 0, "character": 9}},
+                    "severity": 1,
+                    "source": "fake-ls",
+                    "message": "fake type error"
+                }]
+            }
+        })
+"#
+}
+
 fn fake_lsp_script_with_partial_publish() -> String {
     fake_lsp_script_with_preamble("", PARTIAL_DIAGNOSTIC_PUBLISH)
 }
@@ -945,6 +1142,26 @@ const PARTIAL_DIAGNOSTIC_PUBLISH: &str = r#"        sys.stdout.buffer.write(b"Co
         sys.stdout.buffer.flush()
         import time
         time.sleep(60)
+"#;
+
+const NEVER_PUBLISH: &str = r#"        _ = uri
+        pass
+"#;
+
+const FIRST_URI_ONLY_DIAGNOSTIC_PUBLISH: &str = r#"        if uri.endswith("/first.fake"):
+            send({
+                "jsonrpc": "2.0",
+                "method": "textDocument/publishDiagnostics",
+                "params": {
+                    "uri": uri,
+                    "diagnostics": [{
+                        "range": {"start": {"line": 0, "character": 4}, "end": {"line": 0, "character": 9}},
+                        "severity": 1,
+                        "source": "fake-ls",
+                        "message": "first file error"
+                    }]
+                }
+            })
 "#;
 
 const EMPTY_DIAGNOSTIC_PUBLISH: &str = r#"        send({

@@ -64,7 +64,11 @@ pub(crate) async fn validate_and_apply_skill_proposals(
                         match create_managed_skill_draft(profile_root, draft).await {
                             Ok(skill) => {
                                 let skill = if auto_enable_skills {
-                                    approve_managed_skill(profile_root, &skill.metadata.id).await?
+                                    let approved =
+                                        approve_managed_skill(profile_root, &skill.metadata.id)
+                                            .await?;
+                                    refresh_managed_skill_exports_after_auto_enable(profile_root);
+                                    approved
                                 } else {
                                     skill
                                 };
@@ -91,7 +95,11 @@ pub(crate) async fn validate_and_apply_skill_proposals(
                         {
                             Ok(skill) => {
                                 let skill = if auto_enable_skills {
-                                    approve_managed_skill(profile_root, &skill.metadata.id).await?
+                                    let approved =
+                                        approve_managed_skill(profile_root, &skill.metadata.id)
+                                            .await?;
+                                    refresh_managed_skill_exports_after_auto_enable(profile_root);
+                                    approved
                                 } else {
                                     skill
                                 };
@@ -373,6 +381,24 @@ fn accepted_skill_proposal_record(
         }
     }
     record
+}
+
+fn refresh_managed_skill_exports_after_auto_enable(profile_root: &Path) {
+    let Some(home) = crate::agents::home_dir() else {
+        return;
+    };
+    let project_root = std::env::current_dir().unwrap_or_else(|_| home.clone());
+    for report in
+        crate::agents::export_managed_skills_to_agent_hosts(&home, &project_root, profile_root)
+    {
+        if let Some(error) = report.error {
+            tracing::warn!(
+                agent = %report.agent,
+                error = %error,
+                "failed to refresh managed skill exports after auto-enable"
+            );
+        }
+    }
 }
 
 fn accepted_skill_approval_status(

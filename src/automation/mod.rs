@@ -12,6 +12,7 @@ pub mod hermes_bridge;
 mod hermes_config_projection;
 mod hermes_pending_skills;
 mod hermes_skill_inventory;
+mod job_webhook;
 pub mod jobs;
 pub mod lifecycle;
 mod managed_skill_format;
