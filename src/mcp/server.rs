@@ -648,6 +648,7 @@ pub struct McpServer {
     /// to the daemon process profile for selector resolution.
     registry_db: Option<Arc<GlobalDb>>,
     allow_default_registry_fallback: bool,
+    initialize_root_routing_enabled: AtomicBool,
     hook_project_routes: SharedHookProjectRouteCache,
     /// Cached latest-version check result.
     version_cache: std::sync::Mutex<VersionCheckState>,
@@ -775,6 +776,7 @@ impl McpServer {
             global_db,
             registry_db,
             allow_default_registry_fallback,
+            initialize_root_routing_enabled: AtomicBool::new(true),
             hook_project_routes: SharedHookProjectRouteCache::default(),
             version_cache: std::sync::Mutex::new(VersionCheckState {
                 latest: None,
@@ -802,6 +804,11 @@ impl McpServer {
         });
 
         server
+    }
+
+    pub fn set_initialize_root_routing_enabled(&self, enabled: bool) {
+        self.initialize_root_routing_enabled
+            .store(enabled, Ordering::Relaxed);
     }
 
     /// Returns the active scope prefix, if the server was launched from a subdirectory.
@@ -1453,7 +1460,9 @@ impl McpServer {
 
             let response = match parsed {
                 Ok(request) => {
-                    if matches!(classify_mcp_method(&request.method), McpMethod::Initialize) {
+                    if matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
+                        && self.initialize_root_routing_enabled.load(Ordering::Relaxed)
+                    {
                         connection_route
                             .observe_initialize(
                                 request.params.as_ref(),
@@ -1628,7 +1637,8 @@ impl McpServer {
                 .await;
             return None;
         }
-        route_cache.refresh_from_shared(self.hook_project_routes.snapshot());
+        let shared_routes = self.hook_project_routes.snapshot();
+        route_cache.refresh_from_shared(&shared_routes);
         let id = request.id.clone()?;
 
         let result = match classify_mcp_method(&request.method) {

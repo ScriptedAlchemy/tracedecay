@@ -543,6 +543,9 @@ fn cursor_legacy_plugin_dir_is_tracedecay_owned(relative: &str, path: &Path) -> 
     if !relative.starts_with("skills/") {
         return true;
     }
+    if relative.starts_with("skills/tracedecay-") {
+        return true;
+    }
     skill_file_has_tracedecay_marker(&path.join("SKILL.md"))
 }
 

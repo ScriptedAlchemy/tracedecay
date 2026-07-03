@@ -90,11 +90,10 @@ impl HookProjectRouteCache {
         self.project_path.as_deref()
     }
 
-    pub(crate) fn refresh_from_shared(&mut self, mut shared: HookProjectRouteCache) {
-        if shared.project_path.is_none() {
-            shared.project_path.clone_from(&self.project_path);
-        }
-        self.clone_from(&shared);
+    pub(crate) fn refresh_from_shared(&mut self, shared: &HookProjectRouteCache) {
+        let local_project_path = self.project_path.clone();
+        self.clone_from(shared);
+        self.project_path = local_project_path;
     }
 
     fn insert_session_route(&mut self, session_id: String, project_path: String) {

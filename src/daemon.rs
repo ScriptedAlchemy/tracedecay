@@ -1796,9 +1796,7 @@ async fn serve_socket_client(stream: tokio::net::UnixStream, engine: DaemonEngin
                 return Err(e);
             }
         };
-        server
-            .run_connection_with_timings(&mut transport, handshake.timings)
-            .await?;
+        Box::pin(server.run_connection_with_timings(&mut transport, handshake.timings)).await?;
     } else {
         serve_projectless_client(&mut transport, &handshake.client_identity).await?;
     }

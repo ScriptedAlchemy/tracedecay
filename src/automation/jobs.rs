@@ -15,15 +15,11 @@
 //! pre-run command is framed as untrusted data in the prompt.
 
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use url::{Host, Url};
 
 use super::artifacts::{sha256_json, write_improvement_artifacts};
 use super::backend::{
@@ -31,6 +27,7 @@ use super::backend::{
     AgentTaskResponse,
 };
 use super::config::{AutomationBackend, AutomationConfig, AutomationHostMode};
+use super::job_webhook;
 use super::lifecycle::generated_run_id;
 use super::managed_skills::load_managed_skill;
 use super::run_ledger::{
@@ -199,297 +196,6 @@ pub async fn load_jobs(dashboard_root: &Path) -> Result<Vec<AutomationJob>> {
     }
 }
 
-fn parse_webhook_url(raw: &str) -> Result<Url> {
-    let url = Url::parse(raw).map_err(|e| TraceDecayError::Config {
-        message: format!("invalid job webhook delivery url: {e}"),
-    })?;
-    if !matches!(url.scheme(), "http" | "https") {
-        return job_error("job webhook delivery url must use http:// or https://");
-    }
-    if url.host().is_none() {
-        return job_error("job webhook delivery url must include a host");
-    }
-    Ok(url)
-}
-
-fn validate_webhook_url(raw: &str) -> Result<()> {
-    let url = parse_webhook_url(raw)?;
-    let host = url.host().ok_or_else(|| TraceDecayError::Config {
-        message: "job webhook delivery url must include a host".to_string(),
-    })?;
-    validate_webhook_host(&host)
-}
-
-fn validate_webhook_host(host: &Host<&str>) -> Result<()> {
-    match host {
-        Host::Domain(domain) => {
-            let normalized = domain.trim_end_matches('.').to_ascii_lowercase();
-            if is_localhost_like_domain(&normalized) {
-                return job_error("job webhook delivery url must not target localhost");
-            }
-        }
-        Host::Ipv4(ip) => validate_webhook_ip(IpAddr::V4(*ip))?,
-        Host::Ipv6(ip) => validate_webhook_ip(IpAddr::V6(*ip))?,
-    }
-    Ok(())
-}
-
-fn is_localhost_like_domain(domain: &str) -> bool {
-    matches!(domain, "localhost" | "localhost.localdomain")
-        || domain.ends_with(".localhost")
-        || domain.ends_with(".localhost.localdomain")
-}
-
-fn validate_webhook_ip(ip: IpAddr) -> Result<()> {
-    if is_disallowed_webhook_ip(ip) {
-        return job_error("job webhook delivery url must not target private or local networks");
-    }
-    Ok(())
-}
-
-fn is_disallowed_webhook_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => is_disallowed_webhook_ipv4(ip),
-        IpAddr::V6(ip) => is_disallowed_webhook_ipv6(ip),
-    }
-}
-
-fn is_disallowed_webhook_ipv4(ip: Ipv4Addr) -> bool {
-    let [a, b, c, d] = ip.octets();
-    ip.is_loopback()
-        || ip.is_private()
-        || ip.is_link_local()
-        || ip.is_unspecified()
-        || ip.is_broadcast()
-        || ip.is_documentation()
-        || (a == 100 && (64..=127).contains(&b))
-        || (a == 192 && b == 0 && c == 0)
-        || (a == 198 && matches!(b, 18 | 19))
-        || (224..=255).contains(&a)
-        || (a == 0 && (b, c, d) != (0, 0, 0))
-}
-
-fn is_disallowed_webhook_ipv6(ip: Ipv6Addr) -> bool {
-    let segments = ip.segments();
-    ip.is_loopback()
-        || ip.is_unspecified()
-        || ((segments[0] & 0xfe00) == 0xfc00)
-        || ((segments[0] & 0xffc0) == 0xfe80)
-        || ((segments[0] & 0xff00) == 0xff00)
-        || (segments[0] == 0x2001 && segments[1] == 0x0db8)
-}
-
-#[derive(Debug, Clone)]
-struct WebhookEndpoint {
-    url: Url,
-    connect_addr: SocketAddr,
-}
-
-impl WebhookEndpoint {
-    #[cfg(test)]
-    fn new_for_test(url: Url, connect_addr: SocketAddr) -> Self {
-        Self { url, connect_addr }
-    }
-}
-
-fn resolve_webhook_endpoint(url: &Url) -> Result<WebhookEndpoint> {
-    let host = url.host().ok_or_else(|| TraceDecayError::Config {
-        message: "job webhook delivery url must include a host".to_string(),
-    })?;
-    validate_webhook_host(&host)?;
-    let port = url
-        .port_or_known_default()
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "job webhook delivery url must include a port for unknown schemes".to_string(),
-        })?;
-    let connect_addr = match host {
-        Host::Ipv4(ip) => SocketAddr::new(IpAddr::V4(ip), port),
-        Host::Ipv6(ip) => SocketAddr::new(IpAddr::V6(ip), port),
-        Host::Domain(host) => {
-            let addrs: Vec<SocketAddr> = (host, port)
-                .to_socket_addrs()
-                .map_err(|e| TraceDecayError::Config {
-                    message: format!("failed to resolve webhook host '{host}': {e}"),
-                })?
-                .collect();
-            if addrs.is_empty() {
-                return Err(TraceDecayError::Config {
-                    message: format!("webhook host '{host}' resolved no addresses"),
-                });
-            }
-            for addr in &addrs {
-                validate_webhook_ip(addr.ip())?;
-            }
-            addrs[0]
-        }
-    };
-    validate_webhook_ip(connect_addr.ip())?;
-    Ok(WebhookEndpoint {
-        url: url.clone(),
-        connect_addr,
-    })
-}
-
-fn post_webhook_json(
-    endpoint: &WebhookEndpoint,
-    payload: &Value,
-    timeout: Duration,
-) -> Result<u16> {
-    let body = serde_json::to_vec(payload).map_err(|e| TraceDecayError::Config {
-        message: format!("failed to encode webhook payload: {e}"),
-    })?;
-    match endpoint.url.scheme() {
-        "http" => post_webhook_json_over_http(endpoint, &body, timeout),
-        "https" => post_webhook_json_over_https(endpoint, &body, timeout),
-        _ => job_error("job webhook delivery url must use http:// or https://"),
-    }
-}
-
-fn post_webhook_json_over_http(
-    endpoint: &WebhookEndpoint,
-    body: &[u8],
-    timeout: Duration,
-) -> Result<u16> {
-    let mut stream = connect_webhook_tcp(endpoint, timeout)?;
-    write_webhook_request(&mut stream, endpoint, body)?;
-    read_webhook_status(&mut stream)
-}
-
-fn post_webhook_json_over_https(
-    endpoint: &WebhookEndpoint,
-    body: &[u8],
-    timeout: Duration,
-) -> Result<u16> {
-    let stream = connect_webhook_tcp(endpoint, timeout)?;
-    let root_store = rustls::RootCertStore {
-        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-    };
-    let config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-    let host_label = webhook_host_label(&endpoint.url)?;
-    let server_name = rustls::pki_types::ServerName::try_from(host_label).map_err(|_| {
-        TraceDecayError::Config {
-            message: "invalid webhook host for TLS verification".to_string(),
-        }
-    })?;
-    let conn = rustls::ClientConnection::new(Arc::new(config), server_name).map_err(|e| {
-        TraceDecayError::Config {
-            message: format!("failed to create webhook TLS connection: {e}"),
-        }
-    })?;
-    let mut stream = rustls::StreamOwned::new(conn, stream);
-    write_webhook_request(&mut stream, endpoint, body)?;
-    read_webhook_status(&mut stream)
-}
-
-fn connect_webhook_tcp(endpoint: &WebhookEndpoint, timeout: Duration) -> Result<TcpStream> {
-    let stream = TcpStream::connect_timeout(&endpoint.connect_addr, timeout).map_err(|e| {
-        TraceDecayError::Config {
-            message: format!(
-                "failed to connect webhook endpoint '{}': {e}",
-                endpoint.connect_addr
-            ),
-        }
-    })?;
-    stream
-        .set_read_timeout(Some(timeout))
-        .and_then(|()| stream.set_write_timeout(Some(timeout)))
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to configure webhook socket timeout: {e}"),
-        })?;
-    Ok(stream)
-}
-
-fn write_webhook_request<W: Write>(
-    writer: &mut W,
-    endpoint: &WebhookEndpoint,
-    body: &[u8],
-) -> Result<()> {
-    let path = webhook_request_target(&endpoint.url);
-    let host = webhook_host_header(&endpoint.url)?;
-    write!(
-        writer,
-        "POST {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: tracedecay-automation-jobs\r\nContent-Type: application/json\r\nAccept: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
-        body.len()
-    )
-    .and_then(|()| writer.write_all(body))
-    .and_then(|()| writer.flush())
-    .map_err(|e| TraceDecayError::Config {
-        message: format!("failed to write webhook request: {e}"),
-    })
-}
-
-fn read_webhook_status<R: Read>(reader: &mut R) -> Result<u16> {
-    let mut bytes = Vec::new();
-    let mut buf = [0_u8; 512];
-    loop {
-        let n = reader.read(&mut buf).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to read webhook response: {e}"),
-        })?;
-        if n == 0 {
-            break;
-        }
-        bytes.extend_from_slice(&buf[..n]);
-        if bytes.windows(4).any(|window| window == b"\r\n\r\n") || bytes.len() > 8192 {
-            break;
-        }
-    }
-    let header = String::from_utf8_lossy(&bytes);
-    let status = header
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|status| status.parse::<u16>().ok())
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "webhook response did not include an HTTP status".to_string(),
-        })?;
-    Ok(status)
-}
-
-fn webhook_request_target(url: &Url) -> String {
-    let mut target = url.path().to_string();
-    if target.is_empty() {
-        target.push('/');
-    }
-    if let Some(query) = url.query() {
-        target.push('?');
-        target.push_str(query);
-    }
-    target
-}
-
-fn webhook_host_label(url: &Url) -> Result<String> {
-    url.host_str()
-        .map(|host| host.trim_matches(['[', ']']).to_string())
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "job webhook delivery url must include a host".to_string(),
-        })
-}
-
-fn webhook_host_header(url: &Url) -> Result<String> {
-    let host = url.host_str().ok_or_else(|| TraceDecayError::Config {
-        message: "job webhook delivery url must include a host".to_string(),
-    })?;
-    let host = match url.host().ok_or_else(|| TraceDecayError::Config {
-        message: "job webhook delivery url must include a host".to_string(),
-    })? {
-        Host::Ipv6(_) => format!("[{}]", host.trim_matches(['[', ']'])),
-        _ => host.to_string(),
-    };
-    let include_port = url
-        .port()
-        .is_some_and(|port| Some(port) != url.port_or_known_default());
-    if include_port {
-        let port = url.port().ok_or_else(|| TraceDecayError::Config {
-            message: "job webhook delivery url must include a port".to_string(),
-        })?;
-        Ok(format!("{host}:{port}"))
-    } else {
-        Ok(host)
-    }
-}
-
 pub async fn save_jobs(dashboard_root: &Path, jobs: &[AutomationJob]) -> Result<()> {
     let path = jobs_path(dashboard_root);
     if let Some(parent) = path.parent() {
@@ -557,7 +263,7 @@ pub fn validate_job(job: &AutomationJob) -> Result<()> {
         }
         JobDelivery::File { path: None } => {}
         JobDelivery::Webhook { url } => {
-            validate_webhook_url(url)?;
+            job_webhook::validate_url(url)?;
         }
     }
     Ok(())
@@ -1169,8 +875,6 @@ async fn deliver_job_output(
             }))
         }
         JobDelivery::Webhook { url } => {
-            let parsed_url = parse_webhook_url(url)?;
-            let endpoint = resolve_webhook_endpoint(&parsed_url)?;
             let payload = json!({
                 "job_id": job.id,
                 "name": job.name,
@@ -1179,9 +883,11 @@ async fn deliver_job_output(
                 "model": response.model,
                 "completed_at": current_timestamp(),
             });
+            let report_url = url.clone();
+            let post_url = url.clone();
             let status = tokio::task::spawn_blocking(move || {
-                post_webhook_json(
-                    &endpoint,
+                job_webhook::post_json_url(
+                    &post_url,
                     &payload,
                     Duration::from_secs(WEBHOOK_TIMEOUT_SECS),
                 )
@@ -1192,7 +898,7 @@ async fn deliver_job_output(
             })??;
             Ok(json!({
                 "mode": "webhook",
-                "url": url,
+                "url": report_url,
                 "status": status,
             }))
         }
@@ -1203,58 +909,4 @@ fn job_error<T>(message: &str) -> Result<T> {
     Err(TraceDecayError::Config {
         message: message.to_string(),
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::{Read, Write};
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
-    use std::sync::mpsc;
-    use std::thread;
-
-    #[test]
-    fn webhook_http_post_uses_validated_socket_addr_and_preserves_host(
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let listener = TcpListener::bind("127.0.0.1:0")?;
-        let addr = listener.local_addr()?;
-        let (tx, rx) = mpsc::channel();
-        thread::spawn(move || {
-            let Ok((mut stream, peer)) = listener.accept() else {
-                return;
-            };
-            let mut request = Vec::new();
-            let mut buf = [0_u8; 512];
-            while let Ok(read) = stream.read(&mut buf) {
-                if read == 0 {
-                    break;
-                }
-                request.extend_from_slice(&buf[..read]);
-                if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                    break;
-                }
-            }
-            let _ = tx.send((peer, String::from_utf8_lossy(&request).to_string()));
-            let _ = stream.write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n");
-        });
-
-        let url = Url::parse("http://webhook.example.test/hook?token=abc")?;
-        let endpoint = WebhookEndpoint::new_for_test(
-            url,
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), addr.port()),
-        );
-        let status = post_webhook_json(
-            &endpoint,
-            &json!({"ok": true}),
-            Duration::from_secs(WEBHOOK_TIMEOUT_SECS),
-        )
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-        let (_peer, request) = rx.recv()?;
-
-        assert_eq!(status, 202);
-        assert!(request.starts_with("POST /hook?token=abc HTTP/1.1\r\n"));
-        assert!(request.contains("\r\nHost: webhook.example.test\r\n"));
-        assert!(request.contains("\r\nContent-Type: application/json\r\n"));
-        Ok(())
-    }
 }

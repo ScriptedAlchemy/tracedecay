@@ -448,7 +448,7 @@ pub async fn run_serve(path_arg: Option<String>, timings: bool) -> Result<()> {
             transport.push_replay(pending_line);
             let scope_prefix = serve_scope_prefix(original_cwd.as_deref(), cg.project_root());
             let server = crate::mcp::McpServer::new(*cg, scope_prefix).await;
-            server.run(&mut transport).await
+            Box::pin(server.run(&mut transport)).await
         }
     }
 }
@@ -475,11 +475,12 @@ async fn serve_resolved_project(
         crate::daemon::proxy_stdio_to_daemon(&socket_path, &handshake, peeked_line).await
     } else {
         let server = crate::mcp::McpServer::new(cg, handshake.scope_prefix.clone()).await;
+        server.set_initialize_root_routing_enabled(allow_initialize_root_routing);
         let mut transport = ReplayTransport::new(StdioTransport::new());
         if let Some(line) = peeked_line {
             transport.push_replay(line);
         }
-        server.run(&mut transport).await
+        Box::pin(server.run(&mut transport)).await
     }
 }
 
@@ -621,10 +622,7 @@ fn allow_initialize_root_routing_for_startup(
     !explicit_path
         && matches!(
             origin,
-            ServeProjectResolutionOrigin::StartupPath
-                | ServeProjectResolutionOrigin::FreshCwd
-                | ServeProjectResolutionOrigin::InitializeRoots
-                | ServeProjectResolutionOrigin::GlobalDb
+            ServeProjectResolutionOrigin::InitializeRoots | ServeProjectResolutionOrigin::GlobalDb
         )
 }
 
@@ -922,12 +920,12 @@ mod tests {
     }
 
     #[test]
-    fn implicit_startup_discovery_still_allows_daemon_initialize_root_routing() {
-        assert!(allow_initialize_root_routing_for_startup(
+    fn initialize_root_routing_is_only_enabled_after_non_cwd_startup_resolution() {
+        assert!(!allow_initialize_root_routing_for_startup(
             false,
             ServeProjectResolutionOrigin::StartupPath
         ));
-        assert!(allow_initialize_root_routing_for_startup(
+        assert!(!allow_initialize_root_routing_for_startup(
             false,
             ServeProjectResolutionOrigin::FreshCwd
         ));

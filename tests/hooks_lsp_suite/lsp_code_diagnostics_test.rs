@@ -10,7 +10,7 @@ const FAKE_PATH: &str = "src/lib.fake";
 // to cover a didOpen -> publishDiagnostics round trip against an
 // already-initialized fake server.
 const FAKE_LSP_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(150);
-const OUTER_ASYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+const OUTER_ASYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
 
 #[test]
 fn builtin_registry_advertises_phase_one_setup_contract() {
@@ -296,7 +296,7 @@ sys.stderr.flush()
         .refresh_documents(
             FAKE_LANGUAGE,
             vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
-            std::time::Duration::from_millis(50),
+            std::time::Duration::from_millis(500),
         )
         .await
         .unwrap_err();
@@ -449,7 +449,7 @@ async fn stdio_client_allows_slow_but_progressing_document_writes() {
                 FAKE_PATH,
                 &"let nope\n".repeat(80_000),
             )],
-            std::time::Duration::from_millis(50),
+            std::time::Duration::from_millis(500),
         ),
     )
     .await

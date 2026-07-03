@@ -14,8 +14,8 @@ use tokio::task::JoinHandle;
 use crate::diagnostics::lsp::broker::{CodeDiagnostic, DiagnosticSeverity};
 use crate::errors::{Result, TraceDecayError};
 
-const MIN_MESSAGE_IO_TIMEOUT: Duration = Duration::from_millis(250);
-const MIN_INITIALIZE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(1);
+const MIN_MESSAGE_IO_TIMEOUT: Duration = Duration::from_secs(2);
+const MIN_INITIALIZE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LspRefreshTimeouts {

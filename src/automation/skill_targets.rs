@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::agents::safe_write_text_file;
 use crate::automation::managed_skills::{
     managed_skill_root, validate_managed_support_files, ManagedSkill, ManagedSkillState,
     ManagedSupportFile,
@@ -170,7 +171,7 @@ pub fn export_prompt_skill_index(
         if let Some(parent) = prompt_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(prompt_path, updated)?;
+        safe_write_text_file(prompt_path, &updated, None)?;
     }
 
     let exported = skills
@@ -221,7 +222,7 @@ fn remove_prompt_skill_indexes(
     if updated.trim().is_empty() {
         fs::remove_file(prompt_path)?;
     } else {
-        fs::write(prompt_path, updated)?;
+        safe_write_text_file(prompt_path, &updated, None)?;
     }
     Ok(())
 }
