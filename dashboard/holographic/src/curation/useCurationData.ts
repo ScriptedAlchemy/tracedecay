@@ -329,25 +329,44 @@ export function useCurationData({
     }
   }, [activeTab, loadStatus, status, statusLoading]);
 
+  // The loaders are recreated whenever unrelated state they close over
+  // changes (e.g. selecting a skill), which would re-fire tab effects keyed
+  // on them and refetch mid-tab. Reading them through a ref keys the tab
+  // effects on tab activation alone.
+  const tabLoaders = useRef({
+    loadOplog,
+    loadAutomationRuns,
+    loadSchedulerStatus,
+    loadFactProposals,
+    loadManagedSkills,
+  });
+  tabLoaders.current = {
+    loadOplog,
+    loadAutomationRuns,
+    loadSchedulerStatus,
+    loadFactProposals,
+    loadManagedSkills,
+  };
+
   useEffect(() => {
     if (activeTab === "history") {
-      loadOplog();
+      tabLoaders.current.loadOplog();
     }
-  }, [activeTab, loadOplog]);
+  }, [activeTab]);
 
   useEffect(() => {
     if (activeTab === "automation") {
-      loadAutomationRuns();
-      loadSchedulerStatus(false).catch(() => {});
+      tabLoaders.current.loadAutomationRuns();
+      tabLoaders.current.loadSchedulerStatus(false).catch(() => {});
     }
-  }, [activeTab, loadAutomationRuns, loadSchedulerStatus]);
+  }, [activeTab]);
 
   useEffect(() => {
     if (activeTab === "proposals") {
-      loadFactProposals();
-      loadManagedSkills();
+      tabLoaders.current.loadFactProposals();
+      tabLoaders.current.loadManagedSkills();
     }
-  }, [activeTab, loadFactProposals, loadManagedSkills]);
+  }, [activeTab]);
 
   useEffect(() => {
     if (activeTab === "activity" && activity.length === 0) {
