@@ -1005,7 +1005,7 @@ fn assert_cursor_rendered_bundle_valid(plugin_dir: &Path, bin: &str) {
 }
 
 /// Full structural validation of a rendered Codex plugin bundle.
-fn assert_codex_rendered_bundle_valid(plugin_dir: &Path, bin: &str) {
+fn assert_codex_rendered_bundle_valid(plugin_dir: &Path, bin: &str, expect_hooks: bool) {
     // Rendered manifest: version stamped to this binary's package version.
     let manifest = read_json(&plugin_dir.join(".codex-plugin/plugin.json"));
     assert_eq!(manifest["name"], "tracedecay");
@@ -1015,10 +1015,25 @@ fn assert_codex_rendered_bundle_valid(plugin_dir: &Path, bin: &str) {
         "rendered manifest version must match the binary's package version"
     );
 
-    // Rendered hooks.json: Codex nests handlers in matcher groups; every
-    // handler command is the quoted absolute binary plus a hook-codex-*
-    // subcommand.
-    let hooks = read_json(&plugin_dir.join("hooks/hooks.json"));
+    // Rendered hooks.json: only personal/global bundles ship lifecycle hooks;
+    // repo-local bundles omit them (Codex only trusts personal-plugin hooks).
+    let hooks_path = plugin_dir.join("hooks/hooks.json");
+    if !expect_hooks {
+        assert!(
+            !hooks_path.exists(),
+            "repo-local Codex plugin must not ship {}",
+            hooks_path.display()
+        );
+        let manifest = read_json(&plugin_dir.join(".codex-plugin/plugin.json"));
+        assert!(
+            manifest.get("hooks").is_none(),
+            "repo-local Codex plugin manifest must not declare lifecycle hooks"
+        );
+        return;
+    }
+    // Codex nests handlers in matcher groups; every handler command is the
+    // quoted absolute binary plus a hook-codex-* subcommand.
+    let hooks = read_json(&hooks_path);
     let events = hooks["hooks"]
         .as_object()
         .expect("rendered hooks.json must contain a hooks object");
@@ -1088,7 +1103,7 @@ fn codex_install_renders_structurally_valid_bundle() {
     codex.install(&ctx(home.path(), NEW_BIN)).unwrap();
 
     let plugin_dir = codex_bootstrap_dir(home.path());
-    assert_codex_rendered_bundle_valid(&plugin_dir, NEW_BIN);
+    assert_codex_rendered_bundle_valid(&plugin_dir, NEW_BIN, true);
 
     // Global-scope MCP rendering: absolute command, plain `serve` args, and
     // the global-DB env flag.
@@ -1110,7 +1125,7 @@ fn codex_local_install_renders_project_scoped_mcp() {
         .unwrap();
 
     let plugin_dir = codex_bootstrap_dir(project.path());
-    assert_codex_rendered_bundle_valid(&plugin_dir, NEW_BIN);
+    assert_codex_rendered_bundle_valid(&plugin_dir, NEW_BIN, false);
 
     // Project-local scope renders relative-path serve args and drops the
     // global-DB env flag.

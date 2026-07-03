@@ -2990,7 +2990,6 @@ fn test_local_install_codex_writes_project_paths() {
             ".agents/plugins/marketplace.json",
             "plugins/tracedecay/.codex-plugin/plugin.json",
             "plugins/tracedecay/.mcp.json",
-            "plugins/tracedecay/hooks/hooks.json",
             "plugins/tracedecay/skills/exploring-code/SKILL.md",
         ],
     );
