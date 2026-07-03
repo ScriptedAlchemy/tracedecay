@@ -10,7 +10,7 @@ use tracedecay::automation::managed_skills::{
 };
 use tracedecay::automation::skill_targets::{
     export_native_skill_overlay, export_prompt_skill_index, install_managed_skills,
-    SkillInstallTarget,
+    remove_prompt_skill_index_for_target, SkillInstallTarget,
 };
 
 fn draft(id: &str, title: &str) -> ManagedSkillDraft {
@@ -326,6 +326,96 @@ async fn prompt_index_keeps_separate_sections_for_shared_agents_md_hosts() {
     assert!(prompt.contains("This Kimi index lists"));
     assert!(prompt.contains("`opencode-only`"));
     assert!(prompt.contains("`kimi-only`"));
+}
+
+#[tokio::test]
+async fn uninstall_preserves_legacy_block_on_shared_file_mid_migration() {
+    // A shared AGENTS.md mid-migration: host A migrated to a slugged `claude`
+    // block, host B is still using the legacy unslugged block. Uninstalling a
+    // third target (`agents`, which has no slugged block here) must NOT fall
+    // back to deleting the legacy block, since another host's slugged block is
+    // present the legacy block cannot be assumed to be ours.
+    let temp = tempfile::tempdir().unwrap();
+    let agents_md = temp.path().join("AGENTS.md");
+    let contents = concat!(
+        "# Shared prompt\n\n",
+        "<!-- TRACEDECAY MANAGED SKILLS START claude -->\n",
+        "Claude host index.\n",
+        "<!-- TRACEDECAY MANAGED SKILLS END claude -->\n\n",
+        "<!-- TRACEDECAY MANAGED SKILLS START -->\n",
+        "Legacy host B index.\n",
+        "<!-- TRACEDECAY MANAGED SKILLS END -->\n",
+    );
+    std::fs::write(&agents_md, contents).unwrap();
+
+    remove_prompt_skill_index_for_target(&agents_md, SkillInstallTarget::Agents).unwrap();
+
+    let after = std::fs::read_to_string(&agents_md).unwrap();
+    assert!(
+        after.contains("Legacy host B index."),
+        "legacy block belonging to another host must be preserved: {after}"
+    );
+    assert!(
+        after.contains("<!-- TRACEDECAY MANAGED SKILLS START -->"),
+        "legacy markers must be preserved: {after}"
+    );
+    assert!(
+        after.contains("<!-- TRACEDECAY MANAGED SKILLS START claude -->"),
+        "unrelated slugged block must be preserved: {after}"
+    );
+}
+
+#[tokio::test]
+async fn uninstall_removes_own_slugged_block_on_shared_file() {
+    // Uninstalling a target with its own slugged block removes only that block
+    // and leaves the legacy block for a still-migrating host untouched.
+    let temp = tempfile::tempdir().unwrap();
+    let agents_md = temp.path().join("AGENTS.md");
+    let contents = concat!(
+        "# Shared prompt\n\n",
+        "<!-- TRACEDECAY MANAGED SKILLS START claude -->\n",
+        "Claude host index.\n",
+        "<!-- TRACEDECAY MANAGED SKILLS END claude -->\n\n",
+        "<!-- TRACEDECAY MANAGED SKILLS START -->\n",
+        "Legacy host B index.\n",
+        "<!-- TRACEDECAY MANAGED SKILLS END -->\n",
+    );
+    std::fs::write(&agents_md, contents).unwrap();
+
+    remove_prompt_skill_index_for_target(&agents_md, SkillInstallTarget::Claude).unwrap();
+
+    let after = std::fs::read_to_string(&agents_md).unwrap();
+    assert!(
+        !after.contains("Claude host index."),
+        "own block removed: {after}"
+    );
+    assert!(
+        after.contains("Legacy host B index."),
+        "legacy block preserved: {after}"
+    );
+}
+
+#[tokio::test]
+async fn uninstall_removes_legacy_block_when_no_slugged_blocks_remain() {
+    // When only a legacy unslugged block exists (no other host has migrated),
+    // per-target uninstall may safely reclaim it.
+    let temp = tempfile::tempdir().unwrap();
+    let agents_md = temp.path().join("AGENTS.md");
+    let contents = concat!(
+        "# Shared prompt\n\n",
+        "<!-- TRACEDECAY MANAGED SKILLS START -->\n",
+        "Legacy index.\n",
+        "<!-- TRACEDECAY MANAGED SKILLS END -->\n",
+    );
+    std::fs::write(&agents_md, contents).unwrap();
+
+    remove_prompt_skill_index_for_target(&agents_md, SkillInstallTarget::Agents).unwrap();
+
+    let after = std::fs::read_to_string(&agents_md).unwrap();
+    assert!(
+        !after.contains("Legacy index."),
+        "legacy block removed: {after}"
+    );
 }
 
 #[tokio::test]

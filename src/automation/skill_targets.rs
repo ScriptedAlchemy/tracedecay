@@ -18,6 +18,17 @@ const NATIVE_MANIFEST_FILE: &str = ".tracedecay-managed-skills.json";
 const PROMPT_INDEX_START: &str = "<!-- TRACEDECAY MANAGED SKILLS START -->";
 const PROMPT_INDEX_END: &str = "<!-- TRACEDECAY MANAGED SKILLS END -->";
 
+const ALL_SKILL_INSTALL_TARGETS: [SkillInstallTarget; 8] = [
+    SkillInstallTarget::Cursor,
+    SkillInstallTarget::Codex,
+    SkillInstallTarget::Claude,
+    SkillInstallTarget::Agents,
+    SkillInstallTarget::OpenCode,
+    SkillInstallTarget::Kimi,
+    SkillInstallTarget::Kiro,
+    SkillInstallTarget::Hermes,
+];
+
 pub use crate::automation::managed_skills::SkillInstallTarget;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -332,14 +343,31 @@ fn replace_or_append_marked_block(
 fn remove_marked_block_for_target(existing: &str, target: SkillInstallTarget) -> Result<String> {
     let (start_marker, end_marker) = prompt_index_markers(target);
     if let Some((start, end)) = marked_block_range(existing, &start_marker, &end_marker)? {
-        Ok(remove_range(existing, start, end))
-    } else if let Some((start, end)) =
-        marked_block_range(existing, PROMPT_INDEX_START, PROMPT_INDEX_END)?
-    {
-        Ok(remove_range(existing, start, end))
-    } else {
-        Ok(existing.to_string())
+        return Ok(remove_range(existing, start, end));
     }
+    // Legacy fallback: older installs wrote an unslugged block. Only claim it as
+    // this target's when NO other target's slugged block is present. On a shared
+    // file mid-migration (one host slugged, another still legacy-unslugged),
+    // removing the legacy block here would delete the other host's block, so
+    // leave it untouched and let the remove-all path handle it instead.
+    if !has_other_slugged_block(existing, target) {
+        if let Some((start, end)) =
+            marked_block_range(existing, PROMPT_INDEX_START, PROMPT_INDEX_END)?
+        {
+            return Ok(remove_range(existing, start, end));
+        }
+    }
+    Ok(existing.to_string())
+}
+
+/// True when the file contains a slugged managed-skill block belonging to a
+/// target other than `target`.
+fn has_other_slugged_block(existing: &str, target: SkillInstallTarget) -> bool {
+    ALL_SKILL_INSTALL_TARGETS
+        .iter()
+        .copied()
+        .filter(|candidate| *candidate != target)
+        .any(|candidate| existing.contains(&prompt_index_markers(candidate).0))
 }
 
 fn remove_all_marked_blocks(existing: &str) -> Result<String> {
