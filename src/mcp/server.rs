@@ -1637,8 +1637,7 @@ impl McpServer {
                 .await;
             return None;
         }
-        let shared_routes = self.hook_project_routes.snapshot();
-        route_cache.refresh_from_shared(&shared_routes);
+        self.hook_project_routes.refresh_into(route_cache);
         let id = request.id.clone()?;
 
         let result = match classify_mcp_method(&request.method) {
