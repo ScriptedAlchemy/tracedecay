@@ -1,29 +1,21 @@
 # Plugin and Skill Validation
 
-> **Layout note (single-bundle rearchitecture):** the three duplicated bundles
-> `cursor-plugin/`, `codex-plugin/`, and `claude-plugin/` have been collapsed
-> into one shared `plugin/` tree. Shared skills live in `plugin/skills/`;
-> per-host manifests live in `plugin/.cursor-plugin/`, `plugin/.codex-plugin/`,
-> `plugin/.claude-plugin/`; per-host hooks are `plugin/hooks/hooks-<host>.json`;
-> MCP configs are `plugin/.mcp.json` (Claude/Codex) and `plugin/mcp-cursor.json`
-> (Cursor, deployed as `mcp.json`); READMEs are `plugin/README-<host>.md`; and
-> Cursor's 13 workflow slugs ship as native Cursor 1.6+ slash commands
-> (`plugin/overlays/cursor/commands/*.md`, deployed to `commands/` and declared
-> by the manifest's `commands` key), *not* as `disable-model-invocation`
-> dispatcher skills. Cursor's shared skill set is therefore the 17 canonical
-> model-invocable skills, byte-identical to Claude/Codex. The composed per-host
-> deploy set is owned by `src/agents/plugin_bundle.rs`. Sections below that
-> describe cross-bundle *parity/mirroring* are historical — with one shared tree
-> there is nothing to keep in sync.
+> **Current layout:** all agent bundles are composed from the shared
+> `plugin/` tree. Skills live in `plugin/skills/`; per-host manifests in
+> `plugin/.{cursor,codex,claude}-plugin/`; hooks in
+> `plugin/hooks/hooks-<host>.json`; host READMEs in `plugin/README-<host>.md`.
+> Cursor's workflow dispatchers deploy as native Cursor 1.6+ commands from
+> `plugin/overlays/cursor/commands/*.md`; Claude uses `plugin/commands/*.md`.
+> `src/agents/plugin_bundle.rs` owns each host's deployed file set.
 
 How the bundled agent plugins (shared `plugin/` tree) and their
 skills are validated, where each check runs, and how to extend the system
 without breaking the contracts.
 
-This document covers the validation of the *agent integration bundles* — the
-Cursor plugin, the Codex plugin, and their skills, hooks, rules, and MCP
-registrations. It is unrelated to the language-extractor plugin runtime
-described in [`PLUGINS-DESIGN.md`](PLUGINS-DESIGN.md).
+This document covers the bundled Cursor, Codex, and Claude integrations:
+skills, commands, hooks, rules, manifests, and MCP registrations. It is
+unrelated to the language-extractor plugin runtime described in
+[`PLUGINS-DESIGN.md`](PLUGINS-DESIGN.md).
 
 ---
 
@@ -64,7 +56,7 @@ never validates schemas at runtime).
 Beyond schema shape, `tests/agent_suite/plugin_manifest_schema_test.rs` also asserts that
 every component path a manifest declares (`skills/`, `hooks/hooks.json`,
 `rules/*.mdc`, …) resolves to a real file or directory in the bundle, and
-that both bundles share the same plugin `name`. The config-schema tests
+that host manifests share the same plugin `name`. The config-schema tests
 include negative cases proving the mcp/hooks schemas actually reject
 malformed configs (missing `command`, unknown fields, typo'd event names).
 
@@ -101,8 +93,7 @@ matching its file name) and the Cursor agent overlay.
 
 `tests/agent_suite/plugin_skill_contract_test.rs` now owns only what is *not*
 in the intersection: the aggregate 6,000-char metadata budget, the optional
-`agents/openai.yaml` marketplace contract, the per-host frontmatter allowances
-(Codex `quick_validate.py`; Cursor's `disable-model-invocation`/`paths`), and
+`agents/openai.yaml` marketplace contract, Codex `quick_validate.py`, and
 **byte-copy install parity** (installing the Cursor or Codex integration into a
 temp home must produce a byte-identical copy of the source skill tree — catches
 install-time mutation and missing embeds; see
@@ -130,34 +121,24 @@ skilldoctor, skillkit) and Cursor's skills docs:
   checked against the live `tracedecay::mcp::get_tool_definitions()` list);
   `paths` globs must be relative, forward-slash, without `..`.
 
-### 3. Cross-bundle sync (cargo test)
+### 3. Shared source and host projections (cargo test)
 
-`cursor-plugin/` is the **source of truth**. The Codex bundle is a mirror of
-the Cursor skills, embedded via `include_str!` in `src/agents/codex.rs` and
-checked by the unit test `codex_skills_match_the_cursor_source_for_parity`:
-every model-invocable Cursor skill (the `hooks::CURSOR_PLUGIN_SKILLS` list in
-`src/hooks.rs`) must exist in the Codex bundle, and content divergence is
-only allowed through explicit per-skill allowlists in that test. Cursor-only
-skills — the `tracedecay-*` slash dispatchers — are exempt from mirroring.
+There is one source tree: `plugin/`. Host bundles are filtered projections of
+that tree, composed by `src/agents/plugin_bundle.rs`:
 
-Practical consequence: **never edit a `codex-plugin/skills/*/SKILL.md` by
-hand.** Edit the Cursor source and propagate, or the parity test fails.
+- Claude deploys manifest, MCP config, hooks, agents, commands, README, and
+  every file under `plugin/skills/`.
+- Codex deploys manifest, MCP config, hooks, README, and every file under
+  `plugin/skills/`.
+- Cursor deploys its manifest, MCP config, hooks, rules, README, native
+  commands, Cursor agents, and the shared skill files **except** the
+  `tracedecay-*` dispatcher skills. Those slugs are native Cursor commands.
 
-On top of the skill-level parity, `tests/agent_suite/plugin_bundle_sync_test.rs` enforces
-disk-level cross-bundle sync through three declarative tables: the bundle
-list, a top-level manifest assigning every bundle entry a policy
-(`SyncedSkills`, `HostSpecific { reason }`, or `OnlyIn { bundles, reason }`),
-and a skill exception table (`OnlyIn`, `DivergentBody`,
-`DivergentFrontmatter`). The default is strict — every skill ships in every
-bundle with a byte-identical tree — and any deviation needs a documented
-exception. The tables are self-cleaning: an undeclared divergence fails, and
-so does a *stale* exception (an `OnlyIn` that no longer matches, or a
-declared divergence that no longer diverges). The exception table mirrors the
-codex.rs allowlists — if the two drift apart, one of the tests fails and
-names the other — and the set of skills shared by every bundle must equal
-`hooks::CURSOR_PLUGIN_SKILLS`. The assertions are bundle-count agnostic: a
-future ecosystem bundle joins the check by adding one `Bundle` row plus its
-manifest and exception entries.
+`src/agents/plugin_bundle.rs` unit tests check that recursive skill embedding
+matches every file under `plugin/skills/`, that Cursor filtering stays
+intentional, and that the host file lists remain deterministic. Contract tests
+then validate each projected surface: shared skills once, Cursor commands and
+agents separately, and Claude/Codex host metadata separately.
 
 ### 4. Rendered-output and manifest-path validation (cargo test)
 
@@ -167,7 +148,7 @@ Beyond validating the *source* bundles, install-time output is validated.
 `.cursor-plugin/plugin.json` inside the plugin root (per
 [cursor.com/docs/plugins](https://cursor.com/docs/plugins) and the official
 [cursor/plugins](https://github.com/cursor/plugins) marketplace repo). This
-repo already conforms — `cursor-plugin/.cursor-plugin/plugin.json` in source,
+repo already conforms — `plugin/.cursor-plugin/plugin.json` in source,
 and `src/agents/cursor.rs` renders it to
 `~/.cursor/plugins/local/tracedecay/.cursor-plugin/plugin.json`. The layout is
 pinned by existing assertions in `tests/agent_suite/agent_test.rs` and
@@ -190,22 +171,17 @@ parity in layer 2.
 
 ### 5. Claude Code portability (cargo test)
 
-`tests/agent_suite/skill_lint_claude_test.rs` lints every skill in both bundles against
-Claude Code / Agent Skills portability rules, so a future `claude-plugin/`
-bundle would be a re-packaging exercise rather than a rewrite. The rules
-(sources cited in the test's module docs) include: frontmatter keys limited
-to Claude-Code-documented fields, kebab-case `name` matching the directory
+`tests/agent_suite/skill_lint_claude_test.rs` lints the shared skills against
+Claude Code / Agent Skills portability rules. The rules (sources cited in the
+test's module docs) include: frontmatter keys limited to Claude-Code-documented
+fields, kebab-case `name` matching the directory
 (≤ 64 chars, no XML tags, no reserved words `anthropic`/`claude`),
 `description` non-empty with no angle brackets (≤ 1,024 chars, and
 `description` + `when_to_use` ≤ 1,536 chars — Claude Code truncates listings
 beyond that), and the shared 6,000-char per-bundle metadata budget.
 
-One Cursor-required field conflicts with the strict Agent Skills open spec —
-`disable-model-invocation`. Claude Code itself supports it, so it is a
-*documented skip* (`CROSS_ECOSYSTEM_CONFLICT_FIELDS` in the test), with a
-stale-allowlist guard that fails if a documented conflict field stops being
-used. Any *new* nonconformant field fails the strict-spec test, and the Codex
-bundle must stay 100% spec-clean.
+Cursor workflow dispatchers are native commands now, so shared skills do not
+need Cursor-only `disable-model-invocation` frontmatter.
 
 ### 6. Checks outside the Rust test harness
 
@@ -219,7 +195,7 @@ can't do:
   the official `cursor/plugins` marketplace validation: `ajv` compiles all
   four vendored schemas (so a broken schema edit fails even when no manifest
   changed), validates the Cursor manifest against `plugin.schema.json`, and
-  parse-checks every `*.json` in both bundles. The Codex manifest is only
+  parse-checks every `*.json` in `plugin/`. The Codex manifest is only
   parse-checked here (its layout differs from Cursor's); its semantics are
   covered by the Rust tests. The workflow is path-filtered to bundle, schema,
   and plugin-test paths, so it shows as *skipped* on unrelated PRs — account
@@ -311,33 +287,25 @@ not hand-register `include_str!` entries.
 
 ## Adding a new ecosystem bundle
 
-To ship a bundle for another agent host (the way `codex-plugin/` mirrors
-`cursor-plugin/`):
+To ship a bundle for another agent host:
 
-1. **Create the bundle directory** at the repo root (`<host>-plugin/`) with
-   the host's manifest layout and a `README.md` explaining install and any
-   host-specific caveats.
-2. **Add the integration** in `src/agents/<host>.rs`, embedding bundle files
-   with `include_str!` so the installed output is generated from the checked-in
-   source, and register it in `src/agents/mod.rs`.
-3. **Treat `cursor-plugin/` as the skill source of truth.** Mirror skills
-   rather than forking them, and add a parity test in the new integration
-   module modeled on `codex_skills_match_the_cursor_source_for_parity`,
-   including a divergence allowlist for justified host-specific edits.
-4. **Extend the contract tests:** add the host's frontmatter allowlist and a
-   contract assertion in
-   `tests/agent_suite/plugin_skill_contract_test.rs`, plus a byte-copy
-   install-parity test for the generated bundle. Note that
-   `tests/agent_suite/` is a single test binary: new modules must be
+1. **Add host-specific source files** under `plugin/` or
+   `plugin/overlays/<host>/`, keeping shared skills in `plugin/skills/`.
+2. **Add the integration** in `src/agents/<host>.rs`, compose its deployed
+   file set from `src/agents/plugin_bundle.rs`, and register it in
+   `src/agents/mod.rs`.
+3. **Extend the contract tests:** add any host frontmatter allowlist,
+   host-specific manifest/config assertions, and install-output validation.
+   `tests/agent_suite/` is a single test binary, so new modules must be
    registered in `tests/agent_suite/main.rs`.
+4. **Keep skills shared.** Host-specific dispatch belongs in commands, rules,
+   hooks, or overlays, not forked copies of `plugin/skills/*/SKILL.md`.
 5. **Vendor the host's schemas** (if it publishes any) under
    `tests/fixtures/<host>-schemas/` and validate the bundle's JSON artifacts
    against them, following the same offline-vendoring rules as the Cursor
    schemas.
-6. **Wire it into the sync/CI layers:** add a `Bundle` row (plus any
-   divergence exceptions) in `tests/agent_suite/plugin_bundle_sync_test.rs`, and extend
-   the CI schema-validation workflow's path filters if the new bundle lives
-   outside the existing globs.
+6. **Wire it into CI:** extend `.github/workflows/plugin-validation.yml` path
+   filters if the new host adds files outside the existing globs.
 
 ---
 
