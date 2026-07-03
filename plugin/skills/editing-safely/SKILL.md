@@ -42,6 +42,9 @@ the graph in place.
 3. **Risk check → `tracedecay_impact`** (shallow `max_depth` first) when the
    target is widely depended on. The recon output is the edit checklist.
 
+Run this read-only recon in one shot for a symbol or `Struct::field` with
+[scripts/safe-edit-sequence.sh](scripts/safe-edit-sequence.sh).
+
 ## Apply with anchored primitives
 
 1. **Unique string swap → `tracedecay_str_replace`** (`path`, `old_str`,

@@ -266,31 +266,35 @@ official schema rejects.)
 
 ## Adding a skill correctly
 
-1. **Create the Cursor source skill:** a new directory
-   `cursor-plugin/skills/<skill-name>/SKILL.md` with `name` and `description`
+There is now one shared skill tree; there is no per-bundle mirroring to
+maintain, and skill files are embedded **recursively** by `build.rs` — you do
+not hand-register `include_str!` entries.
+
+1. **Create the source skill:** a new directory
+   `plugin/skills/<skill-name>/SKILL.md` with `name` and `description`
    frontmatter. Keep the description trigger-first ("Use when …"), under 320
    characters and 45 words; keep the body under 500 lines. Use only allowed
-   frontmatter keys (see layer 2 above). Slash-command skills set
-   `disable-model-invocation: true` and use a `tracedecay-<verb-phrase>` slug.
-2. **Register the embed:** add the file to the `EMBEDDED_PLUGIN_FILES`
-   `include_str!` list in `src/agents/cursor.rs`, and — if the skill is
-   model-invocable — to `hooks::CURSOR_PLUGIN_SKILLS` in `src/hooks.rs`. The
-   byte-copy parity test fails if the installed bundle and the source tree
-   diverge.
-3. **Mirror to Codex (if model-invocable):** add the skill to
-   `codex-plugin/skills/` and to the `include_str!` list in
-   `src/agents/codex.rs`. Keep it byte-identical to the Cursor source unless
-   you add an entry to the divergence allowlist in
-   `codex_skills_match_the_cursor_source_for_parity` with a reason.
-4. **Watch the metadata budget:** the summed name+description metadata per
-   bundle must stay under 6,000 characters. If your addition tips it over,
-   tighten descriptions rather than raising the budget.
-5. **Run the checks:**
+   frontmatter keys (see layer 2 above). A skill directory may additionally
+   carry `scripts/`, `references/`, and `assets/` support files — these are
+   embedded automatically by the recursive `build.rs` codegen
+   (`GENERATED_SKILL_FILES`), so no table edit is needed.
+2. **Wire it into the model-invocable index (if model-invocable):** add the
+   slug to `hooks::CURSOR_PLUGIN_SKILLS` in `src/hooks/steering.rs`. Workflow
+   dispatch that should be explicit-invoke lives as a Cursor native command
+   under `plugin/overlays/cursor/commands/<slug>.md`, not as a skill.
+3. **Watch the metadata budget:** the summed name+description metadata must
+   stay under 6,000 characters. If your addition tips it over, tighten
+   descriptions rather than raising the budget.
+4. **Run the checks:**
 
    ```bash
    cargo nextest run -E 'binary(=agent_suite)'
-   cargo nextest run codex_skills_match_the_cursor_source_for_parity
+   cargo test --lib covers_the_whole_source_bundle
    ```
+
+   The recursive-embed coverage tests fail if any file under
+   `plugin/skills/` is not embedded, and the byte-copy install tests fail if
+   the installed tree diverges from the source.
 
 ---
 

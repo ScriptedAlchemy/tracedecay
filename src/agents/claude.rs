@@ -1447,6 +1447,32 @@ mod tests {
         names
     }
 
+    /// Every file under a skills root, relative to it, forward-slashed.
+    fn plugin_skill_tree_files(root: &Path) -> Vec<String> {
+        fn walk(base: &Path, dir: &Path, out: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir)
+                .expect("skills dir readable")
+                .flatten()
+            {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(base, &path, out);
+                } else if path.is_file() {
+                    out.push(
+                        path.strip_prefix(base)
+                            .expect("under base")
+                            .to_string_lossy()
+                            .replace('\\', "/"),
+                    );
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(root, root, &mut files);
+        files.sort();
+        files
+    }
+
     fn install_ctx(home: &Path) -> InstallContext {
         InstallContext {
             home: home.to_path_buf(),
@@ -1473,11 +1499,14 @@ mod tests {
 
         let skills = plugin_subdir_names("skills");
         assert_eq!(skills.len(), 30, "expected 30 shared skill dirs");
-        for skill in &skills {
-            let expected = format!("skills/{skill}/SKILL.md");
+        // Every file under plugin/skills/ (SKILL.md *and* any support files) is
+        // deployed — the recursive embed leaves nothing on disk unwired.
+        let skills_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/skills");
+        for relative in plugin_skill_tree_files(&skills_root) {
+            let expected = format!("skills/{relative}");
             assert!(
                 deploy.contains(&expected),
-                "Claude deploy set is missing shared skill {expected}"
+                "Claude deploy set is missing skill file {expected}"
             );
         }
 

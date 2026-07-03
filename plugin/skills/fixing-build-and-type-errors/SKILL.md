@@ -15,6 +15,8 @@ Use this when build or type diagnostics are relevant to the task. Prefer pasted 
 4. **Apply the fix → `tracedecay:editing-safely`** (or your normal edit tools).
 5. **Re-check** with the cheapest applicable diagnostic path, then verify behavior via `tracedecay:assessing-impact`.
 
+Map a specific error class to the cheapest anchoring tool with [references/error-class-to-tool.md](references/error-class-to-tool.md).
+
 ## Guardrails
 
 - `tracedecay_diagnostics` runs `cargo`/`tsc`/`pyright` and is the only heavyweight call here; `tracedecay_diagnose` only parses text you provide — prefer it when you already captured the output.

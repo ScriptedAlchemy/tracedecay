@@ -966,6 +966,21 @@ mod tests {
         names
     }
 
+    /// Every file under a single skill dir, relative to it, forward-slashed.
+    fn skill_dir_tree_files(skill_dir: &Path) -> Vec<String> {
+        let mut files: Vec<String> = collect_regular_files(skill_dir)
+            .expect("skill dir readable")
+            .into_iter()
+            .filter_map(|path| {
+                path.strip_prefix(skill_dir)
+                    .ok()
+                    .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+            })
+            .collect();
+        files.sort();
+        files
+    }
+
     /// The doctor's expected-hooks list is parsed from the embedded bundle
     /// template; a parse regression would silently disable the hook checks.
     #[test]
@@ -1053,10 +1068,13 @@ mod tests {
             .map(|(relative, _)| relative.to_string())
             .collect();
 
-        // Every shared model-invocable skill dir on disk must be deployed by
-        // Cursor. The `tracedecay-*` dispatcher skills are NOT shipped to
-        // Cursor — they are native commands there.
+        // Every file under each shared model-invocable skill dir (SKILL.md and
+        // any support files) must be deployed by Cursor. The `tracedecay-*`
+        // dispatcher skills are NOT shipped to Cursor — they are native commands
+        // there.
+        let skills_root = plugin_source_root().join("skills");
         for skill in shared_skill_dirs() {
+            let skill_dir = skills_root.join(&skill);
             if skill.starts_with("tracedecay-") {
                 let dispatcher = format!("skills/{skill}/SKILL.md");
                 assert!(
@@ -1065,11 +1083,13 @@ mod tests {
                 );
                 continue;
             }
-            let expected = format!("skills/{skill}/SKILL.md");
-            assert!(
-                deploy.contains(&expected),
-                "Cursor deploy set is missing shared skill {expected}"
-            );
+            for relative in skill_dir_tree_files(&skill_dir) {
+                let expected = format!("skills/{skill}/{relative}");
+                assert!(
+                    deploy.contains(&expected),
+                    "Cursor deploy set is missing skill file {expected}"
+                );
+            }
         }
         // Every Cursor native slash command must be deployed.
         for command in cursor_command_files() {

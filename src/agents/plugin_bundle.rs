@@ -33,7 +33,8 @@
 //! whose path may differ from the deploy path (e.g. Cursor's
 //! `hooks/hooks.json` is sourced from `plugin/hooks/hooks-cursor.json`).
 //!
-//! Composed per-host view = `CANONICAL_PLUGIN_FILES ∪ <HOST>_MANIFEST_FILES`.
+//! Composed per-host view = `GENERATED_SKILL_FILES` (recursively embedded from
+//! `plugin/skills/`, filtered per host) ∪ `<HOST>_MANIFEST_FILES` and extras.
 
 /// One embedded plugin file: `relative` is its deploy path (unchanged from the
 /// legacy per-host bundles), `contents` is embedded from the shared `plugin/`
@@ -53,132 +54,30 @@ macro_rules! plugin_file {
     };
 }
 
-/// The 17 model-invocable skills shared byte-for-byte by every host. These are
-/// the "canonical" set every installer deploys unchanged.
-pub const CANONICAL_PLUGIN_FILES: &[PluginFile] = &[
-    plugin_file!(
-        "skills/assessing-impact/SKILL.md",
-        "skills/assessing-impact/SKILL.md"
-    ),
-    plugin_file!("skills/code-health/SKILL.md", "skills/code-health/SKILL.md"),
-    plugin_file!(
-        "skills/curating-project-memory/SKILL.md",
-        "skills/curating-project-memory/SKILL.md"
-    ),
-    plugin_file!(
-        "skills/editing-safely/SKILL.md",
-        "skills/editing-safely/SKILL.md"
-    ),
-    plugin_file!(
-        "skills/exploring-code/SKILL.md",
-        "skills/exploring-code/SKILL.md"
-    ),
-    plugin_file!(
-        "skills/fixing-build-and-type-errors/SKILL.md",
-        "skills/fixing-build-and-type-errors/SKILL.md"
-    ),
-    plugin_file!(
-        "skills/inspecting-managed-skills/SKILL.md",
-        "skills/inspecting-managed-skills/SKILL.md"
-    ),
-    plugin_file!(
-        "skills/managing-session-context/SKILL.md",
-        "skills/managing-session-context/SKILL.md"
-    ),
-    plugin_file!(
-        "skills/recalling-project-memory/SKILL.md",
-        "skills/recalling-project-memory/SKILL.md"
-    ),
-    plugin_file!(
-        "skills/recalling-session-context/SKILL.md",
-        "skills/recalling-session-context/SKILL.md"
-    ),
-    plugin_file!(
-        "skills/retrieving-cached-context/SKILL.md",
-        "skills/retrieving-cached-context/SKILL.md"
-    ),
-    plugin_file!(
-        "skills/retrieving-project-memory/SKILL.md",
-        "skills/retrieving-project-memory/SKILL.md"
-    ),
-    plugin_file!(
-        "skills/reviewing-changes/SKILL.md",
-        "skills/reviewing-changes/SKILL.md"
-    ),
-    plugin_file!(
-        "skills/storing-project-memory/SKILL.md",
-        "skills/storing-project-memory/SKILL.md"
-    ),
-    plugin_file!(
-        "skills/tracing-functions/SKILL.md",
-        "skills/tracing-functions/SKILL.md"
-    ),
-    plugin_file!(
-        "skills/using-the-cli/SKILL.md",
-        "skills/using-the-cli/SKILL.md"
-    ),
-    plugin_file!(
-        "skills/using-tracedecay/SKILL.md",
-        "skills/using-tracedecay/SKILL.md"
-    ),
-];
+// `GENERATED_SKILL_FILES`: every file under `plugin/skills/` (all 30 skill
+// SKILL.md files **plus** any `references/`/`scripts/`/`assets/` support files),
+// embedded recursively at compile time by `build.rs`. This replaced the two
+// hand-maintained flat `include_str!` tables so skills can ship support files
+// without a matching table edit.
+include!(concat!(env!("OUT_DIR"), "/plugin_bundle_generated.rs"));
 
-/// The 13 workflow dispatchers in their canonical (`claude`/`codex`)
-/// model-invocable form, sourced from `plugin/skills/tracedecay-*`.
-const CANONICAL_DISPATCHER_FILES: &[PluginFile] = &[
-    plugin_file!(
-        "skills/tracedecay-audit-safety/SKILL.md",
-        "skills/tracedecay-audit-safety/SKILL.md"
-    ),
-    plugin_file!(
-        "skills/tracedecay-check-health/SKILL.md",
-        "skills/tracedecay-check-health/SKILL.md"
-    ),
-    plugin_file!(
-        "skills/tracedecay-clean-dead-code/SKILL.md",
-        "skills/tracedecay-clean-dead-code/SKILL.md"
-    ),
-    plugin_file!(
-        "skills/tracedecay-compare-branches/SKILL.md",
-        "skills/tracedecay-compare-branches/SKILL.md"
-    ),
-    plugin_file!(
-        "skills/tracedecay-curate-memory/SKILL.md",
-        "skills/tracedecay-curate-memory/SKILL.md"
-    ),
-    plugin_file!(
-        "skills/tracedecay-draft-commit/SKILL.md",
-        "skills/tracedecay-draft-commit/SKILL.md"
-    ),
-    plugin_file!(
-        "skills/tracedecay-find-impact/SKILL.md",
-        "skills/tracedecay-find-impact/SKILL.md"
-    ),
-    plugin_file!(
-        "skills/tracedecay-fix-build/SKILL.md",
-        "skills/tracedecay-fix-build/SKILL.md"
-    ),
-    plugin_file!(
-        "skills/tracedecay-map-architecture/SKILL.md",
-        "skills/tracedecay-map-architecture/SKILL.md"
-    ),
-    plugin_file!(
-        "skills/tracedecay-port-code/SKILL.md",
-        "skills/tracedecay-port-code/SKILL.md"
-    ),
-    plugin_file!(
-        "skills/tracedecay-recall-memory/SKILL.md",
-        "skills/tracedecay-recall-memory/SKILL.md"
-    ),
-    plugin_file!(
-        "skills/tracedecay-review-diff/SKILL.md",
-        "skills/tracedecay-review-diff/SKILL.md"
-    ),
-    plugin_file!(
-        "skills/tracedecay-test-changes/SKILL.md",
-        "skills/tracedecay-test-changes/SKILL.md"
-    ),
-];
+/// Prefix of the dispatcher skills that Cursor does **not** deploy (they are
+/// native commands on Cursor). Claude/Codex deploy every skill.
+const CURSOR_EXCLUDED_SKILL_PREFIX: &str = "skills/tracedecay-";
+
+/// Every skill file (all 30 skills' SKILL.md + support files) — the set
+/// Claude and Codex deploy unchanged.
+fn all_skill_files() -> impl Iterator<Item = &'static PluginFile> {
+    GENERATED_SKILL_FILES.iter()
+}
+
+/// The Cursor skill subset: every skill file *except* the `tracedecay-*`
+/// dispatcher skills (those slugs are native commands on Cursor).
+fn cursor_skill_files() -> impl Iterator<Item = &'static PluginFile> {
+    GENERATED_SKILL_FILES
+        .iter()
+        .filter(|file| !file.relative.starts_with(CURSOR_EXCLUDED_SKILL_PREFIX))
+}
 
 /// Cursor's native slash commands: the same 13 workflow slugs, re-expressed as
 /// Cursor 1.6+ `commands/` entries (no `disable-model-invocation` skill — these
@@ -324,57 +223,60 @@ pub const CODEX_MANIFEST_FILES: &[PluginFile] = &[
     plugin_file!("hooks/hooks.json", "hooks/hooks-codex.json"),
 ];
 
-/// Compose a host's full deploy set as `(relative, contents)` tuples, in a
-/// deterministic order matching the legacy per-host embed tables' shape.
+/// Compose a host's full deploy set as `(relative, contents)` tuples: the
+/// host's manifest/agent/command/rule sections first, then its skill files
+/// (from the recursively-embedded `GENERATED_SKILL_FILES`).
 ///
-/// Order mirrors what each installer historically iterated: manifest/mcp/hooks
-/// pieces first, then the shared skills, dispatchers, and host extras. Exact
-/// ordering does not affect the deployed tree (each file is written by its
-/// deploy `relative` path), but a stable order keeps tests deterministic.
-fn compose(sections: &[&[PluginFile]]) -> Vec<(&'static str, &'static str)> {
+/// Exact ordering does not affect the deployed tree (each file is written by
+/// its deploy `relative` path), but a stable order keeps tests deterministic.
+fn compose(
+    sections: &[&'static [PluginFile]],
+    skills: impl Iterator<Item = &'static PluginFile>,
+) -> Vec<(&'static str, &'static str)> {
     sections
         .iter()
         .flat_map(|section| section.iter())
+        .chain(skills)
         .map(|file| (file.relative, file.contents))
         .collect()
 }
 
-/// Files Claude deploys: manifest + canonical skills + canonical dispatchers +
-/// Claude agents + Claude commands.
+/// Files Claude deploys: manifest + Claude agents + Claude commands + every
+/// skill file (all 30 skills incl. dispatchers, plus any support files).
 pub fn claude_files() -> Vec<(&'static str, &'static str)> {
-    compose(&[
-        CLAUDE_MANIFEST_FILES,
-        CLAUDE_AGENT_FILES,
-        CLAUDE_COMMAND_FILES,
-        CANONICAL_PLUGIN_FILES,
-        CANONICAL_DISPATCHER_FILES,
-    ])
+    compose(
+        &[
+            CLAUDE_MANIFEST_FILES,
+            CLAUDE_AGENT_FILES,
+            CLAUDE_COMMAND_FILES,
+        ],
+        all_skill_files(),
+    )
 }
 
-/// Files Cursor deploys: manifest + canonical skills (the 17 shared
-/// model-invocable set, *without* the `tracedecay-*` dispatcher skills) +
-/// Cursor native commands + Cursor agents + Cursor rules.
+/// Files Cursor deploys: manifest + Cursor rules + Cursor agents + Cursor
+/// native commands + the shared skill files *without* the `tracedecay-*`
+/// dispatcher skills (those slugs are native commands on Cursor).
 pub fn cursor_files() -> Vec<(&'static str, &'static str)> {
-    compose(&[
-        CURSOR_MANIFEST_FILES,
-        CURSOR_RULE_FILES,
-        CURSOR_AGENT_FILES,
-        CURSOR_COMMAND_FILES,
-        CANONICAL_PLUGIN_FILES,
-    ])
+    compose(
+        &[
+            CURSOR_MANIFEST_FILES,
+            CURSOR_RULE_FILES,
+            CURSOR_AGENT_FILES,
+            CURSOR_COMMAND_FILES,
+        ],
+        cursor_skill_files(),
+    )
 }
 
-/// Files Codex deploys: manifest + canonical skills + canonical dispatchers.
-/// Codex ships no agents, commands, or rules.
+/// Files Codex deploys: manifest + every skill file (all 30 skills incl.
+/// dispatchers, plus any support files). Codex ships no agents/commands/rules.
 pub fn codex_files() -> Vec<(&'static str, &'static str)> {
-    compose(&[
-        CODEX_MANIFEST_FILES,
-        CANONICAL_PLUGIN_FILES,
-        CANONICAL_DISPATCHER_FILES,
-    ])
+    compose(&[CODEX_MANIFEST_FILES], all_skill_files())
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
@@ -416,28 +318,76 @@ mod tests {
 
     #[test]
     fn each_host_composes_the_expected_file_count() {
-        // 17 canonical skills + 13 dispatchers = 30 skills, common to all hosts.
-        // Claude: 30 skills + 5 manifest (2 dot + mcp + hooks + README) + 3
-        //   agents + 13 commands = 51.
-        assert_eq!(claude_files().len(), 51);
-        // Cursor: 17 canonical skills (no dispatcher skills) + 13 native
-        //   commands + 4 manifest (dot + mcp + hooks + README) + 2 rules + 3
-        //   agents = 39.
-        assert_eq!(cursor_files().len(), 39);
-        // Codex: 30 skills + 4 manifest (dot + mcp + hooks + README) = 34.
-        assert_eq!(codex_files().len(), 34);
+        // Skill files are embedded recursively (SKILL.md + support files), so
+        // the skill count is derived from the generated set rather than a
+        // frozen literal. Cursor drops the `tracedecay-*` dispatcher skills.
+        let all_skills = GENERATED_SKILL_FILES.len();
+        let cursor_skills = cursor_skill_files().count();
+
+        // Claude: skills + 5 manifest (2 dot + mcp + hooks + README) + 3 agents
+        //   + 13 commands.
+        assert_eq!(claude_files().len(), all_skills + 5 + 3 + 13);
+        // Cursor: cursor-subset skills + 4 manifest (dot + mcp + hooks +
+        //   README) + 2 rules + 3 agents + 13 native commands.
+        assert_eq!(cursor_files().len(), cursor_skills + 4 + 2 + 3 + 13);
+        // Codex: skills + 4 manifest (dot + mcp + hooks + README).
+        assert_eq!(codex_files().len(), all_skills + 4);
     }
 
-    /// Every model-invocable canonical skill maps to an on-disk source dir.
+    /// Every embedded skill file maps to an on-disk source under `plugin/`.
     #[test]
-    fn canonical_skills_have_source_dirs() {
+    fn generated_skill_files_have_source_paths() {
         let root = plugin_source_root();
-        for file in CANONICAL_PLUGIN_FILES {
+        assert!(
+            !GENERATED_SKILL_FILES.is_empty(),
+            "generated skill file set is empty"
+        );
+        for file in GENERATED_SKILL_FILES {
             assert!(
                 root.join(file.relative).exists(),
-                "canonical source missing: plugin/{}",
+                "skill source missing: plugin/{}",
                 file.relative
             );
+        }
+    }
+
+    /// The recursive embed must cover the on-disk skill tree exactly — every
+    /// file under `plugin/skills/` is embedded, and nothing extra.
+    #[test]
+    fn generated_skill_files_cover_the_skill_tree_exactly() {
+        let skills_root = plugin_source_root().join("skills");
+        let mut on_disk = BTreeSet::new();
+        collect_relative(&skills_root, &skills_root, &mut on_disk);
+
+        let embedded: BTreeSet<String> = GENERATED_SKILL_FILES
+            .iter()
+            .map(|file| {
+                file.relative
+                    .strip_prefix("skills/")
+                    .expect("skill deploy path is under skills/")
+                    .to_string()
+            })
+            .collect();
+
+        assert_eq!(
+            embedded, on_disk,
+            "GENERATED_SKILL_FILES must match every file under plugin/skills/ exactly"
+        );
+    }
+
+    fn collect_relative(base: &Path, dir: &Path, out: &mut BTreeSet<String>) {
+        for entry in std::fs::read_dir(dir).expect("read skills dir").flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_relative(base, &path, out);
+            } else if path.is_file() {
+                out.insert(
+                    path.strip_prefix(base)
+                        .expect("under base")
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                );
+            }
         }
     }
 }
