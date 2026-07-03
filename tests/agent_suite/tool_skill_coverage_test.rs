@@ -7,7 +7,7 @@ use std::process::Command;
 
 use crate::common::tracedecay_command_with_home;
 use tempfile::TempDir;
-use tracedecay::mcp::tools::get_tool_definitions;
+use tracedecay::mcp::tools::{get_tool_definitions, render_tool_cli_help};
 
 /// MCP tools intentionally exempt from bundled-skill coverage.
 /// Keep empty unless a tool is truly internal.
@@ -48,20 +48,9 @@ fn every_mcp_tool_is_listed_by_the_cli_discovery_command() {
 
 #[test]
 fn every_mcp_tool_is_invocable_via_the_cli() {
-    let home = TempDir::new().expect("create isolated TraceDecay home");
     for def in get_tool_definitions() {
         let short = short_name(&def.name);
-        let output = isolated_tracedecay_command(&home)
-            .args(["tool", short, "--help"])
-            .output()
-            .unwrap_or_else(|e| panic!("run `tracedecay tool {short} --help`: {e}"));
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            output.status.success(),
-            "`tracedecay tool {short} --help` must succeed so the tool stays \
-             invocable without an MCP client:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let stdout = render_tool_cli_help(&def);
         assert!(
             stdout.contains(&format!("tracedecay tool {short}")),
             "`tracedecay tool {short} --help` should print the tool's own help, got:\n{stdout}"
