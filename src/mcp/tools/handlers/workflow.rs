@@ -227,10 +227,11 @@ pub(super) async fn handle_run_affected_tests(cg: &TraceDecay, args: Value) -> R
     let project_root = cg.project_root().to_path_buf();
 
     // 1) Resolve changed paths — explicit list, or fall back to `git diff`.
-    let changed_paths = match resolve_changed_paths(&args, &project_root, run_args.explicit_paths).await {
-        Ok(paths) => paths,
-        Err(result) => return Ok(result),
-    };
+    let changed_paths =
+        match resolve_changed_paths(&args, &project_root, run_args.explicit_paths).await {
+            Ok(paths) => paths,
+            Err(result) => return Ok(result),
+        };
     if changed_paths.is_empty() {
         return Ok(empty_result(&args, "no changed files detected"));
     }
@@ -238,10 +239,13 @@ pub(super) async fn handle_run_affected_tests(cg: &TraceDecay, args: Value) -> R
     let test_targets = collect_affected_test_targets(cg, &changed_paths).await?;
 
     if test_targets.is_empty() {
-        return Ok(empty_result(&args, &format!(
-            "no tests cover the changed paths ({} file(s))",
-            changed_paths.len()
-        )));
+        return Ok(empty_result(
+            &args,
+            &format!(
+                "no tests cover the changed paths ({} file(s))",
+                changed_paths.len()
+            ),
+        ));
     }
 
     let (selected_targets, test_names, truncated) =

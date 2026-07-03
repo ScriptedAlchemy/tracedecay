@@ -29,10 +29,10 @@ use crate::mcp::response_handles::{retrieve_response_handle, ResponseHandleLooku
 use crate::tracedecay::current_timestamp;
 use crate::tracedecay::TraceDecay;
 
-use super::render;
 use super::dispatch_policy::{
     tool_accepts_registered_project_selector, tool_dispatches_registered_project_reader,
 };
+use super::render;
 use super::ToolResult;
 use support::{profile_root_for_global_db, project_registry_context, project_selector_present};
 
@@ -282,9 +282,12 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         "tracedecay_impact" => graph::handle_impact(cg, args).await,
         "tracedecay_node" => graph::handle_node(cg, args).await,
         "tracedecay_status" => info::handle_status(cg, args, server_stats, scope_prefix).await,
-        "tracedecay_active_project" => {
-            Ok(info::handle_active_project(cg, &args, server_stats, scope_prefix))
-        }
+        "tracedecay_active_project" => Ok(info::handle_active_project(
+            cg,
+            &args,
+            server_stats,
+            scope_prefix,
+        )),
         "tracedecay_storage_status" => info::handle_storage_status(cg, args, scope_prefix).await,
         "tracedecay_project_list" => {
             info::handle_project_list(

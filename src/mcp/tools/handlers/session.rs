@@ -1023,7 +1023,11 @@ fn lcm_not_yet_ingested(args: &Value, storage_scope: &str) -> ToolResult {
     )
 }
 
-fn lcm_scoped_unavailable(args: &Value, storage_scope: &str, message: impl Into<String>) -> ToolResult {
+fn lcm_scoped_unavailable(
+    args: &Value,
+    storage_scope: &str,
+    message: impl Into<String>,
+) -> ToolResult {
     tool_json(
         None,
         args,

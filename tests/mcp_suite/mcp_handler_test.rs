@@ -5454,9 +5454,15 @@ async fn test_dsm_stats() {
 #[tokio::test]
 async fn test_dsm_json_returns_stats_shape() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tracedecay_dsm", json!({ "format": "json" }), None, None)
-        .await
-        .unwrap();
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_dsm",
+        json!({ "format": "json" }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     let text = extract_text(&result.value);
     let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
     assert!(
