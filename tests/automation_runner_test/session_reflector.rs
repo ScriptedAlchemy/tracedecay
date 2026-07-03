@@ -614,6 +614,7 @@ async fn session_reflector_runner_reads_hermes_profile_lcm_with_filters() {
             start_time: Some(1_715_100_000),
             end_time: Some(1_715_100_010),
             run_id: None,
+            ..SessionReflectorAutomationOptions::default()
         },
     )
     .await
@@ -622,6 +623,193 @@ async fn session_reflector_runner_reads_hermes_profile_lcm_with_filters() {
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
     assert_eq!(run.ledger_record.accepted_count, 0);
     assert_eq!(run.ledger_record.rejected_count, 0);
+}
+
+#[tokio::test]
+async fn session_reflector_replays_recent_sessions_without_keyword_matches() {
+    let temp = tempdir().unwrap();
+    let cg = init_project(temp.path()).await;
+    // Deliberately avoids every keyword in the default reflection query so
+    // the grep channel returns nothing and only session replay surfaces it.
+    seed_session_message_in_db(
+        &GlobalDb::open_at(&cg.store_layout().sessions_db_path)
+            .await
+            .expect("session db open"),
+        cg.project_root(),
+        SeedSessionMessage {
+            provider: "cursor",
+            session_id: "session-replay-1",
+            message_id: "session-replay-1-message-001",
+            role: "user",
+            timestamp: 1_715_000_050,
+            text: "Always pass the offline flag to cargo nextest on this machine.",
+            source: None,
+        },
+    )
+    .await;
+    let backend = SessionReplayEvidenceBackend::new(
+        json!({
+            "facts": [
+                {
+                    "content": "Cargo nextest must run with the offline flag on this machine",
+                    "category": "project",
+                    "tags": ["testing"],
+                    "entities": ["cargo-nextest"],
+                    "trust": 0.7,
+                    "source_span": {
+                        "session_id": "session-replay-1",
+                        "message_id": "session-replay-1-message-001"
+                    },
+                    "reason": "Replayed session turn states the requirement directly"
+                }
+            ]
+        }),
+        "session-replay-1",
+        "session-replay-1-message-001",
+    );
+    let config = AutomationConfig {
+        enabled: true,
+        backend: AutomationBackend::CodexAppServer,
+        host_mode: AutomationHostMode::Standalone,
+        tasks: AutomationTaskSet {
+            session_reflector: AutomationTaskConfig {
+                enabled: true,
+                schedule: Some("manual".to_string()),
+                ..AutomationTaskConfig::default()
+            },
+            ..AutomationTaskSet::default()
+        },
+        ..AutomationConfig::default()
+    };
+
+    let run = run_session_reflector_with_backend(
+        &cg,
+        &config,
+        &backend,
+        SessionReflectorAutomationOptions::default(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
+    assert_eq!(
+        run.ledger_record.accepted_count, 1,
+        "a fact citing a replay-only turn should validate: {:?}",
+        run.report["rejected_facts"]
+    );
+    assert_eq!(run.ledger_record.rejected_count, 0);
+}
+
+#[tokio::test]
+async fn session_reflector_suppresses_replay_for_filtered_runs() {
+    let temp = tempdir().unwrap();
+    let cg = init_project(temp.path()).await;
+    seed_session_message_in_db(
+        &GlobalDb::open_at(&cg.store_layout().sessions_db_path)
+            .await
+            .expect("session db open"),
+        cg.project_root(),
+        SeedSessionMessage {
+            provider: "cursor",
+            session_id: "session-replay-filtered",
+            message_id: "session-replay-filtered-message-001",
+            role: "user",
+            timestamp: 1_715_000_070,
+            text: "Always pass the offline flag to cargo nextest on this machine.",
+            source: None,
+        },
+    )
+    .await;
+    let backend = SessionJsonBackend::new(json!({"facts": []}));
+    let config = AutomationConfig {
+        enabled: true,
+        backend: AutomationBackend::CodexAppServer,
+        host_mode: AutomationHostMode::Standalone,
+        tasks: AutomationTaskSet {
+            session_reflector: AutomationTaskConfig {
+                enabled: true,
+                schedule: Some("manual".to_string()),
+                ..AutomationTaskConfig::default()
+            },
+            ..AutomationTaskSet::default()
+        },
+        ..AutomationConfig::default()
+    };
+
+    let run = run_session_reflector_with_backend(
+        &cg,
+        &config,
+        &backend,
+        SessionReflectorAutomationOptions {
+            role: Some("assistant".to_string()),
+            ..SessionReflectorAutomationOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(backend.calls(), 0);
+    assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
+    assert_eq!(
+        run.ledger_record.error.as_deref(),
+        Some("no_session_evidence")
+    );
+}
+
+#[tokio::test]
+async fn session_reflector_skips_when_replay_disabled_and_no_grep_hits() {
+    let temp = tempdir().unwrap();
+    let cg = init_project(temp.path()).await;
+    seed_session_message_in_db(
+        &GlobalDb::open_at(&cg.store_layout().sessions_db_path)
+            .await
+            .expect("session db open"),
+        cg.project_root(),
+        SeedSessionMessage {
+            provider: "cursor",
+            session_id: "session-replay-2",
+            message_id: "session-replay-2-message-001",
+            role: "user",
+            timestamp: 1_715_000_060,
+            text: "Always pass the offline flag to cargo nextest on this machine.",
+            source: None,
+        },
+    )
+    .await;
+    let backend = SessionJsonBackend::new(json!({"facts": []}));
+    let config = AutomationConfig {
+        enabled: true,
+        backend: AutomationBackend::CodexAppServer,
+        host_mode: AutomationHostMode::Standalone,
+        tasks: AutomationTaskSet {
+            session_reflector: AutomationTaskConfig {
+                enabled: true,
+                schedule: Some("manual".to_string()),
+                ..AutomationTaskConfig::default()
+            },
+            ..AutomationTaskSet::default()
+        },
+        ..AutomationConfig::default()
+    };
+
+    let run = run_session_reflector_with_backend(
+        &cg,
+        &config,
+        &backend,
+        SessionReflectorAutomationOptions {
+            include_recent_sessions: false,
+            ..SessionReflectorAutomationOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(backend.calls(), 0);
+    assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
+    assert_eq!(
+        run.ledger_record.error.as_deref(),
+        Some("no_session_evidence")
+    );
 }
 
 #[tokio::test]

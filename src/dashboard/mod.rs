@@ -25,6 +25,7 @@ mod analytics_api;
 pub(crate) mod assets;
 mod automation_config_api;
 mod automation_fact_proposals_api;
+mod automation_jobs_api;
 mod automation_outcomes_api;
 mod automation_run_api;
 mod automation_run_service;
@@ -46,6 +47,7 @@ mod memory_service;
 mod projects;
 mod savings_api;
 mod savings_pricing;
+mod settings_api;
 mod token_count;
 mod util;
 
@@ -57,7 +59,7 @@ use axum::body::Body;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{Method, Request, StatusCode, Uri};
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::{any, get, post};
+use axum::routing::{any, get, patch, post};
 use axum::Router;
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
@@ -416,6 +418,8 @@ pub(crate) fn router(state: DashboardState) -> Router {
         .route("/api/capabilities", any(active_api_gateway))
         .route("/api/plugins/{*tail}", any(active_api_gateway))
         .route("/api/automation/{*tail}", any(active_api_gateway))
+        .route("/api/settings", any(active_api_gateway))
+        .route("/api/settings/{*tail}", any(active_api_gateway))
         .with_state(runtime)
 }
 
@@ -541,6 +545,20 @@ fn project_api_router() -> Router<DashboardState> {
             post(automation_run_api::skill_writing),
         )
         .route(
+            "/api/automation/jobs",
+            get(automation_jobs_api::list).post(automation_jobs_api::create),
+        )
+        .route(
+            "/api/automation/jobs/{id}",
+            get(automation_jobs_api::view)
+                .patch(automation_jobs_api::update)
+                .delete(automation_jobs_api::delete),
+        )
+        .route(
+            "/api/automation/jobs/{id}/run",
+            post(automation_jobs_api::run),
+        )
+        .route(
             "/api/automation/scheduler/status",
             get(automation_scheduler_api::status),
         )
@@ -635,6 +653,16 @@ fn project_api_router() -> Router<DashboardState> {
         .route("/api/plugins/savings/sessions", get(savings_api::sessions))
         .route("/api/plugins/savings/models", get(savings_api::models))
         .route("/api/plugins/savings/pricing", get(savings_api::pricing))
+        // Settings API (aggregated project/user config + read-only env gates)
+        .route("/api/settings", get(settings_api::get_settings))
+        .route(
+            "/api/settings/project",
+            patch(settings_api::patch_project_settings),
+        )
+        .route(
+            "/api/settings/user",
+            patch(settings_api::patch_user_settings),
+        )
 }
 
 async fn active_api_gateway(
@@ -777,6 +805,9 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
             // Savings & Cost tab: savings-ledger analytics + per-session
             // cost accounting with OpenRouter-backed pricing.
             "savings": true,
+            // Settings tab: aggregated project/user config editing plus
+            // read-only environment and storage-path display.
+            "settings": true,
         },
         "automation": {
             "enabled": automation.enabled,

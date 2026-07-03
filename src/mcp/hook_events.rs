@@ -7,31 +7,8 @@ use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HookAgent {
-    Codex,
-    Cursor,
-    Kiro,
-}
-
-impl HookAgent {
-    fn from_wire(value: &str) -> Option<Self> {
-        match value {
-            "codex" => Some(Self::Codex),
-            "cursor" => Some(Self::Cursor),
-            "kiro" => Some(Self::Kiro),
-            _ => None,
-        }
-    }
-
-    fn marker_file(self) -> &'static str {
-        match self {
-            Self::Codex => ".codex_shell_sync_at",
-            Self::Cursor => ".cursor_shell_sync_at",
-            Self::Kiro => ".kiro_post_tool_sync_at",
-        }
-    }
-}
+/// Shared with hook emitters so the receiver accepts the same agent keys.
+pub(crate) use crate::daemon::HookAgent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HookEventKind {
@@ -51,6 +28,15 @@ impl HookEventKind {
             _ => None,
         }
     }
+
+    pub(crate) fn as_key(self) -> &'static str {
+        match self {
+            Self::FileEdit => "file_edit",
+            Self::Shell => "shell",
+            Self::WorkspaceOpen => "workspace_open",
+            Self::IncrementalSync => "incremental_sync",
+        }
+    }
 }
 
 pub(crate) struct HookEvent {
@@ -59,6 +45,7 @@ pub(crate) struct HookEvent {
     pub(crate) rel_paths: Vec<String>,
     pub(crate) command: Option<String>,
     pub(crate) cwd: Option<PathBuf>,
+    pub(crate) route: Option<crate::daemon::HookRouteMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +66,7 @@ pub(crate) fn parse_hook_event(params: Option<&Value>) -> Option<HookEvent> {
         rel_paths: safe_hook_rel_paths(&event.rel_paths),
         command: event.command.filter(|command| !command.is_empty()),
         cwd: event.cwd,
+        route: event.route,
     })
 }
 
@@ -111,7 +99,7 @@ pub(crate) fn plan_hook_event(
 }
 
 pub(crate) fn sync_marker_path(data_root: &Path, agent: HookAgent) -> PathBuf {
-    data_root.join(agent.marker_file())
+    data_root.join(agent.sync_marker_file())
 }
 
 pub(crate) fn should_run_sync(marker: &Path, now_secs: i64, debounce_secs: i64) -> bool {
@@ -359,6 +347,37 @@ mod tests {
     }
 
     #[test]
+    fn preserves_route_metadata_from_hook_notification() {
+        let params = json!({
+            "agent": "codex",
+            "event": "postToolUseShell",
+            "command": "cargo test",
+            "cwd": "/tmp/project",
+            "route": {
+                "session_id": "session-123",
+                "thread_id": "thread-456",
+                "cwd": "/tmp/project",
+                "worktree": "/tmp/project-worktree",
+                "branch": "feature/hook-route"
+            }
+        });
+
+        let event = parse_or_panic(&params);
+
+        let Some(route) = event.route.as_ref() else {
+            panic!("route metadata should parse");
+        };
+        assert_eq!(route.session_id.as_deref(), Some("session-123"));
+        assert_eq!(route.thread_id.as_deref(), Some("thread-456"));
+        assert_eq!(route.cwd.as_deref(), Some(Path::new("/tmp/project")));
+        assert_eq!(
+            route.worktree.as_deref(),
+            Some(Path::new("/tmp/project-worktree"))
+        );
+        assert_eq!(route.branch.as_deref(), Some("feature/hook-route"));
+    }
+
+    #[test]
     fn ignores_unknown_hook_event_names() {
         let params = json!({
             "agent": "cursor",
@@ -376,6 +395,29 @@ mod tests {
         });
 
         assert!(parse_hook_event(Some(&params)).is_none());
+    }
+
+    /// Regression: the receiver used to keep its own agent string match, so
+    /// the claude-keyed events added for Claude `PostToolUse` were silently
+    /// dropped. Every agent the send side can construct must parse here.
+    #[test]
+    fn accepts_every_constructible_hook_agent() {
+        for agent in [
+            HookAgent::Claude,
+            HookAgent::Codex,
+            HookAgent::Cursor,
+            HookAgent::Kiro,
+        ] {
+            let params = json!({
+                "agent": agent.as_wire(),
+                "event": "postToolUseEdit",
+                "rel_paths": ["src/lib.rs"],
+                "cwd": "/tmp/project"
+            });
+            let event = parse_or_panic(&params);
+            assert_eq!(event.agent, agent);
+            assert_eq!(event.kind, HookEventKind::FileEdit);
+        }
     }
 
     #[test]

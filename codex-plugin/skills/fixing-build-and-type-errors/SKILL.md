@@ -11,9 +11,9 @@ Use this when build or type diagnostics are relevant to the task. Prefer pasted 
 
 1. **Already have raw output? → `tracedecay_diagnose`** (`cargo_output` required, `severity?`: `error`|`warning`|`all`, `include_callers?`, `max_diagnostics?`): paste full `cargo check`/`clippy`/`rustc` stderr; each diagnostic maps to the smallest containing node with up to 5 callers pre-attached. No toolchain run — cheap and safe.
 2. **Need fresh diagnostics → `tracedecay_diagnostics`** (`scope`: `workspace` (default) | `package` (needs `name`) | `file` (needs `path`)): structured errors/warnings, each mapped to the enclosing graph node. Forces target dir `/tmp/tracedecay-target/<project_id>/diagnostics`; the **first** run on a fresh tree can take minutes, later calls are sub-second.
-3. **Understand the failing code:** resolve/inspect with the `tracedecay:searching-for-code` ladder; widen blast radius with `tracedecay_impact` if a fix is risky.
-4. **Apply the fix → `tracedecay:atomic-code-edits`** (or your normal edit tools).
-5. **Re-check** with the cheapest applicable diagnostic path, then verify behavior via `tracedecay:running-impacted-tests`.
+3. **Understand the failing code:** resolve/inspect with the `tracedecay:exploring-code` ladder; widen blast radius with `tracedecay_impact` if a fix is risky.
+4. **Apply the fix → `tracedecay:editing-safely`** (or your normal edit tools).
+5. **Re-check** with the cheapest applicable diagnostic path, then verify behavior via `tracedecay:assessing-impact`.
 
 ## Guardrails
 

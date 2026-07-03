@@ -36,6 +36,8 @@
 //! `response_item` form. This append-only JSONL is read with the shared
 //! byte-offset machinery and scoped to the current project by `session_meta.cwd`.
 
+mod context;
+
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
@@ -43,13 +45,14 @@ use serde_json::Value;
 
 use crate::accounting::parser::parse_timestamp;
 use crate::sessions::shared::{
-    append_tool_calls_metadata, content_storage_text_and_tools, paths_equal, title_from_messages,
-    StoredCursor,
+    append_tool_calls_metadata, content_storage_text_and_tools, path_belongs_to_project,
+    title_from_messages, StoredCursor,
 };
 use crate::sessions::source::{
     collect_files_with_ext, stream_new_jsonl, ParsedTranscript, SessionDraft, TranscriptSource,
 };
 use crate::sessions::SessionMessageRecord;
+use context::CodexContextState;
 
 const PROVIDER: &str = "codex";
 /// `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` → date dirs add depth.
@@ -60,6 +63,7 @@ struct CodexMeta {
     cwd: PathBuf,
     session_id: String,
     model: Option<String>,
+    git: Option<Value>,
     parent_session_id: Option<String>,
     is_subagent: bool,
     agent_id: Option<String>,
@@ -119,68 +123,79 @@ impl TranscriptSource for CodexSource {
         // `session_meta` (line 1) is authoritative for cwd + session id; without
         // it we cannot safely attribute the rollout to a project, so skip.
         let meta = session_meta(path)?;
-        if !paths_equal(&meta.cwd, project_root) {
+        if !path_belongs_to_project(&meta.cwd, project_root) {
             return None;
         }
 
         let new = stream_new_jsonl(path, prev, max_new_bytes)?;
         let mut messages = Vec::new();
         let mut turn_usage = CodexTurnUsage::default();
-        // Real session_meta lines carry no model; track the active model from
-        // `turn_context` lines instead (it can change mid-session).
-        let mut current_model = meta.model.clone();
         let replayed_from_start =
             prev.position > 0 && new.lines.first().is_some_and(|line| line.offset == 0);
-        let mut compaction_depth = if replayed_from_start {
-            0
+        let mut context_state = if prev.position > 0 && !replayed_from_start {
+            CodexContextState::scan_prior(path, prev.position, &meta)
         } else {
-            prior_compaction_depth(path, prev.position)
+            CodexContextState::from_meta(&meta)
         };
         for line in &new.lines {
             if turn_usage.observe(&line.value) {
                 continue;
             }
-            if let Some(model) = turn_context_model(&line.value) {
-                current_model = Some(model);
+            if context_state.observe_context_record(&line.value, path, &meta) {
                 continue;
             }
-            if let Some(message) = response_item_goal_context_from_line(
+            if let Some(mut message) = response_item_goal_context_from_line(
                 &line.value,
                 &meta,
-                current_model.as_deref(),
+                context_state.model.as_deref(),
                 path,
                 line.offset,
             ) {
+                context::annotate_message(
+                    &mut message,
+                    context_state.cwd.as_deref(),
+                    context_state.git.as_ref(),
+                );
                 messages.push(message);
                 continue;
             }
-            if let Some(message) = compacted_summary_from_line(
+            if let Some(mut message) = compacted_summary_from_line(
                 &line.value,
                 &meta,
-                current_model.as_deref(),
+                context_state.model.as_deref(),
                 path,
                 line.offset,
-                compaction_depth + 1,
+                context_state.compaction_depth + 1,
             ) {
                 flush_turn_usage(&mut messages, &mut turn_usage);
-                compaction_depth += 1;
+                context_state.compaction_depth += 1;
+                context::annotate_message(
+                    &mut message,
+                    context_state.cwd.as_deref(),
+                    context_state.git.as_ref(),
+                );
                 messages.push(message);
                 continue;
             }
-            if let Some(message) = goal_context_from_line(
+            if let Some(mut message) = goal_context_from_line(
                 &line.value,
                 &meta,
-                current_model.as_deref(),
+                context_state.model.as_deref(),
                 path,
                 line.offset,
             ) {
+                context::annotate_message(
+                    &mut message,
+                    context_state.cwd.as_deref(),
+                    context_state.git.as_ref(),
+                );
                 messages.push(message);
                 continue;
             }
-            if let Some(message) = message_from_line(
+            if let Some(mut message) = message_from_line(
                 &line.value,
                 &meta,
-                current_model.as_deref(),
+                context_state.model.as_deref(),
                 path,
                 line.offset,
             ) {
@@ -189,6 +204,11 @@ impl TranscriptSource for CodexSource {
                 if message.role == "user" {
                     flush_turn_usage(&mut messages, &mut turn_usage);
                 }
+                context::annotate_message(
+                    &mut message,
+                    context_state.cwd.as_deref(),
+                    context_state.git.as_ref(),
+                );
                 messages.push(message);
             }
         }
@@ -202,7 +222,7 @@ impl TranscriptSource for CodexSource {
             project_key: project.clone(),
             project_path: project,
             title: title_from_messages(&messages),
-            metadata_json: codex_metadata_json(&meta),
+            metadata_json: context::session_metadata_json(&meta),
             parent_session_id: meta.parent_session_id.clone(),
             is_subagent: meta.is_subagent,
             agent_id: meta.agent_id.clone(),
@@ -229,62 +249,68 @@ fn session_meta(path: &Path) -> Option<CodexMeta> {
         let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
             continue;
         };
-        if value.get("type").and_then(Value::as_str) != Some("session_meta") {
-            continue;
+        if let Some(meta) = session_meta_from_record(&value, path) {
+            return Some(meta);
         }
-        let payload = value.get("payload").unwrap_or(&value);
-        let cwd = payload
-            .get("cwd")
-            .and_then(Value::as_str)
-            .filter(|cwd| !cwd.is_empty())
-            .map(PathBuf::from)?;
-        let session_id = payload
-            .get("id")
-            .or_else(|| payload.get("session_id"))
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-            .map_or_else(
-                || {
-                    path.file_stem()
-                        .and_then(|stem| stem.to_str())
-                        .unwrap_or("unknown")
-                        .to_string()
-                },
-                ToString::to_string,
-            );
-        // Note: real rollouts have no `model` in session_meta — only
-        // `model_provider` (e.g. "openai"), which is *not* a model and must
-        // not be stored as one; `turn_context` lines carry the actual model.
-        let model = payload
-            .get("model")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let parent_session_id = string_field(payload, "forked_from_id").or_else(|| {
-            nested_string_field(payload, "/source/subagent/thread_spawn/parent_thread_id")
-        });
-        let thread_source = string_field(payload, "thread_source");
-        let agent_nickname = string_field(payload, "agent_nickname").or_else(|| {
-            nested_string_field(payload, "/source/subagent/thread_spawn/agent_nickname")
-        });
-        let agent_role = string_field(payload, "agent_role")
-            .or_else(|| nested_string_field(payload, "/source/subagent/thread_spawn/agent_role"));
-        let is_subagent = thread_source.as_deref() == Some("subagent")
-            || parent_session_id.is_some()
-            || payload.pointer("/source/subagent").is_some();
-        let agent_id = is_subagent.then(|| session_id.clone());
-        return Some(CodexMeta {
-            cwd,
-            session_id,
-            model,
-            parent_session_id,
-            is_subagent,
-            agent_id,
-            agent_nickname,
-            agent_role,
-            thread_source,
-        });
     }
     None
+}
+
+fn session_meta_from_record(record: &Value, path: &Path) -> Option<CodexMeta> {
+    if record.get("type").and_then(Value::as_str) != Some("session_meta") {
+        return None;
+    }
+    let payload = record.get("payload").unwrap_or(record);
+    let cwd = payload
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|cwd| !cwd.is_empty())
+        .map(PathBuf::from)?;
+    let session_id = payload
+        .get("id")
+        .or_else(|| payload.get("session_id"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map_or_else(
+            || {
+                path.file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or("unknown")
+                    .to_string()
+            },
+            ToString::to_string,
+        );
+    // Note: real rollouts have no `model` in session_meta — only
+    // `model_provider` (e.g. "openai"), which is *not* a model and must
+    // not be stored as one; `turn_context` lines carry the actual model.
+    let model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let git = payload.get("git").filter(|git| git.is_object()).cloned();
+    let parent_session_id = string_field(payload, "forked_from_id")
+        .or_else(|| nested_string_field(payload, "/source/subagent/thread_spawn/parent_thread_id"));
+    let thread_source = string_field(payload, "thread_source");
+    let agent_nickname = string_field(payload, "agent_nickname")
+        .or_else(|| nested_string_field(payload, "/source/subagent/thread_spawn/agent_nickname"));
+    let agent_role = string_field(payload, "agent_role")
+        .or_else(|| nested_string_field(payload, "/source/subagent/thread_spawn/agent_role"));
+    let is_subagent = thread_source.as_deref() == Some("subagent")
+        || parent_session_id.is_some()
+        || payload.pointer("/source/subagent").is_some();
+    let agent_id = is_subagent.then(|| session_id.clone());
+    Some(CodexMeta {
+        cwd,
+        session_id,
+        model,
+        git,
+        parent_session_id,
+        is_subagent,
+        agent_id,
+        agent_nickname,
+        agent_role,
+        thread_source,
+    })
 }
 
 fn string_field(payload: &Value, key: &str) -> Option<String> {
@@ -295,42 +321,6 @@ fn string_field(payload: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn prior_compaction_depth(path: &Path, before_offset: u64) -> i64 {
-    use std::io::BufRead;
-
-    if before_offset == 0 {
-        return 0;
-    }
-    let Ok(file) = std::fs::File::open(path) else {
-        return 0;
-    };
-    let mut reader = std::io::BufReader::new(file);
-    let mut line = String::new();
-    let mut offset = 0_u64;
-    let mut depth = 0_i64;
-    loop {
-        line.clear();
-        let Ok(n) = reader.read_line(&mut line) else {
-            break;
-        };
-        if n == 0 || offset >= before_offset {
-            break;
-        }
-        let line_offset = offset;
-        offset = offset.saturating_add(n as u64);
-        if line_offset >= before_offset {
-            break;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
-            continue;
-        };
-        if value.get("type").and_then(Value::as_str) == Some("compacted") {
-            depth += 1;
-        }
-    }
-    depth
-}
-
 fn nested_string_field(payload: &Value, pointer: &str) -> Option<String> {
     payload
         .pointer(pointer)
@@ -339,41 +329,29 @@ fn nested_string_field(payload: &Value, pointer: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn codex_metadata_json(meta: &CodexMeta) -> Option<String> {
-    let mut metadata = serde_json::Map::new();
-    metadata.insert(
-        "source".to_string(),
-        Value::String("codex_rollout".to_string()),
-    );
-    if let Some(thread_source) = &meta.thread_source {
-        metadata.insert(
-            "thread_source".to_string(),
-            Value::String(thread_source.clone()),
-        );
-    }
-    if let Some(agent_role) = &meta.agent_role {
-        metadata.insert("agent_role".to_string(), Value::String(agent_role.clone()));
-    }
-    if let Some(agent_nickname) = &meta.agent_nickname {
-        metadata.insert(
-            "agent_nickname".to_string(),
-            Value::String(agent_nickname.clone()),
-        );
-    }
-    serde_json::to_string(&Value::Object(metadata)).ok()
+struct CodexTurnContext {
+    model: Option<String>,
+    cwd: Option<PathBuf>,
 }
 
-/// Model recorded on a `turn_context` line, the only place rollouts store the
-/// active model (`session_meta` only has `model_provider`).
-fn turn_context_model(record: &Value) -> Option<String> {
+/// Context recorded on a `turn_context` line. Real rollouts use this for the
+/// active model and current cwd; both can change mid-session.
+fn turn_context_from_record(record: &Value) -> Option<CodexTurnContext> {
     if record.get("type").and_then(Value::as_str) != Some("turn_context") {
         return None;
     }
-    record
-        .pointer("/payload/model")
+    let payload = record.get("payload").unwrap_or(record);
+    let model = payload
+        .get("model")
         .and_then(Value::as_str)
         .filter(|model| !model.is_empty())
-        .map(str::to_string)
+        .map(str::to_string);
+    let cwd = payload
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|cwd| !cwd.is_empty())
+        .map(PathBuf::from);
+    Some(CodexTurnContext { model, cwd })
 }
 
 /// Map one rollout line to a provider-neutral message, or `None` for non-message

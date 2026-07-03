@@ -804,12 +804,10 @@ fn test_build_cursor_session_context_initialized_includes_freshness() {
         !context.contains("tracedecay init"),
         "initialized workspaces should not be told to run init: {context}"
     );
-    // The always-applied plugin rule carries the tool-routing steering; the
-    // session context must stay lean and not repeat the tool enumeration.
-    assert!(
-        !context.contains("tracedecay_callers"),
-        "session context should not duplicate the rule's tool list: {context}"
-    );
+    assert!(context.contains("<EXTREMELY_IMPORTANT>"));
+    assert!(context.contains("tracedecay:using-tracedecay"));
+    assert!(context.contains("Grep is faster for this"));
+    assert!(context.contains("tracedecay_callers"));
 }
 
 #[test]
@@ -1015,7 +1013,8 @@ fn test_codex_workspace_status_detects_initialized_trace_decay_project() {
 fn test_build_cursor_session_context_lists_skills_and_tokens_saved() {
     let context = build_cursor_session_context(true, None, Some(12_345));
     assert!(context.contains("Workflow skills: tracedecay:"));
-    assert!(context.contains("searching-for-code"));
+    assert!(context.contains("using-tracedecay"));
+    assert!(context.contains("exploring-code"));
     assert!(context.contains("recalling-session-context"));
     assert!(context.contains("12345"));
 
@@ -1288,7 +1287,7 @@ fn test_codex_subagent_start_injects_context_for_new_no_history_agent() {
     );
     assert!(context.contains("new/no-history subagent"));
     assert!(context.contains("tracedecay_context"));
-    assert!(context.contains("tracedecay:searching-for-code"));
+    assert!(context.contains("tracedecay:exploring-code"));
     assert!(context.contains("tracedecay_lcm_expand_query"));
     assert!(context.contains("tracedecay_message_search"));
     assert!(

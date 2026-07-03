@@ -7,25 +7,44 @@ use super::artifacts::sha256_bytes;
 use super::config::AutomationConfig;
 use super::managed_skills::{
     approve_managed_skill, create_managed_skill_draft, default_managed_skill_targets,
-    list_managed_skills, stage_managed_skill_update, ManagedSkill, ManagedSkillDraft,
-    ManagedSkillProvenance, ManagedSkillSource, ManagedSkillUpdate, ManagedSupportFile,
-    SkillInstallTarget,
+    list_managed_skills, stage_managed_skill_archive, stage_managed_skill_update, ManagedSkill,
+    ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillUpdate,
+    ManagedSupportFile, SkillInstallTarget,
 };
 use super::skill_usage::{
     skill_improvement_recommendations as usage_skill_improvement_recommendations,
-    SkillStaleRecommendation, SkillUsageSummary,
+    SkillOverlapCandidate, SkillStaleRecommendation, SkillUsageSummary,
 };
 use super::text::truncate_chars_for_prompt;
 use crate::analytics::ToolFamilySignal;
 use crate::errors::Result;
 use crate::sessions::lcm::LcmGrepHit;
 
+mod consolidation;
+
+use consolidation::{
+    skill_archive_from_proposal, skill_merge_from_proposal, stage_skill_merge,
+    staged_consolidation_record,
+};
+
+/// Outcome of validating and applying one batch of `skill_writer` proposals.
+/// `consolidations` holds staged merge/archive records; consolidations are
+/// always staged for dashboard approval and never auto-applied, even when
+/// `auto_enable_skills` is set.
+#[derive(Debug, Default)]
+pub(crate) struct SkillProposalOutcome {
+    pub created: Vec<Value>,
+    pub updated: Vec<Value>,
+    pub consolidations: Vec<Value>,
+    pub rejected: Vec<Value>,
+}
+
 pub(crate) async fn validate_and_apply_skill_proposals(
     profile_root: &Path,
     run_id: &str,
     proposals: &[Value],
     auto_enable_skills: bool,
-) -> Result<(Vec<Value>, Vec<Value>, Vec<Value>)> {
+) -> Result<SkillProposalOutcome> {
     let mut existing_skills = list_managed_skills(profile_root)
         .await?
         .into_iter()
@@ -34,6 +53,7 @@ pub(crate) async fn validate_and_apply_skill_proposals(
     let mut existing_ids = existing_skills.keys().cloned().collect::<BTreeSet<_>>();
     let mut created = Vec::new();
     let mut updated = Vec::new();
+    let mut consolidations = Vec::new();
     let mut rejected = Vec::new();
     for proposal in proposals {
         match skill_proposal_action(proposal) {
@@ -90,10 +110,65 @@ pub(crate) async fn validate_and_apply_skill_proposals(
                     Err(reason) => rejected.push(rejected_skill(proposal, &reason)),
                 }
             }
+            Ok(SkillProposalAction::Archive) => {
+                match skill_archive_from_proposal(proposal, &existing_skills) {
+                    Ok(archive) => {
+                        match stage_managed_skill_archive(
+                            profile_root,
+                            &archive.skill_id,
+                            &archive.base_checksum,
+                            Some(archive.reason.clone()),
+                        )
+                        .await
+                        {
+                            Ok(skill) => {
+                                existing_skills.insert(archive.skill_id.clone(), skill.clone());
+                                consolidations.push(staged_consolidation_record(
+                                    SkillProposalAction::Archive,
+                                    proposal,
+                                    &skill,
+                                    &archive.base_checksum,
+                                    None,
+                                ));
+                            }
+                            Err(err) => rejected.push(rejected_skill(proposal, &err.to_string())),
+                        }
+                    }
+                    Err(reason) => rejected.push(rejected_skill(proposal, &reason)),
+                }
+            }
+            Ok(SkillProposalAction::Merge) => {
+                match skill_merge_from_proposal(proposal, &existing_skills) {
+                    Ok(merge) => match stage_skill_merge(profile_root, &merge).await {
+                        Ok((source_skill, target_skill)) => {
+                            existing_skills
+                                .insert(merge.source_skill_id.clone(), source_skill.clone());
+                            if let Some(target_skill) = &target_skill {
+                                existing_skills
+                                    .insert(merge.target_skill_id.clone(), target_skill.clone());
+                            }
+                            consolidations.push(staged_consolidation_record(
+                                SkillProposalAction::Merge,
+                                proposal,
+                                &source_skill,
+                                &merge.source_base_checksum,
+                                Some(&merge),
+                            ));
+                        }
+                        Err(err) => rejected.push(rejected_skill(proposal, &err.to_string())),
+                    },
+                    Err(reason) => rejected.push(rejected_skill(proposal, &reason)),
+                }
+            }
             Err(reason) => rejected.push(rejected_skill(proposal, &reason)),
         }
     }
-    Ok((created, updated, rejected))
+    Ok(SkillProposalOutcome {
+        created,
+        updated,
+        consolidations,
+        rejected,
+    })
 }
 
 pub(crate) fn activation_policy(config: &AutomationConfig) -> &'static str {
@@ -123,8 +198,28 @@ pub(crate) fn skill_improvement_recommendations(
     usage_summaries: &[SkillUsageSummary],
     stale_recommendations: &[SkillStaleRecommendation],
     underused_tool_families: &[ToolFamilySignal],
+    overlap_candidates: &[SkillOverlapCandidate],
 ) -> Vec<Value> {
     let mut recommendations = Vec::new();
+
+    for candidate in overlap_candidates {
+        recommendations.push(json!({
+            "id": format!("skill_overlap:{}:{}", candidate.skill_a, candidate.skill_b),
+            "kind": "managed_skill_consolidation",
+            "priority": if candidate.score >= 0.6 { "high" } else { "medium" },
+            "skill_a": candidate.skill_a,
+            "skill_b": candidate.skill_b,
+            "recommendation": candidate.recommendation,
+            "reason": candidate.reason,
+            "evidence": [
+                format!("content_overlap={:.4}", candidate.content_overlap),
+                format!("title_overlap={:.4}", candidate.title_overlap),
+                format!("shared_tokens={}", candidate.shared_tokens.join(",")),
+                format!("pinned={}/{}", candidate.skill_a_pinned, candidate.skill_b_pinned),
+            ],
+            "source": "skill_overlap_detection",
+        }));
+    }
 
     for recommendation in usage_skill_improvement_recommendations(usage_summaries)
         .into_iter()
@@ -340,6 +435,8 @@ fn skill_draft_from_proposal(
 enum SkillProposalAction {
     Create,
     Update,
+    Merge,
+    Archive,
 }
 
 impl SkillProposalAction {
@@ -347,6 +444,8 @@ impl SkillProposalAction {
         match self {
             SkillProposalAction::Create => "create",
             SkillProposalAction::Update => "update",
+            SkillProposalAction::Merge => "merge",
+            SkillProposalAction::Archive => "archive",
         }
     }
 }
@@ -361,6 +460,8 @@ fn skill_proposal_action(proposal: &Value) -> std::result::Result<SkillProposalA
     match required_proposal_string(Some(action), "action")?.as_str() {
         "create" | "draft" => Ok(SkillProposalAction::Create),
         "update" | "patch" => Ok(SkillProposalAction::Update),
+        "merge" | "consolidate" => Ok(SkillProposalAction::Merge),
+        "archive" => Ok(SkillProposalAction::Archive),
         other => Err(format!("unsupported skill proposal action '{other}'")),
     }
 }

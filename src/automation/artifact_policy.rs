@@ -82,5 +82,18 @@ pub(super) fn artifact_policy(task: AgentTaskKind) -> TaskArtifactPolicy {
             handoff_test: "cargo test --test automation_runner_test combined_review",
             eval_replay_command: "cargo test --test automation_runner_test combined_review_runner_records_both_tasks_from_one_backend_call -- --nocapture",
         },
+        AgentTaskKind::UserJob => TaskArtifactPolicy {
+            optimizer_action: "update the job prompt, schedule, or delivery target",
+            accepted_next_actions: &[
+                "review the delivered job output",
+                "adjust the job definition from the dashboard if needed",
+            ],
+            rejected_next_actions: &[
+                "review the job failure reason",
+                "adjust the job definition before the next scheduled run",
+            ],
+            handoff_test: "cargo test --test automation_runner_test jobs",
+            eval_replay_command: "cargo test --test automation_runner_test jobs -- --nocapture",
+        },
     }
 }

@@ -34,6 +34,7 @@ include = [
     "/dashboard/graph/dist/**",
     "/dashboard/code-diagnostics/dist/**",
     "/dashboard/savings/dist/**",
+    "/dashboard/settings/dist/**",
     "/dashboard/hermes-wrapper/manifest.json",
     "/dashboard/hermes-wrapper/plugin_api.py",
     "/dashboard/hermes-wrapper/src/**",
@@ -159,6 +160,7 @@ criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 # tests (daemon restart-grace windows) run on virtual time instead of real
 # sleeps.
 tokio = { version = "1", features = ["full", "test-util"] }
+jsonschema = { version = "0.46.8", default-features = false }
 
 [[bench]]
 name = "large_repos"

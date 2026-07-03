@@ -24,14 +24,7 @@ use tracedecay::storage::{
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 fn canonical_temp_path(path: &Path) -> PathBuf {
-    #[cfg(windows)]
-    {
-        path.to_path_buf()
-    }
-    #[cfg(not(windows))]
-    {
-        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-    }
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn profile_root(home: &Path) -> PathBuf {
@@ -720,6 +713,8 @@ fn automation_config_set_writes_complete_project_sidecar_noninteractively() {
         "true",
         "--auto-enable-skills",
         "true",
+        "--export-memory-digest",
+        "false",
         "--memory-curator",
         "true",
         "--memory-curator-schedule",
@@ -761,6 +756,8 @@ fn automation_config_set_writes_complete_project_sidecar_noninteractively() {
     );
     assert_eq!(payload["project"]["auto_apply_memory_ops"], true);
     assert_eq!(payload["project"]["auto_enable_skills"], true);
+    assert_eq!(payload["project"]["export_memory_digest"], false);
+    assert_eq!(payload["effective"]["export_memory_digest"], false);
     assert_eq!(
         payload["project"]["session_reflector"]["interval_secs"],
         1800

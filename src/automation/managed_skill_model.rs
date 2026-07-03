@@ -192,6 +192,16 @@ pub struct ManagedSkillPendingUpdate {
     pub body_markdown: String,
     #[serde(default)]
     pub support_files: Vec<ManagedSupportFile>,
+    /// Lifecycle state the skill transitions to when this staged change is
+    /// approved. `None` keeps the historical behavior (promote to `Active`).
+    /// Staged consolidations set `Some(Archived)`; skill content is always
+    /// preserved on disk (archive, never delete).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resulting_state: Option<ManagedSkillState>,
+    /// Reviewer-facing reason recorded when the change was staged (used by
+    /// consolidation proposals).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged_reason: Option<String>,
 }
 
 impl ManagedSkillPendingUpdate {

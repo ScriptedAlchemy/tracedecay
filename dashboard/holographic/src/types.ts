@@ -694,6 +694,18 @@ export interface ManagedSkillListResponse {
   error?: string;
 }
 
+export interface ManagedSkillExportSummary {
+  target: string;
+  output: string;
+  exported_count: number;
+}
+
+export interface ManagedSkillExportReport {
+  agent: string;
+  exports: ManagedSkillExportSummary[];
+  error?: string | null;
+}
+
 export interface ManagedSkillResponse {
   profile_root: string;
   skills_root: string;
@@ -702,6 +714,7 @@ export interface ManagedSkillResponse {
   usage_summary?: SkillUsageSummary;
   stale_recommendation?: SkillStaleRecommendation | null;
   improvement_recommendation?: SkillImprovementRecommendation | null;
+  skill_exports?: ManagedSkillExportReport[];
   error?: string;
 }
 

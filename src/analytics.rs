@@ -658,13 +658,13 @@ mod tests {
     fn infers_skills_from_metadata_and_text() {
         let events = infer_usage_events(
             None,
-            Some(r#"{"context":{"skills":["tracedecay:searching-for-code"]}}"#),
+            Some(r#"{"context":{"skills":["tracedecay:exploring-code"]}}"#),
             Some("Using `build-web-apps:react-best-practices`."),
         );
         assert_usage_event(
             &events,
             UsageKind::Skill,
-            "tracedecay:searching-for-code",
+            "tracedecay:exploring-code",
             UsageCategory::TraceDecayWorkflowSkill,
         );
         assert_usage_event(
@@ -680,7 +680,7 @@ mod tests {
         let events = infer_usage_events(
             None,
             Some(r#"{"url":"https://example.com/a:b","path":"C:\\tmp\\SKILL.md"}"#),
-            Some("Also ignore file:///tmp/tracedecay:searching-for-code"),
+            Some("Also ignore file:///tmp/tracedecay:exploring-code"),
         );
         assert!(
             events.is_empty(),
@@ -693,12 +693,12 @@ mod tests {
         let events = infer_usage_events(
             None,
             None,
-            Some("Using `tracedecay:reading-code-cheaply`, then continue."),
+            Some("Using `tracedecay:exploring-code`, then continue."),
         );
         assert_usage_event(
             &events,
             UsageKind::Skill,
-            "tracedecay:reading-code-cheaply",
+            "tracedecay:exploring-code",
             UsageCategory::TraceDecayWorkflowSkill,
         );
     }
@@ -721,7 +721,7 @@ mod tests {
         assert_usage_event(
             &events,
             UsageKind::Skill,
-            "tracedecay:reading-code-cheaply",
+            "tracedecay:exploring-code",
             UsageCategory::TraceDecayWorkflowSkill,
         );
     }
