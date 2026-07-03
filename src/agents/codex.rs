@@ -726,37 +726,16 @@ fn remove_codex_managed_skill_overlay(install_dir: &Path) {
     std::fs::remove_dir_all(install_dir.join("skills/agent-managed")).ok();
 }
 
-const RETIRED_CODEX_PLUGIN_SKILL_DIRS: &[&str] = &[
-    "architecture-overview",
-    "assessing-test-coverage",
-    "atomic-code-edits",
-    "auditing-code-safety",
-    "cleaning-up-dead-code",
-    "code-health-report",
-    "cross-branch-investigation",
-    "drafting-commit-and-pr",
-    "exploring-types-and-traits",
-    "finding-duplicate-logic",
-    "finding-impacted-areas",
-    "porting-code",
-    "project-status",
-    "reading-code-cheaply",
-    "refactoring-safely",
-    "reviewing-a-diff",
-    "running-impacted-tests",
-    "searching-for-code",
-    "tracking-session-health",
-];
-
 fn remove_codex_plugin_managed_skills(install_dir: &Path, skills_dir: &Path) -> Result<()> {
-    remove_retired_codex_plugin_skill_dirs(skills_dir)?;
+    sweep_retired_bundle_skill_dirs(skills_dir);
     let managed: HashSet<PathBuf> = codex_plugin_managed_paths(install_dir)
         .into_iter()
         .filter(|path| path.starts_with(skills_dir))
         .collect();
-    let mut files = collect_regular_files(skills_dir).map_err(|e| TraceDecayError::Config {
-        message: format!("failed to list {}: {e}", skills_dir.display()),
-    })?;
+    let mut files =
+        super::collect_regular_files(skills_dir).map_err(|e| TraceDecayError::Config {
+            message: format!("failed to list {}: {e}", skills_dir.display()),
+        })?;
     files.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
     for file in files {
         if managed.contains(&file) || codex_skill_file_is_legacy_tracedecay_managed(&file) {
@@ -781,43 +760,54 @@ fn codex_skill_file_is_legacy_tracedecay_managed(path: &Path) -> bool {
         })
 }
 
-fn remove_retired_codex_plugin_skill_dirs(skills_dir: &Path) -> Result<()> {
-    for name in RETIRED_CODEX_PLUGIN_SKILL_DIRS {
-        let skill_dir = skills_dir.join(name);
-        if !codex_skill_dir_is_retired_managed(&skill_dir, name) {
+/// Remove every `skills/<dir>` under the Codex plugin dir that the current
+/// bundle no longer ships. The keep-set is derived from the live embedded
+/// bundle (plus the agent-managed overlays deployed separately), so any retired
+/// skill is swept on upgrade without a hand-maintained legacy list.
+///
+/// Only tracedecay-owned skill dirs are swept: a same-name user-authored skill
+/// whose `SKILL.md` carries no tracedecay marker is left untouched, so an
+/// upgrade never deletes a user's private workflow that collides with a retired
+/// bundle slug.
+fn sweep_retired_bundle_skill_dirs(skills_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(skills_dir) else {
+        return;
+    };
+    let mut shipped: std::collections::BTreeSet<String> = codex_embedded_plugin_files()
+        .into_iter()
+        .filter_map(|(relative, _)| {
+            relative
+                .strip_prefix("skills/")
+                .and_then(|rest| rest.split('/').next())
+                .map(str::to_string)
+        })
+        .collect();
+    // The agent-managed overlays are deployed/removed separately; never treat
+    // them as retired.
+    shipped.insert("agent-managed".to_string());
+    shipped.insert("agent-managed-memory".to_string());
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
             continue;
         }
-        std::fs::remove_dir_all(&skill_dir).map_err(|e| TraceDecayError::Config {
-            message: format!(
-                "failed to remove retired Codex skill {}: {e}",
-                skill_dir.display()
-            ),
-        })?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if shipped.contains(&name) {
+            continue;
+        }
+        // Preserve user-authored skills that reuse a retired slug: only sweep a
+        // non-shipped dir that is demonstrably tracedecay-owned.
+        if !skill_file_has_tracedecay_marker(&entry.path().join("SKILL.md")) {
+            continue;
+        }
+        std::fs::remove_dir_all(entry.path()).ok();
     }
-    Ok(())
 }
 
-fn codex_skill_dir_is_retired_managed(skill_dir: &Path, expected_name: &str) -> bool {
-    let skill_file = skill_dir.join("SKILL.md");
-    let expected_name_line = format!("name: {expected_name}");
-    skill_file.is_file()
-        && std::fs::read_to_string(&skill_file).is_ok_and(|contents| {
-            let expected_name_matches = contents
-                .lines()
-                .map(str::trim)
-                .any(|line| line == expected_name_line);
-            expected_name_matches && skill_contents_have_tracedecay_marker(&contents)
-        })
-}
-
-fn skill_contents_have_tracedecay_marker(contents: &str) -> bool {
-    contents.lines().map(str::trim).any(|line| {
-        line.starts_with("name: tracedecay:")
-            || line.starts_with("description: TraceDecay ")
-            || line.contains("TraceDecay MCP")
-            || line.contains("tracedecay_")
-            || line.contains("`tracedecay:")
-    })
+/// True when a Codex `SKILL.md` at `skill_file` carries a tracedecay authorship
+/// marker, marking the skill dir as tracedecay-owned.
+fn skill_file_has_tracedecay_marker(skill_file: &Path) -> bool {
+    std::fs::read_to_string(skill_file)
+        .is_ok_and(|contents| super::skill_contents_have_tracedecay_marker(&contents))
 }
 
 fn prune_empty_dirs(root: &Path) -> std::io::Result<()> {
@@ -881,7 +871,7 @@ fn codex_plugin_dir_is_tracedecay(install_dir: &Path) -> bool {
 }
 
 fn codex_plugin_dir_has_only_managed_files(install_dir: &Path) -> bool {
-    let Ok(entries) = collect_regular_files(install_dir) else {
+    let Ok(entries) = super::collect_regular_files(install_dir) else {
         return false;
     };
     let managed = codex_plugin_managed_paths(install_dir);
@@ -895,25 +885,6 @@ fn codex_plugin_managed_paths(install_dir: &Path) -> Vec<PathBuf> {
         .collect();
     paths.push(install_dir.join("skills/agent-managed-memory/SKILL.md"));
     paths
-}
-
-fn collect_regular_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    collect_regular_files_inner(root, &mut out)?;
-    Ok(out)
-}
-
-fn collect_regular_files_inner(root: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(root)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            collect_regular_files_inner(&entry.path(), out)?;
-        } else if file_type.is_file() {
-            out.push(entry.path());
-        }
-    }
-    Ok(())
 }
 
 fn remove_codex_marketplace_entry(home: &Path) -> Result<()> {
@@ -1549,7 +1520,7 @@ mod tests {
     /// `codex_bundle_ships_exactly_the_model_invocable_cursor_skills` checks.
     /// Every file under a skills root, relative to it, forward-slashed.
     fn skill_tree_files(root: &Path) -> Vec<String> {
-        let mut files: Vec<String> = collect_regular_files(root)
+        let mut files: Vec<String> = crate::agents::collect_regular_files(root)
             .expect("skills dir readable")
             .into_iter()
             .filter_map(|path| {
