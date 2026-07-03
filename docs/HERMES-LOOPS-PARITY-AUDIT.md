@@ -1,7 +1,7 @@
 # Hermes Self-Improvement Loops — Parity Audit
 
 Status: comparison audit, July 2026. Hermes agent codebase examined at
-`/home/zack/projects/hermes-agent` (registered tracedecay project
+`~/projects/hermes-agent` (registered tracedecay project
 "hermes-agent"). TraceDecay side examined at HEAD of
 the current TraceDecay worktree after dashboard automation work landed.
 
@@ -320,7 +320,7 @@ either.
 
 ## 5. Source map
 
-Hermes (`/home/zack/projects/hermes-agent`):
+Hermes (`~/projects/hermes-agent`):
 
 - `agent/background_review.py` — review fork + prompts
 - `agent/turn_context.py:209`, `agent/turn_finalizer.py:375` — trigger logic
@@ -330,7 +330,7 @@ Hermes (`/home/zack/projects/hermes-agent`):
 - `agent/curator.py` — weekly consolidation curator
 - `cron/jobs.py`, `cron/scheduler.py`, `cron/blueprint_catalog.py`, `cron/suggestions.py` — cron platform
 
-TraceDecay (`/home/zack/projects/tracedecay`):
+TraceDecay (`~/projects/tracedecay`):
 
 - `src/automation/{scheduler,lifecycle,run_ledger}.rs` — gates, locks, ledger
 - `src/automation/{runner,memory_curator,session_reflector,skill_writer}.rs` — the three tasks

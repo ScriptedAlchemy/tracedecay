@@ -228,7 +228,7 @@ async fn claude_transcript_for_other_project_is_skipped() {
     let other = tmp.path().join("other-project");
     std::fs::create_dir_all(&other).unwrap();
     // Transcript records a cwd that is NOT the project we ingest for.
-    write_claude_transcript(&home, &other, "claude-other");
+    let path = write_claude_transcript(&home, &other, "claude-other");
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
@@ -237,6 +237,22 @@ async fn claude_transcript_for_other_project_is_skipped() {
     assert_eq!(
         stats.messages_upserted, 0,
         "a transcript whose cwd is a different project must be skipped"
+    );
+
+    // The cursor must still advance past the filtered-out content, or every
+    // future sweep re-reads and re-filters the whole foreign transcript.
+    let file_size = std::fs::metadata(&path).unwrap().len();
+    let path_str = path.to_string_lossy();
+    let mut offset = db.get_parse_offset(path_str.as_ref()).await;
+    if offset.is_none() && cfg!(windows) {
+        // The scanner stores native separators; the helper built this path
+        // with embedded forward slashes.
+        offset = db.get_parse_offset(&path_str.replace('/', "\\")).await;
+    }
+    let offset = offset.expect("skipped foreign transcript should persist a parse offset");
+    assert_eq!(
+        offset.byte_offset, file_size,
+        "parse cursor should sit at EOF for a fully filtered transcript"
     );
 }
 
