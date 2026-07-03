@@ -382,7 +382,11 @@ mod tests {
         };
         // The trailing `\r\n\r\n` never arrives before the reset, so the loop
         // hits the read error — but a full status line was already received.
-        assert_eq!(read_status(&mut reader).unwrap(), 202);
+        let status = match read_status(&mut reader) {
+            Ok(status) => status,
+            Err(err) => panic!("read_status should succeed: {err}"),
+        };
+        assert_eq!(status, 202);
     }
 
     #[test]
@@ -447,7 +451,7 @@ mod tests {
             // 10053), aborting the client mid-read.
             let _ = stream.shutdown(std::net::Shutdown::Write);
             let mut drain = [0_u8; 64];
-            while stream.read(&mut drain).map(|n| n > 0).unwrap_or(false) {}
+            while stream.read(&mut drain).is_ok_and(|n| n > 0) {}
         });
 
         let url = Url::parse("http://webhook.example.test/hook?token=abc")?;
