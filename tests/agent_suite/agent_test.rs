@@ -4147,6 +4147,7 @@ fn test_claude_install_then_uninstall() {
 
 #[test]
 fn test_claude_uninstall_unrecords_memory_digest_target() {
+    let _env_lock = AGENT_ENV_LOCK.blocking_lock();
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let profile_root = home.join(".tracedecay");
@@ -4270,6 +4271,7 @@ fn test_codex_install_then_uninstall() {
 
 #[test]
 fn test_codex_local_uninstall_unrecords_legacy_repo_memory_digest_target() {
+    let _env_lock = AGENT_ENV_LOCK.blocking_lock();
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let mut ctx = make_install_ctx(home.path());
