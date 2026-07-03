@@ -11,6 +11,7 @@ use crate::common::{EnvVarGuard, PROCESS_ENV_LOCK};
 
 const STANDARD_MARKER: &str = "## Prefer tracedecay MCP tools";
 const CLAUDE_MARKER: &str = "## MANDATORY: No Explore Agents When Tracedecay Is Available";
+const KIRO_MARKER: &str = "## TraceDecay: mandatory tool routing";
 const KIRO_END_MARKER: &str = "<!-- tracedecay:kiro:end -->";
 
 struct HostCase {
@@ -61,7 +62,7 @@ fn hosts() -> Vec<HostCase> {
         HostCase {
             id: "kiro",
             rules_path: |home| home.join(".kiro/steering/tracedecay.md"),
-            marker: STANDARD_MARKER,
+            marker: KIRO_MARKER,
             stale_block_tail: "\n\n<!-- tracedecay:kiro:end -->",
         },
     ]

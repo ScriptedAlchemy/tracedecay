@@ -39,7 +39,7 @@ pub const CURSOR_PLUGIN_SKILLS: &[&str] = &[
 const TRACEDECAY_BOOTSTRAP_SKILL: &str =
     include_str!("../../cursor-plugin/skills/using-tracedecay/SKILL.md");
 
-fn append_tracedecay_bootstrap_context(s: &mut String) {
+pub(super) fn append_tracedecay_bootstrap_context(s: &mut String) {
     s.push_str(
         "<EXTREMELY_IMPORTANT>\n\
          This project has TraceDecay code-graph support. Below is the full `tracedecay:using-tracedecay` \

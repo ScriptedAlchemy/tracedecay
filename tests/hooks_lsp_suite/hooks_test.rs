@@ -2,8 +2,8 @@ use crate::common::{EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK};
 use std::path::Path;
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::hooks::{
-    build_cursor_session_context, codex_additional_context_json, codex_apply_patch_rel_paths,
-    codex_project_root_from_event, codex_subagent_start_log_line,
+    build_cursor_session_context, claude_session_context_for_event, codex_additional_context_json,
+    codex_apply_patch_rel_paths, codex_project_root_from_event, codex_subagent_start_log_line,
     codex_user_prompt_submit_context_for_event, codex_workspace_status_from_event,
     cursor_branch_switch_target, cursor_project_root_from_event, cursor_session_start_json,
     cursor_shell_command_targets_project, cursor_shell_sync_plan,
@@ -826,6 +826,60 @@ fn test_build_codex_session_context_carries_full_steering() {
     assert!(uninit.contains("tracedecay init"));
     assert!(uninit.contains("tracedecay_project_search"));
     assert!(uninit.contains("tracedecay_message_search"));
+}
+
+#[tokio::test]
+async fn test_claude_session_context_injects_bootstrap_when_initialized() {
+    // On an initialized project Claude's SessionStart additionalContext must
+    // carry the full using-tracedecay adoption contract, not just the index
+    // status line (matching Cursor and Codex).
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".tracedecay")).unwrap();
+    std::fs::write(dir.path().join(".tracedecay/tracedecay.db"), "").unwrap();
+    let event = serde_json::json!({
+        "hook_event_name": "SessionStart",
+        "cwd": dir.path().to_str().unwrap(),
+    })
+    .to_string();
+
+    let context = claude_session_context_for_event(&event).await;
+    assert!(
+        context.contains("tracedecay index status: "),
+        "initialized Claude context keeps the index status line: {context}"
+    );
+    assert!(
+        context.contains("<EXTREMELY_IMPORTANT>"),
+        "initialized Claude context must inject the bootstrap contract: {context}"
+    );
+    assert!(context.contains("tracedecay:using-tracedecay"));
+    assert!(context.contains("Grep is faster for this"));
+    assert!(
+        context.contains("SUBAGENT-STOP"),
+        "bootstrap must carry the scoped-subagent guard: {context}"
+    );
+    // The additionalContext channel wraps it as SessionStart context.
+    let json = codex_additional_context_json("SessionStart", &context);
+    assert!(json.contains("<EXTREMELY_IMPORTANT>"));
+}
+
+#[tokio::test]
+async fn test_claude_session_context_omits_bootstrap_for_unindexed_project() {
+    // A project-like workspace without an index gets the init nudge, not the
+    // full contract.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+    let event = serde_json::json!({
+        "hook_event_name": "SessionStart",
+        "cwd": dir.path().to_str().unwrap(),
+    })
+    .to_string();
+
+    let context = claude_session_context_for_event(&event).await;
+    assert!(context.contains("tracedecay init"));
+    assert!(
+        !context.contains("<EXTREMELY_IMPORTANT>"),
+        "unindexed workspaces should not inject the full contract: {context}"
+    );
 }
 
 #[test]

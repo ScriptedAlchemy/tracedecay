@@ -30,7 +30,7 @@ use super::{
 /// Kiro agent.
 pub struct KiroIntegration;
 
-const PROMPT_MARKER: &str = "## Prefer tracedecay MCP tools";
+const PROMPT_MARKER: &str = "## TraceDecay: mandatory tool routing";
 const PROMPT_END_MARKER: &str = "<!-- tracedecay:kiro:end -->";
 const KIRO_AGENT_NAME: &str = "tracedecay";
 const OWNED_AGENT_DESCRIPTION: &str =
@@ -615,28 +615,36 @@ fn prompt_rules_text() -> String {
 
 fn prompt_rules_text_without_end_marker() -> String {
     format!(
-        "## Prefer tracedecay MCP tools\n\n\
-Before reading source files or scanning the codebase, use the tracedecay MCP tools \
-(`tracedecay_context`, `tracedecay_search`, `tracedecay_callers`, `tracedecay_callees`, \
-`tracedecay_impact`, `tracedecay_node`, `tracedecay_files`, `tracedecay_affected`). \
-They provide semantic results from a pre-built local knowledge graph and are faster \
-than broad file reads.\n\n\
+        "## TraceDecay: mandatory tool routing\n\n\
+This project has a live TraceDecay code graph. If there is even a 1% chance a \
+tracedecay tool applies, you MUST use it BEFORE Kiro's file reads, codebase scan, \
+or `delegate`. This is a mandate, not a preference — you cannot rationalize your \
+way out of it.\n\n\
+| The moment you are in | Do this first |\n\
+|---|---|\n\
+| Searching for a symbol or concept | `tracedecay_search` (names) or `tracedecay_context` (concepts) |\n\
+| About to read a source file | `tracedecay_outline` -> `tracedecay_body` -> `tracedecay_read` slices |\n\
+| \"Who calls X\" / \"what does X call\" / \"trace this\" | `tracedecay_callers` / `tracedecay_callees` |\n\
+| About to change code, wondering what breaks | `tracedecay_impact` / `tracedecay_diff_context` / `tracedecay_affected` |\n\
+| Project / storage identity question | `tracedecay_active_project` / `tracedecay_storage_status` |\n\
+| A prior decision or past conversation is referenced | `tracedecay_message_search` / `tracedecay_lcm_expand_query` |\n\n\
+| Red-flag thought | Reality |\n\
+|---|---|\n\
+| \"Grep is faster for this\" | `tracedecay_search` is one call and pre-ranked. |\n\
+| \"I'll just read the whole file\" | `tracedecay_outline` / `tracedecay_body` answer at a fraction of the tokens. |\n\
+| \"This is a simple lookup\" | Simple lookups are exactly what the graph is for. |\n\
+| \"I already know this codebase\" | The graph is fresher than your memory. Check it. |\n\n\
+SUBAGENT-STOP: if you were handed the exact files, symbols, or excerpts to act on, \
+do NOT re-run discovery — act on what you were given. Explicit user instructions and \
+project rules (CLAUDE.md / AGENTS.md) win over this mandate; the mandate wins over the \
+default \"just grep it\" habit. Never fight a direct instruction to satisfy it.\n\n\
 Do not use Kiro's `delegate` tool for codebase exploration, architecture mapping, \
 call graph work, symbol lookup, or other code research until tracedecay MCP tools \
 have been tried. Delegation is still appropriate for long-running execution work \
 such as builds, tests, generated reports, or independent implementation tasks.\n\n\
-For project/storage identity questions, use `tracedecay_active_project` or \
-`tracedecay_storage_status` instead of inferring from marker files or \
-direct DB paths.\n\n\
-If a code analysis question cannot be fully answered by tracedecay MCP tools, prefer \
-built-in MCP tools first. If the user explicitly needs raw store inspection, use the \
-resolved graph DB path reported by `tracedecay_storage_status` rather than a hardcoded \
-repo path. Use SQL for structural queries that go beyond the MCP tools.\n\n\
 For durable project/user facts, prefer `tracedecay_fact_store`, \
-`tracedecay_fact_feedback`, and `tracedecay_memory_status` over ad-hoc notes. Use \
-`tracedecay_message_search` for active-project transcript recall when prior \
-conversation context matters. Do not store secrets, credentials, or unnecessary PII \
-in persistent facts.\n\n\
+`tracedecay_fact_feedback`, and `tracedecay_memory_status` over ad-hoc notes. Do not \
+store secrets, credentials, or unnecessary PII in persistent facts.\n\n\
 {cli_fallback}\n\n\
 If you discover a gap where an extractor, schema, or tracedecay tool could answer a \
 question natively, propose opening an issue at \

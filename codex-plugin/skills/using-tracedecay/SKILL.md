@@ -12,6 +12,16 @@ code, reading code, tracing calls, estimating blast radius, recalling prior
 context — try the matching tracedecay tool BEFORE Grep, Glob, codebase
 search, or file reads. You cannot rationalize your way out of this.
 
+## Scope and priority
+
+- SUBAGENT-STOP: if you are a scoped subagent that was handed the exact files,
+  symbols, or excerpts to act on, do NOT re-run discovery — act on what you
+  were given. This mandate governs open-ended exploration, not narrow handoffs.
+- Priority ladder: explicit user instructions and project rules
+  (CLAUDE.md / AGENTS.md) win over this skill; this skill wins over the host's
+  default "just grep it" habit. Never fight a direct instruction to satisfy
+  the mandate.
+
 ## Moment → mandatory action
 
 | The moment you are in | Do this first |
