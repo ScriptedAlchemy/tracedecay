@@ -3,7 +3,7 @@ use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::sessions::kiro::KiroSource;
 use tracedecay::sessions::source::ingest_source;
 
-use crate::support::setup;
+use crate::support::{assert_metadata_path_eq, create_git_repo_with_linked_worktree, setup};
 
 fn encode_workspace_path(path: &std::path::Path) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -104,9 +104,11 @@ fn write_workspace_session_json(
 async fn kiro_legacy_chat_populates_searchable_messages() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
+    let linked_worktree = tmp.path().join("linked-worktree");
+    create_git_repo_with_linked_worktree(&project, &linked_worktree);
     write_legacy_chat(
         &home,
-        &project,
+        &linked_worktree,
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "exec-1",
     );
@@ -130,12 +132,31 @@ async fn kiro_legacy_chat_populates_searchable_messages() {
             || hit.message.model.as_deref() == Some("claude-sonnet-4.6")
     }));
     let session = db.get_session("kiro", "kiro-workflow-1").await.unwrap();
+    let session_metadata: serde_json::Value =
+        serde_json::from_str(session.metadata_json.as_deref().unwrap()).unwrap();
+    assert_metadata_path_eq(&session_metadata["kiro_workspace_cwd"], &linked_worktree);
+    assert_metadata_path_eq(
+        &session_metadata["kiro_workspace_worktree"],
+        &linked_worktree,
+    );
+    assert_eq!(
+        session_metadata["kiro_workspace_location_provenance"].as_str(),
+        Some("workspace_mapping")
+    );
     assert_eq!(session.started_at, Some(1_800_000_000));
     assert_eq!(session.ended_at, Some(1_800_000_001));
     let first = db
         .get_session_message("kiro", "kiro-workflow-1:0")
         .await
         .unwrap();
+    let first_metadata: serde_json::Value =
+        serde_json::from_str(first.metadata_json.as_deref().unwrap()).unwrap();
+    assert_metadata_path_eq(&first_metadata["kiro_workspace_cwd"], &linked_worktree);
+    assert_metadata_path_eq(&first_metadata["kiro_workspace_worktree"], &linked_worktree);
+    assert_eq!(
+        first_metadata["kiro_workspace_location_provenance"].as_str(),
+        Some("workspace_mapping")
+    );
     assert_eq!(first.timestamp, Some(1_800_000_000));
     let second = db
         .get_session_message("kiro", "kiro-workflow-1:1")
@@ -155,7 +176,9 @@ async fn kiro_legacy_chat_populates_searchable_messages() {
 async fn kiro_workspace_sessions_json_is_ingested() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    write_workspace_session_json(&home, &project, "sess-modern");
+    let linked_worktree = tmp.path().join("linked-worktree");
+    create_git_repo_with_linked_worktree(&project, &linked_worktree);
+    write_workspace_session_json(&home, &linked_worktree, "sess-modern");
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = KiroSource::with_home(&home);
@@ -172,12 +195,31 @@ async fn kiro_workspace_sessions_json_is_ingested() {
         .await;
     assert_eq!(results.len(), 2);
     let session = db.get_session("kiro", "sess-modern").await.unwrap();
+    let session_metadata: serde_json::Value =
+        serde_json::from_str(session.metadata_json.as_deref().unwrap()).unwrap();
+    assert_metadata_path_eq(&session_metadata["kiro_workspace_cwd"], &linked_worktree);
+    assert_metadata_path_eq(
+        &session_metadata["kiro_workspace_worktree"],
+        &linked_worktree,
+    );
+    assert_eq!(
+        session_metadata["kiro_workspace_location_provenance"].as_str(),
+        Some("workspace_mapping")
+    );
     assert_eq!(session.started_at, Some(1_800_000_000));
     assert_eq!(session.ended_at, Some(1_800_000_010));
     let first = db
         .get_session_message("kiro", "sess-modern:0")
         .await
         .unwrap();
+    let first_metadata: serde_json::Value =
+        serde_json::from_str(first.metadata_json.as_deref().unwrap()).unwrap();
+    assert_metadata_path_eq(&first_metadata["kiro_workspace_cwd"], &linked_worktree);
+    assert_metadata_path_eq(&first_metadata["kiro_workspace_worktree"], &linked_worktree);
+    assert_eq!(
+        first_metadata["kiro_workspace_location_provenance"].as_str(),
+        Some("workspace_mapping")
+    );
     assert_eq!(first.timestamp, Some(1_800_000_000));
     let second = db
         .get_session_message("kiro", "sess-modern:1")

@@ -9,6 +9,7 @@ import type {
   SkillStaleRecommendation,
   SkillUsageSummary,
 } from "../types";
+import type { ManagedSkillExportsResult } from "./useManagedSkills";
 
 interface CurationProposalsPanelProps {
   factProposals: FactProposalRecord[];
@@ -24,6 +25,7 @@ interface CurationProposalsPanelProps {
   managedSkillsLoading: boolean;
   managedSkillsError: string;
   managedSkillActioning: string | null;
+  managedSkillExports: ManagedSkillExportsResult | null;
   loadFactProposals: (force?: boolean) => void;
   loadManagedSkills: (force?: boolean) => void;
   loadManagedSkill: (skillId: string) => void;
@@ -45,6 +47,7 @@ export function CurationProposalsPanel({
   managedSkillsLoading,
   managedSkillsError,
   managedSkillActioning,
+  managedSkillExports,
   loadFactProposals,
   loadManagedSkills,
   loadManagedSkill,
@@ -98,6 +101,7 @@ export function CurationProposalsPanel({
         loading={managedSkillsLoading}
         error={managedSkillsError}
         actioning={managedSkillActioning}
+        exportsResult={managedSkillExports}
         onRefresh={() => loadManagedSkills(true)}
         onLoadSkill={loadManagedSkill}
         onAction={runManagedSkillAction}

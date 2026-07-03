@@ -384,7 +384,7 @@ fn assert_codex_plugin_bundle(
         expected_command,
     );
 
-    let skill = std::fs::read_to_string(plugin_dir.join("skills/reading-code-cheaply/SKILL.md"))
+    let skill = std::fs::read_to_string(plugin_dir.join("skills/exploring-code/SKILL.md"))
         .expect("Codex plugin should ship tracedecay steering skills");
     assert!(skill.contains("tracedecay"));
 }
@@ -544,13 +544,13 @@ fn test_cursor_plugin_bundle_files_are_valid() {
 
 #[test]
 fn generated_guidance_prefers_resolved_active_project_store() {
-    let cursor_status = include_str!("../../cursor-plugin/skills/project-status/SKILL.md");
-    let codex_status = include_str!("../../codex-plugin/skills/project-status/SKILL.md");
+    let cursor_status = include_str!("../../cursor-plugin/skills/code-health/SKILL.md");
+    let codex_status = include_str!("../../codex-plugin/skills/code-health/SKILL.md");
     let cursor_rule = include_str!("../../cursor-plugin/rules/tracedecay.mdc");
 
     for (name, guidance) in [
-        ("cursor project-status", cursor_status),
-        ("codex project-status", codex_status),
+        ("cursor code-health", cursor_status),
+        ("codex code-health", codex_status),
     ] {
         assert!(
             guidance.contains("tracedecay_active_project"),
@@ -621,14 +621,15 @@ fn valid_single_quoted_yaml_scalar(value: &str) -> bool {
 
 #[test]
 fn generated_prompt_rules_do_not_hardcode_repo_local_graph_db() {
+    // Hosts that render their own rule text, plus the shared renderer that
+    // copilot/gemini/opencode/kimi/vibe delegate to.
     for (name, source) in [
         ("claude", include_str!("../../src/agents/claude.rs")),
-        ("copilot", include_str!("../../src/agents/copilot.rs")),
-        ("gemini", include_str!("../../src/agents/gemini.rs")),
         ("kiro", include_str!("../../src/agents/kiro.rs")),
-        ("kimi", include_str!("../../src/agents/kimi.rs")),
-        ("opencode", include_str!("../../src/agents/opencode.rs")),
-        ("vibe", include_str!("../../src/agents/vibe.rs")),
+        (
+            "prompt_rules",
+            include_str!("../../src/agents/prompt_rules.rs"),
+        ),
     ] {
         assert!(
             !source.contains(".tracedecay/tracedecay.db"),
@@ -638,6 +639,22 @@ fn generated_prompt_rules_do_not_hardcode_repo_local_graph_db() {
             source.contains("tracedecay_active_project")
                 && source.contains("tracedecay_storage_status"),
             "{name} generated guidance should point store questions to active-project/storage-status tools"
+        );
+    }
+    for (name, source) in [
+        ("copilot", include_str!("../../src/agents/copilot.rs")),
+        ("gemini", include_str!("../../src/agents/gemini.rs")),
+        ("kimi", include_str!("../../src/agents/kimi.rs")),
+        ("opencode", include_str!("../../src/agents/opencode.rs")),
+        ("vibe", include_str!("../../src/agents/vibe.rs")),
+    ] {
+        assert!(
+            !source.contains(".tracedecay/tracedecay.db"),
+            "{name} generated guidance must not hardcode the repo-local graph DB path"
+        );
+        assert!(
+            source.contains("standard_prompt_rules"),
+            "{name} should delegate prompt rules to the shared renderer"
         );
     }
 }
@@ -1040,6 +1057,16 @@ fn test_hermes_local_install_writes_profile_plugin() {
 
     let skill = std::fs::read_to_string(plugin_dir.join("skills/tracedecay/SKILL.md")).unwrap();
     assert!(skill.contains("Use tracedecay"));
+    // CLI-fallback steering: mirrors CLI_FALLBACK_PROMPT_RULES, worded for the
+    // Hermes plugin surface (tool calls already shell out to the tracedecay CLI).
+    assert!(
+        skill.contains("tracedecay tool ") && skill.contains("--help"),
+        "Hermes skill must steer the agent to the `tracedecay tool` CLI when a tool invocation fails"
+    );
+    assert!(
+        skill.contains("instead of querying"),
+        "Hermes skill must warn against querying .tracedecay databases directly"
+    );
 
     assert_hermes_config_enables_tracedecay_memory(&project.path().join(".hermes/config.yaml"));
     assert!(
@@ -2893,7 +2920,7 @@ fn test_local_install_codex_writes_project_paths() {
             "plugins/tracedecay/.codex-plugin/plugin.json",
             "plugins/tracedecay/.mcp.json",
             "plugins/tracedecay/hooks/hooks.json",
-            "plugins/tracedecay/skills/reading-code-cheaply/SKILL.md",
+            "plugins/tracedecay/skills/exploring-code/SKILL.md",
         ],
     );
 }
@@ -3155,6 +3182,12 @@ async fn test_codex_install_exports_active_managed_skills() {
     let skill = std::fs::read_to_string(skill_path).unwrap();
     assert!(skill.contains("id: repo-hygiene"));
     assert!(skill.contains("Use Repo Hygiene for repeated workflows."));
+
+    let digest_skill_path =
+        codex_plugin_install_dir(home).join("skills/agent-managed-memory/SKILL.md");
+    let digest_skill = std::fs::read_to_string(digest_skill_path).unwrap();
+    assert!(digest_skill.contains("name: tracedecay-memory-digest"));
+    assert!(digest_skill.contains("No durable facts exported yet"));
 }
 
 #[tokio::test]
@@ -3195,6 +3228,13 @@ async fn test_codex_shareable_plugin_artifact_exports_bundle_and_managed_skills(
     let skill = std::fs::read_to_string(skill_path).unwrap();
     assert!(skill.contains("id: repo-hygiene"));
     assert!(skill.contains("Use Repo Hygiene for repeated workflows."));
+    assert!(
+        !summary
+            .output
+            .join("skills/agent-managed-memory/SKILL.md")
+            .exists(),
+        "shareable Codex plugin artifacts must not include a personal memory digest"
+    );
 }
 
 #[test]
@@ -4720,7 +4760,15 @@ fn test_healthcheck_cursor_local_install_checks_project_config() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_cursor_healthcheck_warns_on_literal_workspace_folder_transcript_path() {
+    // TraceDecay::init and healthcheck read the user data dir from the
+    // process env, which other tests pin via EnvVarGuard — serialize and pin
+    // like every other TraceDecay::init test in this suite.
+    let _env_lock = AGENT_ENV_LOCK.lock().await;
     let home = TempDir::new().unwrap();
+    let data_dir = home.path().join(".tracedecay");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let data_dir = data_dir.canonicalize().unwrap();
+    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, data_dir);
     let project = TempDir::new().unwrap();
     CursorIntegration
         .install(&make_install_ctx(home.path()))

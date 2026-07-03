@@ -1,24 +1,37 @@
 use std::time::Duration;
 use tempfile::tempdir;
 use tracedecay::mcp::McpServer;
-use tracedecay::tracedecay::TraceDecay;
+use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+
+use crate::common::canonical_existing_path;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_mcps_on_same_project_coordinate_via_sync_lock() {
+    let home = tempdir().unwrap();
     let tmp = tempdir().unwrap();
     let project = tmp.path().to_path_buf();
+    let profile_root = canonical_existing_path(home.path()).join(".tracedecay");
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(profile_root.clone()),
+        global_db_path: Some(profile_root.join("global.db")),
+    };
     std::fs::write(project.join("a.rs"), "fn a() {}").unwrap();
 
     // Initial sync so both MCPs start with the same DB state.
-    let cg_init = crate::fixture::init_project_from_template(&project)
-        .await
-        .unwrap();
+    let cg_init =
+        crate::fixture::init_project_from_template_with_options(&project, open_options.clone())
+            .await
+            .unwrap();
     cg_init.sync().await.unwrap();
     drop(cg_init);
 
     // Spin up two MCP servers on the same project.
-    let cg1 = TraceDecay::open(&project).await.unwrap();
-    let cg2 = TraceDecay::open(&project).await.unwrap();
+    let cg1 = TraceDecay::open_with_options(&project, open_options.clone())
+        .await
+        .unwrap();
+    let cg2 = TraceDecay::open_with_options(&project, open_options)
+        .await
+        .unwrap();
     let server1 = McpServer::new(cg1, None).await;
     let server2 = McpServer::new(cg2, None).await;
 

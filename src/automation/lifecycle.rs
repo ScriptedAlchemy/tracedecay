@@ -618,6 +618,9 @@ fn task_disabled(config: &AutomationConfig, task: AgentTaskKind) -> bool {
         AgentTaskKind::CombinedReview => {
             !config.tasks.session_reflector.enabled || !config.tasks.skill_writer.enabled
         }
+        // User jobs carry their own enabled flag on the job record; the job
+        // runner gates on it before reaching this config-level check.
+        AgentTaskKind::UserJob => false,
     }
 }
 
@@ -627,6 +630,7 @@ fn task_disabled_reason(task: AgentTaskKind) -> &'static str {
         AgentTaskKind::SessionReflector => "session_reflector_disabled",
         AgentTaskKind::SkillWriter => "skill_writer_disabled",
         AgentTaskKind::CombinedReview => "combined_review_disabled",
+        AgentTaskKind::UserJob => "user_job_disabled",
     }
 }
 
@@ -717,6 +721,7 @@ fn noop_output_for_task(task: AgentTaskKind) -> Value {
         AgentTaskKind::SessionReflector => json!({ "facts": [] }),
         AgentTaskKind::SkillWriter => json!({ "skills": [] }),
         AgentTaskKind::CombinedReview => json!({ "facts": [], "skills": [] }),
+        AgentTaskKind::UserJob => json!({ "content": "" }),
     }
 }
 

@@ -27,6 +27,8 @@ export const EMBEDDED_DIST_FILES = [
   "code-diagnostics/dist/style.css",
   "savings/dist/index.js",
   "savings/dist/style.css",
+  "settings/dist/index.js",
+  "settings/dist/style.css",
 ];
 
 export const HERMES_WRAPPER_DIST_FILES = [
@@ -52,6 +54,7 @@ export const DASHBOARD_SOURCE_DIRS = [
   "code-diagnostics/src",
   "lib",
   "savings/src",
+  "settings/src",
   "shell/src",
 ];
 

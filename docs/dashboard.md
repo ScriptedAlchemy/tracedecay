@@ -19,6 +19,7 @@ The tracedecay dashboard is a local web interface for exploring your project's h
   - [Holographic Memory API](#holographic-memory-api)
   - [LCM API](#lcm-api)
   - [Savings & Cost API](#savings--cost-api)
+  - [Settings API](#settings-api)
 - [Capability Flags](#capability-flags)
 - [Frontend Development](#frontend-development)
 - [Troubleshooting](#troubleshooting)
@@ -1088,6 +1089,37 @@ per million tokens). Requesting this endpoint (or `/overview`) kicks off the
 at-most-once background refresh when the cache is stale and
 `TRACEDECAY_OFFLINE` is unset.
 
+### Settings API
+
+Routes under `/api/settings` back the Settings tab.
+
+#### `GET /api/settings`
+
+Aggregated settings payload: `project` (the indexing `config.json` —
+include/exclude globs, `max_file_size`, `extract_docstrings`,
+`track_call_sites`, `git_ignore` — plus its path and the `.tracedecay/`
+gitignore status), `user` (editable user-level settings from
+`~/.tracedecay/config.toml`: `upload_enabled`, `watcher_debounce`,
+`extraction_timeout_secs`), `automation` (read-only summary linking to the
+existing editor at `/api/plugins/holographic/curation/config`),
+`environment` (read-only env-var gate verdicts with explanations),
+`storage` (resolved store paths), and `version` (version + update channel).
+
+#### `PATCH /api/settings/project`
+
+Partial update of the project indexing config. Validates glob patterns and
+`max_file_size >= 1`; rejects unknown fields. Errors follow the automation
+config contract (`validation_errors` array with `field` + `message`). The
+response includes `resync_recommended: true` when any indexing field
+changed — the endpoint never auto-runs a sync.
+
+#### `PATCH /api/settings/user`
+
+Partial update of the editable user-level settings. Validates
+`watcher_debounce` durations (`"2s"`, `"1m"`, …) and
+`extraction_timeout_secs >= 1`. The response includes
+`restart_recommended: true` when a startup-read knob changed.
+
 ---
 
 ## Capability Flags
@@ -1118,6 +1150,7 @@ fetch('/api/capabilities')
 | `features.lcm` | LCM session store is accessible (see `lcm_scope` for which one) | Show LCM tab |
 | `features.graph` | Code-graph API is available | Show Code Graph tab |
 | `features.savings` | Savings & Cost API is available | Show Savings & Cost tab |
+| `features.settings` | Aggregated Settings API is available | Show Settings tab |
 | `features.curation` | Similarity-dedup curation tools are available | Show Curation panel, enable curate actions |
 | `features.llm_curation` | An LLM-backed curation planner is available through standalone automation or a delegated host wrapper | Enable LLM plan actions that target `POST /curate/apply` |
 
@@ -1139,6 +1172,7 @@ The dashboard frontend source lives in `dashboard/`:
 | `dashboard/lcm/` | LCM plugin bundle (TSX) |
 | `dashboard/graph/` | Code Graph explorer plugin bundle |
 | `dashboard/savings/` | Savings & Cost plugin bundle |
+| `dashboard/settings/` | Settings plugin bundle (project/user config editor) |
 | `dashboard/hermes-wrapper/` | Hermes-side thin wrapper (concatenated child bundles) |
 | `dashboard/lib/` | Shared plugin shims (React/JSX-runtime shims), shared UI primitives (`primitives.tsx` / `primitives.css`), and the canonical `cn.ts` classname helper |
 | `dashboard/dev/` | Rsbuild HMR dev server entry |

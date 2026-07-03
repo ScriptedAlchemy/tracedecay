@@ -40,6 +40,8 @@ pub(crate) const CODE_DIAGNOSTICS_CSS: &str =
     include_str!("../../dashboard/code-diagnostics/dist/style.css");
 pub(crate) const SAVINGS_JS: &str = include_str!("../../dashboard/savings/dist/index.js");
 pub(crate) const SAVINGS_CSS: &str = include_str!("../../dashboard/savings/dist/style.css");
+pub(crate) const SETTINGS_JS: &str = include_str!("../../dashboard/settings/dist/index.js");
+pub(crate) const SETTINGS_CSS: &str = include_str!("../../dashboard/settings/dist/style.css");
 const ASSET_STAMP: &str = env!("TRACEDECAY_DASHBOARD_ASSET_STAMP");
 
 pub(crate) struct DashboardPlugin {
@@ -80,6 +82,12 @@ pub(crate) const DASHBOARD_PLUGINS: &[DashboardPlugin] = &[
         description: "LSP-backed compiler and type diagnostics.",
         icon: "Bug",
     },
+    DashboardPlugin {
+        name: "settings",
+        label: "Settings",
+        description: "Project, user, and environment configuration.",
+        icon: "Settings",
+    },
 ];
 
 struct PluginAsset {
@@ -113,6 +121,11 @@ const PLUGIN_ASSETS: &[PluginAsset] = &[
         plugin: "savings",
         js: SAVINGS_JS,
         css: SAVINGS_CSS,
+    },
+    PluginAsset {
+        plugin: "settings",
+        js: SETTINGS_JS,
+        css: SETTINGS_CSS,
     },
 ];
 

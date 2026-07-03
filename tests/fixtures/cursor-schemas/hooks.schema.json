@@ -1,0 +1,116 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://cursor.com/schemas/cursor-plugin/hooks.json",
+  "title": "Cursor Hooks Configuration",
+  "description": "Schema for hooks.json — Cursor's hooks configuration (plugin hooks/hooks.json, .cursor/hooks.json, ~/.cursor/hooks.json). Cursor does not publish a standalone machine-readable schema for hooks.json (the official plugin.schema.json in cursor/plugins types the inline `hooks` field as a bare object), so this schema is derived from the official reference at https://cursor.com/docs/hooks (Configuration file, Global Configuration Options, Per-Script Configuration Options) as of 2026-07-02, cross-checked against the hooks.json files shipped in official plugins in the cursor/plugins repository. Hook event names are enumerated from the documented list; a Cursor release adding new events requires re-vendoring.",
+  "type": "object",
+  "required": ["hooks"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Config schema version. Optional; defaults to 1."
+    },
+    "hooks": {
+      "type": "object",
+      "description": "Map of hook event name to an array of hook definitions.",
+      "additionalProperties": false,
+      "properties": {
+        "sessionStart": { "$ref": "#/$defs/hookArray" },
+        "sessionEnd": { "$ref": "#/$defs/hookArray" },
+        "preToolUse": { "$ref": "#/$defs/hookArray" },
+        "postToolUse": { "$ref": "#/$defs/hookArray" },
+        "postToolUseFailure": { "$ref": "#/$defs/hookArray" },
+        "subagentStart": { "$ref": "#/$defs/hookArray" },
+        "subagentStop": { "$ref": "#/$defs/hookArray" },
+        "beforeShellExecution": { "$ref": "#/$defs/hookArray" },
+        "afterShellExecution": { "$ref": "#/$defs/hookArray" },
+        "beforeMCPExecution": { "$ref": "#/$defs/hookArray" },
+        "afterMCPExecution": { "$ref": "#/$defs/hookArray" },
+        "beforeReadFile": { "$ref": "#/$defs/hookArray" },
+        "afterFileEdit": { "$ref": "#/$defs/hookArray" },
+        "beforeSubmitPrompt": { "$ref": "#/$defs/hookArray" },
+        "preCompact": { "$ref": "#/$defs/hookArray" },
+        "stop": { "$ref": "#/$defs/hookArray" },
+        "afterAgentResponse": { "$ref": "#/$defs/hookArray" },
+        "afterAgentThought": { "$ref": "#/$defs/hookArray" },
+        "beforeTabFileRead": { "$ref": "#/$defs/hookArray" },
+        "afterTabFileEdit": { "$ref": "#/$defs/hookArray" },
+        "workspaceOpen": { "$ref": "#/$defs/hookArray" }
+      }
+    }
+  },
+  "$defs": {
+    "hookArray": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/hookDefinition" }
+    },
+    "hookDefinition": {
+      "oneOf": [
+        { "$ref": "#/$defs/commandHook" },
+        { "$ref": "#/$defs/promptHook" }
+      ]
+    },
+    "commonHookOptions": {
+      "timeout": {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "description": "Execution timeout in seconds."
+      },
+      "loop_limit": {
+        "type": ["number", "null"],
+        "description": "Per-script loop limit for stop/subagentStop hooks. null removes the limit; default is 5."
+      },
+      "failClosed": {
+        "type": "boolean",
+        "description": "When true, hook failures (crash, timeout, invalid JSON) block the action instead of allowing it through."
+      },
+      "matcher": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Filter pattern controlling when the hook runs; the matched value depends on the hook event (tool type, subagent type, shell command text, ...)."
+      }
+    },
+    "commandHook": {
+      "type": "object",
+      "description": "Command-based hook: executes a shell script that receives JSON on stdin and returns JSON on stdout.",
+      "required": ["command"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "command",
+          "description": "Hook execution type. Optional; \"command\" is the default."
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Script path or shell command. Relative paths resolve against the hook source root (plugin root, project root, or ~/.cursor)."
+        },
+        "timeout": { "$ref": "#/$defs/commonHookOptions/timeout" },
+        "loop_limit": { "$ref": "#/$defs/commonHookOptions/loop_limit" },
+        "failClosed": { "$ref": "#/$defs/commonHookOptions/failClosed" },
+        "matcher": { "$ref": "#/$defs/commonHookOptions/matcher" }
+      }
+    },
+    "promptHook": {
+      "type": "object",
+      "description": "Prompt-based hook: an LLM evaluates a natural-language condition and returns { ok, reason? }.",
+      "required": ["type", "prompt"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "prompt" },
+        "prompt": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Natural-language condition for the LLM to evaluate."
+        },
+        "timeout": { "$ref": "#/$defs/commonHookOptions/timeout" },
+        "loop_limit": { "$ref": "#/$defs/commonHookOptions/loop_limit" },
+        "failClosed": { "$ref": "#/$defs/commonHookOptions/failClosed" },
+        "matcher": { "$ref": "#/$defs/commonHookOptions/matcher" }
+      }
+    }
+  }
+}

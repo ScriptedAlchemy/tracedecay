@@ -383,6 +383,15 @@ const apiMock = vi.hoisted(() => ({
       body_markdown: "Use focused checks before broad suites.",
       support_files: [],
     },
+    skill_exports: [
+      {
+        agent: "claude",
+        exports: [
+          { target: "claude", output: "/home/user/.claude/CLAUDE.md", exported_count: 1 },
+        ],
+      },
+      { agent: "cursor", exports: [], error: "permission denied" },
+    ],
   }),
   disableManagedSkill: vi.fn(),
   archiveManagedSkill: vi.fn(),
@@ -735,5 +744,9 @@ describe("CurationPanel", () => {
     await waitFor(() => {
       expect(apiMock.approveManagedSkill).toHaveBeenCalledWith("repo-hygiene");
     });
+
+    expect(await screen.findByText(/agent exports · after approve/)).toBeTruthy();
+    expect(screen.getByText(/1 skill\(s\) deployed/)).toBeTruthy();
+    expect(screen.getByText(/export failed: permission denied/)).toBeTruthy();
   });
 });

@@ -4,7 +4,7 @@ use tracedecay::sessions::cline_like::ClineLikeSource;
 use tracedecay::sessions::cursor::{open_project_session_db, project_session_db_path};
 use tracedecay::sessions::source::ingest_source;
 
-use crate::support::setup;
+use crate::support::{assert_metadata_path_eq, create_git_repo_with_linked_worktree, setup};
 
 fn vscode_storage_root(home: &std::path::Path, extension_id: &str) -> std::path::PathBuf {
     tracedecay::agents::vscode_data_dir(home)
@@ -139,15 +139,16 @@ async fn assert_provider_ingests(
     provider: &str,
     source: ClineLikeSource,
     db: &tracedecay::global_db::GlobalDb,
-    project: &std::path::Path,
+    ingest_project: &std::path::Path,
+    transcript_project: &std::path::Path,
 ) {
-    let stats = ingest_source(db, &source, project, None).await;
+    let stats = ingest_source(db, &source, ingest_project, None).await;
     assert_eq!(stats.messages_upserted, 2);
 
     let results = db
         .search_session_messages(
             provider,
-            Some(project.to_string_lossy().as_ref()),
+            Some(ingest_project.to_string_lossy().as_ref()),
             "billing pipeline",
             10,
         )
@@ -169,6 +170,12 @@ async fn assert_provider_ingests(
         .expect("assistant tool-use message should be searchable");
     let metadata: serde_json::Value =
         serde_json::from_str(assistant.message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_metadata_path_eq(&metadata["cline_like_task_cwd"], transcript_project);
+    assert_metadata_path_eq(&metadata["cline_like_task_worktree"], transcript_project);
+    assert_eq!(
+        metadata["cline_like_task_location_provenance"].as_str(),
+        Some("task_metadata")
+    );
     assert_eq!(metadata["usage"]["input_tokens"], 1200);
     assert_eq!(metadata["usage"]["output_tokens"], 350);
     assert_eq!(metadata["usage"]["cache_read_input_tokens"], 8000);
@@ -185,10 +192,25 @@ async fn assert_provider_ingests(
         raw.content,
         serde_json::to_string(&expected_content).unwrap()
     );
+    let session = db
+        .get_session(provider, &assistant.message.session_id)
+        .await
+        .expect("Cline-like session should be stored");
+    let session_metadata: serde_json::Value =
+        serde_json::from_str(session.metadata_json.as_deref().unwrap()).unwrap();
+    assert_metadata_path_eq(&session_metadata["cline_like_task_cwd"], transcript_project);
+    assert_metadata_path_eq(
+        &session_metadata["cline_like_task_worktree"],
+        transcript_project,
+    );
+    assert_eq!(
+        session_metadata["cline_like_task_location_provenance"].as_str(),
+        Some("task_metadata")
+    );
 
     // ContentHash: unchanged full-rewrite file is a no-op.
     assert_eq!(
-        ingest_source(db, &source, project, None)
+        ingest_source(db, &source, ingest_project, None)
             .await
             .messages_upserted,
         0
@@ -199,9 +221,11 @@ async fn assert_provider_ingests(
 async fn cline_task_history_populates_searchable_messages() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
+    let linked_worktree = tmp.path().join("linked-worktree");
+    create_git_repo_with_linked_worktree(&project, &linked_worktree);
     write_task(
         &vscode_storage_root(&home, "saoudrizwan.claude-dev"),
-        &project,
+        &linked_worktree,
         "cline-task",
     );
 
@@ -211,6 +235,7 @@ async fn cline_task_history_populates_searchable_messages() {
         ClineLikeSource::cline_with_home(&home),
         &db,
         &project,
+        &linked_worktree,
     )
     .await;
 }
@@ -219,9 +244,11 @@ async fn cline_task_history_populates_searchable_messages() {
 async fn roo_code_task_history_populates_searchable_messages() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
+    let linked_worktree = tmp.path().join("linked-worktree");
+    create_git_repo_with_linked_worktree(&project, &linked_worktree);
     write_task(
         &vscode_storage_root(&home, "rooveterinaryinc.roo-cline"),
-        &project,
+        &linked_worktree,
         "roo-task",
     );
 
@@ -231,6 +258,7 @@ async fn roo_code_task_history_populates_searchable_messages() {
         ClineLikeSource::roo_code_with_home(&home),
         &db,
         &project,
+        &linked_worktree,
     )
     .await;
 }
@@ -239,9 +267,11 @@ async fn roo_code_task_history_populates_searchable_messages() {
 async fn kilo_task_history_populates_searchable_messages() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
+    let linked_worktree = tmp.path().join("linked-worktree");
+    create_git_repo_with_linked_worktree(&project, &linked_worktree);
     write_task(
         &vscode_storage_root(&home, "kilocode.kilo-code"),
-        &project,
+        &linked_worktree,
         "kilo-task",
     );
 
@@ -251,6 +281,7 @@ async fn kilo_task_history_populates_searchable_messages() {
         ClineLikeSource::kilo_with_home(&home),
         &db,
         &project,
+        &linked_worktree,
     )
     .await;
 }

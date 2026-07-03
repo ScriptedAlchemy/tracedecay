@@ -77,6 +77,7 @@ export default function CurationPanel({
     managedSkillsLoading,
     managedSkillsError,
     managedSkillActioning,
+    managedSkillExports,
     activity,
     activityLoading,
     activityError,
@@ -479,6 +480,7 @@ export default function CurationPanel({
             managedSkillsLoading={managedSkillsLoading}
             managedSkillsError={managedSkillsError}
             managedSkillActioning={managedSkillActioning}
+            managedSkillExports={managedSkillExports}
             loadFactProposals={loadFactProposals}
             loadManagedSkills={loadManagedSkills}
             loadManagedSkill={loadManagedSkill}

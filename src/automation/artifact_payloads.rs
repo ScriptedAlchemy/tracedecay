@@ -71,12 +71,29 @@ pub(super) fn traces_payload(ctx: &ArtifactPayloadContext<'_>) -> Value {
         "response_schema": ctx.request.contract.response_schema,
         "strict_json": ctx.request.contract.strict_json,
         "evidence_hash": ctx.record.evidence_hash,
+        "evidence_mode": context_evidence_mode(&ctx.request.context),
         "input_hash": ctx.record.input_hash,
         "output_hash": ctx.record.output_hash,
         "context_keys": ctx.request.context.as_object()
             .map(|object| object.keys().cloned().collect::<Vec<_>>())
             .unwrap_or_default(),
     })
+}
+
+/// Extracts the `evidence_mode` label from whichever evidence object the task
+/// placed in the request context (e.g. `session_reflection_evidence` or
+/// `skill_writer_evidence`), so traces distinguish session-replay-backed runs
+/// from grep-only runs. Null for tasks without a mode label.
+fn context_evidence_mode(context: &Value) -> Value {
+    context
+        .as_object()
+        .and_then(|object| {
+            object
+                .values()
+                .find_map(|value| value.get("evidence_mode").filter(|mode| mode.is_string()))
+        })
+        .cloned()
+        .unwrap_or(Value::Null)
 }
 
 pub(super) fn feedback_payload(ctx: &ArtifactPayloadContext<'_>, trace_ref: &Value) -> Value {

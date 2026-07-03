@@ -16,8 +16,9 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::sessions::shared::{
-    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools, paths_equal,
-    title_from_messages, StoredCursor,
+    append_location_metadata, append_tool_calls_metadata, append_usage_metadata,
+    content_storage_text_and_tools, path_belongs_to_project, title_from_messages, StoredCursor,
+    TranscriptLocation, TranscriptLocationMetadataKeys,
 };
 use crate::sessions::source::{
     collect_files_with_ext, stream_new_jsonl, ParsedTranscript, SessionDraft, TranscriptSource,
@@ -26,6 +27,11 @@ use crate::sessions::SessionMessageRecord;
 
 const PROVIDER: &str = "vibe";
 const MAX_SCAN_DEPTH: u8 = 4;
+const VIBE_LOCATION_KEYS: TranscriptLocationMetadataKeys = TranscriptLocationMetadataKeys::new(
+    "vibe_session_cwd",
+    "vibe_session_worktree",
+    "vibe_session_location_provenance",
+);
 
 /// Vibe session locator + parser.
 pub struct VibeSource {
@@ -77,7 +83,7 @@ impl TranscriptSource for VibeSource {
     ) -> Option<ParsedTranscript> {
         let meta_path = path.parent()?.join("meta.json");
         let meta = read_meta(&meta_path)?;
-        if !paths_equal(&meta.working_directory, project_root) {
+        if !path_belongs_to_project(&meta.working_directory, project_root) {
             return None;
         }
 
@@ -91,14 +97,11 @@ impl TranscriptSource for VibeSource {
 
         let project = project_root.to_string_lossy().to_string();
         let draft = SessionDraft {
-            session_id: meta.session_id,
+            session_id: meta.session_id.clone(),
             project_key: project.clone(),
             project_path: project,
             title: title_from_messages(&messages),
-            metadata_json: serde_json::to_string(&serde_json::json!({
-                "source": "vibe_messages",
-            }))
-            .ok(),
+            metadata_json: serde_json::to_string(&session_metadata(&meta)).ok(),
             parent_session_id: None,
             is_subagent: false,
             agent_id: None,
@@ -207,15 +210,34 @@ fn message_from_line(
         tool_names: (!tool_names.is_empty()).then(|| tool_names.join(",")),
         source_path: Some(path.to_string_lossy().to_string()),
         source_offset: Some(offset),
-        metadata_json: serde_json::to_string(&message_metadata(record)).ok(),
+        metadata_json: serde_json::to_string(&message_metadata(record, meta)).ok(),
     })
 }
 
-fn message_metadata(record: &Value) -> Value {
+fn session_metadata(meta: &VibeMeta) -> Value {
     let mut metadata = serde_json::Map::new();
     metadata.insert(
         "source".to_string(),
         Value::String("vibe_messages".to_string()),
+    );
+    append_location_metadata(
+        &mut metadata,
+        VIBE_LOCATION_KEYS,
+        TranscriptLocation::new(Some(&meta.working_directory), "session_meta"),
+    );
+    Value::Object(metadata)
+}
+
+fn message_metadata(record: &Value, meta: &VibeMeta) -> Value {
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        "source".to_string(),
+        Value::String("vibe_messages".to_string()),
+    );
+    append_location_metadata(
+        &mut metadata,
+        VIBE_LOCATION_KEYS,
+        TranscriptLocation::new(Some(&meta.working_directory), "session_meta"),
     );
     append_tool_calls_metadata(&mut metadata, record);
     if let Some(message) = record.get("message") {

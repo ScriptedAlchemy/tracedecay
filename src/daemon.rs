@@ -43,6 +43,63 @@ pub use service::{
     socket_path_or_default, uninstall_service, DaemonServiceSpec,
 };
 
+/// A host whose lifecycle hooks notify the daemon.
+///
+/// Kept shared between hook emitters and daemon-side parsing so new hosts
+/// cannot be accepted by one side and dropped by the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookAgent {
+    Claude,
+    Codex,
+    Cursor,
+    Kiro,
+}
+
+impl HookAgent {
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Cursor => "cursor",
+            Self::Kiro => "kiro",
+        }
+    }
+
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "claude" => Some(Self::Claude),
+            "codex" => Some(Self::Codex),
+            "cursor" => Some(Self::Cursor),
+            "kiro" => Some(Self::Kiro),
+            _ => None,
+        }
+    }
+
+    /// Marker file used to debounce this agent's incremental syncs.
+    pub fn sync_marker_file(self) -> &'static str {
+        match self {
+            Self::Claude => ".claude_post_tool_sync_at",
+            Self::Codex => ".codex_shell_sync_at",
+            Self::Cursor => ".cursor_shell_sync_at",
+            Self::Kiro => ".kiro_post_tool_sync_at",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookRouteMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonHookEvent {
     pub agent: String,
@@ -53,32 +110,41 @@ pub struct DaemonHookEvent {
     pub command: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<HookRouteMetadata>,
 }
 
 impl DaemonHookEvent {
     fn new(
-        agent: &'static str,
+        agent: HookAgent,
         event: &'static str,
         rel_paths: Vec<String>,
         command: Option<String>,
         cwd: Option<PathBuf>,
     ) -> Self {
         Self {
-            agent: agent.to_string(),
+            agent: agent.as_wire().to_string(),
             event: event.to_string(),
             rel_paths,
             command,
             cwd,
+            route: None,
         }
     }
 
+    #[must_use]
+    pub fn with_route(mut self, route: Option<HookRouteMetadata>) -> Self {
+        self.route = route;
+        self
+    }
+
     pub fn cursor_after_file_edit(rel_paths: Vec<String>) -> Self {
-        Self::new("cursor", "afterFileEdit", rel_paths, None, None)
+        Self::new(HookAgent::Cursor, "afterFileEdit", rel_paths, None, None)
     }
 
     pub fn cursor_after_shell_execution(command: String, cwd: PathBuf) -> Self {
         Self::new(
-            "cursor",
+            HookAgent::Cursor,
             "afterShellExecution",
             Vec::new(),
             Some(command),
@@ -87,16 +153,25 @@ impl DaemonHookEvent {
     }
 
     pub fn cursor_workspace_open(cwd: PathBuf) -> Self {
-        Self::new("cursor", "workspaceOpen", Vec::new(), None, Some(cwd))
-    }
-
-    pub fn codex_post_tool_use_edit(rel_paths: Vec<String>, cwd: PathBuf) -> Self {
-        Self::new("codex", "postToolUseEdit", rel_paths, None, Some(cwd))
-    }
-
-    pub fn codex_post_tool_use_shell(command: String, cwd: PathBuf) -> Self {
         Self::new(
-            "codex",
+            HookAgent::Cursor,
+            "workspaceOpen",
+            Vec::new(),
+            None,
+            Some(cwd),
+        )
+    }
+
+    /// A file-edit tool finished: request targeted sync of the edited paths.
+    pub fn post_tool_use_edit(agent: HookAgent, rel_paths: Vec<String>, cwd: PathBuf) -> Self {
+        Self::new(agent, "postToolUseEdit", rel_paths, None, Some(cwd))
+    }
+
+    /// A shell command finished: let the daemon classify it (branch add,
+    /// worktree add, incremental sync, or noop).
+    pub fn post_tool_use_shell(agent: HookAgent, command: String, cwd: PathBuf) -> Self {
+        Self::new(
+            agent,
             "postToolUseShell",
             Vec::new(),
             Some(command),
@@ -105,7 +180,7 @@ impl DaemonHookEvent {
     }
 
     pub fn kiro_post_tool_use(rel_paths: Vec<String>, cwd: Option<PathBuf>) -> Self {
-        Self::new("kiro", "postToolUse", rel_paths, None, cwd)
+        Self::new(HookAgent::Kiro, "postToolUse", rel_paths, None, cwd)
     }
 }
 
@@ -120,6 +195,8 @@ pub struct DaemonHandshake {
     pub scope_prefix: Option<String>,
     pub timings: bool,
     pub allow_init: bool,
+    #[serde(default)]
+    pub allow_initialize_root_routing: bool,
     pub client_identity: DaemonClientIdentity,
     /// Version of the tracedecay binary that opened this connection.
     ///
@@ -144,6 +221,7 @@ impl DaemonHandshake {
             scope_prefix,
             timings,
             allow_init,
+            allow_initialize_root_routing: false,
             client_identity: DaemonClientIdentity::current()?,
             client_version: binary_version().to_string(),
         })
@@ -367,12 +445,7 @@ fn safe_daemon_hook_rel_paths(paths: &[String]) -> Vec<String> {
 
 #[cfg(not(unix))]
 fn hook_marker_file(agent: &str) -> &'static str {
-    match agent {
-        "codex" => ".codex_shell_sync_at",
-        "cursor" => ".cursor_shell_sync_at",
-        "kiro" => ".kiro_post_tool_sync_at",
-        _ => ".daemon_hook_shell_sync_at",
-    }
+    HookAgent::from_wire(agent).map_or(".daemon_hook_shell_sync_at", HookAgent::sync_marker_file)
 }
 
 #[cfg(not(unix))]
@@ -733,14 +806,47 @@ pub async fn proxy_transport_to_daemon(
     replay_line: Option<String>,
     transport: &mut impl McpTransport,
 ) -> Result<()> {
+    let mut routed_handshake = handshake.clone();
     if let Some(line) = replay_line {
-        proxy_request_line_to_daemon(socket_path, handshake, &line, transport).await?;
+        update_proxy_handshake_from_initialize(&mut routed_handshake, &line).await;
+        proxy_request_line_to_daemon(socket_path, &routed_handshake, &line, transport).await?;
     }
 
     while let Some(line) = transport.read_line().await? {
-        proxy_request_line_to_daemon(socket_path, handshake, &line, transport).await?;
+        update_proxy_handshake_from_initialize(&mut routed_handshake, &line).await;
+        proxy_request_line_to_daemon(socket_path, &routed_handshake, &line, transport).await?;
     }
     Ok(())
+}
+
+#[cfg(unix)]
+async fn update_proxy_handshake_from_initialize(handshake: &mut DaemonHandshake, line: &str) {
+    if !handshake.allow_initialize_root_routing {
+        return;
+    }
+    let Ok(request) = serde_json::from_str::<JsonRpcRequest>(line.trim()) else {
+        return;
+    };
+    if request.method != "initialize" {
+        return;
+    }
+    let Some(registry) =
+        crate::global_db::GlobalDb::open_at(&handshake.client_identity.global_db_path).await
+    else {
+        return;
+    };
+    let Some(project_path) = crate::mcp::server::resolve_initialize_roots_project_path(
+        request.params.as_ref(),
+        Some(&registry),
+    )
+    .await
+    else {
+        return;
+    };
+    if handshake.project_path.as_deref() != Some(project_path.as_path()) {
+        handshake.scope_prefix = None;
+    }
+    handshake.project_path = Some(project_path);
 }
 
 #[cfg(unix)]
@@ -1165,8 +1271,12 @@ impl DaemonEngine {
         if let Some(server) = servers.get(&key) {
             let server = Arc::clone(server);
             drop(servers);
-            self.ensure_automation_scheduler(key, canonical_project_path, handshake.clone())
-                .await;
+            Box::pin(self.ensure_automation_scheduler(
+                key,
+                canonical_project_path,
+                handshake.clone(),
+            ))
+            .await;
             return Ok(server);
         }
 
@@ -1187,7 +1297,7 @@ impl DaemonEngine {
         .await;
         servers.insert(key.clone(), Arc::clone(&server));
         drop(servers);
-        self.ensure_automation_scheduler(key, canonical_project_path, handshake.clone())
+        Box::pin(self.ensure_automation_scheduler(key, canonical_project_path, handshake.clone()))
             .await;
         Ok(server)
     }
@@ -1205,21 +1315,25 @@ impl DaemonEngine {
             }
         }
 
-        let scheduler_configured =
-            match automation_scheduler_configured_for_project(&project_path, &handshake).await {
-                Ok(configured) => configured,
-                Err(e) => {
-                    log_daemon_event(
-                        "scheduler_config",
-                        &[
-                            ("project", project_path.display().to_string()),
-                            ("outcome", "error".to_string()),
-                            ("error", e.to_string()),
-                        ],
-                    );
-                    false
-                }
-            };
+        let scheduler_configured = match Box::pin(automation_scheduler_configured_for_project(
+            &project_path,
+            &handshake,
+        ))
+        .await
+        {
+            Ok(configured) => configured,
+            Err(e) => {
+                log_daemon_event(
+                    "scheduler_config",
+                    &[
+                        ("project", project_path.display().to_string()),
+                        ("outcome", "error".to_string()),
+                        ("error", e.to_string()),
+                    ],
+                );
+                false
+            }
+        };
         if scheduler_configured {
             self.start_automation_scheduler(key, project_path, handshake)
                 .await;
@@ -1364,7 +1478,7 @@ async fn run_automation_scheduler_tick(
         return Ok(());
     }
     let config = effective_automation_config_for_project(&cg, &handshake.client_identity).await?;
-    if !automation_scheduler_configured(&config) {
+    if !automation_scheduler_has_work(&cg, &config).await {
         log_daemon_event(
             "scheduler_tick",
             &[
@@ -1501,6 +1615,15 @@ async fn run_automation_scheduler_tick(
     if any_succeeded {
         log_automation_staged_if_pending(project_path, &cg.store_layout().dashboard_root).await;
     }
+    run_user_jobs_scheduler_pass(
+        project_path,
+        &handshake.client_identity.profile_root,
+        &cg,
+        &config,
+        &backend,
+        &mut first_error,
+    )
+    .await;
     match first_error {
         Some(err) => Err(err),
         None => Ok(()),
@@ -1526,7 +1649,7 @@ async fn automation_scheduler_configured_for_project(
 ) -> Result<bool> {
     let cg = open_existing_project_with_options(project_path, handshake.open_options()).await?;
     let config = effective_automation_config_for_project(&cg, &handshake.client_identity).await?;
-    Ok(automation_scheduler_configured(&config))
+    Ok(automation_scheduler_has_work(&cg, &config).await)
 }
 
 #[cfg(unix)]
@@ -1564,9 +1687,92 @@ fn automation_scheduler_configured(config: &crate::automation::config::Automatio
         match parse_schedule(task.schedule.as_deref()) {
             Ok(AutomationSchedule::Manual) | Err(_) => false,
             Ok(AutomationSchedule::ConfiguredInterval) => task.interval_secs.is_some(),
-            Ok(AutomationSchedule::Interval { .. }) => true,
+            Ok(AutomationSchedule::Interval { .. } | AutomationSchedule::Cron(_)) => true,
         }
     })
+}
+
+/// True when the scheduler loop has anything to do for this project: a
+/// scheduled fixed task or a schedulable user-defined job.
+#[cfg(unix)]
+async fn automation_scheduler_has_work(
+    cg: &crate::tracedecay::TraceDecay,
+    config: &crate::automation::config::AutomationConfig,
+) -> bool {
+    use crate::automation::config::{AutomationBackend, AutomationHostMode};
+
+    if automation_scheduler_configured(config) {
+        return true;
+    }
+    if !config.enabled
+        || config.host_mode == AutomationHostMode::DelegatedHost
+        || config.backend != AutomationBackend::CodexAppServer
+    {
+        return false;
+    }
+    crate::automation::jobs::jobs_configured_for_scheduler(&cg.store_layout().dashboard_root).await
+}
+
+/// Ticks every schedulable user-defined job with the same lock/cooldown
+/// discipline as the fixed tasks (enforced inside the job runner).
+#[cfg(unix)]
+async fn run_user_jobs_scheduler_pass(
+    project_path: &Path,
+    profile_root: &Path,
+    cg: &crate::tracedecay::TraceDecay,
+    config: &crate::automation::config::AutomationConfig,
+    backend: &crate::automation::backend::CodexAppServerBackend,
+    first_error: &mut Option<TraceDecayError>,
+) {
+    let dashboard_root = cg.store_layout().dashboard_root.clone();
+    let jobs = match crate::automation::jobs::load_jobs(&dashboard_root).await {
+        Ok(jobs) => jobs,
+        Err(e) => {
+            log_daemon_event(
+                "scheduler_user_jobs",
+                &[
+                    ("project", project_path.display().to_string()),
+                    ("outcome", "error".to_string()),
+                    ("error", e.to_string()),
+                ],
+            );
+            first_error.get_or_insert(e);
+            return;
+        }
+    };
+    for job in jobs
+        .iter()
+        .filter(|job| crate::automation::jobs::job_is_schedulable(job))
+    {
+        log_scheduler_task_start(
+            project_path,
+            crate::automation::backend::AgentTaskKind::UserJob,
+        );
+        match crate::automation::jobs::run_user_job_with_backend(
+            &dashboard_root,
+            config,
+            backend,
+            job,
+            crate::automation::jobs::UserJobRunOptions {
+                trigger: crate::automation::run_ledger::AutomationTrigger::Scheduler,
+                profile_root: Some(profile_root.to_path_buf()),
+                project_root: Some(project_path.to_path_buf()),
+                ..crate::automation::jobs::UserJobRunOptions::default()
+            },
+        )
+        .await
+        {
+            Ok(run) => log_daemon_scheduler_record(project_path, &run.ledger_record),
+            Err(e) => {
+                log_scheduler_task_error(
+                    project_path,
+                    crate::automation::backend::AgentTaskKind::UserJob,
+                    &e,
+                );
+                first_error.get_or_insert(e);
+            }
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -1876,6 +2082,7 @@ mod tests {
             scope_prefix: None,
             timings: false,
             allow_init: false,
+            allow_initialize_root_routing: false,
             client_identity: test_client_identity(),
             client_version: super::binary_version().to_string(),
         }
@@ -2166,6 +2373,136 @@ mod tests {
         assert_eq!(response["id"], json!(42));
         assert_eq!(response["result"]["ok"], json!(true));
         daemon.await.expect("fake daemon task");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn proxy_transport_carries_initialize_root_into_followup_handshake() {
+        let dir = TempDir::new().expect("temp dir");
+        let temp_root = dir.path().canonicalize().expect("canonical temp dir");
+        let active_root = temp_root.join("active");
+        let target_root = temp_root.join("target");
+        std::fs::create_dir_all(active_root.join("src")).expect("active src");
+        std::fs::create_dir_all(target_root.join("src")).expect("target src");
+        let active = active_root.canonicalize().expect("active root");
+        let target = target_root.canonicalize().expect("target root");
+        let socket = temp_root.join("daemon.sock");
+        let client_identity = test_client_identity_for(temp_root.join("profile"));
+        let open_options = crate::tracedecay::TraceDecayOpenOptions {
+            profile_root: Some(client_identity.profile_root.clone()),
+            global_db_path: Some(client_identity.global_db_path.clone()),
+        };
+
+        std::fs::write(active.join("src/active.rs"), "pub fn active_marker() {}\n")
+            .expect("active source");
+        std::fs::write(target.join("src/target.rs"), "pub fn target_marker() {}\n")
+            .expect("target source");
+
+        let active_cg =
+            crate::tracedecay::TraceDecay::init_with_options(&active, open_options.clone())
+                .await
+                .expect("active init");
+        active_cg.index_all().await.expect("active index");
+        let target_cg =
+            crate::tracedecay::TraceDecay::init_with_options(&target, open_options.clone())
+                .await
+                .expect("target init");
+        target_cg.index_all().await.expect("target index");
+        let registry = crate::global_db::GlobalDb::open_at(&client_identity.global_db_path)
+            .await
+            .expect("registry");
+        registry
+            .upsert_code_project("proj_active_proxy", &active, None, None, Some("main"))
+            .await
+            .expect("active project registry");
+        registry
+            .upsert_code_project("proj_target_proxy", &target, None, None, Some("main"))
+            .await
+            .expect("target project registry");
+
+        let listener = tokio::net::UnixListener::bind(&socket).expect("daemon socket");
+        let engine = super::DaemonEngine::default();
+        let accept_task = tokio::spawn(async move {
+            let mut tasks = Vec::new();
+            for _ in 0..2 {
+                let (stream, _addr) = listener.accept().await.expect("accept daemon client");
+                let engine = engine.clone();
+                tasks.push(tokio::spawn(async move {
+                    super::serve_socket_client(stream, engine)
+                        .await
+                        .expect("serve proxied client");
+                }));
+            }
+            for task in tasks {
+                task.await.expect("client task");
+            }
+        });
+
+        let (mut transport, sender, mut receiver) = crate::mcp::transport::ChannelTransport::new();
+        sender
+            .send(
+                serde_json::to_string(&json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "clientInfo": {"name": "codex", "version": "test"},
+                        "roots": [{"uri": format!("file://{}", target.display()), "name": "target"}]
+                    }
+                }))
+                .expect("initialize json"),
+            )
+            .expect("send initialize");
+        sender
+            .send(
+                serde_json::to_string(&json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "tracedecay_files",
+                        "arguments": {"format": "flat"}
+                    }
+                }))
+                .expect("tools/call json"),
+            )
+            .expect("send tools/call");
+        drop(sender);
+
+        let handshake = DaemonHandshake {
+            project_path: Some(active.clone()),
+            allow_initialize_root_routing: true,
+            client_identity,
+            ..test_handshake_defaults()
+        };
+        super::proxy_transport_to_daemon(&socket, &handshake, None, &mut transport)
+            .await
+            .expect("proxy transport");
+
+        let mut responses = Vec::new();
+        while let Ok(Some(line)) =
+            tokio::time::timeout(std::time::Duration::from_millis(100), receiver.recv()).await
+        {
+            responses.push(line);
+        }
+        let files_response = responses
+            .iter()
+            .map(|line| serde_json::from_str::<Value>(line.trim()).expect("response json"))
+            .find(|response| response["id"] == json!(2))
+            .expect("files response");
+        let text = files_response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("files text");
+        assert!(
+            text.contains("src/target.rs"),
+            "daemon proxy should route follow-up tools/call to initialize root, got {text}"
+        );
+        assert!(
+            !text.contains("src/active.rs"),
+            "daemon proxy should not keep using the original handshake project: {text}"
+        );
+
+        accept_task.await.expect("daemon accept task");
     }
 
     #[cfg(unix)]

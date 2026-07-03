@@ -422,6 +422,8 @@ async fn dashboard_job_skip_reason(
         AgentTaskKind::CombinedReview => {
             config.tasks.session_reflector.enabled && config.tasks.skill_writer.enabled
         }
+        // User jobs carry their own enabled flag; the job runner gates on it.
+        AgentTaskKind::UserJob => return Ok(None),
     };
     if !task_enabled {
         return Ok(Some(match task {
@@ -429,6 +431,7 @@ async fn dashboard_job_skip_reason(
             AgentTaskKind::SessionReflector => "session_reflector_disabled",
             AgentTaskKind::SkillWriter => "skill_writer_disabled",
             AgentTaskKind::CombinedReview => "combined_review_disabled",
+            AgentTaskKind::UserJob => "user_job_disabled",
         }));
     }
     Ok(None)
@@ -512,6 +515,7 @@ fn dashboard_task_label(task: AgentTaskKind) -> &'static str {
         AgentTaskKind::SessionReflector => "session-reflector",
         AgentTaskKind::SkillWriter => "skill-writer",
         AgentTaskKind::CombinedReview => "combined-review",
+        AgentTaskKind::UserJob => "user-job",
     }
 }
 

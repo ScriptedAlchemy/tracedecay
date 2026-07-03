@@ -14,6 +14,31 @@ use tokio::task::JoinHandle;
 use crate::diagnostics::lsp::broker::{CodeDiagnostic, DiagnosticSeverity};
 use crate::errors::{Result, TraceDecayError};
 
+const MIN_MESSAGE_IO_TIMEOUT: Duration = Duration::from_millis(250);
+const MIN_INITIALIZE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LspRefreshTimeouts {
+    refresh: Duration,
+    initialize_response: Duration,
+    message_io: Duration,
+    diagnostics_quiet: Duration,
+}
+
+impl LspRefreshTimeouts {
+    pub fn from_diagnostics_quiet_window(diagnostics_quiet: Duration) -> Self {
+        let message_io = diagnostics_quiet.max(MIN_MESSAGE_IO_TIMEOUT);
+        let initialize_response = message_io.max(MIN_INITIALIZE_RESPONSE_TIMEOUT);
+        let refresh = diagnostics_quiet.saturating_add(message_io);
+        Self {
+            refresh,
+            initialize_response,
+            message_io,
+            diagnostics_quiet,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LspDocument {
     pub language: String,
@@ -27,11 +52,13 @@ pub async fn collect_document_diagnostics(
     args: &[String],
     project_root: &Path,
     documents: Vec<LspDocument>,
-    diagnostics_timeout: Duration,
+    diagnostics_quiet_timeout: Duration,
 ) -> Result<Vec<CodeDiagnostic>> {
-    let mut client = StdioLspClient::start(command, args, project_root).await?;
+    let timeouts = LspRefreshTimeouts::from_diagnostics_quiet_window(diagnostics_quiet_timeout);
+    let mut client =
+        StdioLspClient::start_with_timeouts(command, args, project_root, timeouts).await?;
     client
-        .collect_document_diagnostics(project_root, documents, diagnostics_timeout)
+        .collect_document_diagnostics(project_root, documents, timeouts)
         .await
 }
 
@@ -45,7 +72,12 @@ pub struct StdioLspClient {
 }
 
 impl StdioLspClient {
-    pub async fn start(command: &str, args: &[String], project_root: &Path) -> Result<Self> {
+    pub async fn start_with_timeouts(
+        command: &str,
+        args: &[String],
+        project_root: &Path,
+        timeouts: LspRefreshTimeouts,
+    ) -> Result<Self> {
         let mut child = tokio::process::Command::new(command)
             .args(args)
             .current_dir(project_root)
@@ -71,7 +103,7 @@ impl StdioLspClient {
         let stderr_capture = Arc::new(Mutex::new(Vec::new()));
         let stderr_task = spawn_stderr_capture(stderr, Arc::clone(&stderr_capture));
 
-        write_message(
+        write_message_with_timeout(
             &mut stdin,
             json!({
                 "jsonrpc": "2.0",
@@ -94,22 +126,36 @@ impl StdioLspClient {
                     }]
                 }
             }),
+            timeouts.message_io,
         )
         .await?;
-        if let Err(err) = wait_for_initialize(&mut reader).await {
+        let initialize_result = tokio::time::timeout(
+            timeouts.initialize_response,
+            wait_for_initialize(&mut reader),
+        )
+        .await;
+        if let Err(err) = initialize_result.unwrap_or_else(|_| {
+            Err(TraceDecayError::Config {
+                message: format!(
+                    "LSP server '{command}' initialize timed out after {} ms",
+                    timeouts.initialize_response.as_millis()
+                ),
+            })
+        }) {
             let _ = child.start_kill();
             let _ = child.wait().await;
+            let _ = stderr_task.await;
             let stderr = captured_stderr(&stderr_capture).await;
-            stderr_task.abort();
             return Err(enrich_start_error(command, err, &stderr));
         }
-        write_message(
+        write_message_with_timeout(
             &mut stdin,
             json!({
                 "jsonrpc": "2.0",
                 "method": "initialized",
                 "params": {}
             }),
+            timeouts.message_io,
         )
         .await?;
 
@@ -127,15 +173,17 @@ impl StdioLspClient {
         &mut self,
         project_root: &Path,
         documents: Vec<LspDocument>,
-        diagnostics_timeout: Duration,
+        timeouts: LspRefreshTimeouts,
     ) -> Result<Vec<CodeDiagnostic>> {
         let mut uri_to_document = BTreeMap::new();
+        let refresh_deadline = tokio::time::Instant::now() + timeouts.refresh;
         for document in &documents {
             let uri = file_uri(&project_root.join(&document.relative_path));
             uri_to_document.insert(uri.clone(), document.clone());
             let next_version = self.document_versions.get(&uri).copied().unwrap_or(0) + 1;
             if next_version == 1 {
-                write_message(
+                let write_timeout = refresh_remaining(refresh_deadline, timeouts)?;
+                write_message_with_timeout(
                     &mut self.stdin,
                     json!({
                         "jsonrpc": "2.0",
@@ -149,11 +197,13 @@ impl StdioLspClient {
                             }
                         }
                     }),
+                    write_timeout,
                 )
                 .await?;
             }
             let change_version = next_version + 1;
-            write_message(
+            let write_timeout = refresh_remaining(refresh_deadline, timeouts)?;
+            write_message_with_timeout(
                 &mut self.stdin,
                 json!({
                     "jsonrpc": "2.0",
@@ -168,24 +218,30 @@ impl StdioLspClient {
                         }]
                     }
                 }),
+                write_timeout,
             )
             .await?;
             self.document_versions.insert(uri, change_version);
         }
 
         let mut diagnostics_by_uri: BTreeMap<String, Vec<CodeDiagnostic>> = BTreeMap::new();
-        let deadline = tokio::time::Instant::now() + diagnostics_timeout;
+        let quiet_deadline = tokio::time::Instant::now() + timeouts.diagnostics_quiet;
         loop {
             let now = tokio::time::Instant::now();
-            if now >= deadline {
+            if now >= quiet_deadline {
                 break;
             }
-            let remaining = deadline.saturating_duration_since(now);
+            if now >= refresh_deadline {
+                return Err(refresh_timed_out(timeouts));
+            }
+            let read_deadline = quiet_deadline.min(refresh_deadline);
             let message =
-                match tokio::time::timeout(remaining, read_message(&mut self.reader)).await {
-                    Ok(Ok(Some(message))) => message,
-                    Ok(Ok(None)) | Err(_) => break,
-                    Ok(Err(err)) => return Err(err),
+                match read_message_until(&mut self.reader, read_deadline, timeouts).await? {
+                    Some(message) => message,
+                    None if read_deadline == refresh_deadline => {
+                        return Err(refresh_timed_out(timeouts));
+                    }
+                    None => break,
                 };
             if message.method.as_deref() != Some("textDocument/publishDiagnostics") {
                 continue;
@@ -287,6 +343,43 @@ async fn write_message(stdin: &mut tokio::process::ChildStdin, value: Value) -> 
     })
 }
 
+async fn write_message_with_timeout(
+    stdin: &mut tokio::process::ChildStdin,
+    value: Value,
+    timeout: Duration,
+) -> Result<()> {
+    tokio::time::timeout(timeout, write_message(stdin, value))
+        .await
+        .map_err(|_| TraceDecayError::Config {
+            message: format!(
+                "LSP message write timed out after {} ms",
+                timeout.as_millis()
+            ),
+        })?
+}
+
+fn refresh_remaining(
+    refresh_deadline: tokio::time::Instant,
+    timeouts: LspRefreshTimeouts,
+) -> Result<Duration> {
+    let now = tokio::time::Instant::now();
+    if now >= refresh_deadline {
+        return Err(refresh_timed_out(timeouts));
+    }
+    Ok(timeouts
+        .message_io
+        .min(refresh_deadline.saturating_duration_since(now)))
+}
+
+fn refresh_timed_out(timeouts: LspRefreshTimeouts) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!(
+            "LSP diagnostics collection timed out after {} ms",
+            timeouts.refresh.as_millis()
+        ),
+    }
+}
+
 async fn read_message(
     reader: &mut BufReader<tokio::process::ChildStdout>,
 ) -> Result<Option<JsonRpcMessage>> {
@@ -330,6 +423,105 @@ async fn read_message(
         .map_err(|e| TraceDecayError::Config {
             message: format!("failed to parse LSP message: {e}"),
         })
+}
+
+async fn read_message_until(
+    reader: &mut BufReader<tokio::process::ChildStdout>,
+    deadline: tokio::time::Instant,
+    timeouts: LspRefreshTimeouts,
+) -> Result<Option<JsonRpcMessage>> {
+    let mut header = Vec::new();
+    while !header.ends_with(b"\r\n\r\n") && !header.ends_with(b"\n\n") {
+        let Some(byte) = read_byte_until(reader, deadline, !header.is_empty(), timeouts).await?
+        else {
+            return Ok(None);
+        };
+        header.push(byte);
+        if header.len() > 16 * 1024 {
+            return Err(TraceDecayError::Config {
+                message: "LSP message header exceeded 16 KiB".to_string(),
+            });
+        }
+    }
+
+    let header = String::from_utf8_lossy(&header);
+    let content_length = header.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("content-length")
+            .then(|| value.trim().parse::<usize>().ok())
+            .flatten()
+    });
+    let Some(length) = content_length else {
+        return Err(TraceDecayError::Config {
+            message: "LSP message missing Content-Length header".to_string(),
+        });
+    };
+
+    let mut body = vec![0_u8; length];
+    let mut read = 0;
+    while read < length {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Err(refresh_timed_out(timeouts));
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        let bytes_read = match tokio::time::timeout(remaining, reader.read(&mut body[read..])).await
+        {
+            Ok(Ok(bytes_read)) => bytes_read,
+            Ok(Err(err)) => {
+                return Err(TraceDecayError::Config {
+                    message: format!("failed to read LSP body: {err}"),
+                });
+            }
+            Err(_) => return Err(refresh_timed_out(timeouts)),
+        };
+        if bytes_read == 0 {
+            return Err(TraceDecayError::Config {
+                message: "LSP server closed before completing message body".to_string(),
+            });
+        }
+        read += bytes_read;
+    }
+
+    serde_json::from_slice(&body)
+        .map(Some)
+        .map_err(|e| TraceDecayError::Config {
+            message: format!("failed to parse LSP message: {e}"),
+        })
+}
+
+async fn read_byte_until(
+    reader: &mut BufReader<tokio::process::ChildStdout>,
+    deadline: tokio::time::Instant,
+    partial_message: bool,
+    timeouts: LspRefreshTimeouts,
+) -> Result<Option<u8>> {
+    let now = tokio::time::Instant::now();
+    if now >= deadline {
+        return if partial_message {
+            Err(refresh_timed_out(timeouts))
+        } else {
+            Ok(None)
+        };
+    }
+    let mut byte = [0_u8; 1];
+    match tokio::time::timeout(
+        deadline.saturating_duration_since(now),
+        reader.read(&mut byte),
+    )
+    .await
+    {
+        Ok(Ok(0)) if partial_message => Err(TraceDecayError::Config {
+            message: "LSP server closed before completing message header".to_string(),
+        }),
+        Ok(Ok(0)) => Ok(None),
+        Ok(Ok(_)) => Ok(Some(byte[0])),
+        Ok(Err(err)) => Err(TraceDecayError::Config {
+            message: format!("failed to read LSP header: {err}"),
+        }),
+        Err(_) if partial_message => Err(refresh_timed_out(timeouts)),
+        Err(_) => Ok(None),
+    }
 }
 
 fn file_uri(path: &Path) -> String {

@@ -6,7 +6,7 @@
 //! allowing AI assistants to query the code graph interactively.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,16 +15,20 @@ use serde_json::{json, Value};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
+use crate::mcp::project_route::{mcp_analytics_session_id, HookProjectRouteCache};
 use crate::mcp::response_handles::{
     cleanup_expired_response_handles, response_handle_stats_json, RESPONSE_RETRIEVE_TOOL,
 };
-use crate::mcp::tool_analytics::{mcp_tool_analytics_event, McpToolAnalyticsEvent};
+use crate::mcp::tool_analytics::{
+    hook_route_analytics_event, mcp_tool_analytics_event, McpToolAnalyticsEvent,
+};
 use crate::path_tree::format_compact_annotated_path_list;
 use crate::tracedecay::TraceDecay;
 
 use super::hook_events::{self, HookAgent, HookEventPlan};
 use super::tools::{
-    explore_call_budget, get_tool_definitions_with_budget, handle_tool_call_with_registry,
+    explore_call_budget, get_tool_definitions_with_budget,
+    handle_tool_call_with_registry_and_implicit_project, ToolCallRegistryOptions,
 };
 use super::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
 
@@ -159,6 +163,73 @@ impl ServerStats {
             errors: AtomicU64::new(0),
         }
     }
+}
+
+#[derive(Default)]
+struct ConnectionRouteState {
+    implicit_project_path: Option<PathBuf>,
+}
+
+impl ConnectionRouteState {
+    async fn observe_initialize(&mut self, params: Option<&Value>, registry_db: Option<&GlobalDb>) {
+        self.implicit_project_path =
+            resolve_initialize_roots_project_path(params, registry_db).await;
+    }
+
+    fn implicit_project_path(&self) -> Option<&Path> {
+        self.implicit_project_path.as_deref()
+    }
+}
+
+pub(crate) async fn resolve_initialize_roots_project_path(
+    params: Option<&Value>,
+    registry_db: Option<&GlobalDb>,
+) -> Option<PathBuf> {
+    let roots = initialize_root_paths(params);
+    if roots.is_empty() {
+        return None;
+    }
+    let registry_db = registry_db?;
+    let projects = registry_db.search_code_projects("", usize::MAX).await;
+    for root in roots {
+        if let Some(project_path) = match_initialize_root_to_registered_project(&root, &projects) {
+            return Some(project_path);
+        }
+    }
+    None
+}
+
+fn initialize_root_paths(params: Option<&Value>) -> Vec<PathBuf> {
+    params
+        .and_then(|p| p.get("roots"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|root| {
+            let uri = root.get("uri").and_then(Value::as_str)?;
+            crate::serve::local_path_from_mcp_root_uri(uri)
+        })
+        .collect()
+}
+
+fn match_initialize_root_to_registered_project(
+    root: &Path,
+    projects: &[crate::global_db::CodeProjectRecord],
+) -> Option<PathBuf> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut matches: Vec<_> = projects
+        .iter()
+        .filter_map(|project| {
+            let project_path = PathBuf::from(&project.canonical_root);
+            let project_path = project_path
+                .canonicalize()
+                .unwrap_or_else(|_| project_path.clone());
+            (root == project_path || root.starts_with(&project_path))
+                .then(|| (project_path.components().count(), project_path))
+        })
+        .collect();
+    matches.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    matches.into_iter().map(|(_, path)| path).next()
 }
 
 /// Cache duration for version checks (15 minutes).
@@ -766,6 +837,32 @@ impl McpServer {
         self.cg.read().await.clone()
     }
 
+    async fn update_hook_workspace_route(
+        &self,
+        event: &hook_events::HookEvent,
+        route_cache: &mut HookProjectRouteCache,
+    ) {
+        let route_cwd = HookProjectRouteCache::route_cwd(event);
+        let project_path = match route_cwd {
+            Some(cwd) => self.registered_project_containing_path(cwd).await,
+            None => None,
+        };
+        route_cache.observe_hook_event(event, project_path);
+    }
+
+    async fn registered_project_containing_path(&self, cwd: &Path) -> Option<String> {
+        let registry = self.registry_db.as_deref()?;
+        let mut candidate = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+        loop {
+            if let Some(context) = registry.project_registry_context_by_alias(&candidate).await {
+                return Some(context.project.canonical_root);
+            }
+            if !candidate.pop() {
+                return None;
+            }
+        }
+    }
+
     /// Detects mid-session branch drift and reopens the served instance
     /// onto the live branch's DB, returning the instance the caller should
     /// use for this request.
@@ -1267,6 +1364,8 @@ impl McpServer {
         listen_for_process_signals: bool,
         timings_override: Option<bool>,
     ) -> Result<()> {
+        let mut route_cache = HookProjectRouteCache::default();
+
         // Register the SIGTERM listener once before entering the loop so
         // there is no window between iterations where a SIGTERM is delivered
         // but no handler is installed (which would cause silent loss of the
@@ -1277,6 +1376,8 @@ impl McpServer {
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
                 .expect("failed to register SIGTERM handler")
         });
+
+        let mut connection_route = ConnectionRouteState::default();
 
         loop {
             let line: String = {
@@ -1347,9 +1448,19 @@ impl McpServer {
 
             let response = match parsed {
                 Ok(request) => {
-                    self.handle_request_with_timings(
+                    if matches!(classify_mcp_method(&request.method), McpMethod::Initialize) {
+                        connection_route
+                            .observe_initialize(
+                                request.params.as_ref(),
+                                self.registry_db.as_deref(),
+                            )
+                            .await;
+                    }
+                    self.handle_request_with_timings_and_implicit_project(
                         &request,
                         timings_override.unwrap_or_else(|| self.timings_enabled()),
+                        &mut route_cache,
+                        connection_route.implicit_project_path(),
                     )
                     .await
                 }
@@ -1472,7 +1583,8 @@ impl McpServer {
     ///
     /// Returns `None` for notifications (requests without an `id`).
     pub(crate) async fn handle_request(&self, request: &JsonRpcRequest) -> Option<JsonRpcResponse> {
-        self.handle_request_with_timings(request, self.timings_enabled())
+        let mut route_cache = HookProjectRouteCache::default();
+        self.handle_request_with_timings(request, self.timings_enabled(), &mut route_cache)
             .await
     }
 
@@ -1480,6 +1592,23 @@ impl McpServer {
         &self,
         request: &JsonRpcRequest,
         timings_enabled: bool,
+        route_cache: &mut HookProjectRouteCache,
+    ) -> Option<JsonRpcResponse> {
+        self.handle_request_with_timings_and_implicit_project(
+            request,
+            timings_enabled,
+            route_cache,
+            None,
+        )
+        .await
+    }
+
+    async fn handle_request_with_timings_and_implicit_project(
+        &self,
+        request: &JsonRpcRequest,
+        timings_enabled: bool,
+        route_cache: &mut HookProjectRouteCache,
+        implicit_project_path: Option<&Path>,
     ) -> Option<JsonRpcResponse> {
         debug_assert!(
             !request.method.is_empty(),
@@ -1490,7 +1619,7 @@ impl McpServer {
             *counts.entry(request.method.clone()).or_insert(0) += 1;
         }
         if matches!(classify_mcp_method(&request.method), McpMethod::HookEvent) {
-            self.handle_hook_event_notification(request.params.as_ref())
+            self.handle_hook_event_notification(request.params.as_ref(), route_cache)
                 .await;
             return None;
         }
@@ -1505,8 +1634,14 @@ impl McpServer {
             McpMethod::InitializedAck | McpMethod::HookEvent => None,
             McpMethod::ToolsList => Some(self.handle_tools_list(id).await),
             McpMethod::ToolsCall => Some(
-                self.handle_tools_call(id, request.params.as_ref(), timings_enabled)
-                    .await,
+                self.handle_tools_call(
+                    id,
+                    request.params.as_ref(),
+                    timings_enabled,
+                    route_cache,
+                    implicit_project_path,
+                )
+                .await,
             ),
             McpMethod::ResourcesList => Some(Self::handle_resources_list(id)),
             McpMethod::ResourcesRead => Some(
@@ -1531,13 +1666,19 @@ impl McpServer {
         result
     }
 
-    async fn handle_hook_event_notification(&self, params: Option<&Value>) {
+    async fn handle_hook_event_notification(
+        &self,
+        params: Option<&Value>,
+        route_cache: &mut HookProjectRouteCache,
+    ) {
         let Some(event) = hook_events::parse_hook_event(params) else {
             return;
         };
         let cg = self.reopen_if_branch_drifted().await;
         let root = cg.project_root().to_path_buf();
+        self.update_hook_workspace_route(&event, route_cache).await;
         let current_branch = crate::branch::current_branch(&root);
+        self.record_hook_route_analytics(&root, &event, current_branch.as_deref());
         let plan = hook_events::plan_hook_event(&event, &root, current_branch.as_deref());
         self.run_hook_event_plan(cg, &root, plan).await;
     }
@@ -1879,6 +2020,8 @@ impl McpServer {
         id: Value,
         params: Option<&Value>,
         timings_enabled: bool,
+        route_cache: &HookProjectRouteCache,
+        implicit_project_path: Option<&Path>,
     ) -> JsonRpcResponse {
         let Some(params) = params else {
             return JsonRpcResponse::error(
@@ -1931,7 +2074,7 @@ impl McpServer {
         } else {
             None
         };
-        let mut handler_arguments = arguments;
+        let mut handler_arguments = route_cache.apply_to_tool_arguments(tool_name, arguments);
         if crate::analytics::is_skill_view_tool(tool_name) {
             if let Some(request_id) = json_rpc_request_id_string(&id) {
                 if let Some(map) = handler_arguments.as_object_mut() {
@@ -1940,14 +2083,17 @@ impl McpServer {
             }
         }
 
-        let dispatch_outcome = handle_tool_call_with_registry(
+        let dispatch_outcome = handle_tool_call_with_registry_and_implicit_project(
             &cg,
             tool_name,
             handler_arguments,
             server_stats,
             self.scope_prefix(),
-            self.registry_db.as_deref(),
-            self.allow_default_registry_fallback,
+            ToolCallRegistryOptions {
+                global_db: self.registry_db.as_deref(),
+                allow_default_registry_fallback: self.allow_default_registry_fallback,
+                implicit_project_path,
+            },
         )
         .await;
         let handler_elapsed_us = handler_start.map(|t| t.elapsed().as_micros() as u64);
@@ -2236,6 +2382,30 @@ impl McpServer {
         });
     }
 
+    fn record_hook_route_analytics(
+        &self,
+        project_root: &std::path::Path,
+        event: &hook_events::HookEvent,
+        current_branch: Option<&str>,
+    ) {
+        let Some(event) = hook_route_analytics_event(
+            project_root,
+            event,
+            current_branch,
+            crate::tracedecay::current_timestamp(),
+        ) else {
+            return;
+        };
+        let Some(gdb) = self.global_db.clone() else {
+            return;
+        };
+        self.spawn_observed_ledger_write(async move {
+            if let Err(e) = gdb.append_analytics_event(&event).await {
+                eprintln!("[tracedecay] hook route analytics insert failed: {e}");
+            }
+        });
+    }
+
     fn spawn_observed_ledger_write<F>(&self, future: F)
     where
         F: std::future::Future<Output = ()> + Send + 'static,
@@ -2318,24 +2488,6 @@ impl McpServer {
 
         stats
     }
-}
-
-fn mcp_analytics_session_id(arguments: &Value) -> Option<String> {
-    fn string_field(value: &Value, key: &str) -> Option<String> {
-        value
-            .get(key)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(ToOwned::to_owned)
-    }
-
-    [Some(arguments), arguments.get("_meta")]
-        .into_iter()
-        .flatten()
-        .find_map(|value| {
-            string_field(value, "session_id").or_else(|| string_field(value, "sessionId"))
-        })
 }
 
 fn json_rpc_request_id_string(id: &Value) -> Option<String> {

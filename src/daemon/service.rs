@@ -943,13 +943,13 @@ mod tests {
         let _data_dir_guard = EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, profile.path());
 
         let status = super::service_status(&PathBuf::from("/tmp/tracedecay.sock"));
+        let expected_log = crate::config::user_data_dir()
+            .expect("user data dir")
+            .join("daemon.err.log");
 
         assert!(status.contains("service-detail: launchctl print gui/"));
         assert!(status.contains("/com.tracedecay.daemon"));
-        assert!(status.contains(&format!(
-            "logs: tail -f \"{}\"",
-            profile.path().join("daemon.err.log").display()
-        )));
+        assert!(status.contains(&format!("logs: tail -f \"{}\"", expected_log.display())));
     }
 
     #[cfg(unix)]
@@ -1375,19 +1375,22 @@ mod tests {
             crate::config::USER_DATA_DIR_ENV,
             profile.path().join(".tracedecay"),
         );
+        let expected_socket = crate::config::user_data_dir()
+            .expect("user data dir")
+            .join("daemon.sock");
 
         {
             let _cwd_guard = CurrentDirGuard::set(project_a.path());
             assert_eq!(
                 super::default_socket_path().expect("default socket path"),
-                profile.path().join(".tracedecay/daemon.sock")
+                expected_socket
             );
         }
         {
             let _cwd_guard = CurrentDirGuard::set(project_b.path());
             assert_eq!(
                 super::default_socket_path().expect("default socket path"),
-                profile.path().join(".tracedecay/daemon.sock")
+                expected_socket
             );
         }
 
