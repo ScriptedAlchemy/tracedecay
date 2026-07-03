@@ -106,6 +106,17 @@ fn mentions_tool(haystack: &str, tool_name: &str) -> bool {
     false
 }
 
+/// Collects every flat `*.md` command body under a commands directory.
+fn command_bodies(commands_root: &Path) -> Vec<String> {
+    std::fs::read_dir(commands_root)
+        .unwrap_or_else(|e| panic!("read {}: {e}", commands_root.display()))
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("md"))
+        .map(|path| std::fs::read_to_string(&path).expect("read command body"))
+        .collect()
+}
+
 /// Collects every `SKILL.md` body under the given skills-root directories.
 fn skill_bodies(skills_roots: &[PathBuf]) -> Vec<String> {
     let mut bodies = Vec::new();
@@ -130,20 +141,33 @@ fn skill_bodies(skills_roots: &[PathBuf]) -> Vec<String> {
 fn every_mcp_tool_is_taught_by_at_least_one_bundled_skill() {
     let plugin = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin");
     // Codex/Claude deploy the 30 canonical skills under plugin/skills. Cursor
-    // deploys the 17 shared skills plus the 13 dispatcher overlays. Both host
-    // views must teach every MCP tool. `plugin/skills` alone (canonical, 30)
-    // is a superset of the shared 17, so checking `plugin/skills` covers the
-    // Codex/Claude view; adding the cursor overlay covers the Cursor view's
-    // dispatcher bodies (which differ from the canonical dispatcher form).
-    let host_views: &[(&str, Vec<PathBuf>)] = &[
-        ("codex/claude (canonical)", vec![plugin.join("skills")]),
-        (
-            "cursor (shared + overlay)",
-            vec![plugin.join("skills"), plugin.join("overlays/cursor/skills")],
-        ),
+    // deploys the 17 shared model-invocable skills plus the 13 workflow slugs
+    // as native commands (`overlays/cursor/commands`). Both host views must
+    // teach every MCP tool. `plugin/skills` alone (canonical, 30) is a superset
+    // of the shared 17 plus the canonical dispatcher bodies, so it covers the
+    // Codex/Claude view; the Cursor view is the 17 shared skills plus the 13
+    // command bodies (which carry the workflow tool mentions Cursor ships).
+    let codex_claude_bodies = skill_bodies(&[plugin.join("skills")]);
+    let mut cursor_bodies: Vec<String> = std::fs::read_dir(plugin.join("skills"))
+        .expect("read plugin/skills")
+        .flatten()
+        .filter(|entry| {
+            !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("tracedecay-")
+        })
+        .map(|entry| entry.path().join("SKILL.md"))
+        .filter(|path| path.is_file())
+        .map(|path| std::fs::read_to_string(&path).expect("read shared skill"))
+        .collect();
+    cursor_bodies.extend(command_bodies(&plugin.join("overlays/cursor/commands")));
+
+    let host_views: &[(&str, Vec<String>)] = &[
+        ("codex/claude (canonical)", codex_claude_bodies),
+        ("cursor (shared skills + commands)", cursor_bodies),
     ];
-    for (view, roots) in host_views {
-        let bodies = skill_bodies(roots);
+    for (view, bodies) in host_views {
         let mut uncovered: Vec<String> = Vec::new();
         for def in get_tool_definitions() {
             if SKILL_COVERAGE_EXCEPTIONS.contains(&def.name.as_str()) {

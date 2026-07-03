@@ -7,11 +7,14 @@
 > `plugin/.claude-plugin/`; per-host hooks are `plugin/hooks/hooks-<host>.json`;
 > MCP configs are `plugin/.mcp.json` (Claude/Codex) and `plugin/mcp-cursor.json`
 > (Cursor, deployed as `mcp.json`); READMEs are `plugin/README-<host>.md`; and
-> Cursor's 13 slash dispatchers live as an overlay at
-> `plugin/overlays/cursor/skills/`. The composed per-host deploy set is owned by
-> `src/agents/plugin_bundle.rs`. Each host still installs a byte-identical tree
-> to before. Sections below that describe cross-bundle *parity/mirroring* are
-> historical — with one shared tree there is nothing to keep in sync.
+> Cursor's 13 workflow slugs ship as native Cursor 1.6+ slash commands
+> (`plugin/overlays/cursor/commands/*.md`, deployed to `commands/` and declared
+> by the manifest's `commands` key), *not* as `disable-model-invocation`
+> dispatcher skills. Cursor's shared skill set is therefore the 17 canonical
+> model-invocable skills, byte-identical to Claude/Codex. The composed per-host
+> deploy set is owned by `src/agents/plugin_bundle.rs`. Sections below that
+> describe cross-bundle *parity/mirroring* are historical — with one shared tree
+> there is nothing to keep in sync.
 
 How the bundled agent plugins (shared `plugin/` tree) and their
 skills are validated, where each check runs, and how to extend the system
@@ -102,9 +105,11 @@ skilldoctor, skillkit) and Cursor's skills docs:
 - **File hygiene:** no BOM, CRLF, tabs, or trailing whitespace; exactly one
   trailing newline; balanced code fences; no placeholder text; non-empty
   body.
-- **Heading conventions:** exactly one H1; no skipped heading levels; a
-  slash-form H1 (`# /slug`) must match the skill `name` and requires
-  `disable-model-invocation: true`.
+- **Heading conventions:** exactly one H1; no skipped heading levels;
+  model-invocable skills use a plain-title H1 (never the slash form). The
+  Cursor native commands (`plugin/overlays/cursor/commands/*.md`) are linted
+  separately: each must open with a `# /slug` H1 matching its file name and
+  reference only bundled skills and live MCP tools.
 - **Name/description quality:** no reserved `claude`/`anthropic` prefixes;
   descriptions ≥ 50 chars, unique across the bundle, ending in terminal
   punctuation, with no angle brackets.

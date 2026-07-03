@@ -8,11 +8,12 @@
 //!
 //! Layout of `plugin/`:
 //! - `plugin/skills/*/SKILL.md` — the 17 shared model-invocable skills **plus**
-//!   the 13 canonical (`claude`/`codex`) workflow dispatchers.
-//! - `plugin/overlays/cursor/skills/tracedecay-*/SKILL.md` — the Cursor-only
-//!   dispatcher form (`disable-model-invocation: true`, `/slug` H1). Cursor
-//!   deploys these **in place of** the canonical dispatcher form, at the same
-//!   `skills/tracedecay-*/SKILL.md` deploy path.
+//!   the 13 canonical (`claude`/`codex`) workflow dispatcher skills. Cursor
+//!   deploys only the 17 model-invocable skills (not the dispatcher skills);
+//!   its explicit dispatch is native commands (below).
+//! - `plugin/overlays/cursor/commands/tracedecay-*.md` — Cursor 1.6+ native
+//!   slash commands, one per workflow slug, deployed to `commands/<slug>.md`.
+//!   These replace the old Cursor dispatcher *skills*.
 //! - `plugin/agents/*.md` — Claude-form subagents (deployed by Claude).
 //! - `plugin/overlays/cursor/agents/*.md` — Cursor-form subagents.
 //! - `plugin/commands/*.md` — Claude slash commands.
@@ -179,61 +180,64 @@ const CANONICAL_DISPATCHER_FILES: &[PluginFile] = &[
     ),
 ];
 
-/// Cursor's dispatcher overlay: the same 13 slugs, in Cursor slash-dispatcher
-/// form (`disable-model-invocation: true`). Deployed **at the same paths** as
-/// the canonical dispatchers, overriding them for Cursor only.
-const CURSOR_DISPATCHER_FILES: &[PluginFile] = &[
+/// Cursor's native slash commands: the same 13 workflow slugs, re-expressed as
+/// Cursor 1.6+ `commands/` entries (no `disable-model-invocation` skill — these
+/// are commands, not skills). Cursor deploys these to `commands/<slug>.md` and
+/// ships the shared skill set *without* the canonical `tracedecay-*` dispatcher
+/// skills, so Cursor's shared skills are byte-identical to Claude/Codex and its
+/// explicit dispatch is native commands.
+const CURSOR_COMMAND_FILES: &[PluginFile] = &[
     plugin_file!(
-        "skills/tracedecay-audit-safety/SKILL.md",
-        "overlays/cursor/skills/tracedecay-audit-safety/SKILL.md"
+        "commands/tracedecay-audit-safety.md",
+        "overlays/cursor/commands/tracedecay-audit-safety.md"
     ),
     plugin_file!(
-        "skills/tracedecay-check-health/SKILL.md",
-        "overlays/cursor/skills/tracedecay-check-health/SKILL.md"
+        "commands/tracedecay-check-health.md",
+        "overlays/cursor/commands/tracedecay-check-health.md"
     ),
     plugin_file!(
-        "skills/tracedecay-clean-dead-code/SKILL.md",
-        "overlays/cursor/skills/tracedecay-clean-dead-code/SKILL.md"
+        "commands/tracedecay-clean-dead-code.md",
+        "overlays/cursor/commands/tracedecay-clean-dead-code.md"
     ),
     plugin_file!(
-        "skills/tracedecay-compare-branches/SKILL.md",
-        "overlays/cursor/skills/tracedecay-compare-branches/SKILL.md"
+        "commands/tracedecay-compare-branches.md",
+        "overlays/cursor/commands/tracedecay-compare-branches.md"
     ),
     plugin_file!(
-        "skills/tracedecay-curate-memory/SKILL.md",
-        "overlays/cursor/skills/tracedecay-curate-memory/SKILL.md"
+        "commands/tracedecay-curate-memory.md",
+        "overlays/cursor/commands/tracedecay-curate-memory.md"
     ),
     plugin_file!(
-        "skills/tracedecay-draft-commit/SKILL.md",
-        "overlays/cursor/skills/tracedecay-draft-commit/SKILL.md"
+        "commands/tracedecay-draft-commit.md",
+        "overlays/cursor/commands/tracedecay-draft-commit.md"
     ),
     plugin_file!(
-        "skills/tracedecay-find-impact/SKILL.md",
-        "overlays/cursor/skills/tracedecay-find-impact/SKILL.md"
+        "commands/tracedecay-find-impact.md",
+        "overlays/cursor/commands/tracedecay-find-impact.md"
     ),
     plugin_file!(
-        "skills/tracedecay-fix-build/SKILL.md",
-        "overlays/cursor/skills/tracedecay-fix-build/SKILL.md"
+        "commands/tracedecay-fix-build.md",
+        "overlays/cursor/commands/tracedecay-fix-build.md"
     ),
     plugin_file!(
-        "skills/tracedecay-map-architecture/SKILL.md",
-        "overlays/cursor/skills/tracedecay-map-architecture/SKILL.md"
+        "commands/tracedecay-map-architecture.md",
+        "overlays/cursor/commands/tracedecay-map-architecture.md"
     ),
     plugin_file!(
-        "skills/tracedecay-port-code/SKILL.md",
-        "overlays/cursor/skills/tracedecay-port-code/SKILL.md"
+        "commands/tracedecay-port-code.md",
+        "overlays/cursor/commands/tracedecay-port-code.md"
     ),
     plugin_file!(
-        "skills/tracedecay-recall-memory/SKILL.md",
-        "overlays/cursor/skills/tracedecay-recall-memory/SKILL.md"
+        "commands/tracedecay-recall-memory.md",
+        "overlays/cursor/commands/tracedecay-recall-memory.md"
     ),
     plugin_file!(
-        "skills/tracedecay-review-diff/SKILL.md",
-        "overlays/cursor/skills/tracedecay-review-diff/SKILL.md"
+        "commands/tracedecay-review-diff.md",
+        "overlays/cursor/commands/tracedecay-review-diff.md"
     ),
     plugin_file!(
-        "skills/tracedecay-test-changes/SKILL.md",
-        "overlays/cursor/skills/tracedecay-test-changes/SKILL.md"
+        "commands/tracedecay-test-changes.md",
+        "overlays/cursor/commands/tracedecay-test-changes.md"
     ),
 ];
 
@@ -347,15 +351,16 @@ pub fn claude_files() -> Vec<(&'static str, &'static str)> {
     ])
 }
 
-/// Files Cursor deploys: manifest + canonical skills + Cursor dispatcher
-/// overlay + Cursor agents + Cursor rules.
+/// Files Cursor deploys: manifest + canonical skills (the 17 shared
+/// model-invocable set, *without* the `tracedecay-*` dispatcher skills) +
+/// Cursor native commands + Cursor agents + Cursor rules.
 pub fn cursor_files() -> Vec<(&'static str, &'static str)> {
     compose(&[
         CURSOR_MANIFEST_FILES,
         CURSOR_RULE_FILES,
         CURSOR_AGENT_FILES,
+        CURSOR_COMMAND_FILES,
         CANONICAL_PLUGIN_FILES,
-        CURSOR_DISPATCHER_FILES,
     ])
 }
 
@@ -415,8 +420,9 @@ mod tests {
         // Claude: 30 skills + 5 manifest (2 dot + mcp + hooks + README) + 3
         //   agents + 13 commands = 51.
         assert_eq!(claude_files().len(), 51);
-        // Cursor: 30 skills + 4 manifest (dot + mcp + hooks + README) + 2 rules
-        //   + 3 agents = 39.
+        // Cursor: 17 canonical skills (no dispatcher skills) + 13 native
+        //   commands + 4 manifest (dot + mcp + hooks + README) + 2 rules + 3
+        //   agents = 39.
         assert_eq!(cursor_files().len(), 39);
         // Codex: 30 skills + 4 manifest (dot + mcp + hooks + README) = 34.
         assert_eq!(codex_files().len(), 34);

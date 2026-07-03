@@ -495,9 +495,9 @@ fn assert_cursor_plugin_bundle(plugin_dir: &Path, expected_command: &str, expect
             .is_some_and(|keywords| !keywords.is_empty()),
         "plugin manifest should carry keywords"
     );
-    assert!(
-        manifest.get("commands").is_none(),
-        "the deprecated commands surface must not be referenced by the manifest"
+    assert_eq!(
+        manifest["commands"], "commands/",
+        "the manifest must declare the native Cursor commands surface"
     );
     assert!(
         manifest["rules"]
@@ -635,9 +635,9 @@ fn generated_guidance_prefers_resolved_active_project_store() {
 
 #[test]
 fn generated_plugin_skill_descriptions_are_yaml_quoted() {
-    // Shared skills plus the Cursor dispatcher overlay (which carries its own
-    // descriptions) — the single `plugin/` tree replaced the per-host bundles.
-    for root in ["plugin/skills", "plugin/overlays/cursor/skills"] {
+    // The shared skill set — one `plugin/skills/` tree for every host. Cursor's
+    // workflow slugs are native commands now, not skills.
+    for root in ["plugin/skills"] {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(root);
         for entry in std::fs::read_dir(&root).unwrap() {
             let skill_path = entry.unwrap().path().join("SKILL.md");

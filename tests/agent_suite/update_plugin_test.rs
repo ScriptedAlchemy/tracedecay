@@ -739,18 +739,24 @@ fn staged_host_source(host: &str) -> TempDir {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin");
     let staged = TempDir::new().expect("temp host source");
     let mut copies: Vec<(String, String)> = Vec::new();
-    // Shared canonical skills (30) — same deploy path for all hosts.
+    // Shared canonical skills — same deploy path for all hosts. Codex ships all
+    // 30; Cursor ships only the 17 model-invocable ones (the `tracedecay-*`
+    // workflow slugs are native commands on Cursor, not skills).
     for name in subdir_names(&src.join("skills")) {
+        if host == "cursor" && name.starts_with("tracedecay-") {
+            continue;
+        }
         let rel = format!("skills/{name}/SKILL.md");
         copies.push((rel.clone(), rel));
     }
     match host {
         "cursor" => {
-            // Cursor overrides the 13 dispatcher slugs with its overlay form.
-            for name in subdir_names(&src.join("overlays/cursor/skills")) {
+            // Cursor ships the 13 workflow slugs as native slash commands.
+            for entry in std::fs::read_dir(src.join("overlays/cursor/commands")).unwrap() {
+                let file = entry.unwrap().file_name().to_string_lossy().into_owned();
                 copies.push((
-                    format!("overlays/cursor/skills/{name}/SKILL.md"),
-                    format!("skills/{name}/SKILL.md"),
+                    format!("overlays/cursor/commands/{file}"),
+                    format!("commands/{file}"),
                 ));
             }
             for name in ["code-explorer", "code-health-auditor", "session-historian"] {

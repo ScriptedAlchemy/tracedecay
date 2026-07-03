@@ -3,10 +3,11 @@
 //!
 //! The three host bundles now share one `plugin/` tree. Codex deploys all 30
 //! skills from `plugin/skills/` (canonical, model-invocable form). Cursor
-//! deploys the 17 shared skills from `plugin/skills/` plus the 13 dispatcher
-//! slugs in their Cursor overlay form from `plugin/overlays/cursor/skills/`.
-//! Each host's deployed skill *source* set is staged into a temp dir below so
-//! the contract and byte-copy checks run over exactly what that host installs.
+//! deploys only the 17 shared model-invocable skills from `plugin/skills/`
+//! (the `tracedecay-*` workflow slugs are native commands on Cursor, not
+//! skills). Each host's deployed skill *source* set is staged into a temp dir
+//! below so the contract and byte-copy checks run over exactly what that host
+//! installs.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -23,9 +24,6 @@ use tracedecay::config::USER_DATA_DIR_ENV;
 
 /// Codex deploys every skill under `plugin/skills/` (all 30, canonical form).
 const CODEX_SKILL_ROOT: &str = "plugin/skills";
-/// Cursor's dispatcher overlay (13 `tracedecay-*` slugs in slash-dispatcher
-/// form). Cursor deploys these *in place of* the canonical dispatcher form.
-const CURSOR_OVERLAY_SKILL_ROOT: &str = "plugin/overlays/cursor/skills";
 // Size budgets: the 500-line body cap and the "concise, trigger-first
 // description" rule come from Anthropic's skill-creator design advice. The
 // numeric description and metadata caps are house budgets chosen when these
@@ -192,23 +190,18 @@ fn install_ctx(home: &Path) -> InstallContext {
     }
 }
 
-/// Stages the composed Cursor skill *source* tree into a temp dir: the shared
-/// model-invocable skills from `plugin/skills/` (all non-`tracedecay-*` slugs)
-/// plus the 13 Cursor dispatcher overlays. This mirrors exactly what Cursor
-/// deploys — the canonical `tracedecay-*` bodies never reach Cursor.
+/// Stages the Cursor skill *source* tree into a temp dir: the 17 shared
+/// model-invocable skills from `plugin/skills/` (all non-`tracedecay-*` slugs).
+/// This mirrors exactly what Cursor deploys — the `tracedecay-*` workflow slugs
+/// are native commands on Cursor, not skills.
 fn staged_cursor_skill_source() -> TempDir {
     let staged = TempDir::new().expect("temp cursor skill source");
     let shared = repo_path("plugin/skills");
     for name in skill_dir_names(&shared) {
         if name.starts_with("tracedecay-") {
-            // Cursor ships the overlay form of these, added below.
             continue;
         }
         copy_dir(&shared.join(&name), &staged.path().join(&name));
-    }
-    let overlay = repo_path(CURSOR_OVERLAY_SKILL_ROOT);
-    for name in skill_dir_names(&overlay) {
-        copy_dir(&overlay.join(&name), &staged.path().join(&name));
     }
     staged
 }

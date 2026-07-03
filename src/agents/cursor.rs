@@ -305,15 +305,25 @@ fn cursor_plugin_hooks(raw: &str, tracedecay_bin: &str) -> Result<String> {
 /// Bundle directories shipped by older tracedecay plugin versions that no
 /// longer exist in the current bundle. Swept during replace/uninstall so
 /// upgrades don't strand stale surfaces (managed-path removal only covers
-/// files the *current* bundle ships). `commands/` was migrated to slash
-/// skills (`disable-model-invocation: true`) when Cursor deprecated the
-/// standalone Commands surface. The `skills/tracedecay-*` entries are
-/// legacy dispatcher slugs renamed to
-/// verb-phrase slugs because Cursor displays the humanized slug as the skill
-/// title. The other `skills/*` entries are model-invoked workflow skills
-/// retired by the consolidated skill catalog.
+/// files the *current* bundle ships). The `skills/tracedecay-*` entries are
+/// the retired Cursor dispatcher *skills* (`disable-model-invocation: true`) —
+/// re-expressed as native `commands/tracedecay-*.md` slash commands, so their
+/// old skill dirs must be swept on upgrade. The other `skills/*` entries are
+/// model-invoked workflow skills retired by the consolidated skill catalog.
 const LEGACY_PLUGIN_DIRS: &[&str] = &[
-    "commands",
+    "skills/tracedecay-audit-safety",
+    "skills/tracedecay-check-health",
+    "skills/tracedecay-clean-dead-code",
+    "skills/tracedecay-compare-branches",
+    "skills/tracedecay-curate-memory",
+    "skills/tracedecay-draft-commit",
+    "skills/tracedecay-find-impact",
+    "skills/tracedecay-fix-build",
+    "skills/tracedecay-map-architecture",
+    "skills/tracedecay-port-code",
+    "skills/tracedecay-recall-memory",
+    "skills/tracedecay-review-diff",
+    "skills/tracedecay-test-changes",
     "skills/architecture-overview",
     "skills/assessing-test-coverage",
     "skills/atomic-code-edits",
@@ -931,10 +941,18 @@ mod tests {
         subdir_names(&plugin_source_root().join("skills"))
     }
 
-    /// Directory names under `plugin/overlays/cursor/skills/` (the Cursor
-    /// dispatcher overlay slugs).
-    fn cursor_overlay_dispatcher_dirs() -> Vec<String> {
-        subdir_names(&plugin_source_root().join("overlays/cursor/skills"))
+    /// File names under `plugin/overlays/cursor/commands/` (the Cursor native
+    /// slash-command markdown files).
+    fn cursor_command_files() -> Vec<String> {
+        let root = plugin_source_root().join("overlays/cursor/commands");
+        let mut names: Vec<String> = std::fs::read_dir(&root)
+            .expect("plugin cursor commands dir should be readable")
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|t| t.is_file()))
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
     }
 
     fn subdir_names(root: &Path) -> Vec<String> {
@@ -986,8 +1004,8 @@ mod tests {
         assert!(install_dir.join("hooks/hooks.json").exists());
         assert!(install_dir.join("rules/tracedecay.mdc").exists());
 
-        // A representative skill, the agent, and a dispatcher skill also ship,
-        // so released installs are no longer missing the bundle that the
+        // A representative skill, the agent, and a native slash command also
+        // ship, so released installs are no longer missing the bundle that the
         // symlink path provides.
         assert!(
             install_dir.join("skills/exploring-code/SKILL.md").exists(),
@@ -999,13 +1017,17 @@ mod tests {
         );
         assert!(
             install_dir
+                .join("commands/tracedecay-map-architecture.md")
+                .exists(),
+            "a representative native slash command should be embedded"
+        );
+        // Cursor no longer ships the `tracedecay-*` dispatcher *skills* — those
+        // slugs are native commands now.
+        assert!(
+            !install_dir
                 .join("skills/tracedecay-map-architecture/SKILL.md")
                 .exists(),
-            "a representative slash-dispatcher skill should be embedded"
-        );
-        assert!(
-            !install_dir.join("commands").exists(),
-            "the deprecated commands surface must not ship"
+            "the retired dispatcher skill must not ship"
         );
 
         // Every embedded file is also a managed path so uninstall can clean it.
@@ -1019,10 +1041,11 @@ mod tests {
     }
 
     /// The Cursor deploy set (composed from the shared `plugin/` tree) must
-    /// cover every shared model-invocable skill, every dispatcher slug in its
-    /// Cursor overlay form, and Cursor's manifest/rules/agents — with no
-    /// on-disk skill left unwired. The source paths under `plugin/` differ from
-    /// the deploy paths, so this checks the *composition*, not a raw dir walk.
+    /// cover every shared *model-invocable* skill (all non-`tracedecay-*`
+    /// slugs), every native slash command, and Cursor's manifest/rules/agents —
+    /// with no on-disk skill left unwired. The source paths under `plugin/`
+    /// differ from the deploy paths, so this checks the *composition*, not a raw
+    /// dir walk.
     #[test]
     fn embedded_file_list_covers_the_whole_source_bundle() {
         let deploy: std::collections::BTreeSet<String> = embedded_plugin_files()
@@ -1030,20 +1053,30 @@ mod tests {
             .map(|(relative, _)| relative.to_string())
             .collect();
 
-        // Every shared skill dir on disk must be deployed by Cursor.
+        // Every shared model-invocable skill dir on disk must be deployed by
+        // Cursor. The `tracedecay-*` dispatcher skills are NOT shipped to
+        // Cursor — they are native commands there.
         for skill in shared_skill_dirs() {
+            if skill.starts_with("tracedecay-") {
+                let dispatcher = format!("skills/{skill}/SKILL.md");
+                assert!(
+                    !deploy.contains(&dispatcher),
+                    "Cursor deploy set must NOT ship dispatcher skill {dispatcher}"
+                );
+                continue;
+            }
             let expected = format!("skills/{skill}/SKILL.md");
             assert!(
                 deploy.contains(&expected),
                 "Cursor deploy set is missing shared skill {expected}"
             );
         }
-        // Every Cursor dispatcher overlay must be deployed.
-        for skill in cursor_overlay_dispatcher_dirs() {
-            let expected = format!("skills/{skill}/SKILL.md");
+        // Every Cursor native slash command must be deployed.
+        for command in cursor_command_files() {
+            let expected = format!("commands/{command}");
             assert!(
                 deploy.contains(&expected),
-                "Cursor deploy set is missing dispatcher overlay {expected}"
+                "Cursor deploy set is missing native command {expected}"
             );
         }
         // Cursor's manifest surfaces.

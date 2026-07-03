@@ -1,14 +1,12 @@
 ---
-name: tracedecay-clean-dead-code
-description: 'Use to find and safely remove dead code, unused imports, and duplication via the TraceDecay code graph.'
-disable-model-invocation: true
+description: Find and safely remove dead code, unused imports, and duplication via the TraceDecay code graph.
 ---
 
 # /tracedecay-clean-dead-code
 
 Apply the `tracedecay:reviewing-changes` skill.
 
-- **Scope:** the whole repo, or the directory named after the command if one was given.
+- **Scope:** the whole repo, or the directory named in `$ARGUMENTS` if one was given.
 - Follow that skill's workflow and guardrails: confirm zero real callers before deleting anything, be conservative with `pub` items, and respect Cursor approval/run-mode for edits and verification runs.
 
 Output: removed/consolidated items and the before/after health or test result.

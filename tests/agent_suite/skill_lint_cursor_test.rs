@@ -1,7 +1,8 @@
-//! Cursor-specific lint for the composed Cursor skill set (shared
-//! `plugin/skills/` + `plugin/overlays/cursor/skills/`) SKILL.md
-//! files, ported from community/official skill linters so enforcement runs
-//! offline inside `cargo test` (no node/python CI dependency).
+//! Cursor-specific lint for the composed Cursor skill set (the 17 shared
+//! model-invocable skills from `plugin/skills/`) plus the Cursor native slash
+//! commands (`plugin/overlays/cursor/commands/`), ported from
+//! community/official skill linters so enforcement runs offline inside
+//! `cargo test` (no node/python CI dependency).
 //!
 //! Rule sources:
 //! - skillmark (<https://github.com/michellepellon/skillmark>): broken file
@@ -12,8 +13,9 @@
 //!   body, trailing whitespace.
 //! - skillkit (<https://github.com/sakhilchawla/skillkit>): skipped heading
 //!   levels, consistent structure.
-//! - Cursor docs (<https://cursor.com/docs/skills>): `disable-model-invocation`
-//!   slash-command semantics and `paths` glob scoping.
+//! - Cursor docs (<https://cursor.com/docs/skills>): `paths` glob scoping;
+//!   native slash commands (<https://cursor.com/docs/commands>) whose `/slug`
+//!   title matches the command file name.
 //!
 //! Repo-specific reference-integrity rules (same spirit as skillmark E031,
 //! applied to this bundle's conventions): `tracedecay:<skill>` cross-skill
@@ -36,13 +38,13 @@ use tracedecay::mcp::get_tool_definitions;
 use crate::plugin_validation_support::{load_skill_docs_from, repo_path, SkillDoc};
 use tempfile::TempDir;
 
-/// Cursor's dispatcher overlay (the 13 `tracedecay-*` slash dispatchers).
-const CURSOR_OVERLAY_SKILL_ROOT: &str = "plugin/overlays/cursor/skills";
+/// Cursor's native slash commands (the 13 `tracedecay-*` workflow commands).
+const CURSOR_COMMAND_ROOT: &str = "plugin/overlays/cursor/commands";
 
-/// Stages the composed Cursor skill *source* set into a temp dir: the shared
-/// model-invocable skills from `plugin/skills/` (all non-`tracedecay-*` slugs)
-/// plus the 13 Cursor dispatcher overlays. This is exactly what Cursor deploys
-/// — the canonical `tracedecay-*` bodies never reach Cursor.
+/// Stages the Cursor skill *source* set into a temp dir: the 17 shared
+/// model-invocable skills from `plugin/skills/` (all non-`tracedecay-*` slugs).
+/// This is exactly the skill set Cursor deploys — the `tracedecay-*` workflow
+/// slugs are native commands there (see [`command_slugs`]), not skills.
 fn staged_cursor_skills() -> TempDir {
     let staged = TempDir::new().expect("temp cursor skill source");
     let shared = repo_path("plugin/skills");
@@ -54,15 +56,25 @@ fn staged_cursor_skills() -> TempDir {
         }
         copy_dir(&entry.path(), &staged.path().join(&name));
     }
-    let overlay = repo_path(CURSOR_OVERLAY_SKILL_ROOT);
-    for entry in std::fs::read_dir(&overlay).unwrap() {
-        let entry = entry.unwrap();
-        if !entry.file_type().unwrap().is_dir() {
-            continue;
-        }
-        copy_dir(&entry.path(), &staged.path().join(entry.file_name()));
-    }
     staged
+}
+
+/// The `/slug` names Cursor exposes as native commands (the file stems under
+/// `plugin/overlays/cursor/commands/`). Backticked `/slug` references in skill
+/// or command bodies resolve against this set.
+fn command_slugs() -> BTreeSet<String> {
+    std::fs::read_dir(repo_path(CURSOR_COMMAND_ROOT))
+        .expect("cursor commands dir readable")
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|t| t.is_file()))
+        .filter_map(|entry| {
+            entry
+                .path()
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(str::to_string)
+        })
+        .collect()
 }
 
 fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {
@@ -188,23 +200,13 @@ fn cursor_skill_bodies_follow_heading_conventions() {
             prev_level = *level;
         }
 
-        // Cursor docs: `disable-model-invocation: true` makes a skill a slash
-        // command. The bundle titles those skills `# /<name>`; a slash-form H1
-        // on a model-invocable skill (or one naming a different slug) would
-        // document an invocation that does not exist.
+        // Model-invocable skills use a plain-title H1 — never the slash form,
+        // which is reserved for native commands (linted separately below).
         if let Some((_, title)) = headings.iter().find(|(level, _)| *level == 1) {
-            if let Some(slug) = title.strip_prefix('/') {
-                if slug != skill.name {
-                    violations.push(format!(
-                        "{at}: H1 slash title `/{slug}` does not match skill name {:?}",
-                        skill.name
-                    ));
-                }
-                if scalar(skill, "disable-model-invocation") != Some("true") {
-                    violations.push(format!(
-                        "{at}: slash-form H1 requires disable-model-invocation: true"
-                    ));
-                }
+            if title.starts_with('/') {
+                violations.push(format!(
+                    "{at}: model-invocable skill must use a plain-title H1, not the slash form {title:?}"
+                ));
             }
         }
     }
@@ -264,6 +266,7 @@ fn cursor_skill_references_resolve() {
     let staged = staged_cursor_skills();
     let skills = load_skill_docs_from(staged.path());
     let skill_names: BTreeSet<&str> = skills.iter().map(|skill| skill.name.as_str()).collect();
+    let command_names = command_slugs();
     let tool_names = mcp_tool_names();
     let mut violations = Vec::new();
 
@@ -321,13 +324,13 @@ fn cursor_skill_references_resolve() {
             }
         }
 
-        // Cursor docs: `/name` invokes a skill by name; a backticked slash
-        // reference must resolve to a bundled skill.
+        // Cursor docs: `/name` invokes a native command; a backticked slash
+        // reference must resolve to a bundled command.
         for capture in slash_ref_re.captures_iter(&skill.raw) {
-            let slug = &capture[1];
-            if !skill_names.contains(slug) {
+            let slug = capture[1].to_string();
+            if !command_names.contains(&slug) {
                 violations.push(format!(
-                    "{at}: references slash command /{slug} which is not a bundled skill"
+                    "{at}: references slash command /{slug} which is not a bundled command"
                 ));
             }
         }
@@ -369,6 +372,96 @@ fn cursor_skill_references_resolve() {
          the lint regexes are broken"
     );
     assert_no_violations("reference integrity", &violations);
+}
+
+/// The Cursor native slash commands (`plugin/overlays/cursor/commands/*.md`)
+/// must be LF-clean, open with a `# /<slug>` H1 that matches the file name, and
+/// only reference bundled skills and live MCP tools. This is the command-side
+/// analogue of the retired dispatcher-skill slash lint.
+#[test]
+fn cursor_commands_are_hygienic_and_reference_resolve() {
+    let command_dir = repo_path(CURSOR_COMMAND_ROOT);
+    let staged = staged_cursor_skills();
+    let skill_names: BTreeSet<String> = load_skill_docs_from(staged.path())
+        .into_iter()
+        .map(|skill| skill.name)
+        .collect();
+    let tool_names = mcp_tool_names();
+    let skill_ref_re = Regex::new(r"tracedecay:([a-z0-9][a-z0-9-]*)").unwrap();
+    let tool_ref_re = Regex::new(r"tracedecay_[a-z_]+").unwrap();
+    let mut violations = Vec::new();
+    let mut command_count = 0usize;
+
+    let mut entries: Vec<_> = std::fs::read_dir(&command_dir)
+        .expect("cursor commands dir readable")
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("md"))
+        .collect();
+    entries.sort();
+
+    for path in entries {
+        command_count += 1;
+        let at = path.display();
+        let slug = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .expect("command file stem")
+            .to_string();
+        let raw = std::fs::read_to_string(&path).expect("read command");
+
+        if raw.contains('\r') {
+            violations.push(format!("{at}: contains CRLF line endings"));
+        }
+        if !raw.ends_with('\n') {
+            violations.push(format!("{at}: missing trailing newline"));
+        }
+        if raw.ends_with("\n\n") {
+            violations.push(format!("{at}: ends with blank lines"));
+        }
+        for (idx, line) in raw.lines().enumerate() {
+            if line.ends_with(' ') || line.ends_with('\t') || line.contains('\t') {
+                violations.push(format!("{at}:{}: trailing whitespace or tab", idx + 1));
+            }
+        }
+
+        // The command body opens with a `# /<slug>` H1 matching the file name,
+        // so the documented invocation is the one Cursor exposes.
+        let h1 = raw
+            .lines()
+            .find(|line| line.starts_with("# "))
+            .map(|line| line.trim_start_matches("# ").trim());
+        match h1 {
+            Some(title) if title == format!("/{slug}") => {}
+            Some(title) => violations.push(format!(
+                "{at}: H1 {title:?} must be the slash form `/{slug}`"
+            )),
+            None => violations.push(format!("{at}: command body must open with an H1 title")),
+        }
+
+        for capture in skill_ref_re.captures_iter(&raw) {
+            let referenced = capture[1].to_string();
+            if !skill_names.contains(&referenced) {
+                violations.push(format!(
+                    "{at}: references skill tracedecay:{referenced} which is not bundled"
+                ));
+            }
+        }
+        for found in tool_ref_re.find_iter(&raw) {
+            let identifier = found.as_str().trim_end_matches('_');
+            if !tool_names.contains(identifier) && !NON_TOOL_IDENTIFIERS.contains(&identifier) {
+                violations.push(format!(
+                    "{at}: mentions MCP tool {identifier} which the server does not define"
+                ));
+            }
+        }
+    }
+
+    assert_eq!(
+        command_count, 13,
+        "expected 13 Cursor native slash commands, found {command_count}"
+    );
+    assert_no_violations("cursor command integrity", &violations);
 }
 
 fn first_content_line(body: &str) -> Option<&str> {
