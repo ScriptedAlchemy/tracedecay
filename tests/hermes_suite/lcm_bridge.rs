@@ -1231,6 +1231,7 @@ args_index = argv.index("--args")
 args = json.loads(argv[args_index + 1])
 assert args == {
     "project_root": "/tmp/project",
+    "provider": "cursor",
     "fresh_tail_count": 64,
     "leaf_chunk_tokens": 20000,
     "dynamic_leaf_chunk_enabled": False,
@@ -1315,6 +1316,7 @@ assert argv[1:6] == ["tool", "--project", "/tmp/project", "tracedecay_lcm_sessio
 args = json.loads(argv[argv.index("--args") + 1])
 assert args == {
     "project_root": "/tmp/project",
+    "provider": "cursor",
     "session_id": "session-b",
     "old_session_id": "session-c",
     "boundary_reason": "compression",
@@ -1423,6 +1425,7 @@ else:
 assert args == {
     "project_root": "/tmp/project",
     "response_handle_project_root": "/tmp/project",
+    "provider": "cursor",
     "fresh_tail_count": 64,
     "leaf_chunk_tokens": 20000,
     "dynamic_leaf_chunk_enabled": False,

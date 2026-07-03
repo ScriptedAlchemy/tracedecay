@@ -811,8 +811,18 @@ fn timestamp_argument_error(name: &str) -> TraceDecayError {
     ))
 }
 
-fn provider_arg(args: &Value) -> &str {
-    string_arg(args, "provider").unwrap_or("cursor")
+fn provider_or_all_arg(args: &Value) -> &str {
+    optional_search_provider_arg(args).unwrap_or("all")
+}
+
+fn required_specific_provider_arg(args: &Value) -> Result<&str> {
+    match string_arg(args, "provider") {
+        Some("all") => Err(argument_error(
+            "provider must name a specific provider for this tool",
+        )),
+        Some(provider) => Ok(provider),
+        None => Err(argument_error("provider is required for this tool")),
+    }
 }
 
 fn optional_search_provider_arg(args: &Value) -> Option<&str> {
@@ -1270,14 +1280,9 @@ fn parse_lcm_scope(args: &Value) -> Result<LcmScope> {
     }
 }
 
-fn lcm_grep_provider_arg(args: &Value, scope: LcmScope) -> &str {
+fn lcm_grep_provider_arg(args: &Value) -> &str {
     if let Some(provider) = optional_search_provider_arg(args) {
         return provider;
-    }
-    if matches!(scope, LcmScope::Current | LcmScope::Session)
-        && string_arg(args, "provider").is_none()
-    {
-        return provider_arg(args);
     }
     "all"
 }
@@ -1507,7 +1512,7 @@ pub(super) async fn handle_lcm_status(
     context: LcmHandlerContext<'_>,
     args: Value,
 ) -> Result<ToolResult> {
-    let provider = provider_arg(&args);
+    let provider = provider_or_all_arg(&args);
     let session_id = string_arg(&args, "session_id");
     let deep = bool_arg(&args, "deep")?.unwrap_or(false);
     let gc_config = lcm_gc_config(&args)?;
@@ -1534,7 +1539,7 @@ pub(super) async fn handle_lcm_doctor(
     context: LcmHandlerContext<'_>,
     args: Value,
 ) -> Result<ToolResult> {
-    let provider = provider_arg(&args);
+    let provider = required_specific_provider_arg(&args)?;
     let session_id = string_arg(&args, "session_id");
     let mode = lcm_doctor_mode(&args)?;
     let apply = args.get("apply").and_then(Value::as_bool).unwrap_or(false);
@@ -1629,7 +1634,7 @@ pub(super) async fn handle_lcm_load_session(
     context: LcmHandlerContext<'_>,
     args: Value,
 ) -> Result<ToolResult> {
-    let provider = provider_arg(&args);
+    let provider = provider_or_all_arg(&args);
     let session_id = required_string_arg(&args, "session_id")?;
     let (content_slice, content_limit_clamped_from) = lcm_load_content_slice(&args)?;
     let storage = lcm_open_storage_ro!(context, &args);
@@ -1682,7 +1687,7 @@ pub(super) async fn handle_lcm_grep(
     // Validate scope before opening storage so argument errors are reported
     // even when the sessions DB does not exist yet.
     let scope = parse_lcm_scope(&args)?;
-    let provider = lcm_grep_provider_arg(&args, scope);
+    let provider = lcm_grep_provider_arg(&args);
     let storage = lcm_open_storage_ro!(context, &args);
     let hits = storage
         .db
@@ -1721,7 +1726,7 @@ pub(super) async fn handle_lcm_describe(
     context: LcmHandlerContext<'_>,
     args: Value,
 ) -> Result<ToolResult> {
-    let provider = provider_arg(&args);
+    let provider = required_specific_provider_arg(&args)?;
     let session_id = required_string_arg(&args, "session_id")?;
     // Validate target before opening storage so argument errors are reported
     // even when the sessions DB does not exist yet.
@@ -1751,7 +1756,7 @@ pub(super) async fn handle_lcm_expand(
     context: LcmHandlerContext<'_>,
     args: Value,
 ) -> Result<ToolResult> {
-    let provider = provider_arg(&args);
+    let provider = required_specific_provider_arg(&args)?;
     let session_id = required_string_arg(&args, "session_id")?;
     let target = parse_lcm_expand_target(&args)?;
     let storage = lcm_open_storage_ro!(context, &args);
@@ -1782,7 +1787,7 @@ pub(super) async fn handle_lcm_expand_query(
     context: LcmHandlerContext<'_>,
     args: Value,
 ) -> Result<ToolResult> {
-    let provider = provider_arg(&args);
+    let provider = required_specific_provider_arg(&args)?;
     let session_id = required_string_arg(&args, "session_id")?;
     let prompt = required_string_arg(&args, "prompt")?;
     let max_results =
@@ -1835,7 +1840,7 @@ pub(super) async fn handle_lcm_session_boundary(
     context: LcmHandlerContext<'_>,
     args: Value,
 ) -> Result<ToolResult> {
-    let provider = provider_arg(&args);
+    let provider = required_specific_provider_arg(&args)?;
     let session_id = required_string_arg(&args, "session_id")?;
     let storage = lcm_open_storage!(context, &args);
     let response = storage
@@ -1866,7 +1871,7 @@ pub(super) async fn handle_lcm_preflight(
     context: LcmHandlerContext<'_>,
     args: Value,
 ) -> Result<ToolResult> {
-    let provider = provider_arg(&args);
+    let provider = required_specific_provider_arg(&args)?;
     let session_id = required_string_arg(&args, "session_id")?;
     let storage = lcm_open_storage!(context, &args);
     let response = storage
@@ -1907,7 +1912,7 @@ pub(super) async fn handle_lcm_compress(
     context: LcmHandlerContext<'_>,
     args: Value,
 ) -> Result<ToolResult> {
-    let provider = provider_arg(&args);
+    let provider = required_specific_provider_arg(&args)?;
     let session_id = required_string_arg(&args, "session_id")?;
     let response_handle_root = lcm_response_handle_root(context.project_root, &args);
     let storage = lcm_open_storage!(context, &args);

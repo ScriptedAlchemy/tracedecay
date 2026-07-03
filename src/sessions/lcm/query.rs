@@ -100,6 +100,7 @@ pub(crate) async fn load_session(
     let fetch_limit = limit.saturating_add(1);
     let mut values = vec![
         Value::Text(request.provider.clone()),
+        Value::Text(request.provider.clone()),
         Value::Text(request.session_id.clone()),
         Value::Integer(request.after_store_id.unwrap_or(0)),
     ];
@@ -124,7 +125,7 @@ pub(crate) async fn load_session(
                 timestamp, content, content_hash, storage_kind, payload_ref,
                 snippet_text, legacy_source, legacy_truncated, metadata_json
          FROM lcm_raw_messages
-         WHERE provider = ?
+         WHERE (? = 'all' OR provider = ?)
            AND session_id = ?
            AND store_id > ?
            {role_clause}
