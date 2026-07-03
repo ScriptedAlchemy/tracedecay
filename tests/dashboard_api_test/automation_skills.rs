@@ -275,8 +275,12 @@ fn managed_skills_are_dashboard_controllable_with_explicit_approval() {
         let project_root = tmp_root.join("project");
         let global_db_path = tmp_root.join("global").join("global.db");
         let profile_root = tmp_root.join("profile").join(".tracedecay");
+        let home = tmp_root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
         let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
         let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
+        let _home_guard = EnvVarGuard::set("HOME", &home);
+        let _userprofile_guard = EnvVarGuard::set("USERPROFILE", &home);
 
         let cg = setup_project(&project_root).await;
         let agent = http_agent();
@@ -329,11 +333,31 @@ fn managed_skills_are_dashboard_controllable_with_explicit_approval() {
         );
         assert_eq!(updated["skill"]["metadata"]["state"], "pending_approval");
 
-        for (action, expected_state) in [
-            ("approve", "active"),
-            ("disable", "disabled"),
-            ("archive", "archived"),
-            ("restore", "pending_approval"),
+        // Detected global and project-local Claude Code installs must receive
+        // the export as soon as the dashboard approves the skill — not on the
+        // next `tracedecay install` / `update-plugin`.
+        let claude_md = home.join(".claude/CLAUDE.md");
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::write(&claude_md, "# Claude rules\n").unwrap();
+        std::fs::write(
+            home.join(".claude.json"),
+            r#"{"mcpServers":{"tracedecay":{"command":"tracedecay","args":["serve"]}}}"#,
+        )
+        .unwrap();
+        let local_claude_md = project_root.join(".claude/CLAUDE.md");
+        std::fs::create_dir_all(project_root.join(".claude")).unwrap();
+        std::fs::write(&local_claude_md, "# Local Claude rules\n").unwrap();
+        std::fs::write(
+            project_root.join(".mcp.json"),
+            r#"{"mcpServers":{"tracedecay":{"command":"tracedecay","args":["serve"]}}}"#,
+        )
+        .unwrap();
+
+        for (action, expected_state, expect_deployed) in [
+            ("approve", "active", true),
+            ("disable", "disabled", false),
+            ("archive", "archived", false),
+            ("restore", "pending_approval", false),
         ] {
             let (status, payload) = post_json_body(
                 &agent,
@@ -342,6 +366,44 @@ fn managed_skills_are_dashboard_controllable_with_explicit_approval() {
             );
             assert_eq!(status, 200, "{action} should succeed: {payload}");
             assert_eq!(payload["skill"]["metadata"]["state"], expected_state);
+
+            let exports = payload["skill_exports"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{action} should report skill exports: {payload}"));
+            let claude_report = exports
+                .iter()
+                .find(|entry| entry["agent"] == "claude")
+                .unwrap_or_else(|| panic!("{action} should export to claude: {payload}"));
+            assert!(
+                claude_report["error"].is_null(),
+                "{action} claude export should succeed: {claude_report}"
+            );
+            let expected_count = i64::from(expect_deployed);
+            let export_counts = claude_report["exports"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{action} should report claude exports: {payload}"))
+                .iter()
+                .map(|export| export["exported_count"].as_i64().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                export_counts,
+                vec![expected_count, expected_count],
+                "{action} should refresh global and local Claude exports"
+            );
+            let claude_contents = std::fs::read_to_string(&claude_md).unwrap();
+            assert_eq!(
+                claude_contents.contains("repo-hygiene"),
+                expect_deployed,
+                "{action} should {} the skill in CLAUDE.md: {claude_contents}",
+                if expect_deployed { "deploy" } else { "retract" }
+            );
+            let local_claude_contents = std::fs::read_to_string(&local_claude_md).unwrap();
+            assert_eq!(
+                local_claude_contents.contains("repo-hygiene"),
+                expect_deployed,
+                "{action} should {} the skill in local CLAUDE.md: {local_claude_contents}",
+                if expect_deployed { "deploy" } else { "retract" }
+            );
         }
 
         let skill_dir = profile_root
@@ -369,8 +431,12 @@ fn managed_skill_dashboard_api_persists_and_updates_lifecycle() {
         let project_root = tmp_root.join("project");
         let global_db_path = tmp_root.join("global").join("global.db");
         let profile_root = tmp_root.join("profile").join(".tracedecay");
+        let home = tmp_root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
         let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
         let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
+        let _home_guard = EnvVarGuard::set("HOME", &home);
+        let _userprofile_guard = EnvVarGuard::set("USERPROFILE", &home);
 
         let cg = setup_project(&project_root).await;
         let agent = http_agent();
@@ -458,8 +524,12 @@ fn managed_skill_dashboard_api_controls_staged_updates() {
         let project_root = tmp_root.join("project");
         let global_db_path = tmp_root.join("global").join("global.db");
         let profile_root = tmp_root.join("profile").join(".tracedecay");
+        let home = tmp_root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
         let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
         let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
+        let _home_guard = EnvVarGuard::set("HOME", &home);
+        let _userprofile_guard = EnvVarGuard::set("USERPROFILE", &home);
 
         let cg = setup_project(&project_root).await;
         let agent = http_agent();

@@ -33,7 +33,7 @@ After falling back, diagnose the MCP side with `tracedecay doctor` and `tracedec
 
 - Never query `.tracedecay/*.db` with sqlite3 or scripts — schemas are internal and change without notice. The CLI is the supported fallback, not raw DB access.
 - Do not abandon tracedecay for broad Grep/file reads just because MCP transport failed; the CLI answers the same graph, memory, and session questions.
-- CLI editing tools (`str_replace`, `replace_symbol`, …) mutate the working tree exactly like their MCP twins — apply the same care as `tracedecay:atomic-code-edits`.
+- CLI editing tools (`str_replace`, `replace_symbol`, …) mutate the working tree exactly like their MCP twins — apply the same care as `tracedecay:editing-safely`.
 - If the CLI also fails (binary missing or project not initialised), fall back to plain tools and suggest `tracedecay init` / `tracedecay doctor` to the user.
 
 ## Output

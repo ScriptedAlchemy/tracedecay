@@ -16,14 +16,7 @@ use tracedecay::migrate::manifest::{
 };
 
 fn canonical_temp_path(path: &Path) -> PathBuf {
-    #[cfg(windows)]
-    {
-        path.to_path_buf()
-    }
-    #[cfg(not(windows))]
-    {
-        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-    }
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn with_env_vars<T>(vars: &[(&str, Option<&Path>)], f: impl FnOnce() -> T) -> T {

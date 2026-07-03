@@ -1,0 +1,77 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://cursor.com/schemas/cursor-plugin/marketplace.json",
+  "title": "Cursor Plugin Marketplace",
+  "description": "Schema for .cursor-plugin/marketplace.json — defines a marketplace that indexes one or more Cursor plugins.",
+  "type": "object",
+  "required": ["name", "plugins"],
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Unique identifier for the marketplace."
+    },
+    "owner": {
+      "$ref": "#/$defs/owner",
+      "description": "The marketplace owner or organisation."
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "Short description of the marketplace."
+        }
+      },
+      "description": "Arbitrary metadata about the marketplace."
+    },
+    "plugins": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/pluginEntry" },
+      "description": "List of plugins available in the marketplace."
+    }
+  },
+  "$defs": {
+    "owner": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Owner or organisation name."
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Contact email address."
+        }
+      }
+    },
+    "pluginEntry": {
+      "type": "object",
+      "required": ["name", "source"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$",
+          "description": "Plugin identifier matching the plugin's name in its plugin.json."
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Path to the plugin directory (relative to the marketplace root) or a remote URL."
+        },
+        "description": {
+          "type": "string",
+          "description": "Short description of the plugin."
+        }
+      }
+    }
+  }
+}

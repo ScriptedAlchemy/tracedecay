@@ -34,7 +34,7 @@ use tracedecay::serve;
 use tracedecay::storage::{
     default_profile_sharded_layout, write_enrollment_marker, EnrollmentMarker, StorageMode,
 };
-use tracedecay::tracedecay::TraceDecay;
+use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 #[cfg(unix)]
 static READ_ONLY_SERVE_ENV_LOCK: Mutex<()> = Mutex::const_new(());
@@ -156,14 +156,6 @@ async fn create_read_only_project_db(
     let profile_root = profile_root(home);
     let data_root = profile_root.join(format!("projects/{project_id}"));
     let db_path = data_root.join("tracedecay.db");
-
-    unsafe {
-        std::env::set_var("HOME", canonical_existing_path(home));
-        std::env::set_var("USERPROFILE", canonical_existing_path(home));
-        std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
-        std::env::set_var("TRACEDECAY_DATA_DIR", &profile_root);
-        std::env::set_var("TRACEDECAY_GLOBAL_DB", profile_root.join("global.db"));
-    }
 
     write_enrollment_marker(
         &project_root,
@@ -704,6 +696,10 @@ async fn ensure_initialized_rejects_read_only_db_with_pending_migrations() {
     let _env_guard = READ_ONLY_SERVE_ENV_LOCK.lock().await;
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(profile_root(home.path())),
+        global_db_path: Some(profile_root(home.path()).join("global.db")),
+    };
     let (project_root, db_path) = create_read_only_project_db(
         home.path(),
         project.path(),
@@ -718,7 +714,7 @@ async fn ensure_initialized_rejects_read_only_db_with_pending_migrations() {
         "normal TraceDecay::open should fail against the read-only DB fixture"
     );
 
-    let error = match serve::ensure_initialized(&project_root).await {
+    let error = match serve::ensure_initialized_with_options(&project_root, open_options).await {
         Ok(_) => panic!("read-only fallback must reject old schemas instead of serving them"),
         Err(error) => error,
     };
@@ -735,6 +731,10 @@ async fn ensure_initialized_read_only_fallback_reports_and_guards_read_only_stor
     let _env_guard = READ_ONLY_SERVE_ENV_LOCK.lock().await;
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(profile_root(home.path())),
+        global_db_path: Some(profile_root(home.path()).join("global.db")),
+    };
     fs::create_dir_all(project.path().join("src")).unwrap();
     fs::write(
         project.path().join("src/lib.rs"),
@@ -749,7 +749,7 @@ async fn ensure_initialized_read_only_fallback_reports_and_guards_read_only_stor
     )
     .await;
 
-    let cg = TraceDecay::open_read_only(&project_root)
+    let cg = TraceDecay::open_read_only_with_options(&project_root, open_options)
         .await
         .expect("current-schema read-only DB should open for read-only serving");
 

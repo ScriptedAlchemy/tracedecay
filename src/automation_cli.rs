@@ -224,6 +224,11 @@ async fn handle_automation_facts_command(
                 Some("cli".to_string()),
             )
             .await?;
+            tracedecay::automation::memory_digest::refresh_memory_digest_after_memory_change(
+                cg.db().conn(),
+                &project_path,
+            )
+            .await;
             serde_json::json!({ "proposal": proposal })
         }
         AutomationFactsAction::Reject { id, reason, .. } => {
@@ -362,11 +367,20 @@ async fn handle_automation_skills_command(
                     &tracedecay_bin,
                 )?
             } else {
-                tracedecay::automation::skill_targets::install_managed_skills(
+                let summary = tracedecay::automation::skill_targets::install_managed_skills(
                     &profile_root,
                     target.into(),
                     output,
-                )?
+                )?;
+                // The shareable Codex plugin artifact intentionally omits the
+                // memory digest (personal memory must not ship in a bundle);
+                // direct host installs export it alongside the skills.
+                tracedecay::automation::memory_digest::sync_memory_digest_export(
+                    &profile_root,
+                    target.into(),
+                    output,
+                )?;
+                summary
             };
             if json {
                 println!("{}", serde_json::to_string_pretty(&summary)?);
@@ -513,6 +527,7 @@ async fn handle_automation_run_command(
                     role,
                     start_time,
                     end_time,
+                    ..SessionReflectorAutomationOptions::default()
                 },
             )
             .await?;
@@ -559,6 +574,7 @@ async fn handle_automation_run_command(
                     query,
                     evidence_limit,
                     profile_root: None,
+                    ..SkillWriterAutomationOptions::default()
                 },
             )
             .await?;
@@ -641,6 +657,7 @@ async fn handle_automation_config_command(
             require_dashboard_approval,
             auto_apply_memory_ops,
             auto_enable_skills,
+            export_memory_digest,
             memory_curator,
             memory_curator_schedule,
             memory_curator_interval_secs,
@@ -677,6 +694,7 @@ async fn handle_automation_config_command(
             require_dashboard_approval,
             auto_apply_memory_ops,
             auto_enable_skills,
+            export_memory_digest,
             memory_curator: automation_task_patch(
                 memory_curator,
                 memory_curator_schedule,
@@ -831,6 +849,7 @@ fn print_automation_config(
             "approval_required": effective.require_dashboard_approval,
             "auto_apply_memory_ops": effective.auto_apply_memory_ops,
             "auto_enable_skills": effective.auto_enable_skills,
+            "export_memory_digest": effective.export_memory_digest,
         },
     });
     if json {
@@ -870,6 +889,7 @@ fn print_automation_config(
             );
             println!("auto_apply_memory_ops: {}", effective.auto_apply_memory_ops);
             println!("auto_enable_skills: {}", effective.auto_enable_skills);
+            println!("export_memory_digest: {}", effective.export_memory_digest);
         }
     }
     Ok(())

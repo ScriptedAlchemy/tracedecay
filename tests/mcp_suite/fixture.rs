@@ -273,9 +273,10 @@ async fn build_template(dest: &Path) -> io::Result<()> {
     // repo's .git and bootstrap branch metadata that a TempDir-based test
     // project would never have.
     let scratch = tempfile::TempDir::new()?;
+    let scratch_root = scratch.path().canonicalize()?;
 
     for (flavor, indexed) in [(EMPTY_FLAVOR, false), (INDEXED_FLAVOR, true)] {
-        let root = scratch.path().join(flavor);
+        let root = scratch_root.join(flavor);
         let project = root.join("project");
         fs::create_dir_all(&project)?;
         if indexed {

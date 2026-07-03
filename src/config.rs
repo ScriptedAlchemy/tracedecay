@@ -142,10 +142,38 @@ pub fn has_project_database(project_root: &Path) -> bool {
 /// `~/.tracedecay` unless `TRACEDECAY_DATA_DIR` explicitly overrides it.
 pub fn user_data_dir() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os(USER_DATA_DIR_ENV).filter(|path| !path.is_empty()) {
-        return Some(PathBuf::from(path));
+        return Some(canonicalize_data_dir(PathBuf::from(path)));
     }
     let home = dirs::home_dir()?;
-    Some(home.join(TRACEDECAY_DIR))
+    Some(canonicalize_data_dir(home.join(TRACEDECAY_DIR)))
+}
+
+fn canonicalize_data_dir(path: PathBuf) -> PathBuf {
+    if !path.is_absolute() {
+        return path;
+    }
+    canonicalize_path_or_existing_parent(&path)
+}
+
+fn canonicalize_path_or_existing_parent(path: &Path) -> PathBuf {
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
+    }
+
+    let mut current = path;
+    let mut missing_suffix = PathBuf::new();
+    while let Some(name) = current.file_name() {
+        missing_suffix = Path::new(name).join(missing_suffix);
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        current = parent;
+        if let Ok(canonical_parent) = current.canonicalize() {
+            return canonical_parent.join(missing_suffix);
+        }
+    }
+
+    path.to_path_buf()
 }
 
 /// Reads the `TRACEDECAY_<suffix>` environment variable.
@@ -575,11 +603,37 @@ pub fn is_excluded(file_path: &str, config: &TraceDecayConfig) -> bool {
 mod tests {
     use super::{
         db_filename, get_project_db_path, get_tracedecay_dir, is_excluded, is_excluded_dir,
-        is_ignored_by_explicit_global_excludes, is_ignored_by_git, is_included, TraceDecayConfig,
+        is_ignored_by_explicit_global_excludes, is_ignored_by_git, is_included, user_data_dir,
+        TraceDecayConfig, USER_DATA_DIR_ENV,
     };
+    use std::ffi::OsString;
     use std::fs;
     use std::process::Command;
     use tempfile::TempDir;
+
+    static USER_DATA_DIR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct EnvRestore {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvRestore {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     #[test]
     fn test_data_dir_defaults_to_tracedecay_for_new_installs() {
@@ -601,6 +655,23 @@ mod tests {
         assert_eq!(
             get_tracedecay_dir(root.path()),
             root.path().join(".tracedecay")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_data_dir_canonicalizes_symlinked_existing_parent() {
+        let _lock = USER_DATA_DIR_ENV_LOCK.lock().unwrap();
+        let root = TempDir::new().unwrap();
+        let real_home = root.path().join("real-home");
+        let linked_home = root.path().join("linked-home");
+        fs::create_dir_all(&real_home).unwrap();
+        std::os::unix::fs::symlink(&real_home, &linked_home).unwrap();
+        let _env = EnvRestore::set(USER_DATA_DIR_ENV, linked_home.join(".tracedecay"));
+
+        assert_eq!(
+            user_data_dir().unwrap(),
+            real_home.canonicalize().unwrap().join(".tracedecay")
         );
     }
 
