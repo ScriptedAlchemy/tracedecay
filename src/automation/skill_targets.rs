@@ -426,8 +426,18 @@ fn swap_overlay_dirs(overlay_root: &Path, stage_root: &Path) -> Result<()> {
         fs::rename(overlay_root, &backup_root)?;
     }
     if let Err(err) = fs::rename(stage_root, overlay_root) {
+        // Remove the staged directory so a failed swap does not orphan a
+        // `.tracedecay-managed.tmp-<pid>-<nonce>` sibling on every retry.
+        fs::remove_dir_all(stage_root).ok();
         if backup_root.exists() {
-            let _ = fs::rename(&backup_root, overlay_root);
+            if let Err(restore_err) = fs::rename(&backup_root, overlay_root) {
+                tracing::warn!(
+                    backup = %backup_root.display(),
+                    overlay = %overlay_root.display(),
+                    error = %restore_err,
+                    "failed to restore managed skill overlay backup; previous content remains at backup path"
+                );
+            }
         }
         return Err(err.into());
     }
