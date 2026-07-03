@@ -24,12 +24,15 @@ use crate::common::{
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+/// Success-path budget for the fake codex app-server child to spawn (a real
+/// python interpreter) and complete its scripted turn. This is the upper bound
+/// the backend waits before declaring a timeout; it must be generous enough
+/// that a slow python spawn/schedule under nextest's process-per-test
+/// parallelism can never false-fire it, while still failing fast on a genuine
+/// hang. Tests that deliberately exercise the timeout path pass their own tight
+/// `Duration` (e.g. 300ms) and are unaffected by this value.
 fn fake_codex_response_timeout() -> Duration {
-    if cfg!(windows) {
-        Duration::from_secs(30)
-    } else {
-        Duration::from_secs(5)
-    }
+    Duration::from_secs(30)
 }
 
 fn fake_codex_response_timeout_secs() -> u64 {
