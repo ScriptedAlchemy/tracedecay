@@ -24,8 +24,9 @@ use std::time::UNIX_EPOCH;
 use serde_json::Value;
 
 use crate::sessions::shared::{
-    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
-    path_belongs_to_project, title_from_messages, StoredCursor, TranscriptIngestStats,
+    append_location_metadata, append_tool_calls_metadata, append_usage_metadata,
+    content_storage_text_and_tools, path_belongs_to_project, title_from_messages, StoredCursor,
+    TranscriptIngestStats, TranscriptLocation, TranscriptLocationMetadataKeys,
 };
 use crate::sessions::source::{
     collect_files_with_ext, read_changed_file, ParsedTranscript, SessionDraft, TranscriptSource,
@@ -33,6 +34,11 @@ use crate::sessions::source::{
 use crate::sessions::SessionMessageRecord;
 
 const PROVIDER: &str = "kiro";
+const KIRO_LOCATION_KEYS: TranscriptLocationMetadataKeys = TranscriptLocationMetadataKeys::new(
+    "kiro_workspace_cwd",
+    "kiro_workspace_worktree",
+    "kiro_workspace_location_provenance",
+);
 /// Workspace hash dirs plus one level of session nesting.
 const MAX_SCAN_DEPTH: u8 = 3;
 /// Bound workspace hash enumeration on large installs.
@@ -88,7 +94,10 @@ impl TranscriptSource for KiroSource {
         project_root: &Path,
         _max_new_bytes: Option<u64>,
     ) -> Option<ParsedTranscript> {
-        if !transcript_belongs_to_project(path, &self.workspace_storage_dir, project_root) {
+        let Some(location_cwd) = transcript_location_path(path, &self.workspace_storage_dir) else {
+            return None;
+        };
+        if !path_belongs_to_project(&location_cwd, project_root) {
             return None;
         }
 
@@ -99,6 +108,7 @@ impl TranscriptSource for KiroSource {
                 return Some(empty_changed_transcript(
                     path,
                     project_root,
+                    Some(&location_cwd),
                     changed.new_cursor,
                 ));
             }
@@ -107,17 +117,20 @@ impl TranscriptSource for KiroSource {
             return Some(empty_changed_transcript(
                 path,
                 project_root,
+                Some(&location_cwd),
                 changed.new_cursor,
             ));
         }
 
         let session_id = session_id_from_transcript(path, &value);
         let model = model_from_transcript(&value);
-        let messages = messages_from_transcript(&value, &session_id, path, model.as_deref());
+        let messages =
+            messages_from_transcript(&value, &session_id, path, model.as_deref(), &location_cwd);
         if messages.is_empty() {
             return Some(empty_changed_transcript(
                 path,
                 project_root,
+                Some(&location_cwd),
                 changed.new_cursor,
             ));
         }
@@ -128,10 +141,7 @@ impl TranscriptSource for KiroSource {
             project_key: project.clone(),
             project_path: project,
             title: title_from_messages(&messages),
-            metadata_json: serde_json::to_string(&serde_json::json!({
-                "source": "kiro_transcript",
-            }))
-            .ok(),
+            metadata_json: serde_json::to_string(&session_metadata(Some(&location_cwd))).ok(),
             parent_session_id: None,
             is_subagent: false,
             agent_id: None,
@@ -161,6 +171,7 @@ pub async fn ingest_kiro_for_project(
 fn empty_changed_transcript(
     path: &Path,
     project_root: &Path,
+    location_cwd: Option<&Path>,
     new_cursor: StoredCursor,
 ) -> ParsedTranscript {
     let project = project_root.to_string_lossy().to_string();
@@ -174,10 +185,7 @@ fn empty_changed_transcript(
             project_key: project.clone(),
             project_path: project,
             title: None,
-            metadata_json: serde_json::to_string(&serde_json::json!({
-                "source": "kiro_transcript",
-            }))
-            .ok(),
+            metadata_json: serde_json::to_string(&session_metadata(location_cwd)).ok(),
             parent_session_id: None,
             is_subagent: false,
             agent_id: None,
@@ -290,19 +298,12 @@ fn collect_extensionless_execution_files(dir: &Path, max_depth: u8, out: &mut Ve
     }
 }
 
-fn transcript_belongs_to_project(
-    path: &Path,
-    workspace_storage_dir: &Path,
-    project_root: &Path,
-) -> bool {
+fn transcript_location_path(path: &Path, workspace_storage_dir: &Path) -> Option<PathBuf> {
     if let Some(workspace) = workspace_from_sessions_path(path) {
-        return path_belongs_to_project(&workspace, project_root);
+        return Some(workspace);
     }
-    let Some(hash) = workspace_hash_from_path(path) else {
-        return false;
-    };
+    let hash = workspace_hash_from_path(path)?;
     workspace_path_from_hash(workspace_storage_dir, &hash)
-        .is_some_and(|workspace| path_belongs_to_project(&workspace, project_root))
 }
 
 fn workspace_from_sessions_path(path: &Path) -> Option<PathBuf> {
@@ -445,9 +446,17 @@ fn messages_from_transcript(
     session_id: &str,
     path: &Path,
     model: Option<&str>,
+    location_cwd: &Path,
 ) -> Vec<SessionMessageRecord> {
     if let Some(chat) = value.get("chat").and_then(Value::as_array) {
-        return legacy_chat_messages(chat, session_id, path, model, value.get("metadata"));
+        return legacy_chat_messages(
+            chat,
+            session_id,
+            path,
+            model,
+            value.get("metadata"),
+            location_cwd,
+        );
     }
     for key in [
         "messages",
@@ -457,7 +466,7 @@ fn messages_from_transcript(
         "events",
     ] {
         if let Some(messages) = value.get(key).and_then(Value::as_array) {
-            return modern_messages(messages, session_id, path, model);
+            return modern_messages(messages, session_id, path, model, location_cwd);
         }
     }
     Vec::new()
@@ -469,6 +478,7 @@ fn legacy_chat_messages(
     path: &Path,
     model: Option<&str>,
     metadata: Option<&Value>,
+    location_cwd: &Path,
 ) -> Vec<SessionMessageRecord> {
     let base_ts = metadata
         .and_then(|meta| meta.get("startTime"))
@@ -498,7 +508,7 @@ fn legacy_chat_messages(
             tool_names: (!tool_names.is_empty()).then(|| tool_names.join(",")),
             source_path: Some(path.to_string_lossy().to_string()),
             source_offset: Some(index as i64),
-            metadata_json: serde_json::to_string(&message_metadata(entry)).ok(),
+            metadata_json: serde_json::to_string(&message_metadata(entry, Some(location_cwd))).ok(),
         });
     }
     out
@@ -509,6 +519,7 @@ fn modern_messages(
     session_id: &str,
     path: &Path,
     model: Option<&str>,
+    location_cwd: &Path,
 ) -> Vec<SessionMessageRecord> {
     let mut out = Vec::new();
     for (index, entry) in messages.iter().enumerate() {
@@ -542,7 +553,7 @@ fn modern_messages(
             tool_names: (!tool_names.is_empty()).then(|| tool_names.join(",")),
             source_path: Some(path.to_string_lossy().to_string()),
             source_offset: Some(index as i64),
-            metadata_json: serde_json::to_string(&message_metadata(entry)).ok(),
+            metadata_json: serde_json::to_string(&message_metadata(entry, Some(location_cwd))).ok(),
         });
     }
     out
@@ -583,11 +594,30 @@ fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
         .map(str::to_string)
 }
 
-fn message_metadata(entry: &Value) -> Value {
+fn session_metadata(location_cwd: Option<&Path>) -> Value {
     let mut metadata = serde_json::Map::new();
     metadata.insert(
         "source".to_string(),
         Value::String("kiro_transcript".to_string()),
+    );
+    append_location_metadata(
+        &mut metadata,
+        KIRO_LOCATION_KEYS,
+        TranscriptLocation::new(location_cwd, "workspace_mapping"),
+    );
+    Value::Object(metadata)
+}
+
+fn message_metadata(entry: &Value, location_cwd: Option<&Path>) -> Value {
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        "source".to_string(),
+        Value::String("kiro_transcript".to_string()),
+    );
+    append_location_metadata(
+        &mut metadata,
+        KIRO_LOCATION_KEYS,
+        TranscriptLocation::new(location_cwd, "workspace_mapping"),
     );
     append_tool_calls_metadata(&mut metadata, entry);
     append_usage_metadata(&mut metadata, &[entry]);

@@ -13,6 +13,8 @@ use tracedecay::sessions::hermes::ingest_homes;
 use tracedecay::sessions::lcm::LcmPreflightRequest;
 use tracedecay::sessions::SessionRecord;
 
+use crate::support::{assert_metadata_path_eq, create_git_repo_with_linked_worktree};
+
 const SESSION_ID: &str = "20260101_000000_abc123";
 
 /// Like [`crate::support::setup`], but returns the Hermes home
@@ -188,7 +190,9 @@ async fn open_state_db(path: &Path) -> libsql::Connection {
 async fn hermes_state_db_populates_projection_for_pinned_project() {
     let tmp = TempDir::new().unwrap();
     let (hermes_home, project) = setup(&tmp);
-    write_hermes_profile(&hermes_home, "test", Some(&project)).await;
+    let linked_worktree = tmp.path().join("linked-worktree");
+    create_git_repo_with_linked_worktree(&project, &linked_worktree);
+    write_hermes_profile(&hermes_home, "test", Some(&linked_worktree)).await;
 
     let db = open_project_session_db(&project).await.unwrap();
     let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &project).await;
@@ -227,6 +231,12 @@ async fn hermes_state_db_populates_projection_for_pinned_project() {
     assert_eq!(metadata["source"], "hermes_state_db");
     assert_eq!(metadata["profile"], "test");
     assert_eq!(metadata["hermes_source"], "tui");
+    assert_metadata_path_eq(&metadata["hermes_session_cwd"], &linked_worktree);
+    assert_metadata_path_eq(&metadata["hermes_session_worktree"], &linked_worktree);
+    assert_eq!(
+        metadata["hermes_session_location_provenance"].as_str(),
+        Some("profile_pin")
+    );
     // Session-cumulative token counters from the Hermes sessions table map to
     // dashboard counter names; zero counters (cache_write) are omitted.
     assert_eq!(metadata["usage"]["input_tokens"], 96443);
@@ -246,6 +256,14 @@ async fn hermes_state_db_populates_projection_for_pinned_project() {
     assert_eq!(tool_turn.role, "assistant");
     assert!(tool_turn.text.contains("call_FBvwGfCC9lJrXPvOqpDHcjYn"));
     assert_eq!(tool_turn.tool_names.as_deref(), Some("terminal"));
+    let tool_metadata: serde_json::Value =
+        serde_json::from_str(tool_turn.metadata_json.as_deref().unwrap()).unwrap();
+    assert_metadata_path_eq(&tool_metadata["hermes_session_cwd"], &linked_worktree);
+    assert_metadata_path_eq(&tool_metadata["hermes_session_worktree"], &linked_worktree);
+    assert_eq!(
+        tool_metadata["hermes_session_location_provenance"].as_str(),
+        Some("profile_pin")
+    );
 
     // Projection-only: Hermes raw messages are owned by the runtime LCM
     // ingest, so the transcript sweep must never write lcm_raw_messages.

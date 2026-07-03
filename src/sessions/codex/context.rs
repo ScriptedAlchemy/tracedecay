@@ -4,8 +4,23 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::{session_meta_from_record, turn_context_from_record, CodexMeta};
-use crate::sessions::shared::append_location_metadata;
+use crate::sessions::shared::{
+    append_location_metadata, TranscriptLocation, TranscriptLocationMetadataKeys,
+};
 use crate::sessions::SessionMessageRecord;
+
+const CODEX_SESSION_LOCATION_KEYS: TranscriptLocationMetadataKeys =
+    TranscriptLocationMetadataKeys::new(
+        "codex_session_cwd",
+        "codex_session_worktree",
+        "codex_session_location_provenance",
+    );
+const CODEX_TURN_LOCATION_KEYS: TranscriptLocationMetadataKeys =
+    TranscriptLocationMetadataKeys::new(
+        "codex_turn_cwd",
+        "codex_turn_worktree",
+        "codex_turn_location_provenance",
+    );
 
 pub(super) struct CodexContextState {
     pub(super) model: Option<String>,
@@ -118,11 +133,8 @@ pub(super) fn session_metadata_json(meta: &CodexMeta) -> Option<String> {
     }
     append_location_metadata(
         &mut metadata,
-        "codex_session_cwd",
-        "codex_session_worktree",
-        "codex_session_location_provenance",
-        Some(&meta.cwd),
-        "session_meta",
+        CODEX_SESSION_LOCATION_KEYS,
+        TranscriptLocation::new(Some(&meta.cwd), "session_meta"),
     );
     insert_git_metadata(&mut metadata, meta.git.as_ref());
     serde_json::to_string(&Value::Object(metadata)).ok()
@@ -145,11 +157,8 @@ pub(super) fn annotate_message(
 
     append_location_metadata(
         &mut metadata,
-        "codex_turn_cwd",
-        "codex_turn_worktree",
-        "codex_turn_location_provenance",
-        cwd,
-        "codex_context",
+        CODEX_TURN_LOCATION_KEYS,
+        TranscriptLocation::new(cwd, "codex_context"),
     );
     insert_git_metadata(&mut metadata, git);
     message.metadata_json = serde_json::to_string(&Value::Object(metadata)).ok();

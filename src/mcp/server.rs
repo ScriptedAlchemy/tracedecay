@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
+use crate::mcp::project_route::{mcp_analytics_session_id, HookProjectRouteCache};
 use crate::mcp::response_handles::{
     cleanup_expired_response_handles, response_handle_stats_json, RESPONSE_RETRIEVE_TOOL,
 };
@@ -27,8 +28,7 @@ use crate::tracedecay::TraceDecay;
 use super::hook_events::{self, HookAgent, HookEventPlan};
 use super::tools::{
     explore_call_budget, get_tool_definitions_with_budget,
-    handle_tool_call_with_registry_and_implicit_project, tool_dispatches_registered_project_reader,
-    ToolCallRegistryOptions,
+    handle_tool_call_with_registry_and_implicit_project, ToolCallRegistryOptions,
 };
 use super::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
 
@@ -66,20 +66,6 @@ pub(crate) fn classify_mcp_method(method: &str) -> McpMethod {
         "ping" | "logging/setLevel" => McpMethod::TrivialAck,
         _ => McpMethod::Unknown,
     }
-}
-
-fn arguments_have_project_selector(arguments: &Value) -> bool {
-    arguments.get("project_selector").is_some()
-        || arguments.get("project_id").is_some()
-        || arguments.get("project_path").is_some()
-        || arguments.get("project_root").is_some()
-}
-
-#[derive(Default)]
-struct ConnectionContext {
-    project_path: Option<String>,
-    paths_by_session: HashMap<String, String>,
-    paths_by_thread: HashMap<String, String>,
 }
 
 /// The steering instructions advertised from the `initialize` handshake of a
@@ -854,33 +840,14 @@ impl McpServer {
     async fn update_hook_workspace_route(
         &self,
         event: &hook_events::HookEvent,
-        connection: &mut ConnectionContext,
+        route_cache: &mut HookProjectRouteCache,
     ) {
-        let route_cwd = event
-            .route
-            .as_ref()
-            .and_then(|route| route.cwd.as_deref())
-            .or(event.cwd.as_deref());
+        let route_cwd = HookProjectRouteCache::route_cwd(event);
         let project_path = match route_cwd {
             Some(cwd) => self.registered_project_containing_path(cwd).await,
             None => None,
         };
-        connection.project_path.clone_from(&project_path);
-        let Some(project_path) = project_path else {
-            return;
-        };
-        if let Some(route) = event.route.as_ref() {
-            if let Some(session_id) = route.session_id.as_deref().filter(|id| !id.is_empty()) {
-                connection
-                    .paths_by_session
-                    .insert(session_id.to_string(), project_path.clone());
-            }
-            if let Some(thread_id) = route.thread_id.as_deref().filter(|id| !id.is_empty()) {
-                connection
-                    .paths_by_thread
-                    .insert(thread_id.to_string(), project_path);
-            }
-        }
+        route_cache.observe_hook_event(event, project_path);
     }
 
     async fn registered_project_containing_path(&self, cwd: &Path) -> Option<String> {
@@ -894,28 +861,6 @@ impl McpServer {
                 return None;
             }
         }
-    }
-
-    fn apply_hook_project_route(
-        tool_name: &str,
-        mut arguments: Value,
-        connection: &ConnectionContext,
-    ) -> Value {
-        if !tool_dispatches_registered_project_reader(tool_name)
-            || arguments_have_project_selector(&arguments)
-        {
-            return arguments;
-        }
-        let Some(project_path) = hook_project_route_for_arguments(&arguments, connection) else {
-            return arguments;
-        };
-        if let Some(map) = arguments.as_object_mut() {
-            map.insert(
-                "project_selector".to_string(),
-                json!({ "path": project_path }),
-            );
-        }
-        arguments
     }
 
     /// Detects mid-session branch drift and reopens the served instance
@@ -1419,7 +1364,7 @@ impl McpServer {
         listen_for_process_signals: bool,
         timings_override: Option<bool>,
     ) -> Result<()> {
-        let mut connection_context = ConnectionContext::default();
+        let mut route_cache = HookProjectRouteCache::default();
 
         // Register the SIGTERM listener once before entering the loop so
         // there is no window between iterations where a SIGTERM is delivered
@@ -1514,7 +1459,7 @@ impl McpServer {
                     self.handle_request_with_timings_and_implicit_project(
                         &request,
                         timings_override.unwrap_or_else(|| self.timings_enabled()),
-                        &mut connection_context,
+                        &mut route_cache,
                         connection_route.implicit_project_path(),
                     )
                     .await
@@ -1638,8 +1583,8 @@ impl McpServer {
     ///
     /// Returns `None` for notifications (requests without an `id`).
     pub(crate) async fn handle_request(&self, request: &JsonRpcRequest) -> Option<JsonRpcResponse> {
-        let mut connection_context = ConnectionContext::default();
-        self.handle_request_with_timings(request, self.timings_enabled(), &mut connection_context)
+        let mut route_cache = HookProjectRouteCache::default();
+        self.handle_request_with_timings(request, self.timings_enabled(), &mut route_cache)
             .await
     }
 
@@ -1647,12 +1592,12 @@ impl McpServer {
         &self,
         request: &JsonRpcRequest,
         timings_enabled: bool,
-        connection: &mut ConnectionContext,
+        route_cache: &mut HookProjectRouteCache,
     ) -> Option<JsonRpcResponse> {
         self.handle_request_with_timings_and_implicit_project(
             request,
             timings_enabled,
-            connection,
+            route_cache,
             None,
         )
         .await
@@ -1662,7 +1607,7 @@ impl McpServer {
         &self,
         request: &JsonRpcRequest,
         timings_enabled: bool,
-        connection: &mut ConnectionContext,
+        route_cache: &mut HookProjectRouteCache,
         implicit_project_path: Option<&Path>,
     ) -> Option<JsonRpcResponse> {
         debug_assert!(
@@ -1674,7 +1619,7 @@ impl McpServer {
             *counts.entry(request.method.clone()).or_insert(0) += 1;
         }
         if matches!(classify_mcp_method(&request.method), McpMethod::HookEvent) {
-            self.handle_hook_event_notification(request.params.as_ref(), connection)
+            self.handle_hook_event_notification(request.params.as_ref(), route_cache)
                 .await;
             return None;
         }
@@ -1693,7 +1638,7 @@ impl McpServer {
                     id,
                     request.params.as_ref(),
                     timings_enabled,
-                    connection,
+                    route_cache,
                     implicit_project_path,
                 )
                 .await,
@@ -1724,14 +1669,14 @@ impl McpServer {
     async fn handle_hook_event_notification(
         &self,
         params: Option<&Value>,
-        connection: &mut ConnectionContext,
+        route_cache: &mut HookProjectRouteCache,
     ) {
         let Some(event) = hook_events::parse_hook_event(params) else {
             return;
         };
         let cg = self.reopen_if_branch_drifted().await;
         let root = cg.project_root().to_path_buf();
-        self.update_hook_workspace_route(&event, connection).await;
+        self.update_hook_workspace_route(&event, route_cache).await;
         let current_branch = crate::branch::current_branch(&root);
         self.record_hook_route_analytics(&root, &event, current_branch.as_deref());
         let plan = hook_events::plan_hook_event(&event, &root, current_branch.as_deref());
@@ -2075,7 +2020,7 @@ impl McpServer {
         id: Value,
         params: Option<&Value>,
         timings_enabled: bool,
-        connection: &ConnectionContext,
+        route_cache: &HookProjectRouteCache,
         implicit_project_path: Option<&Path>,
     ) -> JsonRpcResponse {
         let Some(params) = params else {
@@ -2129,8 +2074,7 @@ impl McpServer {
         } else {
             None
         };
-        let mut handler_arguments =
-            Self::apply_hook_project_route(tool_name, arguments, connection);
+        let mut handler_arguments = route_cache.apply_to_tool_arguments(tool_name, arguments);
         if crate::analytics::is_skill_view_tool(tool_name) {
             if let Some(request_id) = json_rpc_request_id_string(&id) {
                 if let Some(map) = handler_arguments.as_object_mut() {
@@ -2546,47 +2490,6 @@ impl McpServer {
     }
 }
 
-fn mcp_analytics_session_id(arguments: &Value) -> Option<String> {
-    route_identity_from_arguments(arguments, &["session_id", "sessionId"])
-}
-
-fn mcp_route_thread_id(arguments: &Value) -> Option<String> {
-    route_identity_from_arguments(arguments, &["thread_id", "threadId"])
-}
-
-fn route_identity_from_arguments(arguments: &Value, keys: &[&str]) -> Option<String> {
-    fn string_field(value: &Value, key: &str) -> Option<String> {
-        value
-            .get(key)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(ToOwned::to_owned)
-    }
-
-    [Some(arguments), arguments.get("_meta")]
-        .into_iter()
-        .flatten()
-        .find_map(|value| keys.iter().find_map(|key| string_field(value, key)))
-}
-
-fn hook_project_route_for_arguments<'a>(
-    arguments: &Value,
-    connection: &'a ConnectionContext,
-) -> Option<&'a str> {
-    if let Some(thread_id) = mcp_route_thread_id(arguments) {
-        if let Some(project_path) = connection.paths_by_thread.get(&thread_id) {
-            return Some(project_path.as_str());
-        }
-    }
-    if let Some(session_id) = mcp_analytics_session_id(arguments) {
-        if let Some(project_path) = connection.paths_by_session.get(&session_id) {
-            return Some(project_path.as_str());
-        }
-    }
-    connection.project_path.as_deref()
-}
-
 fn json_rpc_request_id_string(id: &Value) -> Option<String> {
     match id {
         Value::String(id) => Some(id.clone()),
@@ -2598,11 +2501,7 @@ fn json_rpc_request_id_string(id: &Value) -> Option<String> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod staleness_banner_tests {
-    use super::{
-        format_per_file_staleness_banner, hook_project_route_for_arguments, humanize_age,
-        needs_lazy_sync_before_dispatch, ConnectionContext, McpServer,
-    };
-    use serde_json::json;
+    use super::{format_per_file_staleness_banner, humanize_age, needs_lazy_sync_before_dispatch};
     use std::fs;
     use tempfile::tempdir;
 
@@ -2675,80 +2574,5 @@ mod staleness_banner_tests {
                 "{tool} should still get the normal lazy freshness check"
             );
         }
-    }
-
-    #[test]
-    fn hook_project_route_prefers_thread_then_session_then_last_hook_path() {
-        let mut connection = ConnectionContext {
-            project_path: Some("/repo/default".to_string()),
-            ..ConnectionContext::default()
-        };
-        connection
-            .paths_by_session
-            .insert("session-a".to_string(), "/repo/session-a".to_string());
-        connection
-            .paths_by_thread
-            .insert("thread-a".to_string(), "/repo/thread-a".to_string());
-
-        assert_eq!(
-            hook_project_route_for_arguments(
-                &json!({"session_id": "session-a", "thread_id": "thread-a"}),
-                &connection,
-            ),
-            Some("/repo/thread-a")
-        );
-        assert_eq!(
-            hook_project_route_for_arguments(&json!({"session_id": "session-a"}), &connection),
-            Some("/repo/session-a")
-        );
-        assert_eq!(
-            hook_project_route_for_arguments(&json!({"session_id": "unknown"}), &connection),
-            Some("/repo/default")
-        );
-    }
-
-    #[test]
-    fn hook_project_route_reads_thread_and_session_ids_from_meta() {
-        let mut connection = ConnectionContext::default();
-        connection
-            .paths_by_session
-            .insert("session-meta".to_string(), "/repo/session-meta".to_string());
-        connection
-            .paths_by_thread
-            .insert("thread-meta".to_string(), "/repo/thread-meta".to_string());
-
-        assert_eq!(
-            hook_project_route_for_arguments(
-                &json!({"_meta": {"sessionId": "session-meta", "threadId": "thread-meta"}}),
-                &connection,
-            ),
-            Some("/repo/thread-meta")
-        );
-    }
-
-    #[test]
-    fn apply_hook_project_route_injects_selector_without_overriding_explicit_selector() {
-        let mut connection = ConnectionContext::default();
-        connection
-            .paths_by_session
-            .insert("session-a".to_string(), "/repo/session-a".to_string());
-
-        let routed = McpServer::apply_hook_project_route(
-            "tracedecay_context",
-            json!({"task": "inspect routing", "session_id": "session-a"}),
-            &connection,
-        );
-        assert_eq!(routed["project_selector"]["path"], "/repo/session-a");
-
-        let explicit = McpServer::apply_hook_project_route(
-            "tracedecay_context",
-            json!({
-                "task": "inspect routing",
-                "session_id": "session-a",
-                "project_selector": {"path": "/repo/explicit"},
-            }),
-            &connection,
-        );
-        assert_eq!(explicit["project_selector"]["path"], "/repo/explicit");
     }
 }

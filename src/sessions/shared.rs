@@ -214,43 +214,61 @@ pub(crate) fn append_tool_calls_metadata(
     }
 }
 
-pub(crate) fn append_cwd_metadata(
-    map: &mut serde_json::Map<String, Value>,
-    cwd_key: &str,
-    worktree_key: &str,
-    cwd: Option<&Path>,
-) {
-    let Some(cwd) = cwd else {
-        return;
-    };
-    map.insert(
-        cwd_key.to_string(),
-        Value::String(cwd.to_string_lossy().to_string()),
-    );
-    if let Some(worktree) = crate::worktree::git_worktree_root(cwd) {
-        map.insert(
-            worktree_key.to_string(),
-            Value::String(worktree.to_string_lossy().to_string()),
-        );
+#[derive(Clone, Copy)]
+pub(crate) struct TranscriptLocation<'a> {
+    pub(crate) cwd: Option<&'a Path>,
+    pub(crate) provenance: &'a str,
+}
+
+impl<'a> TranscriptLocation<'a> {
+    pub(crate) fn new(cwd: Option<&'a Path>, provenance: &'a str) -> Self {
+        Self { cwd, provenance }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct TranscriptLocationMetadataKeys {
+    pub(crate) cwd: &'static str,
+    pub(crate) worktree: &'static str,
+    pub(crate) provenance: &'static str,
+}
+
+impl TranscriptLocationMetadataKeys {
+    pub(crate) const fn new(
+        cwd: &'static str,
+        worktree: &'static str,
+        provenance: &'static str,
+    ) -> Self {
+        Self {
+            cwd,
+            worktree,
+            provenance,
+        }
     }
 }
 
 pub(crate) fn append_location_metadata(
     map: &mut serde_json::Map<String, Value>,
-    cwd_key: &str,
-    worktree_key: &str,
-    provenance_key: &str,
-    cwd: Option<&Path>,
-    provenance: &str,
+    keys: TranscriptLocationMetadataKeys,
+    location: TranscriptLocation<'_>,
 ) {
-    let had_cwd = cwd.is_some();
-    append_cwd_metadata(map, cwd_key, worktree_key, cwd);
-    if had_cwd {
+    let Some(cwd) = location.cwd else {
+        return;
+    };
+    map.insert(
+        keys.cwd.to_string(),
+        Value::String(cwd.to_string_lossy().to_string()),
+    );
+    if let Some(worktree) = crate::worktree::git_worktree_root(cwd) {
         map.insert(
-            provenance_key.to_string(),
-            Value::String(provenance.to_string()),
+            keys.worktree.to_string(),
+            Value::String(worktree.to_string_lossy().to_string()),
         );
     }
+    map.insert(
+        keys.provenance.to_string(),
+        Value::String(location.provenance.to_string()),
+    );
 }
 
 /// Token-usage counter keys recognized by the savings dashboard

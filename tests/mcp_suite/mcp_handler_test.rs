@@ -668,6 +668,18 @@ fn extract_json(value: &Value) -> Value {
     serde_json::from_str(extract_text(value)).unwrap()
 }
 
+fn extract_first_json_content(value: &Value) -> Value {
+    value["content"]
+        .as_array()
+        .and_then(|items| {
+            items.iter().find_map(|item| {
+                let text = item["text"].as_str()?;
+                serde_json::from_str(text).ok()
+            })
+        })
+        .unwrap_or_else(|| panic!("missing JSON content item in {value}"))
+}
+
 fn metadata_value_at(value: &Value) -> Value {
     serde_json::from_str(
         value
@@ -10662,8 +10674,7 @@ async fn lcm_status_cli_bridge_accepts_json_args() {
     );
     let json: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["content"][0]["type"], "text");
-    let payload: Value =
-        serde_json::from_str(json["content"][0]["text"].as_str().unwrap()).unwrap();
+    let payload = extract_first_json_content(&json);
     // "ok" when sessions.db already exists, "not_ingested" on a fresh project
     // that has never had any LCM data. Both indicate the CLI bridge dispatched
     // correctly; the test is about argument plumbing, not store contents.
@@ -10721,8 +10732,7 @@ async fn lcm_status_cli_profile_scope_dispatches_without_initialized_project() {
         String::from_utf8_lossy(&profile_output.stderr)
     );
     let profile_json: Value = serde_json::from_slice(&profile_output.stdout).unwrap();
-    let profile_payload: Value =
-        serde_json::from_str(profile_json["content"][0]["text"].as_str().unwrap()).unwrap();
+    let profile_payload = extract_first_json_content(&profile_json);
     assert_eq!(profile_payload["status"], "ok");
     assert_eq!(profile_payload["lcm"]["storage_scope"], "hermes_profile");
     assert_eq!(profile_payload["lcm"]["raw_message_count"], 1);

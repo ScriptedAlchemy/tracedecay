@@ -5,7 +5,7 @@ use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::sessions::source::ingest_source;
 use tracedecay::sessions::vibe::VibeSource;
 
-use crate::support::setup;
+use crate::support::{assert_metadata_path_eq, create_git_repo_with_linked_worktree, setup};
 
 fn write_vibe_session(
     home: &std::path::Path,
@@ -54,7 +54,9 @@ fn write_vibe_session(
 async fn vibe_messages_populate_searchable_session_messages() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    write_vibe_session(&home, &project, "vibe-sess");
+    let linked_worktree = tmp.path().join("linked-worktree");
+    create_git_repo_with_linked_worktree(&project, &linked_worktree);
+    write_vibe_session(&home, &linked_worktree, "vibe-sess");
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = VibeSource::with_home(&home);
@@ -92,6 +94,23 @@ async fn vibe_messages_populate_searchable_session_messages() {
     assert_eq!(
         raw.content,
         serde_json::to_string(&expected_content).unwrap()
+    );
+    let message_metadata: serde_json::Value =
+        serde_json::from_str(assistant.message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_metadata_path_eq(&message_metadata["vibe_session_cwd"], &linked_worktree);
+    assert_metadata_path_eq(&message_metadata["vibe_session_worktree"], &linked_worktree);
+    assert_eq!(
+        message_metadata["vibe_session_location_provenance"].as_str(),
+        Some("session_meta")
+    );
+    let session = db.get_session("vibe", "vibe-sess").await.unwrap();
+    let session_metadata: serde_json::Value =
+        serde_json::from_str(session.metadata_json.as_deref().unwrap()).unwrap();
+    assert_metadata_path_eq(&session_metadata["vibe_session_cwd"], &linked_worktree);
+    assert_metadata_path_eq(&session_metadata["vibe_session_worktree"], &linked_worktree);
+    assert_eq!(
+        session_metadata["vibe_session_location_provenance"].as_str(),
+        Some("session_meta")
     );
 }
 

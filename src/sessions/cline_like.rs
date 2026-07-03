@@ -21,8 +21,9 @@ use std::time::UNIX_EPOCH;
 use serde_json::{Map, Value};
 
 use crate::sessions::shared::{
-    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
-    path_belongs_to_project, title_from_messages, StoredCursor,
+    append_location_metadata, append_tool_calls_metadata, append_usage_metadata,
+    content_storage_text_and_tools, path_belongs_to_project, title_from_messages, StoredCursor,
+    TranscriptLocation, TranscriptLocationMetadataKeys,
 };
 use crate::sessions::source::{
     read_changed_with_companion, ParsedTranscript, SessionDraft, TranscriptSource,
@@ -32,6 +33,12 @@ use crate::sessions::SessionMessageRecord;
 /// Cap task-directory scans so a long VS Code globalStorage history cannot
 /// block dashboard startup.
 const MAX_TASK_DIRS_PER_ROOT: usize = 512;
+const CLINE_LIKE_LOCATION_KEYS: TranscriptLocationMetadataKeys =
+    TranscriptLocationMetadataKeys::new(
+        "cline_like_task_cwd",
+        "cline_like_task_worktree",
+        "cline_like_task_location_provenance",
+    );
 
 /// One Cline-family provider configuration.
 #[derive(Clone)]
@@ -114,9 +121,9 @@ impl TranscriptSource for ClineLikeSource {
         let ui_path = task_dir.join("ui_messages.json");
         let changed = read_changed_with_companion(path, &ui_path, prev)?;
         let metadata = read_task_metadata(task_dir)?;
-        if !metadata_belongs_to_project(&metadata, project_root) {
+        let Some(location_cwd) = metadata_project_location(&metadata, project_root) else {
             return None;
-        }
+        };
 
         let document: Value = match serde_json::from_str(&changed.contents) {
             Ok(document) => document,
@@ -125,6 +132,7 @@ impl TranscriptSource for ClineLikeSource {
                     self.provider,
                     path,
                     project_root,
+                    Some(&location_cwd),
                     changed.new_cursor,
                 ));
             }
@@ -134,6 +142,7 @@ impl TranscriptSource for ClineLikeSource {
                 self.provider,
                 path,
                 project_root,
+                Some(&location_cwd),
                 changed.new_cursor,
             ));
         };
@@ -153,9 +162,15 @@ impl TranscriptSource for ClineLikeSource {
             } else {
                 None
             };
-            if let Some(message) =
-                message_from_entry(self.provider, entry, task_id, path, index, usage.as_ref())
-            {
+            if let Some(message) = message_from_entry(
+                self.provider,
+                entry,
+                task_id,
+                path,
+                index,
+                usage.as_ref(),
+                &location_cwd,
+            ) {
                 if message.role == "assistant" {
                     assistant_index += 1;
                 }
@@ -170,9 +185,10 @@ impl TranscriptSource for ClineLikeSource {
             project_path: project,
             title: title_from_messages(&messages)
                 .or_else(|| metadata_task_title(&metadata).map(str::to_string)),
-            metadata_json: serde_json::to_string(&serde_json::json!({
-                "source": format!("{}_task_history", self.provider),
-            }))
+            metadata_json: serde_json::to_string(&session_metadata(
+                self.provider,
+                Some(&location_cwd),
+            ))
             .ok(),
             parent_session_id: None,
             is_subagent: false,
@@ -192,6 +208,7 @@ fn empty_changed_transcript(
     provider: &str,
     path: &Path,
     project_root: &Path,
+    location_cwd: Option<&Path>,
     new_cursor: StoredCursor,
 ) -> ParsedTranscript {
     let project = project_root.to_string_lossy().to_string();
@@ -206,10 +223,7 @@ fn empty_changed_transcript(
             project_key: project.clone(),
             project_path: project,
             title: None,
-            metadata_json: serde_json::to_string(&serde_json::json!({
-                "source": format!("{provider}_task_history"),
-            }))
-            .ok(),
+            metadata_json: serde_json::to_string(&session_metadata(provider, location_cwd)).ok(),
             parent_session_id: None,
             is_subagent: false,
             agent_id: None,
@@ -270,10 +284,10 @@ fn read_task_metadata(task_dir: &Path) -> Option<Value> {
     None
 }
 
-fn metadata_belongs_to_project(metadata: &Value, project_root: &Path) -> bool {
+fn metadata_project_location(metadata: &Value, project_root: &Path) -> Option<PathBuf> {
     metadata_project_paths(metadata)
-        .iter()
-        .any(|path| path_belongs_to_project(path, project_root))
+        .into_iter()
+        .find(|path| path_belongs_to_project(path, project_root))
 }
 
 fn metadata_project_paths(value: &Value) -> Vec<PathBuf> {
@@ -405,6 +419,7 @@ fn message_from_entry(
     path: &Path,
     index: usize,
     ui_usage: Option<&Value>,
+    location_cwd: &Path,
 ) -> Option<SessionMessageRecord> {
     let role = match entry.get("role").and_then(Value::as_str)? {
         "user" => "user",
@@ -448,15 +463,45 @@ fn message_from_entry(
         tool_names: (!tool_names.is_empty()).then(|| tool_names.join(",")),
         source_path: Some(path.to_string_lossy().to_string()),
         source_offset: Some(index as i64),
-        metadata_json: serde_json::to_string(&message_metadata(provider, entry, ui_usage)).ok(),
+        metadata_json: serde_json::to_string(&message_metadata(
+            provider,
+            entry,
+            ui_usage,
+            location_cwd,
+        ))
+        .ok(),
     })
 }
 
-fn message_metadata(provider: &str, entry: &Value, ui_usage: Option<&Value>) -> Value {
+fn session_metadata(provider: &str, location_cwd: Option<&Path>) -> Value {
     let mut metadata = serde_json::Map::new();
     metadata.insert(
         "source".to_string(),
         Value::String(format!("{provider}_task_history")),
+    );
+    append_location_metadata(
+        &mut metadata,
+        CLINE_LIKE_LOCATION_KEYS,
+        TranscriptLocation::new(location_cwd, "task_metadata"),
+    );
+    Value::Object(metadata)
+}
+
+fn message_metadata(
+    provider: &str,
+    entry: &Value,
+    ui_usage: Option<&Value>,
+    location_cwd: &Path,
+) -> Value {
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        "source".to_string(),
+        Value::String(format!("{provider}_task_history")),
+    );
+    append_location_metadata(
+        &mut metadata,
+        CLINE_LIKE_LOCATION_KEYS,
+        TranscriptLocation::new(Some(location_cwd), "task_metadata"),
     );
     append_tool_calls_metadata(&mut metadata, entry);
     if let Some(usage) = ui_usage {

@@ -19,6 +19,7 @@ use crate::accounting::parser::parse_timestamp;
 use crate::sessions::shared::{
     append_location_metadata, append_tool_calls_metadata, append_usage_metadata,
     content_storage_text_and_tools, path_belongs_to_project, title_from_messages, StoredCursor,
+    TranscriptLocation, TranscriptLocationMetadataKeys,
 };
 use crate::sessions::source::{
     collect_files_with_ext, stream_new_jsonl, ParsedTranscript, SessionDraft, TranscriptSource,
@@ -26,6 +27,18 @@ use crate::sessions::source::{
 use crate::sessions::SessionMessageRecord;
 
 const PROVIDER: &str = "claude";
+const CLAUDE_SESSION_LOCATION_KEYS: TranscriptLocationMetadataKeys =
+    TranscriptLocationMetadataKeys::new(
+        "claude_session_cwd",
+        "claude_session_worktree",
+        "claude_session_location_provenance",
+    );
+const CLAUDE_MESSAGE_LOCATION_KEYS: TranscriptLocationMetadataKeys =
+    TranscriptLocationMetadataKeys::new(
+        "claude_message_cwd",
+        "claude_message_worktree",
+        "claude_message_location_provenance",
+    );
 /// `~/.claude/projects/<slug>/<…>.jsonl` is at most a few levels deep.
 const MAX_SCAN_DEPTH: u8 = 6;
 /// `cwd` should appear on an early line; scan a few in case the first is a
@@ -258,11 +271,8 @@ fn session_metadata(session_cwd: Option<&Path>) -> Value {
     );
     append_location_metadata(
         &mut metadata,
-        "claude_session_cwd",
-        "claude_session_worktree",
-        "claude_session_location_provenance",
-        session_cwd,
-        "transcript_session",
+        CLAUDE_SESSION_LOCATION_KEYS,
+        TranscriptLocation::new(session_cwd, "transcript_session"),
     );
     Value::Object(metadata)
 }
@@ -287,11 +297,8 @@ fn message_metadata(
     };
     append_location_metadata(
         &mut metadata,
-        "claude_message_cwd",
-        "claude_message_worktree",
-        "claude_message_location_provenance",
-        location_cwd,
-        location_provenance,
+        CLAUDE_MESSAGE_LOCATION_KEYS,
+        TranscriptLocation::new(location_cwd, location_provenance),
     );
     append_tool_calls_metadata(&mut metadata, message);
     // Anthropic-style per-message counters: `message.usage.{input_tokens,

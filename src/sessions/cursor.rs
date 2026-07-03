@@ -6,6 +6,7 @@ use crate::global_db::GlobalDb;
 use crate::sessions::shared::{
     append_location_metadata, append_tool_calls_metadata, append_usage_metadata,
     content_storage_text_and_tools, paths_equal, title_from_messages, StoredCursor,
+    TranscriptLocation, TranscriptLocationMetadataKeys,
 };
 use crate::sessions::source::{
     collect_files_with_ext, ingest_source, stream_new_jsonl, ParsedTranscript, SessionDraft,
@@ -18,6 +19,12 @@ use crate::storage::{
 };
 
 const PROJECT_SESSION_DB_FILENAME: &str = SESSIONS_DB_FILENAME;
+const CURSOR_EVENT_LOCATION_KEYS: TranscriptLocationMetadataKeys =
+    TranscriptLocationMetadataKeys::new(
+        "cursor_event_cwd",
+        "cursor_event_worktree",
+        "cursor_event_location_provenance",
+    );
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CursorTranscriptIngestStats {
@@ -1100,11 +1107,8 @@ fn session_metadata(event: &Value, event_cwd: Option<&Path>, location_provenance
     }
     append_location_metadata(
         &mut metadata,
-        "cursor_event_cwd",
-        "cursor_event_worktree",
-        "cursor_event_location_provenance",
-        event_cwd,
-        location_provenance,
+        CURSOR_EVENT_LOCATION_KEYS,
+        TranscriptLocation::new(event_cwd, location_provenance),
     );
     Value::Object(metadata)
 }
@@ -1126,11 +1130,8 @@ fn message_metadata(
     );
     append_location_metadata(
         &mut metadata,
-        "cursor_event_cwd",
-        "cursor_event_worktree",
-        "cursor_event_location_provenance",
-        event_cwd,
-        location_provenance,
+        CURSOR_EVENT_LOCATION_KEYS,
+        TranscriptLocation::new(event_cwd, location_provenance),
     );
     append_tool_calls_metadata(&mut metadata, message);
     // Cursor transcripts carry no token counters today (verified across
@@ -1160,11 +1161,8 @@ fn dispatch_message_metadata(
     );
     append_location_metadata(
         &mut metadata,
-        "cursor_event_cwd",
-        "cursor_event_worktree",
-        "cursor_event_location_provenance",
-        event_cwd,
-        location_provenance,
+        CURSOR_EVENT_LOCATION_KEYS,
+        TranscriptLocation::new(event_cwd, location_provenance),
     );
     Value::Object(metadata)
 }
