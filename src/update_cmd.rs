@@ -340,6 +340,18 @@ pub(crate) async fn run_post_update_tasks(
     if let Some(home) = tracedecay::agents::home_dir() {
         tracedecay::agents::migrate_installed_agents(&home, &mut config);
     }
+    // Prune tracked ids that no longer resolve to an integration (a release
+    // renamed/removed one, or a typo landed in `installed_agents`).
+    // `migrate_installed_agents` only ADDS ids, so without this the stale id
+    // would be retried on every command forever. The reinstall pass already
+    // skips such ids, but dropping them here stops the pointless retry churn.
+    let before = config.installed_agents.len();
+    config
+        .installed_agents
+        .retain(|id| tracedecay::agents::get_integration(id).is_ok());
+    if config.installed_agents.len() != before {
+        config.save();
+    }
     if config.installed_agents.is_empty() {
         eprintln!("Refreshing agent integrations: nothing to refresh");
     } else {
@@ -418,8 +430,14 @@ mod tests {
         }
     }
 
+    /// An unresolvable tracked id (renamed/removed by a later release, or a
+    /// typo in `installed_agents`) must be SKIPPED, not treated as a failure —
+    /// otherwise it gates marker advancement forever and wedges the startup
+    /// silent reinstall into an infinite reinstall loop. The reinstall pass
+    /// drops it from the results entirely, so an otherwise-empty pass is AllOk
+    /// and the markers advance.
     #[tokio::test]
-    async fn reinstall_agent_integrations_reports_unknown_ids(
+    async fn reinstall_agent_integrations_skips_unknown_ids(
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let home = TempDir::new()?;
         let results = crate::agent_cmd::reinstall_agent_integrations(
