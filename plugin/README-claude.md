@@ -33,7 +33,6 @@ path with spaces.
 ## CLI fallback
 
 Every MCP tool is also available from the shell as `tracedecay tool <name>`
-(`tracedecay tool` lists all tools; `tracedecay tool <name> --help` shows a
-tool's parameters). The bundled skills and injected steering point agents at
-that CLI fallback when the MCP transport errors or times out, instead of
-querying `.tracedecay` databases directly or giving up on tracedecay.
+(`tracedecay tool` lists tools; `tracedecay tool <name> --help` shows
+parameters). Bundled skills and steering use that CLI fallback when MCP
+transport errors or times out, instead of querying `.tracedecay` databases.

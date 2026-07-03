@@ -1,6 +1,4 @@
-//! Session/steering context builders shared by the Cursor, Claude, and Codex
-//! session hooks: index-freshness lines, the workflow-skill index, and the
-//! post-compaction context-recovery hint.
+//! Shared session/steering context builders.
 
 use std::path::Path;
 
@@ -8,14 +6,7 @@ use serde_json::Value;
 
 use super::now_unix_secs;
 
-/// Model-invocable skills that Cursor ships in its `skills/` directory. The 13
-/// `tracedecay-*` workflow slugs are native Cursor commands (not skills), so
-/// they are excluded. This covers the foundational skills plus the memory
-/// skills (`project-memory` — the merged recall+curate skill —
-/// `managing-session-context`, `retrieving-cached-context`,
-/// `retrieving-project-memory`, `storing-project-memory`). Kept as one constant
-/// so the session steering context and the bundle coverage test in
-/// `agents::cursor` stay in sync.
+/// Model-invocable skills that Cursor ships in its `skills/` directory.
 pub const CURSOR_PLUGIN_SKILLS: &[&str] = &[
     "assessing-impact",
     "code-health",
@@ -51,11 +42,6 @@ pub(super) fn append_tracedecay_bootstrap_context(s: &mut String) {
 pub(super) const COMPACTION_CONTEXT_RECOVERY_HINT: &str = "Context was just compacted. If important prior-session context seems missing, query TraceDecay session context before assuming the compacted summary is complete. Start with `tracedecay_message_search` or `tracedecay_lcm_expand_query`; use `tracedecay_lcm_describe` and `tracedecay_lcm_expand` when you need the summary DAG sources.";
 
 /// Builds the Cursor `sessionStart` `additional_context` text.
-///
-/// Intentionally lean: the always-applied plugin rule already carries the
-/// tool-routing steering, so repeating it here would burn tokens every
-/// session. This adds only the session-specific signals — index freshness,
-/// the workflow-skill index, and the tokens-saved counter.
 pub fn build_cursor_session_context(
     initialized: bool,
     staleness_hint: Option<&str>,
@@ -76,10 +62,7 @@ pub fn build_cursor_session_context(
     s
 }
 
-/// One-line index freshness signal shared by the Cursor and Claude session
-/// contexts. Both hosts carry the tool-routing steering in an always-applied
-/// rule (Cursor plugin rule, CLAUDE.md), so their session hooks report only
-/// session-specific signals.
+/// One-line index freshness signal.
 pub(super) fn index_status_line(initialized: bool, staleness_hint: Option<&str>) -> String {
     if initialized {
         match staleness_hint {
@@ -93,9 +76,7 @@ pub(super) fn index_status_line(initialized: bool, staleness_hint: Option<&str>)
     }
 }
 
-/// Builds the Codex session/prompt steering context. Codex has no
-/// always-applied tracedecay rule, so the full tool-routing steering lives
-/// here.
+/// Builds the Codex session/prompt steering context.
 pub fn build_codex_session_context(initialized: bool, staleness_hint: Option<&str>) -> String {
     let status = if initialized {
         HookWorkspaceStatus::Initialized
@@ -253,8 +234,7 @@ pub fn cursor_staleness_hint(age_secs: i64) -> String {
     }
 }
 
-/// Opens the index once and reads both session-steering signals: the
-/// staleness hint and the session tokens-saved counter.
+/// Opens the index once and reads both session-steering signals.
 pub(super) async fn cursor_index_signals_for_root(root: &Path) -> (Option<String>, Option<u64>) {
     let Ok(cg) = crate::tracedecay::TraceDecay::open(root).await else {
         return (None, None);

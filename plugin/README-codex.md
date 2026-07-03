@@ -29,11 +29,10 @@ tool-routing steering Cursor places in a rule is injected through the
 `SessionStart`/`UserPromptSubmit` hooks instead.
 
 Every MCP tool is also available from the shell as `tracedecay tool <name>`
-(`tracedecay tool` lists all tools; `tracedecay tool <name> --help` shows a
-tool's parameters). The bundled `using-the-cli` skill and the injected steering
-point agents at that CLI fallback when the MCP transport errors or times out,
-instead of querying `.tracedecay` databases directly or giving up on
-tracedecay.
+(`tracedecay tool` lists tools; `tracedecay tool <name> --help` shows
+parameters). The bundled `using-the-cli` skill and injected steering use that
+CLI fallback when MCP transport errors or times out, instead of querying
+`.tracedecay` databases.
 
 The `PostCompact` hook starts `codex app-server` as a short-lived child process
 and sets `TRACEDECAY_CODEX_SUMMARY_CHILD=1` to prevent recursive summary hooks.

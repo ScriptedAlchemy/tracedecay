@@ -1,13 +1,5 @@
-//! Contract tests for the shared plugin skills: frontmatter schema per host,
-//! plus the shared skill-creator design-advice checks.
-//!
-//! The three host bundles now share one `plugin/` tree. Codex deploys all 29
-//! skills from `plugin/skills/` (canonical, model-invocable form). Cursor
-//! deploys only the 16 shared model-invocable skills from `plugin/skills/`
-//! (the `tracedecay-*` workflow slugs are native commands on Cursor, not
-//! skills). Each host's deployed skill *source* set is staged into a temp dir
-//! below so the contract and byte-copy checks run over exactly what that host
-//! installs.
+//! Host-specific contract tests for skills installed from the shared
+//! `plugin/skills/` tree.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -22,12 +14,7 @@ use tempfile::TempDir;
 use tracedecay::agents::{expected_tool_perms, get_integration, InstallContext};
 use tracedecay::config::USER_DATA_DIR_ENV;
 
-/// Codex deploys every skill under `plugin/skills/` (all 29, canonical form).
 const CODEX_SKILL_ROOT: &str = "plugin/skills";
-// Metadata budget: a bundle's preloaded name+description metadata stays under
-// 6,000 chars (~1.5k tokens) so skill discovery never crowds an agent host's
-// context window. The per-skill size budgets (500-line body, 320-char /
-// 45-word description) now live in shared_skill_contract_test.rs.
 const MAX_BUNDLED_SKILL_METADATA_CHARS: usize = 6_000;
 const CODEX_QUICK_VALIDATE_ALLOWED_FRONTMATTER: &[&str] = &[
     "allowed-tools",
@@ -114,12 +101,6 @@ fn generated_cursor_plugin_skills_are_byte_copies_of_the_source_bundle() {
     assert_skill_trees_byte_identical(source_root, &installed_root);
 }
 
-/// The per-file design rules (trigger-first / length / word / 500-line /
-/// no-`## When to Use` / supported-file layout) now live once in
-/// `shared_skill_contract_test.rs` over the single `plugin/skills/` tree, which
-/// is the same set Codex ships and a superset of Cursor's. This test keeps only
-/// what is NOT in that intersection contract: the aggregate metadata budget and
-/// the optional `agents/openai.yaml` marketplace contract.
 #[test]
 fn produced_plugin_skills_meet_the_metadata_budget_and_openai_contract() {
     let codex_skills = load_skill_docs(CODEX_SKILL_ROOT);
@@ -137,7 +118,6 @@ fn produced_plugin_skills_meet_the_metadata_budget_and_openai_contract() {
     }
 }
 
-/// Serializes the generated-bundle tests, which mutate process-wide env vars.
 fn install_env_lock() -> tokio::sync::MutexGuard<'static, ()> {
     PROCESS_ENV_LOCK.blocking_lock()
 }
@@ -160,10 +140,6 @@ fn install_ctx(home: &Path) -> InstallContext {
     }
 }
 
-/// Stages the Cursor skill *source* tree into a temp dir: the 17 shared
-/// model-invocable skills from `plugin/skills/` (all non-`tracedecay-*` slugs).
-/// This mirrors exactly what Cursor deploys — the `tracedecay-*` workflow slugs
-/// are native commands on Cursor, not skills.
 fn staged_cursor_skill_source() -> TempDir {
     let staged = TempDir::new().expect("temp cursor skill source");
     let shared = repo_path("plugin/skills");

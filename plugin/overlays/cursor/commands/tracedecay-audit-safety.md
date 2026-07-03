@@ -4,9 +4,9 @@ description: Audit the repo or a directory for ship-blocking risk, panic sites, 
 
 # /tracedecay-audit-safety
 
-Apply the `tracedecay:reviewing-changes` skill.
+Use `tracedecay:reviewing-changes`.
 
 - **Scope:** the whole repo, or the directory named in `$ARGUMENTS` if one was given.
-- Follow that skill's read-only workflow and guardrails; report findings, don't fix them here.
+- Read-only: report findings, don't fix them here.
 
 Output: findings grouped Critical / Warning / Note with file + enclosing symbol, and a prioritized follow-up list.

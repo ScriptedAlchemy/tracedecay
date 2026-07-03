@@ -717,31 +717,10 @@ fn config_only_integrations_report_config_only_and_write_nothing() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Rendered-output structural validation
-//
-// The install/update-plugin renderers rewrite bundle commands to the absolute
-// tracedecay binary path and stamp the package version. The tests above prove
-// user config survives a refresh; this section proves the RENDERED artifacts
-// themselves are structurally sound: manifests stay schema-shaped, hook
-// commands are absolute and shell-quoted, no template placeholder survives
-// rendering except the one intentional `${workspaceFolder}` in Cursor's
-// mcp.json args, and no source-bundle file is silently dropped.
-// ---------------------------------------------------------------------------
-
-/// Stages a host's deploy-relative source tree from the shared `plugin/` tree
-/// into a temp dir. The shared tree stores host files under host-specific names
-/// (e.g. `mcp-cursor.json`, `README-cursor.md`, `hooks/hooks-cursor.json`);
-/// staging maps them to their deploy paths so `assert_source_bundle_fully_rendered`
-/// compares the correct expected file set. Returns the temp dir (kept alive by
-/// the caller).
 fn staged_host_source(host: &str) -> TempDir {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin");
     let staged = TempDir::new().expect("temp host source");
     let mut copies: Vec<(String, String)> = Vec::new();
-    // Shared canonical skills — same deploy path for all hosts. Codex ships all
-    // 30; Cursor ships only the 17 model-invocable ones (the `tracedecay-*`
-    // workflow slugs are native commands on Cursor, not skills).
     for name in subdir_names(&src.join("skills")) {
         if host == "cursor" && name.starts_with("tracedecay-") {
             continue;
@@ -751,7 +730,6 @@ fn staged_host_source(host: &str) -> TempDir {
     }
     match host {
         "cursor" => {
-            // Cursor ships the 13 workflow slugs as native slash commands.
             for entry in std::fs::read_dir(src.join("overlays/cursor/commands")).unwrap() {
                 let file = entry.unwrap().file_name().to_string_lossy().into_owned();
                 copies.push((

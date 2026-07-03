@@ -17,52 +17,38 @@ The plugin registers the `tracedecay` MCP server as:
 tracedecay serve --path ${workspaceFolder}
 ```
 
-This is intentionally workspace-scoped: each Cursor workspace uses its own
-`.tracedecay/` index instead of the legacy global Cursor MCP registration. The
-`${workspaceFolder}` variable is resolved by Cursor's MCP runner in normal
-editor windows.
+Each Cursor workspace gets its own `.tracedecay/` index. Cursor's MCP runner
+resolves `${workspaceFolder}` in normal editor windows.
 
-Some Cursor contexts (headless agent-session MCP scopes) spawn the server with
-the literal, unexpanded `${workspaceFolder}` string instead, from a working
-directory set to the user home rather than the workspace. Cursor never retries
-a failed MCP scope, so exiting on that bogus path would permanently break the
-connection for the session ("Timed out waiting for connection" on every tool
-call). `serve` therefore detects an unexpanded `${...}` template value, warns
-on stderr, and falls back to project discovery where possible: cwd walk-up,
-MCP initialize roots, then the global project registry. Because the spawn
-directory says nothing about the intended workspace in this mode, the registry
-step accepts only a unique registered project — with several projects
-registered, `serve` still exits with an actionable "multiple projects" error
-instead of guessing, and it logs which project it picked and why when
-discovery succeeds. This is also why the template keeps
-`--path ${workspaceFolder}` rather than dropping it (as was done for VS Code
-Copilot in issue #66): normal Cursor windows do expand it, and from a home-dir
-cwd no-path discovery cannot scope multi-project setups. If tools still do not
-connect, run `tracedecay doctor --agent cursor` to inspect the generated
-plugin config.
+Some Cursor contexts (headless agent-session MCP scopes) pass the literal,
+unexpanded `${workspaceFolder}` from the user home directory. Cursor never
+retries a failed MCP scope, so `serve` detects unexpanded `${...}` values,
+warns on stderr, and falls back to project discovery: cwd walk-up, MCP
+initialize roots, then the global project registry. Registry fallback accepts
+only a unique registered project; otherwise `serve` exits with an actionable
+"multiple projects" error. The template keeps `--path ${workspaceFolder}`
+because normal Cursor windows expand it and home-dir discovery cannot scope
+multi-project setups. If tools still do not connect, run
+`tracedecay doctor --agent cursor`.
 
 Hook commands derive the active project from Cursor's event payload /
 `CURSOR_PROJECT_DIR`, not from the plugin directory.
 
 Every MCP tool is also available from the shell as `tracedecay tool <name>`
-(`tracedecay tool` lists all tools; `tracedecay tool <name> --help` shows a
-tool's parameters). The bundled `using-the-cli` skill and the always-applied
-rule steer agents to that CLI fallback when the MCP transport errors or times
-out, instead of querying `.tracedecay` databases directly or giving up on
-tracedecay.
+(`tracedecay tool` lists tools; `tracedecay tool <name> --help` shows
+parameters). The bundled `using-the-cli` skill and always-applied rule use
+that CLI fallback when MCP transport errors or times out, instead of querying
+`.tracedecay` databases.
 
 For sessions resumed from compacted context, the `sessionStart` hook adds a
 short recovery hint through Cursor's `additional_context` channel so the agent
 knows to query TraceDecay LCM/session recall before assuming the compacted
 summary is complete.
 
-Slash workflows ship as skills with `disable-model-invocation: true`
+Slash workflows ship as Cursor-native commands
 (`/tracedecay-map-architecture`, `/tracedecay-check-health`,
-`/tracedecay-curate-memory`, `/tracedecay-review-diff`, …) — Cursor's Commands surface was absorbed into
-Skills, so this bundle no longer ships a `commands/` directory. Their slugs
-keep the `tracedecay-` prefix so typing `/tracedecay` lists every command, and
-the suffix is a verb phrase so the human-facing title (Cursor displays the
-humanized slug) reads as the action it performs.
+`/tracedecay-curate-memory`, `/tracedecay-review-diff`, ...). Their slugs keep
+the `tracedecay-` prefix so typing `/tracedecay` lists every command.
 
 ## Auto-review and `permissions.json`
 
@@ -212,7 +198,7 @@ window.
 
 - **Cloud agents:** plugin `sessionStart`, `sessionEnd`, `beforeSubmitPrompt`,
   `workspaceOpen`, and `stop` hooks never run in Cursor cloud agents, so the
-  TraceDecay steering context and transcript ingest are desktop-only today.
+  TraceDecay steering context and transcript ingest are desktop-only.
   Cloud agents do run repo-level `.cursor/hooks.json` hooks for the supported
   subset (`afterFileEdit`, `afterShellExecution`, tool hooks, subagent hooks).
 - The plugin's session-recall tools only see transcripts ingested on this
@@ -220,16 +206,12 @@ window.
 
 ## Local development
 
-For checkout dogfooding, Cursor's docs bless symlinking the bundle into the
-local plugin directory so edits are picked up without reinstalling:
+For checkout dogfooding, install the generated Cursor projection after edits:
 
 ```bash
-mkdir -p ~/.cursor/plugins/local
-rm -rf ~/.cursor/plugins/local/tracedecay
-ln -s /path/to/tracedecay/cursor-plugin ~/.cursor/plugins/local/tracedecay
+tracedecay install --agent cursor
 ```
 
-Caveat: a symlinked bundle keeps the literal `tracedecay ...` hook/MCP commands,
-so GUI-launched Cursor must be able to resolve `tracedecay` on `PATH` (the real
-install rewrites them to an absolute binary path). Copying the directory
-(`cp -R` instead of `ln -s`) also works. Reload Cursor after either change.
+The install path rewrites hook/MCP commands to the absolute binary path and
+maps Cursor-specific overlays into their deployed locations. Reload Cursor
+after reinstalling.

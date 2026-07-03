@@ -4,9 +4,9 @@ description: Test current changes by running only affected tests and mapping fai
 
 # /tracedecay-test-changes
 
-Apply the `tracedecay:assessing-impact` skill.
+Use `tracedecay:assessing-impact`.
 
 - **Args:** interpret `$ARGUMENTS` as explicit changed paths; if absent, use the current working tree.
-- Follow that skill's workflow and guardrails (`tracedecay_run_affected_tests` and `tracedecay_diagnostics` run cargo-backed checks — respect Cursor approval/run-mode; preview scope read-only first).
+- Preview scope read-only first. `tracedecay_run_affected_tests` and `tracedecay_diagnostics` run cargo-backed checks; respect Cursor approval/run-mode.
 
 Output: pass/fail summary, failing-symbol mapping, and suggested missing tests.

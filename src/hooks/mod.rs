@@ -1,17 +1,7 @@
 //! Hook handlers for Claude Code, Kiro, Cursor, and Codex integrations.
 //!
-//! These functions are invoked by each agent's hook system to intercept tool
-//! calls, redirect exploration work to tracedecay MCP tools, keep the index
-//! fresh after edits / git state changes, and track per-session token savings.
-//! Each agent sends its own event schema on stdin and expects its own output
-//! shape, so the handlers are kept agent-specific rather than shared blindly.
-//!
-//! This module holds the shared plumbing (stdin reader, hook analytics,
-//! event-field helpers, and per-session hint dedupe); the per-agent handlers
-//! live in the `claude`, `codex`, `cursor`, and `kiro` submodules, with the
-//! shared post-tool-use pipeline in `post_tool_use` and the session/steering
-//! context builders in `steering`. Every public item is re-exported here so
-//! it stays reachable at `crate::hooks::<name>`.
+//! Each agent sends its own event schema and expects its own output shape, so
+//! handlers stay agent-specific while shared plumbing lives here.
 
 use std::collections::HashSet;
 use std::io::Read;

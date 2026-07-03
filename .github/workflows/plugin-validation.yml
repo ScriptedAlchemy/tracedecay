@@ -1,12 +1,8 @@
-# Schema/lint layer for the shipped agent plugin bundles. Mirrors the official
-# Cursor marketplace validation workflow:
+# Schema/lint layer for the shipped agent plugin bundles. Mirrors:
 # https://github.com/cursor/plugins/blob/main/.github/workflows/validate-plugins.yml
-# (ajv + ajv-formats against the plugin/marketplace JSON schemas; the schemas
-# are vendored in tests/fixtures/cursor-schemas/).
 #
-# The Rust contract tests for the bundles already run in ci.yml — do not add
-# plain cargo test jobs here. The MCP conformance smoke below is the one
-# exception: it needs a built binary plus npx, which cargo test can't provide.
+# Rust contract tests already run in ci.yml. Keep this workflow to schema checks
+# and the SDK-backed MCP smoke, which needs a built binary plus npx.
 name: Plugin Validation
 
 on:
@@ -14,13 +10,9 @@ on:
     paths:
       - "plugin/**"
       - "tests/fixtures/cursor-schemas/**"
-      # Plugin/skill test modules (e.g. plugin_manifest_schema_test.rs,
-      # plugin_skill_contract_test.rs, the skill lint tests).
       - "tests/agent_suite/*plugin*"
       - "tests/agent_suite/*skill*"
       - "scripts/mcp-conformance-smoke.sh"
-      # The Inspector smoke is the workflow's SDK-backed coverage for
-      # `tracedecay serve` protocol and tool-schema compatibility.
       - "src/serve.rs"
       - "src/main.rs"
       - "src/lib.rs"
@@ -48,7 +40,6 @@ jobs:
         with:
           node-version: 22
 
-      # Pinned, unlike upstream's floating `npm install ajv ajv-formats`.
       - name: Install ajv-cli
         run: npm install --no-save ajv-cli@5.0.0 ajv-formats@2.1.1
 
@@ -66,9 +57,6 @@ jobs:
             -s tests/fixtures/cursor-schemas/plugin.schema.json \
             -d plugin/.cursor-plugin/plugin.json
 
-      # The Codex manifest follows Codex's own layout (e.g. its `interface`
-      # block), so the Cursor schema does not apply; keep it to a strict JSON
-      # well-formedness check alongside the other bundle JSON files.
       - name: Check bundle JSON files parse
         run: |
           set -euo pipefail
@@ -79,10 +67,8 @@ jobs:
               echo "ok: $f"
             done
 
-  # Drives a real `tracedecay serve` stdio server through the MCP Inspector
-  # CLI (pinned version), which embeds the official TypeScript MCP SDK client
-  # — covering protocol-version negotiation and SDK-side schema validation
-  # that the in-repo Rust MCP tests cannot. See scripts/mcp-conformance-smoke.sh.
+  # Uses MCP Inspector's TypeScript SDK client to cover stdio handshake and
+  # schema compatibility beyond the in-repo Rust MCP tests.
   mcp-conformance-smoke:
     name: MCP conformance smoke
     runs-on: ubuntu-latest

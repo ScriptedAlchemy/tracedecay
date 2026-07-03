@@ -5,11 +5,11 @@ description: 'Use to check code health for the repo or a directory, including wo
 
 # Check health
 
-Use when asked to check code health for the repo or a directory, including worst offenders and a prioritized fix list.
+Use for repo or directory code-health checks, worst offenders, and prioritized fix lists.
 
-Route this through the `tracedecay:code-health` skill.
+Use `tracedecay:code-health`.
 
 - **Scope:** the whole repo, or a specific directory if one is named.
-- Follow that skill's read-only workflow and guardrails: lead with `tracedecay_health` and drill only into weak dimensions.
+- Read-only: lead with `tracedecay_health` and drill only into weak dimensions.
 
 Output: the composite health score + weak dimensions, the worst offenders (complexity, duplication, god files, doc gaps, panic sites, test-risk), and a prioritized fix list.

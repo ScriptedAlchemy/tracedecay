@@ -4,9 +4,9 @@ description: Find and safely remove dead code, unused imports, and duplication v
 
 # /tracedecay-clean-dead-code
 
-Apply the `tracedecay:reviewing-changes` skill.
+Use `tracedecay:reviewing-changes` to identify candidates, then `tracedecay:editing-safely` for removals.
 
 - **Scope:** the whole repo, or the directory named in `$ARGUMENTS` if one was given.
-- Follow that skill's workflow and guardrails: confirm zero real callers before deleting anything, be conservative with `pub` items, and respect Cursor approval/run-mode for edits and verification runs.
+- Confirm zero real callers before deleting anything; be conservative with `pub` items; respect Cursor approval/run-mode for edits and verification runs.
 
 Output: removed/consolidated items and the before/after health or test result.

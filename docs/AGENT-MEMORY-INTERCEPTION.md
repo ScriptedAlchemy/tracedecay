@@ -1,24 +1,16 @@
 # Agent Memory Interception: Codex CLI & Cursor × TraceDecay Fact Store
 
-**Status:** research + design proposal (2026-07-02).
+**Status:** research + design proposal (2026-07-02; plugin paths refreshed
+2026-07-03).
 **Goal:** make Codex CLI and Cursor use the TraceDecay holographic fact store
 (`tracedecay_fact_store` add/search/probe/reason, `memory_facts` table, HRR
 vectors + trust scores) as their agent memory for both **recall** (facts reach
 the model at the right moment) and **storage** (new durable facts get written),
 instead of — or layered on top of — each agent's native memory mechanism.
 
-All file paths below were verified on this machine (Codex CLI 0.142.4, Cursor
-with hooks + plugins, tracedecay plugin v0.0.23 installed for both agents).
-
-> **Note (as of 2026-07-03):** the per-host `cursor-plugin/` / `codex-plugin/`
-> source trees have since collapsed into a single shared `plugin/` tree, so
-> skill/command/agent sources now live under `plugin/skills/…`,
-> `plugin/commands/…`, and `plugin/agents/…` (Cursor-only surfaces under
-> `plugin/overlays/cursor/…`). The `recalling-project-memory` and
-> `curating-project-memory` skills were also merged into a single
-> `project-memory` skill. References below to the old paths/slugs are retained
-> as historical design context; the current locations are the shared-tree
-> equivalents.
+Current plugin source lives under the shared `plugin/` tree: shared skills in
+`plugin/skills/`, Claude commands in `plugin/commands/`, shared agents in
+`plugin/agents/`, and Cursor-only surfaces in `plugin/overlays/cursor/`.
 
 ---
 
@@ -169,8 +161,9 @@ tool calls (reliable but discretionary). **Storage** interception rides on
 
 ### 3.1 `tracedecay install --agent cursor` (`src/agents/cursor.rs`)
 
-Writes an embedded plugin (`EMBEDDED_PLUGIN_FILES`, `src/agents/cursor.rs:175`)
-to `~/.cursor/plugins/local/tracedecay/`:
+Writes the Cursor projection of the shared plugin bundle
+(`src/agents/plugin_bundle.rs::cursor_files`) to
+`~/.cursor/plugins/local/tracedecay/`:
 
 - **`mcp.json`** — stdio server `tracedecay serve --path ${workspaceFolder}`
   (all fact-store/memory/graph tools available to the model).
@@ -182,11 +175,12 @@ to `~/.cursor/plugins/local/tracedecay/`:
 - **`rules/tracedecay.mdc`** — always-applied rule; its **Recall** bullet
   steers models to `tracedecay_message_search` / `tracedecay_fact_store`
   search and the `project-memory` skill.
-- **`skills/`** — 25+ workflow skills incl. `project-memory` (the merged
-  recall+curate memory skill) and `recalling-session-context`; plus an
-  agent-managed skill overlay (`install_cursor_managed_skill_overlay`).
-- **`agents/`** — `code-explorer`, `code-health-auditor`, `session-historian`
-  subagent definitions.
+- **`skills/`** — shared model-invocable skills, excluding the
+  `tracedecay-*` dispatcher skills that Cursor exposes as native commands.
+- **`commands/`** — Cursor-native workflow commands from
+  `plugin/overlays/cursor/commands/`.
+- **`agents/`** — Cursor agent definitions from
+  `plugin/overlays/cursor/agents/`.
 
 What the hooks currently do (all fail-open):
 
@@ -205,8 +199,8 @@ What the hooks currently do (all fail-open):
 
 ### 3.2 `tracedecay install --agent codex` (`src/agents/codex.rs`)
 
-Installs a **plugin bundle** (`CODEX_EMBEDDED_PLUGIN_FILES`,
-`src/agents/codex.rs:209`) to
+Installs the Codex projection of the shared plugin bundle
+(`src/agents/plugin_bundle.rs::codex_files`) to
 `~/.codex/plugins/cache/personal/tracedecay/<version>/` plus a personal
 marketplace entry (`install_codex_marketplace_entry`) and
 `[plugins."tracedecay@personal"] enabled = true` in `config.toml`:
@@ -218,7 +212,8 @@ marketplace entry (`install_codex_marketplace_entry`) and
   `PostToolUse` (matcher `Bash|apply_patch`), `PostCompact`
   (matcher `auto|manual`). Hooks require one-time `/hooks` trust
   (`print_hook_trust_guidance`); trusted hashes live in `[hooks.state]`.
-- **`skills/`** — same 25 workflow skills + `agent-managed/` overlay.
+- **`skills/`** — shared skills from `plugin/skills/` plus the
+  `agent-managed/` overlay.
 - **No rule surface exists in Codex**, so the steering text Cursor gets via
   `tracedecay.mdc` is injected through `SessionStart`/`UserPromptSubmit`
   `additionalContext` instead (`build_codex_session_context`,
@@ -300,13 +295,9 @@ model electing to call an MCP tool; storage depends on the user saying
 
 ---
 
-## 5. Ranked integration designs
+## 5. Integration designs
 
-Ranked by effect ÷ effort. A + B are the core; C–F layer on.
-
-### A. Codex per-prompt & session-start fact injection via existing hooks — **do first**
-
-*Effort: S–M. Effect: high. Risk: low (fail-open, additive).*
+### A. Codex per-prompt & session-start fact injection via existing hooks
 
 Codex is the lowest-effort path because `UserPromptSubmit` carries the prompt
 text and honors `hookSpecificOutput.additionalContext`, and the hook binary is
@@ -335,9 +326,7 @@ Implementation pointers: `src/hooks/codex.rs`, `src/hooks/cursor.rs`,
 change; hook hashes change → users re-trust via `/hooks` (already documented
 in the Codex plugin README).
 
-### B. Cursor session-start injection + a materialized memory rule — **do with A**
-
-*Effort: M. Effect: high (rule) / medium (hook, due to Cursor bugs). Risk: low.*
+### B. Cursor session-start injection + a materialized memory rule
 
 Per-prompt injection is impossible in Cursor (§2.3), so combine the two
 channels that exist:
@@ -358,16 +347,13 @@ channels that exist:
    and/or a scheduler task. Keep it small (facts are one-liners; cap ~1–2 KB)
    and deterministic (sorted) so diffs are reviewable.
 
-Implementation pointers: rule generation next to
-`cursor_plugin_manifest`/`write_embedded_plugin` (`src/agents/cursor.rs:404`),
-refresh in `hook_cursor_workspace_open` (`src/hooks/cursor.rs`); mark the file
-managed the same way the skill overlay marks generated skills
-(`managed_skill_format.rs`) so uninstall (`remove_cursor_plugin_install`) and
-doctor checks cover it.
+Implementation pointers: add the managed rule to the Cursor projection in
+`src/agents/plugin_bundle.rs` / `src/agents/cursor.rs`, refresh it from
+`hook_cursor_workspace_open` (`src/hooks/cursor.rs`), and mark it managed the
+same way generated skills are marked (`managed_skill_format.rs`) so uninstall
+and doctor checks cover it.
 
-### C. Rule/skill text: make storage proactive — **small, ship with A/B**
-
-*Effort: XS. Effect: medium. Risk: memory spam (mitigated by write-time dedupe).*
+### C. Rule/skill text: make storage proactive
 
 Today `project-memory`'s guardrail says add facts "**only when the
 user asks**" — the opposite of agent-memory behavior. Change the instruction
@@ -384,9 +370,7 @@ user asks**" — the opposite of agent-memory behavior. Change the instruction
 This mirrors Cursor's hybrid design (sidecar + tool calls), with the tool-call
 half pointed at TraceDecay.
 
-### D. Enable the reflection loop (sidecar-equivalent storage) — **medium**
-
-*Effort: S (config/UX) — the code exists. Effect: high over time.*
+### D. Enable the reflection loop (sidecar-equivalent storage)
 
 session_reflector is the background sidecar analog: transcripts (both agents,
 already ingested by the hooks) → evidence-cited fact proposals → dashboard
@@ -404,9 +388,7 @@ Pointers: `src/automation/config.rs` (defaults/validation),
 dashboard curation UI (concurrent work in `dashboard/` — coordinate, don't
 touch).
 
-### E. Codex-native-memory coexistence policy — **decide, small change**
-
-*Effort: XS–S. Effect: avoids divergence/duplication.*
+### E. Codex-native-memory coexistence policy
 
 With `features.memories = true`, Codex builds a parallel memory in
 `~/.codex/memories/` from the same sessions. Options:
@@ -430,9 +412,7 @@ is the Settings toggle. Once B+C are live, recommend users disable "Generate
 Memories" to keep one memory system (document in `KIRO-INTEGRATION.md`-style
 agent doc; can't be automated).
 
-### F. Materialized `AGENTS.md` / memory-file generation — **fallback, partial overlap with B2**
-
-*Effort: M. Effect: medium. Risk: touches user-owned files.*
+### F. Materialized `AGENTS.md` / memory-file generation
 
 Scheduled materialization of facts into files agents read natively without
 any tool call: a `## Memory (generated by tracedecay)` fenced section in repo
@@ -466,8 +446,8 @@ alongside D and reusing the managed-file conventions from the skill overlay.
    + `src/memory/retrieval.rs` helpers; measurable via existing hook
    analytics.
 2. **B2 + C** (materialized Cursor memory rule + proactive storage wording) —
-   one PR in `src/agents/cursor.rs` embedded files + plugin rule/skill text
-   (shared skill text under `plugin/skills/`).
+   one PR in `src/agents/plugin_bundle.rs`, `src/agents/cursor.rs`, and plugin
+   rule/skill text (shared skill text under `plugin/skills/`).
 3. **D** (reflector enablement UX) — config/doctor/dashboard nudge.
 4. **E** (coexistence policy + optional Codex-memories harvest importer).
 5. **F** (generalized AGENTS.md materialization across all 15 agent

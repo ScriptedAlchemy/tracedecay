@@ -5,9 +5,9 @@ description: 'Use to curate, update, delete, or inspect TraceDecay memory facts 
 
 # Curate memory
 
-Use when asked to curate, update, delete, or inspect TraceDecay memory facts, or to do dashboard curation.
+Use to curate, update, delete, or inspect TraceDecay memory facts, or to do dashboard curation.
 
-Route this through the `tracedecay:project-memory` skill.
+Use `tracedecay:project-memory`.
 
 - **Scope:** the fact, entity, query, or curation action to review. If none is given, ask what memory scope to curate before mutating anything.
 - Start read-only with `tracedecay_fact_store` search/list/probe/reason/contradict or `tracedecay_memory_status`; open `tracedecay_dashboard` only when the user wants visual curation.
