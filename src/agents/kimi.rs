@@ -110,6 +110,53 @@ impl AgentIntegration for KimiIntegration {
         let servers = json.get("mcpServers");
         servers.and_then(|v| v.get("tracedecay")).is_some()
     }
+
+    fn export_managed_skills(
+        &self,
+        home: &Path,
+        profile_root: &Path,
+    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+        let agents_md = home.join(".kimi").join("AGENTS.md");
+        if !self.has_tracedecay(home) || !agents_md.exists() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![
+            crate::automation::skill_targets::install_managed_skills(
+                profile_root,
+                crate::automation::skill_targets::SkillInstallTarget::Kimi,
+                &agents_md,
+            )?,
+        ])
+    }
+
+    fn export_managed_skills_local(
+        &self,
+        project_root: &Path,
+        profile_root: &Path,
+    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+        let agents_md = project_root.join("AGENTS.md");
+        if !local_mcp_has_tracedecay(project_root) || !agents_md.exists() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![
+            crate::automation::skill_targets::install_managed_skills(
+                profile_root,
+                crate::automation::skill_targets::SkillInstallTarget::Kimi,
+                &agents_md,
+            )?,
+        ])
+    }
+}
+
+fn local_mcp_has_tracedecay(project_root: &Path) -> bool {
+    let mcp_path = project_root.join(".kimi-code/mcp.json");
+    if !mcp_path.exists() {
+        return false;
+    }
+    let json = load_json_file(&mcp_path);
+    json.get("mcpServers")
+        .and_then(|servers| servers.get("tracedecay"))
+        .is_some()
 }
 
 // ---------------------------------------------------------------------------

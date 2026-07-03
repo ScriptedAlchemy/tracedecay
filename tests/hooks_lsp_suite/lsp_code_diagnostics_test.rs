@@ -10,6 +10,7 @@ const FAKE_PATH: &str = "src/lib.fake";
 // to cover a didOpen -> publishDiagnostics round trip against an
 // already-initialized fake server.
 const FAKE_LSP_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(150);
+const OUTER_ASYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
 
 #[test]
 fn builtin_registry_advertises_phase_one_setup_contract() {
@@ -173,15 +174,7 @@ async fn broker_refresh_documents_populates_cached_diagnostics() {
     let snapshot = broker.snapshot();
     assert_eq!(snapshot.summary.total_errors, 1);
     assert_eq!(snapshot.diagnostics[0].source, "fake-ls");
-    assert_eq!(
-        snapshot
-            .engines
-            .iter()
-            .find(|engine| engine.language == "fake")
-            .unwrap()
-            .state,
-        lsp::broker::EngineState::Ready
-    );
+    assert_engine_state(&snapshot, FAKE_LANGUAGE, lsp::broker::EngineState::Ready);
 }
 
 #[test]
@@ -195,12 +188,11 @@ fn broker_marks_active_command_available_before_first_refresh() {
     );
 
     let snapshot = broker.snapshot();
-    let status = snapshot
-        .engines
-        .iter()
-        .find(|engine| engine.language == FAKE_LANGUAGE)
-        .expect("fake engine status should be listed");
-    assert_eq!(status.state, lsp::broker::EngineState::Available);
+    assert_engine_state(
+        &snapshot,
+        FAKE_LANGUAGE,
+        lsp::broker::EngineState::Available,
+    );
 }
 
 #[tokio::test]
@@ -244,12 +236,7 @@ async fn broker_keeps_diagnostics_for_multiple_languages_in_one_snapshot() {
         .iter()
         .any(|diagnostic| diagnostic.language == "beta" && diagnostic.file == "src/lib.beta"));
     for language in ["alpha", "beta"] {
-        let status = snapshot
-            .engines
-            .iter()
-            .find(|engine| engine.language == language)
-            .unwrap_or_else(|| panic!("missing {language} status"));
-        assert_eq!(status.state, lsp::broker::EngineState::Ready);
+        assert_engine_state(&snapshot, language, lsp::broker::EngineState::Ready);
     }
 }
 
@@ -277,11 +264,7 @@ async fn broker_marks_missing_lsp_command_unavailable_after_refresh_failure() {
 
     assert!(err.to_string().contains("not available on PATH"));
     let snapshot = broker.snapshot();
-    let status = snapshot
-        .engines
-        .iter()
-        .find(|engine| engine.language == "fake")
-        .expect("fake engine status should be listed");
+    let status = engine_status(&snapshot, FAKE_LANGUAGE);
     assert_eq!(status.state, lsp::broker::EngineState::Unavailable);
     assert!(status
         .last_error
@@ -320,17 +303,260 @@ sys.stderr.flush()
 
     assert!(err.to_string().contains("unknown binary"));
     let snapshot = broker.snapshot();
-    let status = snapshot
-        .engines
-        .iter()
-        .find(|engine| engine.language == FAKE_LANGUAGE)
-        .expect("fake engine status should be listed");
+    let status = engine_status(&snapshot, FAKE_LANGUAGE);
     assert_eq!(status.state, lsp::broker::EngineState::Crashed);
     assert!(status
         .last_error
         .as_deref()
         .unwrap_or_default()
         .contains("unknown binary"));
+}
+
+#[tokio::test]
+async fn broker_bounds_lsp_initialize_hangs() {
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("hanging_initialize_lsp.py");
+    std::fs::write(&script_path, fake_lsp_script_that_never_initializes()).unwrap();
+    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
+        temp.path(),
+        vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
+    );
+
+    let result = tokio::time::timeout(
+        OUTER_ASYNC_TIMEOUT,
+        broker.refresh_documents(
+            FAKE_LANGUAGE,
+            vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
+            std::time::Duration::from_millis(50),
+        ),
+    )
+    .await;
+
+    let err = result
+        .expect("refresh should be bounded by the diagnostics timeout")
+        .expect_err("hung initialize should crash the engine");
+    assert!(err.to_string().contains("timed out"));
+    let snapshot = broker.snapshot();
+    let status = engine_status(&snapshot, FAKE_LANGUAGE);
+    assert_eq!(status.state, lsp::broker::EngineState::Crashed);
+    assert!(status
+        .last_error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("timed out"));
+}
+
+#[tokio::test]
+async fn broker_bounds_lsp_document_write_hangs() {
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("hanging_write_lsp.py");
+    std::fs::write(
+        &script_path,
+        fake_lsp_script_that_initializes_then_stops_reading(),
+    )
+    .unwrap();
+    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
+        temp.path(),
+        vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
+    );
+
+    let result = tokio::time::timeout(
+        OUTER_ASYNC_TIMEOUT,
+        broker.refresh_documents(
+            FAKE_LANGUAGE,
+            vec![fake_document(
+                FAKE_LANGUAGE,
+                FAKE_PATH,
+                &"let nope\n".repeat(600_000),
+            )],
+            std::time::Duration::from_millis(50),
+        ),
+    )
+    .await;
+
+    let err = result
+        .expect("refresh should be bounded while writing document text")
+        .expect_err("hung document write should crash the engine");
+    assert!(err.to_string().contains("timed out"));
+    let snapshot = broker.snapshot();
+    assert_engine_state(&snapshot, FAKE_LANGUAGE, lsp::broker::EngineState::Crashed);
+
+    std::fs::write(&script_path, fake_lsp_script()).unwrap();
+    broker
+        .refresh_documents(
+            FAKE_LANGUAGE,
+            vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
+            FAKE_LSP_TIMEOUT,
+        )
+        .await
+        .unwrap();
+
+    let snapshot = broker.snapshot();
+    assert_engine_state(&snapshot, FAKE_LANGUAGE, lsp::broker::EngineState::Ready);
+    assert_eq!(snapshot.summary.total_errors, 1);
+}
+
+#[tokio::test]
+async fn stdio_client_bounds_lsp_document_write_hangs() {
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("hanging_write_lsp.py");
+    std::fs::write(
+        &script_path,
+        fake_lsp_script_that_initializes_then_stops_reading(),
+    )
+    .unwrap();
+
+    let result = tokio::time::timeout(
+        OUTER_ASYNC_TIMEOUT,
+        lsp::client::collect_document_diagnostics(
+            python_command(),
+            &[script_path.display().to_string()],
+            temp.path(),
+            vec![fake_document(
+                FAKE_LANGUAGE,
+                FAKE_PATH,
+                &"let nope\n".repeat(600_000),
+            )],
+            std::time::Duration::from_millis(50),
+        ),
+    )
+    .await;
+
+    let err = result
+        .expect("client collection should be bounded while writing document text")
+        .expect_err("hung document write should fail the client collection");
+    assert!(err.to_string().contains("timed out"));
+}
+
+#[tokio::test]
+async fn broker_drops_lsp_client_after_partial_diagnostics_frame_timeout() {
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("partial_frame_lsp.py");
+    std::fs::write(&script_path, fake_lsp_script_with_partial_publish()).unwrap();
+    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
+        temp.path(),
+        vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
+    );
+
+    let err = broker
+        .refresh_documents(
+            FAKE_LANGUAGE,
+            vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
+            std::time::Duration::from_millis(50),
+        )
+        .await
+        .expect_err("partial diagnostics frame should crash the cached client");
+    assert!(err.to_string().contains("timed out"));
+    let snapshot = broker.snapshot();
+    assert_engine_state(&snapshot, FAKE_LANGUAGE, lsp::broker::EngineState::Crashed);
+
+    std::fs::write(&script_path, fake_lsp_script()).unwrap();
+    broker
+        .refresh_documents(
+            FAKE_LANGUAGE,
+            vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
+            FAKE_LSP_TIMEOUT,
+        )
+        .await
+        .unwrap();
+
+    let snapshot = broker.snapshot();
+    assert_engine_state(&snapshot, FAKE_LANGUAGE, lsp::broker::EngineState::Ready);
+    assert_eq!(snapshot.summary.total_errors, 1);
+}
+
+#[tokio::test]
+async fn broker_waits_for_active_lsp_refresh_instead_of_timing_out_lock() {
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("fake_lsp.py");
+    let counter_path = temp.path().join("starts.txt");
+    std::fs::write(
+        &script_path,
+        fake_lsp_script_that_records_start(&counter_path),
+    )
+    .unwrap();
+    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
+        temp.path(),
+        vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
+    );
+    let first = broker
+        .prepare_refresh(
+            FAKE_LANGUAGE,
+            vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
+        )
+        .unwrap()
+        .expect("first refresh should prepare");
+    let second = broker
+        .prepare_refresh(
+            FAKE_LANGUAGE,
+            vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
+        )
+        .unwrap()
+        .expect("second refresh should prepare");
+
+    let first_refresh = async move {
+        first
+            .collect_diagnostics(std::time::Duration::from_millis(500))
+            .await
+    };
+    let second_refresh = async move {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        second
+            .collect_diagnostics(std::time::Duration::from_millis(50))
+            .await
+    };
+    let (first_completed, second_completed) = tokio::join!(first_refresh, second_refresh);
+
+    assert!(first_completed.is_ok());
+    assert!(
+        second_completed.is_ok(),
+        "short second refresh should wait for the active refresh instead of timing out the client lock"
+    );
+    let starts = std::fs::read_to_string(counter_path).unwrap();
+    assert_eq!(starts.lines().count(), 1);
+}
+
+#[tokio::test]
+async fn broker_ignores_stale_refresh_completion() {
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("fake_lsp.py");
+    std::fs::write(&script_path, fake_lsp_script()).unwrap();
+    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
+        temp.path(),
+        vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
+    );
+    let stale = broker
+        .prepare_refresh(
+            FAKE_LANGUAGE,
+            vec![fake_document(FAKE_LANGUAGE, "src/stale.fake", "let nope")],
+        )
+        .unwrap()
+        .expect("stale refresh should prepare");
+    let latest = broker
+        .prepare_refresh(
+            FAKE_LANGUAGE,
+            vec![fake_document(FAKE_LANGUAGE, "src/latest.fake", "let nope")],
+        )
+        .unwrap()
+        .expect("latest refresh should prepare");
+
+    let latest_completed = latest.collect_diagnostics(FAKE_LSP_TIMEOUT).await;
+    assert!(latest_completed.is_ok());
+    broker.finish_refresh(latest_completed).unwrap();
+
+    let stale_completed = stale.collect_diagnostics(FAKE_LSP_TIMEOUT).await;
+    assert!(stale_completed.is_ok());
+    broker.finish_refresh(stale_completed).unwrap();
+
+    let snapshot = broker.snapshot();
+    assert!(snapshot
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.file == "src/latest.fake"));
+    assert!(!snapshot
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.file == "src/stale.fake"));
 }
 
 #[tokio::test]
@@ -426,12 +652,7 @@ async fn broker_ignores_refresh_completion_after_language_is_disabled() {
     broker.finish_refresh(completed).unwrap();
 
     let snapshot = broker.snapshot();
-    let status = snapshot
-        .engines
-        .iter()
-        .find(|engine| engine.language == FAKE_LANGUAGE)
-        .expect("fake engine status should be listed");
-    assert_eq!(status.state, lsp::broker::EngineState::Disabled);
+    assert_engine_state(&snapshot, FAKE_LANGUAGE, lsp::broker::EngineState::Disabled);
     assert!(snapshot.diagnostics.is_empty());
 }
 
@@ -478,6 +699,25 @@ fn adapter<'a>(
         .iter()
         .find(|adapter| adapter.language == language)
         .unwrap_or_else(|| panic!("missing adapter for {language}"))
+}
+
+fn assert_engine_state(
+    snapshot: &lsp::broker::DiagnosticsSnapshot,
+    language: &str,
+    state: lsp::broker::EngineState,
+) {
+    assert_eq!(engine_status(snapshot, language).state, state);
+}
+
+fn engine_status<'a>(
+    snapshot: &'a lsp::broker::DiagnosticsSnapshot,
+    language: &str,
+) -> &'a lsp::broker::EngineStatus {
+    snapshot
+        .engines
+        .iter()
+        .find(|engine| engine.language == language)
+        .unwrap_or_else(|| panic!("{language} engine status should be listed"))
 }
 
 fn fake_document(language: &str, relative_path: &str, text: &str) -> lsp::client::LspDocument {
@@ -575,6 +815,48 @@ with open({:?}, "a", encoding="utf-8") as f:
     fake_lsp_script_with_preamble(&preamble, EMPTY_DIAGNOSTIC_PUBLISH)
 }
 
+fn fake_lsp_script_that_never_initializes() -> &'static str {
+    r#"
+import time
+
+time.sleep(60)
+"#
+}
+
+fn fake_lsp_script_that_initializes_then_stops_reading() -> &'static str {
+    r#"
+import json
+import sys
+import time
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        name, value = line.decode("ascii").split(":", 1)
+        headers[name.lower()] = value.strip()
+    length = int(headers["content-length"])
+    return json.loads(sys.stdin.buffer.read(length).decode("utf-8"))
+
+def send(payload):
+    body = json.dumps(payload).encode("utf-8")
+    sys.stdout.buffer.write(b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n\r\n" + body)
+    sys.stdout.buffer.flush()
+
+message = read_message()
+send({"jsonrpc": "2.0", "id": message["id"], "result": {"capabilities": {"textDocumentSync": 1}}})
+time.sleep(60)
+"#
+}
+
+fn fake_lsp_script_with_partial_publish() -> String {
+    fake_lsp_script_with_preamble("", PARTIAL_DIAGNOSTIC_PUBLISH)
+}
+
 fn fake_lsp_script_with_preamble(preamble: &str, did_open_body: &str) -> String {
     let mut script = String::from(
         r#"
@@ -657,6 +939,12 @@ const INITIAL_EMPTY_THEN_DIAGNOSTIC_PUBLISH: &str = r#"        send({"jsonrpc": 
                 }]
             }
         })
+"#;
+
+const PARTIAL_DIAGNOSTIC_PUBLISH: &str = r#"        sys.stdout.buffer.write(b"Content-Length: 120\r\n\r\n{\"jsonrpc\":\"2.0\"")
+        sys.stdout.buffer.flush()
+        import time
+        time.sleep(60)
 "#;
 
 const EMPTY_DIAGNOSTIC_PUBLISH: &str = r#"        send({

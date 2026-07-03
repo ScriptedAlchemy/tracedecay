@@ -5,7 +5,7 @@ use tracedecay::sessions::claude::ClaudeSource;
 use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::sessions::source::ingest_source;
 
-use crate::support::setup;
+use crate::support::{assert_metadata_path_eq, init_git_repo, init_project_at, setup};
 
 /// Writes a Claude Code transcript (one JSON object per line) for `session` whose
 /// recorded `cwd` is `project`.
@@ -93,6 +93,7 @@ fn write_claude_subagent_transcript(
 async fn claude_transcript_populates_searchable_messages() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
+    init_git_repo(&project);
     write_claude_transcript(&home, &project, "claude-sess");
 
     let db = open_project_session_db(&project).await.unwrap();
@@ -133,6 +134,13 @@ async fn claude_transcript_populates_searchable_messages() {
         .expect("assistant message should be searchable");
     let metadata: serde_json::Value =
         serde_json::from_str(assistant.message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_metadata_path_eq(&metadata["claude_message_cwd"], &project);
+    assert_metadata_path_eq(&metadata["claude_message_worktree"], &project);
+    assert_eq!(
+        metadata["claude_message_location_provenance"].as_str(),
+        Some("transcript_record")
+    );
+    assert!(metadata.get("claude_git_branch").is_none());
     assert_eq!(metadata["usage"]["input_tokens"], 1200);
     assert_eq!(metadata["usage"]["output_tokens"], 340);
     assert_eq!(metadata["usage"]["cache_creation_input_tokens"], 500);
@@ -144,7 +152,21 @@ async fn claude_transcript_populates_searchable_messages() {
         .expect("user message should be searchable");
     let user_metadata: serde_json::Value =
         serde_json::from_str(user.message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_metadata_path_eq(&user_metadata["claude_message_cwd"], &project);
+    assert_metadata_path_eq(&user_metadata["claude_message_worktree"], &project);
+    assert_eq!(
+        user_metadata["claude_message_location_provenance"].as_str(),
+        Some("transcript_record")
+    );
     assert!(user_metadata.get("usage").is_none());
+    let session_metadata: serde_json::Value =
+        serde_json::from_str(results[0].session.metadata_json.as_deref().unwrap()).unwrap();
+    assert_metadata_path_eq(&session_metadata["claude_session_cwd"], &project);
+    assert_metadata_path_eq(&session_metadata["claude_session_worktree"], &project);
+    assert_eq!(
+        session_metadata["claude_session_location_provenance"].as_str(),
+        Some("transcript_session")
+    );
 
     let expected_content = serde_json::json!([
         {"type": "text", "text": "The billing pipeline regression is fixed."},
@@ -215,6 +237,78 @@ async fn claude_transcript_for_other_project_is_skipped() {
     assert_eq!(
         stats.messages_upserted, 0,
         "a transcript whose cwd is a different project must be skipped"
+    );
+}
+
+#[tokio::test]
+async fn claude_transcript_crossing_worktrees_is_split_by_record_cwd() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project_a) = setup(&tmp);
+    init_git_repo(&project_a);
+    let project_b = tmp.path().join("project-b");
+    init_project_at(&project_b);
+    init_git_repo(&project_b);
+
+    let dir = home.join(".claude/projects/-mixed-worktree");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("mixed-worktree-session.jsonl");
+    std::fs::write(
+        &path,
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({
+                "type": "user",
+                "cwd": project_a.to_string_lossy(),
+                "sessionId": "mixed-worktree-session",
+                "uuid": "mixed-a",
+                "timestamp": "2026-01-01T00:00:00.000Z",
+                "message": {"role": "user", "content": "alpha worktree marker"}
+            }),
+            serde_json::json!({
+                "type": "user",
+                "cwd": project_b.to_string_lossy(),
+                "sessionId": "mixed-worktree-session",
+                "uuid": "mixed-b",
+                "timestamp": "2026-01-01T00:00:05.000Z",
+                "message": {"role": "user", "content": "beta worktree marker"}
+            })
+        ),
+    )
+    .unwrap();
+
+    let source = ClaudeSource::with_home(&home);
+    let db_a = open_project_session_db(&project_a).await.unwrap();
+    let stats_a = ingest_source(&db_a, &source, &project_a, None).await;
+    assert_eq!(stats_a.messages_upserted, 1);
+    let hits_a = db_a
+        .search_session_messages("claude", None, "worktree marker", 10)
+        .await;
+    assert_eq!(hits_a.len(), 1);
+    assert!(hits_a[0].message.text.contains("alpha worktree marker"));
+    let metadata_a: serde_json::Value =
+        serde_json::from_str(hits_a[0].message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_metadata_path_eq(&metadata_a["claude_message_cwd"], &project_a);
+    assert_metadata_path_eq(&metadata_a["claude_message_worktree"], &project_a);
+    assert_eq!(
+        metadata_a["claude_message_location_provenance"].as_str(),
+        Some("transcript_record")
+    );
+
+    let db_b = open_project_session_db(&project_b).await.unwrap();
+    let stats_b = ingest_source(&db_b, &source, &project_b, None).await;
+    assert_eq!(stats_b.messages_upserted, 1);
+    let hits_b = db_b
+        .search_session_messages("claude", None, "worktree marker", 10)
+        .await;
+    assert_eq!(hits_b.len(), 1);
+    assert!(hits_b[0].message.text.contains("beta worktree marker"));
+    let metadata_b: serde_json::Value =
+        serde_json::from_str(hits_b[0].message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_metadata_path_eq(&metadata_b["claude_message_cwd"], &project_b);
+    assert_metadata_path_eq(&metadata_b["claude_message_worktree"], &project_b);
+    assert_eq!(
+        metadata_b["claude_message_location_provenance"].as_str(),
+        Some("transcript_record")
     );
 }
 

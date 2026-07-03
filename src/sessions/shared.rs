@@ -125,6 +125,32 @@ pub(crate) fn paths_equal(a: &Path, b: &Path) -> bool {
     }
 }
 
+pub(crate) fn path_belongs_to_project(path: &Path, project_root: &Path) -> bool {
+    if paths_equal(path, project_root) {
+        return true;
+    }
+
+    let path_worktree = crate::worktree::git_worktree_root(path);
+    let project_worktree = crate::worktree::git_worktree_root(project_root);
+    if let (Some(path_worktree), Some(project_worktree)) =
+        (path_worktree.as_ref(), project_worktree.as_ref())
+    {
+        if paths_equal(path_worktree, project_worktree) {
+            return true;
+        }
+        let path_common = crate::worktree::git_common_dir(path);
+        let project_common = crate::worktree::git_common_dir(project_root);
+        return path_common
+            .as_ref()
+            .zip(project_common.as_ref())
+            .is_some_and(|(path_common, project_common)| paths_equal(path_common, project_common));
+    }
+
+    crate::config::discover_project_root(path)
+        .as_ref()
+        .is_some_and(|discovered| paths_equal(discovered, project_root))
+}
+
 #[cfg(windows)]
 fn normalized_paths_equal(a: &Path, b: &Path) -> bool {
     fn normalize(path: &Path) -> String {
@@ -186,6 +212,63 @@ pub(crate) fn append_tool_calls_metadata(
     if let Some(tool_calls) = message.get("tool_calls") {
         map.insert("tool_calls".to_string(), tool_calls.clone());
     }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct TranscriptLocation<'a> {
+    pub(crate) cwd: Option<&'a Path>,
+    pub(crate) provenance: &'a str,
+}
+
+impl<'a> TranscriptLocation<'a> {
+    pub(crate) fn new(cwd: Option<&'a Path>, provenance: &'a str) -> Self {
+        Self { cwd, provenance }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct TranscriptLocationMetadataKeys {
+    pub(crate) cwd: &'static str,
+    pub(crate) worktree: &'static str,
+    pub(crate) provenance: &'static str,
+}
+
+impl TranscriptLocationMetadataKeys {
+    pub(crate) const fn new(
+        cwd: &'static str,
+        worktree: &'static str,
+        provenance: &'static str,
+    ) -> Self {
+        Self {
+            cwd,
+            worktree,
+            provenance,
+        }
+    }
+}
+
+pub(crate) fn append_location_metadata(
+    map: &mut serde_json::Map<String, Value>,
+    keys: TranscriptLocationMetadataKeys,
+    location: TranscriptLocation<'_>,
+) {
+    let Some(cwd) = location.cwd else {
+        return;
+    };
+    map.insert(
+        keys.cwd.to_string(),
+        Value::String(cwd.to_string_lossy().to_string()),
+    );
+    if let Some(worktree) = crate::worktree::git_worktree_root(cwd) {
+        map.insert(
+            keys.worktree.to_string(),
+            Value::String(worktree.to_string_lossy().to_string()),
+        );
+    }
+    map.insert(
+        keys.provenance.to_string(),
+        Value::String(location.provenance.to_string()),
+    );
 }
 
 /// Token-usage counter keys recognized by the savings dashboard

@@ -384,7 +384,7 @@ fn assert_codex_plugin_bundle(
         expected_command,
     );
 
-    let skill = std::fs::read_to_string(plugin_dir.join("skills/reading-code-cheaply/SKILL.md"))
+    let skill = std::fs::read_to_string(plugin_dir.join("skills/exploring-code/SKILL.md"))
         .expect("Codex plugin should ship tracedecay steering skills");
     assert!(skill.contains("tracedecay"));
 }
@@ -544,13 +544,13 @@ fn test_cursor_plugin_bundle_files_are_valid() {
 
 #[test]
 fn generated_guidance_prefers_resolved_active_project_store() {
-    let cursor_status = include_str!("../../cursor-plugin/skills/project-status/SKILL.md");
-    let codex_status = include_str!("../../codex-plugin/skills/project-status/SKILL.md");
+    let cursor_status = include_str!("../../cursor-plugin/skills/code-health/SKILL.md");
+    let codex_status = include_str!("../../codex-plugin/skills/code-health/SKILL.md");
     let cursor_rule = include_str!("../../cursor-plugin/rules/tracedecay.mdc");
 
     for (name, guidance) in [
-        ("cursor project-status", cursor_status),
-        ("codex project-status", codex_status),
+        ("cursor code-health", cursor_status),
+        ("codex code-health", codex_status),
     ] {
         assert!(
             guidance.contains("tracedecay_active_project"),
@@ -2920,7 +2920,7 @@ fn test_local_install_codex_writes_project_paths() {
             "plugins/tracedecay/.codex-plugin/plugin.json",
             "plugins/tracedecay/.mcp.json",
             "plugins/tracedecay/hooks/hooks.json",
-            "plugins/tracedecay/skills/reading-code-cheaply/SKILL.md",
+            "plugins/tracedecay/skills/exploring-code/SKILL.md",
         ],
     );
 }
@@ -3182,6 +3182,12 @@ async fn test_codex_install_exports_active_managed_skills() {
     let skill = std::fs::read_to_string(skill_path).unwrap();
     assert!(skill.contains("id: repo-hygiene"));
     assert!(skill.contains("Use Repo Hygiene for repeated workflows."));
+
+    let digest_skill_path =
+        codex_plugin_install_dir(home).join("skills/agent-managed-memory/SKILL.md");
+    let digest_skill = std::fs::read_to_string(digest_skill_path).unwrap();
+    assert!(digest_skill.contains("name: tracedecay-memory-digest"));
+    assert!(digest_skill.contains("No durable facts exported yet"));
 }
 
 #[tokio::test]
@@ -3222,6 +3228,13 @@ async fn test_codex_shareable_plugin_artifact_exports_bundle_and_managed_skills(
     let skill = std::fs::read_to_string(skill_path).unwrap();
     assert!(skill.contains("id: repo-hygiene"));
     assert!(skill.contains("Use Repo Hygiene for repeated workflows."));
+    assert!(
+        !summary
+            .output
+            .join("skills/agent-managed-memory/SKILL.md")
+            .exists(),
+        "shareable Codex plugin artifacts must not include a personal memory digest"
+    );
 }
 
 #[test]
@@ -4747,7 +4760,15 @@ fn test_healthcheck_cursor_local_install_checks_project_config() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_cursor_healthcheck_warns_on_literal_workspace_folder_transcript_path() {
+    // TraceDecay::init and healthcheck read the user data dir from the
+    // process env, which other tests pin via EnvVarGuard — serialize and pin
+    // like every other TraceDecay::init test in this suite.
+    let _env_lock = AGENT_ENV_LOCK.lock().await;
     let home = TempDir::new().unwrap();
+    let data_dir = home.path().join(".tracedecay");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let data_dir = data_dir.canonicalize().unwrap();
+    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, data_dir);
     let project = TempDir::new().unwrap();
     CursorIntegration
         .install(&make_install_ctx(home.path()))

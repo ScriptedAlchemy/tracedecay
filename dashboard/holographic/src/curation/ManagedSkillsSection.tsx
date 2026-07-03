@@ -15,8 +15,44 @@ import type {
   SkillStaleRecommendation,
   SkillUsageSummary,
 } from "../types";
+import type { ManagedSkillExportsResult } from "./useManagedSkills";
 
 type ManagedSkillAction = "approve" | "discard-update" | "disable" | "archive" | "restore";
+
+function SkillExportResults({ result }: { result: ManagedSkillExportsResult }) {
+  return (
+    <div className="mt-2 border border-border bg-background/50 p-2 text-[11px]">
+      <div className="font-mono-ui text-text-tertiary">
+        agent exports · after {result.action}
+      </div>
+      {result.reports.length ? (
+        <ul className="mt-1 flex flex-col gap-0.5">
+          {result.reports.map((report) => (
+            <li
+              key={report.agent}
+              className={report.error ? "text-destructive" : "text-text-secondary"}
+            >
+              <span className="font-mono-ui">{report.agent}</span>
+              {report.error ? (
+                <span> · export failed: {report.error}</span>
+              ) : (
+                <span>
+                  {" "}
+                  · {report.exports.reduce((sum, entry) => sum + entry.exported_count, 0)}{" "}
+                  skill(s) deployed
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <div className="mt-1 text-text-tertiary">
+          No agent installations detected; skills deploy on the next install.
+        </div>
+      )}
+    </div>
+  );
+}
 
 function SkillStateBadge({ state }: { state: ManagedSkillState }) {
   return (
@@ -71,6 +107,7 @@ export function ManagedSkillsSection({
   loading,
   error,
   actioning,
+  exportsResult = null,
   onRefresh,
   onLoadSkill,
   onAction,
@@ -84,6 +121,7 @@ export function ManagedSkillsSection({
   loading: boolean;
   error: string;
   actioning: string | null;
+  exportsResult?: ManagedSkillExportsResult | null;
   onRefresh: () => void;
   onLoadSkill: (skillId: string) => void;
   onAction: (action: string, skillId: string) => void;
@@ -226,6 +264,9 @@ export function ManagedSkillsSection({
                     support files={selectedSkill.pending_update.support_files.length}
                   </div>
                 </div>
+              ) : null}
+              {exportsResult && exportsResult.skillId === selectedSkill.metadata.id ? (
+                <SkillExportResults result={exportsResult} />
               ) : null}
               <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap border border-border bg-background/70 p-2 font-mono-ui text-[11px] leading-relaxed text-text-secondary">
                 {selectedSkill.body_markdown || "No skill body."}

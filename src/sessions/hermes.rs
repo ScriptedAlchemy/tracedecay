@@ -33,12 +33,18 @@ use serde_json::{Map, Value};
 use crate::agents::hermes::read_config_pinned_project_root;
 use crate::global_db::{GlobalDb, ParseOffset, TranscriptBatch};
 use crate::sessions::shared::{
-    content_storage_text_and_tools, paths_equal, preview_title, read_new_rows, title_from_messages,
-    StoredCursor, TranscriptIngestStats,
+    append_location_metadata, content_storage_text_and_tools, path_belongs_to_project, paths_equal,
+    preview_title, read_new_rows, title_from_messages, StoredCursor, TranscriptIngestStats,
+    TranscriptLocation, TranscriptLocationMetadataKeys,
 };
 use crate::sessions::{SessionMessageRecord, SessionRecord};
 
 const PROVIDER: &str = "hermes";
+const HERMES_LOCATION_KEYS: TranscriptLocationMetadataKeys = TranscriptLocationMetadataKeys::new(
+    "hermes_session_cwd",
+    "hermes_session_worktree",
+    "hermes_session_location_provenance",
+);
 /// Rows ingested per transaction. Keeps the first catch-up over a large
 /// profile history (tens of thousands of rows) memory-bounded while letting
 /// the cursor advance after every committed chunk, so an interrupted sweep
@@ -73,8 +79,8 @@ pub async fn ingest_homes(
     project_root: &Path,
 ) -> TranscriptIngestStats {
     let mut stats = TranscriptIngestStats::default();
-    for (state_db, profile) in pinned_state_dbs(hermes_homes, project_root) {
-        stats = stats.merge(ingest_state_db(db, &state_db, project_root, profile.as_deref()).await);
+    for source in pinned_state_dbs(hermes_homes, project_root) {
+        stats = stats.merge(ingest_state_db(db, &source, project_root).await);
     }
     stats
 }
@@ -88,10 +94,14 @@ pub async fn ingest_homes(
 ///
 /// Returns `(state_db_path, profile_name)`; the default profile (the home
 /// directory itself) has no profile name.
-fn pinned_state_dbs(
-    hermes_homes: &[PathBuf],
-    project_root: &Path,
-) -> Vec<(PathBuf, Option<String>)> {
+struct HermesProfileSource {
+    state_db: PathBuf,
+    profile: Option<String>,
+    location_cwd: PathBuf,
+    location_provenance: &'static str,
+}
+
+fn pinned_state_dbs(hermes_homes: &[PathBuf], project_root: &Path) -> Vec<HermesProfileSource> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
     for home in hermes_homes {
@@ -113,20 +123,37 @@ fn pinned_state_dbs(
             }
         }
         for (profile_dir, profile_name) in candidates {
-            let matches = match read_config_pinned_project_root(&profile_dir.join("config.yaml")) {
-                // An explicit pin (including the legacy home-equal pin)
-                // maps the profile to that project.
-                Some(pin) => paths_equal(Path::new(&pin), project_root),
-                // Unpinned profiles map to their own home as the project
-                // identity in the unified user-level store.
-                None => paths_equal(&profile_dir, project_root),
-            };
+            let (matches, location_cwd, location_provenance) =
+                match read_config_pinned_project_root(&profile_dir.join("config.yaml")) {
+                    // An explicit pin (including the legacy home-equal pin)
+                    // maps the profile to that project.
+                    Some(pin) => {
+                        let pin = PathBuf::from(pin);
+                        (
+                            path_belongs_to_project(&pin, project_root),
+                            pin,
+                            "profile_pin",
+                        )
+                    }
+                    // Unpinned profiles map to their own home as the project
+                    // identity in the unified user-level store.
+                    None => (
+                        paths_equal(&profile_dir, project_root),
+                        profile_dir.clone(),
+                        "profile_home",
+                    ),
+                };
             if !matches {
                 continue;
             }
             let state_db = profile_dir.join("state.db");
             if state_db.is_file() && seen.insert(state_db.clone()) {
-                out.push((state_db, profile_name));
+                out.push(HermesProfileSource {
+                    state_db,
+                    profile: profile_name,
+                    location_cwd,
+                    location_provenance,
+                });
             }
         }
     }
@@ -208,11 +235,11 @@ fn select_new_messages_sql(columns: &std::collections::BTreeSet<String>) -> Stri
 /// whatever was committed so far.
 async fn ingest_state_db(
     db: &GlobalDb,
-    state_db: &Path,
+    source: &HermesProfileSource,
     project_root: &Path,
-    profile: Option<&str>,
 ) -> TranscriptIngestStats {
     let mut stats = TranscriptIngestStats::default();
+    let state_db = &source.state_db;
     let Some(conn) = open_read_only(state_db).await else {
         return stats;
     };
@@ -246,7 +273,7 @@ async fn ingest_state_db(
             mtime: next_cursor.mtime,
             file_id: next_cursor.file_id,
         };
-        let batches = build_batches(db, &new.items, &path_str, project_root, profile).await;
+        let batches = build_batches(db, &new.items, &path_str, project_root, source).await;
         if batches.is_empty() {
             // Only non-conversation rows (e.g. `session_meta`) — still advance
             // the cursor so the next sweep does not re-read them.
@@ -318,7 +345,7 @@ async fn build_batches(
     rows: &[HermesRow],
     state_db_path: &str,
     project_root: &Path,
-    profile: Option<&str>,
+    source: &HermesProfileSource,
 ) -> Vec<TranscriptBatch> {
     let mut order = Vec::new();
     let mut by_session: HashMap<String, TranscriptBatch> = HashMap::new();
@@ -332,13 +359,13 @@ async fn build_batches(
             // them as live history would misrepresent the conversation.
             continue;
         }
-        let Some(message) = message_from_row(row, state_db_path, profile) else {
+        let Some(message) = message_from_row(row, state_db_path, source) else {
             continue;
         };
         let batch = by_session.entry(row.session_id.clone()).or_insert_with(|| {
             order.push(row.session_id.clone());
             TranscriptBatch {
-                session: session_from_row(row, state_db_path, project_root, profile),
+                session: session_from_row(row, state_db_path, project_root, source),
                 messages: Vec::new(),
             }
         });
@@ -360,14 +387,14 @@ fn session_from_row(
     row: &HermesRow,
     state_db_path: &str,
     project_root: &Path,
-    profile: Option<&str>,
+    source: &HermesProfileSource,
 ) -> SessionRecord {
     let mut metadata = Map::new();
     metadata.insert(
         "source".to_string(),
         Value::String("hermes_state_db".to_string()),
     );
-    if let Some(profile) = profile {
+    if let Some(profile) = source.profile.as_deref() {
         metadata.insert("profile".to_string(), Value::String(profile.to_string()));
     }
     if let Some(source) = row.session_source.as_deref() {
@@ -379,6 +406,11 @@ fn session_from_row(
     if let Some(usage) = session_usage_counters(row) {
         metadata.insert("usage".to_string(), usage);
     }
+    append_location_metadata(
+        &mut metadata,
+        HERMES_LOCATION_KEYS,
+        TranscriptLocation::new(Some(&source.location_cwd), source.location_provenance),
+    );
     let project = project_root.to_string_lossy().to_string();
     let parent_session_id = row
         .parent_session_id
@@ -485,7 +517,7 @@ async fn merge_with_existing(db: &GlobalDb, batch: &mut TranscriptBatch) {
 fn message_from_row(
     row: &HermesRow,
     state_db_path: &str,
-    profile: Option<&str>,
+    source: &HermesProfileSource,
 ) -> Option<SessionMessageRecord> {
     let content = row
         .content
@@ -523,9 +555,14 @@ fn message_from_row(
         "source".to_string(),
         Value::String("hermes_state_db".to_string()),
     );
-    if let Some(profile) = profile {
+    if let Some(profile) = source.profile.as_deref() {
         metadata.insert("profile".to_string(), Value::String(profile.to_string()));
     }
+    append_location_metadata(
+        &mut metadata,
+        HERMES_LOCATION_KEYS,
+        TranscriptLocation::new(Some(&source.location_cwd), source.location_provenance),
+    );
     if let Some(value) = tool_calls_value {
         metadata.insert("tool_calls".to_string(), value);
     }

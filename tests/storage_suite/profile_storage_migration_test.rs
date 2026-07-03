@@ -70,14 +70,21 @@ impl Drop for HomeEnvGuard {
 }
 
 fn canonical_temp_path(path: &Path) -> PathBuf {
-    #[cfg(windows)]
-    {
-        path.to_path_buf()
-    }
-    #[cfg(not(windows))]
-    {
-        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-    }
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn normalize_test_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .trim_start_matches("//?/")
+        .to_string()
+}
+
+fn assert_path_eq(actual: impl AsRef<Path>, expected: impl AsRef<Path>) {
+    assert_eq!(
+        normalize_test_path(actual.as_ref()),
+        normalize_test_path(expected.as_ref())
+    );
 }
 
 fn portable_relpath(path: &str) -> String {
@@ -488,8 +495,8 @@ async fn trace_decay_init_uses_profile_shard_when_enrolled() {
 
     let cg = TraceDecay::init(&project).await.unwrap();
 
-    assert_eq!(cg.store_layout().data_root, shard_root);
-    assert_eq!(cg.db_path(), shard_root.join("tracedecay.db"));
+    assert_path_eq(&cg.store_layout().data_root, &shard_root);
+    assert_path_eq(cg.db_path(), shard_root.join("tracedecay.db"));
     assert!(shard_root.join("config.json").is_file());
     assert!(shard_root.join(STORE_MANIFEST_FILENAME).is_file());
     assert!(
@@ -756,8 +763,8 @@ async fn trace_decay_open_branch_uses_profile_shard_branch_db() {
         .await
         .unwrap();
 
-    assert_eq!(cg.store_layout().data_root, shard_root);
-    assert_eq!(cg.db_path(), branch_db);
+    assert_path_eq(&cg.store_layout().data_root, &shard_root);
+    assert_path_eq(cg.db_path(), &branch_db);
     assert_eq!(cg.serving_branch(), Some("feature/profile"));
 }
 

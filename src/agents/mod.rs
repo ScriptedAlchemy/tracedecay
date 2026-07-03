@@ -28,6 +28,9 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
+use serde::Serialize;
+
+use crate::automation::skill_targets::SkillInstallSummary;
 use crate::errors::Result;
 use crate::errors::TraceDecayError;
 use crate::mcp::tools::get_tool_definitions;
@@ -55,11 +58,94 @@ pub(crate) fn install_managed_skill_prompt_index(
 ) -> Result<()> {
     let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(profile_home);
     crate::automation::skill_targets::install_managed_skills(&profile_root, target, prompt_path)?;
+    crate::automation::memory_digest::sync_memory_digest_export(
+        &profile_root,
+        target,
+        prompt_path,
+    )?;
     Ok(())
 }
 
 pub(crate) fn remove_managed_skill_prompt_index(prompt_path: &Path) -> Result<()> {
-    crate::automation::skill_targets::remove_prompt_skill_index(prompt_path)
+    crate::automation::skill_targets::remove_prompt_skill_index(prompt_path)?;
+    crate::automation::memory_digest::remove_memory_digest_prompt_block(prompt_path)
+}
+
+/// Per-agent outcome of a managed-skill export refresh, keyed by agent id.
+/// `error` carries the failure message when the refresh failed; `exports`
+/// lists the destinations that were (re)written on success.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ManagedSkillExportReport {
+    pub agent: String,
+    pub exports: Vec<SkillInstallSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Re-runs the managed-skill overlay/prompt-index export for every agent
+/// integration that already has tracedecay installed under `home`, so a
+/// lifecycle change (approve/disable/archive/restore) deploys without
+/// waiting for the next `tracedecay install` / `update-plugin`.
+///
+/// Failures are collected per agent instead of aborting the sweep: a broken
+/// export for one host must not block the others (or the lifecycle action
+/// that triggered the refresh). Agents with no export destinations are
+/// omitted from the result.
+pub fn export_managed_skills_to_agents(
+    home: &Path,
+    profile_root: &Path,
+) -> Vec<ManagedSkillExportReport> {
+    let mut reports = Vec::new();
+    for ag in all_integrations() {
+        match ag.export_managed_skills(home, profile_root) {
+            Ok(exports) => {
+                if !exports.is_empty() {
+                    reports.push(ManagedSkillExportReport {
+                        agent: ag.id().to_string(),
+                        exports,
+                        error: None,
+                    });
+                }
+            }
+            Err(err) => reports.push(ManagedSkillExportReport {
+                agent: ag.id().to_string(),
+                exports: Vec::new(),
+                error: Some(err.to_string()),
+            }),
+        }
+    }
+    reports
+}
+
+/// Re-runs managed-skill exports for global installs under `home` plus
+/// project-local installs under `project_root`. Reports are merged per agent
+/// so dashboard callers can present one lifecycle refresh result per host.
+pub fn export_managed_skills_to_agent_hosts(
+    home: &Path,
+    project_root: &Path,
+    profile_root: &Path,
+) -> Vec<ManagedSkillExportReport> {
+    let mut reports = Vec::new();
+    for ag in all_integrations() {
+        let mut exports = Vec::new();
+        let mut errors = Vec::new();
+        match ag.export_managed_skills(home, profile_root) {
+            Ok(global_exports) => exports.extend(global_exports),
+            Err(err) => errors.push(err.to_string()),
+        }
+        match ag.export_managed_skills_local(project_root, profile_root) {
+            Ok(local_exports) => exports.extend(local_exports),
+            Err(err) => errors.push(err.to_string()),
+        }
+        if !exports.is_empty() || !errors.is_empty() {
+            reports.push(ManagedSkillExportReport {
+                agent: ag.id().to_string(),
+                exports,
+                error: (!errors.is_empty()).then(|| errors.join("; ")),
+            });
+        }
+    }
+    reports
 }
 
 // ---------------------------------------------------------------------------
@@ -122,6 +208,34 @@ pub trait AgentIntegration {
     /// remains the path that reconciles those.
     fn update_plugin(&self, _ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
         Ok(UpdatePluginOutcome::ConfigOnly)
+    }
+
+    /// Re-export the profile's active managed skills into every export
+    /// destination this agent's existing installation owns (native overlay
+    /// or prompt index), without touching any other config. Returns one
+    /// summary per destination that was refreshed; the default returns an
+    /// empty list for agents that either do not distribute managed skills
+    /// or have no detected tracedecay installation under `home`.
+    ///
+    /// Implementors must never create a new installation here — only
+    /// refresh artifacts that `install` already wrote.
+    fn export_managed_skills(
+        &self,
+        _home: &Path,
+        _profile_root: &Path,
+    ) -> Result<Vec<SkillInstallSummary>> {
+        Ok(Vec::new())
+    }
+
+    /// Re-export active managed skills into destinations created by
+    /// [`AgentIntegration::install_local`] under a project/workspace. The
+    /// default is a no-op for agents without project-local skill exports.
+    fn export_managed_skills_local(
+        &self,
+        _project_root: &Path,
+        _profile_root: &Path,
+    ) -> Result<Vec<SkillInstallSummary>> {
+        Ok(Vec::new())
     }
 
     /// Remove everything installed by [`AgentIntegration::install`].

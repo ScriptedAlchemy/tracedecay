@@ -274,6 +274,48 @@ impl AgentIntegration for KiroIntegration {
             .and_then(|v| v.get("tracedecay"))
             .is_some()
     }
+
+    fn export_managed_skills(
+        &self,
+        home: &Path,
+        profile_root: &Path,
+    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+        if !self.has_tracedecay(home) {
+            return Ok(Vec::new());
+        }
+        Ok(vec![install_managed_skills(
+            profile_root,
+            SkillInstallTarget::Kiro,
+            &managed_skill_index_path(home),
+        )?])
+    }
+
+    fn export_managed_skills_local(
+        &self,
+        project_root: &Path,
+        profile_root: &Path,
+    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+        let skill_index_path = project_root.join(".kiro/steering/tracedecay-managed-skills.md");
+        if !workspace_mcp_has_tracedecay(project_root) || !skill_index_path.exists() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![install_managed_skills(
+            profile_root,
+            SkillInstallTarget::Kiro,
+            &skill_index_path,
+        )?])
+    }
+}
+
+fn workspace_mcp_has_tracedecay(project_root: &Path) -> bool {
+    let path = workspace_mcp_config_path(project_root);
+    if !path.exists() {
+        return false;
+    }
+    let json = load_json_file(&path);
+    json.get("mcpServers")
+        .and_then(|servers| servers.get("tracedecay"))
+        .is_some()
 }
 
 // ---------------------------------------------------------------------------
@@ -401,7 +443,12 @@ fn install_kiro_managed_skill_index<'a>(
 ) -> Result<Option<&'a Path>> {
     let profile_root = profile_root_for_agent_home(home);
     let summary = install_managed_skills(&profile_root, SkillInstallTarget::Kiro, index_path)?;
-    Ok((summary.exported_count > 0).then_some(index_path))
+    let digest_exported = crate::automation::memory_digest::sync_memory_digest_export(
+        &profile_root,
+        SkillInstallTarget::Kiro,
+        index_path,
+    )?;
+    Ok((summary.exported_count > 0 || digest_exported).then_some(index_path))
 }
 
 fn remove_kiro_managed_skill_index(index_path: &Path) {

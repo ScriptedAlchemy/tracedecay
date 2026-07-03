@@ -10,10 +10,12 @@
 
 use std::path::{Path, PathBuf};
 
+use serde_json::json;
 use tempfile::TempDir;
 use tracedecay::agents::{get_integration, InstallContext, UpdatePluginOutcome};
 
 use crate::common::{EnvVarGuard, PROCESS_ENV_LOCK};
+use crate::plugin_validation_support::{assert_schema_valid, compile_schema, relative_files_under};
 
 const OLD_BIN: &str = "/old/bin/tracedecay";
 const NEW_BIN: &str = "/new/bin/tracedecay";
@@ -104,25 +106,13 @@ fn write_stale_codex_skill(plugin_dir: &Path) {
     .unwrap();
 }
 
-/// Every regular file under `root`, relative to it, sorted.
-fn file_listing(root: &Path) -> Vec<PathBuf> {
-    fn walk(dir: &Path, root: &Path, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                walk(&path, root, out);
-            } else {
-                out.push(path.strip_prefix(root).unwrap().to_path_buf());
-            }
-        }
-    }
-    let mut out = Vec::new();
-    walk(root, root, &mut out);
-    out.sort();
-    out
+fn write_retired_codex_skill(plugin_dir: &Path, name: &str) {
+    std::fs::create_dir_all(plugin_dir.join("skills").join(name)).unwrap();
+    std::fs::write(
+        plugin_dir.join("skills").join(name).join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: retired tracedecay skill\n---\n"),
+    )
+    .unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +247,14 @@ fn cursor_update_plugin_refreshes_bundle_and_preserves_user_config() {
 
     // An unmanaged user file inside the plugin dir must survive the refresh.
     std::fs::write(plugin_dir.join("user-note.txt"), "mine\n").unwrap();
+    // A pre-consolidation workflow skill must not survive alongside the new
+    // consolidated model-invoked skill catalog.
+    std::fs::create_dir_all(plugin_dir.join("skills/reading-code-cheaply")).unwrap();
+    std::fs::write(
+        plugin_dir.join("skills/reading-code-cheaply/SKILL.md"),
+        "---\nname: reading-code-cheaply\ndescription: retired tracedecay skill\n---\n",
+    )
+    .unwrap();
     let user_mcp_before = bytes(&user_mcp);
 
     let outcome = cursor.update_plugin(&ctx(home.path(), NEW_BIN)).unwrap();
@@ -268,20 +266,18 @@ fn cursor_update_plugin_refreshes_bundle_and_preserves_user_config() {
     // User config byte-identical; unmanaged file preserved.
     assert_eq!(bytes(&user_mcp), user_mcp_before);
     assert_eq!(text(&plugin_dir.join("user-note.txt")), "mine\n");
+    assert!(
+        !plugin_dir.join("skills/reading-code-cheaply").exists(),
+        "update-plugin must sweep retired Cursor skill dirs so stale workflows are not rediscovered"
+    );
 
     // Generated bundle re-baked: plugin-owned mcp.json command, hook command
     // paths, and the manifest version stamp.
     assert!(text(&plugin_dir.join("mcp.json")).contains(NEW_BIN));
-    // Template decision pin: the rebaked MCP config must keep the
-    // workspace-scoped `--path ${workspaceFolder}` args. Normal Cursor windows
-    // expand the variable; hosts that pass it literally (headless
-    // agent-session scopes) are handled by serve's unexpanded-template
-    // fallback, not by dropping the argument from the template.
-    let rebaked_mcp = read_json(&plugin_dir.join("mcp.json"));
-    assert_eq!(
-        rebaked_mcp["mcpServers"]["tracedecay"]["args"],
-        serde_json::json!(["serve", "--path", "${workspaceFolder}"])
-    );
+    // The `--path ${workspaceFolder}` args pin is asserted by
+    // `assert_cursor_rendered_bundle_valid`, which
+    // `cursor_update_plugin_rerenders_structurally_valid_bundle` runs against
+    // this same update flow.
     assert!(text(&plugin_dir.join("hooks/hooks.json")).contains(NEW_BIN));
     assert!(
         text(&plugin_dir.join(".cursor-plugin/plugin.json")).contains(env!("CARGO_PKG_VERSION"))
@@ -320,6 +316,7 @@ fn codex_update_plugin_refreshes_bundle_without_touching_config() {
         "---\nname: private-skill\n---\n",
     )
     .unwrap();
+    write_retired_codex_skill(&plugin_dir, "architecture-overview");
     let config_before = bytes(&codex_config);
 
     let outcome = codex
@@ -335,6 +332,10 @@ fn codex_update_plugin_refreshes_bundle_without_touching_config() {
     assert_eq!(
         text(&plugin_dir.join("skills/private-skill/SKILL.md")),
         "---\nname: private-skill\n---\n"
+    );
+    assert!(
+        !plugin_dir.join("skills/architecture-overview").exists(),
+        "update-plugin must remove retired bundled Codex skill dirs that lack tracedecay-prefixed names"
     );
     assert_codex_bundle_contains_bin(&plugin_dir, NEW_BIN);
     assert!(text(&plugin_dir.join(".codex-plugin/plugin.json")).contains(env!("CARGO_PKG_VERSION")));
@@ -642,8 +643,324 @@ fn config_only_integrations_report_config_only_and_write_nothing() {
             "{id} should be config-only"
         );
         assert!(
-            file_listing(home.path()).is_empty(),
+            relative_files_under(home.path()).is_empty(),
             "{id} update_plugin wrote files into the home dir"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Rendered-output structural validation
+//
+// The install/update-plugin renderers rewrite bundle commands to the absolute
+// tracedecay binary path and stamp the package version. The tests above prove
+// user config survives a refresh; this section proves the RENDERED artifacts
+// themselves are structurally sound: manifests stay schema-shaped, hook
+// commands are absolute and shell-quoted, no template placeholder survives
+// rendering except the one intentional `${workspaceFolder}` in Cursor's
+// mcp.json args, and no source-bundle file is silently dropped.
+// ---------------------------------------------------------------------------
+
+/// A source plugin bundle directory in the repo (`cursor-plugin/`,
+/// `codex-plugin/`).
+fn repo_bundle_dir(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(name)
+}
+
+/// A vendored Cursor schema under `tests/fixtures/cursor-schemas/`, loaded by
+/// path so the fixtures stay the single source of truth for manifest shape.
+fn load_vendored_schema(file_name: &str) -> serde_json::Value {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/cursor-schemas")
+        .join(file_name);
+    read_json(&path)
+}
+
+/// The exact shell-quoted form the renderer bakes into hook commands:
+/// single-quoted on POSIX, double-quoted on Windows (matching
+/// `agents::hook_command`, which the test binary's platform selects).
+fn quoted_bin(bin: &str) -> String {
+    if cfg!(windows) {
+        format!("\"{bin}\"")
+    } else {
+        format!("'{bin}'")
+    }
+}
+
+/// A rendered hook command must be exactly `<quoted absolute bin> <hook
+/// subcommand>` — quoting guards paths with spaces, and an absolute path
+/// guards against PATH-dependent hooks.
+fn assert_rendered_hook_command(command: &str, bin: &str, subcommand_prefix: &str) {
+    assert!(
+        Path::new(bin).has_root(),
+        "hook binary path {bin:?} must be absolute"
+    );
+    let quoted = quoted_bin(bin);
+    let suffix = command.strip_prefix(&quoted).unwrap_or_else(|| {
+        panic!("hook command {command:?} must start with the quoted binary path {quoted:?}")
+    });
+    let subcommand = suffix.strip_prefix(' ').unwrap_or_else(|| {
+        panic!("hook command {command:?} must separate binary and subcommand with a space")
+    });
+    assert!(
+        subcommand.starts_with(subcommand_prefix) && !subcommand.trim().is_empty(),
+        "hook command {command:?} must invoke a {subcommand_prefix}* subcommand"
+    );
+}
+
+/// Collects every string value containing a `${...}` placeholder from the
+/// rendered JSON files under `install_dir`, as
+/// `(relative file, JSON pointer, value)`. Only JSON files are scanned:
+/// they are the rendered config surfaces, while markdown (README, skills)
+/// legitimately documents the placeholder syntax.
+fn rendered_json_placeholders(install_dir: &Path) -> Vec<(String, String, String)> {
+    fn walk(value: &serde_json::Value, pointer: &str, out: &mut Vec<(String, String)>) {
+        match value {
+            serde_json::Value::String(s) if s.contains("${") => {
+                out.push((pointer.to_string(), s.clone()));
+            }
+            serde_json::Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    walk(item, &format!("{pointer}/{index}"), out);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for (key, item) in map {
+                    walk(item, &format!("{pointer}/{key}"), out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    for relative in relative_files_under(install_dir) {
+        if relative.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let file = relative.to_string_lossy().replace('\\', "/");
+        let mut in_file = Vec::new();
+        walk(&read_json(&install_dir.join(&relative)), "", &mut in_file);
+        found.extend(
+            in_file
+                .into_iter()
+                .map(|(pointer, value)| (file.clone(), pointer, value)),
+        );
+    }
+    found
+}
+
+/// Every file shipped in the source bundle must appear in the rendered
+/// install — a renderer that skips a file drops it silently, because install
+/// wipes the previous managed files first. The rendered dir may hold extras
+/// (managed skill overlay, user files); source ⊆ rendered is the contract.
+fn assert_source_bundle_fully_rendered(source_dir: &Path, install_dir: &Path) {
+    let source = relative_files_under(source_dir);
+    assert!(
+        !source.is_empty(),
+        "source bundle {} should not be empty",
+        source_dir.display()
+    );
+    let rendered = relative_files_under(install_dir);
+    let missing: Vec<&PathBuf> = source
+        .iter()
+        .filter(|relative| !rendered.contains(relative))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "files present in {} but missing from rendered install {}: {missing:?}",
+        source_dir.display(),
+        install_dir.display()
+    );
+}
+
+/// Full structural validation of a rendered Cursor plugin bundle.
+fn assert_cursor_rendered_bundle_valid(plugin_dir: &Path, bin: &str) {
+    // Rendered mcp.json: absolute command, and the args pin — `serve --path
+    // ${workspaceFolder}` is the one placeholder that must survive rendering.
+    // Normal Cursor windows expand the variable at session start; hosts that
+    // pass it through literally (headless agent-session scopes) are handled
+    // by serve's unexpanded-template fallback, not by dropping the argument
+    // from the template.
+    let mcp = read_json(&plugin_dir.join("mcp.json"));
+    let server = &mcp["mcpServers"]["tracedecay"];
+    assert_eq!(server["type"], "stdio");
+    assert_eq!(server["command"], json!(bin));
+    assert!(
+        Path::new(bin).has_root(),
+        "rendered MCP command {bin:?} must be an absolute path"
+    );
+    assert_eq!(
+        server["args"],
+        json!(["serve", "--path", "${workspaceFolder}"]),
+        "rendered mcp.json args must keep the workspaceFolder placeholder pin"
+    );
+
+    // Rendered manifest: still valid against the vendored official plugin
+    // schema, with the version stamped to this binary's package version.
+    let manifest_path = plugin_dir.join(".cursor-plugin/plugin.json");
+    let manifest = read_json(&manifest_path);
+    let plugin_schema = compile_schema(&load_vendored_schema("plugin.schema.json"));
+    assert_schema_valid(&plugin_schema, &manifest, &manifest_path);
+    assert_eq!(manifest["name"], "tracedecay");
+    assert_eq!(
+        manifest["version"],
+        json!(env!("CARGO_PKG_VERSION")),
+        "rendered manifest version must match the binary's package version"
+    );
+
+    // Rendered hooks.json: every event handler runs the quoted absolute
+    // binary with a hook-cursor-* subcommand.
+    let hooks = read_json(&plugin_dir.join("hooks/hooks.json"));
+    let events = hooks["hooks"]
+        .as_object()
+        .expect("rendered hooks.json must contain a hooks object");
+    assert!(
+        !events.is_empty(),
+        "rendered hooks.json must register events"
+    );
+    for (event, entries) in events {
+        let entries = entries
+            .as_array()
+            .unwrap_or_else(|| panic!("hook event {event} must hold an array"));
+        assert!(!entries.is_empty(), "hook event {event} must not be empty");
+        for entry in entries {
+            let command = entry["command"]
+                .as_str()
+                .unwrap_or_else(|| panic!("hook event {event} entry must carry a command"));
+            assert_rendered_hook_command(command, bin, "hook-cursor-");
+        }
+    }
+
+    // No placeholder survives rendering anywhere else in the JSON surfaces.
+    assert_eq!(
+        rendered_json_placeholders(plugin_dir),
+        vec![(
+            "mcp.json".to_string(),
+            "/mcpServers/tracedecay/args/2".to_string(),
+            "${workspaceFolder}".to_string()
+        )],
+        "the mcp.json args pin is the only placeholder allowed in rendered JSON"
+    );
+
+    // Nothing from the source bundle was silently dropped.
+    assert_source_bundle_fully_rendered(&repo_bundle_dir("cursor-plugin"), plugin_dir);
+}
+
+/// Full structural validation of a rendered Codex plugin bundle.
+fn assert_codex_rendered_bundle_valid(plugin_dir: &Path, bin: &str) {
+    // Rendered manifest: version stamped to this binary's package version.
+    let manifest = read_json(&plugin_dir.join(".codex-plugin/plugin.json"));
+    assert_eq!(manifest["name"], "tracedecay");
+    assert_eq!(
+        manifest["version"],
+        json!(env!("CARGO_PKG_VERSION")),
+        "rendered manifest version must match the binary's package version"
+    );
+
+    // Rendered hooks.json: Codex nests handlers in matcher groups; every
+    // handler command is the quoted absolute binary plus a hook-codex-*
+    // subcommand.
+    let hooks = read_json(&plugin_dir.join("hooks/hooks.json"));
+    let events = hooks["hooks"]
+        .as_object()
+        .expect("rendered hooks.json must contain a hooks object");
+    assert!(
+        !events.is_empty(),
+        "rendered hooks.json must register events"
+    );
+    for (event, groups) in events {
+        let groups = groups
+            .as_array()
+            .unwrap_or_else(|| panic!("hook event {event} must hold an array of groups"));
+        assert!(!groups.is_empty(), "hook event {event} must not be empty");
+        for group in groups {
+            let handlers = group["hooks"]
+                .as_array()
+                .unwrap_or_else(|| panic!("hook event {event} group must carry handlers"));
+            for handler in handlers {
+                let command = handler["command"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("hook event {event} handler must carry a command"));
+                assert_rendered_hook_command(command, bin, "hook-codex-");
+            }
+        }
+    }
+
+    // Codex has no intentional placeholder: nothing may survive rendering.
+    assert_eq!(
+        rendered_json_placeholders(plugin_dir),
+        Vec::<(String, String, String)>::new(),
+        "no placeholder may survive rendering in the Codex bundle"
+    );
+
+    // Nothing from the source bundle was silently dropped.
+    assert_source_bundle_fully_rendered(&repo_bundle_dir("codex-plugin"), plugin_dir);
+}
+
+#[test]
+fn cursor_install_renders_structurally_valid_bundle() {
+    let home = TempDir::new().unwrap();
+    let cursor = get_integration("cursor").unwrap();
+    cursor.install(&ctx(home.path(), NEW_BIN)).unwrap();
+    assert_cursor_rendered_bundle_valid(
+        &home.path().join(".cursor/plugins/local/tracedecay"),
+        NEW_BIN,
+    );
+}
+
+#[test]
+fn cursor_update_plugin_rerenders_structurally_valid_bundle() {
+    let home = TempDir::new().unwrap();
+    let cursor = get_integration("cursor").unwrap();
+    cursor.install(&ctx(home.path(), OLD_BIN)).unwrap();
+
+    let outcome = cursor.update_plugin(&ctx(home.path(), NEW_BIN)).unwrap();
+    assert!(matches!(outcome, UpdatePluginOutcome::Refreshed(_)));
+    assert_cursor_rendered_bundle_valid(
+        &home.path().join(".cursor/plugins/local/tracedecay"),
+        NEW_BIN,
+    );
+}
+
+#[test]
+fn codex_install_renders_structurally_valid_bundle() {
+    let home = TempDir::new().unwrap();
+    let codex = get_integration("codex").unwrap();
+    codex.install(&ctx(home.path(), NEW_BIN)).unwrap();
+
+    let plugin_dir = codex_bootstrap_dir(home.path());
+    assert_codex_rendered_bundle_valid(&plugin_dir, NEW_BIN);
+
+    // Global-scope MCP rendering: absolute command, plain `serve` args, and
+    // the global-DB env flag.
+    let mcp = read_json(&plugin_dir.join(".mcp.json"));
+    let server = &mcp["mcpServers"]["tracedecay"];
+    assert_eq!(server["type"], "stdio");
+    assert_eq!(server["command"], json!(NEW_BIN));
+    assert_eq!(server["args"], json!(["serve"]));
+    assert_eq!(server["env"], json!({ "TRACEDECAY_ENABLE_GLOBAL_DB": "1" }));
+}
+
+#[test]
+fn codex_local_install_renders_project_scoped_mcp() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let codex = get_integration("codex").unwrap();
+    codex
+        .install_local(&ctx(home.path(), NEW_BIN), project.path())
+        .unwrap();
+
+    let plugin_dir = codex_bootstrap_dir(project.path());
+    assert_codex_rendered_bundle_valid(&plugin_dir, NEW_BIN);
+
+    // Project-local scope renders relative-path serve args and drops the
+    // global-DB env flag.
+    let mcp = read_json(&plugin_dir.join(".mcp.json"));
+    let server = &mcp["mcpServers"]["tracedecay"];
+    assert_eq!(server["command"], json!(NEW_BIN));
+    assert_eq!(server["args"], json!(["serve", "--path", "."]));
+    assert!(
+        server.get("env").is_none(),
+        "project-local installs must not enable the global DB"
+    );
 }

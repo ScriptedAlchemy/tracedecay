@@ -241,7 +241,7 @@ async fn analytics_events_append_and_query_by_provider_project_session_and_kind(
         &db,
         &AnalyticsEventInsert {
             hook_name: Some("pre-tool-use".to_string()),
-            skill_name: Some("tracedecay:searching-for-code".to_string()),
+            skill_name: Some("tracedecay:exploring-code".to_string()),
             outcome: Some("shown".to_string()),
             metadata_json: Some(r#"{"source":"test"}"#.to_string()),
             ..analytics_event(Some("session-a"), 1_715_000_124, "skill")
