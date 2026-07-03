@@ -45,13 +45,10 @@ short recovery hint through Cursor's `additional_context` channel so the agent
 knows to query TraceDecay LCM/session recall before assuming the compacted
 summary is complete.
 
-Slash workflows ship as skills with `disable-model-invocation: true`
+Slash workflows ship as Cursor-native commands
 (`/tracedecay-map-architecture`, `/tracedecay-check-health`,
-`/tracedecay-curate-memory`, `/tracedecay-review-diff`, …) — Cursor's Commands surface was absorbed into
-Skills, so this bundle no longer ships a `commands/` directory. Their slugs
-keep the `tracedecay-` prefix so typing `/tracedecay` lists every command, and
-the suffix is a verb phrase so the human-facing title (Cursor displays the
-humanized slug) reads as the action it performs.
+`/tracedecay-curate-memory`, `/tracedecay-review-diff`, ...). Their slugs keep
+the `tracedecay-` prefix so typing `/tracedecay` lists every command.
 
 ## Auto-review and `permissions.json`
 
@@ -209,16 +206,12 @@ window.
 
 ## Local development
 
-For checkout dogfooding, Cursor's docs bless symlinking the bundle into the
-local plugin directory so edits are picked up without reinstalling:
+For checkout dogfooding, install the generated Cursor projection after edits:
 
 ```bash
-mkdir -p ~/.cursor/plugins/local
-rm -rf ~/.cursor/plugins/local/tracedecay
-ln -s /path/to/tracedecay/cursor-plugin ~/.cursor/plugins/local/tracedecay
+tracedecay install --agent cursor
 ```
 
-Caveat: a symlinked bundle keeps the literal `tracedecay ...` hook/MCP commands,
-so GUI-launched Cursor must be able to resolve `tracedecay` on `PATH` (the real
-install rewrites them to an absolute binary path). Copying the directory
-(`cp -R` instead of `ln -s`) also works. Reload Cursor after either change.
+The install path rewrites hook/MCP commands to the absolute binary path and
+maps Cursor-specific overlays into their deployed locations. Reload Cursor
+after reinstalling.
