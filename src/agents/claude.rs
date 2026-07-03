@@ -96,7 +96,11 @@ impl AgentIntegration for ClaudeIntegration {
 
         uninstall_mcp_server(&claude_json_path);
         uninstall_settings(&settings_path);
-        super::remove_managed_skill_prompt_index(&claude_md_path)?;
+        super::remove_managed_skill_prompt_index(
+            &ctx.home,
+            &claude_md_path,
+            crate::automation::skill_targets::SkillInstallTarget::Claude,
+        )?;
         uninstall_claude_md_rules(&claude_md_path);
         uninstall_subagents(&claude_dir);
 

@@ -252,6 +252,7 @@ async fn handle_automation_skills_command(
     };
 
     let profile_root = tracedecay::storage::default_profile_root()?;
+    let mut refresh_exports = false;
     let skill = match action {
         AutomationSkillsAction::List { json } => {
             let skills = list_managed_skills(&profile_root).await?;
@@ -341,10 +342,22 @@ async fn handle_automation_skills_command(
             )
             .await?
         }
-        AutomationSkillsAction::Approve { id } => approve_managed_skill(&profile_root, &id).await?,
-        AutomationSkillsAction::Disable { id } => disable_managed_skill(&profile_root, &id).await?,
-        AutomationSkillsAction::Archive { id } => archive_managed_skill(&profile_root, &id).await?,
-        AutomationSkillsAction::Restore { id } => restore_managed_skill(&profile_root, &id).await?,
+        AutomationSkillsAction::Approve { id } => {
+            refresh_exports = true;
+            approve_managed_skill(&profile_root, &id).await?
+        }
+        AutomationSkillsAction::Disable { id } => {
+            refresh_exports = true;
+            disable_managed_skill(&profile_root, &id).await?
+        }
+        AutomationSkillsAction::Archive { id } => {
+            refresh_exports = true;
+            archive_managed_skill(&profile_root, &id).await?
+        }
+        AutomationSkillsAction::Restore { id } => {
+            refresh_exports = true;
+            restore_managed_skill(&profile_root, &id).await?
+        }
         AutomationSkillsAction::Install {
             target,
             output,
@@ -394,8 +407,28 @@ async fn handle_automation_skills_command(
             return Ok(());
         }
     };
+    if refresh_exports {
+        refresh_managed_skill_exports_for_cli(&profile_root);
+    }
     println!("{}", serde_json::to_string_pretty(&skill)?);
     Ok(())
+}
+
+fn refresh_managed_skill_exports_for_cli(profile_root: &std::path::Path) {
+    let Some(home) = tracedecay::agents::home_dir() else {
+        return;
+    };
+    let project_root = std::env::current_dir().unwrap_or_else(|_| home.clone());
+    for report in
+        tracedecay::agents::export_managed_skills_to_agent_hosts(&home, &project_root, profile_root)
+    {
+        if let Some(error) = report.error {
+            eprintln!(
+                "warning: failed to refresh managed skill exports for {}: {}",
+                report.agent, error
+            );
+        }
+    }
 }
 
 fn print_managed_skill(skill: &tracedecay::automation::managed_skills::ManagedSkill) {

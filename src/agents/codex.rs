@@ -149,16 +149,24 @@ impl AgentIntegration for CodexIntegration {
         if codex_plugin_manifest_path(home).exists() {
             plugin_dirs.push(codex_plugin_install_dir(home));
         }
-        plugin_dirs
-            .iter()
-            .map(|dir| {
-                crate::automation::skill_targets::install_managed_skills(
-                    profile_root,
-                    crate::automation::skill_targets::SkillInstallTarget::Codex,
-                    dir,
-                )
-            })
-            .collect()
+        let mut exports = Vec::new();
+        let mut errors = Vec::new();
+        for dir in plugin_dirs {
+            match crate::automation::skill_targets::install_managed_skills(
+                profile_root,
+                crate::automation::skill_targets::SkillInstallTarget::Codex,
+                &dir,
+            ) {
+                Ok(summary) => exports.push(summary),
+                Err(err) => errors.push(format!("{}: {err}", dir.display())),
+            }
+        }
+        if exports.is_empty() && !errors.is_empty() {
+            return Err(TraceDecayError::Config {
+                message: errors.join("; "),
+            });
+        }
+        Ok(exports)
     }
 
     fn export_managed_skills_local(
@@ -489,12 +497,15 @@ fn install_codex_plugin_bundle(
 ) -> Result<()> {
     write_codex_plugin_bundle_base(install_dir, tracedecay_bin, scope)?;
     install_codex_managed_skill_overlay(profile_home, install_dir)?;
-    let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(profile_home);
-    crate::automation::memory_digest::sync_memory_digest_export(
-        &profile_root,
-        crate::automation::skill_targets::SkillInstallTarget::Codex,
-        install_dir,
-    )?;
+    if scope != InstallScope::ProjectLocal {
+        let profile_root =
+            crate::automation::skill_targets::profile_root_for_agent_home(profile_home);
+        crate::automation::memory_digest::sync_memory_digest_export(
+            &profile_root,
+            crate::automation::skill_targets::SkillInstallTarget::Codex,
+            install_dir,
+        )?;
+    }
     Ok(())
 }
 
@@ -710,10 +721,22 @@ fn install_codex_marketplace_entry(
 }
 
 fn uninstall_codex_plugin(home: &Path) -> Result<()> {
+    let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(home);
     for install_dir in codex_plugin_cached_install_dirs(home) {
+        crate::automation::memory_digest::remove_memory_digest_export(
+            &profile_root,
+            crate::automation::skill_targets::SkillInstallTarget::Codex,
+            &install_dir,
+        )?;
         remove_codex_plugin_bootstrap_source(&install_dir)?;
     }
-    remove_codex_plugin_bootstrap_source(&codex_plugin_install_dir(home))?;
+    let install_dir = codex_plugin_install_dir(home);
+    crate::automation::memory_digest::remove_memory_digest_export(
+        &profile_root,
+        crate::automation::skill_targets::SkillInstallTarget::Codex,
+        &install_dir,
+    )?;
+    remove_codex_plugin_bootstrap_source(&install_dir)?;
     remove_codex_marketplace_entry(home)?;
     Ok(())
 }
@@ -723,6 +746,12 @@ fn uninstall_codex_repo_plugin_if_present(ctx: &InstallContext) -> Result<()> {
         return Ok(());
     };
     let install_dir = codex_repo_plugin_install_dir(&project_path);
+    let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(&ctx.home);
+    crate::automation::memory_digest::remove_memory_digest_export(
+        &profile_root,
+        crate::automation::skill_targets::SkillInstallTarget::Codex,
+        &install_dir,
+    )?;
     if install_dir.join(".codex-plugin/plugin.json").exists()
         && codex_plugin_dir_is_tracedecay(&install_dir)
     {
@@ -835,11 +864,22 @@ fn codex_skill_dir_is_retired_managed(skill_dir: &Path, expected_name: &str) -> 
     let expected_name_line = format!("name: {expected_name}");
     skill_file.is_file()
         && std::fs::read_to_string(&skill_file).is_ok_and(|contents| {
-            contents
+            let expected_name_matches = contents
                 .lines()
                 .map(str::trim)
-                .any(|line| line == expected_name_line)
+                .any(|line| line == expected_name_line);
+            expected_name_matches && skill_contents_have_tracedecay_marker(&contents)
         })
+}
+
+fn skill_contents_have_tracedecay_marker(contents: &str) -> bool {
+    contents.lines().map(str::trim).any(|line| {
+        line.starts_with("name: tracedecay:")
+            || line.starts_with("description: TraceDecay ")
+            || line.contains("TraceDecay MCP")
+            || line.contains("tracedecay_")
+            || line.contains("`tracedecay:")
+    })
 }
 
 fn prune_empty_dirs(root: &Path) -> std::io::Result<()> {

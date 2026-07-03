@@ -731,6 +731,7 @@ async fn build_session_reflector_evidence(
             &lcm_db,
             &provider,
             session_id.as_deref(),
+            options.include_summaries,
             options.recent_sessions_limit,
             "session_reflector",
         )
@@ -837,6 +838,7 @@ async fn build_skill_writer_evidence(
             &lcm_db,
             &provider,
             None,
+            true,
             options.recent_sessions_limit,
             "skill_writer",
         )
@@ -1401,6 +1403,7 @@ async fn recent_session_replay_evidence(
     lcm_db: &GlobalDb,
     provider: &str,
     explicit_session_id: Option<&str>,
+    include_summaries: bool,
     sessions_limit: usize,
     task_name: &str,
 ) -> Result<Option<Value>> {
@@ -1448,7 +1451,11 @@ async fn recent_session_replay_evidence(
                 head_limit: SESSION_REPLAY_HEAD_TURNS,
                 tail_limit: SESSION_REPLAY_TAIL_TURNS,
                 max_snippet_chars: SESSION_REPLAY_SNIPPET_CHARS,
-                summary_limit: SESSION_REPLAY_SUMMARY_NODES,
+                summary_limit: if include_summaries {
+                    SESSION_REPLAY_SUMMARY_NODES
+                } else {
+                    0
+                },
                 max_summary_chars: SESSION_REPLAY_SUMMARY_CHARS,
             })
             .await
@@ -1469,7 +1476,11 @@ async fn recent_session_replay_evidence(
             "head_turns": SESSION_REPLAY_HEAD_TURNS,
             "tail_turns": SESSION_REPLAY_TAIL_TURNS,
             "snippet_chars": SESSION_REPLAY_SNIPPET_CHARS,
-            "summary_nodes": SESSION_REPLAY_SUMMARY_NODES,
+            "summary_nodes": if include_summaries {
+                SESSION_REPLAY_SUMMARY_NODES
+            } else {
+                0
+            },
             "summary_chars": SESSION_REPLAY_SUMMARY_CHARS,
         },
         "sessions": sessions,

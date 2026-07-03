@@ -551,7 +551,10 @@ pub async fn resolve_serve_startup(path_arg: Option<String>) -> ServeStartup {
             return ServeStartup::Ready {
                 cg: Box::new(cg),
                 peeked_line,
-                allow_initialize_root_routing: false,
+                allow_initialize_root_routing: allow_initialize_root_routing_for_startup(
+                    resolver.explicit_path,
+                    ServeProjectResolutionOrigin::StartupPath,
+                ),
             };
         }
         Err(e) => e,
@@ -574,7 +577,10 @@ pub async fn resolve_serve_startup(path_arg: Option<String>) -> ServeStartup {
         Ok((cg, origin)) => ServeStartup::Ready {
             cg: Box::new(cg),
             peeked_line,
-            allow_initialize_root_routing: origin == ServeProjectResolutionOrigin::InitializeRoots,
+            allow_initialize_root_routing: allow_initialize_root_routing_for_startup(
+                resolver.explicit_path,
+                origin,
+            ),
         },
         Err(error) => ServeStartup::Degraded {
             resolver,
@@ -606,6 +612,20 @@ enum ServeProjectResolutionOrigin {
     FreshCwd,
     InitializeRoots,
     GlobalDb,
+}
+
+fn allow_initialize_root_routing_for_startup(
+    explicit_path: bool,
+    origin: ServeProjectResolutionOrigin,
+) -> bool {
+    !explicit_path
+        && matches!(
+            origin,
+            ServeProjectResolutionOrigin::StartupPath
+                | ServeProjectResolutionOrigin::FreshCwd
+                | ServeProjectResolutionOrigin::InitializeRoots
+                | ServeProjectResolutionOrigin::GlobalDb
+        )
 }
 
 impl ServeProjectResolver {
@@ -899,5 +919,25 @@ mod tests {
             sanitize_serve_path_arg(Some("${workspaceFolder}/nested".to_string())),
             None
         );
+    }
+
+    #[test]
+    fn implicit_startup_discovery_still_allows_daemon_initialize_root_routing() {
+        assert!(allow_initialize_root_routing_for_startup(
+            false,
+            ServeProjectResolutionOrigin::StartupPath
+        ));
+        assert!(allow_initialize_root_routing_for_startup(
+            false,
+            ServeProjectResolutionOrigin::FreshCwd
+        ));
+        assert!(allow_initialize_root_routing_for_startup(
+            false,
+            ServeProjectResolutionOrigin::InitializeRoots
+        ));
+        assert!(!allow_initialize_root_routing_for_startup(
+            true,
+            ServeProjectResolutionOrigin::StartupPath
+        ));
     }
 }

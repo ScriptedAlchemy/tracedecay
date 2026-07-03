@@ -176,13 +176,11 @@ impl StdioLspClient {
         timeouts: LspRefreshTimeouts,
     ) -> Result<Vec<CodeDiagnostic>> {
         let mut uri_to_document = BTreeMap::new();
-        let refresh_deadline = tokio::time::Instant::now() + timeouts.refresh;
         for document in &documents {
             let uri = file_uri(&project_root.join(&document.relative_path));
             uri_to_document.insert(uri.clone(), document.clone());
             let next_version = self.document_versions.get(&uri).copied().unwrap_or(0) + 1;
             if next_version == 1 {
-                let write_timeout = refresh_remaining(refresh_deadline, timeouts)?;
                 write_message_with_timeout(
                     &mut self.stdin,
                     json!({
@@ -197,12 +195,11 @@ impl StdioLspClient {
                             }
                         }
                     }),
-                    write_timeout,
+                    timeouts.message_io,
                 )
                 .await?;
             }
             let change_version = next_version + 1;
-            let write_timeout = refresh_remaining(refresh_deadline, timeouts)?;
             write_message_with_timeout(
                 &mut self.stdin,
                 json!({
@@ -218,7 +215,7 @@ impl StdioLspClient {
                         }]
                     }
                 }),
-                write_timeout,
+                timeouts.message_io,
             )
             .await?;
             self.document_versions.insert(uri, change_version);
@@ -231,18 +228,11 @@ impl StdioLspClient {
             if now >= quiet_deadline {
                 break;
             }
-            if now >= refresh_deadline {
-                return Err(refresh_timed_out(timeouts));
-            }
-            let read_deadline = quiet_deadline.min(refresh_deadline);
-            let message =
-                match read_message_until(&mut self.reader, read_deadline, timeouts).await? {
-                    Some(message) => message,
-                    None if read_deadline == refresh_deadline => {
-                        return Err(refresh_timed_out(timeouts));
-                    }
-                    None => break,
-                };
+            let Some(message) =
+                read_message_until(&mut self.reader, quiet_deadline, timeouts).await?
+            else {
+                break;
+            };
             if message.method.as_deref() != Some("textDocument/publishDiagnostics") {
                 continue;
             }
@@ -263,6 +253,9 @@ impl StdioLspClient {
                     .map(|diagnostic| diagnostic.into_code_diagnostic(document, &self.command))
                     .collect(),
             );
+        }
+        if diagnostics_by_uri.len() < uri_to_document.len() {
+            return Err(refresh_timed_out(timeouts));
         }
         Ok(diagnostics_by_uri.into_values().flatten().collect())
     }
@@ -356,19 +349,6 @@ async fn write_message_with_timeout(
                 timeout.as_millis()
             ),
         })?
-}
-
-fn refresh_remaining(
-    refresh_deadline: tokio::time::Instant,
-    timeouts: LspRefreshTimeouts,
-) -> Result<Duration> {
-    let now = tokio::time::Instant::now();
-    if now >= refresh_deadline {
-        return Err(refresh_timed_out(timeouts));
-    }
-    Ok(timeouts
-        .message_io
-        .min(refresh_deadline.saturating_duration_since(now)))
 }
 
 fn refresh_timed_out(timeouts: LspRefreshTimeouts) -> TraceDecayError {

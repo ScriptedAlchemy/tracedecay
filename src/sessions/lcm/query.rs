@@ -158,8 +158,11 @@ pub(crate) async fn load_session(
     })
 }
 
-/// Lists sessions in the raw LCM store ordered by most recent activity
-/// (latest message timestamp, falling back to insertion order).
+/// Lists sessions in the raw LCM store ordered by most recent ingested activity.
+///
+/// `timestamp` is provider-supplied and may be absent or use a clock domain that
+/// cannot be compared with `store_id`, so recency ordering uses the raw store's
+/// insertion order.
 pub(crate) async fn recent_sessions(
     conn: &Connection,
     provider: Option<&str>,
@@ -180,7 +183,7 @@ pub(crate) async fn recent_sessions(
          FROM lcm_raw_messages
          {provider_clause}
          GROUP BY provider, session_id
-         ORDER BY COALESCE(MAX(timestamp), MAX(store_id)) DESC, MAX(store_id) DESC
+         ORDER BY MAX(store_id) DESC
          LIMIT ?"
     );
     let mut rows = conn.query(&sql, values).await?;
@@ -199,7 +202,7 @@ pub(crate) async fn recent_sessions(
 }
 
 /// Lists providers that contain raw messages for an explicit session id,
-/// ordered by most recent activity.
+/// ordered by most recent ingested activity.
 pub(crate) async fn session_providers(
     conn: &Connection,
     session_id: &str,
@@ -210,7 +213,7 @@ pub(crate) async fn session_providers(
              FROM lcm_raw_messages
              WHERE session_id = ?1
              GROUP BY provider
-             ORDER BY COALESCE(MAX(timestamp), MAX(store_id)) DESC, MAX(store_id) DESC",
+             ORDER BY MAX(store_id) DESC",
             params![session_id],
         )
         .await?;

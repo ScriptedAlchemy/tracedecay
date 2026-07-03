@@ -4749,6 +4749,7 @@ dependencies = [
  "open",
  "rayon",
  "regex",
+ "rustls 0.23.38",
  "self-replace",
  "serde",
  "serde_json",
@@ -4768,7 +4769,9 @@ dependencies = [
  "tree-sitter-hlsl",
  "tree-sitter-language",
  "ureq",
+ "url",
  "walkdir",
+ "webpki-roots 1.0.7",
  "zip",
 ]
 

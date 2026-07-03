@@ -359,10 +359,8 @@ pub fn load_memory_digest_snapshot(profile_root: &Path) -> Result<MemoryDigestSn
 
 fn save_memory_digest_snapshot(profile_root: &Path, snapshot: &MemoryDigestSnapshot) -> Result<()> {
     let path = memory_digest_snapshot_path(profile_root);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(&path, serde_json::to_vec_pretty(snapshot)?)?;
+    let contents = serde_json::to_string_pretty(snapshot)?;
+    crate::agents::safe_write_text_file(&path, &contents, None)?;
     Ok(())
 }
 
@@ -410,10 +408,8 @@ fn load_digest_targets(profile_root: &Path) -> DigestTargetManifest {
 
 fn save_digest_targets(profile_root: &Path, manifest: &DigestTargetManifest) -> Result<()> {
     let path = digest_targets_path(profile_root);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(&path, serde_json::to_vec_pretty(manifest)?)?;
+    let contents = serde_json::to_string_pretty(manifest)?;
+    crate::agents::safe_write_text_file(&path, &contents, None)?;
     Ok(())
 }
 
@@ -434,6 +430,16 @@ fn record_digest_target(
     Ok(())
 }
 
+fn digest_target_output_matches(recorded: &Path, output: &Path) -> bool {
+    if recorded == output {
+        return true;
+    }
+    match (recorded.canonicalize(), output.canonicalize()) {
+        (Ok(recorded), Ok(output)) => recorded == output,
+        _ => false,
+    }
+}
+
 fn unrecord_digest_target(
     profile_root: &Path,
     target: SkillInstallTarget,
@@ -441,9 +447,9 @@ fn unrecord_digest_target(
 ) -> Result<()> {
     let mut manifest = load_digest_targets(profile_root);
     let before = manifest.targets.len();
-    manifest
-        .targets
-        .retain(|entry| !(entry.target == target && entry.output == output));
+    manifest.targets.retain(|entry| {
+        !(entry.target == target && digest_target_output_matches(&entry.output, output))
+    });
     if manifest.targets.len() != before {
         save_digest_targets(profile_root, &manifest)?;
     }
@@ -539,10 +545,7 @@ fn export_native_digest(
     body: &str,
 ) -> Result<PathBuf> {
     let path = plugin_root.join(native_digest_relative(target)?);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(&path, render_native_digest_file(target, body)?)?;
+    crate::agents::safe_write_text_file(&path, &render_native_digest_file(target, body)?, None)?;
     Ok(path)
 }
 
@@ -631,10 +634,7 @@ fn export_prompt_digest(prompt_path: &Path, body: &str) -> Result<()> {
     let block = render_prompt_digest_block(body);
     let updated = replace_or_append_digest_block(&existing, &block)?;
     if updated != existing {
-        if let Some(parent) = prompt_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(prompt_path, updated)?;
+        crate::agents::safe_write_text_file(prompt_path, &updated, None)?;
     }
     Ok(())
 }
@@ -654,7 +654,7 @@ pub fn remove_memory_digest_prompt_block(prompt_path: &Path) -> Result<()> {
     if updated.trim().is_empty() {
         fs::remove_file(prompt_path)?;
     } else {
-        fs::write(prompt_path, updated)?;
+        crate::agents::safe_write_text_file(prompt_path, &updated, None)?;
     }
     Ok(())
 }
@@ -663,6 +663,19 @@ fn hermes_host_owned_error() -> TraceDecayError {
     config_error(
         "Hermes owns its MEMORY.md snapshot; TraceDecay does not export a memory digest into Hermes",
     )
+}
+
+fn native_digest_superseded_by_host_injection(target: SkillInstallTarget) -> bool {
+    matches!(
+        target,
+        SkillInstallTarget::Cursor | SkillInstallTarget::Codex
+    )
+}
+
+fn native_digest_superseded_error(target: SkillInstallTarget) -> TraceDecayError {
+    config_error(format!(
+        "{target:?} memory digest export is delivered by the host lifecycle memory injection channel; TraceDecay only cleans up the legacy native digest artifact",
+    ))
 }
 
 /// Projects the profile snapshot into one host channel, mirroring the
@@ -678,6 +691,9 @@ pub fn export_memory_digest(
 ) -> Result<MemoryDigestExportSummary> {
     if target == SkillInstallTarget::Hermes {
         return Err(hermes_host_owned_error());
+    }
+    if native_digest_superseded_by_host_injection(target) {
+        return Err(native_digest_superseded_error(target));
     }
     let snapshot = load_memory_digest_snapshot(profile_root)?;
     let body = compose_digest_body(&snapshot, DEFAULT_DIGEST_CHAR_BUDGET);
@@ -732,6 +748,10 @@ pub fn sync_memory_digest_export(
     if target == SkillInstallTarget::Hermes {
         return Ok(false);
     }
+    if native_digest_superseded_by_host_injection(target) {
+        remove_memory_digest_export(profile_root, target, output)?;
+        return Ok(false);
+    }
     if memory_digest_export_enabled(profile_root) {
         export_memory_digest(profile_root, target, output)?;
         Ok(true)
@@ -751,6 +771,10 @@ pub fn export_memory_digest_to_recorded_targets(
     let manifest = load_digest_targets(profile_root);
     let mut summaries = Vec::new();
     for entry in &manifest.targets {
+        if native_digest_superseded_by_host_injection(entry.target) {
+            remove_memory_digest_export(profile_root, entry.target, &entry.output)?;
+            continue;
+        }
         let refreshable = if entry.target.is_native_overlay() {
             entry.output.is_dir()
         } else {

@@ -6,6 +6,8 @@
 //! - `GET/PATCH/DELETE /api/automation/jobs/{id}`
 //! - `POST /api/automation/jobs/{id}/run`
 
+use std::collections::BTreeMap;
+
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::Json;
@@ -115,6 +117,7 @@ pub(crate) async fn create(
         delivery: body.delivery.unwrap_or_default(),
         created_at: now,
         updated_at: now,
+        extra: BTreeMap::new(),
     };
     validate_job(&job).map_err(|err| bad_request(&err.to_string()))?;
     let mut jobs = load_jobs(&state.dashboard_root)

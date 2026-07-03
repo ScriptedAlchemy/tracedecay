@@ -15,7 +15,9 @@ use serde_json::{json, Value};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
-use crate::mcp::project_route::{mcp_analytics_session_id, HookProjectRouteCache};
+use crate::mcp::project_route::{
+    mcp_analytics_session_id, HookProjectRouteCache, SharedHookProjectRouteCache,
+};
 use crate::mcp::response_handles::{
     cleanup_expired_response_handles, response_handle_stats_json, RESPONSE_RETRIEVE_TOOL,
 };
@@ -646,6 +648,7 @@ pub struct McpServer {
     /// to the daemon process profile for selector resolution.
     registry_db: Option<Arc<GlobalDb>>,
     allow_default_registry_fallback: bool,
+    hook_project_routes: SharedHookProjectRouteCache,
     /// Cached latest-version check result.
     version_cache: std::sync::Mutex<VersionCheckState>,
     /// Pending JSON-RPC notifications to send before the next response.
@@ -772,6 +775,7 @@ impl McpServer {
             global_db,
             registry_db,
             allow_default_registry_fallback,
+            hook_project_routes: SharedHookProjectRouteCache::default(),
             version_cache: std::sync::Mutex::new(VersionCheckState {
                 latest: None,
                 checked_at: None,
@@ -848,6 +852,7 @@ impl McpServer {
             None => None,
         };
         route_cache.observe_hook_event(event, project_path);
+        self.hook_project_routes.store(route_cache);
     }
 
     async fn registered_project_containing_path(&self, cwd: &Path) -> Option<String> {
@@ -1364,7 +1369,7 @@ impl McpServer {
         listen_for_process_signals: bool,
         timings_override: Option<bool>,
     ) -> Result<()> {
-        let mut route_cache = HookProjectRouteCache::default();
+        let mut route_cache = self.hook_project_routes.snapshot();
 
         // Register the SIGTERM listener once before entering the loop so
         // there is no window between iterations where a SIGTERM is delivered
@@ -1583,7 +1588,7 @@ impl McpServer {
     ///
     /// Returns `None` for notifications (requests without an `id`).
     pub(crate) async fn handle_request(&self, request: &JsonRpcRequest) -> Option<JsonRpcResponse> {
-        let mut route_cache = HookProjectRouteCache::default();
+        let mut route_cache = self.hook_project_routes.snapshot();
         self.handle_request_with_timings(request, self.timings_enabled(), &mut route_cache)
             .await
     }
@@ -1623,6 +1628,7 @@ impl McpServer {
                 .await;
             return None;
         }
+        route_cache.refresh_from_shared(self.hook_project_routes.snapshot());
         let id = request.id.clone()?;
 
         let result = match classify_mcp_method(&request.method) {

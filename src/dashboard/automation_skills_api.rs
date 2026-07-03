@@ -260,7 +260,13 @@ async fn export_skills_to_agent_hosts(
         export_managed_skills_to_agent_hosts(&home, &project_root, &profile_root)
     })
     .await
-    .unwrap_or_default()
+    .unwrap_or_else(|err| {
+        vec![ManagedSkillExportReport {
+            agent: "export-task".to_string(),
+            exports: Vec::new(),
+            error: Some(format!("managed skill export task failed: {err}")),
+        }]
+    })
 }
 
 async fn skill_payload(profile_root: &std::path::Path, skill: ManagedSkill) -> ApiResult {

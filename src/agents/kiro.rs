@@ -230,7 +230,7 @@ impl AgentIntegration for KiroIntegration {
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
         uninstall_mcp_server(&mcp_config_path(&ctx.home));
         remove_steering_rules(&steering_path(&ctx.home));
-        remove_kiro_managed_skill_index(&managed_skill_index_path(&ctx.home));
+        remove_kiro_managed_skill_index(&ctx.home, &managed_skill_index_path(&ctx.home));
         let agent_path = managed_agent_path(&ctx.home);
         let owned_agent = is_owned_agent_file(&agent_path);
         uninstall_managed_agent(&agent_path);
@@ -451,8 +451,8 @@ fn install_kiro_managed_skill_index<'a>(
     Ok((summary.exported_count > 0 || digest_exported).then_some(index_path))
 }
 
-fn remove_kiro_managed_skill_index(index_path: &Path) {
-    super::remove_managed_skill_prompt_index(index_path).ok();
+fn remove_kiro_managed_skill_index(home: &Path, index_path: &Path) {
+    super::remove_managed_skill_prompt_index(home, index_path, SkillInstallTarget::Kiro).ok();
 }
 
 fn install_default_agent(path: &Path, owns_agent: bool) -> Result<()> {

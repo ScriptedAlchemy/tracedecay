@@ -103,7 +103,14 @@ impl AgentIntegration for CursorIntegration {
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
-        remove_cursor_plugin_install(&cursor_plugin_install_dir(&ctx.home))?;
+        let install_dir = cursor_plugin_install_dir(&ctx.home);
+        let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(&ctx.home);
+        crate::automation::memory_digest::remove_memory_digest_export(
+            &profile_root,
+            crate::automation::skill_targets::SkillInstallTarget::Cursor,
+            &install_dir,
+        )?;
+        remove_cursor_plugin_install(&install_dir)?;
         let mcp_path = ctx.home.join(".cursor/mcp.json");
         uninstall_mcp_server(&mcp_path);
         sweep_legacy_project_artifacts_at_cwd(&ctx.home);
@@ -511,7 +518,7 @@ fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
     // across upgrades.
     for legacy in LEGACY_PLUGIN_DIRS {
         let path = install_dir.join(legacy);
-        if path.is_dir() {
+        if path.is_dir() && cursor_legacy_plugin_dir_is_tracedecay_owned(legacy, &path) {
             std::fs::remove_dir_all(&path).ok();
         }
     }
@@ -530,6 +537,25 @@ fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
 
 fn remove_cursor_managed_skill_overlay(install_dir: &Path) {
     std::fs::remove_dir_all(install_dir.join("skills/agent-managed")).ok();
+}
+
+fn cursor_legacy_plugin_dir_is_tracedecay_owned(relative: &str, path: &Path) -> bool {
+    if !relative.starts_with("skills/") {
+        return true;
+    }
+    skill_file_has_tracedecay_marker(&path.join("SKILL.md"))
+}
+
+fn skill_file_has_tracedecay_marker(skill_file: &Path) -> bool {
+    std::fs::read_to_string(skill_file).is_ok_and(|contents| {
+        contents.lines().map(str::trim).any(|line| {
+            line.starts_with("name: tracedecay:")
+                || line.starts_with("description: TraceDecay ")
+                || line.contains("TraceDecay MCP")
+                || line.contains("tracedecay_")
+                || line.contains("`tracedecay:")
+        })
+    })
 }
 
 fn cursor_plugin_dir_is_tracedecay(install_dir: &Path) -> bool {

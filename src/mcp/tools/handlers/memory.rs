@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
+use crate::automation::memory_digest::refresh_memory_digest_after_memory_change;
 use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
@@ -286,6 +287,7 @@ pub(super) async fn handle_fact_store(
         open_target_memory_db(cg, &args, global_db, allow_default_registry_fallback).await?;
     let conn = target_memory.db.conn();
     let store = MemoryStore::new(conn);
+    let mut refresh_digest = false;
     let out = match action {
         "add" => {
             let outcome = store
@@ -308,6 +310,7 @@ pub(super) async fn handle_fact_store(
             // Additive write-time diff report fields, so writers SEE
             // near-duplicates, possible conflicts, and secret rejections.
             let count = usize::from(outcome.fact.is_some());
+            refresh_digest = count > 0;
             json!({
                 "action": action,
                 "fact": outcome.fact,
@@ -450,7 +453,10 @@ pub(super) async fn handle_fact_store(
                 metadata: args.get("metadata").cloned(),
             };
             match store.update_fact(update).await {
-                Ok(fact) => json!({ "action": action, "fact": fact, "count": 1 }),
+                Ok(fact) => {
+                    refresh_digest = true;
+                    json!({ "action": action, "fact": fact, "count": 1 })
+                }
                 Err(err) => {
                     if let Some(reason) = update_rejected_secret_like(&err) {
                         json!({
@@ -469,6 +475,7 @@ pub(super) async fn handle_fact_store(
         }
         "remove" => {
             let removed = store.remove_fact(fact_id(&args)?).await?;
+            refresh_digest = removed;
             json!({ "action": action, "removed": removed, "count": usize::from(removed) })
         }
         "list" => {
@@ -483,6 +490,9 @@ pub(super) async fn handle_fact_store(
         }
         other => return Err(config_error(format!("unknown fact_store action: {other}"))),
     };
+    if refresh_digest {
+        refresh_memory_digest_after_memory_change(conn, &target_memory.project_root).await;
+    }
     Ok(tool_json(Some(&target_memory.project_root), &out))
 }
 
@@ -504,6 +514,7 @@ pub(super) async fn handle_fact_feedback(cg: &TraceDecay, args: Value) -> Result
             note,
         })
         .await?;
+    refresh_memory_digest_after_memory_change(db.conn(), cg.project_root()).await;
     Ok(tool_json(
         Some(cg.project_root()),
         &json!({ "status": "recorded", "feedback": result }),

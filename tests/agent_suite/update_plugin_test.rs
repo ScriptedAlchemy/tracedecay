@@ -110,7 +110,9 @@ fn write_retired_codex_skill(plugin_dir: &Path, name: &str) {
     std::fs::create_dir_all(plugin_dir.join("skills").join(name)).unwrap();
     std::fs::write(
         plugin_dir.join("skills").join(name).join("SKILL.md"),
-        format!("---\nname: {name}\ndescription: retired tracedecay skill\n---\n"),
+        format!(
+            "---\nname: {name}\ndescription: retired tracedecay skill\n---\n\nUse TraceDecay MCP tools for this workflow.\n"
+        ),
     )
     .unwrap();
 }
@@ -252,7 +254,13 @@ fn cursor_update_plugin_refreshes_bundle_and_preserves_user_config() {
     std::fs::create_dir_all(plugin_dir.join("skills/reading-code-cheaply")).unwrap();
     std::fs::write(
         plugin_dir.join("skills/reading-code-cheaply/SKILL.md"),
-        "---\nname: reading-code-cheaply\ndescription: retired tracedecay skill\n---\n",
+        "---\nname: reading-code-cheaply\ndescription: retired tracedecay skill\n---\n\nUse TraceDecay MCP tools for this workflow.\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(plugin_dir.join("skills/project-status")).unwrap();
+    std::fs::write(
+        plugin_dir.join("skills/project-status/SKILL.md"),
+        "---\nname: project-status\ndescription: My private project status workflow\n---\n",
     )
     .unwrap();
     let user_mcp_before = bytes(&user_mcp);
@@ -269,6 +277,10 @@ fn cursor_update_plugin_refreshes_bundle_and_preserves_user_config() {
     assert!(
         !plugin_dir.join("skills/reading-code-cheaply").exists(),
         "update-plugin must sweep retired Cursor skill dirs so stale workflows are not rediscovered"
+    );
+    assert!(
+        plugin_dir.join("skills/project-status/SKILL.md").exists(),
+        "same-name user-authored Cursor skills without TraceDecay markers must be preserved"
     );
 
     // Generated bundle re-baked: plugin-owned mcp.json command, hook command
@@ -317,6 +329,12 @@ fn codex_update_plugin_refreshes_bundle_without_touching_config() {
     )
     .unwrap();
     write_retired_codex_skill(&plugin_dir, "architecture-overview");
+    std::fs::create_dir_all(plugin_dir.join("skills/project-status")).unwrap();
+    std::fs::write(
+        plugin_dir.join("skills/project-status/SKILL.md"),
+        "---\nname: project-status\ndescription: My private project status workflow\n---\n",
+    )
+    .unwrap();
     let config_before = bytes(&codex_config);
 
     let outcome = codex
@@ -336,6 +354,10 @@ fn codex_update_plugin_refreshes_bundle_without_touching_config() {
     assert!(
         !plugin_dir.join("skills/architecture-overview").exists(),
         "update-plugin must remove retired bundled Codex skill dirs that lack tracedecay-prefixed names"
+    );
+    assert!(
+        plugin_dir.join("skills/project-status/SKILL.md").exists(),
+        "same-name user-authored Codex skills without TraceDecay markers must be preserved"
     );
     assert_codex_bundle_contains_bin(&plugin_dir, NEW_BIN);
     assert!(text(&plugin_dir.join(".codex-plugin/plugin.json")).contains(env!("CARGO_PKG_VERSION")));

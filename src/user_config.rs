@@ -1,8 +1,9 @@
 //! User-level configuration stored in the `TraceDecay` user data directory.
 //!
 //! All fields have defaults so a missing file or missing fields are handled
-//! gracefully. Unknown fields are silently ignored for forward compatibility.
+//! gracefully. Unknown fields are preserved for forward compatibility.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -99,6 +100,10 @@ pub struct UserConfig {
     /// The `TRACEDECAY_MEMORY_INJECTION` env var overrides this at runtime.
     #[serde(default = "default_true")]
     pub memory_injection_enabled: bool,
+
+    /// Unknown user config keys preserved for forward compatibility.
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, toml::Value>,
 }
 
 fn default_true() -> bool {
@@ -135,6 +140,7 @@ impl Default for UserConfig {
             extraction_timeout_secs: default_extraction_timeout_secs(),
             automation: AutomationConfig::default(),
             memory_injection_enabled: true,
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -163,6 +169,14 @@ impl UserConfig {
         let Some(path) = config_path() else {
             return false;
         };
+        if path.exists() {
+            let Ok(contents) = std::fs::read_to_string(&path) else {
+                return false;
+            };
+            if toml::from_str::<Self>(&contents).is_err() {
+                return false;
+            }
+        }
         if let Some(parent) = path.parent() {
             if std::fs::create_dir_all(parent).is_err() {
                 return false;
@@ -237,7 +251,34 @@ pub fn parse_duration(s: &str) -> Option<std::time::Duration> {
 )]
 mod tests {
     use super::*;
+    use crate::config::USER_DATA_DIR_ENV;
+    use std::ffi::OsString;
     use std::time::Duration;
+    use tempfile::TempDir;
+
+    static USER_DATA_DIR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct EnvRestore {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvRestore {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     #[test]
     fn parse_duration_seconds() {
@@ -262,5 +303,49 @@ mod tests {
         assert_eq!(parse_duration("abc"), None);
         assert_eq!(parse_duration(""), None);
         assert_eq!(parse_duration("1h"), None);
+    }
+
+    #[test]
+    fn save_preserves_existing_corrupt_config_file() {
+        let _lock = USER_DATA_DIR_ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvRestore::set(USER_DATA_DIR_ENV, temp.path());
+        let path = config_path().expect("config path should resolve");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = "installed_agents = [\"claude\"]\nautomation =";
+        std::fs::write(&path, original).unwrap();
+
+        let mut config = UserConfig::load();
+        config.upload_enabled = false;
+
+        assert!(
+            !config.save(),
+            "saving a defaulted config must fail when the existing file is corrupt"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn save_preserves_unknown_config_keys() {
+        let _lock = USER_DATA_DIR_ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvRestore::set(USER_DATA_DIR_ENV, temp.path());
+        let path = config_path().expect("config path should resolve");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "upload_enabled = true\nfuture_key = \"keep-me\"\n[future_table]\nflag = true\n",
+        )
+        .unwrap();
+
+        let mut config = UserConfig::load();
+        config.upload_enabled = false;
+
+        assert!(config.save());
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("future_key = \"keep-me\""));
+        assert!(saved.contains("[future_table]"));
+        assert!(saved.contains("flag = true"));
+        assert!(saved.contains("upload_enabled = false"));
     }
 }

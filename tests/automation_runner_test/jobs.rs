@@ -4,7 +4,9 @@
 
 use crate::support::*;
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use tracedecay::automation::jobs::{
     job_schedule_decision, job_task_key, load_jobs, run_user_job_with_backend, save_jobs,
@@ -26,6 +28,7 @@ fn sample_job(id: &str) -> AutomationJob {
         delivery: JobDelivery::File { path: None },
         created_at: 1_715_000_000,
         updated_at: 1_715_000_000,
+        extra: BTreeMap::new(),
     }
 }
 
@@ -107,6 +110,69 @@ async fn job_persistence_round_trips() {
         .is_empty());
 }
 
+#[tokio::test]
+async fn load_jobs_skips_corrupt_entries_without_losing_valid_jobs() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    let valid_one = sample_job("valid-one");
+    let valid_two = sample_job("valid-two");
+    let document = json!({
+        "schema_version": 1,
+        "jobs": [
+            valid_one,
+            {
+                "id": "broken",
+                "name": "Broken",
+                "prompt": 42,
+                "enabled": true
+            },
+            valid_two
+        ]
+    });
+    fs::write(
+        root.join("automation_jobs.json"),
+        serde_json::to_vec_pretty(&document).unwrap(),
+    )
+    .unwrap();
+
+    let loaded = load_jobs(root).await.unwrap();
+    let ids: Vec<&str> = loaded.iter().map(|job| job.id.as_str()).collect();
+    assert_eq!(ids, vec!["valid-one", "valid-two"]);
+}
+
+#[tokio::test]
+async fn job_persistence_preserves_unknown_job_fields() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    let document = json!({
+        "schema_version": 1,
+        "jobs": [
+            {
+                "id": "future-job",
+                "name": "Future job",
+                "prompt": "Preserve future fields.",
+                "enabled": true,
+                "delivery": {"mode": "file"},
+                "future_flag": true,
+                "nested_future": {"level": 2}
+            }
+        ]
+    });
+    fs::write(
+        root.join("automation_jobs.json"),
+        serde_json::to_vec_pretty(&document).unwrap(),
+    )
+    .unwrap();
+
+    let loaded = load_jobs(root).await.unwrap();
+    save_jobs(root, &loaded).await.unwrap();
+    let persisted: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("automation_jobs.json")).unwrap()).unwrap();
+
+    assert_eq!(persisted["jobs"][0]["future_flag"], json!(true));
+    assert_eq!(persisted["jobs"][0]["nested_future"], json!({"level": 2}));
+}
+
 #[test]
 fn job_validation_rejects_bad_definitions() {
     let mut job = sample_job("ok-job");
@@ -158,6 +224,34 @@ fn job_validation_rejects_bad_definitions() {
         url: "ftp://example.test".to_string(),
     };
     assert!(validate_job(&job).is_err());
+}
+
+#[test]
+fn job_validation_rejects_webhook_ssrf_targets() {
+    for url in [
+        "http://localhost/hook",
+        "http://localhost.localdomain/hook",
+        "http://127.0.0.1/hook",
+        "http://10.0.0.5/hook",
+        "http://172.16.0.5/hook",
+        "http://192.168.1.10/hook",
+        "http://169.254.169.254/latest/meta-data",
+        "http://[::1]/hook",
+        "http://[fe80::1]/hook",
+        "http://[fc00::1]/hook",
+    ] {
+        let mut job = sample_job("hook");
+        job.delivery = JobDelivery::Webhook {
+            url: url.to_string(),
+        };
+        assert!(validate_job(&job).is_err(), "{url} must be rejected");
+    }
+
+    let mut job = sample_job("hook");
+    job.delivery = JobDelivery::Webhook {
+        url: "https://example.test/hook".to_string(),
+    };
+    validate_job(&job).unwrap();
 }
 
 #[test]
@@ -634,4 +728,113 @@ async fn scheduler_trigger_skips_repeat_and_respects_lock_discipline() {
         "repeat scheduler skips must persist only once"
     );
     assert_eq!(records[0].run_id, "sched-run-1");
+}
+
+#[tokio::test]
+async fn manual_job_trigger_respects_existing_per_job_lock() {
+    let temp = tempdir().unwrap();
+    let dashboard_root = temp.path().join("dashboard");
+    let profile_root = temp.path().join("profile");
+    fs::create_dir_all(&profile_root).unwrap();
+    let lock_dir = dashboard_root.join("automation_locks");
+    fs::create_dir_all(&lock_dir).unwrap();
+    fs::write(lock_dir.join("user_job_locked-job.lock"), b"9999999999").unwrap();
+
+    let job = sample_job("locked-job");
+    let config = enabled_job_config();
+    let backend = ContentBackend::new("unused");
+    let run = run_user_job_with_backend(
+        &dashboard_root,
+        &config,
+        &backend,
+        &job,
+        UserJobRunOptions {
+            trigger: AutomationTrigger::Dashboard,
+            run_id: Some("dashboard-lock-run".to_string()),
+            profile_root: Some(profile_root),
+            project_root: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(backend.calls(), 0);
+    assert_eq!(run.report["status"], json!("skipped"));
+    assert_eq!(run.report["reason"], json!("job_lock_active"));
+    assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
+}
+
+#[tokio::test]
+async fn concurrent_manual_job_triggers_do_not_double_execute() {
+    struct SlowBackend {
+        calls: AtomicUsize,
+    }
+    impl AgentTaskBackend for SlowBackend {
+        fn run_task(
+            &self,
+            request: &AgentTaskRequest,
+        ) -> tracedecay::errors::Result<AgentTaskResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(200));
+            Ok(AgentTaskResponse {
+                run_id: request.run_id.clone(),
+                task: request.task,
+                output_text: "done".to_string(),
+                output_json: None,
+                model: Some("fixture-model".to_string()),
+                input_tokens: None,
+                output_tokens: None,
+            })
+        }
+    }
+
+    let temp = tempdir().unwrap();
+    let dashboard_root = temp.path().join("dashboard");
+    let profile_root = temp.path().join("profile");
+    fs::create_dir_all(&profile_root).unwrap();
+    let job = sample_job("concurrent-job");
+    let config = enabled_job_config();
+    let backend = SlowBackend {
+        calls: AtomicUsize::new(0),
+    };
+
+    let (first, second) = tokio::join!(
+        run_user_job_with_backend(
+            &dashboard_root,
+            &config,
+            &backend,
+            &job,
+            UserJobRunOptions {
+                trigger: AutomationTrigger::Dashboard,
+                run_id: Some("concurrent-run-1".to_string()),
+                profile_root: Some(profile_root.clone()),
+                project_root: None,
+            },
+        ),
+        run_user_job_with_backend(
+            &dashboard_root,
+            &config,
+            &backend,
+            &job,
+            UserJobRunOptions {
+                trigger: AutomationTrigger::ManualCli,
+                run_id: Some("concurrent-run-2".to_string()),
+                profile_root: Some(profile_root),
+                project_root: None,
+            },
+        )
+    );
+    let runs = [first.unwrap(), second.unwrap()];
+    let delivered = runs
+        .iter()
+        .filter(|run| run.report["status"] == json!("delivered"))
+        .count();
+    let locked = runs
+        .iter()
+        .filter(|run| run.report["reason"] == json!("job_lock_active"))
+        .count();
+
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(delivered, 1);
+    assert_eq!(locked, 1);
 }

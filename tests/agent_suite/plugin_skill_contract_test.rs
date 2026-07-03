@@ -47,7 +47,6 @@ const CURSOR_ALLOWED_FRONTMATTER: &[&str] = &[
     "name",
     "paths",
 ];
-const CODEX_GENERATED_MEMORY_SKILL: &str = "agent-managed-memory";
 
 #[test]
 fn codex_plugin_skills_match_codex_skill_creator_quick_validate_rules() {
@@ -72,22 +71,17 @@ fn generated_codex_plugin_skills_are_byte_copies_of_the_source_bundle() {
     let source_root = repo_path(CODEX_SKILL_ROOT);
     let installed_root = home.path().join("plugins/tracedecay/skills");
     assert!(
-        installed_root
-            .join(CODEX_GENERATED_MEMORY_SKILL)
-            .join("SKILL.md")
+        !installed_root
+            .join("agent-managed-memory/SKILL.md")
             .exists(),
-        "generated Codex plugin install must export the active memory digest skill"
+        "generated Codex plugin install must not add a duplicate memory digest skill"
     );
     assert_eq!(
-        skill_dir_names_except(&installed_root, &[CODEX_GENERATED_MEMORY_SKILL]),
+        skill_dir_names(&installed_root),
         skill_dir_names(&source_root),
         "generated Codex plugin bundle must ship the same bundled skills as the source bundle"
     );
-    assert_skill_trees_byte_identical_except(
-        &source_root,
-        &installed_root,
-        &[CODEX_GENERATED_MEMORY_SKILL],
-    );
+    assert_skill_trees_byte_identical(&source_root, &installed_root);
 }
 
 #[test]

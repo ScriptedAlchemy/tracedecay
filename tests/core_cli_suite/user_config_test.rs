@@ -33,6 +33,7 @@ fn round_trip_serialization() {
         extraction_timeout_secs: 60,
         automation: Default::default(),
         memory_injection_enabled: true,
+        extra: Default::default(),
     };
     let toml_str = toml::to_string_pretty(&config).unwrap();
     let parsed: UserConfig = toml::from_str(&toml_str).unwrap();

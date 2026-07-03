@@ -40,7 +40,7 @@ function textToGlobs(text: string): string[] {
     .filter(Boolean);
 }
 
-interface ProjectDraft {
+export interface ProjectDraft {
   includeText: string;
   excludeText: string;
   maxFileSize: string;
@@ -49,7 +49,7 @@ interface ProjectDraft {
   gitIgnore: boolean;
 }
 
-interface UserDraft {
+export interface UserDraft {
   uploadEnabled: boolean;
   watcherDebounce: string;
   extractionTimeoutSecs: string;
@@ -75,23 +75,57 @@ function userDraftFrom(settings: SettingsPayload): UserDraft {
   };
 }
 
-function projectPatchFrom(draft: ProjectDraft): ProjectSettingsPatch {
-  return {
-    include: textToGlobs(draft.includeText),
-    exclude: textToGlobs(draft.excludeText),
-    max_file_size: Number(draft.maxFileSize),
-    extract_docstrings: draft.extractDocstrings,
-    track_call_sites: draft.trackCallSites,
-    git_ignore: draft.gitIgnore,
-  };
+function sameStringList(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
 }
 
-function userPatchFrom(draft: UserDraft): UserSettingsPatch {
-  return {
-    upload_enabled: draft.uploadEnabled,
-    watcher_debounce: draft.watcherDebounce.trim(),
-    extraction_timeout_secs: Number(draft.extractionTimeoutSecs),
-  };
+export function projectPatchFrom(
+  draft: ProjectDraft,
+  saved: ProjectDraft | null,
+): ProjectSettingsPatch {
+  const patch: ProjectSettingsPatch = {};
+  const include = textToGlobs(draft.includeText);
+  const exclude = textToGlobs(draft.excludeText);
+  const maxFileSize = Number(draft.maxFileSize);
+
+  if (!saved || !sameStringList(include, textToGlobs(saved.includeText))) {
+    patch.include = include;
+  }
+  if (!saved || !sameStringList(exclude, textToGlobs(saved.excludeText))) {
+    patch.exclude = exclude;
+  }
+  if (!saved || maxFileSize !== Number(saved.maxFileSize)) {
+    patch.max_file_size = maxFileSize;
+  }
+  if (!saved || draft.extractDocstrings !== saved.extractDocstrings) {
+    patch.extract_docstrings = draft.extractDocstrings;
+  }
+  if (!saved || draft.trackCallSites !== saved.trackCallSites) {
+    patch.track_call_sites = draft.trackCallSites;
+  }
+  if (!saved || draft.gitIgnore !== saved.gitIgnore) {
+    patch.git_ignore = draft.gitIgnore;
+  }
+
+  return patch;
+}
+
+export function userPatchFrom(draft: UserDraft, saved: UserDraft | null): UserSettingsPatch {
+  const patch: UserSettingsPatch = {};
+  const watcherDebounce = draft.watcherDebounce.trim();
+  const extractionTimeoutSecs = Number(draft.extractionTimeoutSecs);
+
+  if (!saved || draft.uploadEnabled !== saved.uploadEnabled) {
+    patch.upload_enabled = draft.uploadEnabled;
+  }
+  if (!saved || watcherDebounce !== saved.watcherDebounce.trim()) {
+    patch.watcher_debounce = watcherDebounce;
+  }
+  if (!saved || extractionTimeoutSecs !== Number(saved.extractionTimeoutSecs)) {
+    patch.extraction_timeout_secs = extractionTimeoutSecs;
+  }
+
+  return patch;
 }
 
 function sameDraft<T>(a: T | null, b: T | null): boolean {
@@ -165,7 +199,7 @@ export default function SettingsPanel() {
     setProjectError("");
     setProjectFieldErrors({});
     try {
-      const payload = await api.patchProject(projectPatchFrom(projectDraft));
+      const payload = await api.patchProject(projectPatchFrom(projectDraft, projectSaved));
       applySettings(payload);
       setResyncRecommended(Boolean(payload.resync_recommended));
     } catch (err) {
@@ -174,7 +208,7 @@ export default function SettingsPanel() {
     } finally {
       setProjectSaving(false);
     }
-  }, [applySettings, projectDraft]);
+  }, [applySettings, projectDraft, projectSaved]);
 
   const saveUser = useCallback(async () => {
     if (!userDraft) return;
@@ -182,7 +216,7 @@ export default function SettingsPanel() {
     setUserError("");
     setUserFieldErrors({});
     try {
-      const payload = await api.patchUser(userPatchFrom(userDraft));
+      const payload = await api.patchUser(userPatchFrom(userDraft, userSaved));
       applySettings(payload);
       setRestartRecommended(Boolean(payload.restart_recommended));
     } catch (err) {
@@ -191,7 +225,7 @@ export default function SettingsPanel() {
     } finally {
       setUserSaving(false);
     }
-  }, [applySettings, userDraft]);
+  }, [applySettings, userDraft, userSaved]);
 
   const discardProject = useCallback(() => {
     setProjectDraft(projectSaved);
