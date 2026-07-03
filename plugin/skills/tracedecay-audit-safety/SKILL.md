@@ -5,11 +5,11 @@ description: 'Use to audit the repo or a directory for ship-blocking risk, panic
 
 # Audit safety
 
-Use when asked to audit the repo or a directory for ship-blocking risk, panic sites, risk markers, dead code, or untested high-risk symbols.
+Use for repo or directory audits covering ship-blocking risk, panic sites, risk markers, dead code, or untested high-risk symbols.
 
-Route this through the `tracedecay:reviewing-changes` skill.
+Use `tracedecay:reviewing-changes`.
 
 - **Scope:** the whole repo, or a specific directory if one is named.
-- Follow that skill's read-only workflow and guardrails: report findings, do not fix them here.
+- Read-only: report findings, do not fix them here.
 
 Output: findings grouped Critical / Warning / Note with file + enclosing symbol, and a prioritized follow-up list.

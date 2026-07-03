@@ -5,11 +5,11 @@ description: 'Use to map repo or directory architecture, including layered modul
 
 # Map architecture
 
-Use when asked to map the repo or a directory's architecture, including layered modules, dependency hotspots, and structural risks.
+Use to map repo or directory architecture: layered modules, dependency hotspots, and structural risks.
 
-Route this through the `tracedecay:exploring-code` skill for structure, and `tracedecay:code-health` for dependency hotspots and structural risk.
+Use `tracedecay:exploring-code` for structure and `tracedecay:code-health` for dependency hotspots and structural risk.
 
 - **Scope:** the whole repo, or a specific directory if one is named.
-- Follow those skills' read-only workflow and guardrails.
+- Read-only.
 
 Output: a layered module map, dependency hotspots/violations, and a prioritized risk list.

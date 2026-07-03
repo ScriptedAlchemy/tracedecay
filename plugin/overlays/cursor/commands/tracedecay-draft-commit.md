@@ -4,9 +4,9 @@ description: Draft a commit message, PR description, or changelog from semantic 
 
 # /tracedecay-draft-commit
 
-Apply the `tracedecay:reviewing-changes` skill.
+Use `tracedecay:reviewing-changes`.
 
 - **Args:** interpret `$ARGUMENTS` as the target (e.g. "pr", "changelog", a base ref, or "staged"); if absent, draft a commit message for the working tree/staged changes.
-- Follow that skill's guardrails: it drafts text only — leave `git commit` / `gh pr create` to the user unless they explicitly ask.
+- Draft text only — leave `git commit` / `gh pr create` to the user unless they explicitly ask.
 
 Output: the drafted commit / PR / changelog text.
