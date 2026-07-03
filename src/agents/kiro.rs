@@ -336,32 +336,11 @@ fn mcp_server_entry(tracedecay_bin: &str) -> serde_json::Value {
     })
 }
 
+/// Render a path as a `file://` resource URI for Kiro's agent config. Reuses
+/// the LSP client's encoder, which additionally handles Windows drive paths and
+/// UNC (`//server/share`) prefixes; POSIX paths encode identically to before.
 fn file_resource_uri(path: &Path) -> String {
-    let path = path.to_string_lossy().replace('\\', "/");
-    let path = percent_encode_file_uri_path(&path);
-    if path.starts_with('/') {
-        format!("file://{path}")
-    } else {
-        format!("file:///{path}")
-    }
-}
-
-fn percent_encode_file_uri_path(path: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut encoded = String::with_capacity(path.len());
-    for byte in path.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b':' | b'-' | b'.' | b'_' | b'~' => {
-                encoded.push(byte as char);
-            }
-            _ => {
-                encoded.push('%');
-                encoded.push(HEX[(byte >> 4) as usize] as char);
-                encoded.push(HEX[(byte & 0x0F) as usize] as char);
-            }
-        }
-    }
-    encoded
+    crate::diagnostics::lsp::client::file_uri_from_path_text(&path.to_string_lossy())
 }
 
 fn managed_agent_config(
