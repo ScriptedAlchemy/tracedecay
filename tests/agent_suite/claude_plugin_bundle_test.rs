@@ -450,7 +450,3 @@ fn claude_bundle_agents_are_byte_identical_to_the_source_of_truth() {
         required_scalar(&raw, "description", &bundle_path);
     }
 }
-
-// (Removed `claude_bundle_skills_stay_byte_identical_to_the_codex_source`:
-// Claude and Codex now read the identical skills from the single shared
-// `plugin/skills/` tree, so there is no second copy to keep in sync.)

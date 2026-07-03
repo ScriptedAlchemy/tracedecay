@@ -1,38 +1,7 @@
-//! Unified contract for the single shared `plugin/skills/` tree.
+//! Intersection contract for the single shared `plugin/skills/` tree.
 //!
-//! Since the three host bundles collapsed into one `plugin/` tree, there is one
-//! model-invocable skill set that every host (Claude, Codex, Cursor) ships
-//! byte-identically. This test validates that one set against the **intersection
-//! contract** — the rules a SKILL.md must satisfy to install cleanly on *all*
-//! three hosts — plus each host's extra allowances. It supersedes the shared
-//! frontmatter/description/heading/hygiene checks that previously lived split
-//! across `plugin_skill_contract_test.rs` and `skill_lint_cursor_test.rs`.
-//!
-//! Covered here (the intersection contract, over `plugin/skills/`):
-//! - Frontmatter keys ⊆ {name, description, allowed-tools, license, metadata};
-//!   `name` matches the directory and is kebab-case; `name`/`description`
-//!   required and non-empty.
-//! - `description`: 50–320 chars, ≤45 words, trigger-first ("Use …"), ends with
-//!   a period, no angle brackets, unique across the set.
-//! - Body: exactly one plain-title H1 (never the slash form), no skipped
-//!   heading levels, no `## When to Use` section, ≤500 lines.
-//! - Hygiene: no BOM, LF-only, exactly one trailing newline, no trailing
-//!   whitespace/tabs, balanced code fences, non-empty body.
-//! - Support-file layout: only SKILL.md + scripts/references/assets/agents.
-//!
-//! Also validated **separately** (host-extra surfaces):
-//! - Cursor native commands (`plugin/overlays/cursor/commands/*.md`): a
-//!   `# /<slug>` H1 matching the file name, and hygiene.
-//! - Cursor agent overlay (`plugin/overlays/cursor/agents/*.md`): present and
-//!   hygienic.
-//! - Host-extra frontmatter: Codex is spec-strict (intersection only); Cursor
-//!   additionally tolerates `disable-model-invocation` / `paths` (none are used
-//!   in the shared set today, but the allowance is asserted so a future
-//!   Cursor-only key does not silently pass the strict intersection).
-//!
-//! Install-time byte-parity (`generated_*_plugin_skills_are_byte_copies_*`) and
-//! the metadata/openai.yaml budgets stay in `plugin_skill_contract_test.rs`;
-//! this file owns the pure per-file contract over the single source tree.
+//! Host-specific install parity stays in `plugin_skill_contract_test.rs`; this
+//! file owns per-skill frontmatter, body, hygiene, and support-file rules.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -44,15 +13,10 @@ use crate::plugin_validation_support::{
     is_kebab_case_skill_name, load_skill_docs, relative_files_under, repo_path, SkillDoc,
 };
 
-/// The one shared model-invocable skill tree every host ships.
 const SHARED_SKILL_ROOT: &str = "plugin/skills";
-/// Cursor native slash commands (the 13 `tracedecay-*` workflow slugs).
 const CURSOR_COMMAND_ROOT: &str = "plugin/overlays/cursor/commands";
-/// Cursor agent overlay.
 const CURSOR_AGENT_OVERLAY_ROOT: &str = "plugin/overlays/cursor/agents";
 
-/// The intersection frontmatter whitelist: the keys accepted by *every* host's
-/// validator (Codex `quick_validate.py` ∩ Cursor ∩ Claude Agent Skills spec).
 const INTERSECTION_FRONTMATTER: &[&str] = &[
     "allowed-tools",
     "description",
@@ -61,10 +25,6 @@ const INTERSECTION_FRONTMATTER: &[&str] = &[
     "name",
 ];
 
-/// Cursor tolerates two extra keys on top of the intersection. None are used in
-/// the shared set today (workflow dispatch is native commands), but the
-/// allowance is documented so the strict intersection check below can point at
-/// it if a Cursor-only key ever appears.
 const CURSOR_EXTRA_FRONTMATTER: &[&str] = &["disable-model-invocation", "paths"];
 
 const MIN_DESCRIPTION_CHARS: usize = 50;
@@ -94,7 +54,6 @@ fn scalar<'a>(skill: &'a SkillDoc, field: &str) -> Option<&'a str> {
         .and_then(SkillFrontmatterValue::as_scalar)
 }
 
-/// ATX headings outside code fences, as (level, text-after-hashes).
 fn unfenced_headings(body: &str) -> Vec<(usize, String)> {
     let mut in_fence = false;
     let mut headings = Vec::new();
@@ -124,9 +83,6 @@ fn shared_skills_pass_the_intersection_frontmatter_contract() {
 
     for skill in &skills {
         let at = skill.path.display();
-        // Frontmatter keys ⊆ the intersection whitelist. A Cursor-only key
-        // (disable-model-invocation / paths) would break Codex/Claude, so the
-        // shared set must not carry it.
         for key in skill.frontmatter.keys() {
             if !INTERSECTION_FRONTMATTER.contains(&key.as_str()) {
                 let hint = if CURSOR_EXTRA_FRONTMATTER.contains(&key.as_str()) {
@@ -141,7 +97,6 @@ fn shared_skills_pass_the_intersection_frontmatter_contract() {
             }
         }
 
-        // name required, matches dir, kebab-case, ≤64 chars.
         match scalar(skill, "name") {
             None => violations.push(format!("{at}: missing name")),
             Some(name) => {
@@ -198,8 +153,6 @@ fn shared_skill_descriptions_meet_the_intersection_budget() {
                 "{at}: description over {MAX_DESCRIPTION_WORDS} words"
             ));
         }
-        // Trigger-first: agents route on metadata alone, so a "Use …" trigger
-        // must lead or follow a short capability summary.
         if !(description.starts_with("Use ") || description.contains(". Use ")) {
             violations.push(format!(
                 "{at}: description must be trigger-first (\"Use …\")"
@@ -227,7 +180,6 @@ fn shared_skill_bodies_follow_the_intersection_body_rules() {
         let at = skill.path.display();
         let headings = unfenced_headings(&skill.body);
 
-        // Exactly one H1, plain-title form (never `# /slug`).
         let h1s: Vec<&String> = headings
             .iter()
             .filter(|(level, _)| *level == 1)
@@ -247,9 +199,6 @@ fn shared_skill_bodies_follow_the_intersection_body_rules() {
             }
         }
 
-        // The first content line after the frontmatter must be that H1: a
-        // single plain-title H1 opens the body (restores the retired
-        // `cursor_skill_bodies_follow_heading_conventions` check).
         match skill.body.lines().find(|line| !line.trim().is_empty()) {
             Some(first) if first.starts_with("# ") => {}
             Some(first) => violations.push(format!(
@@ -258,7 +207,6 @@ fn shared_skill_bodies_follow_the_intersection_body_rules() {
             None => {} // empty-body already flagged by the hygiene test
         }
 
-        // No skipped heading levels.
         let mut prev = 0usize;
         for (level, text) in &headings {
             if prev > 0 && *level > prev + 1 {
@@ -267,14 +215,12 @@ fn shared_skill_bodies_follow_the_intersection_body_rules() {
             prev = *level;
         }
 
-        // Trigger lives in the description, never a body `## When to Use`.
         if skill.raw.to_ascii_lowercase().contains("\n## when to use") {
             violations.push(format!(
                 "{at}: body must not carry a `## When to Use` section"
             ));
         }
 
-        // ≤500 lines.
         let lines = skill.raw.lines().count();
         if lines > MAX_SKILL_MD_LINES {
             violations.push(format!("{at}: {lines} lines exceeds {MAX_SKILL_MD_LINES}"));
@@ -326,8 +272,6 @@ fn shared_skill_files_are_hygienic_and_use_supported_layout() {
             }
         }
 
-        // Support-file layout: only SKILL.md + the allowed resource dirs, and
-        // no auxiliary documentation files (keep skill folders lean).
         let forbidden_doc_files = [
             "README.md",
             "CHANGELOG.md",
@@ -365,8 +309,6 @@ fn shared_skill_files_are_hygienic_and_use_supported_layout() {
     assert_no_violations("hygiene + layout", &violations);
 }
 
-/// Cursor native commands are a separate surface from the shared skills: they
-/// carry the slash-form H1 the model-invocable skills must NOT use.
 #[test]
 fn cursor_native_commands_are_hygienic_slash_commands() {
     let command_dir = repo_path(CURSOR_COMMAND_ROOT);
@@ -405,8 +347,6 @@ fn cursor_native_commands_are_hygienic_slash_commands() {
     assert_no_violations("cursor commands", &violations);
 }
 
-/// The Cursor agent overlay is a small separate surface; assert it ships and is
-/// LF-clean so a byte-copy install of it stays stable.
 #[test]
 fn cursor_agent_overlay_is_present_and_clean() {
     let overlay = repo_path(CURSOR_AGENT_OVERLAY_ROOT);
