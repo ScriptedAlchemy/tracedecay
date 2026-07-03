@@ -57,14 +57,12 @@ impl AgentIntegration for CodexIntegration {
         for path in [
             codex_repo_plugin_install_dir(project_path).join(".codex-plugin/plugin.json"),
             codex_repo_plugin_install_dir(project_path).join(".mcp.json"),
-            codex_repo_plugin_install_dir(project_path).join("hooks/hooks.json"),
             codex_repo_marketplace_path(project_path),
         ] {
             super::ensure_project_local_safe_path(project_path, &path)?;
         }
         install_codex_repo_plugin(&ctx.home, project_path, &ctx.tracedecay_bin)?;
         sweep_legacy_project_codex_config(project_path);
-        print_hook_trust_guidance();
         Ok(())
     }
 
@@ -90,6 +88,7 @@ impl AgentIntegration for CodexIntegration {
     fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
         let cached_dirs = codex_plugin_cached_install_dirs(&ctx.home);
         let plugin_dir = codex_plugin_install_dir(&ctx.home);
+        let legacy_config_install = codex_legacy_config_has_tracedecay(&ctx.home);
         let mut refreshed = Vec::new();
         if !cached_dirs.is_empty() {
             let target = install_codex_cached_plugin(&ctx.home, &ctx.tracedecay_bin)?;
@@ -122,10 +121,12 @@ impl AgentIntegration for CodexIntegration {
         }
 
         if !refreshed.is_empty() {
+            if legacy_config_install {
+                sweep_legacy_global_codex_config(&ctx.home);
+            }
             return Ok(UpdatePluginOutcome::Refreshed(refreshed));
         }
 
-        let legacy_config_install = codex_legacy_config_has_tracedecay(&ctx.home);
         let target = if codex_plugin_manifest_path(&ctx.home).exists() || legacy_config_install {
             Some(plugin_dir.clone())
         } else {
@@ -573,6 +574,7 @@ const CODEX_MANAGED_HOOKS: &[CodexManagedHook] = &[
 /// Subcommands from older bundles that uninstall must also strip even though
 /// the current bundle no longer registers them.
 const CODEX_LEGACY_HOOK_SUBCOMMANDS: &[&str] = &["hook-codex-pre-tool-use"];
+const CODEX_PERSONAL_PLUGIN_HOOK_TRUST_PREFIX: &str = "tracedecay@personal:hooks/hooks.json:";
 
 #[derive(Debug, PartialEq, Eq)]
 enum CodexHookTrustState {
@@ -609,14 +611,12 @@ fn codex_plugin_hook_trust_state(config: &toml::Value) -> CodexHookTrustState {
         .iter()
         .map(|hook| codex_hook_state_event_key(hook.event))
         .filter(|event_key| {
-            let suffix = format!(":hooks/hooks.json:{event_key}:0:0");
-            !state.iter().any(|(key, entry)| {
-                key.starts_with("tracedecay@")
-                    && key.ends_with(&suffix)
-                    && entry
-                        .get("trusted_hash")
-                        .and_then(|hash| hash.as_str())
-                        .is_some_and(|hash| hash.starts_with("sha256:"))
+            let trust_key = format!("{CODEX_PERSONAL_PLUGIN_HOOK_TRUST_PREFIX}{event_key}:0:0");
+            !state.get(&trust_key).is_some_and(|entry| {
+                entry
+                    .get("trusted_hash")
+                    .and_then(|hash| hash.as_str())
+                    .is_some_and(|hash| hash.starts_with("sha256:"))
             })
         })
         .collect();
@@ -1365,7 +1365,7 @@ fn doctor_check_hooks(dc: &mut DoctorCounters, hooks_path: &Path, config_path: O
         }
     } else {
         dc.warn(&format!(
-            "tracedecay hook(s) missing for {} in {} — run `tracedecay install --local --agent codex` or `tracedecay install --agent codex`",
+            "tracedecay hook(s) missing for {} in {} — run `tracedecay install --agent codex`",
             missing.join(", "),
             hooks_path.display(),
         ));
@@ -1504,6 +1504,42 @@ trusted_hash = "sha256:post"
                 "session_start".to_string(),
                 "user_prompt_submit".to_string(),
                 "subagent_start".to_string(),
+                "post_compact".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn codex_hook_trust_state_ignores_repo_local_plugin_entries() {
+        let config = toml::from_str::<toml::Value>(
+            r#"
+[hooks.state]
+
+[hooks.state."tracedecay@local-repo:hooks/hooks.json:post_tool_use:0:0"]
+trusted_hash = "sha256:post"
+
+[hooks.state."tracedecay@local-repo:hooks/hooks.json:session_start:0:0"]
+trusted_hash = "sha256:session"
+
+[hooks.state."tracedecay@local-repo:hooks/hooks.json:user_prompt_submit:0:0"]
+trusted_hash = "sha256:prompt"
+
+[hooks.state."tracedecay@local-repo:hooks/hooks.json:subagent_start:0:0"]
+trusted_hash = "sha256:subagent"
+
+[hooks.state."tracedecay@local-repo:hooks/hooks.json:post_compact:0:0"]
+trusted_hash = "sha256:compact"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            codex_plugin_hook_trust_state(&config),
+            CodexHookTrustState::Missing(vec![
+                "session_start".to_string(),
+                "user_prompt_submit".to_string(),
+                "subagent_start".to_string(),
+                "post_tool_use".to_string(),
                 "post_compact".to_string(),
             ])
         );

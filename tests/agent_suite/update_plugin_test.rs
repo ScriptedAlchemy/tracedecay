@@ -72,7 +72,10 @@ fn assert_codex_marketplace_entry(marketplace_path: &Path, source_path: &str) {
 
 fn assert_codex_bundle_contains_bin(plugin_dir: &Path, tracedecay_bin: &str) {
     assert!(text(&plugin_dir.join(".mcp.json")).contains(tracedecay_bin));
-    assert!(text(&plugin_dir.join("hooks/hooks.json")).contains(tracedecay_bin));
+    let hooks_path = plugin_dir.join("hooks/hooks.json");
+    if hooks_path.exists() {
+        assert!(text(&hooks_path).contains(tracedecay_bin));
+    }
 }
 
 fn codex_bootstrap_dir(home: &Path) -> PathBuf {
@@ -95,6 +98,18 @@ fn write_codex_plugin_manifest(plugin_dir: &Path, version: &str) {
         format!(r#"{{"name":"tracedecay","version":"{version}"}}"#),
     )
     .unwrap();
+}
+
+fn write_codex_legacy_config(home: &Path) -> PathBuf {
+    let codex_dir = home.join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    let config_path = codex_dir.join("config.toml");
+    std::fs::write(
+        &config_path,
+        "[mcp_servers.tracedecay]\ncommand = \"/old/bin/tracedecay\"\nargs = [\"serve\"]\n",
+    )
+    .unwrap();
+    config_path
 }
 
 fn write_stale_codex_skill(plugin_dir: &Path) {
@@ -490,6 +505,31 @@ fn codex_update_plugin_recreates_bootstrap_source_from_cache_only_state() {
 }
 
 #[test]
+fn codex_update_plugin_sweeps_legacy_config_when_cache_exists() {
+    let home = TempDir::new().unwrap();
+    let project_root = home.path().join("workspace");
+    let cached_plugin_dir = codex_cached_plugin_dir(home.path());
+    let legacy_config = write_codex_legacy_config(home.path());
+    write_codex_plugin_manifest(&cached_plugin_dir, "0.0.0");
+
+    let codex = get_integration("codex").unwrap();
+    let outcome = codex
+        .update_plugin(&ctx_with_project(home.path(), NEW_BIN, &project_root))
+        .unwrap();
+    let UpdatePluginOutcome::Refreshed(paths) = outcome else {
+        panic!("expected codex update_plugin to refresh the installed cache");
+    };
+    assert_eq!(
+        paths,
+        vec![cached_plugin_dir.clone(), codex_bootstrap_dir(home.path())]
+    );
+    assert!(
+        !legacy_config.exists(),
+        "Codex update-plugin should remove legacy config even when a plugin cache exists"
+    );
+}
+
+#[test]
 fn codex_update_plugin_refreshes_global_cache_and_repo_local_bundle() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
@@ -592,13 +632,7 @@ fn codex_uninstall_removes_repo_local_bundle_from_project_root() {
 fn codex_update_plugin_migrates_legacy_config_only_install_to_plugin() {
     let home = TempDir::new().unwrap();
     let project_root = home.path().join("workspace");
-    let codex_dir = home.path().join(".codex");
-    std::fs::create_dir_all(&codex_dir).unwrap();
-    std::fs::write(
-        codex_dir.join("config.toml"),
-        "[mcp_servers.tracedecay]\ncommand = \"/old/bin/tracedecay\"\nargs = [\"serve\"]\n",
-    )
-    .unwrap();
+    let legacy_config = write_codex_legacy_config(home.path());
     let codex = get_integration("codex").unwrap();
     let outcome = codex
         .update_plugin(&ctx_with_project(home.path(), NEW_BIN, &project_root))
@@ -608,7 +642,7 @@ fn codex_update_plugin_migrates_legacy_config_only_install_to_plugin() {
     };
     assert_eq!(paths, vec![home.path().join("plugins/tracedecay")]);
     assert!(
-        !codex_dir.join("config.toml").exists(),
+        !legacy_config.exists(),
         "Codex update-plugin should remove the migrated legacy config-managed install"
     );
     assert_codex_bundle_contains_bin(&home.path().join("plugins/tracedecay"), NEW_BIN);
