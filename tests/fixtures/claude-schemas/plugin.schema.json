@@ -1,0 +1,67 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://anthropic.com/schemas/claude-code/plugin.json",
+  "title": "Claude Code Plugin Manifest",
+  "description": "Schema for .claude-plugin/plugin.json — a Claude Code plugin manifest. Anthropic does not publish a standalone machine-readable schema, so this is derived from the Claude Code plugins reference (https://docs.anthropic.com/en/docs/claude-code/plugins — plugin.json fields) as of 2026-07-03. A Claude Code release adding new manifest fields requires re-vendoring.",
+  "type": "object",
+  "required": ["name"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$",
+      "description": "Plugin identifier: lowercase kebab-case, no spaces."
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Semantic version of the plugin."
+    },
+    "description": {
+      "type": "string",
+      "description": "Short description of what the plugin does."
+    },
+    "author": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "email": { "type": "string" },
+        "url": { "type": "string" }
+      },
+      "description": "Plugin author or organisation."
+    },
+    "homepage": { "type": "string" },
+    "repository": { "type": "string" },
+    "license": { "type": "string" },
+    "keywords": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "commands": {
+      "type": ["string", "array"],
+      "items": { "type": "string" },
+      "description": "Extra command file or directory paths beyond the default commands/ directory."
+    },
+    "agents": {
+      "type": ["string", "array"],
+      "items": { "type": "string" },
+      "description": "Extra agent file or directory paths beyond the default agents/ directory."
+    },
+    "skills": {
+      "type": ["string", "array"],
+      "items": { "type": "string" },
+      "description": "Extra skill directory paths beyond the default skills/ directory."
+    },
+    "hooks": {
+      "type": ["string", "object"],
+      "description": "Hooks config path (string) or inline hooks configuration."
+    },
+    "mcpServers": {
+      "type": ["string", "object"],
+      "description": "MCP config path (string) or inline MCP server definitions."
+    }
+  }
+}

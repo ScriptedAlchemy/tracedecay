@@ -1,0 +1,82 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://anthropic.com/schemas/claude-code/hooks.json",
+  "title": "Claude Code Hooks Configuration",
+  "description": "Schema for a Claude Code hooks configuration (plugin hooks/hooks.json or the `hooks` block in settings.json). Anthropic does not publish a standalone machine-readable schema, so this is derived from the Claude Code hooks reference (https://docs.anthropic.com/en/docs/claude-code/hooks — Configuration, Hook Events) as of 2026-07-03, cross-checked against the plugin hooks files Claude Code loads. Event names are enumerated from the documented list; a Claude Code release adding new events requires re-vendoring.",
+  "type": "object",
+  "required": ["hooks"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "description": {
+      "type": "string",
+      "description": "Human-readable summary of what the hook set does. Accepted in plugin hooks.json files."
+    },
+    "hooks": {
+      "type": "object",
+      "description": "Map of hook event name to an array of matcher groups.",
+      "additionalProperties": false,
+      "properties": {
+        "PreToolUse": { "$ref": "#/$defs/matcherGroupArray" },
+        "PostToolUse": { "$ref": "#/$defs/matcherGroupArray" },
+        "Notification": { "$ref": "#/$defs/matcherGroupArray" },
+        "UserPromptSubmit": { "$ref": "#/$defs/matcherGroupArray" },
+        "Stop": { "$ref": "#/$defs/matcherGroupArray" },
+        "SubagentStop": { "$ref": "#/$defs/matcherGroupArray" },
+        "PreCompact": { "$ref": "#/$defs/matcherGroupArray" },
+        "SessionStart": { "$ref": "#/$defs/matcherGroupArray" },
+        "SessionEnd": { "$ref": "#/$defs/matcherGroupArray" }
+      }
+    }
+  },
+  "$defs": {
+    "matcherGroupArray": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/matcherGroup" }
+    },
+    "matcherGroup": {
+      "type": "object",
+      "description": "One matcher group: an optional matcher pattern plus the hook commands that run when it matches.",
+      "required": ["hooks"],
+      "additionalProperties": false,
+      "properties": {
+        "matcher": {
+          "type": "string",
+          "description": "Filter pattern; matched value depends on the event (tool name regex for PreToolUse/PostToolUse, compaction trigger for PreCompact, source for SessionStart). Omitted or empty matches everything."
+        },
+        "hooks": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/commandHook" }
+        }
+      }
+    },
+    "commandHook": {
+      "type": "object",
+      "description": "Command hook: executes a shell command that receives the event JSON on stdin.",
+      "required": ["type", "command"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "command",
+          "description": "Hook execution type; only \"command\" is documented."
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Executable or shell command. Plugin hooks may reference ${CLAUDE_PLUGIN_ROOT} or a binary placeholder substituted at install time."
+        },
+        "args": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Arguments passed to the command (plugin hooks form)."
+        },
+        "timeout": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Per-command timeout in seconds."
+        }
+      }
+    }
+  }
+}

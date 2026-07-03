@@ -14,5 +14,6 @@ mod common;
 
 mod extract_worker_test;
 mod hook_branch_routing_test;
+mod hook_replay_test;
 mod hooks_test;
 mod lsp_code_diagnostics_test;

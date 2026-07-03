@@ -2202,6 +2202,21 @@ impl GlobalDb {
         Ok(ids)
     }
 
+    pub async fn session_message_count(&self) -> Result<i64, String> {
+        let mut rows = self
+            .conn
+            .query("SELECT COUNT(*) FROM session_messages", ())
+            .await
+            .map_err(|e| format!("failed to count session messages: {e}"))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|e| format!("failed to read session message count: {e}"))?
+            .ok_or_else(|| "session message count returned no row".to_string())?;
+        row.get::<i64>(0)
+            .map_err(|e| format!("failed to decode session message count: {e}"))
+    }
+
     pub async fn query_analytics_events(
         &self,
         query: &AnalyticsEventQuery,

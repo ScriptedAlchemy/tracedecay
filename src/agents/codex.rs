@@ -1549,7 +1549,7 @@ mod tests {
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
         skill_dirs.sort();
-        assert_eq!(skill_dirs.len(), 29, "expected 29 shared skill dirs");
+        assert_eq!(skill_dirs.len(), 30, "expected 30 shared skill dirs");
         // Every file under plugin/skills/ (SKILL.md *and* any support files) is
         // deployed — the recursive embed leaves nothing on disk unwired.
         for relative in skill_tree_files(&skills_root) {

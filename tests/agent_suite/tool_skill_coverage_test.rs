@@ -140,10 +140,10 @@ fn skill_bodies(skills_roots: &[PathBuf]) -> Vec<String> {
 #[test]
 fn every_mcp_tool_is_taught_by_at_least_one_bundled_skill() {
     let plugin = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin");
-    // Codex/Claude deploy the 29 canonical skills under plugin/skills. Cursor
-    // deploys the 16 shared model-invocable skills plus the 13 workflow slugs
+    // Codex/Claude deploy the 30 canonical skills under plugin/skills. Cursor
+    // deploys the 17 shared model-invocable skills plus the 13 workflow slugs
     // as native commands (`overlays/cursor/commands`). Both host views must
-    // teach every MCP tool. `plugin/skills` alone (canonical, 29) is a superset
+    // teach every MCP tool. `plugin/skills` alone (canonical, 30) is a superset
     // of the shared 17 plus the canonical dispatcher bodies, so it covers the
     // Codex/Claude view; the Cursor view is the 17 shared skills plus the 13
     // command bodies (which carry the workflow tool mentions Cursor ships).

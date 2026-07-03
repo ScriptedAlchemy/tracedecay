@@ -157,7 +157,7 @@ async fn durable_analytics_rows(
     }
 }
 
-fn durable_analytics_event_row(event: &AnalyticsEventRecord) -> Value {
+pub(crate) fn durable_analytics_event_row(event: &AnalyticsEventRecord) -> Value {
     json!({
         "provider": &event.provider,
         "timestamp": event.timestamp,
@@ -441,8 +441,17 @@ async fn diagnostics_summary(state: &DashboardState, durable_events: Option<&[Va
     let message_count = session_message_rows(state.lcm_conn.as_ref())
         .await
         .map_or(0, |rows| rows.len() as i64);
-    let hook_rows = read_hook_analytics_rows(state);
-    let hook_call_count = hook_invocation_count(&hook_rows);
+    let hook_analytics = read_hook_analytics_rows(state);
+    diagnostics_summary_from_parts(message_count, &hook_analytics, durable_events)
+}
+
+pub(crate) fn diagnostics_summary_from_parts(
+    message_count: i64,
+    hook_analytics: &HookAnalyticsRows,
+    durable_events: Option<&[Value]>,
+) -> Value {
+    let hook_rows = &hook_analytics.rows;
+    let hook_call_count = hook_invocation_count(hook_rows);
 
     let Some(events) = durable_events else {
         return json!({
@@ -454,16 +463,17 @@ async fn diagnostics_summary(state: &DashboardState, durable_events: Option<&[Va
             "mcp_tool_call_count": 0,
             "tracedecay_call_count": 0,
             "hook_call_count": hook_call_count,
+            "hook_sources": hook_analytics.sources.clone(),
             "ratios": diagnostics_ratios(message_count, 0, 0, 0, hook_call_count),
             "by_event_kind": [],
             "by_tool": [],
             "by_mcp_tool": [],
             "by_tool_category": [],
             "by_outcome": [],
-            "by_hook": hook_count_rows(&hook_rows),
-            "by_prompt_category": hook_prompt_category_rows(&hook_rows),
+            "by_hook": hook_count_rows(hook_rows),
+            "by_prompt_category": hook_prompt_category_rows(hook_rows),
             "recent_events": [],
-            "recent_hooks": recent_hook_rows(&hook_rows, 20),
+            "recent_hooks": recent_hook_rows(hook_rows, 20),
         });
     };
 
@@ -522,6 +532,7 @@ async fn diagnostics_summary(state: &DashboardState, durable_events: Option<&[Va
         "mcp_tool_call_count": mcp_tool_call_count,
         "tracedecay_call_count": tracedecay_call_count,
         "hook_call_count": hook_call_count,
+        "hook_sources": hook_analytics.sources.clone(),
         "events_per_hour": events_per_hour,
         "ratios": diagnostics_ratios(
             message_count,
@@ -535,10 +546,10 @@ async fn diagnostics_summary(state: &DashboardState, durable_events: Option<&[Va
         "by_mcp_tool": count_rows("tool_name", by_mcp_tool),
         "by_tool_category": count_rows("tool_category", by_tool_category),
         "by_outcome": count_rows("outcome", by_outcome),
-        "by_hook": hook_count_rows(&hook_rows),
-        "by_prompt_category": hook_prompt_category_rows(&hook_rows),
+        "by_hook": hook_count_rows(hook_rows),
+        "by_prompt_category": hook_prompt_category_rows(hook_rows),
         "recent_events": recent_event_rows(events, 20),
-        "recent_hooks": recent_hook_rows(&hook_rows, 20),
+        "recent_hooks": recent_hook_rows(hook_rows, 20),
     })
 }
 
@@ -578,13 +589,86 @@ fn count_rows(label: &str, counts: BTreeMap<String, i64>) -> Vec<Value> {
         .collect()
 }
 
-fn read_hook_analytics_rows(state: &DashboardState) -> Vec<Value> {
-    let Ok(text) = std::fs::read_to_string(state.store_root.join("hook_analytics.jsonl")) else {
-        return Vec::new();
+pub(crate) struct HookAnalyticsRows {
+    pub(crate) rows: Vec<Value>,
+    pub(crate) sources: Vec<Value>,
+}
+
+/// Hooks write `hook_analytics.jsonl` into the project store when they can
+/// resolve a project root and into the user-level profile root otherwise, so
+/// a project's hook stream is split across both files. Read both, keeping
+/// only user-level rows whose attribution places them inside this project.
+fn read_hook_analytics_rows(state: &DashboardState) -> HookAnalyticsRows {
+    read_hook_analytics_rows_at(Some(&state.store_root), Some(&state.project_root))
+}
+
+/// Path-based variant shared with the `tracedecay analytics` CLI. Passing no
+/// `project_root` includes every user-level row instead of filtering.
+pub(crate) fn read_hook_analytics_rows_at(
+    store_root: Option<&std::path::Path>,
+    project_root: Option<&std::path::Path>,
+) -> HookAnalyticsRows {
+    let mut out = HookAnalyticsRows {
+        rows: Vec::new(),
+        sources: Vec::new(),
     };
-    text.lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .collect()
+    let store_path = store_root.map(|root| root.join("hook_analytics.jsonl"));
+    if let Some(store_path) = &store_path {
+        read_hook_analytics_file(store_path, None, &mut out);
+    }
+    if let Ok(profile_root) = crate::storage::default_profile_root() {
+        let global_path = profile_root.join("hook_analytics.jsonl");
+        if store_path.as_deref() != Some(global_path.as_path()) {
+            read_hook_analytics_file(&global_path, project_root, &mut out);
+        }
+    }
+    out.rows.sort_by_key(|row| {
+        row.get("ts_unix_ms")
+            .and_then(Value::as_i64)
+            .unwrap_or_default()
+    });
+    out
+}
+
+fn read_hook_analytics_file(
+    path: &std::path::Path,
+    project_filter: Option<&std::path::Path>,
+    out: &mut HookAnalyticsRows,
+) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let mut rows_total = 0i64;
+    let mut rows_included = 0i64;
+    for line in text.lines() {
+        let Ok(row) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        rows_total += 1;
+        let included = match project_filter {
+            None => true,
+            Some(root) => hook_row_matches_project(&row, root),
+        };
+        if included {
+            rows_included += 1;
+            out.rows.push(row);
+        }
+    }
+    out.sources.push(json!({
+        "path": path.display().to_string(),
+        "rows_total": rows_total,
+        "rows_included": rows_included,
+    }));
+}
+
+/// Rows written since project attribution landed carry `project_root` and/or
+/// `event_cwd`; earlier user-level rows carry neither and stay unattributed.
+fn hook_row_matches_project(row: &Value, project_root: &std::path::Path) -> bool {
+    ["project_root", "event_cwd"].iter().any(|key| {
+        row.get(*key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| std::path::Path::new(value).starts_with(project_root))
+    })
 }
 
 fn hook_invocation_count(rows: &[Value]) -> i64 {

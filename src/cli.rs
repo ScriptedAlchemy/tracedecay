@@ -459,6 +459,12 @@ pub enum Commands {
         #[command(subcommand)]
         action: SessionsAction,
     },
+    /// Adoption analytics: durable tool/hook events and diagnostics summary
+    #[command(long_about = ANALYTICS_LONG_ABOUT, after_help = ANALYTICS_AFTER_HELP)]
+    Analytics {
+        #[command(subcommand)]
+        action: AnalyticsAction,
+    },
     /// Inspect registered TraceDecay projects from the global registry
     #[command(long_about = PROJECTS_LONG_ABOUT, after_help = PROJECTS_AFTER_HELP)]
     Projects {
@@ -576,6 +582,22 @@ pub enum DaemonAction {
     Restart,
     /// Print daemon service/socket status
     Status,
+}
+
+#[derive(Subcommand)]
+pub enum AnalyticsAction {
+    /// Print the adoption diagnostics summary (durable analytics events plus
+    /// hook telemetry) for the current project
+    Diagnostics {
+        /// Include events for every project, not just the current one
+        #[arg(long)]
+        all: bool,
+        /// Skip the hook-JSONL import pass before summarizing
+        #[arg(long)]
+        no_sync: bool,
+    },
+    /// Import hook_analytics.jsonl rows into the durable analytics_events table
+    Sync,
 }
 
 #[derive(Subcommand)]

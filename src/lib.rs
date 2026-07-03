@@ -18,6 +18,7 @@
 pub mod accounting;
 pub mod agents;
 mod analytics;
+pub mod analytics_bridge;
 pub mod automation;
 pub mod bench;
 pub mod branch;

@@ -22,7 +22,20 @@ use super::{
 /// `PreToolUse` hook handler for Claude Code's Agent tool matcher.
 pub fn hook_pre_tool_use() {
     let tool_input = std::env::var("TOOL_INPUT").unwrap_or_default();
-    record_hook_invoked(None, HintAgent::Claude, "preToolUse", &tool_input);
+    let parsed: Value = serde_json::from_str(&tool_input).unwrap_or(Value::Null);
+    // TOOL_INPUT has no `cwd`; Claude Code runs hooks with the project as the
+    // process working directory, so fall back to it for attribution.
+    let root = codex_project_root_from_parsed_event(&parsed).or_else(|| {
+        std::env::current_dir()
+            .ok()
+            .and_then(|cwd| crate::config::discover_project_root(&cwd))
+    });
+    record_hook_invoked(
+        root.as_deref(),
+        HintAgent::Claude,
+        "preToolUse",
+        &tool_input,
+    );
     let decision = evaluate_hook_decision(&tool_input);
     if !decision.is_empty() {
         println!("{decision}");

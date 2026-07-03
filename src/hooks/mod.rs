@@ -101,6 +101,14 @@ fn record_hook_analytics(root: Option<&Path>, event: &str, mut fields: serde_jso
     let Some(fields) = fields.as_object_mut() else {
         return;
     };
+    // Attribute the row to its project even when it lands in the user-level
+    // fallback file, so readers can re-join the split streams per project.
+    if let Some(root) = root {
+        fields.insert(
+            "project_root".to_string(),
+            serde_json::Value::String(root.display().to_string()),
+        );
+    }
     fields.insert(
         "event".to_string(),
         serde_json::Value::String(event.to_string()),
@@ -156,6 +164,7 @@ fn record_hook_invoked(root: Option<&Path>, agent: HintAgent, hook_name: &str, e
             "tool_name": text_field(&parsed, &["tool_name", "toolName", "name"]),
             "command": text_field(&parsed, &["command", "cmd", "shell_command"]),
             "prompt_category": inferred_prompt_category(&parsed),
+            "event_cwd": event_cwd_from_parsed(&parsed).map(|cwd| cwd.display().to_string()),
         }),
     );
 }
