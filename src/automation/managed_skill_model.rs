@@ -32,6 +32,14 @@ impl SkillInstallTarget {
         matches!(self, Self::Cursor | Self::Codex)
     }
 
+    /// True for hosts that reconcile their managed-skill listing as a
+    /// marker-gated block inside a prompt file. Native-overlay hosts
+    /// (Cursor/Codex) deploy a skills directory instead, and Hermes owns its
+    /// own curation — neither writes a prompt-index block.
+    pub fn writes_prompt_index(self) -> bool {
+        !self.is_native_overlay() && self != Self::Hermes
+    }
+
     pub fn prompt_label(self) -> &'static str {
         match self {
             Self::Cursor => "Cursor",

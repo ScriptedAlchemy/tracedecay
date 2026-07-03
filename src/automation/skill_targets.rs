@@ -15,7 +15,9 @@ use crate::errors::{Result, TraceDecayError};
 
 const NATIVE_NAMESPACE_DIR: &str = "agent-managed";
 const NATIVE_MANIFEST_FILE: &str = ".tracedecay-managed-skills.json";
-const PROMPT_INDEX_START: &str = "<!-- TRACEDECAY MANAGED SKILLS START -->";
+/// The unslugged legacy managed-skill start marker. Reuses the same literal the
+/// prompt-rules block-splicer stops at, keeping the two in sync.
+const PROMPT_INDEX_START: &str = crate::agents::prompt_rules::SKILL_INDEX_START;
 const PROMPT_INDEX_END: &str = "<!-- TRACEDECAY MANAGED SKILLS END -->";
 
 const ALL_SKILL_INSTALL_TARGETS: [SkillInstallTarget; 8] = [
@@ -305,30 +307,13 @@ fn replace_or_append_marked_block(
     block: &str,
 ) -> Result<String> {
     let (start_marker, end_marker) = prompt_index_markers(target);
-    if let Some((start, end)) = marked_block_range(existing, &start_marker, &end_marker)? {
-        let mut updated = String::new();
-        updated.push_str(existing[..start].trim_end());
-        updated.push_str("\n\n");
-        updated.push_str(block.trim_end());
-        updated.push_str("\n\n");
-        updated.push_str(existing[end..].trim_start());
-        if !updated.ends_with('\n') {
-            updated.push('\n');
-        }
-        Ok(updated)
-    } else if let Some((start, end)) =
-        marked_block_range(existing, PROMPT_INDEX_START, PROMPT_INDEX_END)?
-    {
-        let mut updated = String::new();
-        updated.push_str(existing[..start].trim_end());
-        updated.push_str("\n\n");
-        updated.push_str(block.trim_end());
-        updated.push_str("\n\n");
-        updated.push_str(existing[end..].trim_start());
-        if !updated.ends_with('\n') {
-            updated.push('\n');
-        }
-        Ok(updated)
+    // Prefer this target's slugged block; fall back to the legacy unslugged one.
+    let existing_range = match marked_block_range(existing, &start_marker, &end_marker)? {
+        Some(range) => Some(range),
+        None => marked_block_range(existing, PROMPT_INDEX_START, PROMPT_INDEX_END)?,
+    };
+    if let Some((start, end)) = existing_range {
+        Ok(splice_range(existing, start, end, block))
     } else {
         let mut updated = String::new();
         updated.push_str(existing.trim_end());
@@ -338,6 +323,21 @@ fn replace_or_append_marked_block(
         updated.push_str(block);
         Ok(updated)
     }
+}
+
+/// Replace `existing[start..end]` with `block`, normalizing surrounding blank
+/// lines and guaranteeing a trailing newline.
+fn splice_range(existing: &str, start: usize, end: usize, block: &str) -> String {
+    let mut updated = String::new();
+    updated.push_str(existing[..start].trim_end());
+    updated.push_str("\n\n");
+    updated.push_str(block.trim_end());
+    updated.push_str("\n\n");
+    updated.push_str(existing[end..].trim_start());
+    if !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated
 }
 
 fn remove_marked_block_for_target(existing: &str, target: SkillInstallTarget) -> Result<String> {
@@ -372,13 +372,10 @@ fn has_other_slugged_block(existing: &str, target: SkillInstallTarget) -> bool {
 
 fn remove_all_marked_blocks(existing: &str) -> Result<String> {
     let mut updated = existing.to_string();
-    for target in [
-        SkillInstallTarget::Claude,
-        SkillInstallTarget::Agents,
-        SkillInstallTarget::OpenCode,
-        SkillInstallTarget::Kimi,
-        SkillInstallTarget::Kiro,
-    ] {
+    for target in ALL_SKILL_INSTALL_TARGETS
+        .into_iter()
+        .filter(|target| target.writes_prompt_index())
+    {
         updated = remove_marked_block_for_target(&updated, target)?;
     }
     if let Some((start, end)) = marked_block_range(&updated, PROMPT_INDEX_START, PROMPT_INDEX_END)?
