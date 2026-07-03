@@ -77,9 +77,9 @@ fn arguments_have_project_selector(arguments: &Value) -> bool {
 
 #[derive(Default)]
 struct ConnectionContext {
-    hook_project_path: Option<String>,
-    hook_project_paths_by_session: HashMap<String, String>,
-    hook_project_paths_by_thread: HashMap<String, String>,
+    project_path: Option<String>,
+    paths_by_session: HashMap<String, String>,
+    paths_by_thread: HashMap<String, String>,
 }
 
 /// The steering instructions advertised from the `initialize` handshake of a
@@ -865,19 +865,19 @@ impl McpServer {
             Some(cwd) => self.registered_project_containing_path(cwd).await,
             None => None,
         };
-        connection.hook_project_path = project_path.clone();
+        connection.project_path.clone_from(&project_path);
         let Some(project_path) = project_path else {
             return;
         };
         if let Some(route) = event.route.as_ref() {
             if let Some(session_id) = route.session_id.as_deref().filter(|id| !id.is_empty()) {
                 connection
-                    .hook_project_paths_by_session
+                    .paths_by_session
                     .insert(session_id.to_string(), project_path.clone());
             }
             if let Some(thread_id) = route.thread_id.as_deref().filter(|id| !id.is_empty()) {
                 connection
-                    .hook_project_paths_by_thread
+                    .paths_by_thread
                     .insert(thread_id.to_string(), project_path);
             }
         }
@@ -2575,16 +2575,16 @@ fn hook_project_route_for_arguments<'a>(
     connection: &'a ConnectionContext,
 ) -> Option<&'a str> {
     if let Some(thread_id) = mcp_route_thread_id(arguments) {
-        if let Some(project_path) = connection.hook_project_paths_by_thread.get(&thread_id) {
+        if let Some(project_path) = connection.paths_by_thread.get(&thread_id) {
             return Some(project_path.as_str());
         }
     }
     if let Some(session_id) = mcp_analytics_session_id(arguments) {
-        if let Some(project_path) = connection.hook_project_paths_by_session.get(&session_id) {
+        if let Some(project_path) = connection.paths_by_session.get(&session_id) {
             return Some(project_path.as_str());
         }
     }
-    connection.hook_project_path.as_deref()
+    connection.project_path.as_deref()
 }
 
 fn json_rpc_request_id_string(id: &Value) -> Option<String> {
@@ -2680,14 +2680,14 @@ mod staleness_banner_tests {
     #[test]
     fn hook_project_route_prefers_thread_then_session_then_last_hook_path() {
         let mut connection = ConnectionContext {
-            hook_project_path: Some("/repo/default".to_string()),
+            project_path: Some("/repo/default".to_string()),
             ..ConnectionContext::default()
         };
         connection
-            .hook_project_paths_by_session
+            .paths_by_session
             .insert("session-a".to_string(), "/repo/session-a".to_string());
         connection
-            .hook_project_paths_by_thread
+            .paths_by_thread
             .insert("thread-a".to_string(), "/repo/thread-a".to_string());
 
         assert_eq!(
@@ -2711,10 +2711,10 @@ mod staleness_banner_tests {
     fn hook_project_route_reads_thread_and_session_ids_from_meta() {
         let mut connection = ConnectionContext::default();
         connection
-            .hook_project_paths_by_session
+            .paths_by_session
             .insert("session-meta".to_string(), "/repo/session-meta".to_string());
         connection
-            .hook_project_paths_by_thread
+            .paths_by_thread
             .insert("thread-meta".to_string(), "/repo/thread-meta".to_string());
 
         assert_eq!(
@@ -2730,7 +2730,7 @@ mod staleness_banner_tests {
     fn apply_hook_project_route_injects_selector_without_overriding_explicit_selector() {
         let mut connection = ConnectionContext::default();
         connection
-            .hook_project_paths_by_session
+            .paths_by_session
             .insert("session-a".to_string(), "/repo/session-a".to_string());
 
         let routed = McpServer::apply_hook_project_route(

@@ -9,7 +9,7 @@ use tracedecay::sessions::lcm::{
 };
 use tracedecay::sessions::source::{ingest_source, StoredCursor, TranscriptSource};
 
-use crate::support::setup;
+use crate::support::{assert_metadata_path_eq, create_git_repo_with_linked_worktree, setup};
 
 fn write_jsonl(path: &std::path::Path, lines: &[serde_json::Value]) {
     std::fs::write(
@@ -22,52 +22,6 @@ fn write_jsonl(path: &std::path::Path, lines: &[serde_json::Value]) {
             + "\n",
     )
     .unwrap();
-}
-
-fn run_git(project: &std::path::Path, args: &[&str]) {
-    let output = std::process::Command::new("git")
-        .args(args)
-        .current_dir(project)
-        .output()
-        .expect("git command should run");
-    assert!(
-        output.status.success(),
-        "git {:?} should succeed\nstdout:\n{}\nstderr:\n{}",
-        args,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-fn create_git_repo_with_linked_worktree(
-    project: &std::path::Path,
-    linked_worktree: &std::path::Path,
-) {
-    run_git(project, &["-c", "init.defaultBranch=main", "init"]);
-    std::fs::write(project.join("README.md"), "transcript location fixture\n").unwrap();
-    run_git(project, &["add", "README.md"]);
-    run_git(
-        project,
-        &[
-            "-c",
-            "user.name=TraceDecay Tests",
-            "-c",
-            "user.email=tests@example.invalid",
-            "commit",
-            "-m",
-            "init fixture repo",
-        ],
-    );
-    run_git(
-        project,
-        &[
-            "worktree",
-            "add",
-            "-b",
-            "linked-worktree",
-            linked_worktree.to_str().unwrap(),
-        ],
-    );
 }
 
 /// Writes a Codex rollout JSONL whose `session_meta.cwd` is `project`. Includes a
@@ -1455,14 +1409,8 @@ async fn codex_messages_keep_turn_cwd_and_session_git_updates() {
     assert_eq!(hits.len(), 2);
     let session_metadata: serde_json::Value =
         serde_json::from_str(hits[0].session.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(
-        session_metadata["codex_session_cwd"].as_str(),
-        Some(main_cwd.as_ref())
-    );
-    assert_eq!(
-        session_metadata["codex_session_worktree"].as_str(),
-        Some(main_cwd.as_ref())
-    );
+    assert_metadata_path_eq(&session_metadata["codex_session_cwd"], &project);
+    assert_metadata_path_eq(&session_metadata["codex_session_worktree"], &project);
     assert_eq!(
         session_metadata["codex_session_location_provenance"].as_str(),
         Some("session_meta")
@@ -1477,8 +1425,8 @@ async fn codex_messages_keep_turn_cwd_and_session_git_updates() {
     };
 
     let first = metadata_of("First branch");
-    assert_eq!(first["codex_turn_cwd"], main_cwd.as_ref());
-    assert_eq!(first["codex_turn_worktree"], main_cwd.as_ref());
+    assert_metadata_path_eq(&first["codex_turn_cwd"], &project);
+    assert_metadata_path_eq(&first["codex_turn_worktree"], &project);
     assert_eq!(
         first["codex_turn_location_provenance"].as_str(),
         Some("codex_context")
@@ -1490,8 +1438,8 @@ async fn codex_messages_keep_turn_cwd_and_session_git_updates() {
     );
 
     let second = metadata_of("Second branch");
-    assert_eq!(second["codex_turn_cwd"], linked_cwd.as_ref());
-    assert_eq!(second["codex_turn_worktree"], linked_cwd.as_ref());
+    assert_metadata_path_eq(&second["codex_turn_cwd"], &linked_worktree);
+    assert_metadata_path_eq(&second["codex_turn_worktree"], &linked_worktree);
     assert_eq!(
         second["codex_turn_location_provenance"].as_str(),
         Some("codex_context")
@@ -1586,13 +1534,13 @@ async fn codex_incremental_ingest_reconstructs_prior_turn_cwd_and_git() {
     assert_eq!(parsed.messages.len(), 1);
     let metadata: serde_json::Value =
         serde_json::from_str(parsed.messages[0].metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(metadata["codex_turn_cwd"], linked_cwd.as_ref());
+    assert_metadata_path_eq(&metadata["codex_turn_cwd"], &linked_worktree);
     assert_eq!(
         metadata["codex_turn_location_provenance"].as_str(),
         Some("codex_context")
     );
     assert_eq!(metadata["codex_git_branch"], "feature/worktree");
-    assert_eq!(metadata["codex_turn_worktree"], linked_cwd.as_ref());
+    assert_metadata_path_eq(&metadata["codex_turn_worktree"], &linked_worktree);
     assert_eq!(
         metadata["codex_git_commit_hash"],
         "2222222222222222222222222222222222222222"

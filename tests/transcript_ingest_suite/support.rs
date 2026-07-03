@@ -8,6 +8,29 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
+fn normalize_path_text(raw: &str) -> String {
+    let raw = raw.strip_prefix("\\\\?\\").unwrap_or(raw);
+    let unc_path;
+    let raw = if let Some(rest) = raw.strip_prefix("UNC\\") {
+        unc_path = format!("\\\\{rest}");
+        unc_path.as_str()
+    } else {
+        raw
+    };
+    let path = Path::new(raw);
+    let normalized = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let text = normalized.to_string_lossy();
+    text.strip_prefix("\\\\?\\").unwrap_or(&text).to_string()
+}
+
+pub fn assert_metadata_path_eq(actual: &serde_json::Value, expected: &Path) {
+    let actual = actual.as_str().expect("metadata path should be a string");
+    assert_eq!(
+        normalize_path_text(actual),
+        normalize_path_text(&expected.to_string_lossy())
+    );
+}
+
 /// Initializes `project` as a tracedecay project the ingest resolvers accept
 /// (a local `.tracedecay/tracedecay.db` marker).
 pub fn init_project_at(project: &Path) {
@@ -16,18 +39,52 @@ pub fn init_project_at(project: &Path) {
     std::fs::write(project.join(".tracedecay/tracedecay.db"), "").unwrap();
 }
 
-pub fn init_git_repo(project: &Path) {
+pub fn run_git(project: &Path, args: &[&str]) {
     let output = std::process::Command::new("git")
-        .arg("init")
+        .args(args)
         .current_dir(project)
         .output()
-        .expect("git init should run");
+        .expect("git command should run");
     assert!(
         output.status.success(),
-        "git init should succeed\nstdout:\n{}\nstderr:\n{}",
+        "git {:?} should succeed\nstdout:\n{}\nstderr:\n{}",
+        args,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+pub fn init_git_repo(project: &Path) {
+    run_git(project, &["init"]);
+}
+
+pub fn create_git_repo_with_linked_worktree(project: &Path, linked_worktree: &Path) {
+    run_git(project, &["-c", "init.defaultBranch=main", "init"]);
+    std::fs::write(project.join("README.md"), "transcript location fixture\n").unwrap();
+    run_git(project, &["add", "README.md"]);
+    run_git(
+        project,
+        &[
+            "-c",
+            "user.name=TraceDecay Tests",
+            "-c",
+            "user.email=tests@example.invalid",
+            "commit",
+            "-m",
+            "init fixture repo",
+        ],
+    );
+    run_git(
+        project,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "linked-worktree",
+            linked_worktree.to_str().unwrap(),
+        ],
+    );
+    init_project_at(linked_worktree);
 }
 
 /// Builds an initialized project dir under `tmp` and returns it.

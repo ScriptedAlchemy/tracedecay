@@ -668,6 +668,15 @@ fn extract_json(value: &Value) -> Value {
     serde_json::from_str(extract_text(value)).unwrap()
 }
 
+fn metadata_value_at(value: &Value) -> Value {
+    serde_json::from_str(
+        value
+            .as_str()
+            .expect("metadata_json should be returned as a JSON string"),
+    )
+    .expect("metadata_json should parse")
+}
+
 fn assert_fact_results(payload: &Value, included: &str, excluded: &str, context: &str) {
     assert_eq!(payload["count"].as_u64(), Some(1), "{context}: {payload}");
     let results = payload["results"].to_string();
@@ -6996,6 +7005,93 @@ async fn message_search_reads_project_local_session_db() {
 }
 
 #[tokio::test]
+async fn mcp_session_retrieval_preserves_observed_location_metadata() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let metadata = json!({
+        "metadata_provenance": "transcript_record",
+        "codex_turn_cwd": "/repo/.worktrees/feature-a",
+        "codex_turn_worktree": "/repo/.worktrees/feature-a",
+        "codex_git_branch": "codex/feature-a",
+        "codex_git_repository": "/repo"
+    });
+    let metadata_json = metadata.to_string();
+
+    seed_lcm_session_message_with_metadata_for_provider(
+        &cg,
+        "codex",
+        "location-session",
+        "location-message",
+        "observed location metadata token",
+        1,
+        &metadata_json,
+    )
+    .await;
+
+    let search = handle_tool_call(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "query": "observed location metadata",
+            "provider": "codex",
+            "limit": 5,
+            "catch_up": false
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let search_payload = extract_json(&search.value);
+    assert_eq!(search_payload["status"], "ok");
+    assert_eq!(search_payload["count"], 1);
+    assert_eq!(
+        metadata_value_at(&search_payload["results"][0]["message"]["metadata_json"]),
+        metadata
+    );
+
+    let loaded = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_load_session",
+        json!({
+            "provider": "codex",
+            "session_id": "location-session",
+            "limit": 5
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let loaded_payload = extract_json(&loaded.value);
+    assert_eq!(loaded_payload["status"], "ok");
+    assert_eq!(
+        metadata_value_at(&loaded_payload["messages"][0]["metadata_json"]),
+        metadata
+    );
+
+    let store_id = lcm_raw_store_id_for_provider(&cg, "codex", "location-message").await;
+    let expanded = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_expand",
+        json!({
+            "provider": "codex",
+            "session_id": "location-session",
+            "target": {"kind": "raw_message", "store_id": store_id}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let expanded_payload = extract_json(&expanded.value);
+    assert_eq!(expanded_payload["status"], "ok");
+    assert_eq!(
+        metadata_value_at(&expanded_payload["expansion"]["raw_message"]["metadata_json"]),
+        metadata
+    );
+}
+
+#[tokio::test]
 async fn message_search_catches_up_provider_transcripts_before_querying() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let home = cg.project_root().join("home");
@@ -7403,6 +7499,54 @@ async fn seed_lcm_session_message_for_provider(
     );
 }
 
+async fn seed_lcm_session_message_with_metadata_for_provider(
+    cg: &TraceDecay,
+    provider: &str,
+    session_id: &str,
+    message_id: &str,
+    text: impl Into<String>,
+    ordinal: i64,
+    metadata_json: &str,
+) {
+    let db = open_active_project_session_db(cg).await;
+    assert!(
+        db.upsert_session(&SessionRecord {
+            provider: provider.to_string(),
+            session_id: session_id.to_string(),
+            project_key: cg.project_root().to_string_lossy().to_string(),
+            project_path: cg.project_root().to_string_lossy().to_string(),
+            title: Some(format!("LCM session {session_id}")),
+            started_at: Some(ordinal),
+            ended_at: None,
+            transcript_path: Some(format!("{session_id}.jsonl")),
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        })
+        .await
+    );
+    assert!(
+        db.upsert_session_message(&SessionMessageRecord {
+            provider: provider.to_string(),
+            message_id: message_id.to_string(),
+            session_id: session_id.to_string(),
+            role: "assistant".to_string(),
+            timestamp: Some(ordinal + 1),
+            ordinal,
+            text: text.into(),
+            kind: Some("message".to_string()),
+            model: Some("test-model".to_string()),
+            tool_names: None,
+            source_path: Some(format!("{session_id}.jsonl")),
+            source_offset: Some(0),
+            metadata_json: Some(metadata_json.to_string()),
+        })
+        .await
+    );
+}
+
 async fn seed_lcm_tool_result_message(
     cg: &TraceDecay,
     session_id: &str,
@@ -7580,11 +7724,15 @@ async fn lcm_fts_match_count(cg: &TraceDecay, query: &str) -> i64 {
 }
 
 async fn lcm_raw_store_id(cg: &TraceDecay, message_id: &str) -> i64 {
+    lcm_raw_store_id_for_provider(cg, "cursor", message_id).await
+}
+
+async fn lcm_raw_store_id_for_provider(cg: &TraceDecay, provider: &str, message_id: &str) -> i64 {
     let conn = project_lcm_conn(cg).await;
     let mut rows = conn
         .query(
-            "SELECT store_id FROM lcm_raw_messages WHERE provider = 'cursor' AND message_id = ?1",
-            libsql::params![message_id],
+            "SELECT store_id FROM lcm_raw_messages WHERE provider = ?1 AND message_id = ?2",
+            libsql::params![provider, message_id],
         )
         .await
         .unwrap();

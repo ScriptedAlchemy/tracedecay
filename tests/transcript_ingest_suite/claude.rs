@@ -5,7 +5,7 @@ use tracedecay::sessions::claude::ClaudeSource;
 use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::sessions::source::ingest_source;
 
-use crate::support::{init_git_repo, init_project_at, setup};
+use crate::support::{assert_metadata_path_eq, init_git_repo, init_project_at, setup};
 
 /// Writes a Claude Code transcript (one JSON object per line) for `session` whose
 /// recorded `cwd` is `project`.
@@ -134,14 +134,8 @@ async fn claude_transcript_populates_searchable_messages() {
         .expect("assistant message should be searchable");
     let metadata: serde_json::Value =
         serde_json::from_str(assistant.message.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(
-        metadata["claude_message_cwd"].as_str(),
-        Some(project.to_string_lossy().as_ref())
-    );
-    assert_eq!(
-        metadata["claude_message_worktree"].as_str(),
-        Some(project.to_string_lossy().as_ref())
-    );
+    assert_metadata_path_eq(&metadata["claude_message_cwd"], &project);
+    assert_metadata_path_eq(&metadata["claude_message_worktree"], &project);
     assert_eq!(
         metadata["claude_message_location_provenance"].as_str(),
         Some("transcript_record")
@@ -158,14 +152,8 @@ async fn claude_transcript_populates_searchable_messages() {
         .expect("user message should be searchable");
     let user_metadata: serde_json::Value =
         serde_json::from_str(user.message.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(
-        user_metadata["claude_message_cwd"].as_str(),
-        Some(project.to_string_lossy().as_ref())
-    );
-    assert_eq!(
-        user_metadata["claude_message_worktree"].as_str(),
-        Some(project.to_string_lossy().as_ref())
-    );
+    assert_metadata_path_eq(&user_metadata["claude_message_cwd"], &project);
+    assert_metadata_path_eq(&user_metadata["claude_message_worktree"], &project);
     assert_eq!(
         user_metadata["claude_message_location_provenance"].as_str(),
         Some("transcript_record")
@@ -305,14 +293,8 @@ async fn claude_transcript_crossing_worktrees_is_split_by_record_cwd() {
     assert!(hits_a[0].message.text.contains("alpha worktree marker"));
     let metadata_a: serde_json::Value =
         serde_json::from_str(hits_a[0].message.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(
-        metadata_a["claude_message_cwd"].as_str(),
-        Some(project_a.to_string_lossy().as_ref())
-    );
-    assert_eq!(
-        metadata_a["claude_message_worktree"].as_str(),
-        Some(project_a.to_string_lossy().as_ref())
-    );
+    assert_metadata_path_eq(&metadata_a["claude_message_cwd"], &project_a);
+    assert_metadata_path_eq(&metadata_a["claude_message_worktree"], &project_a);
     assert_eq!(
         metadata_a["claude_message_location_provenance"].as_str(),
         Some("transcript_record")
@@ -328,14 +310,8 @@ async fn claude_transcript_crossing_worktrees_is_split_by_record_cwd() {
     assert!(hits_b[0].message.text.contains("beta worktree marker"));
     let metadata_b: serde_json::Value =
         serde_json::from_str(hits_b[0].message.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(
-        metadata_b["claude_message_cwd"].as_str(),
-        Some(project_b.to_string_lossy().as_ref())
-    );
-    assert_eq!(
-        metadata_b["claude_message_worktree"].as_str(),
-        Some(project_b.to_string_lossy().as_ref())
-    );
+    assert_metadata_path_eq(&metadata_b["claude_message_cwd"], &project_b);
+    assert_metadata_path_eq(&metadata_b["claude_message_worktree"], &project_b);
     assert_eq!(
         metadata_b["claude_message_location_provenance"].as_str(),
         Some("transcript_record")

@@ -13,7 +13,7 @@ use tracedecay::sessions::source::ingest_source;
 use tracedecay::sessions::SessionSearchScope;
 
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK};
-use crate::support::{init_git_repo, init_project, init_project_at};
+use crate::support::{assert_metadata_path_eq, init_git_repo, init_project, init_project_at};
 
 fn cursor_event(project: &std::path::Path, transcript: &std::path::Path) -> serde_json::Value {
     serde_json::json!({
@@ -212,14 +212,8 @@ async fn cursor_transcript_ingest_populates_searchable_messages() {
         .any(|hit| hit.message.tool_names.as_deref() == Some("tracedecay_context")));
     let session_metadata: serde_json::Value =
         serde_json::from_str(results[0].session.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(
-        session_metadata["cursor_event_cwd"].as_str(),
-        Some(project.to_string_lossy().as_ref())
-    );
-    assert_eq!(
-        session_metadata["cursor_event_worktree"].as_str(),
-        Some(project.to_string_lossy().as_ref())
-    );
+    assert_metadata_path_eq(&session_metadata["cursor_event_cwd"], &project);
+    assert_metadata_path_eq(&session_metadata["cursor_event_worktree"], &project);
     assert_eq!(
         session_metadata["cursor_event_location_provenance"].as_str(),
         Some("hook_event")
@@ -227,14 +221,8 @@ async fn cursor_transcript_ingest_populates_searchable_messages() {
     assert!(session_metadata.get("cursor_event_git_branch").is_none());
     let message_metadata: serde_json::Value =
         serde_json::from_str(results[0].message.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(
-        message_metadata["cursor_event_cwd"].as_str(),
-        Some(project.to_string_lossy().as_ref())
-    );
-    assert_eq!(
-        message_metadata["cursor_event_worktree"].as_str(),
-        Some(project.to_string_lossy().as_ref())
-    );
+    assert_metadata_path_eq(&message_metadata["cursor_event_cwd"], &project);
+    assert_metadata_path_eq(&message_metadata["cursor_event_worktree"], &project);
     assert_eq!(
         message_metadata["cursor_event_location_provenance"].as_str(),
         Some("hook_event")
@@ -295,14 +283,8 @@ async fn cursor_transcript_ingest_reads_nested_dispatch_tool_input_model() {
     {
         let metadata: serde_json::Value =
             serde_json::from_str(hit.message.metadata_json.as_deref().unwrap()).unwrap();
-        assert_eq!(
-            metadata["cursor_event_cwd"].as_str(),
-            Some(project.to_string_lossy().as_ref())
-        );
-        assert_eq!(
-            metadata["cursor_event_worktree"].as_str(),
-            Some(project.to_string_lossy().as_ref())
-        );
+        assert_metadata_path_eq(&metadata["cursor_event_cwd"], &project);
+        assert_metadata_path_eq(&metadata["cursor_event_worktree"], &project);
         assert_eq!(
             metadata["cursor_event_location_provenance"].as_str(),
             Some("hook_event")
