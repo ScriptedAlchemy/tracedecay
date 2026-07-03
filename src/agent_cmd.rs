@@ -420,30 +420,76 @@ pub(crate) async fn handle_reinstall_command() -> tracedecay::errors::Result<()>
         eprintln!("No installed agents found. Run `tracedecay install` first.");
     } else {
         let agents = user_cfg.installed_agents.clone();
-        let project_path = std::env::current_dir().ok();
         eprintln!(
             "Reinstalling {} agent(s): {}",
             agents.len(),
             agents.join(", ")
         );
-        for id in &agents {
-            let ag = tracedecay::agents::get_integration(id)?;
-            let ctx = tracedecay::agents::InstallContext {
-                home: home.clone(),
-                tracedecay_bin: tracedecay_bin.clone(),
-                tool_permissions: tracedecay::agents::expected_tool_perms(),
-                profile: None,
-                project_root: None,
-                dashboard: true,
-            };
-            ag.install(&ctx)?;
-            ag.post_install(project_path.as_deref()).await;
+        let results = reinstall_agent_integrations(&agents, &home, &tracedecay_bin).await;
+        let failed: Vec<String> = results
+            .iter()
+            .filter_map(|(id, result)| result.as_ref().err().map(|_| id.clone()))
+            .collect();
+        if !failed.is_empty() {
+            return Err(tracedecay::errors::TraceDecayError::Config {
+                message: format!("failed to reinstall agent(s): {}", failed.join(", ")),
+            });
         }
         eprintln!("\x1b[32m✔\x1b[0m All agents reinstalled");
         user_cfg.last_installed_version = env!("CARGO_PKG_VERSION").to_string();
         user_cfg.save();
     }
     Ok(())
+}
+
+/// Re-runs `install()` + `post_install()` for each tracked agent id, returning
+/// only the ids that resolve to a real integration paired with their install
+/// result.
+///
+/// An id that does NOT resolve to an integration (a later release renamed or
+/// removed it, or a typo landed in `installed_agents`) is SKIPPED, not failed:
+/// it is logged as a warning and left out of the returned results entirely.
+/// Gating version-marker advancement on such an id would wedge the reinstall
+/// loop forever — `migrate_installed_agents` only ever adds ids, never prunes,
+/// so a stale id would never resolve and the markers would never advance. Only
+/// genuine `install()` failures are reported as `Err` so they still gate
+/// markers.
+pub(crate) async fn reinstall_agent_integrations(
+    agent_ids: &[String],
+    home: &Path,
+    tracedecay_bin: &str,
+) -> Vec<(String, tracedecay::errors::Result<()>)> {
+    let project_path = std::env::current_dir().ok();
+    let mut results = Vec::new();
+    for id in agent_ids {
+        let ag = match tracedecay::agents::get_integration(id) {
+            Ok(ag) => ag,
+            Err(_) => {
+                eprintln!(
+                    "  \x1b[33mwarning:\x1b[0m skipping unknown tracked agent id \"{id}\" \
+                     (no such integration); it will not gate the version-marker refresh."
+                );
+                continue;
+            }
+        };
+        let ctx = tracedecay::agents::InstallContext {
+            home: home.to_path_buf(),
+            tracedecay_bin: tracedecay_bin.to_string(),
+            tool_permissions: tracedecay::agents::expected_tool_perms(),
+            profile: None,
+            project_root: None,
+            dashboard: true,
+        };
+        let result = match ag.install(&ctx) {
+            Ok(()) => {
+                ag.post_install(project_path.as_deref()).await;
+                Ok(())
+            }
+            Err(e) => Err(e),
+        };
+        results.push((id.clone(), result));
+    }
+    results
 }
 
 pub(crate) async fn handle_uninstall_command(

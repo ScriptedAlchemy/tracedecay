@@ -29,3 +29,4 @@ mod skill_targets_test;
 mod skill_usage_test;
 mod tool_skill_coverage_test;
 mod update_plugin_test;
+mod upgrade_refresh_test;
