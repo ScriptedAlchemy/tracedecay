@@ -320,21 +320,32 @@ pub async fn delete_external_payload(
     opts: &DeleteOpts,
 ) -> Result<DeleteOutcome, LcmError> {
     validate_payload_ref(payload_ref)?;
-    let dir = existing_payload_dir(storage_root)?;
-    let path = dir.join(payload_ref);
-    ensure_contained(&dir, &path)?;
+    // The DB-side cleanup below must still run for a store whose payload
+    // directory is gone — the file simply counts as already removed.
+    let dir = existing_payload_dir_opt(storage_root)?;
+    let path = match dir.as_deref() {
+        Some(dir) => {
+            let path = dir.join(payload_ref);
+            ensure_contained(dir, &path)?;
+            Some(path)
+        }
+        None => None,
+    };
 
     let metadata = match load_payload_metadata(conn, payload_ref).await {
         Ok(payload) => Some(payload),
         Err(LcmError::PayloadNotFound) => None,
         Err(err) => return Err(err),
     };
-    let (file_existed, file_identity) = inspect_payload_file_for_delete(&path)?;
+    let (file_existed, file_identity) = match path.as_deref() {
+        Some(path) => inspect_payload_file_for_delete(path)?,
+        None => (false, None),
+    };
 
     if opts.verify_hash && file_existed {
-        if let Some(metadata) = metadata.as_ref() {
+        if let (Some(metadata), Some(path)) = (metadata.as_ref(), path.as_deref()) {
             let (content, identity) =
-                read_payload_file_for_verify(&path)?.ok_or(LcmError::PayloadMissing)?;
+                read_payload_file_for_verify(path)?.ok_or(LcmError::PayloadMissing)?;
             if Some(identity) != file_identity
                 || util::sha256_hex(&content) != metadata.content_hash
             {
@@ -384,10 +395,11 @@ pub async fn delete_external_payload(
         }
     }
 
-    let file_removed = if opts.remove_file && file_existed {
-        safe_remove_payload_file_checked(&dir, payload_ref, file_identity.as_ref())?
-    } else {
-        false
+    let file_removed = match (dir.as_deref(), opts.remove_file && file_existed) {
+        (Some(dir), true) => {
+            safe_remove_payload_file_checked(dir, payload_ref, file_identity.as_ref())?
+        }
+        _ => false,
     };
 
     Ok(DeleteOutcome {
@@ -726,12 +738,30 @@ fn prepare_payload_dir(storage_root: &Path) -> Result<PathBuf, LcmError> {
 }
 
 pub(crate) fn existing_payload_dir(storage_root: &Path) -> Result<PathBuf, LcmError> {
+    existing_payload_dir_opt(storage_root)?.ok_or_else(|| {
+        LcmError::Io(format!(
+            "payload directory missing under {}",
+            storage_root.display()
+        ))
+    })
+}
+
+/// Like `existing_payload_dir`, but a payload directory that was never
+/// created (it is made lazily on first externalization) or has been removed
+/// reports as `None` instead of an I/O error. Invalid configurations —
+/// symlinked dir, wrong file type, dir escaping the storage root — still
+/// error.
+pub(crate) fn existing_payload_dir_opt(storage_root: &Path) -> Result<Option<PathBuf>, LcmError> {
     let root = canonical_storage_root(storage_root)?;
     let dir = root.join("lcm-payloads");
-    let metadata = fs::symlink_metadata(&dir).map_err(|err| LcmError::Io(err.to_string()))?;
+    let metadata = match fs::symlink_metadata(&dir) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(LcmError::Io(err.to_string())),
+    };
     ensure_actual_private_dir(&dir, &metadata)?;
     ensure_payload_dir_under_root(&root, &dir)?;
-    Ok(dir)
+    Ok(Some(dir))
 }
 
 pub(crate) fn canonical_storage_root(storage_root: &Path) -> Result<PathBuf, LcmError> {

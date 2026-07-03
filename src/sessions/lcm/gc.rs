@@ -338,7 +338,14 @@ pub async fn run_payload_gc_with_apply(
         .and_then(|value| value.parse::<i64>().ok());
     report.last_error = schema::get_gc_meta(conn, "last_error").await?;
 
-    if apply && cfg.backup_before_reap {
+    // The payload directory is created lazily on first externalization, so a
+    // missing directory is a normal state: filesystem scans see it as empty
+    // while the DB-side phases below still run (missing payloads, stale
+    // marks, dangling placeholders).
+    let dir = payload::existing_payload_dir_opt(storage_root)?;
+    let all_metadata_refs = all_payload_metadata_refs(conn).await?;
+
+    if apply && cfg.backup_before_reap && (dir.is_some() || !all_metadata_refs.is_empty()) {
         checkpoint_wal_for_backup(conn).await?;
         report.backup = Some(backup_database(
             &gc_database_path(storage_root),
@@ -346,8 +353,6 @@ pub async fn run_payload_gc_with_apply(
         )?);
     }
 
-    let dir = payload::existing_payload_dir(storage_root)?;
-    let all_metadata_refs = all_payload_metadata_refs(conn).await?;
     let scoped_metadata_refs = payload_metadata_refs_for_scope(conn, provider, session_id).await?;
     let referenced = referenced_payload_refs(conn, provider, session_id).await?;
     let metadata_bytes = payload_metadata_bytes(conn).await?;
@@ -356,15 +361,17 @@ pub async fn run_payload_gc_with_apply(
     // Orphan files have no metadata row, so they cannot be attributed to a
     // provider/session. Include them in every scoped GC preview/apply just as
     // the payload-health surface includes them for scoped drill-downs.
-    reap_orphan_files(
-        &dir,
-        &all_metadata_refs,
-        now,
-        &cfg,
-        apply,
-        &mut remaining,
-        &mut report,
-    )?;
+    if let Some(dir) = dir.as_deref() {
+        reap_orphan_files(
+            dir,
+            &all_metadata_refs,
+            now,
+            &cfg,
+            apply,
+            &mut remaining,
+            &mut report,
+        )?;
+    }
     reap_unreferenced_metadata(
         conn,
         storage_root,
@@ -392,7 +399,7 @@ pub async fn run_payload_gc_with_apply(
     .await?;
     rewrite_dangling_placeholders(
         conn,
-        &dir,
+        dir.as_deref(),
         &all_metadata_refs,
         provider,
         session_id,
@@ -598,11 +605,9 @@ async fn reap_missing_metadata(
     remaining: &mut usize,
     report: &mut LcmGcReport,
 ) -> Result<(), LcmError> {
-    let dir = payload::existing_payload_dir(storage_root)?;
+    let dir = payload::existing_payload_dir_opt(storage_root)?;
     for payload_ref in metadata_refs.intersection(referenced) {
-        let path = dir.join(payload_ref);
-        payload::ensure_contained(&dir, &path)?;
-        if fs::symlink_metadata(&path).is_ok_and(|m| m.is_file() && !m.file_type().is_symlink()) {
+        if payload_file_present(dir.as_deref(), payload_ref)? {
             if apply {
                 conn.execute(
                     "DELETE FROM lcm_gc_marks WHERE payload_ref = ?1 AND state = 'missing'",
@@ -659,9 +664,20 @@ async fn reap_missing_metadata(
     Ok(())
 }
 
+/// True when the payload file exists as a regular (non-symlink) file; a
+/// missing payload directory means no payload file can exist.
+fn payload_file_present(dir: Option<&Path>, payload_ref: &str) -> Result<bool, LcmError> {
+    let Some(dir) = dir else {
+        return Ok(false);
+    };
+    let path = dir.join(payload_ref);
+    payload::ensure_contained(dir, &path)?;
+    Ok(fs::symlink_metadata(&path).is_ok_and(|m| m.is_file() && !m.file_type().is_symlink()))
+}
+
 pub async fn rewrite_dangling_placeholders(
     conn: &Connection,
-    dir: &Path,
+    dir: Option<&Path>,
     metadata_refs: &BTreeSet<String>,
     provider: &str,
     session_id: Option<&str>,
@@ -670,9 +686,7 @@ pub async fn rewrite_dangling_placeholders(
 ) -> Result<(), LcmError> {
     let referenced = referenced_payload_refs(conn, provider, session_id).await?;
     for payload_ref in referenced.difference(metadata_refs) {
-        let path = dir.join(payload_ref);
-        payload::ensure_contained(dir, &path)?;
-        if fs::symlink_metadata(&path).is_ok_and(|m| m.is_file() && !m.file_type().is_symlink()) {
+        if payload_file_present(dir, payload_ref)? {
             continue;
         }
         let changed = if apply {
@@ -1381,6 +1395,66 @@ mod tests {
         };
         assert_eq!(err, LcmError::InvalidPayloadRef);
         assert!(dir.join(SECONDARY_REF).is_dir());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn gc_on_store_without_payload_dir_reports_empty_run() -> Result<(), String> {
+        let store = test_store().await?;
+        assert!(!payload::payload_dir(&store.storage_root).exists());
+        let cfg = LcmGcConfig {
+            backup_before_reap: false,
+            ..Default::default()
+        }
+        .normalized();
+        for apply in [false, true] {
+            let report = run_payload_gc_with_apply(
+                &store.conn,
+                &store.storage_root,
+                PROVIDER,
+                None,
+                &cfg,
+                apply,
+                1_000,
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+            assert_eq!(report.orphans.count, 0);
+            assert_eq!(report.unreferenced.count, 0);
+            assert_eq!(report.missing.count, 0);
+            assert_eq!(report.totals.files, 0);
+            assert!(report.errors.is_empty());
+        }
+        assert!(!payload::payload_dir(&store.storage_root).exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn gc_reports_missing_payloads_when_payload_dir_was_deleted() -> Result<(), String> {
+        let store = test_store().await?;
+        let payload_ref = seed_payload(&store, "msg-1", "externalized content").await?;
+        std::fs::remove_dir_all(payload::payload_dir(&store.storage_root))
+            .map_err(|err| format!("remove payload dir: {err}"))?;
+        let cfg = LcmGcConfig {
+            backup_before_reap: false,
+            ..Default::default()
+        }
+        .normalized();
+        let report = run_payload_gc_with_apply(
+            &store.conn,
+            &store.storage_root,
+            PROVIDER,
+            None,
+            &cfg,
+            false,
+            1_000,
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+        assert_eq!(report.missing.count, 1);
+        assert_eq!(report.missing.refs, vec![payload_ref]);
+        assert!(report.errors.is_empty());
+        assert!(!payload::payload_dir(&store.storage_root).exists());
         Ok(())
     }
 

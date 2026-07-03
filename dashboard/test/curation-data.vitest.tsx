@@ -1,7 +1,10 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { useCurationData, type CurationApi } from "../holographic/src/curation/useCurationData";
+import {
+  useCurationData,
+  type CurationApi,
+} from "../holographic/src/curation/useCurationData";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -25,7 +28,9 @@ function deferred<T = unknown>(): Deferred<T> {
 
 function makeApi(overrides: Partial<CurationApi> = {}): CurationApi {
   return {
-    getMemoryCuratorPreview: vi.fn().mockResolvedValue({ report: null, saved_at: null }),
+    getMemoryCuratorPreview: vi
+      .fn()
+      .mockResolvedValue({ report: null, saved_at: null }),
     getMemoryCuratorActivity: vi.fn().mockResolvedValue({ events: [] }),
     getMemoryAutomationRuns: vi.fn().mockResolvedValue({ records: [] }),
     getAutomationSchedulerStatus: vi.fn().mockResolvedValue({
@@ -35,9 +40,21 @@ function makeApi(overrides: Partial<CurationApi> = {}): CurationApi {
       scheduler_tick_secs: 60,
       now: 1782283200,
       tasks: [
-        { task: "memory_curator", due: false, skip_reason: "automation_disabled" },
-        { task: "session_reflector", due: false, skip_reason: "automation_disabled" },
-        { task: "skill_writer", due: false, skip_reason: "automation_disabled" },
+        {
+          task: "memory_curator",
+          due: false,
+          skip_reason: "automation_disabled",
+        },
+        {
+          task: "session_reflector",
+          due: false,
+          skip_reason: "automation_disabled",
+        },
+        {
+          task: "skill_writer",
+          due: false,
+          skip_reason: "automation_disabled",
+        },
       ],
     }),
     pauseAutomationScheduler: vi.fn().mockResolvedValue({
@@ -56,7 +73,9 @@ function makeApi(overrides: Partial<CurationApi> = {}): CurationApi {
       now: 1782283200,
       tasks: [],
     }),
-    getMemoryAutomationRunArtifacts: vi.fn().mockResolvedValue({ artifacts: [], count: 0 }),
+    getMemoryAutomationRunArtifacts: vi
+      .fn()
+      .mockResolvedValue({ artifacts: [], count: 0 }),
     getMemoryAutomationRunArtifact: vi.fn().mockResolvedValue({
       run_id: "memory-run",
       artifact: {
@@ -68,22 +87,33 @@ function makeApi(overrides: Partial<CurationApi> = {}): CurationApi {
       },
       payload: {},
     }),
-    getFactProposals: vi.fn().mockResolvedValue({ proposals: [], count: 0, limit: 50 }),
+    getFactProposals: vi
+      .fn()
+      .mockResolvedValue({ proposals: [], count: 0, limit: 50 }),
     applyFactProposal: vi.fn(),
     rejectFactProposal: vi.fn(),
-    getManagedSkills: vi.fn().mockResolvedValue({ skills: [], skill_metadata: [], count: 0 }),
+    getManagedSkills: vi
+      .fn()
+      .mockResolvedValue({ skills: [], skill_metadata: [], count: 0 }),
     getManagedSkill: vi.fn(),
     approveManagedSkill: vi.fn(),
     discardManagedSkillUpdate: vi.fn(),
     disableManagedSkill: vi.fn(),
     archiveManagedSkill: vi.fn(),
     restoreManagedSkill: vi.fn(),
-    postMemoryCurate: vi.fn().mockResolvedValue({ dry_run: true, actions: [], counts: {} }),
+    postMemoryCurate: vi
+      .fn()
+      .mockResolvedValue({ dry_run: true, actions: [], counts: {} }),
     postAutomationRunMemoryCurator: vi.fn().mockResolvedValue({
       run_id: "memory-run",
       dry_run: true,
       status: "skipped",
-      report: { dry_run: true, actions: [], counts: {}, reason: "automation_disabled" },
+      report: {
+        dry_run: true,
+        actions: [],
+        counts: {},
+        reason: "automation_disabled",
+      },
       ledger_record: {
         schema_version: 1,
         run_id: "memory-run",
@@ -176,9 +206,18 @@ function makeApi(overrides: Partial<CurationApi> = {}): CurationApi {
           auto_apply_memory_ops: patch.auto_apply_memory_ops ?? false,
           auto_enable_skills: patch.auto_enable_skills ?? false,
           tasks: {
-            memory_curator: patch.memory_curator ?? { enabled: false, schedule: null },
-            session_reflector: patch.session_reflector ?? { enabled: false, schedule: null },
-            skill_writer: patch.skill_writer ?? { enabled: false, schedule: null },
+            memory_curator: patch.memory_curator ?? {
+              enabled: false,
+              schedule: null,
+            },
+            session_reflector: patch.session_reflector ?? {
+              enabled: false,
+              schedule: null,
+            },
+            skill_writer: patch.skill_writer ?? {
+              enabled: false,
+              schedule: null,
+            },
           },
         },
       }),
@@ -214,12 +253,20 @@ describe("useCurationData", () => {
   it("preview() flips to activity while running, then lands on plan with a fresh saved preview timestamp", async () => {
     vi.useFakeTimers();
     const run = deferred();
-    const savedPreview = { dry_run: true, actions: [{ op: "retag" }], counts: { retag: 1 } };
+    const savedPreview = {
+      dry_run: true,
+      actions: [{ op: "retag" }],
+      counts: { retag: 1 },
+    };
     const api = makeApi({
       postMemoryCurate: vi.fn().mockImplementation(() => run.promise),
-      getMemoryCuratorPreview: vi.fn()
+      getMemoryCuratorPreview: vi
+        .fn()
         .mockResolvedValueOnce({ report: null, saved_at: null })
-        .mockResolvedValue({ report: savedPreview, saved_at: "2026-06-14T12:00:00.000Z" }),
+        .mockResolvedValue({
+          report: savedPreview,
+          saved_at: "2026-06-14T12:00:00.000Z",
+        }),
     });
 
     const { result } = renderHook(() =>
@@ -242,14 +289,21 @@ describe("useCurationData", () => {
     expect(api.getMemoryCuratorActivity).toHaveBeenCalled();
 
     await act(async () => {
-      run.resolve({ dry_run: true, actions: [{ op: "retag" }], counts: { retag: 1 } });
+      run.resolve({
+        dry_run: true,
+        actions: [{ op: "retag" }],
+        counts: { retag: 1 },
+      });
       await pending;
       await Promise.resolve();
     });
 
     expect(result.current.loading).toBe(false);
     expect(result.current.activeTab).toBe("plan");
-    expect(result.current.report).toMatchObject({ dry_run: true, actions: [{ op: "retag" }] });
+    expect(result.current.report).toMatchObject({
+      dry_run: true,
+      actions: [{ op: "retag" }],
+    });
     expect(result.current.previewSavedAt).toBe("2026-06-14T12:00:00.000Z");
     expect(result.current.previewStale).toBe(false);
     vi.useRealTimers();
@@ -258,18 +312,32 @@ describe("useCurationData", () => {
   it("apply() clears the saved preview, closes confirmation, and notifies the parent callback", async () => {
     const applyRun = deferred();
     const onApplied = vi.fn();
-    const savedPreview = { dry_run: true, actions: [{ op: "delete" }], counts: { delete: 1 } };
+    const savedPreview = {
+      dry_run: true,
+      actions: [{ op: "delete" }],
+      counts: { delete: 1 },
+    };
     const api = makeApi({
-      getMemoryCuratorPreview: vi.fn()
+      getMemoryCuratorPreview: vi
+        .fn()
         .mockResolvedValueOnce({ report: null, saved_at: null })
-        .mockResolvedValue({ report: savedPreview, saved_at: "2026-06-14T12:00:00.000Z" }),
-      postMemoryCurate: vi.fn().mockImplementation(({ dry_run }) =>
-        dry_run ? Promise.resolve(savedPreview) : applyRun.promise,
-      ),
+        .mockResolvedValue({
+          report: savedPreview,
+          saved_at: "2026-06-14T12:00:00.000Z",
+        }),
+      postMemoryCurate: vi
+        .fn()
+        .mockImplementation(({ dry_run }) =>
+          dry_run ? Promise.resolve(savedPreview) : applyRun.promise,
+        ),
     });
 
     const { result } = renderHook(() =>
-      useCurationData({ api, onApplied, now: () => "2026-06-14T12:00:00.000Z" }),
+      useCurationData({
+        api,
+        onApplied,
+        now: () => "2026-06-14T12:00:00.000Z",
+      }),
     );
 
     await act(async () => {
@@ -291,7 +359,12 @@ describe("useCurationData", () => {
     expect(result.current.activeTab).toBe("activity");
 
     await act(async () => {
-      applyRun.resolve({ dry_run: false, actions: [], counts: {}, applied_counts: { delete: 1 } });
+      applyRun.resolve({
+        dry_run: false,
+        actions: [],
+        counts: {},
+        applied_counts: { delete: 1 },
+      });
       await pending;
       await Promise.resolve();
     });
@@ -314,7 +387,10 @@ describe("useCurationData", () => {
     });
 
     const panel = document.createElement("div");
-    Object.defineProperty(panel, "offsetParent", { configurable: true, get: () => null });
+    Object.defineProperty(panel, "offsetParent", {
+      configurable: true,
+      get: () => null,
+    });
     result.current.panelRef.current = panel;
     act(() => result.current.setActiveTab("activity"));
     vi.mocked(api.getMemoryCuratorActivity).mockClear();
@@ -324,7 +400,10 @@ describe("useCurationData", () => {
     });
     expect(api.getMemoryCuratorActivity).not.toHaveBeenCalled();
 
-    Object.defineProperty(panel, "offsetParent", { configurable: true, get: () => ({ nodeName: "DIV" }) });
+    Object.defineProperty(panel, "offsetParent", {
+      configurable: true,
+      get: () => ({ nodeName: "DIV" }),
+    });
     await act(async () => {
       vi.advanceTimersByTime(2500);
     });
@@ -362,7 +441,9 @@ describe("useCurationData", () => {
 
     expect(result.current.configDirty).toBe(true);
     expect(result.current.configDraft.enabled).toBe(true);
-    expect(result.current.configDraft.tasks.memory_curator.schedule).toBe("manual");
+    expect(result.current.configDraft.tasks.memory_curator.schedule).toBe(
+      "manual",
+    );
 
     await act(async () => {
       await result.current.saveConfigDraft();
@@ -511,7 +592,13 @@ describe("useCurationData", () => {
         enabled: true,
         scheduler_tick_secs: 60,
         now: 1782283200,
-        tasks: [{ task: "memory_curator", due: false, skip_reason: "scheduler_paused" }],
+        tasks: [
+          {
+            task: "memory_curator",
+            due: false,
+            skip_reason: "scheduler_paused",
+          },
+        ],
       }),
       resumeAutomationScheduler: vi.fn().mockResolvedValue({
         status: "configured",
@@ -592,7 +679,7 @@ describe("useCurationData", () => {
     expect(result.current.configDirty).toBe(true);
   });
 
-  it("loads automation run history when the history tab opens", async () => {
+  it("loads automation run history when the automation tab opens", async () => {
     const api = makeApi({
       getMemoryAutomationRuns: vi.fn().mockResolvedValue({
         records: [
@@ -621,7 +708,7 @@ describe("useCurationData", () => {
       expect(result.current.configDraft).toBeTruthy();
     });
 
-    act(() => result.current.setActiveTab("history"));
+    act(() => result.current.setActiveTab("automation"));
 
     await waitFor(() => {
       expect(api.getMemoryAutomationRuns).toHaveBeenCalledWith({ limit: 20 });
@@ -657,7 +744,10 @@ describe("useCurationData", () => {
       await result.current.loadAutomationRunArtifact("run-1", "codex_handoff");
     });
 
-    expect(api.getMemoryAutomationRunArtifact).toHaveBeenCalledWith("run-1", "codex_handoff");
+    expect(api.getMemoryAutomationRunArtifact).toHaveBeenCalledWith(
+      "run-1",
+      "codex_handoff",
+    );
     expect(result.current.automationRunArtifact?.payload).toMatchObject({
       status: "ready_for_review",
     });
@@ -675,7 +765,9 @@ describe("useCurationData", () => {
       await result.current.runAutomationTask("session_reflector");
     });
 
-    expect(api.postAutomationRunSessionReflection).toHaveBeenCalledWith({ dry_run: true });
+    expect(api.postAutomationRunSessionReflection).toHaveBeenCalledWith({
+      dry_run: true,
+    });
     expect(api.getMemoryAutomationRuns).toHaveBeenCalledWith({ limit: 20 });
     expect(api.getFactProposals).toHaveBeenCalledWith({ limit: 50 });
 
@@ -683,14 +775,18 @@ describe("useCurationData", () => {
       await result.current.runAutomationTask("skill_writer");
     });
 
-    expect(api.postAutomationRunSkillWriting).toHaveBeenCalledWith({ dry_run: true });
+    expect(api.postAutomationRunSkillWriting).toHaveBeenCalledWith({
+      dry_run: true,
+    });
     expect(api.getManagedSkills).toHaveBeenCalled();
 
     await act(async () => {
       await result.current.runAutomationTask("memory_curator");
     });
 
-    expect(api.postAutomationRunMemoryCurator).toHaveBeenCalledWith({ dry_run: true });
+    expect(api.postAutomationRunMemoryCurator).toHaveBeenCalledWith({
+      dry_run: true,
+    });
     expect(api.getMemoryCuratorActivity).toHaveBeenCalled();
   });
 
@@ -719,10 +815,26 @@ describe("useCurationData", () => {
         status: "queued",
         ledger_record: queuedRun,
       }),
-      getMemoryAutomationRuns: vi.fn()
-        .mockResolvedValueOnce({ records: [queuedRun], count: 1, limit: 20, error: "" })
-        .mockResolvedValueOnce({ records: [queuedRun], count: 1, limit: 20, error: "" })
-        .mockResolvedValueOnce({ records: [succeededRun], count: 1, limit: 20, error: "" }),
+      getMemoryAutomationRuns: vi
+        .fn()
+        .mockResolvedValueOnce({
+          records: [queuedRun],
+          count: 1,
+          limit: 20,
+          error: "",
+        })
+        .mockResolvedValueOnce({
+          records: [queuedRun],
+          count: 1,
+          limit: 20,
+          error: "",
+        })
+        .mockResolvedValueOnce({
+          records: [succeededRun],
+          count: 1,
+          limit: 20,
+          error: "",
+        }),
     });
     const { result } = renderHook(() =>
       useCurationData({ api, pollFastMs: 25 }),
@@ -778,7 +890,8 @@ describe("useCurationData", () => {
       task: "skill_writer",
     };
     const api = makeApi({
-      getMemoryAutomationRuns: vi.fn()
+      getMemoryAutomationRuns: vi
+        .fn()
         .mockResolvedValueOnce({
           records: [queuedMemoryRun, queuedReflectionRun, queuedSkillRun],
           count: 3,
@@ -827,7 +940,7 @@ describe("useCurationData", () => {
     expect(api.getManagedSkills).toHaveBeenCalledTimes(1);
   });
 
-  it("loads and applies fact proposals from the history tab", async () => {
+  it("loads and applies fact proposals from the proposals tab", async () => {
     const pendingProposal = {
       schema_version: 1,
       proposal_id: "prop-1",
@@ -844,7 +957,8 @@ describe("useCurationData", () => {
       updated_at: 1782283300,
     };
     const api = makeApi({
-      getFactProposals: vi.fn()
+      getFactProposals: vi
+        .fn()
         .mockResolvedValueOnce({
           proposals: [pendingProposal],
           count: 1,
@@ -855,7 +969,9 @@ describe("useCurationData", () => {
           count: 1,
           limit: 50,
         }),
-      applyFactProposal: vi.fn().mockResolvedValue({ proposal: appliedProposal }),
+      applyFactProposal: vi
+        .fn()
+        .mockResolvedValue({ proposal: appliedProposal }),
     });
     const { result } = renderHook(() => useCurationData({ api }));
 
@@ -863,7 +979,7 @@ describe("useCurationData", () => {
       expect(result.current.configDraft).toBeTruthy();
     });
 
-    act(() => result.current.setActiveTab("history"));
+    act(() => result.current.setActiveTab("proposals"));
 
     await waitFor(() => {
       expect(api.getFactProposals).toHaveBeenCalledWith({ limit: 50 });
@@ -878,7 +994,7 @@ describe("useCurationData", () => {
     expect(result.current.factProposals[0].state).toBe("applied");
   });
 
-  it("loads and approves managed skills from the history tab", async () => {
+  it("loads and approves managed skills from the proposals tab", async () => {
     const pendingSkill = {
       metadata: {
         id: "repo-hygiene",
@@ -890,7 +1006,11 @@ describe("useCurationData", () => {
         pinned: false,
         created_at: 1782259200,
         updated_at: 1782259200,
-        provenance: { source: "automation_run", actor: "skill_writer", run_id: "run-1" },
+        provenance: {
+          source: "automation_run",
+          actor: "skill_writer",
+          run_id: "run-1",
+        },
       },
       body_markdown: "Use focused checks before broad suites.",
       support_files: [],
@@ -900,7 +1020,8 @@ describe("useCurationData", () => {
       metadata: { ...pendingSkill.metadata, state: "active" },
     };
     const api = makeApi({
-      getManagedSkills: vi.fn()
+      getManagedSkills: vi
+        .fn()
         .mockResolvedValueOnce({
           skills: [pendingSkill],
           skill_metadata: [pendingSkill.metadata],
@@ -909,7 +1030,8 @@ describe("useCurationData", () => {
               skill_id: "repo-hygiene",
               improvement: true,
               recommendation: "patch_review",
-              reason: "repeated patches suggest the skill instructions may still be unstable",
+              reason:
+                "repeated patches suggest the skill instructions may still be unstable",
               priority: "medium",
               evidence: ["patches=2"],
             },
@@ -924,14 +1046,16 @@ describe("useCurationData", () => {
               skill_id: "repo-hygiene",
               improvement: true,
               recommendation: "patch_review",
-              reason: "repeated patches suggest the skill instructions may still be unstable",
+              reason:
+                "repeated patches suggest the skill instructions may still be unstable",
               priority: "medium",
               evidence: ["patches=2"],
             },
           ],
           count: 1,
         }),
-      getManagedSkill: vi.fn()
+      getManagedSkill: vi
+        .fn()
         .mockResolvedValueOnce({ skill: pendingSkill })
         .mockResolvedValue({ skill: activeSkill }),
       approveManagedSkill: vi.fn().mockResolvedValue({ skill: activeSkill }),
@@ -942,14 +1066,17 @@ describe("useCurationData", () => {
       expect(result.current.configDraft).toBeTruthy();
     });
 
-    act(() => result.current.setActiveTab("history"));
+    act(() => result.current.setActiveTab("proposals"));
 
     await waitFor(() => {
       expect(api.getManagedSkills).toHaveBeenCalled();
-      expect(result.current.selectedManagedSkill?.metadata.id).toBe("repo-hygiene");
+      expect(result.current.selectedManagedSkill?.metadata.id).toBe(
+        "repo-hygiene",
+      );
     });
     expect(
-      result.current.managedSkillImprovementRecommendations["repo-hygiene"].recommendation,
+      result.current.managedSkillImprovementRecommendations["repo-hygiene"]
+        .recommendation,
     ).toBe("patch_review");
 
     await act(async () => {
