@@ -109,6 +109,22 @@ section so the contributor command and blocking/advisory split still match CI.
 4. Add a fixture file `tests/fixtures/sample.{ext}` and a test module `tests/extraction_suite/{lang}.rs`, then register it with a `mod {lang};` declaration in `tests/extraction_suite/main.rs`.
 5. Update the feature flag tables in `Cargo.toml` and this document.
 
+## Validating Plugins and Skills
+
+Changes under `cursor-plugin/`, `codex-plugin/`, or `src/agents/` are covered
+by a layered validation system: vendored JSON-schema checks, per-host skill
+frontmatter contracts, cross-bundle sync/parity tests, and a CI
+schema-validation workflow. `cursor-plugin/` is the source of truth — never
+hand-edit mirrored Codex skills. Before submitting, run:
+
+```bash
+cargo nextest run -E 'binary(=agent_suite)'
+```
+
+See [`docs/PLUGIN-VALIDATION.md`](docs/PLUGIN-VALIDATION.md) for the full
+layer breakdown, schema refresh procedure, and how to add a skill or a new
+ecosystem bundle correctly.
+
 ## Running Specific Tests
 
 ```bash

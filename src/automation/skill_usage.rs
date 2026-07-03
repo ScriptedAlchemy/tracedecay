@@ -8,10 +8,15 @@ use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::current_timestamp;
 
 mod analytics;
+mod overlap;
 mod recommendations;
 
 pub(crate) use analytics::analytics_import_key_for_request;
 pub use analytics::{ingest_analytics_events, ingest_project_analytics_events};
+pub use overlap::{
+    skill_overlap_candidates, SkillOverlapCandidate, DEFAULT_SKILL_OVERLAP_LIMIT,
+    SKILL_OVERLAP_CONTENT_THRESHOLD, SKILL_OVERLAP_TITLE_THRESHOLD,
+};
 pub use recommendations::{skill_improvement_recommendations, stale_skill_recommendations};
 
 const SKILL_USAGE_LEDGER_FILENAME: &str = "skill_usage.json";

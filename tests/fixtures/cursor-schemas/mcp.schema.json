@@ -1,0 +1,103 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://cursor.com/schemas/cursor-plugin/mcp.json",
+  "title": "Cursor MCP Server Configuration",
+  "description": "Schema for mcp.json — Cursor's MCP server configuration (plugin-root mcp.json, .cursor/mcp.json, ~/.cursor/mcp.json). Cursor does not publish a standalone machine-readable schema for mcp.json (the official plugin.schema.json in cursor/plugins types the inline `mcpServers` field as a bare object), so this schema is derived from the official field reference at https://cursor.com/docs/context/mcp (STDIO server configuration, remote servers, static OAuth) as of 2026-07-02. Field values may contain Cursor config interpolation variables such as ${env:NAME} and ${workspaceFolder}.",
+  "type": "object",
+  "required": ["mcpServers"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "mcpServers": {
+      "type": "object",
+      "description": "Map of server name to MCP server definition.",
+      "additionalProperties": { "$ref": "#/$defs/mcpServer" }
+    }
+  },
+  "$defs": {
+    "stringMap": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "mcpServer": {
+      "oneOf": [
+        { "$ref": "#/$defs/stdioServer" },
+        { "$ref": "#/$defs/remoteServer" }
+      ]
+    },
+    "stdioServer": {
+      "type": "object",
+      "description": "Local command-line (stdio) MCP server.",
+      "required": ["command"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "stdio",
+          "description": "Server connection type. Optional in practice; when present must be \"stdio\" for command-based servers."
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Command to start the server executable. Must be on the system path or a full path."
+        },
+        "args": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Arguments passed to the command."
+        },
+        "env": {
+          "$ref": "#/$defs/stringMap",
+          "description": "Environment variables for the server process."
+        },
+        "envFile": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Path to an environment file to load additional variables (stdio servers only)."
+        }
+      }
+    },
+    "remoteServer": {
+      "type": "object",
+      "description": "Remote MCP server reached over SSE or streamable HTTP.",
+      "required": ["url"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": ["sse", "http", "streamable-http"],
+          "description": "Server connection type. Optional; inferred from the endpoint when omitted."
+        },
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "description": "URL of the SSE or HTTP endpoint."
+        },
+        "headers": {
+          "$ref": "#/$defs/stringMap",
+          "description": "HTTP headers sent to the server (e.g. Authorization)."
+        },
+        "auth": {
+          "type": "object",
+          "description": "Static OAuth client credentials for providers without dynamic client registration.",
+          "required": ["CLIENT_ID"],
+          "additionalProperties": false,
+          "properties": {
+            "CLIENT_ID": {
+              "type": "string",
+              "minLength": 1,
+              "description": "OAuth 2.0 Client ID from the MCP provider."
+            },
+            "CLIENT_SECRET": {
+              "type": "string",
+              "description": "OAuth 2.0 Client Secret, for confidential clients."
+            },
+            "scopes": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "OAuth scopes to request. Discovered from the provider when omitted."
+            }
+          }
+        }
+      }
+    }
+  }
+}
