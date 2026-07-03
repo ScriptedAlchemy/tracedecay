@@ -10,14 +10,14 @@ import {
 } from "./historyFormat";
 import type {
   ManagedSkill,
-  ManagedSkillState,
   SkillImprovementRecommendation,
   SkillStaleRecommendation,
   SkillUsageSummary,
 } from "../types";
 import type { ManagedSkillExportsResult } from "./useManagedSkills";
 
-type ManagedSkillAction = "approve" | "discard-update" | "disable" | "archive" | "restore";
+type ManagedSkillAction =
+  "approve" | "discard-update" | "disable" | "archive" | "restore";
 
 function SkillExportResults({ result }: { result: ManagedSkillExportsResult }) {
   return (
@@ -30,7 +30,9 @@ function SkillExportResults({ result }: { result: ManagedSkillExportsResult }) {
           {result.reports.map((report) => (
             <li
               key={report.agent}
-              className={report.error ? "text-destructive" : "text-text-secondary"}
+              className={
+                report.error ? "text-destructive" : "text-text-secondary"
+              }
             >
               <span className="font-mono-ui">{report.agent}</span>
               {report.error ? (
@@ -38,7 +40,11 @@ function SkillExportResults({ result }: { result: ManagedSkillExportsResult }) {
               ) : (
                 <span>
                   {" "}
-                  · {report.exports.reduce((sum, entry) => sum + entry.exported_count, 0)}{" "}
+                  ·{" "}
+                  {report.exports.reduce(
+                    (sum, entry) => sum + entry.exported_count,
+                    0,
+                  )}{" "}
                   skill(s) deployed
                 </span>
               )}
@@ -54,7 +60,8 @@ function SkillExportResults({ result }: { result: ManagedSkillExportsResult }) {
   );
 }
 
-function SkillStateBadge({ state }: { state: ManagedSkillState }) {
+/** Shared state pill for managed skills and fact proposals. */
+export function StateBadge({ state }: { state: string }) {
   return (
     <span
       className={`shrink-0 rounded-sm border px-1.5 py-0.5 text-[10px] uppercase tracking-[0.08em] ${managedSkillStateClass(state)}`}
@@ -178,7 +185,7 @@ export function ManagedSkillsSection({
                         {skill.metadata.id}
                       </div>
                     </div>
-                    <SkillStateBadge state={skill.metadata.state} />
+                    <StateBadge state={skill.metadata.state} />
                   </div>
                   <div className="mt-1 line-clamp-2 text-[11px] text-text-secondary">
                     {skill.metadata.summary}
@@ -198,15 +205,19 @@ export function ManagedSkillsSection({
                     {managedSkillSummary(selectedSkill)}
                   </div>
                 </div>
-                <SkillStateBadge state={selectedSkill.metadata.state} />
+                <StateBadge state={selectedSkill.metadata.state} />
               </div>
               <div className="mt-2 grid gap-1 text-[11px] text-text-tertiary sm:grid-cols-2">
                 <span className="font-mono-ui break-all">
                   checksum={selectedSkill.metadata.checksum}
                 </span>
-                <span>updated={formatUnixTime(selectedSkill.metadata.updated_at)}</span>
+                <span>
+                  updated={formatUnixTime(selectedSkill.metadata.updated_at)}
+                </span>
                 <span>support files={selectedSkill.support_files.length}</span>
-                <span>pinned={selectedSkill.metadata.pinned ? "yes" : "no"}</span>
+                <span>
+                  pinned={selectedSkill.metadata.pinned ? "yes" : "no"}
+                </span>
               </div>
               {selectedUsage ? (
                 <div className="mt-2 grid gap-1 border border-border/60 bg-secondary/20 p-2 text-[11px] text-text-tertiary sm:grid-cols-2">
@@ -219,16 +230,22 @@ export function ManagedSkillsSection({
                   <span className="font-mono-ui">
                     patches={selectedUsage.patch_count}
                   </span>
-                  <span>last={formatUnixTime(selectedUsage.last_activity_at)}</span>
+                  <span>
+                    last={formatUnixTime(selectedUsage.last_activity_at)}
+                  </span>
                   <span className="sm:col-span-2">
-                    targets={selectedUsage.targets.length ? selectedUsage.targets.join(", ") : "none"}
+                    targets=
+                    {selectedUsage.targets.length
+                      ? selectedUsage.targets.join(", ")
+                      : "none"}
                   </span>
                 </div>
               ) : null}
               {selectedRecommendation ? (
                 <div
                   className={`mt-2 border px-2 py-1.5 text-[11px] ${
-                    selectedRecommendation.stale || selectedRecommendation.recommendation !== "keep"
+                    selectedRecommendation.stale ||
+                    selectedRecommendation.recommendation !== "keep"
                       ? "border-warning/30 bg-warning/10 text-warning"
                       : "border-border bg-background/50 text-text-tertiary"
                   }`}
@@ -253,19 +270,23 @@ export function ManagedSkillsSection({
               {selectedSkill.pending_update ? (
                 <div className="mt-2 border border-warning/30 bg-warning/10 p-2 text-[11px] text-warning">
                   <div className="font-mono-ui">
-                    staged update · checksum={selectedSkill.pending_update.metadata.checksum}
+                    staged update · checksum=
+                    {selectedSkill.pending_update.metadata.checksum}
                   </div>
                   <div className="mt-1 text-text-secondary">
                     {selectedSkill.pending_update.metadata.summary}
                   </div>
                   <div className="mt-1 text-text-tertiary">
-                    staged={formatUnixTime(selectedSkill.pending_update.staged_at)}
+                    staged=
+                    {formatUnixTime(selectedSkill.pending_update.staged_at)}
                     {" · "}
-                    support files={selectedSkill.pending_update.support_files.length}
+                    support files=
+                    {selectedSkill.pending_update.support_files.length}
                   </div>
                 </div>
               ) : null}
-              {exportsResult && exportsResult.skillId === selectedSkill.metadata.id ? (
+              {exportsResult &&
+              exportsResult.skillId === selectedSkill.metadata.id ? (
                 <SkillExportResults result={exportsResult} />
               ) : null}
               <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap border border-border bg-background/70 p-2 font-mono-ui text-[11px] leading-relaxed text-text-secondary">

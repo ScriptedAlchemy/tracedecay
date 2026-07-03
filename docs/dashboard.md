@@ -228,11 +228,24 @@ Detects duplicate and related facts using phase-vector cosine similarity:
 
 *(Availability controlled by capability flag `features.curation`)*
 
-Memory maintenance tools:
-- **Status**: Current curation configuration and last run summary
-- **Activity**: Event log of curation actions
-- **Preview**: Dry-run analysis showing proposed actions (persisted to `.tracedecay/dashboard/curation_preview.json` so it survives server restarts)
-- **Run Curation**: Execute deduplication (**permanently hard-DELETES** the lower-trust fact in each duplicate pair)
+The Curation panel is organized into five sub-tabs:
+
+- **Plan**: Dry-run analysis showing proposed actions (persisted to
+  `.tracedecay/dashboard/curation_preview.json` so it survives server
+  restarts), plus the Preview / Apply controls. Applying deduplicates by
+  permanently deleting the lower-trust fact in each duplicate pair.
+- **Automation**: Scheduler state (with pause/resume), the effective
+  automation config editor (backend, host mode, model, per-task schedules),
+  per-task **Run** buttons for the memory curator / session reflector /
+  skill writer loops, and the automation run ledger with hash-verified
+  artifact drill-down.
+- **Proposals**: Session-reflection fact proposals awaiting approval
+  (pending first; resolved proposals are collapsed) and managed-skill
+  drafts with approve/disable/archive/restore actions. The tab label shows
+  the pending count.
+- **History**: Curator run history, recent snapshots, the memory operation
+  log (oplog), and the saved preview state.
+- **Activity**: Live event log of curation phases from preview and apply runs.
 
 Curation is implemented as similarity-based deduplication (no LLM calls). It proposes hard-deleting the lower-trust fact in each `likely_duplicate` pair (similarity ≥ 0.95 with lexical overlap). Rule-based hygiene signals are emitted separately as `hygiene_candidates`; they are review evidence for a human or external LLM curator, not deterministic apply operations.
 
@@ -331,6 +344,17 @@ Analyze LCM compression efficiency:
 - Per-session breakdown
 - Per-node breakdown
 - Node count and token savings statistics
+
+#### Store Maintenance
+
+The overview footer surfaces external-payload health from
+`GET /payloads/health` (externalized payload count and bytes, reclaimable
+bytes, orphan files, missing payloads/placeholder refs, tombstones, and the
+last GC outcome) with a two-step payload GC flow: **Preview GC** runs the
+dry-run (`GET /payloads/gc`) and **Apply GC** submits the returned
+`dry_run_token` (`POST /payloads/gc`) to reap unreferenced payload files.
+Stores that never externalized a payload report an empty "nothing to
+reclaim" dry run rather than an error.
 
 ### Code Graph
 

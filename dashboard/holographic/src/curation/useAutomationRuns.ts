@@ -44,7 +44,7 @@ export function useAutomationRuns({
 }: {
   api: AutomationRunsApi;
   pollFastMs: number;
-  setActiveTab: (tab: "history") => void;
+  setActiveTab: (tab: "automation") => void;
   setMemoryPreviewFromRun: (report: MemoryCurateResponse) => void;
   loadMemoryPreview: (force?: boolean) => Promise<unknown>;
   loadActivity: (showSpinner?: boolean) => void;
@@ -67,6 +67,11 @@ export function useAutomationRuns({
   );
   const [automationRunArtifactError, setAutomationRunArtifactError] = useState("");
 
+  const refreshMemoryState = useCallback(() => {
+    loadActivity(false);
+    loadStatus();
+  }, [loadActivity, loadStatus]);
+
   const refreshCompletedRuns = useCallback(async (
     completedRuns: MemoryAutomationRunRecord[],
   ) => {
@@ -85,18 +90,16 @@ export function useAutomationRuns({
     const refreshes: Promise<unknown>[] = [];
     if (refreshMemoryPreview) {
       refreshes.push(loadMemoryPreview(true));
-      loadActivity(false);
-      loadStatus();
+      refreshMemoryState();
     }
     if (refreshFactProposals) refreshes.push(loadFactProposals(false));
     if (refreshManagedSkills) refreshes.push(loadManagedSkills(false));
     await Promise.all(refreshes);
   }, [
-    loadActivity,
     loadFactProposals,
     loadManagedSkills,
     loadMemoryPreview,
-    loadStatus,
+    refreshMemoryState,
   ]);
 
   const loadAutomationRuns = useCallback(() => {
@@ -151,7 +154,7 @@ export function useAutomationRuns({
   const runAutomationTask = useCallback(async (task: AutomationRunTask) => {
     setAutomationRunActioning(task);
     setAutomationRunError("");
-      setActiveTab("history");
+    setActiveTab("automation");
     try {
       const descriptor = AUTOMATION_TASK_BY_ID[task];
       const response = await api[descriptor.runMethod]({ dry_run: true });
@@ -171,8 +174,7 @@ export function useAutomationRuns({
       ) {
         const report = (response as MemoryAutomationRunResponse<MemoryCurateResponse>).report;
         if (report) setMemoryPreviewFromRun(report);
-        loadActivity(false);
-        loadStatus();
+        refreshMemoryState();
       } else if (descriptor.refreshTarget === "fact_proposals") {
         await loadFactProposals(false);
       } else if (descriptor.refreshTarget === "managed_skills") {
@@ -191,7 +193,7 @@ export function useAutomationRuns({
     loadAutomationRuns,
     loadFactProposals,
     loadManagedSkills,
-    loadStatus,
+    refreshMemoryState,
     setActiveTab,
     setMemoryPreviewFromRun,
   ]);
