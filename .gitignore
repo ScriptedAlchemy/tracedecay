@@ -4,6 +4,7 @@
 .tracedecay
 .mcp.json
 !codex-plugin/.mcp.json
+!claude-plugin/.mcp.json
 .claude/
 .cursor/
 docs/superpowers

@@ -53,19 +53,22 @@ fn read_json(path: &Path) -> serde_json::Value {
 // ===========================================================================
 
 #[test]
-fn test_install_creates_claude_json_with_mcp_server() {
+fn test_install_deploys_plugin_mcp_server() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let ctx = make_install_ctx(home);
     ClaudeIntegration.install(&ctx).unwrap();
 
-    let claude_json = read_json(&home.join(".claude.json"));
-    let ts = &claude_json["mcpServers"]["tracedecay"];
+    // The MCP server now lives in the deployed plugin's .mcp.json (rendered with
+    // the resolved absolute binary path), not in ~/.claude.json.
+    let plugin_mcp = home.join(".claude/plugins/marketplaces/tracedecay/.mcp.json");
+    let mcp = read_json(&plugin_mcp);
+    let ts = &mcp["mcpServers"]["tracedecay"];
     assert!(ts.is_object(), "mcpServers.tracedecay should be an object");
     assert_eq!(
         ts["command"].as_str().unwrap(),
         "/usr/local/bin/tracedecay",
-        "command should match the bin path"
+        "command should be rendered with the resolved bin path"
     );
     let args: Vec<&str> = ts["args"]
         .as_array()
@@ -77,14 +80,18 @@ fn test_install_creates_claude_json_with_mcp_server() {
 }
 
 #[test]
-fn test_install_creates_settings_with_hook() {
+fn test_install_deploys_plugin_hooks() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let ctx = make_install_ctx(home);
     ClaudeIntegration.install(&ctx).unwrap();
 
-    let settings = read_json(&home.join(".claude/settings.json"));
-    let hooks = settings["hooks"]["PreToolUse"]
+    // Hooks are now provided by the plugin's own hooks/hooks.json (deployed with
+    // the __TRACEDECAY_BIN__ placeholder rendered), not written into
+    // ~/.claude/settings.json.
+    let hooks_json =
+        read_json(&home.join(".claude/plugins/marketplaces/tracedecay/hooks/hooks.json"));
+    let hooks = hooks_json["hooks"]["PreToolUse"]
         .as_array()
         .expect("PreToolUse should be an array");
 
@@ -104,16 +111,17 @@ fn test_install_creates_settings_with_hook() {
     });
     assert!(
         tracedecay_hook.is_some(),
-        "PreToolUse should contain a hook with matcher=Agent and command containing tracedecay"
+        "plugin PreToolUse should contain a hook with matcher=Agent and command containing tracedecay"
     );
 
-    // Verify the hook command format (issue #81: modern args[] shape).
+    // Verify the hook command format (issue #81: modern args[] shape) and that
+    // the binary placeholder was rendered to the resolved bin path.
     let hook = tracedecay_hook.unwrap();
     let inner = &hook["hooks"][0];
     let cmd = inner["command"].as_str().unwrap();
-    assert!(
-        cmd.contains("tracedecay"),
-        "hook command should be the tracedecay exe path, got: {cmd}"
+    assert_eq!(
+        cmd, "/usr/local/bin/tracedecay",
+        "hook command should be the rendered tracedecay exe path, got: {cmd}"
     );
     let args: Vec<&str> = inner["args"]
         .as_array()
@@ -125,6 +133,13 @@ fn test_install_creates_settings_with_hook() {
         args,
         vec!["hook-pre-tool-use"],
         "subcommand must live in args[], not concatenated into command"
+    );
+
+    // The old config-managed settings.json must not carry a tracedecay hook.
+    let settings = read_json(&home.join(".claude/settings.json"));
+    assert!(
+        settings.get("hooks").is_none(),
+        "install must not write tracedecay hooks into settings.json (plugin provides them)"
     );
 }
 
@@ -277,9 +292,13 @@ fn test_install_preserves_existing_claude_json() {
         "bar",
         "existing key 'foo' should be preserved"
     );
+    // The plugin model no longer writes tracedecay into ~/.claude.json.
     assert!(
-        claude_json["mcpServers"]["tracedecay"].is_object(),
-        "mcpServers.tracedecay should be added alongside existing keys"
+        claude_json
+            .get("mcpServers")
+            .and_then(|v| v.get("tracedecay"))
+            .is_none(),
+        "install must not add a config-managed MCP entry to ~/.claude.json"
     );
 }
 
@@ -312,64 +331,122 @@ fn test_install_preserves_existing_settings() {
     let settings = read_json(&claude_dir.join("settings.json"));
     let hooks = settings["hooks"]["PreToolUse"].as_array().unwrap();
 
-    // Should have both the existing Bash hook and the new Agent hook
+    // The user's existing (non-tracedecay) Bash hook must be preserved, and the
+    // plugin must be enabled. Install no longer injects a tracedecay Agent hook
+    // into settings.json — the plugin's own hooks.json provides it.
     let has_bash = hooks
         .iter()
         .any(|h| h.get("matcher").and_then(|m| m.as_str()) == Some("Bash"));
-    let has_agent = hooks
-        .iter()
-        .any(|h| h.get("matcher").and_then(|m| m.as_str()) == Some("Agent"));
     assert!(has_bash, "existing Bash hook should be preserved");
-    assert!(has_agent, "new Agent hook should be added");
+    let has_tracedecay_hook = hooks.iter().any(|h| {
+        h.get("hooks")
+            .and_then(|a| a.as_array())
+            .is_some_and(|arr| {
+                arr.iter().any(|entry| {
+                    entry
+                        .get("command")
+                        .and_then(|c| c.as_str())
+                        .is_some_and(|c| c.contains("tracedecay"))
+                })
+            })
+    });
+    assert!(
+        !has_tracedecay_hook,
+        "install must not add a tracedecay hook to settings.json (plugin provides it)"
+    );
+    assert_eq!(
+        settings["enabledPlugins"]["tracedecay@tracedecay"],
+        serde_json::json!(true),
+        "install should enable the plugin"
+    );
 }
 
 #[test]
-fn test_install_migrates_old_mcp_from_settings() {
+fn test_install_migrates_off_config_managed_integration() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
-
-    // Pre-populate settings.json with old-location MCP server
     let claude_dir = home.join(".claude");
     std::fs::create_dir_all(&claude_dir).unwrap();
+
+    // Seed a legacy config-managed install: loose MCP entry in ~/.claude.json,
+    // a tracedecay hook in settings.json, and a loose managed subagent file.
+    std::fs::write(
+        home.join(".claude.json"),
+        r#"{
+  "mcpServers": {
+    "tracedecay": { "command": "/old/path/tracedecay", "args": ["serve"] },
+    "other": { "command": "keep-me" }
+  }
+}"#,
+    )
+    .unwrap();
     std::fs::write(
         claude_dir.join("settings.json"),
         r#"{
-  "mcpServers": {
-    "tracedecay": {
-      "command": "/old/path/tracedecay",
-      "args": ["serve"]
-    }
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Agent",
+        "hooks": [{"type": "command", "command": "/old/path/tracedecay hook-pre-tool-use"}]
+      }
+    ]
   }
 }"#,
+    )
+    .unwrap();
+    let agents_dir = claude_dir.join("agents");
+    std::fs::create_dir_all(&agents_dir).unwrap();
+    std::fs::write(
+        agents_dir.join("code-explorer.md"),
+        "---\nname: code-explorer\n---\nUse tracedecay for exploration.\n",
     )
     .unwrap();
 
     let ctx = make_install_ctx(home);
     ClaudeIntegration.install(&ctx).unwrap();
 
-    // settings.json should NOT have mcpServers.tracedecay anymore
-    let settings = read_json(&claude_dir.join("settings.json"));
-    let has_stale = settings
-        .get("mcpServers")
-        .and_then(|v| v.get("tracedecay"))
-        .is_some();
-    assert!(
-        !has_stale,
-        "tracedecay MCP server should be removed from settings.json (old location)"
-    );
-
-    // .claude.json should have it in the new location
+    // The loose MCP tracedecay entry is migrated away; the foreign server stays.
     let claude_json = read_json(&home.join(".claude.json"));
     assert!(
-        claude_json["mcpServers"]["tracedecay"].is_object(),
-        "tracedecay MCP server should exist in .claude.json (new location)"
+        claude_json
+            .get("mcpServers")
+            .and_then(|v| v.get("tracedecay"))
+            .is_none(),
+        "legacy loose MCP tracedecay entry should be migrated away"
     );
-    assert_eq!(
-        claude_json["mcpServers"]["tracedecay"]["command"]
-            .as_str()
-            .unwrap(),
-        "/usr/local/bin/tracedecay",
-        "MCP command should use the new bin path, not the old one"
+    assert!(
+        claude_json["mcpServers"]["other"].is_object(),
+        "foreign MCP server must be preserved during migration"
+    );
+
+    // The tracedecay hook is migrated out of settings.json.
+    let settings = read_json(&claude_dir.join("settings.json"));
+    let has_tracedecay_hook = settings
+        .get("hooks")
+        .and_then(|h| h.get("PreToolUse"))
+        .and_then(|v| v.as_array())
+        .is_some_and(|arr| {
+            arr.iter().any(|w| {
+                w.get("hooks")
+                    .and_then(|a| a.as_array())
+                    .is_some_and(|inner| {
+                        inner.iter().any(|e| {
+                            e.get("command")
+                                .and_then(|c| c.as_str())
+                                .is_some_and(|c| c.contains("tracedecay"))
+                        })
+                    })
+            })
+        });
+    assert!(
+        !has_tracedecay_hook,
+        "legacy tracedecay hook should be migrated out of settings.json"
+    );
+
+    // The loose managed subagent is removed.
+    assert!(
+        !agents_dir.join("code-explorer.md").exists(),
+        "loose tracedecay-managed subagent should be migrated away"
     );
 }
 
@@ -401,21 +478,35 @@ fn test_uninstall_removes_mcp_from_claude_json() {
 }
 
 #[test]
-fn test_uninstall_removes_empty_claude_json() {
+fn test_uninstall_removes_deployed_bundle_and_lone_marketplace_file() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let ctx = make_install_ctx(home);
 
-    // Install (creates .claude.json with only mcpServers.tracedecay)
+    // Install deploys the plugin bundle and registers the marketplace.
     ClaudeIntegration.install(&ctx).unwrap();
-    assert!(home.join(".claude.json").exists());
+    let deploy_dir = home.join(".claude/plugins/marketplaces/tracedecay");
+    let known_path = home.join(".claude/plugins/known_marketplaces.json");
+    assert!(
+        deploy_dir.exists(),
+        "bundle should be deployed after install"
+    );
+    assert!(
+        known_path.exists(),
+        "known_marketplaces.json should exist after install"
+    );
 
     ClaudeIntegration.uninstall(&ctx).unwrap();
 
-    // Since the only content was tracedecay, file should be deleted
+    // The deployed bundle dir is removed entirely.
     assert!(
-        !home.join(".claude.json").exists(),
-        ".claude.json should be deleted when it becomes empty after uninstall"
+        !deploy_dir.exists(),
+        "deployed plugin bundle should be removed after uninstall"
+    );
+    // known_marketplaces.json held only tracedecay, so it should be deleted.
+    assert!(
+        !known_path.exists(),
+        "known_marketplaces.json should be deleted when tracedecay was its only entry"
     );
 }
 
@@ -583,7 +674,7 @@ fn test_uninstall_preserves_other_claude_md_content() {
 // ===========================================================================
 
 #[test]
-fn test_healthcheck_detects_missing_claude_json() {
+fn test_healthcheck_detects_missing_plugin() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
 
@@ -593,9 +684,11 @@ fn test_healthcheck_detects_missing_claude_json() {
         project_path: home.to_path_buf(),
     };
     ClaudeIntegration.healthcheck(&mut dc, &hctx);
+    // With nothing installed, the plugin manifest is absent — the doctor flags
+    // it (as a warning to install the plugin) plus missing CLAUDE.md.
     assert!(
-        dc.issues > 0,
-        "healthcheck should detect missing .claude.json"
+        dc.issues > 0 || dc.warnings > 0,
+        "healthcheck should detect the missing plugin bundle"
     );
 }
 

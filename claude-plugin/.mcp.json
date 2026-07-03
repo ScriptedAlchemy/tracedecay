@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "tracedecay": {
+      "type": "stdio",
+      "command": "tracedecay",
+      "args": [
+        "serve"
+      ],
+      "env": {
+        "TRACEDECAY_ENABLE_GLOBAL_DB": "1"
+      }
+    }
+  }
+}
