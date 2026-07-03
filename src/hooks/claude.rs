@@ -1,7 +1,6 @@
 //! Claude Code hook handlers.
 //!
-//! Claude and Codex share the common hook JSON shape, while older Claude
-//! handlers keep their legacy input/output contracts.
+//! Claude and Codex share the common hook JSON shape.
 
 use serde_json::Value;
 
@@ -21,9 +20,6 @@ use super::{
 };
 
 /// `PreToolUse` hook handler for Claude Code's Agent tool matcher.
-///
-/// Blocks Explore agents and exploration-style prompts, directing Claude to
-/// use tracedecay MCP tools instead.
 pub fn hook_pre_tool_use() {
     let tool_input = std::env::var("TOOL_INPUT").unwrap_or_default();
     record_hook_invoked(None, HintAgent::Claude, "preToolUse", &tool_input);
@@ -34,8 +30,6 @@ pub fn hook_pre_tool_use() {
 }
 
 /// Pure decision logic for the `PreToolUse` hook.
-///
-/// Returns the JSON decision for Claude to print to stdout.
 pub fn evaluate_hook_decision(tool_input: &str) -> String {
     let parsed: serde_json::Value =
         serde_json::from_str(tool_input).unwrap_or_else(|_| serde_json::json!({}));
@@ -100,9 +94,7 @@ pub(super) fn is_code_research_prompt(prompt: &str) -> bool {
     exploration_patterns.iter().any(|pat| lower.contains(pat))
 }
 
-/// Claude Code `SessionStart` hook handler (fail-open).
-///
-/// Emits session-specific index freshness and compaction recovery context.
+/// Claude Code `SessionStart` hook handler.
 pub async fn hook_claude_session_start() -> i32 {
     let event = read_hook_event!();
     let root = codex_project_root_from_event(&event);
@@ -123,11 +115,6 @@ pub async fn hook_claude_session_start() -> i32 {
 }
 
 /// Builds the Claude `SessionStart` context for code workspaces.
-///
-/// On an initialized project this injects the full `using-tracedecay`
-/// adoption contract (the `<EXTREMELY_IMPORTANT>` bootstrap) after the index
-/// status line, matching the Cursor and Codex session hooks so Claude's
-/// `SessionStart` channel carries the same mandate.
 pub async fn claude_session_context_for_event(event_json: &str) -> String {
     let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
     match codex_project_root_from_parsed_event(&parsed) {
@@ -147,11 +134,7 @@ pub async fn claude_session_context_for_event(event_json: &str) -> String {
     }
 }
 
-/// Claude Code `PostToolUse` hook handler used to keep the graph fresh after
-/// writes.
-///
-/// Notifies the daemon, which owns targeted sync, branch tracking, and
-/// coalescing. Fail-open and silent.
+/// Claude Code `PostToolUse` hook handler used to keep the graph fresh.
 pub async fn hook_claude_post_tool_use() -> i32 {
     let event = read_hook_event!();
     let root = codex_project_root_from_event(&event);
@@ -161,9 +144,6 @@ pub async fn hook_claude_post_tool_use() -> i32 {
 }
 
 /// `UserPromptSubmit` hook handler: resets the per-session local counter.
-///
-/// Token savings are now reported inline in each MCP tool response,
-/// so this hook only needs to reset the counter for the new turn.
 pub async fn hook_prompt_submit() {
     let project_path = crate::config::resolve_path(None);
     if let Ok(cg) = crate::tracedecay::TraceDecay::open(&project_path).await {
@@ -172,8 +152,6 @@ pub async fn hook_prompt_submit() {
 }
 
 /// `Stop` hook handler: ingests new session data and prints a cost receipt.
-///
-/// Ingests new Claude Code session lines and prints a one-line cost receipt.
 pub async fn hook_stop() {
     let Some(gdb) = crate::global_db::GlobalDb::open().await else {
         return;

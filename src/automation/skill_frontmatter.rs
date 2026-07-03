@@ -1,30 +1,16 @@
-//! Canonical parser for `SKILL.md` YAML frontmatter.
-//!
-//! Skill frontmatter across the repo (the shared `plugin/skills/` bundle,
-//! Hermes hub skills, agent-managed exports) uses a
-//! small YAML subset: a `---` fence, `key: value` scalars (optionally single-
-//! or double-quoted), and block values made of indented lines (list items or
-//! nested maps). This module is the one place that subset is parsed so
-//! consumers ([`crate::automation::hermes_skill_inventory`] and the plugin
-//! contract tests in `tests/agent_suite/plugin_skill_contract_test.rs`) stop growing
-//! bespoke, subtly different parsers.
-//!
-//! Parsing is line-ending tolerant: CRLF checkouts (e.g. GitHub Windows
-//! runners with `core.autocrlf=true`) parse identically to LF checkouts.
+//! Parser for the `SKILL.md` frontmatter subset used by plugin and managed
+//! skills.
 
 use std::collections::BTreeMap;
 
 use crate::errors::{Result, TraceDecayError};
 
-/// One frontmatter value: either an inline scalar (`key: value`) or a block
-/// of indented continuation lines (`key:` followed by list items or nested
-/// mappings).
+/// One frontmatter value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkillFrontmatterValue {
-    /// Inline scalar with quoting already resolved (outer quotes stripped,
-    /// YAML `''` doubling inside single-quoted scalars unescaped).
+    /// Inline scalar with outer quotes stripped.
     Scalar(String),
-    /// Raw trimmed block lines under a key with no inline value.
+    /// Trimmed block lines under a key with no inline value.
     Block(Vec<String>),
 }
 
@@ -36,9 +22,7 @@ impl SkillFrontmatterValue {
         }
     }
 
-    /// Returns the unquoted items of a block whose every line is a YAML list
-    /// item (`- item`), or `None` for scalars and other block shapes (nested
-    /// maps, empty blocks).
+    /// Returns unquoted `- item` block entries.
     pub fn as_list_items(&self) -> Option<Vec<String>> {
         match self {
             Self::Scalar(_) => None,
@@ -58,11 +42,7 @@ impl SkillFrontmatterValue {
     }
 }
 
-/// Parses the leading `---`-fenced YAML frontmatter of a `SKILL.md` document.
-///
-/// Returns an error when the document does not open with frontmatter, never
-/// closes it, repeats a key, or contains a top-level line that is not a
-/// `key: value` mapping. Line endings (`\n` vs `\r\n`) are normalized away.
+/// Parses the leading `---`-fenced frontmatter of a `SKILL.md` document.
 pub fn parse_skill_frontmatter(contents: &str) -> Result<BTreeMap<String, SkillFrontmatterValue>> {
     let mut lines = contents.lines();
     if lines.next().map(str::trim_end) != Some("---") {
@@ -126,9 +106,7 @@ pub fn parse_skill_frontmatter(contents: &str) -> Result<BTreeMap<String, SkillF
     Ok(fields)
 }
 
-/// Strips one level of YAML quoting: single-quoted scalars also unescape the
-/// `''` doubling YAML uses to embed a literal `'`. Skill frontmatter never
-/// uses backslash escapes, so double-quoted scalars only lose their quotes.
+/// Strips one level of YAML quoting.
 fn unquote_scalar(value: &str) -> String {
     if let Some(inner) = value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')) {
         inner.replace("''", "'")

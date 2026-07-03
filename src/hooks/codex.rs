@@ -1,7 +1,6 @@
 //! Codex CLI hook handlers.
 //!
-//! Codex emits its documented hook output shape instead of reusing the Claude,
-//! Cursor, or Kiro contracts.
+//! Codex emits its own hook output shape.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -39,9 +38,7 @@ may be missing.";
 
 const CODEX_POST_COMPACT_BUDGET: Duration = Duration::from_secs(115);
 
-/// Codex `SessionStart` hook handler (fire-and-forget).
-///
-/// Emits tracedecay steering and index freshness for the session `cwd`.
+/// Codex `SessionStart` hook handler.
 pub async fn hook_codex_session_start() -> i32 {
     let event = read_hook_event!();
     let root = codex_project_root_from_event(&event);
@@ -70,8 +67,7 @@ pub async fn hook_codex_session_start() -> i32 {
 
 /// Codex `UserPromptSubmit` hook handler.
 ///
-/// Resets the per-project local counter for the new turn and injects the same
-/// tracedecay steering context as `SessionStart`. Never blocks the prompt.
+/// Resets the local counter and injects steering context for the new turn.
 pub async fn hook_codex_user_prompt_submit() -> i32 {
     let event = read_hook_event!();
     let root = codex_project_root_from_event(&event);
@@ -111,8 +107,7 @@ async fn codex_prompt_memory_recall(event_json: &str) -> Option<String> {
     memory_inject::prompt_memory_recall(&root, session_id.as_deref(), &prompt).await
 }
 
-/// Builds Codex session/prompt context. Unlike Cursor, Codex has no
-/// always-applied tracedecay rule, so this carries full steering.
+/// Builds Codex session/prompt context.
 async fn codex_session_context_for_event(event_json: &str) -> (String, HookWorkspaceStatus) {
     let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
     let root = codex_project_root_from_parsed_event(&parsed);
@@ -134,10 +129,6 @@ async fn codex_session_context_for_event(event_json: &str) -> (String, HookWorks
 }
 
 /// Codex `SubagentStart` hook handler.
-///
-/// Steers research/explore subagents toward tracedecay MCP tools. Codex cannot
-/// hard-stop a subagent at start (`continue: false` is ignored for this event),
-/// so this injects `additionalContext` instead of denying.
 pub async fn hook_codex_subagent_start() -> i32 {
     let event = read_hook_event!();
     let root = codex_project_root_from_event(&event);
@@ -181,10 +172,7 @@ fn merge_codex_subagent_output(output: Option<String>, digest: Option<String>) -
     Some(parsed.to_string())
 }
 
-/// Codex `PostToolUse` hook handler used to keep the graph fresh after writes.
-///
-/// Notifies the daemon, which owns targeted sync, branch tracking, and
-/// coalescing. Fail-open and silent.
+/// Codex `PostToolUse` hook handler used to keep the graph fresh.
 pub async fn hook_codex_post_tool_use() -> i32 {
     let event = read_hook_event!();
     let root = codex_project_root_from_event(&event);
@@ -195,10 +183,7 @@ pub async fn hook_codex_post_tool_use() -> i32 {
 
 /// Codex `PostCompact` hook handler.
 ///
-/// Codex stores compacted context bodies encrypted in the transcript. This hook
-/// uses the visible source messages already ingested into the LCM store, asks a
-/// child Codex app-server turn to summarize them, and replaces the temporary
-/// deterministic summary node. Fail-open: compaction must never block Codex.
+/// Replaces temporary compaction summaries from visible LCM source messages.
 pub async fn hook_codex_post_compact() -> i32 {
     let event = read_hook_event!();
     let root = codex_project_root_from_event(&event);
@@ -210,9 +195,7 @@ pub async fn hook_codex_post_compact() -> i32 {
     0
 }
 
-/// Builds a Codex hook stdout payload that injects model-visible context via
-/// `hookSpecificOutput.additionalContext`. Used by `SessionStart`,
-/// `UserPromptSubmit`, and `SubagentStart`.
+/// Builds a Codex hook stdout payload with `additionalContext`.
 pub fn codex_additional_context_json(event_name: &str, additional_context: &str) -> String {
     serde_json::json!({
         "hookSpecificOutput": {
@@ -224,9 +207,6 @@ pub fn codex_additional_context_json(event_name: &str, additional_context: &str)
 }
 
 /// Pure decision logic for Codex `SubagentStart` events.
-///
-/// Returns Codex context for research or no-history subagents, or `None` for
-/// execution-style subagents that already have history.
 pub fn evaluate_codex_subagent_start(event_json: &str) -> Option<String> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
     let agent_type = parsed
@@ -281,9 +261,7 @@ pub fn evaluate_codex_subagent_start(event_json: &str) -> Option<String> {
     None
 }
 
-/// Records a Codex `SubagentStart` in the current project's profile-sharded
-/// hook state and returns the session-local count. Fail-open: malformed events,
-/// missing roots, and storage errors only disable counting.
+/// Records a Codex `SubagentStart` and returns the session-local count.
 pub fn record_codex_subagent_start(event_json: &str) -> Option<u64> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
     let root = codex_project_root_from_parsed_event(&parsed)?;
@@ -447,14 +425,6 @@ pub fn codex_workspace_status_from_event(event_json: &str) -> HookWorkspaceStatu
 }
 
 /// Extracts the project-relative paths touched by a Codex `apply_patch` command.
-///
-/// Codex sends the patch text as `tool_input.command`. The `apply_patch` envelope
-/// names each file with `*** Add File:`, `*** Update File:`, `*** Delete File:`,
-/// or `*** Move to:` lines. Patch paths are relative to the session `cwd`
-/// (which may be a subdirectory of the discovered project root), so we resolve
-/// each against `cwd` and then make it relative to `project_root`. Absolute
-/// paths outside the root are skipped. The result feeds the daemon's targeted
-/// single-file sync event.
 pub fn codex_apply_patch_rel_paths(command: &str, cwd: &Path, project_root: &Path) -> Vec<String> {
     const PREFIXES: [&str; 4] = [
         "*** Add File:",

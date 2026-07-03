@@ -1,10 +1,8 @@
-//! Single-source-of-truth plugin bundle registry.
+//! Shared plugin bundle registry.
 //!
-//! All three host bundles (Claude, Cursor, Codex) used to live as three
-//! byte-duplicated trees (`claude-plugin/`, `cursor-plugin/`, `codex-plugin/`)
-//! embedded via three separate `include_str!` tables. They now share **one**
-//! on-disk tree under `plugin/`, and this module owns the composed per-host
-//! view that each installer deploys.
+//! The source tree is unified where host formats match; host-specific overlays
+//! remain where each installer needs a different manifest, hook, command, or
+//! agent format.
 //!
 //! Layout of `plugin/`:
 //! - `plugin/skills/*/SKILL.md` — the 16 shared model-invocable skills **plus**
@@ -26,12 +24,6 @@
 //! - `plugin/.mcp.json` — shared Claude/Codex MCP config (byte-identical);
 //!   `plugin/mcp-cursor.json` — Cursor MCP config (deploys to `mcp.json`).
 //! - `plugin/README-<host>.md` — per-host README (deploys to `README.md`).
-//!
-//! Each [`PluginFile::relative`] is the **deploy-relative** path on disk, kept
-//! byte-for-byte identical to the pre-refactor bundles so no host's installed
-//! tree changes. The embedded `contents` come from the shared `plugin/` source,
-//! whose path may differ from the deploy path (e.g. Cursor's
-//! `hooks/hooks.json` is sourced from `plugin/hooks/hooks-cursor.json`).
 //!
 //! Composed per-host view = `GENERATED_SKILL_FILES` (recursively embedded from
 //! `plugin/skills/`, filtered per host) ∪ `<HOST>_MANIFEST_FILES` and extras.
@@ -56,9 +48,8 @@ pub(crate) fn set_mcp_command(raw: &str, bin: &str) -> Result<String> {
     Ok(format!("{}\n", serde_json::to_string_pretty(&mcp)?))
 }
 
-/// One embedded plugin file: `relative` is its deploy path (unchanged from the
-/// legacy per-host bundles), `contents` is embedded from the shared `plugin/`
-/// tree at compile time.
+/// One embedded plugin file: `relative` is its deploy path; `contents` is
+/// embedded from the shared `plugin/` tree at compile time.
 #[derive(Clone, Copy)]
 pub struct PluginFile {
     pub relative: &'static str,
@@ -74,37 +65,24 @@ macro_rules! plugin_file {
     };
 }
 
-// `GENERATED_SKILL_FILES`: every file under `plugin/skills/` (all 29 skill
-// SKILL.md files **plus** any `references/`/`scripts/`/`assets/` support files),
-// embedded recursively at compile time by `build.rs`. This replaced the two
-// hand-maintained flat `include_str!` tables so skills can ship support files
-// without a matching table edit.
+// Every file under `plugin/skills/`, embedded recursively by `build.rs`.
 include!(concat!(env!("OUT_DIR"), "/plugin_bundle_generated.rs"));
 
 /// Prefix of the dispatcher skills that Cursor does **not** deploy (they are
 /// native commands on Cursor). Claude/Codex deploy every skill.
 const CURSOR_EXCLUDED_SKILL_PREFIX: &str = "skills/tracedecay-";
 
-/// Every skill file (all 29 skills' SKILL.md + support files) — the set
-/// Claude and Codex deploy unchanged.
 fn all_skill_files() -> impl Iterator<Item = &'static PluginFile> {
     GENERATED_SKILL_FILES.iter()
 }
 
-/// The Cursor skill subset: every skill file *except* the `tracedecay-*`
-/// dispatcher skills (those slugs are native commands on Cursor).
 fn cursor_skill_files() -> impl Iterator<Item = &'static PluginFile> {
     GENERATED_SKILL_FILES
         .iter()
         .filter(|file| !file.relative.starts_with(CURSOR_EXCLUDED_SKILL_PREFIX))
 }
 
-/// Cursor's native slash commands: the same 13 workflow slugs, re-expressed as
-/// Cursor 1.6+ `commands/` entries (no `disable-model-invocation` skill — these
-/// are commands, not skills). Cursor deploys these to `commands/<slug>.md` and
-/// ships the shared skill set *without* the canonical `tracedecay-*` dispatcher
-/// skills, so Cursor's shared skills are byte-identical to Claude/Codex and its
-/// explicit dispatch is native commands.
+/// Cursor's native slash commands for the canonical workflow slugs.
 const CURSOR_COMMAND_FILES: &[PluginFile] = &[
     plugin_file!(
         "commands/tracedecay-audit-safety.md",
@@ -243,12 +221,7 @@ pub const CODEX_MANIFEST_FILES: &[PluginFile] = &[
     plugin_file!("hooks/hooks.json", "hooks/hooks-codex.json"),
 ];
 
-/// Compose a host's full deploy set as `(relative, contents)` tuples: the
-/// host's manifest/agent/command/rule sections first, then its skill files
-/// (from the recursively-embedded `GENERATED_SKILL_FILES`).
-///
-/// Exact ordering does not affect the deployed tree (each file is written by
-/// its deploy `relative` path), but a stable order keeps tests deterministic.
+/// Compose a host's deploy set as deterministic `(relative, contents)` tuples.
 fn compose(
     sections: &[&'static [PluginFile]],
     skills: impl Iterator<Item = &'static PluginFile>,
