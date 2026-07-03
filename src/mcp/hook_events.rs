@@ -276,12 +276,66 @@ mod tests {
         }
     }
 
+    /// Resolves the `git` executable to an absolute path exactly once per
+    /// process. Under heavy parallel test load (nextest spawns one process per
+    /// test, each spawning several `git` subprocesses), a bare
+    /// `Command::new("git")` PATH lookup can transiently fail the spawn with
+    /// `ENOENT` ("No such file or directory") even though git is installed.
+    /// Resolving to an absolute path up front, plus a `GIT` env override,
+    /// removes the per-spawn PATH walk and makes the lookup deterministic.
+    fn git_program() -> std::ffi::OsString {
+        use std::sync::OnceLock;
+        static GIT: OnceLock<std::ffi::OsString> = OnceLock::new();
+        GIT.get_or_init(|| {
+            if let Some(explicit) = std::env::var_os("GIT") {
+                return explicit;
+            }
+            let exe_name = if cfg!(windows) { "git.exe" } else { "git" };
+            if let Some(paths) = std::env::var_os("PATH") {
+                for dir in std::env::split_paths(&paths) {
+                    let candidate = dir.join(exe_name);
+                    if candidate.is_file() {
+                        return candidate.into_os_string();
+                    }
+                }
+            }
+            // Fall back to a bare name and let the OS resolve it.
+            std::ffi::OsString::from("git")
+        })
+        .clone()
+    }
+
     fn run_git(cwd: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .unwrap_or_else(|e| panic!("git {args:?} should run: {e}"));
+        // A cwd that does not yet exist makes the spawn itself fail with
+        // ENOENT, which is indistinguishable from git-not-found; guard it so
+        // any real failure is attributable.
+        assert!(
+            cwd.is_dir(),
+            "git cwd {cwd:?} should exist before running git {args:?}"
+        );
+        let git = git_program();
+        // Retry a transient spawn ENOENT a few times: under load the initial
+        // fork/exec can spuriously fail even with a valid absolute program.
+        let mut last_err: Option<std::io::Error> = None;
+        let mut output = None;
+        for attempt in 0..5 {
+            match Command::new(&git).args(args).current_dir(cwd).output() {
+                Ok(out) => {
+                    output = Some(out);
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound && attempt < 4 => {
+                    last_err = Some(e);
+                    std::thread::sleep(std::time::Duration::from_millis(20 * (attempt + 1)));
+                }
+                Err(e) => {
+                    panic!("git {args:?} should run (program {git:?}): {e}");
+                }
+            }
+        }
+        let output = output.unwrap_or_else(|| {
+            panic!("git {args:?} should run (program {git:?}) after retries: {last_err:?}")
+        });
         assert!(
             output.status.success(),
             "git {:?} failed\nstdout:\n{}\nstderr:\n{}",

@@ -10,6 +10,13 @@ const FAKE_PATH: &str = "src/lib.fake";
 // to cover a didOpen -> publishDiagnostics round trip against an
 // already-initialized fake server.
 const FAKE_LSP_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(150);
+// Recovery collections (re-run a healthy server after forcing a crash) must
+// complete a real python spawn + didOpen -> publishDiagnostics round trip. The
+// client early-returns as soon as every requested URI has published, so this
+// generous bound costs no extra wall time on success — it only prevents a
+// false timeout when a loaded runner is slow to spawn/schedule the child. It
+// stays well under `OUTER_ASYNC_TIMEOUT`, so a genuine hang is still caught.
+const FAKE_LSP_RECOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const OUTER_ASYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
 
 #[test]
@@ -386,7 +393,7 @@ async fn broker_bounds_lsp_document_write_hangs() {
         .refresh_documents(
             FAKE_LANGUAGE,
             vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
-            FAKE_LSP_TIMEOUT,
+            FAKE_LSP_RECOVERY_TIMEOUT,
         )
         .await
         .unwrap();
@@ -487,7 +494,7 @@ async fn broker_drops_lsp_client_after_partial_diagnostics_frame_timeout() {
         .refresh_documents(
             FAKE_LANGUAGE,
             vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
-            FAKE_LSP_TIMEOUT,
+            FAKE_LSP_RECOVERY_TIMEOUT,
         )
         .await
         .unwrap();

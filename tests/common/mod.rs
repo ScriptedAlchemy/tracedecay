@@ -389,6 +389,35 @@ pub fn tracedecay_command_with_home(home: &Path) -> Command {
     command
 }
 
+/// Resolves the `git` executable to an absolute path exactly once per process.
+///
+/// Under heavy parallel test load (nextest spawns one process per test, each
+/// spawning several `git` subprocesses), a bare `Command::new("git")` PATH
+/// lookup can transiently fail the spawn with `ENOENT` ("No such file or
+/// directory") even though git is installed. Resolving to an absolute path up
+/// front — with an optional `GIT` env override — removes the per-spawn PATH
+/// walk and makes the lookup deterministic.
+pub fn git_program() -> std::ffi::OsString {
+    use std::sync::OnceLock;
+    static GIT: OnceLock<std::ffi::OsString> = OnceLock::new();
+    GIT.get_or_init(|| {
+        if let Some(explicit) = std::env::var_os("GIT") {
+            return explicit;
+        }
+        let exe_name = if cfg!(windows) { "git.exe" } else { "git" };
+        if let Some(paths) = std::env::var_os("PATH") {
+            for dir in std::env::split_paths(&paths) {
+                let candidate = dir.join(exe_name);
+                if candidate.is_file() {
+                    return candidate.into_os_string();
+                }
+            }
+        }
+        std::ffi::OsString::from("git")
+    })
+    .clone()
+}
+
 #[cfg(unix)]
 pub fn daemon_socket_path(home: &Path) -> PathBuf {
     canonical_existing_path(home).join(".tracedecay/daemon.sock")
@@ -438,19 +467,68 @@ pub fn response_to_json(mut response: ureq::http::Response<ureq::Body>) -> (u16,
     (status, parsed)
 }
 
+/// True when a `ureq` error is a connection-level failure that a freshly
+/// started (or briefly overloaded) server can transiently raise before it is
+/// steadily accepting requests: peer disconnected, connection refused/reset,
+/// or a bare I/O error. These are safe to retry for idempotent test requests;
+/// an HTTP status error is NOT one of these (the agent is built with
+/// `http_status_as_error(false)`, so 4xx/5xx come back as `Ok`).
+pub fn is_transient_connection_error(err: &ureq::Error) -> bool {
+    match err {
+        ureq::Error::ConnectionFailed => true,
+        ureq::Error::Io(_) => true,
+        other => {
+            // Fall back to a message match so newer/renamed variants (e.g.
+            // "Peer disconnected", "connection reset") still count as transient
+            // without pinning to a specific ureq version's enum shape.
+            let text = other.to_string().to_ascii_lowercase();
+            text.contains("peer disconnected")
+                || text.contains("connection refused")
+                || text.contains("connection reset")
+                || text.contains("broken pipe")
+                || text.contains("timed out")
+        }
+    }
+}
+
+/// Issues an idempotent HTTP request, retrying transient connection-level
+/// errors (the server racing its own readiness under parallel load) with a
+/// short bounded backoff. `send` performs one attempt; a `ureq::Error` that
+/// passes [`is_transient_connection_error`] is retried, any other error (or
+/// exhausted retries) panics with `label`.
+pub fn http_call_with_retry(
+    label: &str,
+    send: impl Fn() -> Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+) -> ureq::http::Response<ureq::Body> {
+    let mut last_err: Option<ureq::Error> = None;
+    for attempt in 0..12 {
+        match send() {
+            Ok(response) => return response,
+            Err(err) if is_transient_connection_error(&err) => {
+                last_err = Some(err);
+                std::thread::sleep(Duration::from_millis(25 * (attempt + 1)));
+            }
+            Err(err) => panic!("{label} failed: {err}"),
+        }
+    }
+    panic!("{label} failed after retries: {last_err:?}");
+}
+
 pub fn get_json(agent: &ureq::Agent, url: &str) -> (u16, Value) {
-    let response = match agent.get(url).call() {
-        Ok(response) => response,
-        Err(err) => panic!("GET {url} failed: {err}"),
-    };
+    let response = http_call_with_retry(&format!("GET {url}"), || agent.get(url).call());
     response_to_json(response)
 }
 
 pub async fn wait_for_dashboard(agent: &ureq::Agent, base_url: &str) {
     let probe = format!("{base_url}/api/capabilities");
-    for _ in 0..80 {
-        if agent.get(&probe).call().is_ok() {
-            return;
+    // Poll until the server both accepts the connection AND returns a real
+    // HTTP response (2xx). A bare connect success is not enough — the server
+    // can accept then drop the socket during startup ("Peer disconnected").
+    for _ in 0..160 {
+        if let Ok(response) = agent.get(&probe).call() {
+            if response.status().is_success() {
+                return;
+            }
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
