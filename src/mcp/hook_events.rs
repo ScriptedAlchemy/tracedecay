@@ -137,7 +137,9 @@ fn plan_shell_hook_event(
         return HookEventPlan::Noop;
     };
     let cwd = event.cwd.as_deref().unwrap_or(project_root);
-    let hook_project_root = hook_project_root(cwd, project_root);
+    let Some(hook_project_root) = hook_project_root(cwd, project_root) else {
+        return HookEventPlan::Noop;
+    };
     if !crate::hooks::cursor_shell_command_targets_project(command, cwd, &hook_project_root) {
         return HookEventPlan::Noop;
     }
@@ -180,19 +182,20 @@ fn plan_shell_hook_event(
     }
 }
 
-fn hook_project_root(cwd: &Path, project_root: &Path) -> PathBuf {
+fn hook_project_root(cwd: &Path, project_root: &Path) -> Option<PathBuf> {
     if let Some(root) = crate::config::discover_project_root(cwd) {
-        return root;
+        if root_belongs_to_project(&root, project_root) {
+            return Some(root);
+        }
+        return None;
     }
     let Some(worktree_root) = crate::worktree::git_worktree_root(cwd) else {
-        return project_root.to_path_buf();
+        return path_is_inside(cwd, project_root).then(|| project_root.to_path_buf());
     };
-    let cwd_common = crate::worktree::git_common_dir(&worktree_root);
-    let project_common = crate::worktree::git_common_dir(project_root);
-    if cwd_common.is_some() && cwd_common == project_common {
-        worktree_root
+    if git_roots_share_common_dir(&worktree_root, project_root) {
+        Some(worktree_root)
     } else {
-        project_root.to_path_buf()
+        None
     }
 }
 
@@ -209,6 +212,25 @@ fn branch_plan_for_root(
             branch,
         }
     }
+}
+
+fn root_belongs_to_project(root: &Path, project_root: &Path) -> bool {
+    paths_same(root, project_root) || git_roots_share_common_dir(root, project_root)
+}
+
+fn path_is_inside(path: &Path, root: &Path) -> bool {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    path.starts_with(root)
+}
+
+fn git_roots_share_common_dir(a: &Path, b: &Path) -> bool {
+    let a_common = crate::worktree::git_common_dir(a);
+    let b_common = crate::worktree::git_common_dir(b);
+    a_common
+        .as_ref()
+        .zip(b_common.as_ref())
+        .is_some_and(|(a_common, b_common)| paths_same(a_common, b_common))
 }
 
 fn paths_same(a: &Path, b: &Path) -> bool {
@@ -306,6 +328,16 @@ mod tests {
             "planned root {root:?} should match expected root {expected_root:?}"
         );
         assert_eq!(branch, expected_branch);
+    }
+
+    fn write_project_marker(root: &Path) {
+        let db_path = crate::config::get_project_db_path(root);
+        let Some(parent) = db_path.parent() else {
+            panic!("db path should have parent");
+        };
+        std::fs::create_dir_all(parent)
+            .unwrap_or_else(|e| panic!("project marker dir should create: {e}"));
+        std::fs::write(db_path, b"").unwrap_or_else(|e| panic!("project marker should write: {e}"));
     }
 
     #[test]
@@ -467,6 +499,32 @@ mod tests {
                 Some("feature/daemon-hooks")
             ),
             HookEventPlan::AddBranch("feature/daemon-hooks".to_string())
+        );
+    }
+
+    #[test]
+    fn ignores_shell_branch_add_from_unrelated_project_root() {
+        let base = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir should create: {e}"));
+        let project_root = base.path().join("project");
+        let unrelated_root = base.path().join("unrelated");
+        std::fs::create_dir_all(&project_root)
+            .unwrap_or_else(|e| panic!("project root should create: {e}"));
+        std::fs::create_dir_all(&unrelated_root)
+            .unwrap_or_else(|e| panic!("unrelated root should create: {e}"));
+        write_project_marker(&project_root);
+        write_project_marker(&unrelated_root);
+
+        let params = json!({
+            "agent": "codex",
+            "event": "postToolUseShell",
+            "command": "git switch feature/unrelated",
+            "cwd": unrelated_root
+        });
+        let event = parse_or_panic(&params);
+
+        assert_eq!(
+            plan_hook_event(&event, &project_root, Some("feature/unrelated")),
+            HookEventPlan::Noop
         );
     }
 
