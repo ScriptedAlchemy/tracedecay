@@ -77,7 +77,7 @@ fn plausible_template_contents(contents: &str) -> bool {
 ///
 /// Some hosts pass config template variables like `${workspaceFolder}`
 /// through literally instead of expanding them (Cursor's headless
-/// agent-session MCP scopes do this; see `cursor-plugin/README.md`). Such a
+/// agent-session MCP scopes do this; see `plugin/README-cursor.md`). Such a
 /// value is discarded with a stderr warning so `serve` can fall back to its
 /// no-path discovery chain where possible; callers must use
 /// [`ServeGlobalDbMatch::UniqueOnly`] for the global-registry step in that

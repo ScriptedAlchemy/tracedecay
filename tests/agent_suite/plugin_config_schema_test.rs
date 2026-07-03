@@ -51,8 +51,8 @@ fn validate_if_present(validator: &Validator, relative: &str) -> bool {
 fn cursor_bundle_mcp_config_matches_the_mcp_schema() {
     let validator = compile(MCP_SCHEMA);
     assert!(
-        validate_if_present(&validator, "cursor-plugin/mcp.json"),
-        "cursor-plugin/mcp.json must exist"
+        validate_if_present(&validator, "plugin/mcp-cursor.json"),
+        "plugin/mcp-cursor.json must exist"
     );
 }
 
@@ -60,24 +60,23 @@ fn cursor_bundle_mcp_config_matches_the_mcp_schema() {
 fn cursor_bundle_hooks_config_matches_the_hooks_schema() {
     let validator = compile(HOOKS_SCHEMA);
     assert!(
-        validate_if_present(&validator, "cursor-plugin/hooks/hooks.json"),
-        "cursor-plugin/hooks/hooks.json must exist"
+        validate_if_present(&validator, "plugin/hooks/hooks-cursor.json"),
+        "plugin/hooks/hooks-cursor.json must exist"
     );
 }
 
-/// The Codex bundle reuses the same hooks.json shape. It currently ships an
-/// empty hook map (Codex wires lifecycle differently), and has no mcp.json;
-/// both are validated here as soon as they appear.
+/// The Codex bundle reuses the same hooks.json shape (its host hook file is
+/// `plugin/hooks/hooks-codex.json`) and shares the Claude/Codex `.mcp.json`.
 #[test]
 fn codex_bundle_configs_match_the_schemas_when_present() {
     let hooks_validator = compile(HOOKS_SCHEMA);
     assert!(
-        validate_if_present(&hooks_validator, "codex-plugin/hooks/hooks.json"),
-        "codex-plugin/hooks/hooks.json must exist"
+        validate_if_present(&hooks_validator, "plugin/hooks/hooks-codex.json"),
+        "plugin/hooks/hooks-codex.json must exist"
     );
 
     let mcp_validator = compile(MCP_SCHEMA);
-    validate_if_present(&mcp_validator, "codex-plugin/mcp.json");
+    validate_if_present(&mcp_validator, "plugin/.mcp.json");
 }
 
 /// Guards against the vendored schemas degenerating into accept-everything:

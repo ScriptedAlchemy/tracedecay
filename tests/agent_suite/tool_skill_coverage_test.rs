@@ -2,7 +2,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::common::tracedecay_command_with_home;
@@ -106,33 +106,44 @@ fn mentions_tool(haystack: &str, tool_name: &str) -> bool {
     false
 }
 
-fn bundle_skill_bodies(bundle_root: &Path) -> Vec<String> {
-    let skills_root = bundle_root.join("skills");
+/// Collects every `SKILL.md` body under the given skills-root directories.
+fn skill_bodies(skills_roots: &[PathBuf]) -> Vec<String> {
     let mut bodies = Vec::new();
-    for entry in std::fs::read_dir(&skills_root)
-        .unwrap_or_else(|e| panic!("read {}: {e}", skills_root.display()))
-    {
-        let skill_md = entry.expect("skill dir entry").path().join("SKILL.md");
-        if !skill_md.is_file() {
-            continue;
+    for skills_root in skills_roots {
+        for entry in std::fs::read_dir(skills_root)
+            .unwrap_or_else(|e| panic!("read {}: {e}", skills_root.display()))
+        {
+            let skill_md = entry.expect("skill dir entry").path().join("SKILL.md");
+            if !skill_md.is_file() {
+                continue;
+            }
+            let body = std::fs::read_to_string(&skill_md)
+                .unwrap_or_else(|e| panic!("read {}: {e}", skill_md.display()));
+            bodies.push(body);
         }
-        let body = std::fs::read_to_string(&skill_md)
-            .unwrap_or_else(|e| panic!("read {}: {e}", skill_md.display()));
-        bodies.push(body);
     }
-    assert!(
-        !bodies.is_empty(),
-        "no skills under {}",
-        skills_root.display()
-    );
+    assert!(!bodies.is_empty(), "no skills under {skills_roots:?}");
     bodies
 }
 
 #[test]
 fn every_mcp_tool_is_taught_by_at_least_one_bundled_skill() {
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    for bundle in ["cursor-plugin", "codex-plugin"] {
-        let bodies = bundle_skill_bodies(&repo_root.join(bundle));
+    let plugin = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin");
+    // Codex/Claude deploy the 30 canonical skills under plugin/skills. Cursor
+    // deploys the 17 shared skills plus the 13 dispatcher overlays. Both host
+    // views must teach every MCP tool. `plugin/skills` alone (canonical, 30)
+    // is a superset of the shared 17, so checking `plugin/skills` covers the
+    // Codex/Claude view; adding the cursor overlay covers the Cursor view's
+    // dispatcher bodies (which differ from the canonical dispatcher form).
+    let host_views: &[(&str, Vec<PathBuf>)] = &[
+        ("codex/claude (canonical)", vec![plugin.join("skills")]),
+        (
+            "cursor (shared + overlay)",
+            vec![plugin.join("skills"), plugin.join("overlays/cursor/skills")],
+        ),
+    ];
+    for (view, roots) in host_views {
+        let bodies = skill_bodies(roots);
         let mut uncovered: Vec<String> = Vec::new();
         for def in get_tool_definitions() {
             if SKILL_COVERAGE_EXCEPTIONS.contains(&def.name.as_str()) {
@@ -145,9 +156,10 @@ fn every_mcp_tool_is_taught_by_at_least_one_bundled_skill() {
         }
         assert!(
             uncovered.is_empty(),
-            "MCP tools not referenced by any {bundle} skill — extend an existing \
-             skill or add one so agents can discover them (or, for genuinely \
-             internal tools, document them in SKILL_COVERAGE_EXCEPTIONS): {uncovered:?}"
+            "MCP tools not referenced by any skill in the {view} view — extend an \
+             existing skill or add one so agents can discover them (or, for \
+             genuinely internal tools, document them in SKILL_COVERAGE_EXCEPTIONS): \
+             {uncovered:?}"
         );
     }
 }

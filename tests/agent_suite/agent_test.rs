@@ -571,24 +571,39 @@ fn assert_cursor_plugin_bundle(plugin_dir: &Path, expected_command: &str, expect
 
 #[test]
 fn test_cursor_plugin_bundle_files_are_valid() {
-    assert_cursor_plugin_bundle(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("cursor-plugin")
-            .as_path(),
-        "tracedecay",
-        "0.0.0",
-    );
+    // The single shared `plugin/` tree stores Cursor's files under host-specific
+    // source names (e.g. `mcp-cursor.json`, `README-cursor.md`,
+    // `hooks/hooks-cursor.json`). Stage them into a temp dir under their
+    // *deploy* names so the un-rendered (`command: tracedecay`, `version:
+    // 0.0.0`) source is validated exactly as it lands on disk pre-render.
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin");
+    let staged = TempDir::new().unwrap();
+    let dst = staged.path();
+    let copies: &[(&str, &str)] = &[
+        (".cursor-plugin/plugin.json", ".cursor-plugin/plugin.json"),
+        ("mcp-cursor.json", "mcp.json"),
+        ("hooks/hooks-cursor.json", "hooks/hooks.json"),
+        ("rules/tracedecay.mdc", "rules/tracedecay.mdc"),
+        ("README-cursor.md", "README.md"),
+    ];
+    for (source, deploy) in copies {
+        let target = dst.join(deploy);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::copy(src.join(source), &target).unwrap();
+    }
+    assert_cursor_plugin_bundle(dst, "tracedecay", "0.0.0");
 }
 
 #[test]
 fn generated_guidance_prefers_resolved_active_project_store() {
-    let cursor_status = include_str!("../../cursor-plugin/skills/code-health/SKILL.md");
-    let codex_status = include_str!("../../codex-plugin/skills/code-health/SKILL.md");
-    let cursor_rule = include_str!("../../cursor-plugin/rules/tracedecay.mdc");
+    // The 17 model-invocable skills are now shared byte-for-byte across hosts
+    // in `plugin/skills/`, so cursor and codex read the same source file.
+    let shared_status = include_str!("../../plugin/skills/code-health/SKILL.md");
+    let cursor_rule = include_str!("../../plugin/rules/tracedecay.mdc");
 
     for (name, guidance) in [
-        ("cursor code-health", cursor_status),
-        ("codex code-health", codex_status),
+        ("cursor code-health", shared_status),
+        ("codex code-health", shared_status),
     ] {
         assert!(
             guidance.contains("tracedecay_active_project"),
@@ -620,7 +635,9 @@ fn generated_guidance_prefers_resolved_active_project_store() {
 
 #[test]
 fn generated_plugin_skill_descriptions_are_yaml_quoted() {
-    for root in ["codex-plugin/skills", "cursor-plugin/skills"] {
+    // Shared skills plus the Cursor dispatcher overlay (which carries its own
+    // descriptions) — the single `plugin/` tree replaced the per-host bundles.
+    for root in ["plugin/skills", "plugin/overlays/cursor/skills"] {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(root);
         for entry in std::fs::read_dir(&root).unwrap() {
             let skill_path = entry.unwrap().path().join("SKILL.md");

@@ -37,7 +37,7 @@ pub const CURSOR_PLUGIN_SKILLS: &[&str] = &[
 ];
 
 const TRACEDECAY_BOOTSTRAP_SKILL: &str =
-    include_str!("../../cursor-plugin/skills/using-tracedecay/SKILL.md");
+    include_str!("../../plugin/skills/using-tracedecay/SKILL.md");
 
 pub(super) fn append_tracedecay_bootstrap_context(s: &mut String) {
     s.push_str(

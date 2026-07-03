@@ -1,13 +1,11 @@
-//! Filesystem validation and parity contract tests for the Claude Code plugin
-//! bundle at `claude-plugin/`.
+//! Filesystem validation contract tests for the Claude Code plugin surface of
+//! the shared `plugin/` tree.
 //!
 //! These mirror the sibling bundle tests (`plugin_manifest_schema_test.rs`,
-//! `plugin_config_schema_test.rs`, `plugin_skill_contract_test.rs`,
-//! `plugin_bundle_sync_test.rs`) but operate purely on the on-disk bundle,
-//! asserting the manifests, MCP config, lifecycle hooks, skills, commands, and
-//! agents are shaped correctly and stay in sync with their single sources of
-//! truth (`src/agents/claude_agents/` for agents, `codex-plugin/skills/` for
-//! skills).
+//! `plugin_config_schema_test.rs`, `plugin_skill_contract_test.rs`) but operate
+//! purely on the on-disk shared tree, asserting Claude's manifests, MCP config,
+//! lifecycle hooks, skills, commands, and agents are shaped correctly and stay
+//! in sync with the agent source of truth (`src/agents/claude_agents/`).
 //!
 //! The embedded-file-list coverage check (asserting a Rust `const` registry
 //! matches the on-disk tree) is intentionally omitted here; it is handled with
@@ -21,12 +19,14 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::plugin_validation_support::{body_after_frontmatter, read_json_file, repo_path};
+use crate::plugin_validation_support::{body_after_frontmatter, read_json_file};
 use tracedecay::automation::skill_frontmatter::parse_skill_frontmatter;
 
-/// The Claude Code plugin bundle root.
+/// The shared plugin tree root (holds Claude's manifest, skills, commands, and
+/// agents; Claude's host-specific files are `README-claude.md`, `.mcp.json`,
+/// and `hooks/hooks-claude.json`).
 fn bundle_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("claude-plugin")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin")
 }
 
 /// The 30 skills the bundle ships (also the codex-plugin skill set): the 13
@@ -250,7 +250,7 @@ fn claude_bundle_mcp_config_declares_the_tracedecay_server() {
 
 #[test]
 fn claude_bundle_hooks_wire_the_expected_lifecycle_events() {
-    let hooks_path = bundle_root().join("hooks/hooks.json");
+    let hooks_path = bundle_root().join("hooks/hooks-claude.json");
     let config = read_json_file(&hooks_path);
 
     let hooks = config
@@ -450,37 +450,6 @@ fn claude_bundle_agents_are_byte_identical_to_the_source_of_truth() {
     }
 }
 
-#[test]
-fn claude_bundle_skills_stay_byte_identical_to_the_codex_source() {
-    let claude_skills_root = bundle_root().join("skills");
-    let codex_skills_root = repo_path("codex-plugin/skills");
-
-    let claude_skills: BTreeSet<String> = sorted_subdir_names(&claude_skills_root)
-        .into_iter()
-        .collect();
-    let codex_skills: BTreeSet<String> = sorted_subdir_names(&codex_skills_root)
-        .into_iter()
-        .collect();
-
-    // The two surfaces ship the identical synced skill set.
-    assert_eq!(
-        claude_skills, codex_skills,
-        "claude-plugin skills {claude_skills:?} must equal codex-plugin skills {codex_skills:?} (skills are synced across surfaces)"
-    );
-
-    // Every skill's SKILL.md is byte-identical across surfaces; lock them in sync.
-    for skill in &claude_skills {
-        let claude_path = claude_skills_root.join(skill).join("SKILL.md");
-        let codex_path = codex_skills_root.join(skill).join("SKILL.md");
-        let claude_bytes = fs::read(&claude_path)
-            .unwrap_or_else(|err| panic!("failed to read {}: {err}", claude_path.display()));
-        let codex_bytes = fs::read(&codex_path)
-            .unwrap_or_else(|err| panic!("failed to read {}: {err}", codex_path.display()));
-        assert!(
-            claude_bytes == codex_bytes,
-            "{} must be byte-identical to the codex source {}",
-            claude_path.display(),
-            codex_path.display()
-        );
-    }
-}
+// (Removed `claude_bundle_skills_stay_byte_identical_to_the_codex_source`:
+// Claude and Codex now read the identical skills from the single shared
+// `plugin/skills/` tree, so there is no second copy to keep in sync.)

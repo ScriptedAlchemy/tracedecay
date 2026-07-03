@@ -729,10 +729,76 @@ fn config_only_integrations_report_config_only_and_write_nothing() {
 // mcp.json args, and no source-bundle file is silently dropped.
 // ---------------------------------------------------------------------------
 
-/// A source plugin bundle directory in the repo (`cursor-plugin/`,
-/// `codex-plugin/`).
-fn repo_bundle_dir(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(name)
+/// Stages a host's deploy-relative source tree from the shared `plugin/` tree
+/// into a temp dir. The shared tree stores host files under host-specific names
+/// (e.g. `mcp-cursor.json`, `README-cursor.md`, `hooks/hooks-cursor.json`);
+/// staging maps them to their deploy paths so `assert_source_bundle_fully_rendered`
+/// compares the correct expected file set. Returns the temp dir (kept alive by
+/// the caller).
+fn staged_host_source(host: &str) -> TempDir {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin");
+    let staged = TempDir::new().expect("temp host source");
+    let mut copies: Vec<(String, String)> = Vec::new();
+    // Shared canonical skills (30) — same deploy path for all hosts.
+    for name in subdir_names(&src.join("skills")) {
+        let rel = format!("skills/{name}/SKILL.md");
+        copies.push((rel.clone(), rel));
+    }
+    match host {
+        "cursor" => {
+            // Cursor overrides the 13 dispatcher slugs with its overlay form.
+            for name in subdir_names(&src.join("overlays/cursor/skills")) {
+                copies.push((
+                    format!("overlays/cursor/skills/{name}/SKILL.md"),
+                    format!("skills/{name}/SKILL.md"),
+                ));
+            }
+            for name in ["code-explorer", "code-health-auditor", "session-historian"] {
+                copies.push((
+                    format!("overlays/cursor/agents/{name}.md"),
+                    format!("agents/{name}.md"),
+                ));
+            }
+            copies.push((
+                ".cursor-plugin/plugin.json".into(),
+                ".cursor-plugin/plugin.json".into(),
+            ));
+            copies.push(("mcp-cursor.json".into(), "mcp.json".into()));
+            copies.push(("hooks/hooks-cursor.json".into(), "hooks/hooks.json".into()));
+            copies.push(("README-cursor.md".into(), "README.md".into()));
+            for rule in ["tracedecay.mdc", "tracedecay-memory.mdc"] {
+                copies.push((format!("rules/{rule}"), format!("rules/{rule}")));
+            }
+        }
+        "codex" => {
+            copies.push((
+                ".codex-plugin/plugin.json".into(),
+                ".codex-plugin/plugin.json".into(),
+            ));
+            copies.push((".mcp.json".into(), ".mcp.json".into()));
+            copies.push(("hooks/hooks-codex.json".into(), "hooks/hooks.json".into()));
+            copies.push(("README-codex.md".into(), "README.md".into()));
+        }
+        other => panic!("unknown host {other} (only cursor/codex are staged)"),
+    }
+    for (source, deploy) in copies {
+        let target = staged.path().join(&deploy);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::copy(src.join(&source), &target)
+            .unwrap_or_else(|e| panic!("copy {source} -> {deploy}: {e}"));
+    }
+    staged
+}
+
+fn subdir_names(root: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(root)
+        .unwrap_or_else(|e| panic!("read {}: {e}", root.display()))
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|t| t.is_dir()))
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
 }
 
 /// A vendored Cursor schema under `tests/fixtures/cursor-schemas/`, loaded by
@@ -911,7 +977,8 @@ fn assert_cursor_rendered_bundle_valid(plugin_dir: &Path, bin: &str) {
     );
 
     // Nothing from the source bundle was silently dropped.
-    assert_source_bundle_fully_rendered(&repo_bundle_dir("cursor-plugin"), plugin_dir);
+    let staged = staged_host_source("cursor");
+    assert_source_bundle_fully_rendered(staged.path(), plugin_dir);
 }
 
 /// Full structural validation of a rendered Codex plugin bundle.
@@ -962,7 +1029,8 @@ fn assert_codex_rendered_bundle_valid(plugin_dir: &Path, bin: &str) {
     );
 
     // Nothing from the source bundle was silently dropped.
-    assert_source_bundle_fully_rendered(&repo_bundle_dir("codex-plugin"), plugin_dir);
+    let staged = staged_host_source("codex");
+    assert_source_bundle_fully_rendered(staged.path(), plugin_dir);
 }
 
 #[test]

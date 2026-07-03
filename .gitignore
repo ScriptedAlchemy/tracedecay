@@ -3,8 +3,7 @@
 .codegraph
 .tracedecay
 .mcp.json
-!codex-plugin/.mcp.json
-!claude-plugin/.mcp.json
+!plugin/.mcp.json
 .claude/
 .cursor/
 docs/superpowers

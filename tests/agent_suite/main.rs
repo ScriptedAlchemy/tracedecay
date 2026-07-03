@@ -18,7 +18,6 @@ mod managed_skill_archive_test;
 mod managed_skills_test;
 mod memory_digest_test;
 mod opencode_agent_test;
-mod plugin_bundle_sync_test;
 mod plugin_config_schema_test;
 mod plugin_manifest_schema_test;
 mod plugin_skill_contract_test;
