@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "tracedecay",
+  "owner": {
+    "name": "ScriptedAlchemy"
+  },
+  "plugins": [
+    {
+      "name": "tracedecay",
+      "source": "./",
+      "description": "Semantic code intelligence, code graph, and project memory for Claude Code.",
+      "category": "productivity",
+      "homepage": "https://github.com/ScriptedAlchemy/tracedecay"
+    }
+  ]
+}

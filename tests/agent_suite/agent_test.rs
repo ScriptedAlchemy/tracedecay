@@ -2943,10 +2943,11 @@ fn assert_local_install_writes_project_paths(agent: &str, paths: &[&str]) {
 
 #[test]
 fn test_local_install_claude_writes_project_paths() {
-    assert_local_install_writes_project_paths(
-        "claude",
-        &[".mcp.json", ".claude/settings.json", ".claude/CLAUDE.md"],
-    );
+    // Claude Code plugins are global (deployed under ~/.claude/plugins), so a
+    // `--local` install ensures the global plugin is present and only writes
+    // the genuinely project-scoped part: the CLAUDE.md steering rules. It does
+    // not write a project `.mcp.json` or `.claude/settings.json`.
+    assert_local_install_writes_project_paths("claude", &[".claude/CLAUDE.md"]);
 }
 
 #[test]
@@ -3073,29 +3074,35 @@ fn test_claude_install_creates_config() {
     let ctx = make_install_ctx(home);
     ClaudeIntegration.install(&ctx).unwrap();
 
-    // Check ~/.claude.json exists and has mcpServers.tracedecay
-    let claude_json = home.join(".claude.json");
+    // The plugin bundle is deployed to the stable marketplace dir; the MCP
+    // server now lives in the plugin's own .mcp.json (not ~/.claude.json).
+    let marketplace_manifest =
+        home.join(".claude/plugins/marketplaces/tracedecay/.claude-plugin/marketplace.json");
     assert!(
-        claude_json.exists(),
-        "~/.claude.json should exist after install"
+        marketplace_manifest.exists(),
+        "plugin marketplace manifest should be deployed after install"
     );
-    let content: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&claude_json).unwrap()).unwrap();
+    let plugin_mcp = home.join(".claude/plugins/marketplaces/tracedecay/.mcp.json");
+    assert!(plugin_mcp.exists(), "plugin .mcp.json should be deployed");
+    let mcp: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&plugin_mcp).unwrap()).unwrap();
     assert!(
-        content.get("mcpServers").is_some(),
-        "mcpServers key should exist"
+        mcp["mcpServers"]["tracedecay"].is_object(),
+        "plugin .mcp.json should define the tracedecay MCP server"
     );
-    assert!(
-        content["mcpServers"]["tracedecay"].is_object(),
-        "mcpServers.tracedecay should be an object"
-    );
-    // Verify args contain "serve"
-    let args = content["mcpServers"]["tracedecay"]["args"]
-        .as_array()
-        .unwrap();
-    assert!(args.iter().any(|v| v.as_str() == Some("serve")));
 
-    // Check ~/.claude/settings.json exists with hook and permissions
+    // The marketplace is registered in known_marketplaces.json as a directory.
+    let known: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(home.join(".claude/plugins/known_marketplaces.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        known["tracedecay"]["source"]["source"].as_str(),
+        Some("directory"),
+        "known_marketplaces.json should register tracedecay as a directory marketplace"
+    );
+
+    // settings.json enables the plugin and carries the MCP tool permissions.
     let settings_path = home.join(".claude/settings.json");
     assert!(
         settings_path.exists(),
@@ -3103,10 +3110,10 @@ fn test_claude_install_creates_config() {
     );
     let settings: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
-    // Check hook
-    assert!(
-        settings["hooks"]["PreToolUse"].is_array(),
-        "PreToolUse hook should be an array"
+    assert_eq!(
+        settings["enabledPlugins"]["tracedecay@tracedecay"],
+        serde_json::json!(true),
+        "settings.json should enable the tracedecay plugin"
     );
     // Check permissions
     assert!(
@@ -3119,6 +3126,20 @@ fn test_claude_install_creates_config() {
         assert!(
             allow_strs.contains(&perm.as_str()),
             "permissions.allow should contain {perm}"
+        );
+    }
+
+    // The old config-managed ~/.claude.json MCP entry must NOT be written.
+    let claude_json = home.join(".claude.json");
+    if claude_json.exists() {
+        let content: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&claude_json).unwrap()).unwrap();
+        assert!(
+            content
+                .get("mcpServers")
+                .and_then(|v| v.get("tracedecay"))
+                .is_none(),
+            "install must not write the legacy config-managed MCP entry to ~/.claude.json"
         );
     }
 
@@ -4066,27 +4087,43 @@ fn test_claude_install_then_uninstall() {
     let home = dir.path();
     let ctx = make_install_ctx(home);
 
-    // Install
-    ClaudeIntegration.install(&ctx).unwrap();
-    assert!(home.join(".claude.json").exists());
+    let marketplace_manifest =
+        home.join(".claude/plugins/marketplaces/tracedecay/.claude-plugin/marketplace.json");
 
-    // Uninstall
+    // Install deploys the plugin bundle + registers the marketplace.
+    ClaudeIntegration.install(&ctx).unwrap();
+    assert!(
+        marketplace_manifest.exists(),
+        "plugin marketplace manifest should exist after install"
+    );
+
+    // Uninstall removes the deployed bundle, unregisters the marketplace, and
+    // disables the plugin.
     ClaudeIntegration.uninstall(&ctx).unwrap();
 
-    // ~/.claude.json should be removed (was only tracedecay)
-    // It may be removed entirely or have mcpServers removed
-    if home.join(".claude.json").exists() {
-        let content: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(home.join(".claude.json")).unwrap())
-                .unwrap();
-        // Should not have tracedecay anymore
-        let has_tracedecay = content
-            .get("mcpServers")
-            .and_then(|v| v.get("tracedecay"))
-            .is_some();
+    assert!(
+        !marketplace_manifest.exists(),
+        "deployed plugin bundle should be removed after uninstall"
+    );
+    let known_path = home.join(".claude/plugins/known_marketplaces.json");
+    if known_path.exists() {
+        let known: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&known_path).unwrap()).unwrap();
         assert!(
-            !has_tracedecay,
-            "tracedecay should be removed from .claude.json after uninstall"
+            known.get("tracedecay").is_none(),
+            "tracedecay marketplace should be unregistered after uninstall"
+        );
+    }
+    let settings_path = home.join(".claude/settings.json");
+    if settings_path.exists() {
+        let settings: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+        assert!(
+            settings
+                .get("enabledPlugins")
+                .and_then(|v| v.get("tracedecay@tracedecay"))
+                .is_none(),
+            "plugin should be disabled after uninstall"
         );
     }
 }
@@ -4367,15 +4404,58 @@ fn assert_install_backs_up_and_preserves(
 
 #[test]
 fn test_claude_install_preserves_existing_config() {
+    // The Claude plugin install merges into settings.json and
+    // known_marketplaces.json rather than owning a single user-editable config
+    // file, so preservation is checked against those two files directly: a
+    // foreign settings key and a foreign registered marketplace must survive.
     let dir = TempDir::new().unwrap();
-    let original = r#"{
-  "theme": "solarized",
-  "mcpServers": {
-    "other": { "command": "other-bin", "args": ["--flag"] }
-  }
-}
-"#;
-    assert_install_backs_up_and_preserves(&ClaudeIntegration, dir.path(), original, "solarized");
+    let home = dir.path();
+    let claude_dir = home.join(".claude");
+    let plugins_dir = claude_dir.join("plugins");
+    std::fs::create_dir_all(&plugins_dir).unwrap();
+
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        r#"{ "theme": "solarized" }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        plugins_dir.join("known_marketplaces.json"),
+        r#"{ "other": { "source": { "source": "directory", "path": "/somewhere" } } }"#,
+    )
+    .unwrap();
+
+    ClaudeIntegration
+        .install(&make_install_ctx(home))
+        .expect("install should succeed");
+
+    let settings: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        settings["theme"].as_str(),
+        Some("solarized"),
+        "existing settings.json key must be preserved"
+    );
+    assert_eq!(
+        settings["enabledPlugins"]["tracedecay@tracedecay"],
+        serde_json::json!(true),
+        "install must still enable the plugin alongside the existing key"
+    );
+
+    let known: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(plugins_dir.join("known_marketplaces.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        known.get("other").is_some(),
+        "existing foreign marketplace must be preserved"
+    );
+    assert_eq!(
+        known["tracedecay"]["source"]["source"].as_str(),
+        Some("directory"),
+        "install must register the tracedecay marketplace alongside the foreign one"
+    );
 }
 
 #[test]
@@ -5555,10 +5635,20 @@ fn test_claude_install_idempotent() {
     ClaudeIntegration.install(&ctx).unwrap();
     ClaudeIntegration.install(&ctx).unwrap();
 
-    // Config should still be valid
-    let claude_json: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(home.join(".claude.json")).unwrap()).unwrap();
-    assert!(claude_json["mcpServers"]["tracedecay"].is_object());
+    // The plugin should remain installed and enabled (idempotent).
+    assert!(
+        home.join(".claude/plugins/marketplaces/tracedecay/.claude-plugin/marketplace.json")
+            .exists(),
+        "marketplace manifest should still be deployed after a second install"
+    );
+    let settings: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(home.join(".claude/settings.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        settings["enabledPlugins"]["tracedecay@tracedecay"],
+        serde_json::json!(true),
+        "plugin should stay enabled after a second install"
+    );
 }
 
 #[test]
@@ -5605,7 +5695,9 @@ fn test_claude_install_preserves_existing_claude_json() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
 
-    // Pre-populate .claude.json with other data
+    // Pre-populate .claude.json with a foreign MCP server and a custom key.
+    // The plugin model no longer writes tracedecay into ~/.claude.json, and the
+    // install's config-managed migration must leave unrelated entries intact.
     let claude_json_path = home.join(".claude.json");
     std::fs::write(
         &claude_json_path,
@@ -5618,9 +5710,12 @@ fn test_claude_install_preserves_existing_claude_json() {
 
     let content: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&claude_json_path).unwrap()).unwrap();
-    // tracedecay added
-    assert!(content["mcpServers"]["tracedecay"].is_object());
-    // existing server preserved
+    // tracedecay must NOT be added to ~/.claude.json (plugin provides the server)
+    assert!(
+        content["mcpServers"].get("tracedecay").is_none(),
+        "install must not write tracedecay into ~/.claude.json"
+    );
+    // existing foreign server preserved
     assert!(content["mcpServers"]["other-server"].is_object());
     // custom key preserved
     assert_eq!(content["customKey"], 42);

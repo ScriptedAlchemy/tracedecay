@@ -306,6 +306,53 @@ fn cursor_update_plugin_reports_not_installed_without_a_bundle() {
     assert!(!home.path().join(".cursor/plugins").exists());
 }
 
+#[test]
+fn claude_update_plugin_refreshes_bundle_and_preserves_user_config() {
+    let home = TempDir::new().unwrap();
+    let claude = get_integration("claude").unwrap();
+
+    // User-owned Claude config that update-plugin must never destroy.
+    let user_claude_json = home.path().join(".claude.json");
+    std::fs::write(
+        &user_claude_json,
+        "{\n  \"mcpServers\": { \"other\": { \"command\": \"other-bin\" } }\n}\n",
+    )
+    .unwrap();
+
+    claude.install(&ctx(home.path(), OLD_BIN)).unwrap();
+    let deploy_dir = home.path().join(".claude/plugins/marketplaces/tracedecay");
+    let user_json_before = bytes(&user_claude_json);
+
+    let outcome = claude.update_plugin(&ctx(home.path(), NEW_BIN)).unwrap();
+    let UpdatePluginOutcome::Refreshed(paths) = outcome else {
+        panic!("expected claude update_plugin to refresh the deployed bundle");
+    };
+    assert_eq!(paths, vec![deploy_dir.clone()]);
+
+    // Foreign user config is byte-identical after the refresh.
+    assert_eq!(bytes(&user_claude_json), user_json_before);
+
+    // The deployed bundle is re-rendered with the new bin path and version.
+    assert!(text(&deploy_dir.join(".mcp.json")).contains(NEW_BIN));
+    assert!(text(&deploy_dir.join("hooks/hooks.json")).contains(NEW_BIN));
+    assert!(
+        text(&deploy_dir.join(".claude-plugin/plugin.json")).contains(env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[test]
+fn claude_update_plugin_reports_not_installed_without_a_bundle() {
+    let home = TempDir::new().unwrap();
+    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+    let claude = get_integration("claude").unwrap();
+    let outcome = claude.update_plugin(&ctx(home.path(), NEW_BIN)).unwrap();
+    assert!(matches!(outcome, UpdatePluginOutcome::NotInstalled));
+    assert!(!home
+        .path()
+        .join(".claude/plugins/marketplaces/tracedecay")
+        .exists());
+}
+
 // ---------------------------------------------------------------------------
 // Codex
 // ---------------------------------------------------------------------------
@@ -644,7 +691,6 @@ fn config_only_integrations_report_config_only_and_write_nothing() {
     // config files (MCP entries, hook blocks, prompt rules); update-plugin
     // must not create or modify a single file for them.
     let config_only = [
-        "claude",
         "opencode",
         "gemini",
         "copilot",

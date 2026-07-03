@@ -269,11 +269,15 @@ const CODEX_EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
         include_str!("../../codex-plugin/hooks/hooks.json"),
     ),
     // Codex auto-discovers every `SKILL.md` under the manifest `skills/` dir by
-    // its `name`/`description` frontmatter. The Codex bundle mirrors the
-    // model-invocable Cursor skills (`hooks::CURSOR_PLUGIN_SKILLS`) so both
-    // hosts steer agents toward the same consolidated tracedecay workflows; the
-    // parity is enforced by `codex_skills_match_the_cursor_source_for_parity`.
-    // Cursor-only slash dispatchers (`tracedecay-*`) are intentionally omitted.
+    // its `name`/`description` frontmatter. The Codex bundle ships the full
+    // 30-skill set: the 13 foundational + 4 memory skills are byte-identical to
+    // the model-invocable Cursor skills (`hooks::CURSOR_PLUGIN_SKILLS`), and the
+    // 13 `tracedecay-*` workflow skills ship in their canonical (model-invocable)
+    // form — byte-identical to the Claude bundle. Cursor keeps its own dispatcher
+    // form of those 13 workflow skills (disable-model-invocation), so Codex and
+    // Cursor diverge on the workflow content by design. Parity is enforced by
+    // `codex_skills_match_the_cursor_source_for_parity` and
+    // `codex_bundle_ships_exactly_the_model_invocable_cursor_skills`.
     (
         "skills/assessing-impact/SKILL.md",
         include_str!("../../codex-plugin/skills/assessing-impact/SKILL.md"),
@@ -303,6 +307,10 @@ const CODEX_EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
         include_str!("../../codex-plugin/skills/inspecting-managed-skills/SKILL.md"),
     ),
     (
+        "skills/managing-session-context/SKILL.md",
+        include_str!("../../codex-plugin/skills/managing-session-context/SKILL.md"),
+    ),
+    (
         "skills/recalling-project-memory/SKILL.md",
         include_str!("../../codex-plugin/skills/recalling-project-memory/SKILL.md"),
     ),
@@ -311,8 +319,72 @@ const CODEX_EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
         include_str!("../../codex-plugin/skills/recalling-session-context/SKILL.md"),
     ),
     (
+        "skills/retrieving-cached-context/SKILL.md",
+        include_str!("../../codex-plugin/skills/retrieving-cached-context/SKILL.md"),
+    ),
+    (
+        "skills/retrieving-project-memory/SKILL.md",
+        include_str!("../../codex-plugin/skills/retrieving-project-memory/SKILL.md"),
+    ),
+    (
         "skills/reviewing-changes/SKILL.md",
         include_str!("../../codex-plugin/skills/reviewing-changes/SKILL.md"),
+    ),
+    (
+        "skills/storing-project-memory/SKILL.md",
+        include_str!("../../codex-plugin/skills/storing-project-memory/SKILL.md"),
+    ),
+    (
+        "skills/tracedecay-audit-safety/SKILL.md",
+        include_str!("../../codex-plugin/skills/tracedecay-audit-safety/SKILL.md"),
+    ),
+    (
+        "skills/tracedecay-check-health/SKILL.md",
+        include_str!("../../codex-plugin/skills/tracedecay-check-health/SKILL.md"),
+    ),
+    (
+        "skills/tracedecay-clean-dead-code/SKILL.md",
+        include_str!("../../codex-plugin/skills/tracedecay-clean-dead-code/SKILL.md"),
+    ),
+    (
+        "skills/tracedecay-compare-branches/SKILL.md",
+        include_str!("../../codex-plugin/skills/tracedecay-compare-branches/SKILL.md"),
+    ),
+    (
+        "skills/tracedecay-curate-memory/SKILL.md",
+        include_str!("../../codex-plugin/skills/tracedecay-curate-memory/SKILL.md"),
+    ),
+    (
+        "skills/tracedecay-draft-commit/SKILL.md",
+        include_str!("../../codex-plugin/skills/tracedecay-draft-commit/SKILL.md"),
+    ),
+    (
+        "skills/tracedecay-find-impact/SKILL.md",
+        include_str!("../../codex-plugin/skills/tracedecay-find-impact/SKILL.md"),
+    ),
+    (
+        "skills/tracedecay-fix-build/SKILL.md",
+        include_str!("../../codex-plugin/skills/tracedecay-fix-build/SKILL.md"),
+    ),
+    (
+        "skills/tracedecay-map-architecture/SKILL.md",
+        include_str!("../../codex-plugin/skills/tracedecay-map-architecture/SKILL.md"),
+    ),
+    (
+        "skills/tracedecay-port-code/SKILL.md",
+        include_str!("../../codex-plugin/skills/tracedecay-port-code/SKILL.md"),
+    ),
+    (
+        "skills/tracedecay-recall-memory/SKILL.md",
+        include_str!("../../codex-plugin/skills/tracedecay-recall-memory/SKILL.md"),
+    ),
+    (
+        "skills/tracedecay-review-diff/SKILL.md",
+        include_str!("../../codex-plugin/skills/tracedecay-review-diff/SKILL.md"),
+    ),
+    (
+        "skills/tracedecay-test-changes/SKILL.md",
+        include_str!("../../codex-plugin/skills/tracedecay-test-changes/SKILL.md"),
     ),
     (
         "skills/tracing-functions/SKILL.md",
@@ -1638,11 +1710,16 @@ mod tests {
     }
 
     /// Codex auto-discovers skills by description (it has no slash-command or
-    /// `disable-model-invocation` surface), so the Codex bundle ships exactly
-    /// the *model-invocable* Cursor skills — the same set the Cursor plugin
-    /// advertises via [`crate::hooks::CURSOR_PLUGIN_SKILLS`]. The Cursor-only
-    /// slash dispatchers (`tracedecay-*`) are intentionally not mirrored:
-    /// their workflows are covered by these skills.
+    /// `disable-model-invocation` surface), so every skill it ships is
+    /// model-invocable. The Codex bundle therefore ships the full 30-skill set:
+    /// the 17 model-invocable Cursor skills (the same set the Cursor plugin
+    /// advertises via [`crate::hooks::CURSOR_PLUGIN_SKILLS`] — 13 foundational +
+    /// 4 memory) plus the 13 `tracedecay-*` workflow skills in their canonical
+    /// model-invocable form. On Cursor those 13 workflows are slash dispatchers
+    /// (`disable-model-invocation: true`, excluded from `CURSOR_PLUGIN_SKILLS`);
+    /// Codex ships the canonical bodies instead, which is why the two hosts
+    /// diverge on workflow content (byte-identity for the 17 is enforced by
+    /// `codex_skills_match_the_cursor_source_for_parity`).
     #[test]
     fn codex_bundle_ships_exactly_the_model_invocable_cursor_skills() {
         let mut shipped: Vec<String> = CODEX_EMBEDDED_PLUGIN_FILES
@@ -1655,14 +1732,30 @@ mod tests {
             })
             .collect();
         shipped.sort();
+        // The 13 `tracedecay-*` workflow skills ship on Codex in canonical form
+        // (on Cursor they are slash dispatchers, hence absent from
+        // CURSOR_PLUGIN_SKILLS). Expected = the model-invocable Cursor set plus
+        // those 13 workflow skills.
         let mut expected: Vec<String> = crate::hooks::CURSOR_PLUGIN_SKILLS
             .iter()
             .map(|skill| (*skill).to_string())
             .collect();
+        for &(relative, _) in CODEX_EMBEDDED_PLUGIN_FILES {
+            if let Some(name) = relative
+                .strip_prefix("skills/")
+                .and_then(|rest| rest.strip_suffix("/SKILL.md"))
+            {
+                if name.starts_with("tracedecay-") {
+                    expected.push(name.to_string());
+                }
+            }
+        }
         expected.sort();
+        expected.dedup();
         assert_eq!(
             shipped, expected,
-            "Codex must embed exactly the model-invocable Cursor skills for parity"
+            "Codex must embed the model-invocable Cursor skills plus the canonical \
+             `tracedecay-*` workflow skills"
         );
     }
 

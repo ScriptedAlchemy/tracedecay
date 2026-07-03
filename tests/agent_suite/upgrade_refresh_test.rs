@@ -57,8 +57,15 @@ fn claude_json_upgrade_refresh_is_idempotent_and_preserves_unknown_keys() {
         serde_json::json!([1, 2, 3])
     );
     assert!(parsed["mcpServers"]["someOtherServer"].is_object());
+    // The plugin model no longer writes tracedecay into ~/.claude.json; the MCP
+    // server is now provided by the deployed plugin bundle, and any legacy loose
+    // entry is migrated away on install. A refresh must therefore leave no
+    // config-managed tracedecay entry in ~/.claude.json.
     assert!(
-        parsed["mcpServers"]["tracedecay"].is_object(),
-        "the tracedecay MCP entry must be present after refresh"
+        parsed
+            .get("mcpServers")
+            .and_then(|v| v.get("tracedecay"))
+            .is_none(),
+        "refresh must not add a config-managed MCP entry to ~/.claude.json"
     );
 }

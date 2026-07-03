@@ -1,0 +1,72 @@
+{
+  "description": "TraceDecay lifecycle hooks: inject index status and tool-routing steering, keep the graph/session store warm, and redirect explore-agent calls toward tracedecay tools.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__TRACEDECAY_BIN__",
+            "args": [
+              "hook-pre-tool-use"
+            ]
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__TRACEDECAY_BIN__",
+            "args": [
+              "hook-prompt-submit"
+            ]
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__TRACEDECAY_BIN__",
+            "args": [
+              "hook-stop"
+            ]
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__TRACEDECAY_BIN__",
+            "args": [
+              "hook-claude-session-start"
+            ]
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|MultiEdit|Write|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__TRACEDECAY_BIN__",
+            "args": [
+              "hook-claude-post-tool-use"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

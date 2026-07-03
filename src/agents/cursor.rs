@@ -255,12 +255,28 @@ const EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
         include_str!("../../cursor-plugin/skills/recalling-project-memory/SKILL.md"),
     ),
     (
+        "skills/managing-session-context/SKILL.md",
+        include_str!("../../cursor-plugin/skills/managing-session-context/SKILL.md"),
+    ),
+    (
         "skills/recalling-session-context/SKILL.md",
         include_str!("../../cursor-plugin/skills/recalling-session-context/SKILL.md"),
     ),
     (
+        "skills/retrieving-cached-context/SKILL.md",
+        include_str!("../../cursor-plugin/skills/retrieving-cached-context/SKILL.md"),
+    ),
+    (
+        "skills/retrieving-project-memory/SKILL.md",
+        include_str!("../../cursor-plugin/skills/retrieving-project-memory/SKILL.md"),
+    ),
+    (
         "skills/reviewing-changes/SKILL.md",
         include_str!("../../cursor-plugin/skills/reviewing-changes/SKILL.md"),
+    ),
+    (
+        "skills/storing-project-memory/SKILL.md",
+        include_str!("../../cursor-plugin/skills/storing-project-memory/SKILL.md"),
     ),
     // Slash-command dispatcher skills (`disable-model-invocation: true`).
     // Slugs keep the `tracedecay-` prefix (so `/tracedecay` lists them all) with

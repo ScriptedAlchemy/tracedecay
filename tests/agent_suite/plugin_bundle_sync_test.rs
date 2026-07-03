@@ -131,7 +131,19 @@ const TOP_LEVEL_MANIFEST: &[(&str, TopLevelPolicy)] = &[
 enum SkillSyncRule {
     /// Shipped only in the listed bundles (must match actual presence
     /// exactly, so a stale exception fails).
+    ///
+    /// Part of the exception vocabulary and handled by every `match` over
+    /// `SkillSyncRule`, but not currently constructed by any live entry in
+    /// `SKILL_SYNC_EXCEPTIONS` (today's only exception is `ContentDiverges`).
+    #[allow(dead_code)]
     OnlyIn {
+        bundles: &'static [&'static str],
+        reason: &'static str,
+    },
+    /// Shipped in the listed bundles, but the SKILL.md content diverges by
+    /// design (the presence set must match exactly; content is not
+    /// byte-compared across bundles).
+    ContentDiverges {
         bundles: &'static [&'static str],
         reason: &'static str,
     },
@@ -157,11 +169,14 @@ const SKILL_SYNC_EXCEPTIONS: &[(&[&str], SkillSyncRule)] = &[(
         "tracedecay-review-diff",
         "tracedecay-test-changes",
     ],
-    SkillSyncRule::OnlyIn {
-        bundles: &["cursor"],
-        reason: "Cursor-only slash dispatchers (disable-model-invocation: true) that \
-                     hand off to the shared workflow skills; Codex auto-discovers the \
-                     workflow skills directly",
+    SkillSyncRule::ContentDiverges {
+        bundles: &["cursor", "codex"],
+        reason: "The 13 `tracedecay-*` workflow skills ship in both bundles but in \
+                     divergent forms by design: Cursor ships slash dispatchers \
+                     (disable-model-invocation: true, slash H1) for its native \
+                     explicit-dispatch surface, while Codex (like Claude) ships the \
+                     canonical model-invocable form. Presence is enforced in both; \
+                     content is intentionally not byte-compared across the two.",
     },
 )];
 
@@ -210,6 +225,16 @@ fn skills_are_synced_across_bundles_or_declared_exceptions() {
                      in {shipped_in:?}; fix the bundles or the exception"
                 );
             }
+            Some(SkillSyncRule::ContentDiverges { bundles, reason }) => {
+                let declared: BTreeSet<&'static str> = bundles.iter().copied().collect();
+                assert_eq!(
+                    shipped_in, &declared,
+                    "skill `{skill}` is declared ContentDiverges across {declared:?} \
+                     ({reason}) but ships in {shipped_in:?}; fix the bundles or the \
+                     exception"
+                );
+                // Content intentionally not byte-compared: the divergence is the point.
+            }
             None => {
                 assert_eq!(
                     shipped_in, &every_bundle,
@@ -222,14 +247,26 @@ fn skills_are_synced_across_bundles_or_declared_exceptions() {
     }
 }
 
-/// The cross-bundle shared skill set must equal the runtime skill index the
-/// hooks advertise (`hooks::CURSOR_PLUGIN_SKILLS`).
+/// The cross-bundle shared *and byte-identical* skill set must equal the
+/// runtime skill index the hooks advertise (`hooks::CURSOR_PLUGIN_SKILLS`).
+/// The 13 `tracedecay-*` workflow skills are also shared by every bundle now,
+/// but they diverge in content by design (Cursor dispatchers vs Codex canonical
+/// form — see `SKILL_SYNC_EXCEPTIONS`), so they are excluded here: the runtime
+/// index only lists the model-invocable skills whose bodies are identical
+/// everywhere.
 #[test]
 fn skills_shared_by_every_bundle_match_the_runtime_skill_index() {
     let bundle_count = BUNDLES.len();
+    let exceptions = skill_exception_index();
     let shared: Vec<String> = skill_presence_by_bundle()
         .into_iter()
-        .filter(|(_, shipped_in)| shipped_in.len() == bundle_count)
+        .filter(|(skill, shipped_in)| {
+            shipped_in.len() == bundle_count
+                && !matches!(
+                    exceptions.get(skill.as_str()),
+                    Some(SkillSyncRule::ContentDiverges { .. })
+                )
+        })
         .map(|(skill, _)| skill)
         .collect();
     let mut expected: Vec<String> = CURSOR_PLUGIN_SKILLS
@@ -239,8 +276,8 @@ fn skills_shared_by_every_bundle_match_the_runtime_skill_index() {
     expected.sort();
     assert_eq!(
         shared, expected,
-        "the skills shared by every bundle must be exactly \
-         hooks::CURSOR_PLUGIN_SKILLS (the model-invocable workflow set)"
+        "the skills shared and byte-identical across every bundle must be exactly \
+         hooks::CURSOR_PLUGIN_SKILLS (the model-invocable set)"
     );
 }
 
@@ -262,7 +299,8 @@ fn every_sync_exception_documents_a_reason() {
     }
     for (skills, rule) in SKILL_SYNC_EXCEPTIONS {
         let reason = match rule {
-            SkillSyncRule::OnlyIn { reason, .. } => reason,
+            SkillSyncRule::OnlyIn { reason, .. }
+            | SkillSyncRule::ContentDiverges { reason, .. } => reason,
         };
         assert!(
             !reason.trim().is_empty(),
@@ -298,7 +336,8 @@ fn assert_only_in_lists_name_real_bundles() {
     }
     for (skills, rule) in SKILL_SYNC_EXCEPTIONS {
         match rule {
-            SkillSyncRule::OnlyIn { bundles, .. } => {
+            SkillSyncRule::OnlyIn { bundles, .. }
+            | SkillSyncRule::ContentDiverges { bundles, .. } => {
                 check(format!("SKILL_SYNC_EXCEPTIONS entry {skills:?}"), bundles);
             }
         }
@@ -413,8 +452,8 @@ fn assert_skill_md_synced(
                 reference_file.display()
             );
         }
-        Some(SkillSyncRule::OnlyIn { .. }) => {
-            unreachable!("OnlyIn skills are never content-compared across bundles")
+        Some(SkillSyncRule::OnlyIn { .. }) | Some(SkillSyncRule::ContentDiverges { .. }) => {
+            unreachable!("excepted skills are never content-compared across bundles")
         }
     }
 }
