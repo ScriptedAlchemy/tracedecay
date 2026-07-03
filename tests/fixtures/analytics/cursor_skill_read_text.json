@@ -3,7 +3,7 @@
     "type": "tool_use",
     "name": "ReadFile",
     "input": {
-      "path": "/home/zack/.cursor/plugins/local/tracedecay/skills/curating-project-memory/SKILL.md"
+      "path": "/home/zack/.cursor/plugins/local/tracedecay/skills/project-memory/SKILL.md"
     }
   },
   {

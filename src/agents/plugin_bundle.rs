@@ -7,10 +7,10 @@
 //! view that each installer deploys.
 //!
 //! Layout of `plugin/`:
-//! - `plugin/skills/*/SKILL.md` — the 17 shared model-invocable skills **plus**
-//!   the 13 canonical (`claude`/`codex`) workflow dispatcher skills. Cursor
-//!   deploys only the 17 model-invocable skills (not the dispatcher skills);
-//!   its explicit dispatch is native commands (below).
+//! - `plugin/skills/*/SKILL.md` — the 16 shared model-invocable skills **plus**
+//!   the 13 canonical (`claude`/`codex`) workflow dispatcher skills (29 total).
+//!   Cursor deploys only the 16 model-invocable skills (not the dispatcher
+//!   skills); its explicit dispatch is native commands (below).
 //! - `plugin/overlays/cursor/commands/tracedecay-*.md` — Cursor 1.6+ native
 //!   slash commands, one per workflow slug, deployed to `commands/<slug>.md`.
 //!   These replace the old Cursor dispatcher *skills*.
@@ -54,7 +54,7 @@ macro_rules! plugin_file {
     };
 }
 
-// `GENERATED_SKILL_FILES`: every file under `plugin/skills/` (all 30 skill
+// `GENERATED_SKILL_FILES`: every file under `plugin/skills/` (all 29 skill
 // SKILL.md files **plus** any `references/`/`scripts/`/`assets/` support files),
 // embedded recursively at compile time by `build.rs`. This replaced the two
 // hand-maintained flat `include_str!` tables so skills can ship support files
@@ -65,7 +65,7 @@ include!(concat!(env!("OUT_DIR"), "/plugin_bundle_generated.rs"));
 /// native commands on Cursor). Claude/Codex deploy every skill.
 const CURSOR_EXCLUDED_SKILL_PREFIX: &str = "skills/tracedecay-";
 
-/// Every skill file (all 30 skills' SKILL.md + support files) — the set
+/// Every skill file (all 29 skills' SKILL.md + support files) — the set
 /// Claude and Codex deploy unchanged.
 fn all_skill_files() -> impl Iterator<Item = &'static PluginFile> {
     GENERATED_SKILL_FILES.iter()
@@ -242,7 +242,7 @@ fn compose(
 }
 
 /// Files Claude deploys: manifest + Claude agents + Claude commands + every
-/// skill file (all 30 skills incl. dispatchers, plus any support files).
+/// skill file (all 29 skills incl. dispatchers, plus any support files).
 pub fn claude_files() -> Vec<(&'static str, &'static str)> {
     compose(
         &[
@@ -269,7 +269,7 @@ pub fn cursor_files() -> Vec<(&'static str, &'static str)> {
     )
 }
 
-/// Files Codex deploys: manifest + every skill file (all 30 skills incl.
+/// Files Codex deploys: manifest + every skill file (all 29 skills incl.
 /// dispatchers, plus any support files). Codex ships no agents/commands/rules.
 pub fn codex_files() -> Vec<(&'static str, &'static str)> {
     compose(&[CODEX_MANIFEST_FILES], all_skill_files())

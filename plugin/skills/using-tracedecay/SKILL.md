@@ -33,7 +33,7 @@ search, or file reads. You cannot rationalize your way out of this.
 | About to write a new helper, rename, or do a mechanical edit | `tracedecay:editing-safely` (duplicate probe, rename recon, anchored edits) |
 | Reviewing a diff, auditing risk, or drafting commit/PR text | `tracedecay:reviewing-changes` |
 | Asked about architecture, tech debt, or project/index status | `tracedecay:code-health` |
-| The user references prior decisions or past conversations | `tracedecay:recalling-project-memory` / `tracedecay:recalling-session-context` |
+| The user references prior decisions or past conversations | `tracedecay:project-memory` / `tracedecay:recalling-session-context` |
 | A compiler/type error needs context | `tracedecay:fixing-build-and-type-errors` |
 | A tracedecay MCP call errors or times out | `tracedecay:using-the-cli` — never abandon tracedecay over transport |
 

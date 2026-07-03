@@ -596,7 +596,7 @@ fn test_cursor_plugin_bundle_files_are_valid() {
 
 #[test]
 fn generated_guidance_prefers_resolved_active_project_store() {
-    // The 17 model-invocable skills are now shared byte-for-byte across hosts
+    // The 16 model-invocable skills are now shared byte-for-byte across hosts
     // in `plugin/skills/`, so cursor and codex read the same source file.
     let shared_status = include_str!("../../plugin/skills/code-health/SKILL.md");
     let cursor_rule = include_str!("../../plugin/rules/tracedecay.mdc");

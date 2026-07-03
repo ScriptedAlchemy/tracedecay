@@ -86,7 +86,7 @@ and the specific scans the user asked for — don't run every tool by reflex.
 - This skill reports and prioritizes; it does not edit. Hand fixes to
   `tracedecay:editing-safely` / `tracedecay:reviewing-changes`, verification
   to `tracedecay:assessing-impact`. Memory recall belongs to
-  `tracedecay:recalling-project-memory`; past-session recall to
+  `tracedecay:project-memory`; past-session recall to
   `tracedecay:recalling-session-context`.
 
 ## Output

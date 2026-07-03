@@ -1542,7 +1542,7 @@ mod tests {
     /// via `codex_files`) must cover every shared model-invocable skill and the
     /// 13 canonical `tracedecay-*` workflow dispatchers, plus Codex's manifest,
     /// `.mcp.json`, hooks, and README. Codex has no slash-command or
-    /// `disable-model-invocation` surface, so it ships all 30 skills in their
+    /// `disable-model-invocation` surface, so it ships all 29 skills in their
     /// canonical (model-invocable) form. The single shared tree means there is
     /// no cross-bundle parity to enforce anymore — this replaces the old
     /// `codex_skills_match_the_cursor_source_for_parity` /
@@ -1569,7 +1569,7 @@ mod tests {
             .map(|(relative, _)| relative.to_string())
             .collect();
 
-        // Every skill dir under plugin/skills is deployed by Codex (all 30).
+        // Every skill dir under plugin/skills is deployed by Codex (all 29).
         let skills_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/skills");
         let mut skill_dirs: Vec<String> = std::fs::read_dir(&skills_root)
             .expect("plugin/skills should be readable")
@@ -1578,7 +1578,7 @@ mod tests {
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
         skill_dirs.sort();
-        assert_eq!(skill_dirs.len(), 30, "expected 30 shared skill dirs");
+        assert_eq!(skill_dirs.len(), 29, "expected 29 shared skill dirs");
         // Every file under plugin/skills/ (SKILL.md *and* any support files) is
         // deployed — the recursive embed leaves nothing on disk unwired.
         for relative in skill_tree_files(&skills_root) {

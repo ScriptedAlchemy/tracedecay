@@ -24,7 +24,7 @@ The daemon automation loop (skill writer, memory curator, session reflector) dra
 
 - Running or configuring the automation jobs themselves → `tracedecay automation run` / `tracedecay automation config` (CLI).
 - Reviewing session-reflection fact proposals → `tracedecay automation facts list|view|apply|reject` (CLI).
-- Memory fact curation → `tracedecay:curating-project-memory`.
+- Memory fact curation → `tracedecay:project-memory`.
 
 ## Output
 

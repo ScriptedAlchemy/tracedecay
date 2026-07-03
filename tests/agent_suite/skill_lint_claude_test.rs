@@ -29,7 +29,7 @@ use tracedecay::automation::skill_frontmatter::SkillFrontmatterValue;
 
 use crate::plugin_validation_support::{is_kebab_case_skill_name, load_skill_docs, SkillDoc};
 
-/// The full shared skill surface: the 30 canonical model-invocable skills
+/// The full shared skill surface: the 29 canonical model-invocable skills
 /// (`plugin/skills`) that every host ships. Cursor's workflow slugs are native
 /// commands, not skills, so there is no dispatcher overlay left to lint here.
 const SKILL_ROOTS: &[&str] = &["plugin/skills"];

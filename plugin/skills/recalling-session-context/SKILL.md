@@ -5,11 +5,13 @@ description: 'Use when retrieving what happened in past agent sessions: full-tex
 
 # Recalling session context
 
-Climb this ladder cheapest-first; stop as soon as the question is answered. For durable *decisions and facts* (rather than raw conversation), start with `tracedecay:recalling-project-memory` instead.
+Climb this ladder cheapest-first; stop as soon as the question is answered. For durable *decisions and facts* (rather than raw conversation), start with `tracedecay:project-memory` instead.
+
+This skill owns the **FTS → LCM** lane of `tracedecay_message_search`: `message_search` is the entry point into raw-message grep, lossless replay, and summary-DAG drill-down (the ladder below). When `message_search` is instead the entry point into durable *facts*, that is `tracedecay:project-memory`'s FTS → fact lane.
 
 ## Retrieval ladder
 
-1. **Fast full-text recall → `tracedecay_message_search`** (`query`, optional `provider`, `scope`: `all`|`parents_only`|`subagents_only`, `limit`): FTS over ingested transcripts; returns messages with their session ids — the entry point for everything below.
+1. **Fast full-text recall → `tracedecay_message_search`** (`query`, optional `provider`, `scope`: `all`|`parents_only`|`subagents_only`, `limit`): FTS over ingested transcripts; returns messages with their session ids — the entry point for the LCM ladder below.
 2. **Scoped/filtered grep → `tracedecay_lcm_grep`** (`query`, `scope`: `current`|`session`|`all` — `current`/`session` require `session_id`; `role`, `source`, `start_time`/`end_time`, `sort`: `recency`|`relevance`|`hybrid`): bounded raw-message snippets plus summary text when FTS recall needs role/time/session precision.
 3. **Lossless replay → `tracedecay_lcm_load_session`** (`session_id`, `after_store_id` + `limit` for stable pagination, `roles`, `content_offset`/`content_limit`): ordered raw messages of one session; page with `next_cursor` instead of asking for everything at once.
 4. **Summary-DAG drill-down:** `tracedecay_lcm_describe` (`session_id`) for the session's raw/summary shape; `tracedecay_lcm_expand` (`target.kind`: `raw_message`|`summary_node`|`external_payload`) to open one node, paging sources via `source_offset`/`source_limit`; `tracedecay_lcm_expand_query` (`query`) to assemble bounded retrieval context for a prompt in one call.
@@ -24,7 +26,7 @@ Climb this ladder cheapest-first; stop as soon as the question is answered. For 
 
 ## Handoff
 
-- Durable decisions/facts and persisting new ones → `tracedecay:recalling-project-memory`.
+- Durable decisions/facts and persisting new ones → `tracedecay:project-memory`.
 
 ## Output
 

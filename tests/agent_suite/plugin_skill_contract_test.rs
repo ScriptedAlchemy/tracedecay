@@ -1,9 +1,9 @@
 //! Contract tests for the shared plugin skills: frontmatter schema per host,
 //! plus the shared skill-creator design-advice checks.
 //!
-//! The three host bundles now share one `plugin/` tree. Codex deploys all 30
+//! The three host bundles now share one `plugin/` tree. Codex deploys all 29
 //! skills from `plugin/skills/` (canonical, model-invocable form). Cursor
-//! deploys only the 17 shared model-invocable skills from `plugin/skills/`
+//! deploys only the 16 shared model-invocable skills from `plugin/skills/`
 //! (the `tracedecay-*` workflow slugs are native commands on Cursor, not
 //! skills). Each host's deployed skill *source* set is staged into a temp dir
 //! below so the contract and byte-copy checks run over exactly what that host
@@ -22,7 +22,7 @@ use tempfile::TempDir;
 use tracedecay::agents::{expected_tool_perms, get_integration, InstallContext};
 use tracedecay::config::USER_DATA_DIR_ENV;
 
-/// Codex deploys every skill under `plugin/skills/` (all 30, canonical form).
+/// Codex deploys every skill under `plugin/skills/` (all 29, canonical form).
 const CODEX_SKILL_ROOT: &str = "plugin/skills";
 // Size budgets: the 500-line body cap and the "concise, trigger-first
 // description" rule come from Anthropic's skill-creator design advice. The
