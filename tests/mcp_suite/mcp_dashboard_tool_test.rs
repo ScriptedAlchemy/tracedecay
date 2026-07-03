@@ -11,6 +11,8 @@ use tempfile::TempDir;
 use tracedecay::mcp::handle_tool_call;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
+use crate::common::canonical_existing_path;
+
 /// The dashboard manager is process-global (one dashboard per MCP server
 /// process), so these tests must not run concurrently: serialize them.
 static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -19,7 +21,7 @@ async fn setup_minimal_project() -> (TraceDecay, TempDir, TempDir) {
     let home = TempDir::new().unwrap();
     let dir = TempDir::new().unwrap();
     let project = dir.path();
-    let profile_root = home.path().join(".tracedecay");
+    let profile_root = canonical_existing_path(home.path()).join(".tracedecay");
     let open_options = TraceDecayOpenOptions {
         profile_root: Some(profile_root.clone()),
         global_db_path: Some(profile_root.join("global.db")),

@@ -3,12 +3,14 @@ use tempfile::tempdir;
 use tracedecay::mcp::McpServer;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
+use crate::common::canonical_existing_path;
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_mcps_on_same_project_coordinate_via_sync_lock() {
     let home = tempdir().unwrap();
     let tmp = tempdir().unwrap();
     let project = tmp.path().to_path_buf();
-    let profile_root = home.path().join(".tracedecay");
+    let profile_root = canonical_existing_path(home.path()).join(".tracedecay");
     let open_options = TraceDecayOpenOptions {
         profile_root: Some(profile_root.clone()),
         global_db_path: Some(profile_root.join("global.db")),
