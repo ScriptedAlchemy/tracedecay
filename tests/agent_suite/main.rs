@@ -13,6 +13,7 @@ mod agent_test;
 mod claude_agent_test;
 mod copilot_agent_test;
 mod kiro_agent_test;
+mod managed_skill_archive_test;
 mod managed_skills_test;
 mod memory_digest_test;
 mod opencode_agent_test;

@@ -351,9 +351,62 @@ pub async fn stage_managed_skill_update(
         metadata: staged.metadata.clone(),
         body_markdown: staged.body_markdown.clone(),
         support_files: staged.support_files.clone(),
+        resulting_state: None,
+        staged_reason: None,
     };
     save_pending_update(profile_root, id, &pending).await?;
     record_skill_patch(profile_root, &staged, "staged_update".to_string()).await?;
+    Ok(pending.into_skill())
+}
+
+/// Stages an archive transition for a managed skill as a pending update that
+/// must be approved (or discarded) through the normal review lifecycle.
+/// Skill content is untouched: approving only flips the state to `Archived`,
+/// keeping the body and support files recoverable on disk. Pinned skills are
+/// exempt, matching the Hermes curator.
+pub async fn stage_managed_skill_archive(
+    profile_root: &Path,
+    id: &str,
+    base_checksum: &str,
+    reason: Option<String>,
+) -> Result<ManagedSkill> {
+    let skill = load_managed_skill(profile_root, id).await?;
+    if base_checksum != skill.metadata.checksum {
+        return Err(config_error(format!(
+            "base_checksum for managed skill id '{id}' is stale"
+        )));
+    }
+    if skill.pending_update.is_some() {
+        return Err(config_error(format!(
+            "managed skill '{id}' already has a pending update"
+        )));
+    }
+    if skill.metadata.pinned {
+        return Err(config_error(format!(
+            "managed skill '{id}' is pinned and exempt from staged archive"
+        )));
+    }
+    if skill.metadata.state == ManagedSkillState::Archived {
+        return Err(config_error(format!(
+            "managed skill '{id}' is already archived"
+        )));
+    }
+
+    let mut staged = skill.clone();
+    staged.pending_update = None;
+    staged.set_state(ManagedSkillState::PendingApproval);
+    staged.touch();
+    let pending = ManagedSkillPendingUpdate {
+        base_checksum: base_checksum.to_string(),
+        staged_at: current_metadata_timestamp(),
+        metadata: staged.metadata.clone(),
+        body_markdown: staged.body_markdown.clone(),
+        support_files: staged.support_files.clone(),
+        resulting_state: Some(ManagedSkillState::Archived),
+        staged_reason: reason,
+    };
+    save_pending_update(profile_root, id, &pending).await?;
+    record_skill_patch(profile_root, &staged, "staged_archive".to_string()).await?;
     Ok(pending.into_skill())
 }
 
@@ -433,13 +486,17 @@ pub async fn approve_managed_skill(profile_root: &Path, id: &str) -> Result<Mana
     let approved = match skill.pending_update {
         None => set_managed_skill_state(profile_root, id, ManagedSkillState::Active).await?,
         Some(pending) => {
+            let resulting_state = pending.resulting_state.unwrap_or(ManagedSkillState::Active);
+            let patch_target = match resulting_state {
+                ManagedSkillState::Archived => "approve_staged_archive",
+                _ => "approve_staged_update",
+            };
             let mut promoted = pending.into_skill();
-            promoted.set_state(ManagedSkillState::Active);
+            promoted.set_state(resulting_state);
             promoted.refresh_checksum();
             remove_pending_update(profile_root, id).await?;
             save_managed_skill(profile_root, &promoted).await?;
-            record_skill_patch(profile_root, &promoted, "approve_staged_update".to_string())
-                .await?;
+            record_skill_patch(profile_root, &promoted, patch_target.to_string()).await?;
             promoted
         }
     };
