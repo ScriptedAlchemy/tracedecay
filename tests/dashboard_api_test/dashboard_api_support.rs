@@ -435,34 +435,29 @@ pub(crate) async fn seed_lcm_fixture(global_db: &GlobalDb, project_path: &Path) 
 }
 
 pub(crate) fn post_json(agent: &ureq::Agent, url: &str) -> (u16, Value) {
-    let response = match agent.post(url).send_empty() {
-        Ok(response) => response,
-        Err(err) => panic!("POST {url} failed: {err}"),
-    };
+    let response = crate::common::http_call_with_retry(&format!("POST {url}"), || {
+        agent.post(url).send_empty()
+    });
     response_to_json(response)
 }
 
 pub(crate) fn post_json_body(agent: &ureq::Agent, url: &str, body: &Value) -> (u16, Value) {
-    let response = match agent.post(url).send_json(body) {
-        Ok(response) => response,
-        Err(err) => panic!("POST {url} (with body) failed: {err}"),
-    };
+    let response = crate::common::http_call_with_retry(&format!("POST {url} (with body)"), || {
+        agent.post(url).send_json(body)
+    });
     response_to_json(response)
 }
 
 pub(crate) fn patch_json_body(agent: &ureq::Agent, url: &str, body: &Value) -> (u16, Value) {
-    let response = match agent.patch(url).send_json(body) {
-        Ok(response) => response,
-        Err(err) => panic!("PATCH {url} (with body) failed: {err}"),
-    };
+    let response = crate::common::http_call_with_retry(&format!("PATCH {url} (with body)"), || {
+        agent.patch(url).send_json(body)
+    });
     response_to_json(response)
 }
 
 pub(crate) fn delete_json(agent: &ureq::Agent, url: &str) -> (u16, Value) {
-    let response = match agent.delete(url).call() {
-        Ok(response) => response,
-        Err(err) => panic!("DELETE {url} failed: {err}"),
-    };
+    let response =
+        crate::common::http_call_with_retry(&format!("DELETE {url}"), || agent.delete(url).call());
     response_to_json(response)
 }
 
@@ -733,11 +728,31 @@ pub(crate) async fn set_fact_access_without_touching_updated_at(
 }
 
 pub(crate) fn git(project: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(project)
-        .output()
-        .unwrap_or_else(|err| panic!("failed to run git {args:?}: {err}"));
+    assert!(
+        project.is_dir(),
+        "git cwd {project:?} should exist before running git {args:?}"
+    );
+    let git = crate::common::git_program();
+    // Retry a transient spawn ENOENT: under heavy parallel test load the
+    // initial fork/exec can spuriously fail with "No such file or directory".
+    let mut last_err: Option<std::io::Error> = None;
+    let mut output = None;
+    for attempt in 0..5 {
+        match Command::new(&git).args(args).current_dir(project).output() {
+            Ok(out) => {
+                output = Some(out);
+                break;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound && attempt < 4 => {
+                last_err = Some(err);
+                thread::sleep(std::time::Duration::from_millis(20 * (attempt + 1)));
+            }
+            Err(err) => panic!("failed to run git {args:?} (program {git:?}): {err}"),
+        }
+    }
+    let output = output.unwrap_or_else(|| {
+        panic!("failed to run git {args:?} (program {git:?}) after retries: {last_err:?}")
+    });
     assert!(
         output.status.success(),
         "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
