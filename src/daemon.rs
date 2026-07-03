@@ -2428,7 +2428,7 @@ mod tests {
                 let (stream, _addr) = listener.accept().await.expect("accept daemon client");
                 let engine = engine.clone();
                 tasks.push(tokio::spawn(async move {
-                    super::serve_socket_client(stream, engine)
+                    Box::pin(super::serve_socket_client(stream, engine))
                         .await
                         .expect("serve proxied client");
                 }));

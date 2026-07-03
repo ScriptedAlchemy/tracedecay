@@ -52,8 +52,15 @@ pub(crate) struct HookEvent {
 pub(crate) enum HookEventPlan {
     SyncFiles(Vec<String>),
     AddBranch(String),
-    AddBranchAt { root: PathBuf, branch: String },
-    SyncCurrentBranch { branch: String, agent: HookAgent },
+    AddBranchAt {
+        root: PathBuf,
+        branch: String,
+        agent: HookAgent,
+    },
+    SyncCurrentBranch {
+        branch: String,
+        agent: HookAgent,
+    },
     DebouncedIncrementalSync(HookAgent),
     Noop,
 }
@@ -153,7 +160,7 @@ fn plan_shell_hook_event(
     };
     match crate::hooks::cursor_shell_sync_plan_with_current_branch(command, current_branch) {
         crate::hooks::CursorShellSyncPlan::BranchAdd(branch) => {
-            branch_plan_for_root(project_root, hook_project_root, branch)
+            branch_plan_for_root(project_root, hook_project_root, branch, event.agent)
         }
         crate::hooks::CursorShellSyncPlan::WorktreeBranchAdd {
             branch,
@@ -161,6 +168,7 @@ fn plan_shell_hook_event(
         } => HookEventPlan::AddBranchAt {
             root: crate::hooks::resolve_worktree_add_root(command, cwd, &worktree_path),
             branch,
+            agent: event.agent,
         },
         crate::hooks::CursorShellSyncPlan::IncrementalSync => {
             HookEventPlan::DebouncedIncrementalSync(event.agent)
@@ -175,6 +183,7 @@ fn plan_shell_hook_event(
                 HookEventPlan::AddBranchAt {
                     root: hook_project_root,
                     branch,
+                    agent: event.agent,
                 }
             }
         }
@@ -203,6 +212,7 @@ fn branch_plan_for_root(
     project_root: &Path,
     hook_project_root: PathBuf,
     branch: String,
+    agent: HookAgent,
 ) -> HookEventPlan {
     if paths_same(&hook_project_root, project_root) {
         HookEventPlan::AddBranch(branch)
@@ -210,6 +220,7 @@ fn branch_plan_for_root(
         HookEventPlan::AddBranchAt {
             root: hook_project_root,
             branch,
+            agent,
         }
     }
 }
@@ -320,7 +331,12 @@ mod tests {
     }
 
     fn assert_add_branch_at(plan: HookEventPlan, expected_root: &Path, expected_branch: &str) {
-        let HookEventPlan::AddBranchAt { root, branch } = plan else {
+        let HookEventPlan::AddBranchAt {
+            root,
+            branch,
+            agent,
+        } = plan
+        else {
             panic!("expected AddBranchAt plan, got {plan:?}");
         };
         assert!(
@@ -328,6 +344,7 @@ mod tests {
             "planned root {root:?} should match expected root {expected_root:?}"
         );
         assert_eq!(branch, expected_branch);
+        assert_eq!(agent, HookAgent::Codex);
     }
 
     fn write_project_marker(root: &Path) {
@@ -543,6 +560,7 @@ mod tests {
             HookEventPlan::AddBranchAt {
                 root: Path::new("/tmp/wt").to_path_buf(),
                 branch: "feature/daemon-hooks".to_string(),
+                agent: HookAgent::Codex,
             }
         );
     }
@@ -576,6 +594,7 @@ mod tests {
             HookEventPlan::AddBranchAt {
                 root: base_root.join("wt"),
                 branch: "feature/daemon-hooks".to_string(),
+                agent: HookAgent::Codex,
             }
         );
     }
