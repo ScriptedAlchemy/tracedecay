@@ -22,20 +22,25 @@
 //! references, backticked `/skill` invocations, and `tracedecay_*` MCP tool
 //! mentions must all resolve against the bundle / the live MCP tool list.
 //!
-//! `tests/agent_suite/plugin_skill_contract_test.rs` already enforces the
-//! frontmatter key whitelist, name/folder match and charset, description
-//! budgets and trigger language, the 500-line body cap, resource-dir layout,
-//! and install byte-parity. Those rules are intentionally NOT duplicated here.
+//! The generic per-file intersection contract — frontmatter whitelist,
+//! name/folder match, description budgets/trigger/uniqueness, one plain-title
+//! H1 / heading levels / no `## When to Use`, the 500-line cap, LF hygiene,
+//! placeholder + reserved-prefix checks, and resource-dir layout — now lives
+//! once in `tests/agent_suite/shared_skill_contract_test.rs` over the single
+//! `plugin/skills/` tree. `plugin_skill_contract_test.rs` owns install
+//! byte-parity + host-extra frontmatter + metadata budgets. This file keeps
+//! only the Cursor-specific reference-integrity checks (skill/tool/link
+//! resolution and `paths` glob scoping) plus the native-command lint.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use regex::Regex;
 use tracedecay::automation::skill_frontmatter::SkillFrontmatterValue;
 use tracedecay::mcp::get_tool_definitions;
 
-use crate::plugin_validation_support::{load_skill_docs_from, repo_path, SkillDoc};
+use crate::plugin_validation_support::{load_skill_docs_from, repo_path};
 use tempfile::TempDir;
 
 /// Cursor's native slash commands (the 13 `tracedecay-*` workflow commands).
@@ -90,176 +95,9 @@ fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {
     }
 }
 
-/// skillmark W003 flags descriptions under 50 chars as too short to convey
-/// what the skill does and when to trigger it.
-const MIN_DESCRIPTION_CHARS: usize = 50;
-
-/// skillmark E037: reserved vendor prefixes a skill name must not claim.
-const RESERVED_NAME_PREFIXES: &[&str] = &["claude", "anthropic"];
-
-/// skillmark W006: placeholder fragments that mark unfinished authoring.
-/// Plain TODO/FIXME words are deliberately not listed: several bundled skills
-/// legitimately discuss TODO/FIXME markers (`tracedecay_todos`).
-const PLACEHOLDER_FRAGMENTS: &[&str] = &["{{", "}}", "tktk", "lorem ipsum", "<placeholder"];
-
 /// `tracedecay_*` identifiers that are documented output artifacts, not MCP
 /// tools (skills tell agents to report the `tracedecay_metrics:` line).
 const NON_TOOL_IDENTIFIERS: &[&str] = &["tracedecay_metrics"];
-
-#[test]
-fn cursor_skill_files_are_hygienic() {
-    let staged = staged_cursor_skills();
-    let skills = load_skill_docs_from(staged.path());
-    let mut violations = Vec::new();
-
-    for skill in &skills {
-        let at = skill.path.display();
-        let bytes = std::fs::read(&skill.path).expect("re-read skill bytes");
-        // skillmark E032-E034: structural hygiene (BOM, unclosed frontmatter
-        // is already a parse error upstream).
-        if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
-            violations.push(format!("{at}: starts with a UTF-8 BOM"));
-        }
-        // The install byte-parity tests copy these files verbatim, so the
-        // canonical bundle must be LF-only even though the parser tolerates
-        // CRLF checkouts.
-        if skill.raw.contains('\r') {
-            violations.push(format!("{at}: contains CRLF line endings"));
-        }
-        if !skill.raw.ends_with('\n') {
-            violations.push(format!("{at}: missing trailing newline"));
-        }
-        if skill.raw.ends_with("\n\n") {
-            violations.push(format!("{at}: ends with blank lines"));
-        }
-        // skilldoctor skill/trailing-whitespace, plus markdown consistency.
-        for (idx, line) in skill.raw.lines().enumerate() {
-            if line.ends_with(' ') || line.ends_with('\t') {
-                violations.push(format!("{at}:{}: trailing whitespace", idx + 1));
-            }
-            if line.contains('\t') {
-                violations.push(format!("{at}:{}: tab character", idx + 1));
-            }
-        }
-        // skilldoctor skill/empty-body.
-        if skill.body.trim().is_empty() {
-            violations.push(format!("{at}: instruction body is empty"));
-        }
-        // Unbalanced fences would corrupt every line-oriented rule below and
-        // render badly in the skill viewer.
-        let fence_lines = skill
-            .raw
-            .lines()
-            .filter(|line| line.trim_start().starts_with("```"))
-            .count();
-        if fence_lines % 2 != 0 {
-            violations.push(format!("{at}: unbalanced ``` code fences"));
-        }
-        for fragment in PLACEHOLDER_FRAGMENTS {
-            if skill.raw.to_ascii_lowercase().contains(fragment) {
-                violations.push(format!("{at}: contains placeholder text {fragment:?}"));
-            }
-        }
-    }
-
-    assert_no_violations("file hygiene", &violations);
-}
-
-#[test]
-fn cursor_skill_bodies_follow_heading_conventions() {
-    let staged = staged_cursor_skills();
-    let skills = load_skill_docs_from(staged.path());
-    let mut violations = Vec::new();
-
-    for skill in &skills {
-        let at = skill.path.display();
-        // skillmark W009 (body must have headings), tightened to the bundle's
-        // convention: the body opens with exactly one H1 title.
-        match first_content_line(&skill.body) {
-            Some(first) if first.starts_with("# ") => {}
-            Some(first) => violations.push(format!(
-                "{at}: body must open with an H1 title, found {first:?}"
-            )),
-            None => continue, // empty body reported by the hygiene test
-        }
-
-        let headings = unfenced_headings(&skill.body);
-        let h1_count = headings.iter().filter(|(level, _)| *level == 1).count();
-        if h1_count != 1 {
-            violations.push(format!("{at}: expected exactly one H1, found {h1_count}"));
-        }
-
-        // skillkit best-practices: no skipped heading levels (h2 -> h4).
-        let mut prev_level = 0usize;
-        for (level, text) in &headings {
-            if prev_level > 0 && *level > prev_level + 1 {
-                violations.push(format!(
-                    "{at}: heading {text:?} skips from h{prev_level} to h{level}"
-                ));
-            }
-            prev_level = *level;
-        }
-
-        // Model-invocable skills use a plain-title H1 — never the slash form,
-        // which is reserved for native commands (linted separately below).
-        if let Some((_, title)) = headings.iter().find(|(level, _)| *level == 1) {
-            if title.starts_with('/') {
-                violations.push(format!(
-                    "{at}: model-invocable skill must use a plain-title H1, not the slash form {title:?}"
-                ));
-            }
-        }
-    }
-
-    assert_no_violations("heading conventions", &violations);
-}
-
-#[test]
-fn cursor_skill_names_and_descriptions_meet_lint_quality_bar() {
-    let staged = staged_cursor_skills();
-    let skills = load_skill_docs_from(staged.path());
-    let mut violations = Vec::new();
-    let mut descriptions_seen: BTreeMap<String, String> = BTreeMap::new();
-
-    for skill in &skills {
-        let at = skill.path.display();
-        // skillmark E037.
-        for prefix in RESERVED_NAME_PREFIXES {
-            if skill.name.starts_with(prefix) {
-                violations.push(format!("{at}: name uses reserved prefix {prefix:?}"));
-            }
-        }
-
-        let Some(description) = scalar(skill, "description") else {
-            continue; // required-field enforcement lives in the contract test
-        };
-        // skillmark W003.
-        if description.chars().count() < MIN_DESCRIPTION_CHARS {
-            violations.push(format!(
-                "{at}: description is shorter than {MIN_DESCRIPTION_CHARS} chars"
-            ));
-        }
-        // skillmark E036: the contract test only checks Codex descriptions
-        // for angle brackets; Cursor metadata is injected into prompts too.
-        if description.contains(['<', '>']) {
-            violations.push(format!("{at}: description contains angle brackets"));
-        }
-        if !description.ends_with(['.', '!', '?']) {
-            violations.push(format!(
-                "{at}: description must end with terminal punctuation"
-            ));
-        }
-        // Duplicate descriptions make model routing between skills ambiguous
-        // (the agent picks skills from metadata alone).
-        if let Some(other) = descriptions_seen.insert(description.to_string(), skill.name.clone()) {
-            violations.push(format!(
-                "{at}: description duplicates skill {other:?} exactly"
-            ));
-        }
-    }
-
-    assert_no_violations("name/description quality", &violations);
-}
 
 #[test]
 fn cursor_skill_references_resolve() {
@@ -462,42 +300,6 @@ fn cursor_commands_are_hygienic_and_reference_resolve() {
         "expected 13 Cursor native slash commands, found {command_count}"
     );
     assert_no_violations("cursor command integrity", &violations);
-}
-
-fn first_content_line(body: &str) -> Option<&str> {
-    body.lines()
-        .map(str::trim_end)
-        .find(|line| !line.is_empty())
-}
-
-/// ATX headings outside code fences, as (level, text-after-hashes).
-fn unfenced_headings(body: &str) -> Vec<(usize, String)> {
-    let mut in_fence = false;
-    let mut headings = Vec::new();
-    for line in body.lines() {
-        if line.trim_start().starts_with("```") {
-            in_fence = !in_fence;
-            continue;
-        }
-        if in_fence || !line.starts_with('#') {
-            continue;
-        }
-        let level = line.bytes().take_while(|byte| *byte == b'#').count();
-        let rest = &line[level..];
-        if level <= 6 {
-            if let Some(text) = rest.strip_prefix(' ') {
-                headings.push((level, text.trim().to_string()));
-            }
-        }
-    }
-    headings
-}
-
-fn scalar<'a>(skill: &'a SkillDoc, field: &str) -> Option<&'a str> {
-    skill
-        .frontmatter
-        .get(field)
-        .and_then(SkillFrontmatterValue::as_scalar)
 }
 
 fn mcp_tool_names() -> BTreeSet<String> {
