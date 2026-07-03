@@ -131,7 +131,7 @@ fn test_install_creates_global_mcp_steering_agent_and_default() {
         "global Kiro tracedecay.md should exist"
     );
     let steering = std::fs::read_to_string(&steering_path).unwrap();
-    assert!(steering.contains("## Prefer tracedecay MCP tools"));
+    assert!(steering.contains("## TraceDecay: mandatory tool routing"));
     assert!(steering.contains("delegate"));
 
     let agent_path = home.join(".kiro/agents/tracedecay.json");
@@ -333,18 +333,18 @@ fn test_install_and_uninstall_preserve_existing_steering_content() {
     let user_steering = std::fs::read_to_string(&user_steering_path).unwrap();
     assert!(user_steering.contains("## Existing Kiro guidance"));
     assert!(user_steering.contains("Keep this user-authored guidance."));
-    assert!(!user_steering.contains("## Prefer tracedecay MCP tools"));
+    assert!(!user_steering.contains("## TraceDecay: mandatory tool routing"));
 
     let tracedecay_steering_path = home.join(".kiro/steering/tracedecay.md");
     let installed = std::fs::read_to_string(&tracedecay_steering_path).unwrap();
-    assert!(installed.contains("## Prefer tracedecay MCP tools"));
+    assert!(installed.contains("## TraceDecay: mandatory tool routing"));
 
     KiroIntegration.uninstall(&ctx).unwrap();
 
     let uninstalled = std::fs::read_to_string(&user_steering_path).unwrap();
     assert!(uninstalled.contains("## Existing Kiro guidance"));
     assert!(uninstalled.contains("Keep this user-authored guidance."));
-    assert!(!uninstalled.contains("## Prefer tracedecay MCP tools"));
+    assert!(!uninstalled.contains("## TraceDecay: mandatory tool routing"));
     assert!(!tracedecay_steering_path.exists());
 }
 
@@ -368,7 +368,7 @@ fn test_uninstall_preserves_user_steering_after_tracedecay_block() {
 
     let uninstalled = std::fs::read_to_string(&steering_path).unwrap();
     assert!(uninstalled.contains("User guidance appended after setup without a new heading."));
-    assert!(!uninstalled.contains("## Prefer tracedecay MCP tools"));
+    assert!(!uninstalled.contains("## TraceDecay: mandatory tool routing"));
 }
 
 #[test]
@@ -401,7 +401,7 @@ fn test_uninstall_removes_tracedecay_and_preserves_other_mcp_servers() {
     );
     let steering =
         std::fs::read_to_string(home.join(".kiro/steering/tracedecay.md")).unwrap_or_default();
-    assert!(!steering.contains("## Prefer tracedecay MCP tools"));
+    assert!(!steering.contains("## TraceDecay: mandatory tool routing"));
 }
 
 #[test]
@@ -525,7 +525,7 @@ fn test_healthcheck_fails_when_steering_lacks_owned_end_marker() {
     let steering_path = home.join(".kiro/steering/tracedecay.md");
     std::fs::write(
         &steering_path,
-        "## Prefer tracedecay MCP tools\n\nEdited tracedecay guidance without ownership marker.\n",
+        "## TraceDecay: mandatory tool routing\n\nEdited tracedecay guidance without ownership marker.\n",
     )
     .unwrap();
 

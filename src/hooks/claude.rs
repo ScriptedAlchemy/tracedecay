@@ -11,8 +11,8 @@ use super::codex::{
 };
 use super::post_tool_use::{notify_post_tool_use, CLAUDE_POST_TOOL_USE_SPEC};
 use super::steering::{
-    append_context_recovery_hint, cursor_index_signals_for_root, index_status_line,
-    session_start_from_compaction,
+    append_context_recovery_hint, append_tracedecay_bootstrap_context,
+    cursor_index_signals_for_root, index_status_line, session_start_from_compaction,
 };
 use super::tool_hints::{decide_hint, HintAgent, ToolHintInput};
 use super::{
@@ -122,13 +122,20 @@ pub async fn hook_claude_session_start() -> i32 {
     0
 }
 
-/// Builds the lean Claude `SessionStart` context for code workspaces.
-async fn claude_session_context_for_event(event_json: &str) -> String {
+/// Builds the Claude `SessionStart` context for code workspaces.
+///
+/// On an initialized project this injects the full `using-tracedecay`
+/// adoption contract (the `<EXTREMELY_IMPORTANT>` bootstrap) after the index
+/// status line, matching the Cursor and Codex session hooks so Claude's
+/// `SessionStart` channel carries the same mandate.
+pub async fn claude_session_context_for_event(event_json: &str) -> String {
     let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
     match codex_project_root_from_parsed_event(&parsed) {
         Some(root) => {
             let (staleness, _) = cursor_index_signals_for_root(&root).await;
-            index_status_line(true, staleness.as_deref())
+            let mut context = index_status_line(true, staleness.as_deref());
+            append_tracedecay_bootstrap_context(&mut context);
+            context
         }
         None if event_cwd_from_parsed(&parsed)
             .as_deref()
