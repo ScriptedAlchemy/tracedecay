@@ -33,7 +33,7 @@ use tracedecay::daemon::call_default_tool;
 use tracedecay::daemon::DaemonHandshake;
 use tracedecay::errors::{Result, TraceDecayError};
 use tracedecay::mcp::tools::{
-    get_tool_definitions, handle_profile_scoped_lcm_tool_call, ToolDefinition,
+    get_tool_definitions, handle_profile_scoped_lcm_tool_call, render_tool_cli_help, ToolDefinition,
 };
 
 /// Old CLI command names that don't match the MCP tool name. Keeps muscle
@@ -719,66 +719,7 @@ fn group_for(def: &ToolDefinition) -> &'static str {
 
 /// Print one tool's description, usage line, and parameter table.
 fn print_tool_help(def: &ToolDefinition) {
-    let short = short_name(&def.name);
-    println!("tracedecay tool {short}");
-    println!();
-    println!("{}", def.description);
-    println!();
-
-    let props = def
-        .input_schema
-        .get("properties")
-        .and_then(Value::as_object)
-        .filter(|props| !props.is_empty());
-    let required: Vec<&str> = def
-        .input_schema
-        .get("required")
-        .and_then(Value::as_array)
-        .map(|arr| arr.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-
-    let Some(props) = props else {
-        println!("(no parameters)");
-        println!();
-        println!("Usage: tracedecay tool {short} [--json] [--project <path>]");
-        return;
-    };
-
-    let usage_params: String = required
-        .iter()
-        .map(|req| format!(" --{} <value>", req.replace('_', "-")))
-        .collect();
-    println!("Usage: tracedecay tool {short}{usage_params} [--key value]... [--json]");
-    println!();
-
-    println!("Parameters:");
-    let mut entries: Vec<(&String, &Value)> = props.iter().collect();
-    entries.sort_by_key(|(k, _)| (*k).clone());
-    for (key, schema) in entries {
-        let ty = schema
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("string");
-        let req = if required.contains(&key.as_str()) {
-            "required"
-        } else {
-            "optional"
-        };
-        let desc = schema
-            .get("description")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        println!(
-            "  --{:<26} {:<8} {:<8}  {}",
-            key.replace('_', "-"),
-            ty,
-            req,
-            desc
-        );
-    }
-    println!();
-    println!("Reserved flags: --json, --project <path>, --args <json|@file>, -h/--help");
-    println!("Any value starting with @ is read from that file (multi-line payloads).");
+    print!("{}", render_tool_cli_help(def));
 }
 
 #[cfg(test)]
