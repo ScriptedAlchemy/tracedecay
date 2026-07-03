@@ -420,30 +420,59 @@ pub(crate) async fn handle_reinstall_command() -> tracedecay::errors::Result<()>
         eprintln!("No installed agents found. Run `tracedecay install` first.");
     } else {
         let agents = user_cfg.installed_agents.clone();
-        let project_path = std::env::current_dir().ok();
         eprintln!(
             "Reinstalling {} agent(s): {}",
             agents.len(),
             agents.join(", ")
         );
-        for id in &agents {
-            let ag = tracedecay::agents::get_integration(id)?;
-            let ctx = tracedecay::agents::InstallContext {
-                home: home.clone(),
-                tracedecay_bin: tracedecay_bin.clone(),
-                tool_permissions: tracedecay::agents::expected_tool_perms(),
-                profile: None,
-                project_root: None,
-                dashboard: true,
-            };
-            ag.install(&ctx)?;
-            ag.post_install(project_path.as_deref()).await;
+        let results = reinstall_agent_integrations(&agents, &home, &tracedecay_bin).await;
+        let failed: Vec<String> = results
+            .iter()
+            .filter_map(|(id, result)| result.as_ref().err().map(|_| id.clone()))
+            .collect();
+        if !failed.is_empty() {
+            return Err(tracedecay::errors::TraceDecayError::Config {
+                message: format!("failed to reinstall agent(s): {}", failed.join(", ")),
+            });
         }
         eprintln!("\x1b[32m✔\x1b[0m All agents reinstalled");
         user_cfg.last_installed_version = env!("CARGO_PKG_VERSION").to_string();
         user_cfg.save();
     }
     Ok(())
+}
+
+pub(crate) async fn reinstall_agent_integrations(
+    agent_ids: &[String],
+    home: &Path,
+    tracedecay_bin: &str,
+) -> Vec<(String, tracedecay::errors::Result<()>)> {
+    let project_path = std::env::current_dir().ok();
+    let mut results = Vec::new();
+    for id in agent_ids {
+        let result = match tracedecay::agents::get_integration(id) {
+            Ok(ag) => {
+                let ctx = tracedecay::agents::InstallContext {
+                    home: home.to_path_buf(),
+                    tracedecay_bin: tracedecay_bin.to_string(),
+                    tool_permissions: tracedecay::agents::expected_tool_perms(),
+                    profile: None,
+                    project_root: None,
+                    dashboard: true,
+                };
+                match ag.install(&ctx) {
+                    Ok(()) => {
+                        ag.post_install(project_path.as_deref()).await;
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            Err(e) => Err(e),
+        };
+        results.push((id.clone(), result));
+    }
+    results
 }
 
 pub(crate) async fn handle_uninstall_command(

@@ -32,13 +32,16 @@ fn explicit_agent_config_commands_skip_startup_maintenance() {
     assert!(should_skip_startup_maintenance(&Commands::Reinstall));
     assert!(should_skip_startup_maintenance(&Commands::UpdatePlugin));
     assert!(should_skip_startup_maintenance(&Commands::Upgrade {
-        no_heal: false
+        no_heal: false,
+        no_reinstall: false
     }));
     assert!(should_skip_startup_maintenance(&Commands::Update {
-        no_heal: false
+        no_heal: false,
+        no_reinstall: false
     }));
     assert!(should_skip_startup_maintenance(&Commands::PostUpdate {
-        no_heal: false
+        no_heal: false,
+        no_reinstall: false
     }));
     assert!(should_skip_startup_maintenance(&Commands::Uninstall {
         agent: Some("kiro".to_string()),
@@ -86,13 +89,18 @@ fn agent_install_maintenance_is_selective() {
         &Commands::UpdatePlugin
     ));
     assert!(should_skip_agent_install_maintenance(&Commands::Upgrade {
-        no_heal: false
+        no_heal: false,
+        no_reinstall: false
     }));
     assert!(should_skip_agent_install_maintenance(&Commands::Update {
-        no_heal: false
+        no_heal: false,
+        no_reinstall: false
     }));
     assert!(should_skip_agent_install_maintenance(
-        &Commands::PostUpdate { no_heal: false }
+        &Commands::PostUpdate {
+            no_heal: false,
+            no_reinstall: false
+        }
     ));
     assert!(should_skip_agent_install_maintenance(&Commands::Tool {
         project: None,
@@ -171,6 +179,25 @@ fn post_update_full_reinstall_marker_advancement_suppresses_startup_reinstall() 
     );
     // Idempotent: a second post-update run has nothing left to record.
     assert!(!config.mark_version_installed(running));
+}
+
+#[test]
+fn partial_reinstall_failure_leaves_startup_reinstall_pending() {
+    // A partial failure in the post-update / silent reinstall pass must NOT
+    // advance the version markers, so `silent_reinstall_action` still returns
+    // `Reinstall` on the next startup — the self-healing retry path.
+    let running = "6.1.0";
+    let config = UserConfig {
+        installed_agents: vec!["cursor".to_string()],
+        previous_version: "6.0.0".to_string(),
+        // markers deliberately left unadvanced (simulating a partial failure)
+        ..UserConfig::default()
+    };
+
+    assert_eq!(
+        silent_reinstall_action(&config, running),
+        SilentReinstallAction::Reinstall
+    );
 }
 
 #[test]

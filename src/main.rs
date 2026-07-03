@@ -205,7 +205,7 @@ async fn run(cli: Cli) -> tracedecay::errors::Result<()> {
     };
 
     maybe_run_extract_worker(&command);
-    run_startup_preamble(&command);
+    run_startup_preamble(&command).await;
     dispatch_command(command).await
 }
 
@@ -219,7 +219,7 @@ fn maybe_run_extract_worker(command: &Commands) {
     }
 }
 
-fn run_startup_preamble(command: &Commands) {
+async fn run_startup_preamble(command: &Commands) {
     let skip_startup_maintenance = should_skip_startup_maintenance(command);
     let skip_agent_install_maintenance = should_skip_agent_install_maintenance(command);
 
@@ -257,7 +257,7 @@ fn run_startup_preamble(command: &Commands) {
     // Best-effort check: warn if install needs re-running.
     if !skip_agent_install_maintenance {
         tracedecay::agents::claude::check_install_stale();
-        maybe_run_silent_reinstall(&mut user_config);
+        maybe_run_silent_reinstall(&mut user_config).await;
     }
 }
 
@@ -311,12 +311,12 @@ fn silent_reinstall_action(
     }
 }
 
-fn maybe_run_silent_reinstall(user_config: &mut tracedecay::user_config::UserConfig) {
+async fn maybe_run_silent_reinstall(user_config: &mut tracedecay::user_config::UserConfig) {
     // Silent reinstall: re-run install for every tracked agent so permissions,
     // hooks, and MCP config stay in sync with the new binary.
     let running = env!("CARGO_PKG_VERSION");
     match silent_reinstall_action(user_config, running) {
-        SilentReinstallAction::Reinstall => run_silent_reinstall(user_config, running),
+        SilentReinstallAction::Reinstall => run_silent_reinstall(user_config, running).await,
         SilentReinstallAction::AdvanceMarker => {
             user_config.previous_version = running.to_string();
             user_config.save();
@@ -325,8 +325,13 @@ fn maybe_run_silent_reinstall(user_config: &mut tracedecay::user_config::UserCon
     }
 }
 
-fn run_silent_reinstall(user_config: &mut tracedecay::user_config::UserConfig, running: &str) {
-    if update_cmd::reinstall_tracked_agents(user_config) {
+async fn run_silent_reinstall(
+    user_config: &mut tracedecay::user_config::UserConfig,
+    running: &str,
+) {
+    if let update_cmd::ReinstallOutcome::AllOk =
+        update_cmd::reinstall_tracked_agents(user_config).await
+    {
         user_config.mark_version_installed(running);
         user_config.save();
     }
@@ -561,14 +566,23 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                 print!("{}", tracedecay::daemon::service_status(&socket_path));
             }
         },
-        Commands::Upgrade { no_heal } => {
-            update_cmd::run_upgrade_command(no_heal)?;
+        Commands::Upgrade {
+            no_heal,
+            no_reinstall,
+        } => {
+            update_cmd::run_upgrade_command(no_heal, no_reinstall)?;
         }
-        Commands::Update { no_heal } => {
-            update_cmd::run_update_command(no_heal)?;
+        Commands::Update {
+            no_heal,
+            no_reinstall,
+        } => {
+            update_cmd::run_update_command(no_heal, no_reinstall)?;
         }
-        Commands::PostUpdate { no_heal } => {
-            update_cmd::run_post_update_tasks(no_heal).await?;
+        Commands::PostUpdate {
+            no_heal,
+            no_reinstall,
+        } => {
+            update_cmd::run_post_update_tasks(no_heal, no_reinstall).await?;
         }
         Commands::Channel { channel } => match channel {
             Some(target) => {

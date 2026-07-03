@@ -312,6 +312,9 @@ pub enum Commands {
         /// Skip the post-update health pass (safe repairs + doctor summary)
         #[arg(long)]
         no_heal: bool,
+        /// Skip refreshing already-configured agent integrations
+        #[arg(long)]
+        no_reinstall: bool,
     },
     /// Refresh generated plugins and the daemon, even when already up to date
     ///
@@ -323,6 +326,9 @@ pub enum Commands {
         /// Skip the post-update health pass (safe repairs + doctor summary)
         #[arg(long)]
         no_heal: bool,
+        /// Skip refreshing already-configured agent integrations
+        #[arg(long)]
+        no_reinstall: bool,
     },
     /// Refresh plugins and daemon after the binary has been updated.
     #[command(name = "post-update", hide = true)]
@@ -330,6 +336,9 @@ pub enum Commands {
         /// Skip the post-update health pass (safe repairs + doctor summary)
         #[arg(long)]
         no_heal: bool,
+        /// Skip refreshing already-configured agent integrations
+        #[arg(long)]
+        no_reinstall: bool,
     },
     /// Show or switch the update channel (stable or beta)
     #[command(long_about = CHANNEL_LONG_ABOUT, after_help = CHANNEL_AFTER_HELP)]

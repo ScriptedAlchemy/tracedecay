@@ -2,6 +2,11 @@
 //! upgrade via subprocess re-exec, generated-plugin refresh, daemon service
 //! refresh, the post-update health pass, and the full tracked-agent
 //! reinstall that keeps config-managed integrations in sync.
+//!
+//! The post-update pass refreshes every already-configured agent integration
+//! (re-running `install` + `post_install` for each tracked agent), so a
+//! separate `tracedecay reinstall` is not needed after an upgrade. Pass
+//! `--no-reinstall` to skip that agent-integration refresh.
 
 use std::path::{Path, PathBuf};
 
@@ -17,7 +22,6 @@ pub(crate) fn refresh_generated_plugins() -> tracedecay::errors::Result<()> {
     // decides whether generated artifacts exist on this machine, so stale
     // tracking state can neither skip a real install nor install anywhere new.
     let mut refreshed_any = false;
-    let mut config_only_installed: Vec<&'static str> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
     for ag in tracedecay::agents::all_integrations() {
         let ctx = tracedecay::agents::InstallContext {
@@ -40,19 +44,12 @@ pub(crate) fn refresh_generated_plugins() -> tracedecay::errors::Result<()> {
                 }
             }
             Ok(tracedecay::agents::UpdatePluginOutcome::NotInstalled) => {}
-            Ok(tracedecay::agents::UpdatePluginOutcome::ConfigOnly) => {
-                if ag.has_tracedecay(&home) {
-                    config_only_installed.push(ag.id());
-                }
-            }
+            // Config-managed integrations (claude, copilot, …) are refreshed by
+            // the tracked-agent reinstall in `run_post_update_tasks`, so there
+            // is nothing to do — and nothing to nag about — here.
+            Ok(tracedecay::agents::UpdatePluginOutcome::ConfigOnly) => {}
             Err(e) => failures.push(format!("{}: {e}", ag.id())),
         }
-    }
-    if !config_only_installed.is_empty() {
-        eprintln!(
-            "  Config-managed integrations left untouched: {} (run `tracedecay reinstall` to refresh their config entries)",
-            config_only_installed.join(", ")
-        );
     }
     if !refreshed_any {
         eprintln!("No generated plugin installs detected — nothing to update.");
@@ -193,19 +190,25 @@ where
     }
 }
 
-pub(crate) fn run_update_command(no_heal: bool) -> tracedecay::errors::Result<()> {
+pub(crate) fn run_update_command(
+    no_heal: bool,
+    no_reinstall: bool,
+) -> tracedecay::errors::Result<()> {
     run_install_then_refresh(
         RefreshPolicy::Always,
         tracedecay::upgrade::run_upgrade,
-        |binary| run_post_update_subcommand(no_heal, binary),
+        |binary| run_post_update_subcommand(no_heal, no_reinstall, binary),
     )
 }
 
-pub(crate) fn run_upgrade_command(no_heal: bool) -> tracedecay::errors::Result<()> {
+pub(crate) fn run_upgrade_command(
+    no_heal: bool,
+    no_reinstall: bool,
+) -> tracedecay::errors::Result<()> {
     run_install_then_refresh(
         RefreshPolicy::AfterInstall,
         tracedecay::upgrade::run_upgrade,
-        |binary| run_post_update_subcommand(no_heal, binary),
+        |binary| run_post_update_subcommand(no_heal, no_reinstall, binary),
     )
 }
 
@@ -222,6 +225,7 @@ fn post_update_binary(installed: Option<&Path>) -> tracedecay::errors::Result<St
 
 fn run_post_update_subcommand(
     no_heal: bool,
+    no_reinstall: bool,
     installed: Option<&Path>,
 ) -> tracedecay::errors::Result<()> {
     let tracedecay_bin = post_update_binary(installed)?;
@@ -229,6 +233,9 @@ fn run_post_update_subcommand(
     command.arg("post-update");
     if no_heal {
         command.arg("--no-heal");
+    }
+    if no_reinstall {
+        command.arg("--no-reinstall");
     }
     let status = command
         .status()
@@ -243,38 +250,66 @@ fn run_post_update_subcommand(
     })
 }
 
-/// Re-runs full `install()` for every tracked agent so tool permissions,
-/// hooks, and MCP config stay in sync with the running binary — a superset
-/// of `refresh_generated_plugins`, which rewrites generated artifacts only
-/// and deliberately leaves config-managed integrations untouched. Returns
-/// whether every install succeeded (an empty tracked list is a success).
-pub(crate) fn reinstall_tracked_agents(user_config: &UserConfig) -> bool {
+/// The result of a tracked-agent reinstall pass. Version markers may only
+/// advance on [`ReinstallOutcome::AllOk`]; a partial failure leaves the
+/// markers untouched so the startup silent reinstall retries the work.
+pub(crate) enum ReinstallOutcome {
+    /// Every tracked agent reinstalled successfully (an empty tracked list is
+    /// also `AllOk`).
+    AllOk,
+    /// One or more tracked agents failed to reinstall; `failed` lists ids (or
+    /// a descriptive pseudo-id when the environment could not be resolved).
+    PartialFailure { failed: Vec<String> },
+}
+
+/// Partitions per-agent reinstall results into a [`ReinstallOutcome`]. A pure
+/// helper so the outcome logic is unit-testable without touching the real
+/// filesystem or agent registry.
+pub(crate) fn partition_reinstall_results(
+    results: Vec<(String, tracedecay::errors::Result<()>)>,
+) -> ReinstallOutcome {
+    let failed: Vec<String> = results
+        .into_iter()
+        .filter_map(|(id, result)| result.err().map(|_| id))
+        .collect();
+    if failed.is_empty() {
+        ReinstallOutcome::AllOk
+    } else {
+        ReinstallOutcome::PartialFailure { failed }
+    }
+}
+
+/// Re-runs full `install()` + `post_install()` for every tracked agent so tool
+/// permissions, hooks, and MCP config stay in sync with the running binary — a
+/// superset of `refresh_generated_plugins`, which rewrites generated artifacts
+/// only. Mirrors the canonical `handle_reinstall_command` (global scope:
+/// `project_root: None`). Continues past a failing agent; returns
+/// [`ReinstallOutcome::PartialFailure`] listing every failure (an empty tracked
+/// list is [`ReinstallOutcome::AllOk`]). If the home or binary cannot be
+/// resolved, no install runs and a descriptive failure is reported so the
+/// version markers stay put.
+pub(crate) async fn reinstall_tracked_agents(user_config: &UserConfig) -> ReinstallOutcome {
     let (Some(home), Some(bin)) = (
         tracedecay::agents::home_dir(),
         tracedecay::agents::which_tracedecay(),
     ) else {
-        return false;
+        return ReinstallOutcome::PartialFailure {
+            failed: vec![
+                "<environment>: could not resolve home directory or tracedecay binary on PATH"
+                    .to_string(),
+            ],
+        };
     };
-    let mut all_ok = true;
-    for id in &user_config.installed_agents {
-        if let Ok(ag) = tracedecay::agents::get_integration(id) {
-            let ctx = tracedecay::agents::InstallContext {
-                home: home.clone(),
-                tracedecay_bin: bin.clone(),
-                tool_permissions: tracedecay::agents::expected_tool_perms(),
-                profile: None,
-                project_root: None,
-                dashboard: true,
-            };
-            if ag.install(&ctx).is_err() {
-                all_ok = false;
-            }
-        }
-    }
-    all_ok
+    let results =
+        crate::agent_cmd::reinstall_agent_integrations(&user_config.installed_agents, &home, &bin)
+            .await;
+    partition_reinstall_results(results)
 }
 
-pub(crate) async fn run_post_update_tasks(no_heal: bool) -> tracedecay::errors::Result<()> {
+pub(crate) async fn run_post_update_tasks(
+    no_heal: bool,
+    no_reinstall: bool,
+) -> tracedecay::errors::Result<()> {
     refresh_generated_plugins()?;
     if let Err(error) = refresh_daemon_service_after_update() {
         eprintln!("  \x1b[33mwarning:\x1b[0m daemon service refresh failed: {error}");
@@ -285,6 +320,11 @@ pub(crate) async fn run_post_update_tasks(no_heal: bool) -> tracedecay::errors::
         tracedecay::doctor::heal::run_post_update_health_pass().await;
     }
 
+    if no_reinstall {
+        eprintln!("Skipping agent integration refresh (--no-reinstall).");
+        return Ok(());
+    }
+
     // The generated-artifact refresh above skips config-managed integrations
     // (claude, copilot, …), but a version bump can change their tool
     // permissions, hooks, or MCP config too. Run the same full tracked-agent
@@ -292,22 +332,35 @@ pub(crate) async fn run_post_update_tasks(no_heal: bool) -> tracedecay::errors::
     // version markers so that startup pass does not repeat it. On failure the
     // markers stay put, so the next ordinary command retries via the silent
     // reinstall.
+    //
+    // Migrate first so a configured-but-untracked agent (has_tracedecay true,
+    // absent from `installed_agents`) is picked up and refreshed too — exactly
+    // what the canonical `handle_reinstall_command` does.
     let mut config = UserConfig::load();
-    if !config.installed_agents.is_empty() {
+    if let Some(home) = tracedecay::agents::home_dir() {
+        tracedecay::agents::migrate_installed_agents(&home, &mut config);
+    }
+    if config.installed_agents.is_empty() {
+        eprintln!("Refreshing agent integrations: nothing to refresh");
+    } else {
         eprintln!(
-            "Re-running agent install for: {}",
+            "Refreshing agent integrations: {}",
             config.installed_agents.join(", ")
         );
     }
-    if reinstall_tracked_agents(&config) {
-        if config.mark_version_installed(env!("CARGO_PKG_VERSION")) {
-            config.save();
+    match reinstall_tracked_agents(&config).await {
+        ReinstallOutcome::AllOk => {
+            if config.mark_version_installed(env!("CARGO_PKG_VERSION")) {
+                config.save();
+            }
         }
-    } else {
-        eprintln!(
-            "  \x1b[33mwarning:\x1b[0m agent install failed for at least one integration; \
-             it will be retried on the next tracedecay command."
-        );
+        ReinstallOutcome::PartialFailure { failed } => {
+            eprintln!(
+                "  \x1b[33mwarning:\x1b[0m agent install failed for: {}; \
+                 it will be retried on the next tracedecay command.",
+                failed.join(", ")
+            );
+        }
     }
     Ok(())
 }
@@ -317,13 +370,109 @@ mod tests {
     use std::cell::RefCell;
     use std::path::{Path, PathBuf};
 
-    use super::{post_update_binary, run_install_then_refresh, RefreshPolicy};
+    use super::{
+        partition_reinstall_results, post_update_binary, run_install_then_refresh, RefreshPolicy,
+        ReinstallOutcome,
+    };
+    use tempfile::TempDir;
     use tracedecay::upgrade::UpgradeOutcome;
+    use tracedecay::user_config::UserConfig;
 
     fn config_err(message: &str) -> tracedecay::errors::TraceDecayError {
         tracedecay::errors::TraceDecayError::Config {
             message: message.to_string(),
         }
+    }
+
+    fn ok(id: &str) -> (String, tracedecay::errors::Result<()>) {
+        (id.to_string(), Ok(()))
+    }
+
+    fn err(id: &str) -> (String, tracedecay::errors::Result<()>) {
+        (id.to_string(), Err(config_err("install failed")))
+    }
+
+    #[test]
+    fn partition_empty_is_all_ok() {
+        assert!(matches!(
+            partition_reinstall_results(Vec::new()),
+            ReinstallOutcome::AllOk
+        ));
+    }
+
+    #[test]
+    fn partition_all_success_is_all_ok() {
+        assert!(matches!(
+            partition_reinstall_results(vec![ok("claude"), ok("cursor")]),
+            ReinstallOutcome::AllOk
+        ));
+    }
+
+    #[test]
+    fn partition_collects_only_failed_ids_in_order() {
+        match partition_reinstall_results(vec![ok("claude"), err("cursor"), err("copilot")]) {
+            ReinstallOutcome::PartialFailure { failed } => {
+                assert_eq!(failed, vec!["cursor".to_string(), "copilot".to_string()]);
+            }
+            ReinstallOutcome::AllOk => panic!("expected a partial failure"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reinstall_agent_integrations_reports_unknown_ids(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let home = TempDir::new()?;
+        let results = crate::agent_cmd::reinstall_agent_integrations(
+            &["unknown-agent".to_string()],
+            home.path(),
+            "tracedecay",
+        )
+        .await;
+        match partition_reinstall_results(results) {
+            ReinstallOutcome::PartialFailure { failed } => {
+                assert_eq!(failed, vec!["unknown-agent".to_string()]);
+            }
+            ReinstallOutcome::AllOk => panic!("unknown tracked agent id must fail reinstall"),
+        }
+        Ok(())
+    }
+
+    /// Markers advance only when every tracked agent reinstalled (AllOk).
+    #[test]
+    fn markers_advance_only_on_all_ok() {
+        let running = "9.9.9";
+
+        // AllOk: markers advance.
+        let mut config = UserConfig {
+            installed_agents: vec!["claude".to_string()],
+            previous_version: "9.0.0".to_string(),
+            ..UserConfig::default()
+        };
+        if let ReinstallOutcome::AllOk = partition_reinstall_results(vec![ok("claude")]) {
+            assert!(config.mark_version_installed(running));
+        } else {
+            panic!("expected AllOk");
+        }
+        assert_eq!(config.previous_version, running);
+        assert_eq!(config.last_installed_version, running);
+
+        // PartialFailure: markers must NOT advance, so a later
+        // mark_version_installed still reports work to do.
+        let mut config = UserConfig {
+            installed_agents: vec!["claude".to_string()],
+            previous_version: "9.0.0".to_string(),
+            ..UserConfig::default()
+        };
+        match partition_reinstall_results(vec![err("claude")]) {
+            ReinstallOutcome::PartialFailure { .. } => {
+                // Intentionally do not advance markers.
+            }
+            ReinstallOutcome::AllOk => panic!("expected PartialFailure"),
+        }
+        assert_eq!(config.previous_version, "9.0.0");
+        assert!(config.last_installed_version.is_empty());
+        // A subsequent full install pass would still have work to record.
+        assert!(config.mark_version_installed(running));
     }
 
     /// Closure factory for the upgrade step: records `label`, returns `result`.
