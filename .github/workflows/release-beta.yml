@@ -64,19 +64,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - uses: rui314/setup-mold@v1
-        if: runner.os == 'Linux'
-        with:
-          mold-version: 2.41.0
-          make-default: false
-
-      - name: Use mold linker
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          mold --version
-          echo "RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/setup-linux-mold
 
       - name: Use lld-link
         if: runner.os == 'Windows'
