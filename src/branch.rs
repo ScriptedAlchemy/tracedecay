@@ -39,7 +39,7 @@ pub fn local_branch_exists(project_root: &Path, branch: &str) -> bool {
     if !crate::worktree::git_may_resolve_repo(project_root) {
         return false;
     }
-    std::process::Command::new("git")
+    std::process::Command::new(crate::git::git_program())
         .args(["show-ref", "--verify", "--quiet", &refname])
         .current_dir(project_root)
         .status()
@@ -79,7 +79,7 @@ fn current_branch_gix(project_root: &Path) -> GixHead {
 }
 
 fn current_branch_git(project_root: &Path) -> Option<String> {
-    let output = std::process::Command::new("git")
+    let output = std::process::Command::new(crate::git::git_program())
         .args(["symbolic-ref", "-q", "HEAD"])
         .current_dir(project_root)
         .output()
@@ -94,7 +94,7 @@ fn current_branch_git(project_root: &Path) -> Option<String> {
 }
 
 fn git_rev_list_count(project_root: &Path, from_ref: &str, to_ref: &str) -> Option<usize> {
-    let output = std::process::Command::new("git")
+    let output = std::process::Command::new(crate::git::git_program())
         .args(["rev-list", "--count", &format!("{from_ref}..{to_ref}")])
         .current_dir(project_root)
         .output()

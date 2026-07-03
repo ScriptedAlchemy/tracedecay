@@ -11,7 +11,7 @@ use crate::errors::Result;
 /// Shells out to `git log --format= --name-only --since='{days} days ago'`.
 /// Returns an empty map if git is not available or not a repo.
 pub async fn file_churn(project_root: &Path, days: u32) -> Result<HashMap<String, usize>> {
-    let output = tokio::process::Command::new("git")
+    let output = tokio::process::Command::new(crate::git::git_program())
         .args([
             "log",
             "--format=",

@@ -531,7 +531,7 @@ fn tail(s: &str, n: usize) -> String {
 async fn git_changed_paths(
     project_root: &std::path::Path,
 ) -> std::result::Result<Vec<String>, String> {
-    let output = Command::new("git")
+    let output = Command::new(crate::git::git_program())
         .args(["diff", "--name-only", "HEAD"])
         .current_dir(project_root)
         .output()
