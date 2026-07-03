@@ -70,15 +70,58 @@ fn assert_component_paths_resolve(manifest: &Value, bundle_root: &Path, manifest
     }
 }
 
+/// The manifests now live in the single shared `plugin/` tree, but their
+/// component pointers are *deploy-relative* (e.g. `mcp.json`, `hooks/hooks.json`
+/// — sourced from `mcp-cursor.json` / `hooks/hooks-cursor.json`). Stage the
+/// per-host deploy layout into a temp dir so `assert_component_paths_resolve`
+/// checks against the tree each host actually installs.
+fn stage_host_deploy(copies: &[(&str, &str)]) -> tempfile::TempDir {
+    let src = repo_path("plugin");
+    let staged = tempfile::tempdir().expect("temp dir");
+    for (source, deploy) in copies {
+        let target = staged.path().join(deploy);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        let src_path = src.join(source);
+        if src_path.is_dir() {
+            copy_dir(&src_path, &target);
+        } else {
+            std::fs::copy(&src_path, &target).unwrap();
+        }
+    }
+    staged
+}
+
+fn copy_dir(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let target = dst.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
 #[test]
 fn cursor_bundle_manifest_matches_the_official_cursor_plugin_schema() {
     let schema: Value = serde_json::from_str(PLUGIN_SCHEMA).expect("schema fixture parses");
     let validator = compile_schema(&schema);
 
-    let manifest_path = repo_path("cursor-plugin/.cursor-plugin/plugin.json");
+    let manifest_path = repo_path("plugin/.cursor-plugin/plugin.json");
     let manifest = read_json_file(&manifest_path);
     assert_schema_valid(&validator, &manifest, &manifest_path);
-    assert_component_paths_resolve(&manifest, &repo_path("cursor-plugin"), &manifest_path);
+
+    let staged = stage_host_deploy(&[
+        (".cursor-plugin/plugin.json", ".cursor-plugin/plugin.json"),
+        ("mcp-cursor.json", "mcp.json"),
+        ("hooks/hooks-cursor.json", "hooks/hooks.json"),
+        ("rules", "rules"),
+        ("skills", "skills"),
+        ("agents", "agents"),
+    ]);
+    assert_component_paths_resolve(&manifest, staged.path(), &manifest_path);
 }
 
 #[test]
@@ -90,19 +133,28 @@ fn codex_bundle_manifest_matches_the_cursor_schema_plus_interface_extension() {
     schema["properties"]["interface"] = json!({ "type": "object" });
     let validator = compile_schema(&schema);
 
-    let manifest_path = repo_path("codex-plugin/.codex-plugin/plugin.json");
+    let manifest_path = repo_path("plugin/.codex-plugin/plugin.json");
     let manifest = read_json_file(&manifest_path);
     assert_schema_valid(&validator, &manifest, &manifest_path);
-    assert_component_paths_resolve(&manifest, &repo_path("codex-plugin"), &manifest_path);
+
+    let staged = stage_host_deploy(&[
+        (".codex-plugin/plugin.json", ".codex-plugin/plugin.json"),
+        (".mcp.json", ".mcp.json"),
+        ("hooks/hooks-codex.json", "hooks/hooks.json"),
+        ("skills", "skills"),
+    ]);
+    assert_component_paths_resolve(&manifest, staged.path(), &manifest_path);
 }
 
 /// The schema's `name` pattern is what the marketplace submission checklist
-/// enforces; both bundles must agree on the plugin name so cross-bundle
+/// enforces; both host manifests must agree on the plugin name so cross-host
 /// tooling (marketplace entries, cache paths) can key on one identifier.
 #[test]
 fn bundle_manifests_share_the_plugin_name() {
-    let cursor = read_json_file(&repo_path("cursor-plugin/.cursor-plugin/plugin.json"));
-    let codex = read_json_file(&repo_path("codex-plugin/.codex-plugin/plugin.json"));
+    let cursor = read_json_file(&repo_path("plugin/.cursor-plugin/plugin.json"));
+    let codex = read_json_file(&repo_path("plugin/.codex-plugin/plugin.json"));
+    let claude = read_json_file(&repo_path("plugin/.claude-plugin/plugin.json"));
     assert_eq!(cursor["name"], "tracedecay");
     assert_eq!(codex["name"], "tracedecay");
+    assert_eq!(claude["name"], "tracedecay");
 }

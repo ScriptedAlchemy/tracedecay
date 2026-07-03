@@ -1,7 +1,7 @@
 //! Canonical parser for `SKILL.md` YAML frontmatter.
 //!
-//! Skill frontmatter across the repo (bundled `codex-plugin/` and
-//! `cursor-plugin/` skills, Hermes hub skills, agent-managed exports) uses a
+//! Skill frontmatter across the repo (the shared `plugin/skills/` bundle,
+//! Hermes hub skills, agent-managed exports) uses a
 //! small YAML subset: a `---` fence, `key: value` scalars (optionally single-
 //! or double-quoted), and block values made of indented lines (list items or
 //! nested maps). This module is the one place that subset is parsed so

@@ -4,11 +4,9 @@ tests/fixtures/** text eol=lf
 # Force LF for bundled plugin skill docs; the skill hygiene tests assert the
 # canonical source files are LF-only, and Windows checkout otherwise rewrites
 # them before the lint runs.
-codex-plugin/skills/** text eol=lf
-cursor-plugin/skills/** text eol=lf
-claude-plugin/** text eol=lf
+plugin/** text eol=lf
 # Force LF for the retained agent source of truth; the bundle byte-identity
-# test compares claude-plugin agents against these files and Windows checkout
+# test compares plugin agents against these files and Windows checkout
 # otherwise rewrites them to CRLF.
 src/agents/claude_agents/** text eol=lf
 # Force LF for embedded Hermes plugin template assets — they are pulled into

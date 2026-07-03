@@ -196,169 +196,15 @@ async fn track_branch_after_install(project_path: Option<&Path>) {
 // Plugin install helpers
 // ---------------------------------------------------------------------------
 
-/// Every file in the Cursor plugin bundle, embedded into the binary so installs
-/// work from a released binary without the repo `cursor-plugin/` source tree.
-/// Each entry is `(relative_path, file_contents)`. This is the single source of
-/// truth for the embedded writer, the managed-path set used for uninstall, and
-/// the coverage-guard test. The manifest, `mcp.json`, and `hooks/hooks.json`
-/// entries are rendered through helpers at install time to inject the package
-/// version and the absolute tracedecay binary path.
-const EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
-    (
-        ".cursor-plugin/plugin.json",
-        include_str!("../../cursor-plugin/.cursor-plugin/plugin.json"),
-    ),
-    ("README.md", include_str!("../../cursor-plugin/README.md")),
-    ("mcp.json", include_str!("../../cursor-plugin/mcp.json")),
-    (
-        "hooks/hooks.json",
-        include_str!("../../cursor-plugin/hooks/hooks.json"),
-    ),
-    (
-        "rules/tracedecay.mdc",
-        include_str!("../../cursor-plugin/rules/tracedecay.mdc"),
-    ),
-    (
-        "rules/tracedecay-memory.mdc",
-        include_str!("../../cursor-plugin/rules/tracedecay-memory.mdc"),
-    ),
-    (
-        "skills/assessing-impact/SKILL.md",
-        include_str!("../../cursor-plugin/skills/assessing-impact/SKILL.md"),
-    ),
-    (
-        "skills/code-health/SKILL.md",
-        include_str!("../../cursor-plugin/skills/code-health/SKILL.md"),
-    ),
-    (
-        "skills/curating-project-memory/SKILL.md",
-        include_str!("../../cursor-plugin/skills/curating-project-memory/SKILL.md"),
-    ),
-    (
-        "skills/editing-safely/SKILL.md",
-        include_str!("../../cursor-plugin/skills/editing-safely/SKILL.md"),
-    ),
-    (
-        "skills/exploring-code/SKILL.md",
-        include_str!("../../cursor-plugin/skills/exploring-code/SKILL.md"),
-    ),
-    (
-        "skills/fixing-build-and-type-errors/SKILL.md",
-        include_str!("../../cursor-plugin/skills/fixing-build-and-type-errors/SKILL.md"),
-    ),
-    (
-        "skills/inspecting-managed-skills/SKILL.md",
-        include_str!("../../cursor-plugin/skills/inspecting-managed-skills/SKILL.md"),
-    ),
-    (
-        "skills/recalling-project-memory/SKILL.md",
-        include_str!("../../cursor-plugin/skills/recalling-project-memory/SKILL.md"),
-    ),
-    (
-        "skills/managing-session-context/SKILL.md",
-        include_str!("../../cursor-plugin/skills/managing-session-context/SKILL.md"),
-    ),
-    (
-        "skills/recalling-session-context/SKILL.md",
-        include_str!("../../cursor-plugin/skills/recalling-session-context/SKILL.md"),
-    ),
-    (
-        "skills/retrieving-cached-context/SKILL.md",
-        include_str!("../../cursor-plugin/skills/retrieving-cached-context/SKILL.md"),
-    ),
-    (
-        "skills/retrieving-project-memory/SKILL.md",
-        include_str!("../../cursor-plugin/skills/retrieving-project-memory/SKILL.md"),
-    ),
-    (
-        "skills/reviewing-changes/SKILL.md",
-        include_str!("../../cursor-plugin/skills/reviewing-changes/SKILL.md"),
-    ),
-    (
-        "skills/storing-project-memory/SKILL.md",
-        include_str!("../../cursor-plugin/skills/storing-project-memory/SKILL.md"),
-    ),
-    // Slash-command dispatcher skills (`disable-model-invocation: true`).
-    // Slugs keep the `tracedecay-` prefix (so `/tracedecay` lists them all) with
-    // a verb-phrase suffix, because Cursor uses the humanized slug as the
-    // skill's display title.
-    (
-        "skills/tracedecay-audit-safety/SKILL.md",
-        include_str!("../../cursor-plugin/skills/tracedecay-audit-safety/SKILL.md"),
-    ),
-    (
-        "skills/tracedecay-check-health/SKILL.md",
-        include_str!("../../cursor-plugin/skills/tracedecay-check-health/SKILL.md"),
-    ),
-    (
-        "skills/tracedecay-clean-dead-code/SKILL.md",
-        include_str!("../../cursor-plugin/skills/tracedecay-clean-dead-code/SKILL.md"),
-    ),
-    (
-        "skills/tracedecay-compare-branches/SKILL.md",
-        include_str!("../../cursor-plugin/skills/tracedecay-compare-branches/SKILL.md"),
-    ),
-    (
-        "skills/tracedecay-curate-memory/SKILL.md",
-        include_str!("../../cursor-plugin/skills/tracedecay-curate-memory/SKILL.md"),
-    ),
-    (
-        "skills/tracedecay-draft-commit/SKILL.md",
-        include_str!("../../cursor-plugin/skills/tracedecay-draft-commit/SKILL.md"),
-    ),
-    (
-        "skills/tracedecay-find-impact/SKILL.md",
-        include_str!("../../cursor-plugin/skills/tracedecay-find-impact/SKILL.md"),
-    ),
-    (
-        "skills/tracedecay-fix-build/SKILL.md",
-        include_str!("../../cursor-plugin/skills/tracedecay-fix-build/SKILL.md"),
-    ),
-    (
-        "skills/tracedecay-map-architecture/SKILL.md",
-        include_str!("../../cursor-plugin/skills/tracedecay-map-architecture/SKILL.md"),
-    ),
-    (
-        "skills/tracedecay-port-code/SKILL.md",
-        include_str!("../../cursor-plugin/skills/tracedecay-port-code/SKILL.md"),
-    ),
-    (
-        "skills/tracedecay-recall-memory/SKILL.md",
-        include_str!("../../cursor-plugin/skills/tracedecay-recall-memory/SKILL.md"),
-    ),
-    (
-        "skills/tracedecay-review-diff/SKILL.md",
-        include_str!("../../cursor-plugin/skills/tracedecay-review-diff/SKILL.md"),
-    ),
-    (
-        "skills/tracedecay-test-changes/SKILL.md",
-        include_str!("../../cursor-plugin/skills/tracedecay-test-changes/SKILL.md"),
-    ),
-    (
-        "skills/tracing-functions/SKILL.md",
-        include_str!("../../cursor-plugin/skills/tracing-functions/SKILL.md"),
-    ),
-    (
-        "skills/using-the-cli/SKILL.md",
-        include_str!("../../cursor-plugin/skills/using-the-cli/SKILL.md"),
-    ),
-    (
-        "skills/using-tracedecay/SKILL.md",
-        include_str!("../../cursor-plugin/skills/using-tracedecay/SKILL.md"),
-    ),
-    (
-        "agents/code-explorer.md",
-        include_str!("../../cursor-plugin/agents/code-explorer.md"),
-    ),
-    (
-        "agents/code-health-auditor.md",
-        include_str!("../../cursor-plugin/agents/code-health-auditor.md"),
-    ),
-    (
-        "agents/session-historian.md",
-        include_str!("../../cursor-plugin/agents/session-historian.md"),
-    ),
-];
+/// The Cursor plugin's composed deploy set, sourced from the shared
+/// `plugin/` tree via [`crate::agents::plugin_bundle::cursor_files`].
+/// Each entry is `(deploy_relative_path, file_contents)`. The manifest,
+/// `mcp.json`, and `hooks/hooks.json` entries are rendered through helpers at
+/// install time to inject the package version and the absolute tracedecay
+/// binary path.
+fn embedded_plugin_files() -> Vec<(&'static str, &'static str)> {
+    crate::agents::plugin_bundle::cursor_files()
+}
 
 fn cursor_plugin_install_dir(home: &Path) -> PathBuf {
     home.join(".cursor/plugins/local/tracedecay")
@@ -410,7 +256,7 @@ fn install_cursor_managed_skill_overlay(home: &Path, install_dir: &Path) -> Resu
 }
 
 fn write_embedded_plugin(install_dir: &Path, tracedecay_bin: &str) -> Result<()> {
-    for &(relative, contents) in EMBEDDED_PLUGIN_FILES {
+    for (relative, contents) in embedded_plugin_files() {
         let rendered = match relative {
             ".cursor-plugin/plugin.json" => cursor_plugin_manifest(contents)?,
             "mcp.json" => cursor_plugin_mcp(contents, tracedecay_bin)?,
@@ -594,9 +440,9 @@ fn cursor_plugin_dir_has_only_managed_files(install_dir: &Path) -> bool {
 }
 
 fn cursor_plugin_managed_paths(install_dir: &Path) -> Vec<PathBuf> {
-    let mut paths: Vec<PathBuf> = EMBEDDED_PLUGIN_FILES
-        .iter()
-        .map(|&(relative, _)| install_dir.join(relative))
+    let mut paths: Vec<PathBuf> = embedded_plugin_files()
+        .into_iter()
+        .map(|(relative, _)| install_dir.join(relative))
         .collect();
     paths.push(install_dir.join("rules/tracedecay-memory-digest.mdc"));
     paths
@@ -922,7 +768,8 @@ fn doctor_check_plugin_mcp(dc: &mut DoctorCounters, mcp_path: &Path) {
 /// `hooks/hooks.json` template, so the doctor check can never drift from the
 /// hooks the bundle actually registers.
 fn cursor_plugin_hook_expectations() -> Vec<(String, String)> {
-    let raw = EMBEDDED_PLUGIN_FILES
+    let files = embedded_plugin_files();
+    let raw = files
         .iter()
         .find(|(relative, _)| *relative == "hooks/hooks.json")
         .map_or("{}", |&(_, contents)| contents);
@@ -1075,23 +922,30 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn cursor_plugin_source_dir() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("cursor-plugin")
+    fn plugin_source_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin")
     }
 
-    fn relative_paths_under(root: &Path) -> Vec<String> {
-        let mut paths: Vec<String> = collect_regular_files(root)
-            .expect("source bundle should be readable")
-            .iter()
-            .map(|path| {
-                path.strip_prefix(root)
-                    .expect("collected paths live under root")
-                    .to_string_lossy()
-                    .replace('\\', "/")
-            })
+    /// Directory names directly under `plugin/skills/` on disk.
+    fn shared_skill_dirs() -> Vec<String> {
+        subdir_names(&plugin_source_root().join("skills"))
+    }
+
+    /// Directory names under `plugin/overlays/cursor/skills/` (the Cursor
+    /// dispatcher overlay slugs).
+    fn cursor_overlay_dispatcher_dirs() -> Vec<String> {
+        subdir_names(&plugin_source_root().join("overlays/cursor/skills"))
+    }
+
+    fn subdir_names(root: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(root)
+            .expect("plugin source dir should be readable")
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|t| t.is_dir()))
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
-        paths.sort();
-        paths
+        names.sort();
+        names
     }
 
     /// The doctor's expected-hooks list is parsed from the embedded bundle
@@ -1156,7 +1010,7 @@ mod tests {
 
         // Every embedded file is also a managed path so uninstall can clean it.
         let managed = cursor_plugin_managed_paths(&install_dir);
-        for &(relative, _) in EMBEDDED_PLUGIN_FILES {
+        for (relative, _) in embedded_plugin_files() {
             assert!(
                 managed.contains(&install_dir.join(relative)),
                 "{relative} should be a managed path"
@@ -1164,25 +1018,58 @@ mod tests {
         }
     }
 
+    /// The Cursor deploy set (composed from the shared `plugin/` tree) must
+    /// cover every shared model-invocable skill, every dispatcher slug in its
+    /// Cursor overlay form, and Cursor's manifest/rules/agents — with no
+    /// on-disk skill left unwired. The source paths under `plugin/` differ from
+    /// the deploy paths, so this checks the *composition*, not a raw dir walk.
     #[test]
     fn embedded_file_list_covers_the_whole_source_bundle() {
-        let on_disk = relative_paths_under(&cursor_plugin_source_dir());
-        let mut expected: Vec<String> = EMBEDDED_PLUGIN_FILES
-            .iter()
-            .map(|&(relative, _)| relative.to_string())
+        let deploy: std::collections::BTreeSet<String> = embedded_plugin_files()
+            .into_iter()
+            .map(|(relative, _)| relative.to_string())
             .collect();
-        expected.sort();
-        assert_eq!(
-            on_disk, expected,
-            "EMBEDDED_PLUGIN_FILES must cover every cursor-plugin file"
-        );
+
+        // Every shared skill dir on disk must be deployed by Cursor.
+        for skill in shared_skill_dirs() {
+            let expected = format!("skills/{skill}/SKILL.md");
+            assert!(
+                deploy.contains(&expected),
+                "Cursor deploy set is missing shared skill {expected}"
+            );
+        }
+        // Every Cursor dispatcher overlay must be deployed.
+        for skill in cursor_overlay_dispatcher_dirs() {
+            let expected = format!("skills/{skill}/SKILL.md");
+            assert!(
+                deploy.contains(&expected),
+                "Cursor deploy set is missing dispatcher overlay {expected}"
+            );
+        }
+        // Cursor's manifest surfaces.
+        for expected in [
+            ".cursor-plugin/plugin.json",
+            "mcp.json",
+            "hooks/hooks.json",
+            "README.md",
+            "rules/tracedecay.mdc",
+            "rules/tracedecay-memory.mdc",
+            "agents/code-explorer.md",
+            "agents/code-health-auditor.md",
+            "agents/session-historian.md",
+        ] {
+            assert!(
+                deploy.contains(expected),
+                "Cursor deploy set is missing {expected}"
+            );
+        }
     }
 
     /// Every `tracedecay_*` token mentioned anywhere in the embedded plugin
     /// bundle (skills, rules, agents, commands, README).
     fn embedded_plugin_tool_mentions() -> std::collections::BTreeSet<String> {
         let mut mentions = std::collections::BTreeSet::new();
-        for &(_, contents) in EMBEDDED_PLUGIN_FILES {
+        for (_, contents) in embedded_plugin_files() {
             let bytes = contents.as_bytes();
             let mut search_from = 0;
             while let Some(found) = contents[search_from..].find("tracedecay_") {
@@ -1270,9 +1157,9 @@ mod tests {
     /// be noise in steering context.
     #[test]
     fn session_context_skill_index_matches_bundle_skills() {
-        let mut bundled: Vec<String> = EMBEDDED_PLUGIN_FILES
-            .iter()
-            .filter_map(|&(relative, contents)| {
+        let mut bundled: Vec<String> = embedded_plugin_files()
+            .into_iter()
+            .filter_map(|(relative, contents)| {
                 let name = relative
                     .strip_prefix("skills/")
                     .and_then(|rest| rest.strip_suffix("/SKILL.md"))?;
@@ -1296,7 +1183,8 @@ mod tests {
     /// tool is listed (so it skips the classifier) and no mutating tool is.
     #[test]
     fn readme_mcp_allowlist_matches_read_only_tools() {
-        let readme = EMBEDDED_PLUGIN_FILES
+        let files = embedded_plugin_files();
+        let readme = files
             .iter()
             .find(|&&(relative, _)| relative == "README.md")
             .map(|&(_, contents)| contents)

@@ -1,10 +1,12 @@
-//! Contract tests for the bundled Codex (`codex-plugin/`) and Cursor
-//! (`cursor-plugin/`) plugin skills: frontmatter schema per host, plus the
-//! shared skill-creator design-advice checks.
+//! Contract tests for the shared plugin skills: frontmatter schema per host,
+//! plus the shared skill-creator design-advice checks.
 //!
-//! Cross-host parity — each Codex skill mirroring its Cursor source, and the
-//! divergence allowlists — is covered by the unit tests in
-//! `src/agents/codex.rs` (`codex_skills_match_the_cursor_source_for_parity`).
+//! The three host bundles now share one `plugin/` tree. Codex deploys all 30
+//! skills from `plugin/skills/` (canonical, model-invocable form). Cursor
+//! deploys the 17 shared skills from `plugin/skills/` plus the 13 dispatcher
+//! slugs in their Cursor overlay form from `plugin/overlays/cursor/skills/`.
+//! Each host's deployed skill *source* set is staged into a temp dir below so
+//! the contract and byte-copy checks run over exactly what that host installs.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -12,14 +14,18 @@ use std::path::Path;
 
 use crate::common::{EnvVarGuard, PROCESS_ENV_LOCK};
 use crate::plugin_validation_support::{
-    is_kebab_case_skill_name, load_skill_docs, relative_files_under, repo_path, SkillDoc,
+    is_kebab_case_skill_name, load_skill_docs, load_skill_docs_from, relative_files_under,
+    repo_path, SkillDoc,
 };
 use tempfile::TempDir;
 use tracedecay::agents::{expected_tool_perms, get_integration, InstallContext};
 use tracedecay::config::USER_DATA_DIR_ENV;
 
-const CODEX_SKILL_ROOT: &str = "codex-plugin/skills";
-const CURSOR_SKILL_ROOT: &str = "cursor-plugin/skills";
+/// Codex deploys every skill under `plugin/skills/` (all 30, canonical form).
+const CODEX_SKILL_ROOT: &str = "plugin/skills";
+/// Cursor's dispatcher overlay (13 `tracedecay-*` slugs in slash-dispatcher
+/// form). Cursor deploys these *in place of* the canonical dispatcher form.
+const CURSOR_OVERLAY_SKILL_ROOT: &str = "plugin/overlays/cursor/skills";
 // Size budgets: the 500-line body cap and the "concise, trigger-first
 // description" rule come from Anthropic's skill-creator design advice. The
 // numeric description and metadata caps are house budgets chosen when these
@@ -86,7 +92,8 @@ fn generated_codex_plugin_skills_are_byte_copies_of_the_source_bundle() {
 
 #[test]
 fn cursor_plugin_skills_match_cursor_skill_contract() {
-    let skills = load_skill_docs(CURSOR_SKILL_ROOT);
+    let staged = staged_cursor_skill_source();
+    let skills = load_skill_docs_from(staged.path());
     assert!(!skills.is_empty(), "expected bundled Cursor skills");
 
     for skill in &skills {
@@ -104,20 +111,22 @@ fn generated_cursor_plugin_skills_are_byte_copies_of_the_source_bundle() {
         .install(&install_ctx(home.path()))
         .expect("install generated Cursor plugin bundle");
 
-    let source_root = repo_path(CURSOR_SKILL_ROOT);
+    let staged = staged_cursor_skill_source();
+    let source_root = staged.path();
     let installed_root = home.path().join(".cursor/plugins/local/tracedecay/skills");
     assert_eq!(
         skill_dir_names(&installed_root),
-        skill_dir_names(&source_root),
-        "generated Cursor plugin bundle must ship the same skills as the source bundle"
+        skill_dir_names(source_root),
+        "generated Cursor plugin bundle must ship the same skills as the composed source"
     );
-    assert_skill_trees_byte_identical(&source_root, &installed_root);
+    assert_skill_trees_byte_identical(source_root, &installed_root);
 }
 
 #[test]
 fn produced_plugin_skills_follow_skill_creator_design_advice() {
     let codex_skills = load_skill_docs(CODEX_SKILL_ROOT);
-    let cursor_skills = load_skill_docs(CURSOR_SKILL_ROOT);
+    let cursor_staged = staged_cursor_skill_source();
+    let cursor_skills = load_skill_docs_from(cursor_staged.path());
 
     assert_metadata_budget("Codex", &codex_skills, |_| true);
     assert_metadata_budget("Cursor model-invoked", &cursor_skills, |skill| {
@@ -180,6 +189,40 @@ fn install_ctx(home: &Path) -> InstallContext {
         profile: None,
         project_root: None,
         dashboard: true,
+    }
+}
+
+/// Stages the composed Cursor skill *source* tree into a temp dir: the shared
+/// model-invocable skills from `plugin/skills/` (all non-`tracedecay-*` slugs)
+/// plus the 13 Cursor dispatcher overlays. This mirrors exactly what Cursor
+/// deploys — the canonical `tracedecay-*` bodies never reach Cursor.
+fn staged_cursor_skill_source() -> TempDir {
+    let staged = TempDir::new().expect("temp cursor skill source");
+    let shared = repo_path("plugin/skills");
+    for name in skill_dir_names(&shared) {
+        if name.starts_with("tracedecay-") {
+            // Cursor ships the overlay form of these, added below.
+            continue;
+        }
+        copy_dir(&shared.join(&name), &staged.path().join(&name));
+    }
+    let overlay = repo_path(CURSOR_OVERLAY_SKILL_ROOT);
+    for name in skill_dir_names(&overlay) {
+        copy_dir(&overlay.join(&name), &staged.path().join(&name));
+    }
+    staged
+}
+
+fn copy_dir(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let target = dst.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).unwrap();
+        }
     }
 }
 

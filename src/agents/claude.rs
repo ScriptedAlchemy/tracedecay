@@ -262,212 +262,13 @@ const PLUGIN_IDENTIFIER: &str = "tracedecay@tracedecay";
 /// tracedecay binary path at deploy time.
 const TRACEDECAY_BIN_PLACEHOLDER: &str = "__TRACEDECAY_BIN__";
 
-/// Every file under `claude-plugin/`, embedded so released binaries can deploy
-/// the bundle without shipping the source tree. Paths are relative to the
-/// deploy dir; the deploy loop preserves them and creates parent dirs.
-///
-/// Coverage of the whole `claude-plugin/` tree is enforced by
-/// `claude_embedded_file_list_covers_the_whole_source_bundle`.
-const CLAUDE_EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
-    (
-        ".claude-plugin/marketplace.json",
-        include_str!("../../claude-plugin/.claude-plugin/marketplace.json"),
-    ),
-    (
-        ".claude-plugin/plugin.json",
-        include_str!("../../claude-plugin/.claude-plugin/plugin.json"),
-    ),
-    (".mcp.json", include_str!("../../claude-plugin/.mcp.json")),
-    ("README.md", include_str!("../../claude-plugin/README.md")),
-    (
-        "agents/code-explorer.md",
-        include_str!("../../claude-plugin/agents/code-explorer.md"),
-    ),
-    (
-        "agents/code-health-auditor.md",
-        include_str!("../../claude-plugin/agents/code-health-auditor.md"),
-    ),
-    (
-        "agents/session-historian.md",
-        include_str!("../../claude-plugin/agents/session-historian.md"),
-    ),
-    (
-        "commands/audit-safety.md",
-        include_str!("../../claude-plugin/commands/audit-safety.md"),
-    ),
-    (
-        "commands/check-health.md",
-        include_str!("../../claude-plugin/commands/check-health.md"),
-    ),
-    (
-        "commands/clean-dead-code.md",
-        include_str!("../../claude-plugin/commands/clean-dead-code.md"),
-    ),
-    (
-        "commands/compare-branches.md",
-        include_str!("../../claude-plugin/commands/compare-branches.md"),
-    ),
-    (
-        "commands/curate-memory.md",
-        include_str!("../../claude-plugin/commands/curate-memory.md"),
-    ),
-    (
-        "commands/draft-commit.md",
-        include_str!("../../claude-plugin/commands/draft-commit.md"),
-    ),
-    (
-        "commands/find-impact.md",
-        include_str!("../../claude-plugin/commands/find-impact.md"),
-    ),
-    (
-        "commands/fix-build.md",
-        include_str!("../../claude-plugin/commands/fix-build.md"),
-    ),
-    (
-        "commands/map-architecture.md",
-        include_str!("../../claude-plugin/commands/map-architecture.md"),
-    ),
-    (
-        "commands/port-code.md",
-        include_str!("../../claude-plugin/commands/port-code.md"),
-    ),
-    (
-        "commands/recall-memory.md",
-        include_str!("../../claude-plugin/commands/recall-memory.md"),
-    ),
-    (
-        "commands/review-diff.md",
-        include_str!("../../claude-plugin/commands/review-diff.md"),
-    ),
-    (
-        "commands/test-changes.md",
-        include_str!("../../claude-plugin/commands/test-changes.md"),
-    ),
-    (
-        "hooks/hooks.json",
-        include_str!("../../claude-plugin/hooks/hooks.json"),
-    ),
-    (
-        "skills/assessing-impact/SKILL.md",
-        include_str!("../../claude-plugin/skills/assessing-impact/SKILL.md"),
-    ),
-    (
-        "skills/code-health/SKILL.md",
-        include_str!("../../claude-plugin/skills/code-health/SKILL.md"),
-    ),
-    (
-        "skills/curating-project-memory/SKILL.md",
-        include_str!("../../claude-plugin/skills/curating-project-memory/SKILL.md"),
-    ),
-    (
-        "skills/editing-safely/SKILL.md",
-        include_str!("../../claude-plugin/skills/editing-safely/SKILL.md"),
-    ),
-    (
-        "skills/exploring-code/SKILL.md",
-        include_str!("../../claude-plugin/skills/exploring-code/SKILL.md"),
-    ),
-    (
-        "skills/fixing-build-and-type-errors/SKILL.md",
-        include_str!("../../claude-plugin/skills/fixing-build-and-type-errors/SKILL.md"),
-    ),
-    (
-        "skills/inspecting-managed-skills/SKILL.md",
-        include_str!("../../claude-plugin/skills/inspecting-managed-skills/SKILL.md"),
-    ),
-    (
-        "skills/managing-session-context/SKILL.md",
-        include_str!("../../claude-plugin/skills/managing-session-context/SKILL.md"),
-    ),
-    (
-        "skills/recalling-project-memory/SKILL.md",
-        include_str!("../../claude-plugin/skills/recalling-project-memory/SKILL.md"),
-    ),
-    (
-        "skills/recalling-session-context/SKILL.md",
-        include_str!("../../claude-plugin/skills/recalling-session-context/SKILL.md"),
-    ),
-    (
-        "skills/retrieving-cached-context/SKILL.md",
-        include_str!("../../claude-plugin/skills/retrieving-cached-context/SKILL.md"),
-    ),
-    (
-        "skills/retrieving-project-memory/SKILL.md",
-        include_str!("../../claude-plugin/skills/retrieving-project-memory/SKILL.md"),
-    ),
-    (
-        "skills/reviewing-changes/SKILL.md",
-        include_str!("../../claude-plugin/skills/reviewing-changes/SKILL.md"),
-    ),
-    (
-        "skills/storing-project-memory/SKILL.md",
-        include_str!("../../claude-plugin/skills/storing-project-memory/SKILL.md"),
-    ),
-    (
-        "skills/tracedecay-audit-safety/SKILL.md",
-        include_str!("../../claude-plugin/skills/tracedecay-audit-safety/SKILL.md"),
-    ),
-    (
-        "skills/tracedecay-check-health/SKILL.md",
-        include_str!("../../claude-plugin/skills/tracedecay-check-health/SKILL.md"),
-    ),
-    (
-        "skills/tracedecay-clean-dead-code/SKILL.md",
-        include_str!("../../claude-plugin/skills/tracedecay-clean-dead-code/SKILL.md"),
-    ),
-    (
-        "skills/tracedecay-compare-branches/SKILL.md",
-        include_str!("../../claude-plugin/skills/tracedecay-compare-branches/SKILL.md"),
-    ),
-    (
-        "skills/tracedecay-curate-memory/SKILL.md",
-        include_str!("../../claude-plugin/skills/tracedecay-curate-memory/SKILL.md"),
-    ),
-    (
-        "skills/tracedecay-draft-commit/SKILL.md",
-        include_str!("../../claude-plugin/skills/tracedecay-draft-commit/SKILL.md"),
-    ),
-    (
-        "skills/tracedecay-find-impact/SKILL.md",
-        include_str!("../../claude-plugin/skills/tracedecay-find-impact/SKILL.md"),
-    ),
-    (
-        "skills/tracedecay-fix-build/SKILL.md",
-        include_str!("../../claude-plugin/skills/tracedecay-fix-build/SKILL.md"),
-    ),
-    (
-        "skills/tracedecay-map-architecture/SKILL.md",
-        include_str!("../../claude-plugin/skills/tracedecay-map-architecture/SKILL.md"),
-    ),
-    (
-        "skills/tracedecay-port-code/SKILL.md",
-        include_str!("../../claude-plugin/skills/tracedecay-port-code/SKILL.md"),
-    ),
-    (
-        "skills/tracedecay-recall-memory/SKILL.md",
-        include_str!("../../claude-plugin/skills/tracedecay-recall-memory/SKILL.md"),
-    ),
-    (
-        "skills/tracedecay-review-diff/SKILL.md",
-        include_str!("../../claude-plugin/skills/tracedecay-review-diff/SKILL.md"),
-    ),
-    (
-        "skills/tracedecay-test-changes/SKILL.md",
-        include_str!("../../claude-plugin/skills/tracedecay-test-changes/SKILL.md"),
-    ),
-    (
-        "skills/tracing-functions/SKILL.md",
-        include_str!("../../claude-plugin/skills/tracing-functions/SKILL.md"),
-    ),
-    (
-        "skills/using-the-cli/SKILL.md",
-        include_str!("../../claude-plugin/skills/using-the-cli/SKILL.md"),
-    ),
-    (
-        "skills/using-tracedecay/SKILL.md",
-        include_str!("../../claude-plugin/skills/using-tracedecay/SKILL.md"),
-    ),
-];
+/// The Claude plugin's composed deploy set, sourced from the shared `plugin/`
+/// tree via [`crate::agents::plugin_bundle::claude_files`]. Each entry is
+/// `(deploy_relative_path, file_contents)`. Coverage of the shared tree is
+/// enforced by `claude_embedded_file_list_covers_the_whole_source_bundle`.
+fn claude_embedded_plugin_files() -> Vec<(&'static str, &'static str)> {
+    crate::agents::plugin_bundle::claude_files()
+}
 
 /// The stable marketplace/deploy root. It contains
 /// `.claude-plugin/marketplace.json` plus the plugin component dirs at root
@@ -491,7 +292,7 @@ fn known_marketplaces_path(home: &Path) -> PathBuf {
 /// Returns the deploy dir.
 fn deploy_plugin_bundle(home: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
     let deploy_dir = plugin_deploy_dir(home);
-    for &(relative, contents) in CLAUDE_EMBEDDED_PLUGIN_FILES {
+    for (relative, contents) in claude_embedded_plugin_files() {
         let rendered = render_plugin_file(relative, contents, tracedecay_bin)?;
         safe_write_text_file(&deploy_dir.join(relative), &rendered, None)?;
     }
@@ -1632,8 +1433,18 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn repo_root() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
+    fn plugin_subdir_names(rel: &str) -> Vec<String> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("plugin")
+            .join(rel);
+        let mut names: Vec<String> = std::fs::read_dir(&root)
+            .expect("plugin source dir should be readable")
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|t| t.is_dir()))
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
     }
 
     fn install_ctx(home: &Path) -> InstallContext {
@@ -1647,51 +1458,55 @@ mod tests {
         }
     }
 
-    fn relative_paths_under(root: &Path) -> Vec<String> {
-        fn walk(root: &Path, out: &mut Vec<PathBuf>) {
-            let Ok(entries) = std::fs::read_dir(root) else {
-                return;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    walk(&path, out);
-                } else {
-                    out.push(path);
-                }
-            }
-        }
-        let mut files = Vec::new();
-        walk(root, &mut files);
-        let mut paths: Vec<String> = files
-            .iter()
-            .map(|path| {
-                path.strip_prefix(root)
-                    .expect("collected paths live under root")
-                    .to_string_lossy()
-                    .replace('\\', "/")
-            })
-            .collect();
-        paths.sort();
-        paths
-    }
-
-    /// The embedded writer is the single source of truth for released installs
-    /// (the binary ships without the repo `claude-plugin/` tree), so the list
-    /// must cover every file actually present in the source bundle — otherwise
-    /// a freshly added skill/command/agent would silently never reach users.
+    /// The composed Claude deploy set (sourced from the shared `plugin/` tree
+    /// via `claude_files`) must cover every shared model-invocable skill, the
+    /// 13 canonical `tracedecay-*` dispatchers, all 3 subagents, all 13 slash
+    /// commands, and Claude's manifest/marketplace/mcp/hooks/README. The single
+    /// shared tree removes the old cross-bundle parity checks; this guards that
+    /// nothing on disk is left unwired for Claude.
     #[test]
     fn claude_embedded_file_list_covers_the_whole_source_bundle() {
-        let on_disk = relative_paths_under(&repo_root().join("claude-plugin"));
-        let mut expected: Vec<String> = CLAUDE_EMBEDDED_PLUGIN_FILES
-            .iter()
-            .map(|&(relative, _)| relative.to_string())
+        let deploy: std::collections::BTreeSet<String> = claude_embedded_plugin_files()
+            .into_iter()
+            .map(|(relative, _)| relative.to_string())
             .collect();
-        expected.sort();
-        assert_eq!(
-            on_disk, expected,
-            "CLAUDE_EMBEDDED_PLUGIN_FILES must cover every claude-plugin file"
-        );
+
+        let skills = plugin_subdir_names("skills");
+        assert_eq!(skills.len(), 30, "expected 30 shared skill dirs");
+        for skill in &skills {
+            let expected = format!("skills/{skill}/SKILL.md");
+            assert!(
+                deploy.contains(&expected),
+                "Claude deploy set is missing shared skill {expected}"
+            );
+        }
+
+        for expected in [
+            ".claude-plugin/plugin.json",
+            ".claude-plugin/marketplace.json",
+            ".mcp.json",
+            "hooks/hooks.json",
+            "README.md",
+            "agents/code-explorer.md",
+            "agents/code-health-auditor.md",
+            "agents/session-historian.md",
+        ] {
+            assert!(
+                deploy.contains(expected),
+                "Claude deploy set is missing {expected}"
+            );
+        }
+
+        // Every command in plugin/commands is deployed.
+        let commands_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/commands");
+        for entry in std::fs::read_dir(&commands_root).expect("plugin/commands readable") {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            let expected = format!("commands/{name}");
+            assert!(
+                deploy.contains(&expected),
+                "Claude deploy set is missing command {expected}"
+            );
+        }
     }
 
     /// Deploy stamps the crate version into plugin.json, substitutes the
@@ -1950,8 +1765,9 @@ mod tests {
     /// frontmatter and reference tracedecay so migration recognizes copies.
     #[test]
     fn managed_subagent_definitions_have_valid_frontmatter() {
+        let files = claude_embedded_plugin_files();
         for &file_name in LEGACY_SUBAGENT_FILES {
-            let contents = CLAUDE_EMBEDDED_PLUGIN_FILES
+            let contents = files
                 .iter()
                 .find_map(|&(relative, body)| {
                     (relative == format!("agents/{file_name}")).then_some(body)

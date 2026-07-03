@@ -1,6 +1,19 @@
 # Plugin and Skill Validation
 
-How the bundled agent plugins (`cursor-plugin/`, `codex-plugin/`) and their
+> **Layout note (single-bundle rearchitecture):** the three duplicated bundles
+> `cursor-plugin/`, `codex-plugin/`, and `claude-plugin/` have been collapsed
+> into one shared `plugin/` tree. Shared skills live in `plugin/skills/`;
+> per-host manifests live in `plugin/.cursor-plugin/`, `plugin/.codex-plugin/`,
+> `plugin/.claude-plugin/`; per-host hooks are `plugin/hooks/hooks-<host>.json`;
+> MCP configs are `plugin/.mcp.json` (Claude/Codex) and `plugin/mcp-cursor.json`
+> (Cursor, deployed as `mcp.json`); READMEs are `plugin/README-<host>.md`; and
+> Cursor's 13 slash dispatchers live as an overlay at
+> `plugin/overlays/cursor/skills/`. The composed per-host deploy set is owned by
+> `src/agents/plugin_bundle.rs`. Each host still installs a byte-identical tree
+> to before. Sections below that describe cross-bundle *parity/mirroring* are
+> historical — with one shared tree there is nothing to keep in sync.
+
+How the bundled agent plugins (shared `plugin/` tree) and their
 skills are validated, where each check runs, and how to extend the system
 without breaking the contracts.
 
@@ -35,11 +48,11 @@ JSON artifacts in the bundles are validated against vendored JSON Schemas in
 
 | Artifact | Schema | Test |
 |---|---|---|
-| `cursor-plugin/.cursor-plugin/plugin.json` | `plugin.schema.json` | `tests/agent_suite/plugin_manifest_schema_test.rs` |
-| `codex-plugin/.codex-plugin/plugin.json` | `plugin.schema.json` + `interface` extension | `tests/agent_suite/plugin_manifest_schema_test.rs` |
-| Marketplace index | `marketplace.schema.json` | vendored for refresh parity; this repo ships no marketplace index today |
-| `cursor-plugin/mcp.json` | `mcp.schema.json` | `tests/agent_suite/plugin_config_schema_test.rs` |
-| `cursor-plugin/hooks/hooks.json` and `codex-plugin/hooks/hooks.json` | `hooks.schema.json` | `tests/agent_suite/plugin_config_schema_test.rs` |
+| `plugin/.cursor-plugin/plugin.json` | `plugin.schema.json` | `tests/agent_suite/plugin_manifest_schema_test.rs` |
+| `plugin/.codex-plugin/plugin.json` | `plugin.schema.json` + `interface` extension | `tests/agent_suite/plugin_manifest_schema_test.rs` |
+| `plugin/.claude-plugin/marketplace.json` | `marketplace.schema.json` | vendored for refresh parity |
+| `plugin/mcp-cursor.json` (deploys as `mcp.json`) | `mcp.schema.json` | `tests/agent_suite/plugin_config_schema_test.rs` |
+| `plugin/hooks/hooks-cursor.json` and `plugin/hooks/hooks-codex.json` | `hooks.schema.json` | `tests/agent_suite/plugin_config_schema_test.rs` |
 
 The tests use the `jsonschema` crate (dev-dependency only, no network
 resolvers — the schemas are self-contained draft-07, and the shipped binary

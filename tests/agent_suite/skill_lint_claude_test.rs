@@ -1,5 +1,6 @@
-//! Claude Code / Agent Skills portability lint for the bundled skill
-//! collections (`cursor-plugin/skills/` and `codex-plugin/skills/`).
+//! Claude Code / Agent Skills portability lint for the shared skill
+//! collections (`plugin/skills/` and the Cursor dispatcher overlay at
+//! `plugin/overlays/cursor/skills/`).
 //!
 //! These tests keep the shared skills close to Claude Code's documented skill
 //! rules so a Claude bundle can reuse them without a rewrite.
@@ -33,7 +34,15 @@ use tracedecay::automation::skill_frontmatter::SkillFrontmatterValue;
 
 use crate::plugin_validation_support::{is_kebab_case_skill_name, load_skill_docs, SkillDoc};
 
-const SKILL_ROOTS: &[&str] = &["cursor-plugin/skills", "codex-plugin/skills"];
+/// The full shared skill surface: the 30 canonical model-invocable skills
+/// (`plugin/skills`, the set Codex/Claude ship) plus the 13 Cursor dispatcher
+/// overlays (`disable-model-invocation: true`, the form Cursor ships).
+const SKILL_ROOTS: &[&str] = &["plugin/skills", CURSOR_OVERLAY_SKILL_ROOT];
+/// The Codex/Claude canonical skill set — must be strictly Agent-Skills-spec
+/// conformant (no `disable-model-invocation`, no Cursor-only keys).
+const CANONICAL_SKILL_ROOT: &str = "plugin/skills";
+/// The Cursor dispatcher overlay carrying the cross-ecosystem conflict fields.
+const CURSOR_OVERLAY_SKILL_ROOT: &str = "plugin/overlays/cursor/skills";
 
 /// Frontmatter fields Claude Code recognizes, per the field table at
 /// code.claude.com/docs/en/skills, plus the Agent Skills open-spec fields
@@ -203,7 +212,7 @@ fn bundled_skill_descriptions_satisfy_claude_description_rules() {
 #[test]
 fn open_spec_conflicts_are_limited_to_documented_cursor_requirements() {
     for root in SKILL_ROOTS {
-        let is_codex_bundle = root.starts_with("codex-plugin");
+        let is_codex_bundle = *root == CANONICAL_SKILL_ROOT;
         for skill in load_skill_docs(root) {
             let extras = skill
                 .frontmatter
@@ -241,7 +250,7 @@ fn open_spec_conflicts_are_limited_to_documented_cursor_requirements() {
 /// conflict field, the allowlist entry (and the notes matrix) is stale.
 #[test]
 fn documented_conflict_fields_are_actually_used_by_the_cursor_bundle() {
-    let cursor_skills = load_skill_docs("cursor-plugin/skills");
+    let cursor_skills = load_skill_docs(CURSOR_OVERLAY_SKILL_ROOT);
     for field in CROSS_ECOSYSTEM_CONFLICT_FIELDS {
         assert!(
             cursor_skills

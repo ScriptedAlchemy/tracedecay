@@ -1,4 +1,5 @@
-//! Cursor-specific lint for the bundled `cursor-plugin/skills/` SKILL.md
+//! Cursor-specific lint for the composed Cursor skill set (shared
+//! `plugin/skills/` + `plugin/overlays/cursor/skills/`) SKILL.md
 //! files, ported from community/official skill linters so enforcement runs
 //! offline inside `cargo test` (no node/python CI dependency).
 //!
@@ -32,9 +33,50 @@ use regex::Regex;
 use tracedecay::automation::skill_frontmatter::SkillFrontmatterValue;
 use tracedecay::mcp::get_tool_definitions;
 
-use crate::plugin_validation_support::{load_skill_docs, SkillDoc};
+use crate::plugin_validation_support::{load_skill_docs_from, repo_path, SkillDoc};
+use tempfile::TempDir;
 
-const CURSOR_SKILL_ROOT: &str = "cursor-plugin/skills";
+/// Cursor's dispatcher overlay (the 13 `tracedecay-*` slash dispatchers).
+const CURSOR_OVERLAY_SKILL_ROOT: &str = "plugin/overlays/cursor/skills";
+
+/// Stages the composed Cursor skill *source* set into a temp dir: the shared
+/// model-invocable skills from `plugin/skills/` (all non-`tracedecay-*` slugs)
+/// plus the 13 Cursor dispatcher overlays. This is exactly what Cursor deploys
+/// — the canonical `tracedecay-*` bodies never reach Cursor.
+fn staged_cursor_skills() -> TempDir {
+    let staged = TempDir::new().expect("temp cursor skill source");
+    let shared = repo_path("plugin/skills");
+    for entry in std::fs::read_dir(&shared).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !entry.file_type().unwrap().is_dir() || name.starts_with("tracedecay-") {
+            continue;
+        }
+        copy_dir(&entry.path(), &staged.path().join(&name));
+    }
+    let overlay = repo_path(CURSOR_OVERLAY_SKILL_ROOT);
+    for entry in std::fs::read_dir(&overlay).unwrap() {
+        let entry = entry.unwrap();
+        if !entry.file_type().unwrap().is_dir() {
+            continue;
+        }
+        copy_dir(&entry.path(), &staged.path().join(entry.file_name()));
+    }
+    staged
+}
+
+fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let target = dst.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
 
 /// skillmark W003 flags descriptions under 50 chars as too short to convey
 /// what the skill does and when to trigger it.
@@ -54,7 +96,8 @@ const NON_TOOL_IDENTIFIERS: &[&str] = &["tracedecay_metrics"];
 
 #[test]
 fn cursor_skill_files_are_hygienic() {
-    let skills = load_skill_docs(CURSOR_SKILL_ROOT);
+    let staged = staged_cursor_skills();
+    let skills = load_skill_docs_from(staged.path());
     let mut violations = Vec::new();
 
     for skill in &skills {
@@ -112,7 +155,8 @@ fn cursor_skill_files_are_hygienic() {
 
 #[test]
 fn cursor_skill_bodies_follow_heading_conventions() {
-    let skills = load_skill_docs(CURSOR_SKILL_ROOT);
+    let staged = staged_cursor_skills();
+    let skills = load_skill_docs_from(staged.path());
     let mut violations = Vec::new();
 
     for skill in &skills {
@@ -170,7 +214,8 @@ fn cursor_skill_bodies_follow_heading_conventions() {
 
 #[test]
 fn cursor_skill_names_and_descriptions_meet_lint_quality_bar() {
-    let skills = load_skill_docs(CURSOR_SKILL_ROOT);
+    let staged = staged_cursor_skills();
+    let skills = load_skill_docs_from(staged.path());
     let mut violations = Vec::new();
     let mut descriptions_seen: BTreeMap<String, String> = BTreeMap::new();
 
@@ -216,7 +261,8 @@ fn cursor_skill_names_and_descriptions_meet_lint_quality_bar() {
 
 #[test]
 fn cursor_skill_references_resolve() {
-    let skills = load_skill_docs(CURSOR_SKILL_ROOT);
+    let staged = staged_cursor_skills();
+    let skills = load_skill_docs_from(staged.path());
     let skill_names: BTreeSet<&str> = skills.iter().map(|skill| skill.name.as_str()).collect();
     let tool_names = mcp_tool_names();
     let mut violations = Vec::new();

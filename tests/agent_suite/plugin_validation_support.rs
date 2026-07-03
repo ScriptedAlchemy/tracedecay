@@ -59,8 +59,13 @@ pub struct SkillDoc {
 /// sorted by path. Panics on unreadable/unparsable skills and asserts the
 /// root is non-empty.
 pub fn load_skill_docs(root: &str) -> Vec<SkillDoc> {
-    let skills_root = repo_path(root);
-    let mut dirs = fs::read_dir(&skills_root)
+    load_skill_docs_from(&repo_path(root))
+}
+
+/// Like [`load_skill_docs`] but takes an absolute skills-root path (e.g. a
+/// staged temp dir composing per-host skill sources).
+pub fn load_skill_docs_from(skills_root: &Path) -> Vec<SkillDoc> {
+    let mut dirs = fs::read_dir(skills_root)
         .unwrap_or_else(|err| {
             panic!(
                 "failed to read bundled skills at {}: {err}",

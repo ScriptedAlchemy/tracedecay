@@ -12,8 +12,7 @@ name: Plugin Validation
 on:
   pull_request:
     paths:
-      - "cursor-plugin/**"
-      - "codex-plugin/**"
+      - "plugin/**"
       - "tests/fixtures/cursor-schemas/**"
       # Plugin/skill test modules (e.g. plugin_manifest_schema_test.rs,
       # plugin_skill_contract_test.rs, the skill lint tests).
@@ -65,7 +64,7 @@ jobs:
         run: |
           npx --no-install ajv validate --spec=draft7 -c ajv-formats --errors=text \
             -s tests/fixtures/cursor-schemas/plugin.schema.json \
-            -d cursor-plugin/.cursor-plugin/plugin.json
+            -d plugin/.cursor-plugin/plugin.json
 
       # The Codex manifest follows Codex's own layout (e.g. its `interface`
       # block), so the Cursor schema does not apply; keep it to a strict JSON
@@ -73,7 +72,7 @@ jobs:
       - name: Check bundle JSON files parse
         run: |
           set -euo pipefail
-          find cursor-plugin codex-plugin -name '*.json' -print0 |
+          find plugin -name '*.json' -print0 |
             while IFS= read -r -d '' f; do
               python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$f" \
                 || { echo "invalid JSON: $f" >&2; exit 1; }
