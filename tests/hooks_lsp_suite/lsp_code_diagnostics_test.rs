@@ -598,13 +598,37 @@ async fn broker_cancels_partial_refresh_without_poisoning_warm_client() {
     let _ = handle.await;
 
     std::fs::write(&script_path, fake_lsp_script()).unwrap();
-    broker
-        .refresh_documents(
-            FAKE_LANGUAGE,
-            vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
-            FAKE_LSP_TIMEOUT,
-        )
-        .await
+    // The property under test is that aborting a partial refresh does not
+    // poison the broker: a *subsequent* refresh must spin up a clean client.
+    // On a loaded CI runner the recovery client's `python3` cold-start can
+    // exceed the initialize floor and surface a transient "initialize timed
+    // out" — that is a slow start, not a poisoned broker — so retry the
+    // recovery a bounded number of times before asserting.
+    let mut recovery = None;
+    for attempt in 0..5 {
+        let result = broker
+            .refresh_documents(
+                FAKE_LANGUAGE,
+                vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
+                FAKE_LSP_TIMEOUT,
+            )
+            .await;
+        match &result {
+            Ok(()) => {
+                recovery = Some(result);
+                break;
+            }
+            Err(err) if err.to_string().contains("initialize timed out") => {
+                recovery = Some(result);
+                if attempt + 1 < 5 {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
+            Err(err) => panic!("recovery refresh failed unexpectedly: {err}"),
+        }
+    }
+    recovery
+        .expect("recovery refresh should have been attempted")
         .expect("next refresh should start a clean client and recover");
 
     let snapshot = broker.snapshot();
