@@ -47,7 +47,7 @@ fn every_mcp_tool_is_listed_by_the_cli_discovery_command() {
 }
 
 #[test]
-fn every_mcp_tool_is_invocable_via_the_cli() {
+fn every_mcp_tool_renders_its_own_cli_help() {
     for def in get_tool_definitions() {
         let short = short_name(&def.name);
         let stdout = render_tool_cli_help(&def);
@@ -56,6 +56,35 @@ fn every_mcp_tool_is_invocable_via_the_cli() {
             "`tracedecay tool {short} --help` should print the tool's own help, got:\n{stdout}"
         );
     }
+}
+
+/// One real `tracedecay tool <name> --help` invocation, asserting the binary
+/// prints exactly what `render_tool_cli_help` renders. Tool-name resolution
+/// and help dispatch are shared across tools, so a single spawn keeps the CLI
+/// wiring covered end-to-end without paying one process per tool.
+#[test]
+fn tool_cli_help_matches_rendered_help_end_to_end() {
+    let home = TempDir::new().expect("create isolated TraceDecay home");
+    let def = get_tool_definitions()
+        .into_iter()
+        .next()
+        .expect("at least one MCP tool definition");
+    let short = short_name(&def.name);
+    let output = isolated_tracedecay_command(&home)
+        .args(["tool", short, "--help"])
+        .output()
+        .unwrap_or_else(|e| panic!("run `tracedecay tool {short} --help`: {e}"));
+    assert!(
+        output.status.success(),
+        "`tracedecay tool {short} --help` must succeed so tools stay invocable \
+         without an MCP client:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        render_tool_cli_help(&def),
+        "CLI help output should be exactly the rendered help"
+    );
 }
 
 /// True when `haystack` mentions `tool_name` as a standalone identifier

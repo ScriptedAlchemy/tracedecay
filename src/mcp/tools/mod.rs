@@ -161,7 +161,7 @@ pub fn render_tool_cli_help(def: &ToolDefinition) -> String {
 }
 
 fn short_tool_name(full: &str) -> &str {
-    full.trim_start_matches("tracedecay_")
+    full.strip_prefix("tracedecay_").unwrap_or(full)
 }
 
 #[cfg(test)]
