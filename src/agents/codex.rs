@@ -187,7 +187,12 @@ impl AgentIntegration for CodexIntegration {
         eprintln!("\n\x1b[1mCodex CLI integration\x1b[0m");
         let local_plugin_dir = codex_repo_plugin_install_dir(&ctx.project_path);
         if local_plugin_dir.join(".codex-plugin/plugin.json").exists() {
-            doctor_check_plugin_dir(dc, &local_plugin_dir, None);
+            doctor_check_plugin_dir(
+                dc,
+                &local_plugin_dir,
+                CodexBundlePolicy::for_scope(InstallScope::ProjectLocal),
+                &ctx.home,
+            );
             doctor_check_marketplace_entry(
                 dc,
                 &codex_repo_marketplace_path(&ctx.project_path),
@@ -406,15 +411,70 @@ fn uninstall_tracedecay_mcp_if_present(config_path: &Path) {
     }
 }
 
+/// The scope contract for a rendered Codex plugin bundle, in one place.
+///
+/// A global bundle ships lifecycle hooks (declared in the manifest and
+/// recorded as trusted in the user-level `~/.codex/config.toml`), serves with
+/// the global DB enabled, and carries the memory digest. A repo-local bundle
+/// ships no hooks, serves the project path with no env, and stays free of
+/// user-profile state. The bundle writer, manifest/MCP renderers, and doctor
+/// all consume this type instead of re-encoding the scope as ad-hoc
+/// conditionals.
+#[derive(Debug, Clone, Copy)]
+struct CodexBundlePolicy {
+    scope: InstallScope,
+}
+
+impl CodexBundlePolicy {
+    fn for_scope(scope: InstallScope) -> Self {
+        Self { scope }
+    }
+
+    /// Whether the bundle ships `hooks/hooks.json` and declares it in the
+    /// plugin manifest.
+    fn include_hooks(self) -> bool {
+        self.scope == InstallScope::Global
+    }
+
+    /// The `serve` args baked into the bundle's `.mcp.json`.
+    fn mcp_args(self) -> serde_json::Value {
+        match self.scope {
+            InstallScope::Global => json!(["serve"]),
+            InstallScope::ProjectLocal => json!(["serve", "--path", "."]),
+        }
+    }
+
+    /// The `env` baked into the bundle's `.mcp.json`; `None` strips the key.
+    fn mcp_env(self) -> Option<serde_json::Value> {
+        match self.scope {
+            InstallScope::Global => Some(json!({ "TRACEDECAY_ENABLE_GLOBAL_DB": "1" })),
+            InstallScope::ProjectLocal => None,
+        }
+    }
+
+    /// Where Codex records trust for this bundle's hooks — `None` for scopes
+    /// that ship no hooks and therefore have no trust surface.
+    fn hook_trust_config_path(self, home: &Path) -> Option<PathBuf> {
+        self.include_hooks()
+            .then(|| home.join(".codex/config.toml"))
+    }
+
+    /// The memory digest rides only the global bundle.
+    fn include_memory_digest(self) -> bool {
+        self.scope == InstallScope::Global
+    }
+}
+
 fn install_codex_plugin_bundle(
     install_dir: &Path,
     tracedecay_bin: &str,
     scope: InstallScope,
     profile_home: &Path,
 ) -> Result<()> {
-    write_codex_plugin_bundle_base(install_dir, tracedecay_bin, scope)?;
+    let policy = CodexBundlePolicy::for_scope(scope);
+    write_codex_plugin_bundle_base(install_dir, tracedecay_bin, policy)?;
     install_codex_managed_skill_overlay(profile_home, install_dir)?;
-    if scope != InstallScope::ProjectLocal {
+    if policy.include_memory_digest() {
         let profile_root =
             crate::automation::skill_targets::profile_root_for_agent_home(profile_home);
         crate::automation::memory_digest::sync_memory_digest_export(
@@ -432,7 +492,11 @@ pub fn export_codex_plugin_artifact(
     output: &Path,
     tracedecay_bin: &str,
 ) -> Result<crate::automation::skill_targets::SkillInstallSummary> {
-    write_codex_plugin_bundle_base(output, tracedecay_bin, InstallScope::Global)?;
+    write_codex_plugin_bundle_base(
+        output,
+        tracedecay_bin,
+        CodexBundlePolicy::for_scope(InstallScope::Global),
+    )?;
     crate::automation::skill_targets::export_native_skill_overlay(
         profile_root,
         crate::automation::skill_targets::SkillInstallTarget::Codex,
@@ -443,7 +507,7 @@ pub fn export_codex_plugin_artifact(
 fn write_codex_plugin_bundle_base(
     install_dir: &Path,
     tracedecay_bin: &str,
-    scope: InstallScope,
+    policy: CodexBundlePolicy,
 ) -> Result<()> {
     if let Some(parent) = install_dir.parent() {
         std::fs::create_dir_all(parent).map_err(|e| TraceDecayError::Config {
@@ -451,7 +515,7 @@ fn write_codex_plugin_bundle_base(
         })?;
     }
     remove_codex_plugin_install(install_dir)?;
-    write_codex_plugin_files(install_dir, tracedecay_bin, scope)
+    write_codex_plugin_files(install_dir, tracedecay_bin, policy)
 }
 
 fn install_codex_managed_skill_overlay(
@@ -469,13 +533,13 @@ fn install_codex_managed_skill_overlay(
 fn write_codex_plugin_files(
     install_dir: &Path,
     tracedecay_bin: &str,
-    scope: InstallScope,
+    policy: CodexBundlePolicy,
 ) -> Result<()> {
     for (relative, contents) in codex_embedded_plugin_files() {
         let rendered = match relative {
-            ".codex-plugin/plugin.json" => codex_plugin_manifest(contents, scope)?,
-            ".mcp.json" => codex_plugin_mcp(contents, tracedecay_bin, scope)?,
-            "hooks/hooks.json" if scope == InstallScope::ProjectLocal => continue,
+            ".codex-plugin/plugin.json" => codex_plugin_manifest(contents, policy)?,
+            ".mcp.json" => codex_plugin_mcp(contents, tracedecay_bin, policy)?,
+            "hooks/hooks.json" if !policy.include_hooks() => continue,
             "hooks/hooks.json" => codex_plugin_hooks(contents, tracedecay_bin)?,
             _ => contents.to_string(),
         };
@@ -484,9 +548,9 @@ fn write_codex_plugin_files(
     Ok(())
 }
 
-fn codex_plugin_manifest(raw: &str, scope: InstallScope) -> Result<String> {
+fn codex_plugin_manifest(raw: &str, policy: CodexBundlePolicy) -> Result<String> {
     let stamped = super::plugin_bundle::stamp_manifest_version(raw)?;
-    if scope != InstallScope::ProjectLocal {
+    if policy.include_hooks() {
         return Ok(stamped);
     }
 
@@ -497,19 +561,16 @@ fn codex_plugin_manifest(raw: &str, scope: InstallScope) -> Result<String> {
     Ok(format!("{}\n", serde_json::to_string_pretty(&manifest)?))
 }
 
-fn codex_plugin_mcp(raw: &str, tracedecay_bin: &str, scope: InstallScope) -> Result<String> {
-    // Reuse the shared command rewrite, then layer Codex's scope-specific
-    // args/env on top of the result.
+fn codex_plugin_mcp(raw: &str, tracedecay_bin: &str, policy: CodexBundlePolicy) -> Result<String> {
+    // Reuse the shared command rewrite, then layer the policy's args/env on
+    // top of the result.
     let stamped = super::plugin_bundle::set_mcp_command(raw, tracedecay_bin)?;
     let mut mcp: serde_json::Value = serde_json::from_str(&stamped)?;
     let server = &mut mcp["mcpServers"]["tracedecay"];
-    match scope {
-        InstallScope::Global => {
-            server["args"] = json!(["serve"]);
-            server["env"] = json!({ "TRACEDECAY_ENABLE_GLOBAL_DB": "1" });
-        }
-        InstallScope::ProjectLocal => {
-            server["args"] = json!(["serve", "--path", "."]);
+    server["args"] = policy.mcp_args();
+    match policy.mcp_env() {
+        Some(env) => server["env"] = env,
+        None => {
             if let Some(object) = server.as_object_mut() {
                 object.remove("env");
             }
@@ -1160,10 +1221,11 @@ fn uninstall_prompt_rules(agents_md: &Path) {
 // ---------------------------------------------------------------------------
 
 fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
+    let global_policy = CodexBundlePolicy::for_scope(InstallScope::Global);
     let cached_dirs = codex_plugin_cached_install_dirs(home);
     if !cached_dirs.is_empty() {
         for plugin_dir in cached_dirs {
-            doctor_check_plugin_dir(dc, &plugin_dir, Some(&home.join(".codex/config.toml")));
+            doctor_check_plugin_dir(dc, &plugin_dir, global_policy, home);
         }
         return;
     }
@@ -1178,50 +1240,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
         return;
     }
 
-    let manifest = load_json_file(&manifest_path);
-    if manifest.get("name").and_then(|value| value.as_str()) == Some("tracedecay") {
-        dc.pass(&format!(
-            "Codex plugin manifest present in {}",
-            manifest_path.display()
-        ));
-    } else {
-        dc.fail(&format!(
-            "Codex plugin manifest at {} is not a tracedecay plugin",
-            manifest_path.display()
-        ));
-    }
-    match manifest.get("version").and_then(|value| value.as_str()) {
-        Some(env!("CARGO_PKG_VERSION")) => dc.pass("Codex plugin version matches tracedecay"),
-        Some(version) => dc.warn(&format!(
-            "Codex plugin version {version} does not match tracedecay {} — run `tracedecay update-plugin`",
-            env!("CARGO_PKG_VERSION")
-        )),
-        None => dc.warn("Codex plugin manifest does not contain a version"),
-    }
-
-    let mcp_path = plugin_dir.join(".mcp.json");
-    let mcp = load_json_file(&mcp_path);
-    if mcp
-        .get("mcpServers")
-        .and_then(|servers| servers.get("tracedecay"))
-        .is_some()
-    {
-        dc.pass(&format!(
-            "Codex plugin MCP server registered in {}",
-            mcp_path.display()
-        ));
-    } else {
-        dc.fail(&format!(
-            "Codex plugin MCP server missing in {} — run `tracedecay install --agent codex`",
-            mcp_path.display()
-        ));
-    }
-    doctor_check_hooks(
-        dc,
-        &plugin_dir.join("hooks/hooks.json"),
-        &home.join(".codex/config.toml"),
-    );
-
+    doctor_check_plugin_dir(dc, &plugin_dir, global_policy, home);
     doctor_check_marketplace_entry(
         dc,
         &codex_personal_marketplace_path(home),
@@ -1270,7 +1289,12 @@ fn doctor_check_marketplace_entry(
     }
 }
 
-fn doctor_check_plugin_dir(dc: &mut DoctorCounters, plugin_dir: &Path, config_path: Option<&Path>) {
+fn doctor_check_plugin_dir(
+    dc: &mut DoctorCounters,
+    plugin_dir: &Path,
+    policy: CodexBundlePolicy,
+    home: &Path,
+) {
     let manifest_path = plugin_dir.join(".codex-plugin/plugin.json");
     let manifest = load_json_file(&manifest_path);
     if manifest.get("name").and_then(|value| value.as_str()) == Some("tracedecay") {
@@ -1310,8 +1334,14 @@ fn doctor_check_plugin_dir(dc: &mut DoctorCounters, plugin_dir: &Path, config_pa
             mcp_path.display()
         ));
     }
-    if let Some(config_path) = config_path {
-        doctor_check_hooks(dc, &plugin_dir.join("hooks/hooks.json"), config_path);
+    let hooks_path = plugin_dir.join("hooks/hooks.json");
+    if let Some(config_path) = policy.hook_trust_config_path(home) {
+        doctor_check_hooks(dc, &hooks_path, &config_path);
+    } else if hooks_path.exists() {
+        dc.warn(&format!(
+            "repo-local Codex bundle unexpectedly ships lifecycle hooks in {} — run `tracedecay install --local --agent codex` to refresh it",
+            hooks_path.display()
+        ));
     }
 }
 

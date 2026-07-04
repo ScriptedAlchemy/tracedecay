@@ -70,11 +70,33 @@ fn assert_codex_marketplace_entry(marketplace_path: &Path, source_path: &str) {
     assert_eq!(entry["source"]["path"], source_path);
 }
 
-fn assert_codex_bundle_contains_bin(plugin_dir: &Path, tracedecay_bin: &str) {
+/// The scope contract a rendered Codex bundle must follow: global bundles
+/// must ship lifecycle hooks, repo-local bundles must not. Kept explicit so a
+/// refresh path that silently stops rendering hooks/hooks.json fails the
+/// global assertions instead of skipping them.
+#[derive(Clone, Copy, PartialEq)]
+enum CodexScope {
+    Global,
+    RepoLocal,
+}
+
+fn assert_codex_bundle_contains_bin(plugin_dir: &Path, tracedecay_bin: &str, scope: CodexScope) {
     assert!(text(&plugin_dir.join(".mcp.json")).contains(tracedecay_bin));
     let hooks_path = plugin_dir.join("hooks/hooks.json");
-    if hooks_path.exists() {
-        assert!(text(&hooks_path).contains(tracedecay_bin));
+    match scope {
+        CodexScope::Global => {
+            assert!(
+                hooks_path.exists(),
+                "global Codex bundle {} must ship hooks/hooks.json",
+                plugin_dir.display()
+            );
+            assert!(text(&hooks_path).contains(tracedecay_bin));
+        }
+        CodexScope::RepoLocal => assert!(
+            !hooks_path.exists(),
+            "repo-local Codex bundle {} must not ship lifecycle hooks",
+            plugin_dir.display()
+        ),
     }
 }
 
@@ -421,7 +443,7 @@ fn codex_update_plugin_refreshes_bundle_without_touching_config() {
         plugin_dir.join("skills/project-status/SKILL.md").exists(),
         "same-name user-authored Codex skills without TraceDecay markers must be preserved"
     );
-    assert_codex_bundle_contains_bin(&plugin_dir, NEW_BIN);
+    assert_codex_bundle_contains_bin(&plugin_dir, NEW_BIN, CodexScope::Global);
     assert!(text(&plugin_dir.join(".codex-plugin/plugin.json")).contains(env!("CARGO_PKG_VERSION")));
 }
 
@@ -457,8 +479,8 @@ fn codex_update_plugin_refreshes_cache_and_keeps_bootstrap_source_listable() {
         vec![cached_plugin_dir.clone(), bootstrap_dir.clone()]
     );
 
-    assert_codex_bundle_contains_bin(&cached_plugin_dir, NEW_BIN);
-    assert_codex_bundle_contains_bin(&bootstrap_dir, NEW_BIN);
+    assert_codex_bundle_contains_bin(&cached_plugin_dir, NEW_BIN, CodexScope::Global);
+    assert_codex_bundle_contains_bin(&bootstrap_dir, NEW_BIN, CodexScope::Global);
     assert!(
         !stale_plugin_dir.exists(),
         "update-plugin should migrate managed Codex cache installs to the current plugin version"
@@ -492,8 +514,8 @@ fn codex_update_plugin_recreates_bootstrap_source_from_cache_only_state() {
         vec![cached_plugin_dir.clone(), bootstrap_dir.clone()]
     );
 
-    assert_codex_bundle_contains_bin(&cached_plugin_dir, NEW_BIN);
-    assert_codex_bundle_contains_bin(&bootstrap_dir, NEW_BIN);
+    assert_codex_bundle_contains_bin(&cached_plugin_dir, NEW_BIN, CodexScope::Global);
+    assert_codex_bundle_contains_bin(&bootstrap_dir, NEW_BIN, CodexScope::Global);
     assert!(
         !cached_plugin_dir
             .join("skills/stale-skill/SKILL.md")
@@ -556,9 +578,9 @@ fn codex_update_plugin_refreshes_global_cache_and_repo_local_bundle() {
         ]
     );
 
-    assert_codex_bundle_contains_bin(&cached_plugin_dir, NEW_BIN);
-    assert_codex_bundle_contains_bin(&bootstrap_dir, NEW_BIN);
-    assert_codex_bundle_contains_bin(&repo_plugin_dir, NEW_BIN);
+    assert_codex_bundle_contains_bin(&cached_plugin_dir, NEW_BIN, CodexScope::Global);
+    assert_codex_bundle_contains_bin(&bootstrap_dir, NEW_BIN, CodexScope::Global);
+    assert_codex_bundle_contains_bin(&repo_plugin_dir, NEW_BIN, CodexScope::RepoLocal);
     assert_codex_marketplace_entry(&codex_marketplace_path(home.path()), "./plugins/tracedecay");
     assert_codex_marketplace_entry(
         &codex_marketplace_path(project.path()),
@@ -582,7 +604,7 @@ fn codex_update_plugin_repairs_personal_marketplace_for_bootstrap_bundle() {
     };
     assert_eq!(paths, vec![plugin_dir.clone()]);
 
-    assert_codex_bundle_contains_bin(&plugin_dir, NEW_BIN);
+    assert_codex_bundle_contains_bin(&plugin_dir, NEW_BIN, CodexScope::Global);
     assert_codex_marketplace_entry(&codex_marketplace_path(home.path()), "./plugins/tracedecay");
 }
 
@@ -606,7 +628,7 @@ fn codex_update_plugin_refreshes_repo_local_bundle_from_project_root() {
 
     assert_eq!(paths, vec![plugin_dir.clone()]);
     assert_eq!(text(&plugin_dir.join("user-note.txt")), "mine\n");
-    assert_codex_bundle_contains_bin(&plugin_dir, NEW_BIN);
+    assert_codex_bundle_contains_bin(&plugin_dir, NEW_BIN, CodexScope::RepoLocal);
     assert!(text(&plugin_dir.join(".codex-plugin/plugin.json")).contains(env!("CARGO_PKG_VERSION")));
 }
 
@@ -645,7 +667,11 @@ fn codex_update_plugin_migrates_legacy_config_only_install_to_plugin() {
         !legacy_config.exists(),
         "Codex update-plugin should remove the migrated legacy config-managed install"
     );
-    assert_codex_bundle_contains_bin(&home.path().join("plugins/tracedecay"), NEW_BIN);
+    assert_codex_bundle_contains_bin(
+        &home.path().join("plugins/tracedecay"),
+        NEW_BIN,
+        CodexScope::Global,
+    );
     assert_codex_marketplace_entry(&codex_marketplace_path(home.path()), "./plugins/tracedecay");
 }
 
@@ -1005,7 +1031,7 @@ fn assert_cursor_rendered_bundle_valid(plugin_dir: &Path, bin: &str) {
 }
 
 /// Full structural validation of a rendered Codex plugin bundle.
-fn assert_codex_rendered_bundle_valid(plugin_dir: &Path, bin: &str, expect_hooks: bool) {
+fn assert_codex_rendered_bundle_valid(plugin_dir: &Path, bin: &str, scope: CodexScope) {
     // Rendered manifest: version stamped to this binary's package version.
     let manifest = read_json(&plugin_dir.join(".codex-plugin/plugin.json"));
     assert_eq!(manifest["name"], "tracedecay");
@@ -1015,47 +1041,48 @@ fn assert_codex_rendered_bundle_valid(plugin_dir: &Path, bin: &str, expect_hooks
         "rendered manifest version must match the binary's package version"
     );
 
-    // Rendered hooks.json: only personal/global bundles ship lifecycle hooks;
-    // repo-local bundles omit them (Codex only trusts personal-plugin hooks).
-    let hooks_path = plugin_dir.join("hooks/hooks.json");
-    if !expect_hooks {
-        assert!(
-            !hooks_path.exists(),
-            "repo-local Codex plugin must not ship {}",
-            hooks_path.display()
-        );
-        let manifest = read_json(&plugin_dir.join(".codex-plugin/plugin.json"));
-        assert!(
-            manifest.get("hooks").is_none(),
-            "repo-local Codex plugin manifest must not declare lifecycle hooks"
-        );
-        return;
-    }
-    // Codex nests handlers in matcher groups; every handler command is the
-    // quoted absolute binary plus a hook-codex-* subcommand.
-    let hooks = read_json(&hooks_path);
-    let events = hooks["hooks"]
-        .as_object()
-        .expect("rendered hooks.json must contain a hooks object");
-    assert!(
-        !events.is_empty(),
-        "rendered hooks.json must register events"
-    );
-    for (event, groups) in events {
-        let groups = groups
-            .as_array()
-            .unwrap_or_else(|| panic!("hook event {event} must hold an array of groups"));
-        assert!(!groups.is_empty(), "hook event {event} must not be empty");
-        for group in groups {
-            let handlers = group["hooks"]
-                .as_array()
-                .unwrap_or_else(|| panic!("hook event {event} group must carry handlers"));
-            for handler in handlers {
-                let command = handler["command"]
-                    .as_str()
-                    .unwrap_or_else(|| panic!("hook event {event} handler must carry a command"));
-                assert_rendered_hook_command(command, bin, "hook-codex-");
+    match scope {
+        CodexScope::Global => {
+            // Rendered hooks.json: Codex nests handlers in matcher groups;
+            // every handler command is the quoted absolute binary plus a
+            // hook-codex-* subcommand.
+            let hooks = read_json(&plugin_dir.join("hooks/hooks.json"));
+            let events = hooks["hooks"]
+                .as_object()
+                .expect("rendered hooks.json must contain a hooks object");
+            assert!(
+                !events.is_empty(),
+                "rendered hooks.json must register events"
+            );
+            for (event, groups) in events {
+                let groups = groups
+                    .as_array()
+                    .unwrap_or_else(|| panic!("hook event {event} must hold an array of groups"));
+                assert!(!groups.is_empty(), "hook event {event} must not be empty");
+                for group in groups {
+                    let handlers = group["hooks"]
+                        .as_array()
+                        .unwrap_or_else(|| panic!("hook event {event} group must carry handlers"));
+                    for handler in handlers {
+                        let command = handler["command"].as_str().unwrap_or_else(|| {
+                            panic!("hook event {event} handler must carry a command")
+                        });
+                        assert_rendered_hook_command(command, bin, "hook-codex-");
+                    }
+                }
             }
+        }
+        CodexScope::RepoLocal => {
+            // Repo-local bundles get their lifecycle hooks from the global
+            // plugin: no hooks file, no manifest hooks declaration.
+            assert!(
+                !plugin_dir.join("hooks/hooks.json").exists(),
+                "repo-local Codex bundle must not ship lifecycle hooks"
+            );
+            assert!(
+                manifest.get("hooks").is_none(),
+                "repo-local Codex manifest must not declare lifecycle hooks"
+            );
         }
     }
 
@@ -1066,8 +1093,13 @@ fn assert_codex_rendered_bundle_valid(plugin_dir: &Path, bin: &str, expect_hooks
         "no placeholder may survive rendering in the Codex bundle"
     );
 
-    // Nothing from the source bundle was silently dropped.
+    // Nothing from the source bundle was silently dropped. Repo-local
+    // bundles intentionally drop the hooks file, so remove it from the
+    // staged expectation.
     let staged = staged_host_source("codex");
+    if scope == CodexScope::RepoLocal {
+        std::fs::remove_file(staged.path().join("hooks/hooks.json")).unwrap();
+    }
     assert_source_bundle_fully_rendered(staged.path(), plugin_dir);
 }
 
@@ -1103,7 +1135,7 @@ fn codex_install_renders_structurally_valid_bundle() {
     codex.install(&ctx(home.path(), NEW_BIN)).unwrap();
 
     let plugin_dir = codex_bootstrap_dir(home.path());
-    assert_codex_rendered_bundle_valid(&plugin_dir, NEW_BIN, true);
+    assert_codex_rendered_bundle_valid(&plugin_dir, NEW_BIN, CodexScope::Global);
 
     // Global-scope MCP rendering: absolute command, plain `serve` args, and
     // the global-DB env flag.
@@ -1125,7 +1157,7 @@ fn codex_local_install_renders_project_scoped_mcp() {
         .unwrap();
 
     let plugin_dir = codex_bootstrap_dir(project.path());
-    assert_codex_rendered_bundle_valid(&plugin_dir, NEW_BIN, false);
+    assert_codex_rendered_bundle_valid(&plugin_dir, NEW_BIN, CodexScope::RepoLocal);
 
     // Project-local scope renders relative-path serve args and drops the
     // global-DB env flag.
