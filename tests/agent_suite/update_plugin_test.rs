@@ -676,6 +676,44 @@ fn codex_update_plugin_migrates_legacy_config_only_install_to_plugin() {
 }
 
 #[test]
+fn codex_update_plugin_migrates_legacy_config_even_when_repo_bundle_refreshes() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let codex = get_integration("codex").unwrap();
+    // A repo-local bundle exists (so the refresh list is non-empty) alongside
+    // a legacy config-managed global install, but no personal/cached plugin.
+    codex
+        .install_local(&ctx(home.path(), OLD_BIN), project.path())
+        .unwrap();
+    let legacy_config = write_codex_legacy_config(home.path());
+
+    let outcome = codex
+        .update_plugin(&ctx_with_project(home.path(), NEW_BIN, project.path()))
+        .unwrap();
+
+    let UpdatePluginOutcome::Refreshed(paths) = outcome else {
+        panic!("expected codex update_plugin to refresh");
+    };
+    // The sweep removed the working legacy registration, so the personal
+    // bundle replacement must have been installed — not just the repo bundle.
+    assert!(
+        paths.contains(&home.path().join("plugins/tracedecay")),
+        "legacy migration must install the personal bundle even when a \
+         repo-local refresh already populated the refreshed list; got {paths:?}"
+    );
+    assert!(
+        codex_bootstrap_dir(home.path())
+            .join(".codex-plugin/plugin.json")
+            .exists(),
+        "personal plugin bundle must exist after migrating a legacy install"
+    );
+    assert!(
+        !legacy_config.exists(),
+        "legacy config-managed install should be swept after migration"
+    );
+}
+
+#[test]
 fn codex_update_plugin_reports_not_installed_without_bundle_or_legacy_config() {
     let home = TempDir::new().unwrap();
     let project_root = home.path().join("workspace");

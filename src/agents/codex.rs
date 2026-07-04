@@ -120,16 +120,31 @@ impl AgentIntegration for CodexIntegration {
             }
         }
 
+        // A legacy config-managed install must gain its personal-bundle
+        // replacement before the sweep below strips the working global
+        // config — even when a cached or repo-local refresh already put
+        // something into `refreshed`.
+        let has_personal_bundle =
+            !cached_dirs.is_empty() || codex_plugin_manifest_path(&ctx.home).exists();
         if refreshed.is_empty() {
-            if !codex_plugin_manifest_path(&ctx.home).exists() && !legacy_config_install {
+            if !has_personal_bundle && !legacy_config_install {
                 return Ok(UpdatePluginOutcome::NotInstalled);
             }
             install_codex_personal_bootstrap(&ctx.home, &ctx.tracedecay_bin)?;
-            refreshed.push(plugin_dir);
+            refreshed.push(plugin_dir.clone());
+        } else if legacy_config_install && !has_personal_bundle {
+            install_codex_personal_bootstrap(&ctx.home, &ctx.tracedecay_bin)?;
+            refreshed.push(plugin_dir.clone());
         }
 
         if legacy_config_install {
             sweep_legacy_global_codex_config(&ctx.home);
+            eprintln!(
+                "\x1b[1mAction required:\x1b[0m migrated the legacy Codex config-managed \
+                 install to the personal plugin bundle."
+            );
+            eprintln!("  In Codex, run: codex plugin add tracedecay@personal");
+            print_hook_trust_guidance();
         }
         Ok(UpdatePluginOutcome::Refreshed(refreshed))
     }
@@ -200,6 +215,15 @@ impl AgentIntegration for CodexIntegration {
                 "./plugins/tracedecay",
                 "tracedecay install --local --agent codex",
             );
+            // Repo-local bundles ship no lifecycle hooks by design; hooks come
+            // from the personal plugin. Without one, no session/tool hooks run.
+            if !codex_plugin_manifest_path(&ctx.home).exists()
+                && codex_plugin_cached_install_dirs(&ctx.home).is_empty()
+            {
+                dc.warn(
+                    "repo-local Codex bundles ship no lifecycle hooks — run `tracedecay install --agent codex` to add the personal plugin (session hooks, transcript ingest)",
+                );
+            }
         } else {
             doctor_check_plugin(dc, &ctx.home);
         }
@@ -634,15 +658,14 @@ enum CodexHookTrustState {
     Missing(Vec<String>),
 }
 
-fn codex_hook_state_event_key(event: &str) -> String {
-    let mut key = String::new();
-    for (index, ch) in event.chars().enumerate() {
-        if ch.is_ascii_uppercase() && index > 0 {
-            key.push('_');
-        }
-        key.push(ch.to_ascii_lowercase());
-    }
-    key
+/// Codex records hook state under `snake_case` event keys. Derive them from the
+/// managed hook's subcommand (`hook-codex-post-tool-use` -> `post_tool_use`)
+/// so the mapping stays anchored to the single-source-of-truth table instead
+/// of re-implementing Codex's name normalization.
+fn codex_hook_state_event_key(hook: &CodexManagedHook) -> String {
+    hook.subcommand
+        .trim_start_matches("hook-codex-")
+        .replace('-', "_")
 }
 
 fn codex_plugin_hook_trust_state(config: &toml::Value) -> CodexHookTrustState {
@@ -654,14 +677,14 @@ fn codex_plugin_hook_trust_state(config: &toml::Value) -> CodexHookTrustState {
         return CodexHookTrustState::Missing(
             CODEX_MANAGED_HOOKS
                 .iter()
-                .map(|hook| codex_hook_state_event_key(hook.event))
+                .map(codex_hook_state_event_key)
                 .collect(),
         );
     };
 
     let missing: Vec<String> = CODEX_MANAGED_HOOKS
         .iter()
-        .map(|hook| codex_hook_state_event_key(hook.event))
+        .map(codex_hook_state_event_key)
         .filter(|event_key| {
             let trust_key = format!("{CODEX_PERSONAL_PLUGIN_HOOK_TRUST_PREFIX}{event_key}:0:0");
             !state.get(&trust_key).is_some_and(|entry| {
@@ -1107,10 +1130,16 @@ fn uninstall_hooks(hooks_path: &Path) {
     let Some(events) = hooks.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
         return;
     };
+    let mut removed_any = false;
     for groups in events.values_mut() {
         if let Some(arr) = groups.as_array_mut() {
+            let before = arr.len();
             arr.retain(|group| !subcommands.iter().any(|sc| group_has_subcommand(group, sc)));
+            removed_any |= arr.len() != before;
         }
+    }
+    if !removed_any {
+        return;
     }
     events.retain(|_, groups| groups.as_array().is_some_and(|a| !a.is_empty()));
 
@@ -1156,6 +1185,7 @@ fn uninstall_mcp_server(config_path: &Path) -> Result<()> {
         table.remove("mcp_servers");
     }
     if table.is_empty() {
+        let _ = super::backup_file(config_path);
         std::fs::remove_file(config_path).ok();
         eprintln!(
             "\x1b[32m✔\x1b[0m Removed {} (was empty)",
@@ -1379,7 +1409,7 @@ fn doctor_check_hooks(dc: &mut DoctorCounters, hooks_path: &Path, config_path: &
     match load_toml_file(config_path) {
         Ok(config) => match codex_plugin_hook_trust_state(&config) {
             CodexHookTrustState::Trusted => dc.info(&format!(
-                "Codex hook trust entries recorded in {}",
+                "Codex hook trust entries recorded in {} — trust is pinned to hook content, so if hooks changed since trusting (e.g. after update-plugin), run /hooks in Codex to re-trust",
                 config_path.display()
             )),
             CodexHookTrustState::Missing(missing) => dc.info(&format!(
