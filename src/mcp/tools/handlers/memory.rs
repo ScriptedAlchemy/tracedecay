@@ -17,7 +17,7 @@ use crate::memory::types::{
 };
 use crate::tracedecay::TraceDecay;
 
-use super::super::render;
+use super::super::render::{self, truncated_json_envelope_with_handle};
 use super::super::ToolResult;
 use super::support::{
     profile_root_for_global_db, project_registry_context, project_selector_present,
@@ -37,6 +37,12 @@ fn text_tool_result(text: &str) -> ToolResult {
         json!({ "content": [{ "type": "text", "text": text }] }),
         vec![],
     )
+}
+
+fn tool_json(project_root: Option<&Path>, value: &Value) -> ToolResult {
+    let formatted = serde_json::to_string(value).unwrap_or_default();
+    let text = truncated_json_envelope_with_handle(project_root, &formatted);
+    text_tool_result(&text)
 }
 
 fn rendered_tool_json(project_root: Option<&Path>, args: &Value, value: &Value) -> ToolResult {
@@ -487,11 +493,7 @@ pub(super) async fn handle_fact_store(
     if refresh_digest {
         refresh_memory_digest_after_memory_change(conn, &target_memory.project_root).await;
     }
-    Ok(rendered_tool_json(
-        Some(&target_memory.project_root),
-        &args,
-        &out,
-    ))
+    Ok(tool_json(Some(&target_memory.project_root), &out))
 }
 
 pub(super) async fn handle_fact_feedback(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
@@ -513,9 +515,8 @@ pub(super) async fn handle_fact_feedback(cg: &TraceDecay, args: Value) -> Result
         })
         .await?;
     refresh_memory_digest_after_memory_change(db.conn(), cg.project_root()).await;
-    Ok(rendered_tool_json(
+    Ok(tool_json(
         Some(cg.project_root()),
-        &args,
         &json!({ "status": "recorded", "feedback": result }),
     ))
 }
