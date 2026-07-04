@@ -377,6 +377,78 @@ fn claude_update_plugin_refreshes_bundle_and_preserves_user_config() {
     );
 }
 
+/// `update-plugin` must write the plugin-namespace tool permissions (so an
+/// install that predates them stops prompting) and refresh the managed
+/// CLAUDE.md steering block, without disturbing unrelated allowlist entries.
+#[test]
+fn claude_update_plugin_writes_plugin_permissions_and_refreshes_claude_md() {
+    let home = TempDir::new().unwrap();
+    let claude = get_integration("claude").unwrap();
+
+    claude.install(&ctx(home.path(), OLD_BIN)).unwrap();
+
+    let settings_path = home.path().join(".claude/settings.json");
+    let claude_md_path = home.path().join(".claude/CLAUDE.md");
+
+    // Simulate an older install: strip the plugin-namespace entries, add an
+    // unrelated permission, and overwrite CLAUDE.md with a stale managed block.
+    let mut settings = read_json(&settings_path);
+    let allow = settings["permissions"]["allow"].as_array_mut().unwrap();
+    allow.retain(|v| {
+        !v.as_str()
+            .is_some_and(|s| s.starts_with("mcp__plugin_tracedecay_tracedecay__"))
+    });
+    allow.push(serde_json::json!("Bash(*)"));
+    std::fs::write(
+        &settings_path,
+        serde_json::to_string_pretty(&settings).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        &claude_md_path,
+        "# Project\n\n## MANDATORY: No Explore Agents When Tracedecay Is Available\n\nstale body\n",
+    )
+    .unwrap();
+
+    let outcome = claude.update_plugin(&ctx(home.path(), NEW_BIN)).unwrap();
+    assert!(matches!(outcome, UpdatePluginOutcome::Refreshed(_)));
+
+    // Plugin-namespace permissions are (re)written; unrelated perm preserved.
+    let settings = read_json(&settings_path);
+    let allow_strs: Vec<String> = settings["permissions"]["allow"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    for name in tracedecay::agents::tool_names() {
+        let perm = format!("mcp__plugin_tracedecay_tracedecay__{name}");
+        assert!(
+            allow_strs.contains(&perm),
+            "update-plugin should write plugin-namespace permission {perm}"
+        );
+    }
+    assert!(
+        allow_strs.contains(&"Bash(*)".to_string()),
+        "update-plugin must preserve unrelated permissions"
+    );
+
+    // The stale CLAUDE.md block is refreshed to the current moment-trigger text.
+    let claude_md = text(&claude_md_path);
+    assert!(
+        !claude_md.contains("stale body"),
+        "stale managed block should be replaced"
+    );
+    assert!(
+        claude_md.contains("Before your FIRST"),
+        "refreshed CLAUDE.md should carry the moment-trigger lead"
+    );
+    assert!(
+        claude_md.contains("# Project"),
+        "user content outside the managed block must be preserved"
+    );
+}
+
 #[test]
 fn claude_update_plugin_reports_not_installed_without_a_bundle() {
     let home = TempDir::new().unwrap();
