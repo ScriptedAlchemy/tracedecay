@@ -90,6 +90,10 @@ impl ProjectHealth {
 }
 
 /// A point-in-time copy of a project's watch health, for the doctor section.
+// The doctor watcher-health section consumes this surface (follow-up wiring);
+// fields are populated by the watch loop today so the snapshot is truthful
+// the moment doctor reads it.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ProjectHealthSnapshot {
     pub last_heartbeat: u64,
@@ -140,12 +144,6 @@ struct DirtySet {
 }
 
 impl DirtySet {
-    fn is_clean(&self) -> bool {
-        !self.dirty
-            && self.branches.is_empty()
-            && self.new_worktrees.is_empty()
-            && !self.gc_eligible
-    }
     fn take(&mut self) -> DirtyPlan {
         let plan = DirtyPlan {
             dirty: self.dirty,
@@ -235,6 +233,8 @@ impl GitWatcher {
         }
     }
 
+    // Doctor watcher-health surface (follow-up wiring).
+    #[allow(dead_code)]
     pub fn is_enabled(&self) -> bool {
         self.inner.enabled
     }

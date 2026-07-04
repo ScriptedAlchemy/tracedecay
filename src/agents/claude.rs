@@ -23,7 +23,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Value};
+use serde_json::json;
 
 use crate::errors::{Result, TraceDecayError};
 
