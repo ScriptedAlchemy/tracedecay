@@ -149,19 +149,11 @@ impl AgentIntegration for ClaudeIntegration {
 
         let mut settings = load_json_file_strict(&settings_path)?;
         enable_plugin(&mut settings);
-        // Write/refresh the plugin-namespace permission allowlist (and migrate
-        // legacy `mcp__tracedecay__*` entries to their plugin twins) so an
-        // `update-plugin` from an older install stops prompting on every tool
-        // call. Idempotent.
         install_permissions(&mut settings, &ctx.tool_permissions);
         write_json_file(&settings_path, &settings)?;
 
         migrate_off_config_managed(&ctx.home);
 
-        // Refresh the managed CLAUDE.md steering block so an `update-plugin`
-        // rewrites a stale block to the current moment-trigger text. The block
-        // reaches subagents (they load the project/user CLAUDE.md), so keeping
-        // it current is how updated steering actually propagates.
         install_claude_md_rules(&claude_md_path)?;
 
         sync_claude_plugin_cache(&ctx.home);
@@ -781,22 +773,11 @@ fn ensure_claude_dir(claude_dir: &Path) -> Result<()> {
     })
 }
 
-/// Permission-allowlist prefix for the tracedecay tools exposed through the
-/// Claude **plugin** MCP server. Claude namespaces a plugin server's tools as
-/// `mcp__plugin_<pluginName>_<serverKey>__<tool>`; with plugin name
-/// `tracedecay` and the server key `tracedecay` (see `plugin/.mcp.json`), that
-/// yields `mcp__plugin_tracedecay_tracedecay__<tool>`.
-///
-/// The legacy config-managed install wrote `mcp__tracedecay__<tool>` entries,
-/// which do NOT match the plugin namespace, so every plugin tool call prompted
-/// interactively (and hard-failed headless/in subagents). The installer now
-/// also writes the plugin-namespace twins.
+/// Claude plugin MCP tool permissions use
+/// `mcp__plugin_<pluginName>_<serverKey>__<tool>`.
 const PLUGIN_TOOL_PERM_PREFIX: &str = "mcp__plugin_tracedecay_tracedecay__";
-/// Legacy config-managed permission prefix, kept only to detect and mirror
-/// existing entries into the plugin namespace during migration.
 const LEGACY_TOOL_PERM_PREFIX: &str = "mcp__tracedecay__";
 
-/// Every managed tracedecay tool's plugin-namespace permission entry.
 fn plugin_tool_perms() -> Vec<String> {
     super::tool_names()
         .into_iter()
@@ -804,9 +785,6 @@ fn plugin_tool_perms() -> Vec<String> {
         .collect()
 }
 
-/// Map a legacy `mcp__tracedecay__<tool>` permission entry to its
-/// plugin-namespace twin `mcp__plugin_tracedecay_tracedecay__<tool>`. Returns
-/// `None` for any entry that is not a legacy tracedecay tool permission.
 fn legacy_perm_to_plugin_twin(entry: &str) -> Option<String> {
     entry
         .strip_prefix(LEGACY_TOOL_PERM_PREFIX)
@@ -816,15 +794,6 @@ fn legacy_perm_to_plugin_twin(entry: &str) -> Option<String> {
 /// Add MCP tool permissions (idempotent). Kept: auto-approval is orthogonal to
 /// how the MCP server is registered.
 ///
-/// Writes three sources of allowlist entries, all deduped:
-/// 1. the caller-supplied `tool_permissions` (the legacy `mcp__tracedecay__*`
-///    namespace, preserved for backward compatibility);
-/// 2. the plugin-namespace twins for the full managed tool set
-///    (`mcp__plugin_tracedecay_tracedecay__*`) — the entries the plugin MCP
-///    server actually matches against; and
-/// 3. a plugin-namespace twin for every legacy `mcp__tracedecay__<tool>` entry
-///    already present in the user's settings (migration for users whose only
-///    entries are legacy). Legacy entries are never removed.
 fn install_permissions(settings: &mut serde_json::Value, tool_permissions: &[String]) {
     let existing: Vec<String> = settings["permissions"]["allow"]
         .as_array()
@@ -834,12 +803,8 @@ fn install_permissions(settings: &mut serde_json::Value, tool_permissions: &[Str
                 .collect()
         })
         .unwrap_or_default();
-    // Migrate: for every legacy entry — pre-existing in settings OR supplied
-    // by the caller this run — ensure its plugin-namespace twin is also
-    // present (do not remove the legacy entry). Deriving twins from the union
-    // keeps the first run at the fixed point; twins only from `existing`
-    // would make a fresh install converge on the SECOND run, breaking
-    // idempotency.
+    // Include both old config-managed entries and plugin-namespace twins; do
+    // not require a second install/update to reach a stable allowlist.
     let migrated_twins: Vec<String> = existing
         .iter()
         .chain(tool_permissions.iter())
@@ -943,12 +908,6 @@ fn claude_md_rules_block_range(contents: &str, markers: &[&str]) -> Option<std::
 
 /// The full tracedecay-managed CLAUDE.md rules block.
 ///
-/// Written for any indexed project on install/update. The text leads with
-/// concrete *moment triggers* ("before your FIRST Grep/Glob/…") rather than an
-/// anti-Explore polemic, because that is what actually redirects a tool call in
-/// the moment. This block is loaded by subagents too (they inherit the project
-/// and user CLAUDE.md), so the routing here reaches them without any per-agent
-/// wiring.
 fn claude_md_rules_text() -> String {
     format!(
         "{marker}\n\n\
@@ -1427,10 +1386,6 @@ fn doctor_check_permissions_json(dc: &mut DoctorCounters, home: &Path) {
         .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
 
-    // The plugin-namespace entries are the ones the plugin MCP server actually
-    // matches against; a missing entry means every call to that tool prompts
-    // interactively and hard-fails headless/in subagents. Check these first —
-    // this is the real adoption gate.
     let plugin_expected = plugin_tool_perms();
     let plugin_missing: Vec<&String> = plugin_expected
         .iter()
@@ -1694,10 +1649,6 @@ fn warn_missing_permissions(settings: &serde_json::Value) {
         .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
 
-    // Check the plugin namespace — the entries the plugin MCP server matches.
-    // A machine mid-upgrade may carry legacy `mcp__tracedecay__*` entries but
-    // lack the `mcp__plugin_tracedecay_tracedecay__*` twins, which is exactly
-    // what causes per-call prompts, so that is the gap worth warning about.
     let expected = plugin_tool_perms();
     let missing_count = expected
         .iter()
