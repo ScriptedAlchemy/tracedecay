@@ -144,6 +144,15 @@ struct DirtySet {
 }
 
 impl DirtySet {
+    /// Test-only invariant probe; `cfg_attr` keeps the non-test lib build
+    /// from flagging it dead.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn is_clean(&self) -> bool {
+        !self.dirty
+            && self.branches.is_empty()
+            && self.new_worktrees.is_empty()
+            && !self.gc_eligible
+    }
     fn take(&mut self) -> DirtyPlan {
         let plan = DirtyPlan {
             dirty: self.dirty,
