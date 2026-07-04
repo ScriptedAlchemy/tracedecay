@@ -1,53 +1,18 @@
-//! Session ↔ git correlation index.
+//! Session/git correlation index.
 //!
-//! Correlates agent sessions (and their LCM messages) with the git artifacts
-//! they touched: branches, worktrees, and commits. The raw signals already
-//! exist — hook route metadata carries `(session_id, thread_id, cwd,
-//! worktree, branch)` per tool use, and the session store has every ingested
-//! message with timestamps — but they were never joined. This module owns the
-//! join tables and their query API.
-//!
-//! ## Where the index lives
-//!
-//! The tables live in the **per-project session store** (`sessions.db`, the
-//! same file that holds `sessions`, `session_messages`, and the LCM tables;
-//! see [`crate::global_db::GlobalDb::open_at`]). Rationale:
-//!
-//! - Every query surface joins against `sessions` / `session_messages` /
-//!   `lcm_raw_messages`, which are per-project rows. Keeping the correlation
-//!   rows in the same file makes branch/worktree/commit filters a plain SQL
-//!   join instead of a cross-database merge.
-//! - Branches, worktrees, and commits are inherently project-scoped: a
-//!   branch name is only meaningful relative to one repository.
-//! - Hook route rows in the global analytics store are a *signal source*,
-//!   not a query surface: live attribution and the backfill command resolve
-//!   each observation's project (via its worktree/cwd) and write the span
-//!   into that project's store.
-//!
-//! ## Model
-//!
-//! Sessions can switch branches (and hop worktrees) mid-session, so
-//! attribution is **span-based**: a [`SessionGitSpan`] says "session S was
-//! active on branch B in worktree W between `first_ts` and `last_ts`".
-//! Repeated observations of the same (session, branch, worktree) extend the
-//! newest matching span when they arrive within a merge gap; a branch switch
-//! (or a long silence) starts a new span, so A → B → A produces three spans.
-//!
-//! A commit is attributed to a session when its commit time falls inside a
-//! session span on the same branch/worktree (see [`SpanOverlapKind`]); the
-//! result is a [`CommitSessionRecord`] row keyed by `(commit_sha, provider,
-//! session_id)`.
+//! Stores branch/worktree spans and commit attribution in the per-project
+//! `sessions.db`, alongside `sessions`, `session_messages`, and LCM tables.
+//! Sessions can switch branches or worktrees, so attribution is span-based:
+//! repeated observations widen nearby spans, while branch switches or long
+//! gaps open new spans.
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 
 use libsql::{params, Connection, Value};
 use serde::{Deserialize, Serialize};
 
-/// Schema version recorded in `session_schema_migrations` under
-/// [`MIGRATION_NAME`]. Bump when the DDL below changes shape.
-///
-/// - v1: `session_git_spans` + `commit_sessions`.
-/// - v2: `git_correlation_meta` key/value table for sweep watermarks.
+/// Schema version recorded in `session_schema_migrations`.
 pub const GIT_CORRELATION_SCHEMA_VERSION: i64 = 2;
 
 const MIGRATION_NAME: &str = "git_correlation";
@@ -370,20 +335,13 @@ pub fn observation_extends_span(first_ts: i64, last_ts: i64, ts: i64, gap_secs: 
     ts >= first_ts.saturating_sub(gap_secs) && ts <= last_ts.saturating_add(gap_secs)
 }
 
-/// In-process rate limiter for live hook-route span observations. A burst of
-/// tool-use hook events for one `(provider, session, branch, worktree)` key
-/// arrives far faster than spans need re-widening (spans merge anyway), so at
-/// most one DB write per `min_interval_secs` per key is recorded. Purely
-/// advisory: dropping an observation only widens a span slightly less, never
-/// loses attribution, so this never has to persist across restarts.
+/// In-process rate limiter for live hook-route span observations.
 #[derive(Debug, Default)]
 pub struct SpanObservationDebounce {
     last_write: std::collections::HashMap<String, i64>,
 }
 
-/// Default minimum spacing between recorded hook-route observations for one
-/// key. Matches [`DEFAULT_SPAN_MERGE_GAP_SECS`] granularity: writing more
-/// often than this cannot change which spans exist.
+/// Default minimum spacing between recorded hook-route observations for one key.
 pub const DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS: i64 = 30;
 
 impl SpanObservationDebounce {
@@ -808,15 +766,7 @@ pub struct ScannedCommit {
     pub committed_at: i64,
 }
 
-/// Runs the commit-attribution sweep against the correlation store. For each
-/// `(branch, worktree)` pair touched since the last sweep, `scan` is asked for
-/// the commits on that branch in the pair's span window (widened by
-/// `gap_secs`); each commit is matched to the overlapping spans and upserted.
-/// Advances the watermark to the newest span `last_ts` seen. Returns the
-/// number of attribution rows newly inserted.
-///
-/// `scan` is injected so the git subprocess stays out of this module and unit
-/// tests can drive attribution without a real repository.
+/// Runs commit attribution for span targets touched since the last sweep.
 pub(crate) async fn run_commit_attribution_sweep<F>(
     conn: &Connection,
     gap_secs: i64,
@@ -903,17 +853,7 @@ pub(crate) async fn sessions_for(
     }
 }
 
-/// Resolves the set of `(provider, session_id)` pairs that satisfy a
-/// [`GitScopeFilter`], intersecting each present constraint (a session must
-/// match branch AND worktree AND commit when all three are set). Returns
-/// `None` when the filter is empty (no scoping requested) and
-/// `Some(Vec::new())` when the filter is non-empty but nothing matched (or
-/// the correlation tables do not exist yet).
-///
-/// This is a convenience for callers that want the resolved id set directly;
-/// the search paths instead push [`git_scope_exists_predicate`] EXISTS
-/// subqueries into their own statement so scoping stays index-served and
-/// single-statement.
+/// Resolves the `(provider, session_id)` pairs matching all present git filters.
 pub(crate) async fn session_ids_for_scope(
     conn: &Connection,
     filter: &GitScopeFilter,
@@ -924,8 +864,6 @@ pub(crate) async fn session_ids_for_scope(
     if !correlation_tables_present(conn).await? {
         return Ok(Some(Vec::new()));
     }
-    // Intersect via a session-id key set, seeded by the first constraint and
-    // narrowed by each remaining one.
     let mut result: Option<Vec<(String, String)>> = None;
     if let Some(branch) = &filter.branch {
         let ids = span_session_ids(conn, "branch = ?1", Value::Text(branch.clone())).await?;
@@ -948,10 +886,13 @@ fn intersect_session_ids(
 ) -> Vec<(String, String)> {
     match accumulated {
         None => next,
-        Some(existing) => existing
-            .into_iter()
-            .filter(|pair| next.contains(pair))
-            .collect(),
+        Some(existing) => {
+            let next: HashSet<_> = next.into_iter().collect();
+            existing
+                .into_iter()
+                .filter(|pair| next.contains(pair))
+                .collect()
+        }
     }
 }
 
@@ -1177,12 +1118,7 @@ async fn commit_hits(
     Ok(hits)
 }
 
-// ── Historical backfill ─────────────────────────────────────────────────
-//
-// The live path folds observations in as sessions run, but sessions that
-// predate span recording leave only three offline signals: session-store
-// timestamps, global analytics events, and the git reflog. The backfill
-// reconstructs spans and commit attribution from those.
+// Historical backfill for sessions that predate live span recording.
 
 /// One session's declared and message-derived activity bounds, read from the
 /// per-project session store. Any field may be `None` when the source row left
@@ -1204,10 +1140,7 @@ pub struct SessionActivityRow {
 /// `GlobalDb::latest_session_activity_secs` and `kiro::normalize_timestamp`).
 const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;
 
-/// Normalizes a stored session timestamp to unix seconds. Providers persist
-/// either seconds or milliseconds; a millis-scale value left un-normalized
-/// yields a span window ~1000x too wide, so commit attribution (seconds-scale
-/// `git %ct`) never overlaps it and rendered dates land in the far future.
+/// Normalizes provider timestamps to unix seconds.
 fn normalize_activity_ts(ts: i64) -> i64 {
     if ts >= UNIX_TIMESTAMP_MILLIS_THRESHOLD {
         ts / 1000
