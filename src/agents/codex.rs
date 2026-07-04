@@ -126,13 +126,10 @@ impl AgentIntegration for CodexIntegration {
         // something into `refreshed`.
         let has_personal_bundle =
             !cached_dirs.is_empty() || codex_plugin_manifest_path(&ctx.home).exists();
-        if refreshed.is_empty() {
-            if !has_personal_bundle && !legacy_config_install {
-                return Ok(UpdatePluginOutcome::NotInstalled);
-            }
-            install_codex_personal_bootstrap(&ctx.home, &ctx.tracedecay_bin)?;
-            refreshed.push(plugin_dir.clone());
-        } else if legacy_config_install && !has_personal_bundle {
+        if refreshed.is_empty() && !has_personal_bundle && !legacy_config_install {
+            return Ok(UpdatePluginOutcome::NotInstalled);
+        }
+        if refreshed.is_empty() || (legacy_config_install && !has_personal_bundle) {
             install_codex_personal_bootstrap(&ctx.home, &ctx.tracedecay_bin)?;
             refreshed.push(plugin_dir.clone());
         }
@@ -250,7 +247,7 @@ impl AgentIntegration for CodexIntegration {
 }
 
 fn codex_legacy_config_has_tracedecay(home: &Path) -> bool {
-    let config = home.join(".codex").join("config.toml");
+    let config = codex_config_path(home);
     if !config.exists() {
         return false;
     }
@@ -304,6 +301,11 @@ fn codex_plugin_manifest_path(home: &Path) -> PathBuf {
 
 fn codex_personal_marketplace_path(home: &Path) -> PathBuf {
     home.join(".agents/plugins/marketplace.json")
+}
+
+/// The user-level Codex config that carries MCP registrations and hook trust.
+fn codex_config_path(home: &Path) -> PathBuf {
+    home.join(".codex/config.toml")
 }
 
 fn codex_repo_plugin_install_dir(project_path: &Path) -> PathBuf {
@@ -386,7 +388,7 @@ fn install_codex_repo_plugin(home: &Path, project_path: &Path, tracedecay_bin: &
 
 fn sweep_legacy_global_codex_config(home: &Path) {
     let codex_dir = home.join(".codex");
-    uninstall_tracedecay_mcp_if_present(&codex_dir.join("config.toml"));
+    uninstall_tracedecay_mcp_if_present(&codex_config_path(home));
     uninstall_hooks(&codex_dir.join("hooks.json"));
     uninstall_prompt_rules(&codex_dir.join("AGENTS.md"));
 }
@@ -479,8 +481,7 @@ impl CodexBundlePolicy {
     /// Where Codex records trust for this bundle's hooks — `None` for scopes
     /// that ship no hooks and therefore have no trust surface.
     fn hook_trust_config_path(self, home: &Path) -> Option<PathBuf> {
-        self.include_hooks()
-            .then(|| home.join(".codex/config.toml"))
+        self.include_hooks().then(|| codex_config_path(home))
     }
 
     /// The memory digest rides only the global bundle.
@@ -573,16 +574,13 @@ fn write_codex_plugin_files(
 }
 
 fn codex_plugin_manifest(raw: &str, policy: CodexBundlePolicy) -> Result<String> {
-    let stamped = super::plugin_bundle::stamp_manifest_version(raw)?;
-    if policy.include_hooks() {
-        return Ok(stamped);
-    }
-
-    let mut manifest: serde_json::Value = serde_json::from_str(&stamped)?;
-    if let Some(object) = manifest.as_object_mut() {
-        object.remove("hooks");
-    }
-    Ok(format!("{}\n", serde_json::to_string_pretty(&manifest)?))
+    super::plugin_bundle::stamp_manifest_version_with(raw, |manifest| {
+        if !policy.include_hooks() {
+            if let Some(object) = manifest.as_object_mut() {
+                object.remove("hooks");
+            }
+        }
+    })
 }
 
 fn codex_plugin_mcp(raw: &str, tracedecay_bin: &str, policy: CodexBundlePolicy) -> Result<String> {
@@ -669,18 +667,14 @@ fn codex_hook_state_event_key(hook: &CodexManagedHook) -> String {
 }
 
 fn codex_plugin_hook_trust_state(config: &toml::Value) -> CodexHookTrustState {
-    let Some(state) = config
+    // A missing [hooks.state] table is just "nothing trusted yet" — treat it
+    // as empty so one pipeline produces the missing list either way.
+    let empty = toml::value::Table::new();
+    let state = config
         .get("hooks")
         .and_then(|hooks| hooks.get("state"))
         .and_then(|state| state.as_table())
-    else {
-        return CodexHookTrustState::Missing(
-            CODEX_MANAGED_HOOKS
-                .iter()
-                .map(codex_hook_state_event_key)
-                .collect(),
-        );
-    };
+        .unwrap_or(&empty);
 
     let missing: Vec<String> = CODEX_MANAGED_HOOKS
         .iter()
@@ -1434,7 +1428,7 @@ fn doctor_suggest_native_memories_off(dc: &mut DoctorCounters, home: &Path) {
     if !crate::hooks::memory_inject::memory_injection_enabled() {
         return;
     }
-    let config_path = home.join(".codex/config.toml");
+    let config_path = codex_config_path(home);
     let Ok(config) = load_toml_file(&config_path) else {
         return;
     };
