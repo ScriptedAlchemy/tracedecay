@@ -33,6 +33,12 @@ pub(super) fn append_tracedecay_bootstrap_context(s: &mut String) {
          skill; follow it before native search or broad file reads.\n\n",
     );
     s.push_str(TRACEDECAY_BOOTSTRAP_SKILL);
+    s.push_str(
+        "\nCore TraceDecay MCP tools: tracedecay_context, tracedecay_grep, \
+         tracedecay_search, tracedecay_callers, tracedecay_callees, \
+         tracedecay_impact, tracedecay_project_search, tracedecay_message_search, \
+         tracedecay_fact_store.\n",
+    );
     s.push_str("\n</EXTREMELY_IMPORTANT>\n");
 }
 

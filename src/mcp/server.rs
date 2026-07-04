@@ -1390,14 +1390,13 @@ impl McpServer {
                     Some(base) => cg.stale_files_since_commit(&base, escalation),
                     None => None,
                 };
-                let result = if let Some(files) = scoped {
-                    if files.is_empty() {
-                        Ok(())
-                    } else {
-                        cg.sync_if_stale_silent(&files).await
-                    }
+                let result = if let Some(files) = scoped.as_ref().filter(|files| !files.is_empty())
+                {
+                    cg.sync_if_stale_silent(files).await
                 } else {
-                    // Fallback: full tree walk.
+                    // Fallback: full tree walk. This also covers untracked
+                    // files, which a git diff from the last synced commit
+                    // intentionally cannot see.
                     let stale = cg.find_stale_files().await;
                     if stale.is_empty() {
                         Ok(())
