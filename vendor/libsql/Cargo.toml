@@ -25,6 +25,14 @@ readme = "README.md"
 license = "MIT"
 repository = "https://github.com/tursodatabase/libsql"
 
+# Local addition to the vendored copy (see [patch.crates-io] in the workspace
+# Cargo.toml): cargo treats path dependencies as local code and prints their
+# warnings on every check/clippy run. Silence the two upstream lints so
+# workspace builds stay noise-free; drop with the vendor patch itself.
+[lints.rust]
+mismatched_lifetime_syntaxes = "allow"
+private_interfaces = "allow"
+
 [package.metadata.cargo-udeps.ignore]
 normal = ["hyper-rustls"]
 
