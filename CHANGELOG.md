@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.29](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.28...v0.0.29) - 2026-07-04
+
+### Added
+
+- *(claude)* sync Claude Code plugin cache on install and update ([#273](https://github.com/ScriptedAlchemy/tracedecay/pull/273))
+
+### Fixed
+
+- *(sessions)* follow store remote fallback for renamed checkouts ([#269](https://github.com/ScriptedAlchemy/tracedecay/pull/269))
+- *(lsp)* classify initialize-request write failures with stderr ([#270](https://github.com/ScriptedAlchemy/tracedecay/pull/270))
+- *(claude)* write schema-required marketplace registration fields ([#268](https://github.com/ScriptedAlchemy/tracedecay/pull/268))
+
 ## [0.0.28](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.27...v0.0.28) - 2026-07-04
 
 ### Fixed
