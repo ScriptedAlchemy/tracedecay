@@ -429,6 +429,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
             )
             .await
         }
+        "tracedecay_sessions_for" => session::handle_sessions_for(cg, args).await,
         "tracedecay_lcm_status" => {
             session::handle_lcm_status(session::LcmHandlerContext::active(cg), args).await
         }
@@ -1017,7 +1018,7 @@ mod tests {
         // host CLI capabilities they need; agents should never see a tool that
         // will instantly fail. The count and per-tool checks below adapt to
         // the host's capability set.
-        let expected_total = 97 + usize::from(super::super::definitions::ast_grep_available());
+        let expected_total = 98 + usize::from(super::super::definitions::ast_grep_available());
         assert_eq!(tools.len(), expected_total);
 
         let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
@@ -1099,6 +1100,7 @@ mod tests {
         assert!(tool_names.contains(&"tracedecay_memory_status"));
         assert!(tool_names.contains(&"tracedecay_dashboard"));
         assert!(tool_names.contains(&"tracedecay_message_search"));
+        assert!(tool_names.contains(&"tracedecay_sessions_for"));
         assert!(tool_names.contains(&"tracedecay_lcm_status"));
         assert!(tool_names.contains(&"tracedecay_lcm_doctor"));
         assert!(tool_names.contains(&"tracedecay_lcm_load_session"));

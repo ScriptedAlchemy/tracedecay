@@ -332,6 +332,16 @@ pub fn format_yyyy_mm_dd(days: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+/// Formats a Unix-seconds instant as a human-readable UTC
+/// `YYYY-MM-DD HH:MM:SSZ` string. Used to render session activity windows
+/// and commit times as calendar timestamps instead of raw epoch seconds.
+pub fn humanize_unix_secs(secs: i64) -> String {
+    let (year, month, day) = civil_from_days(secs.div_euclid(86_400));
+    let rem = secs.rem_euclid(86_400);
+    let (hour, min, sec) = (rem / 3_600, (rem / 60) % 60, rem % 60);
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{min:02}:{sec:02}Z")
+}
+
 /// The current UTC time as an ISO 8601 `yyyy-mm-ddThh:mm:ssZ` string.
 pub fn now_iso_utc() -> String {
     let secs = std::time::SystemTime::now()
@@ -361,6 +371,13 @@ mod tests {
     #[test]
     fn parses_space_separator_and_lowercase_zone() {
         assert_eq!(parse_rfc3339_timestamp("1970-01-01 00:00:01z"), Some(1));
+    }
+
+    #[test]
+    fn humanizes_unix_seconds_as_utc_calendar_time() {
+        assert_eq!(humanize_unix_secs(0), "1970-01-01 00:00:00Z");
+        assert_eq!(humanize_unix_secs(1_767_225_600), "2026-01-01 00:00:00Z");
+        assert_eq!(humanize_unix_secs(1_767_225_661), "2026-01-01 00:01:01Z");
     }
 
     #[test]

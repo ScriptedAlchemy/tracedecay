@@ -336,6 +336,7 @@ async fn grep_searches_raw_snippets_and_summary_nodes() {
             role: None,
             start_time: None,
             end_time: None,
+            git_filter: Default::default(),
         })
         .await
         .expect("grep should succeed");
@@ -377,6 +378,7 @@ async fn grep_tokenizes_punctuation_heavy_path_like_queries() {
             role: None,
             start_time: None,
             end_time: None,
+            git_filter: Default::default(),
         })
         .await
         .expect("path-like grep should not miss because punctuation was collapsed");
@@ -434,6 +436,7 @@ async fn grep_like_fallback_recalls_infix_hyphen_query_matches() {
             role: None,
             start_time: None,
             end_time: None,
+            git_filter: Default::default(),
         })
         .await
         .expect("hyphenated fallback query should keep infix matches");
@@ -471,6 +474,7 @@ async fn grep_like_fallback_recalls_infix_slash_query_matches() {
             role: None,
             start_time: None,
             end_time: None,
+            git_filter: Default::default(),
         })
         .await
         .expect("slash fallback query should keep infix matches");
@@ -507,6 +511,7 @@ async fn grep_like_fallback_handles_hash_separator_queries() {
             role: None,
             start_time: None,
             end_time: None,
+            git_filter: Default::default(),
         })
         .await
         .expect("hash separator grep should not produce an FTS syntax error");
@@ -543,6 +548,7 @@ async fn grep_quotes_reserved_operator_looking_query_text() {
             role: None,
             start_time: None,
             end_time: None,
+            git_filter: Default::default(),
         })
         .await
         .expect("reserved FTS operator text should be treated as literal text");
@@ -581,6 +587,7 @@ async fn grep_preserves_quoted_phrase_semantics() {
             role: None,
             start_time: None,
             end_time: None,
+            git_filter: Default::default(),
         })
         .await
         .expect("quoted phrase grep should preserve phrase matching");
@@ -619,6 +626,7 @@ async fn grep_preserves_boolean_or_semantics() {
             role: None,
             start_time: None,
             end_time: None,
+            git_filter: Default::default(),
         })
         .await
         .expect("OR query should preserve boolean operator semantics");
@@ -664,6 +672,7 @@ async fn grep_cjk_query_uses_like_fallback_substring_matching() {
             role: None,
             start_time: None,
             end_time: None,
+            git_filter: Default::default(),
         })
         .await
         .expect("CJK grep should fall back to LIKE substring matching");
@@ -727,6 +736,7 @@ async fn grep_filters_raw_hits_by_role_source_and_time_and_sorts() {
             role: Some("assistant".into()),
             start_time: Some(5),
             end_time: Some(25),
+            git_filter: Default::default(),
         })
         .await
         .expect("filtered grep should succeed");
@@ -1959,6 +1969,7 @@ async fn empty_session_load_grep_and_describe_return_empty_results() {
             role: None,
             start_time: None,
             end_time: None,
+            git_filter: Default::default(),
         })
         .await
         .expect("grep on empty session should succeed");
@@ -2083,6 +2094,7 @@ fn grep_request(query: &str) -> LcmGrepRequest {
         role: None,
         start_time: None,
         end_time: None,
+        git_filter: Default::default(),
     }
 }
 

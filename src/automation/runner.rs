@@ -713,6 +713,7 @@ async fn build_session_reflector_evidence(
             role: role.clone(),
             start_time: options.start_time,
             end_time: options.end_time,
+            git_filter: crate::sessions::git_correlation::GitScopeFilter::default(),
         })
         .await
         .map_err(|e| TraceDecayError::Config {
@@ -828,6 +829,7 @@ async fn build_skill_writer_evidence(
             role: None,
             start_time: None,
             end_time: None,
+            git_filter: crate::sessions::git_correlation::GitScopeFilter::default(),
         })
         .await
         .map_err(|e| TraceDecayError::Config {

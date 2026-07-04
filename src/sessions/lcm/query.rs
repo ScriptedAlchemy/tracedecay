@@ -372,6 +372,12 @@ pub(crate) async fn grep(
     if matches!(request.scope, LcmScope::Current | LcmScope::Session) && session_filter.is_none() {
         return Ok(Vec::new());
     }
+    // A git-scoped grep against a store predating the git-correlation schema
+    // can never match; short-circuit rather than issue a `no such table`
+    // EXISTS subquery.
+    if !request.git_filter.is_empty() && !lcm_table_exists(conn, "session_git_spans").await? {
+        return Ok(Vec::new());
+    }
 
     let raw_only_filters =
         request.role.is_some() || request.start_time.is_some() || request.end_time.is_some();
@@ -520,6 +526,7 @@ pub(crate) async fn expand_query(
                     role: None,
                     start_time: None,
                     end_time: None,
+                    git_filter: crate::sessions::git_correlation::GitScopeFilter::default(),
                 };
                 let summary_hits = summary_grep_hits(
                     conn,
@@ -1727,6 +1734,27 @@ fn push_raw_grep_filters(
         filters.push("r.timestamp <= ?".to_string());
         values.push(Value::Integer(end_time));
     }
+    push_grep_git_scope_filter(request, "r.session_id", filters, values);
+}
+
+/// Appends the request's git-scope constraint (branch/worktree/commit) as an
+/// EXISTS predicate correlated to the outer row via `session_column`. No-op
+/// when the filter is empty.
+fn push_grep_git_scope_filter(
+    request: &LcmGrepRequest,
+    session_column: &str,
+    filters: &mut Vec<String>,
+    values: &mut Vec<Value>,
+) {
+    if let Some((predicate, predicate_values)) =
+        crate::sessions::git_correlation::git_scope_exists_predicate(
+            &request.git_filter,
+            session_column,
+        )
+    {
+        filters.push(predicate);
+        values.extend(predicate_values);
+    }
 }
 
 fn push_summary_grep_filters(
@@ -1760,6 +1788,7 @@ fn push_summary_grep_filters(
         values.push(Value::Text(source.to_string()));
         values.push(Value::Text(format!("%\"source\":\"{source}\"%")));
     }
+    push_grep_git_scope_filter(request, "n.session_id", filters, values);
 }
 
 fn raw_hit_from_row(row: &libsql::Row, like_terms: &[String]) -> Result<LcmGrepHit, LcmError> {

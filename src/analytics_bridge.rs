@@ -289,6 +289,7 @@ pub async fn run_analytics_diagnostics(
             project_id: project_filter.clone(),
             session_id: None,
             event_kind: None,
+            since: None,
             limit: 10_000,
         })
         .await

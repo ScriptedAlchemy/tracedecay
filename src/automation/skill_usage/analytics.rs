@@ -68,6 +68,7 @@ pub async fn ingest_project_analytics_events(
             project_id: Some(GlobalDb::canonical_project_key(project_root)),
             session_id: None,
             event_kind: None,
+            since: None,
             limit,
         })
         .await

@@ -9,6 +9,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+mod git_backfill;
 mod global_db;
 mod lcm_compression;
 mod lcm_dag;

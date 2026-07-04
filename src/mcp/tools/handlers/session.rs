@@ -14,6 +14,7 @@ use crate::mcp::response_handles::{
 };
 use crate::mcp::tools::{ToolResult, MAX_RESPONSE_CHARS};
 use crate::sessions::cursor::HermesProfileDbReadOnly;
+use crate::sessions::git_correlation::{GitRefFilter, GitScopeFilter, SessionsForQuery};
 use crate::sessions::lcm::compression_decision::{self, AssemblyCapInput};
 use crate::sessions::lcm::{
     LcmCleanConfig, LcmCompressionRequest, LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget,
@@ -76,6 +77,9 @@ fn render_message_search_md(value: &Value) -> String {
         }
     }
     md.field("count", &render::field_i64(value, "count").to_string());
+    if let Some(summary) = git_filter_summary(value) {
+        md.field("git filter", &summary);
+    }
     let results = value.get("results").and_then(Value::as_array);
     match results {
         Some(results) if !results.is_empty() => {
@@ -89,6 +93,31 @@ fn render_message_search_md(value: &Value) -> String {
         }
     }
     md.render()
+}
+
+/// One-line `branch=… worktree=… commit=…` summary of the applied git-scope
+/// filter, or `None` when no filter was applied. Reads the `git_filter` object
+/// echoed into the payload by the message-search / lcm-grep handlers.
+fn git_filter_summary(value: &Value) -> Option<String> {
+    if !value
+        .get("git_filter_applied")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let filter = value.get("git_filter")?;
+    let mut parts = Vec::new();
+    for key in ["branch", "worktree", "commit"] {
+        if let Some(field) = filter.get(key).and_then(Value::as_str) {
+            parts.push(format!("{key}={field}"));
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
 }
 
 fn append_message_search_hit(md: &mut Md, hit: &Value) {
@@ -1618,10 +1647,13 @@ async fn open_lcm_storage(
                                 LcmOpenMode::ReadOnlyOrMissing => {
                                     lcm_not_yet_ingested(args, "hermes_profile")
                                 }
-                                _ => invalid_hermes_profile_home(args, format!(
-                                    "hermes_profile LCM storage requires an existing session database: {}",
-                                    db_path.display()
-                                )),
+                                _ => invalid_hermes_profile_home(
+                                    args,
+                                    format!(
+                                        "hermes_profile LCM storage requires an existing session database: {}",
+                                        db_path.display()
+                                    ),
+                                ),
                             });
                         }
                         HermesProfileDbReadOnly::ConfigError(msg) => {
@@ -1762,6 +1794,157 @@ fn parse_message_search_provider_scope(args: &Value) -> Result<ProviderScope> {
     ProviderScope::parse_optional(string_arg(args, "provider")).map_err(argument_error)
 }
 
+/// Parses the optional `branch` / `worktree` / `commit` git-scope filter
+/// arguments shared by `tracedecay_message_search` and `tracedecay_lcm_grep`.
+fn parse_git_scope_filter(args: &Value) -> Result<GitScopeFilter> {
+    GitScopeFilter::from_args(
+        string_arg(args, "branch"),
+        string_arg(args, "worktree"),
+        string_arg(args, "commit"),
+    )
+    .map_err(|err| argument_error(err.to_string()))
+}
+
+const DEFAULT_SESSIONS_FOR_LIMIT: usize = 20;
+
+/// Renders `tracedecay_sessions_for` results as compact markdown: one bullet
+/// per correlated session with its activity window or commit attribution.
+fn render_sessions_for_md(value: &Value) -> String {
+    let mut md = Md::new();
+    md.heading(2, "Sessions For Git Ref");
+    for key in ["git_ref", "value"] {
+        let field = render::field_str(value, key);
+        if !field.is_empty() {
+            md.field(key, field);
+        }
+    }
+    md.field("count", &render::field_i64(value, "count").to_string());
+    let results = value.get("results").and_then(Value::as_array);
+    match results {
+        Some(results) if !results.is_empty() => {
+            md.blank();
+            for hit in results {
+                append_sessions_for_hit(&mut md, hit);
+            }
+        }
+        _ => {
+            md.blank()
+                .empty_note("No correlated sessions recorded for this git ref.");
+        }
+    }
+    md.render()
+}
+
+fn append_sessions_for_hit(md: &mut Md, hit: &Value) {
+    let session_id = render::field_str(hit, "session_id");
+    let provider = render::field_str(hit, "provider");
+    let mut header = format!("session `{session_id}`");
+    if !provider.is_empty() {
+        let _ = write!(header, " · {provider}");
+    }
+    md.bullet(&header);
+    let mut detail = String::new();
+    if let Some(branch) = hit.get("branch").and_then(Value::as_str) {
+        let _ = write!(detail, "branch `{branch}`");
+    }
+    if let Some(worktree) = hit.get("worktree").and_then(Value::as_str) {
+        if !detail.is_empty() {
+            detail.push_str(" · ");
+        }
+        let _ = write!(detail, "worktree `{worktree}`");
+    }
+    if let (Some(first), Some(last)) = (
+        hit.get("first_ts").and_then(Value::as_i64),
+        hit.get("last_ts").and_then(Value::as_i64),
+    ) {
+        if !detail.is_empty() {
+            detail.push_str(" · ");
+        }
+        let _ = write!(
+            detail,
+            "active {} .. {}",
+            crate::timeutil::humanize_unix_secs(first),
+            crate::timeutil::humanize_unix_secs(last)
+        );
+    }
+    if let Some(sha) = hit.get("commit_sha").and_then(Value::as_str) {
+        if !detail.is_empty() {
+            detail.push_str(" · ");
+        }
+        let short = sha.get(..12).unwrap_or(sha);
+        let _ = write!(detail, "commit `{short}`");
+        if let Some(committed_at) = hit.get("committed_at").and_then(Value::as_i64) {
+            let _ = write!(
+                detail,
+                " at {}",
+                crate::timeutil::humanize_unix_secs(committed_at)
+            );
+        }
+    }
+    if !detail.is_empty() {
+        md.line(&format!("  {detail}"));
+    }
+}
+
+pub(super) async fn handle_sessions_for(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+    let kind = required_string_arg(&args, "git_ref")?;
+    let value = required_string_arg(&args, "value")?;
+    let git_ref =
+        GitRefFilter::parse(kind, value).map_err(|err| argument_error(err.to_string()))?;
+    let since = non_negative_timestamp_arg(&args, "since", SearchTimeBound::Start)?;
+    let until = non_negative_timestamp_arg(&args, "until", SearchTimeBound::End)?;
+    let limit = bounded_usize_arg(&args, "limit", 1, MAX_LCM_RESULT_LIMIT)?
+        .unwrap_or(DEFAULT_SESSIONS_FOR_LIMIT);
+    let query = SessionsForQuery {
+        git_ref,
+        since,
+        until,
+        limit,
+    };
+
+    // Read-only lookup against the project session store; a missing store
+    // means nothing was ever recorded, which is a valid empty result (the
+    // tool never ghost-creates an empty sessions.db).
+    let db_path = cg.store_layout().sessions_db_path.clone();
+    let results = if db_path.is_file() {
+        let Some(db) = GlobalDb::open_read_only_at(&db_path).await else {
+            return Ok(tool_json(
+                Some(cg.project_root()),
+                &args,
+                &json!({
+                    "status": "unavailable",
+                    "message": "could not open project tracedecay session database",
+                    "results": [],
+                    "count": 0
+                }),
+            ));
+        };
+        db.git_sessions_for(&query)
+            .await
+            .map_err(|err| TraceDecayError::Config {
+                message: err.to_string(),
+            })?
+    } else {
+        Vec::new()
+    };
+
+    let payload = json!({
+        "status": "ok",
+        "git_ref": query.git_ref.kind(),
+        "value": query.git_ref.value(),
+        "since": since,
+        "until": until,
+        "count": results.len(),
+        "results": results,
+    });
+    Ok(tool_json_with_md(
+        Some(cg.project_root()),
+        &args,
+        &payload,
+        || render_sessions_for_md(&payload),
+    ))
+}
+
 pub(super) async fn handle_message_search(
     cg: &TraceDecay,
     args: Value,
@@ -1805,6 +1988,8 @@ pub(super) async fn handle_message_search(
         .and_then(Value::as_u64)
         .unwrap_or(10)
         .clamp(1, 50) as usize;
+    let git_filter = parse_git_scope_filter(&args)?;
+    let git_filter_applied = !git_filter.is_empty();
     let time_range = message_search_time_range(&args)?;
 
     let Some((db_path, target_root)) = selected_project_session_db_path(
@@ -1848,7 +2033,21 @@ pub(super) async fn handle_message_search(
         )
         .await;
     }
-    let results = if let Some(provider) = requested_provider {
+    let results = if git_filter_applied {
+        db.search_session_messages_git_scoped(
+            requested_provider,
+            project_key,
+            query,
+            limit,
+            SessionSearchFilters {
+                scope,
+                parent_session_id,
+                time_range,
+            },
+            &git_filter,
+        )
+        .await
+    } else if let Some(provider) = requested_provider {
         db.search_session_messages_filtered(
             provider,
             project_key,
@@ -1875,7 +2074,7 @@ pub(super) async fn handle_message_search(
         .await
     };
 
-    let payload = json!({
+    let mut payload = json!({
         "status": "ok",
         "provider": requested_provider.unwrap_or("all"),
         "requested_provider": requested_provider,
@@ -1897,6 +2096,15 @@ pub(super) async fn handle_message_search(
         "count": results.len(),
         "results": results,
     });
+    if git_filter_applied {
+        if let Some(map) = payload.as_object_mut() {
+            map.insert(
+                "git_filter".to_string(),
+                serde_json::to_value(&git_filter).unwrap_or(Value::Null),
+            );
+            map.insert("git_filter_applied".to_string(), Value::Bool(true));
+        }
+    }
     Ok(tool_json_with_md(
         Some(&target_root),
         &args,
@@ -2088,6 +2296,8 @@ pub(super) async fn handle_lcm_grep(
     // even when the sessions DB does not exist yet.
     let scope = parse_lcm_scope(&args)?;
     let provider = lcm_grep_provider_arg(&args);
+    let git_filter = parse_git_scope_filter(&args)?;
+    let git_filter_applied = !git_filter.is_empty();
     let storage = lcm_open_storage_ro!(context, &args);
     let hits = storage
         .db
@@ -2114,21 +2324,28 @@ pub(super) async fn handle_lcm_grep(
                 &["until", "end_time", "time_to"],
                 SearchTimeBound::End,
             )?,
+            git_filter: git_filter.clone(),
         })
         .await
         .map_err(lcm_error)?;
-    Ok(tool_json(
-        context.project_root,
-        &args,
-        &json!({
-            "status": "ok",
-            "provider": provider,
-            "query": query,
-            "count": hits.len(),
-            "hits": hits,
-            "sort": string_arg(&args, "sort").unwrap_or("recency"),
-        }),
-    ))
+    let mut payload = json!({
+        "status": "ok",
+        "provider": provider,
+        "query": query,
+        "count": hits.len(),
+        "hits": hits,
+        "sort": string_arg(&args, "sort").unwrap_or("recency"),
+    });
+    if git_filter_applied {
+        if let Some(map) = payload.as_object_mut() {
+            map.insert(
+                "git_filter".to_string(),
+                serde_json::to_value(&git_filter).unwrap_or(Value::Null),
+            );
+            map.insert("git_filter_applied".to_string(), Value::Bool(true));
+        }
+    }
+    Ok(tool_json(context.project_root, &args, &payload))
 }
 
 pub(super) async fn handle_lcm_describe(

@@ -2056,6 +2056,7 @@ async fn mcp_runtime_events(
         project_id: None,
         session_id: Some(session_id.to_string()),
         event_kind: Some("mcp_tool_call".to_string()),
+        since: None,
         limit: 100,
     })
     .await
@@ -3068,4 +3069,205 @@ async fn cross_branch_tools_keep_using_explicit_branch_dbs_after_drift_reopen() 
         !main_search_text.contains("feature_only"),
         "explicit main branch search must ignore the live feature branch DB: {main_search_text}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Live session↔git span + commit attribution
+// ---------------------------------------------------------------------------
+
+/// Captures stdout of a git command (trimmed).
+fn git_capture(project: &std::path::Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(project)
+        .output()
+        .expect("git failed to spawn");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Proves live span recording from hook route notifications and the
+/// commit-attribution sweep at ingest time:
+///  (1) a hook notification with route metadata creates a span row in the
+///      resolved project's `sessions.db`;
+///  (2) a mid-session branch switch creates a second span row;
+///  (3) a commit made inside the feature span is attributed to the session by
+///      the ingest sweep.
+#[tokio::test]
+async fn hook_route_records_spans_and_ingest_attributes_commits() {
+    use tracedecay::sessions::git_correlation::{GitRefFilter, SessionsForQuery, SpanOverlapKind};
+
+    let (_env, project) = crate::common::IsolatedEnv::acquire().await;
+    let worktree = project.with_file_name("feature-worktree");
+
+    // Real repo on `main`, plus a linked worktree checked out on `feature`.
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn marker() {}\n").unwrap();
+    fs::write(project.join(".gitignore"), ".tracedecay/\n").unwrap();
+    git(&project, &["init", "-b", "main"]);
+    git(&project, &["config", "user.email", "test@test.com"]);
+    git(&project, &["config", "user.name", "Test"]);
+    git(&project, &["add", "."]);
+    git(&project, &["commit", "-m", "initial"]);
+    git(
+        &project,
+        &[
+            "worktree",
+            "add",
+            worktree.to_string_lossy().as_ref(),
+            "-b",
+            "feature",
+        ],
+    );
+
+    let cg = crate::fixture::init_project_from_template(&project)
+        .await
+        .unwrap();
+    cg.index_all().await.unwrap();
+    let project_root = cg.project_root().to_path_buf();
+
+    // Register with the git common dir so the linked-worktree hook route (a
+    // sibling path the parent-alias walk never reaches) resolves back to this
+    // project by git-common-dir identity.
+    let git_common_dir = tracedecay::worktree::git_common_dir(&project_root);
+    let registry = tracedecay::global_db::GlobalDb::open().await.unwrap();
+    registry
+        .upsert_code_project(
+            "proj_live",
+            &project_root,
+            git_common_dir.as_deref(),
+            None,
+            Some("main"),
+        )
+        .await
+        .unwrap();
+    let server = McpServer::new_with_dbs(cg, None, None, Some(Arc::new(registry)), false).await;
+
+    let session_id = "sess-live";
+    let main_worktree = project_root.to_string_lossy().to_string();
+    let feature_worktree =
+        tracedecay::sessions::git_correlation::normalize_worktree(&worktree.to_string_lossy());
+
+    // (1) Hook notification on `main` in the project worktree.
+    run_server_with_messages(
+        server.clone(),
+        vec![jsonrpc_notification_with_params(
+            "tracedecay/hookEvent",
+            json!({
+                "agent": "claude",
+                "event": "postToolUse",
+                "cwd": project_root.to_string_lossy(),
+                "route": {
+                    "session_id": session_id,
+                    "cwd": project_root.to_string_lossy(),
+                    "worktree": project_root.to_string_lossy(),
+                    "branch": "main",
+                }
+            }),
+        )],
+    )
+    .await;
+    server.ledger_writes_settled().await;
+
+    // (2) Mid-session branch switch: same session, `feature` in the worktree.
+    run_server_with_messages(
+        server.clone(),
+        vec![jsonrpc_notification_with_params(
+            "tracedecay/hookEvent",
+            json!({
+                "agent": "claude",
+                "event": "postToolUse",
+                "cwd": worktree.to_string_lossy(),
+                "route": {
+                    "session_id": session_id,
+                    "cwd": worktree.to_string_lossy(),
+                    "worktree": worktree.to_string_lossy(),
+                    "branch": "feature",
+                }
+            }),
+        )],
+    )
+    .await;
+    server.ledger_writes_settled().await;
+
+    // Open the project's sessions.db the same way the live writer resolved it.
+    let db_path = tracedecay::storage::resolve_project_session_db_path(&project_root)
+        .expect("resolve sessions.db path");
+    let db = tracedecay::global_db::GlobalDb::open_at(&db_path)
+        .await
+        .expect("open sessions.db");
+
+    // Span on main exists (scenario 1).
+    let on_main = db
+        .git_sessions_for(&SessionsForQuery {
+            git_ref: GitRefFilter::Branch("main".to_string()),
+            since: None,
+            until: None,
+            limit: 10,
+        })
+        .await
+        .unwrap();
+    assert!(
+        on_main.iter().any(|hit| hit.session_id == session_id),
+        "main span should exist: {on_main:?}"
+    );
+
+    // A distinct span on feature exists (scenario 2: branch switch).
+    let on_feature = db
+        .git_sessions_for(&SessionsForQuery {
+            git_ref: GitRefFilter::Branch("feature".to_string()),
+            since: None,
+            until: None,
+            limit: 10,
+        })
+        .await
+        .unwrap();
+    assert!(
+        on_feature.iter().any(|hit| hit.session_id == session_id),
+        "feature span should exist after branch switch: {on_feature:?}"
+    );
+
+    // Both branches recorded distinct worktrees for the same session.
+    assert_ne!(main_worktree, feature_worktree);
+
+    // (3) Make a commit on `feature` inside the live span window, then run the
+    // ingest sweep and confirm it is attributed to the session.
+    fs::write(
+        worktree.join("src/lib.rs"),
+        "pub fn marker() { /* edit */ }\n",
+    )
+    .unwrap();
+    git(&worktree, &["add", "."]);
+    git(&worktree, &["commit", "-m", "feature change"]);
+    let sha = git_capture(&worktree, &["rev-parse", "HEAD"]);
+
+    tracedecay::sessions::ingest_global_sources(&db, &project_root).await;
+
+    let by_commit = db
+        .git_sessions_for(&SessionsForQuery {
+            git_ref: GitRefFilter::Commit(sha.clone()),
+            since: None,
+            until: None,
+            limit: 10,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        by_commit.len(),
+        1,
+        "commit {sha} should be attributed once: {by_commit:?}"
+    );
+    assert_eq!(by_commit[0].session_id, session_id);
+    assert_eq!(by_commit[0].commit_sha.as_deref(), Some(sha.as_str()));
+    assert_eq!(by_commit[0].branch.as_deref(), Some("feature"));
+    assert!(matches!(
+        by_commit[0].span_overlap_kind,
+        Some(SpanOverlapKind::WithinSpan) | Some(SpanOverlapKind::ExtendedWindow)
+    ));
+
+    drop(db);
 }

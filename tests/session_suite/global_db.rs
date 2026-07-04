@@ -151,6 +151,7 @@ fn analytics_query(
         project_id: Some("project-a".to_string()),
         session_id: session_id.map(ToOwned::to_owned),
         event_kind: event_kind.map(ToOwned::to_owned),
+        since: None,
         limit,
     }
 }
@@ -287,6 +288,39 @@ async fn analytics_events_append_and_query_by_provider_project_session_and_kind(
         events[0].metadata_json.as_deref(),
         Some(r#"{"tokens_saved":42}"#)
     );
+}
+
+#[tokio::test]
+async fn analytics_events_query_since_bounds_timestamp() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_isolated_db(&tmp).await;
+
+    append_analytics_event(
+        &db,
+        &analytics_event(Some("session-old"), 1_715_000_100, "tool"),
+        "append old analytics event",
+    )
+    .await;
+    let recent_id = append_analytics_event(
+        &db,
+        &analytics_event(Some("session-new"), 1_715_000_200, "tool"),
+        "append recent analytics event",
+    )
+    .await;
+
+    // A `since` lower bound drops rows older than the boundary; the boundary
+    // itself is inclusive.
+    let events = db
+        .query_analytics_events(&AnalyticsEventQuery {
+            since: Some(1_715_000_200),
+            limit: 100,
+            ..Default::default()
+        })
+        .await
+        .expect("query analytics events since bound");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].id, recent_id);
+    assert_eq!(events[0].timestamp, 1_715_000_200);
 }
 
 #[tokio::test]
@@ -742,6 +776,74 @@ async fn search_session_messages_applies_hyphen_filter_before_limit() {
 }
 
 #[tokio::test]
+async fn search_session_messages_git_scoped_by_branch_with_hyphen_term() {
+    use tracedecay::sessions::git_correlation::{GitScopeFilter, SpanObservation, SpanSource};
+
+    let tmp = TempDir::new().unwrap();
+    let db = open_isolated_db(&tmp).await;
+    let session = sample_session("cursor", "cursor-scoped", "project-a");
+    db.upsert_session(&session).await;
+    db.upsert_session_message(&sample_message(
+        "cursor",
+        "scoped-msg",
+        "cursor-scoped",
+        "the literal foo-bar marker on a scoped branch",
+    ))
+    .await;
+
+    // The session was active on `feat/x`; record a span so the scoping EXISTS
+    // subquery has a row to match against.
+    db.git_record_span_observation(
+        &SpanObservation {
+            provider: "cursor".to_string(),
+            session_id: "cursor-scoped".to_string(),
+            thread_id: None,
+            branch: Some("feat/x".to_string()),
+            worktree: "/repo".to_string(),
+            ts: 1_000,
+            source: SpanSource::HookRoute,
+        },
+        600,
+    )
+    .await
+    .unwrap();
+
+    let filters = SessionSearchFilters {
+        scope: SessionSearchScope::All,
+        parent_session_id: None,
+        time_range: SessionSearchTimeRange::default(),
+    };
+
+    // A hyphenated query term appends a numbered placeholder *after* the git
+    // EXISTS predicate's anonymous placeholders; the match must still resolve.
+    let matched = db
+        .search_session_messages_git_scoped(
+            Some("cursor"),
+            Some("project-a"),
+            "foo-bar",
+            10,
+            filters,
+            &GitScopeFilter::from_args(Some("feat/x"), None, None).unwrap(),
+        )
+        .await;
+    assert_eq!(matched.len(), 1);
+    assert_eq!(matched[0].message.message_id, "scoped-msg");
+
+    // A branch the session was never on excludes the message.
+    let excluded = db
+        .search_session_messages_git_scoped(
+            Some("cursor"),
+            Some("project-a"),
+            "foo-bar",
+            10,
+            filters,
+            &GitScopeFilter::from_args(Some("other"), None, None).unwrap(),
+        )
+        .await;
+    assert!(excluded.is_empty());
+}
+
+#[tokio::test]
 async fn search_session_messages_filters_by_message_timestamp() {
     let tmp = TempDir::new().unwrap();
     let db = open_isolated_db(&tmp).await;
@@ -1030,6 +1132,7 @@ async fn hook_analytics_import_is_incremental_and_idempotent() {
             project_id: None,
             session_id: None,
             event_kind: None,
+            since: None,
             limit: 100,
         })
         .await

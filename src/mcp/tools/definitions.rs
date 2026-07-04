@@ -303,6 +303,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_hermes_skill_bridge(),
         def_dashboard(),
         def_message_search(),
+        def_sessions_for(),
         def_lcm_status(),
         def_lcm_doctor(),
         def_lcm_load_session(),
@@ -2399,9 +2400,76 @@ fn def_message_search() -> ToolDefinition {
                 "project_path": {
                     "type": "string",
                     "description": "Optional registered project root path or alias to search instead of the active project."
-                }
+                },
+                "branch": git_scope_branch_schema(),
+                "worktree": git_scope_worktree_schema(),
+                "commit": git_scope_commit_schema()
             },
             "required": ["query"]
+        }),
+    )
+}
+
+fn git_scope_branch_schema() -> Value {
+    json!({
+        "type": "string",
+        "description": "Optional git branch filter: only messages from sessions active on this branch (via the session-git correlation index)."
+    })
+}
+
+fn git_scope_worktree_schema() -> Value {
+    json!({
+        "type": "string",
+        "description": "Optional git worktree root path filter: only messages from sessions active in this worktree (via the session-git correlation index)."
+    })
+}
+
+fn git_scope_commit_schema() -> Value {
+    json!({
+        "type": "string",
+        "description": "Optional commit sha filter (full or >=6-char hex prefix): only messages from sessions attributed to this commit (via the session-git correlation index)."
+    })
+}
+
+fn def_sessions_for() -> ToolDefinition {
+    def(
+        "tracedecay_sessions_for",
+        "Sessions For Git Ref",
+        "Find agent sessions correlated with a git artifact in the active project: all sessions active on a branch, in a worktree, or attributed to a commit (the conversations that produced it). Attribution is span-based, so mid-session branch switches are respected. Supports time-scoped queries via since/until.",
+        json!({
+            "type": "object",
+            "properties": {
+                "git_ref": {
+                    "type": "string",
+                    "enum": ["branch", "worktree", "commit"],
+                    "description": "Kind of git reference to correlate against."
+                },
+                "value": {
+                    "type": "string",
+                    "description": "The branch name, worktree root path, or commit sha (full or >=6-char hex prefix) to look up."
+                },
+                "since": {
+                    "oneOf": [
+                        { "type": "integer", "minimum": 0 },
+                        { "type": "string" }
+                    ],
+                    "description": "Optional inclusive minimum activity/commit timestamp. Integer strings and timezone-aware ISO/RFC3339 strings are accepted."
+                },
+                "until": {
+                    "oneOf": [
+                        { "type": "integer", "minimum": 0 },
+                        { "type": "string" }
+                    ],
+                    "description": "Optional inclusive maximum activity/commit timestamp. Integer strings and timezone-aware ISO/RFC3339 strings are accepted."
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "description": "Maximum sessions to return (default: 20)."
+                }
+            },
+            "required": ["git_ref", "value"]
         }),
     )
 }
@@ -2673,6 +2741,9 @@ fn def_lcm_grep() -> ToolDefinition {
                     "maximum": 100,
                     "description": "Maximum hits."
                 },
+                "branch": git_scope_branch_schema(),
+                "worktree": git_scope_worktree_schema(),
+                "commit": git_scope_commit_schema(),
                 "storage_scope": lcm_storage_scope_schema(),
                 "hermes_home": lcm_hermes_home_schema()
             },
