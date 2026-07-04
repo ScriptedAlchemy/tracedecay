@@ -21,7 +21,10 @@ use crate::sessions::lcm::{
     LcmGrepSort, LcmLoadSessionRequest, LcmPreflightRequest, LcmScope, LcmSessionBoundaryRequest,
     LcmSummarizerMode, LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT,
 };
-use crate::sessions::{ProviderScope, SessionSearchScope};
+use crate::sessions::{
+    ProviderScope, SessionSearchFilters, SessionSearchScope, SessionSearchTimeRange,
+};
+use crate::timeutil::SearchTimeBound;
 use crate::tracedecay::{current_timestamp, TraceDecay};
 
 const DEFAULT_LCM_CONTENT_LIMIT: usize = 4096;
@@ -1094,18 +1097,24 @@ fn non_negative_i64_arg_alias(args: &Value, primary: &str, alias: &str) -> Resul
     }
 }
 
-fn non_negative_timestamp_arg_alias(
+fn non_negative_timestamp_arg_aliases(
     args: &Value,
-    primary: &str,
-    alias: &str,
+    names: &[&str],
+    bound: SearchTimeBound,
 ) -> Result<Option<i64>> {
-    match non_negative_timestamp_arg(args, primary)? {
-        Some(value) => Ok(Some(value)),
-        None => non_negative_timestamp_arg(args, alias),
+    for name in names {
+        if args.get(name).is_some() {
+            return non_negative_timestamp_arg(args, name, bound);
+        }
     }
+    Ok(None)
 }
 
-fn non_negative_timestamp_arg(args: &Value, name: &str) -> Result<Option<i64>> {
+fn non_negative_timestamp_arg(
+    args: &Value,
+    name: &str,
+    bound: SearchTimeBound,
+) -> Result<Option<i64>> {
     let Some(value) = args.get(name) else {
         return Ok(None);
     };
@@ -1113,7 +1122,7 @@ fn non_negative_timestamp_arg(args: &Value, name: &str) -> Result<Option<i64>> {
         Value::Number(number) => number
             .as_i64()
             .ok_or_else(|| timestamp_argument_error(name))?,
-        Value::String(text) => parse_timestamp_string(text, name)?,
+        Value::String(text) => parse_timestamp_string(text, name, bound)?,
         _ => return Err(timestamp_argument_error(name)),
     };
     if timestamp < 0 {
@@ -1122,7 +1131,7 @@ fn non_negative_timestamp_arg(args: &Value, name: &str) -> Result<Option<i64>> {
     Ok(Some(timestamp))
 }
 
-fn parse_timestamp_string(value: &str, name: &str) -> Result<i64> {
+fn parse_timestamp_string(value: &str, name: &str, bound: SearchTimeBound) -> Result<i64> {
     let text = value.trim();
     if text.is_empty() {
         return Err(argument_error(format!("{name} must not be empty")));
@@ -1133,12 +1142,29 @@ fn parse_timestamp_string(value: &str, name: &str) -> Result<i64> {
         }
         return Err(argument_error(format!("{name} must be >= 0")));
     }
-    crate::timeutil::parse_rfc3339_timestamp(text).ok_or_else(|| timestamp_argument_error(name))
+    let now = crate::tracedecay::current_timestamp();
+    crate::timeutil::parse_search_time_filter_bound(text, now, bound)
+        .ok_or_else(|| timestamp_argument_error(name))
+}
+
+fn message_search_time_range(args: &Value) -> Result<SessionSearchTimeRange> {
+    Ok(SessionSearchTimeRange {
+        start_time: non_negative_timestamp_arg_aliases(
+            args,
+            &["since", "start_time", "time_from"],
+            SearchTimeBound::Start,
+        )?,
+        end_time: non_negative_timestamp_arg_aliases(
+            args,
+            &["until", "end_time", "time_to"],
+            SearchTimeBound::End,
+        )?,
+    })
 }
 
 fn timestamp_argument_error(name: &str) -> TraceDecayError {
     argument_error(format!(
-        "{name} must be a non-negative Unix timestamp or timezone-aware ISO/RFC3339 string"
+        "{name} must be a non-negative Unix timestamp, timezone-aware ISO/RFC3339 string, YYYY-MM-DD date, or relative time like 'last hour'"
     ))
 }
 
@@ -1779,6 +1805,7 @@ pub(super) async fn handle_message_search(
         .and_then(Value::as_u64)
         .unwrap_or(10)
         .clamp(1, 50) as usize;
+    let time_range = message_search_time_range(&args)?;
 
     let Some((db_path, target_root)) = selected_project_session_db_path(
         cg.project_root(),
@@ -1827,8 +1854,11 @@ pub(super) async fn handle_message_search(
             project_key,
             query,
             limit,
-            scope,
-            parent_session_id,
+            SessionSearchFilters {
+                scope,
+                parent_session_id,
+                time_range,
+            },
         )
         .await
     } else {
@@ -1836,8 +1866,11 @@ pub(super) async fn handle_message_search(
             project_key,
             query,
             limit,
-            scope,
-            parent_session_id,
+            SessionSearchFilters {
+                scope,
+                parent_session_id,
+                time_range,
+            },
         )
         .await
     };
@@ -1858,6 +1891,8 @@ pub(super) async fn handle_message_search(
             SessionSearchScope::ParentsOnly => "parents_only",
             SessionSearchScope::SubagentsOnly => "subagents_only",
         },
+        "since": time_range.start_time,
+        "until": time_range.end_time,
         "query": query,
         "count": results.len(),
         "results": results,
@@ -2069,8 +2104,16 @@ pub(super) async fn handle_lcm_grep(
             sort: parse_lcm_grep_sort(&args)?,
             source: string_arg(&args, "source").map(str::to_string),
             role: string_arg(&args, "role").map(str::to_string),
-            start_time: non_negative_timestamp_arg_alias(&args, "start_time", "time_from")?,
-            end_time: non_negative_timestamp_arg_alias(&args, "end_time", "time_to")?,
+            start_time: non_negative_timestamp_arg_aliases(
+                &args,
+                &["since", "start_time", "time_from"],
+                SearchTimeBound::Start,
+            )?,
+            end_time: non_negative_timestamp_arg_aliases(
+                &args,
+                &["until", "end_time", "time_to"],
+                SearchTimeBound::End,
+            )?,
         })
         .await
         .map_err(lcm_error)?;

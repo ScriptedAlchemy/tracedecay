@@ -84,6 +84,91 @@ pub fn parse_rfc3339_timestamp(value: &str) -> Option<i64> {
     (timestamp >= 0).then_some(timestamp)
 }
 
+/// Parses search filter timestamps. Accepts Unix seconds, RFC3339, `YYYY-MM-DD`
+/// UTC dates, `today`, `yesterday`, and relative forms like `last hour`.
+pub fn parse_search_time_filter(value: &str, now: i64) -> Option<i64> {
+    parse_search_time_filter_bound(value, now, SearchTimeBound::Start)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchTimeBound {
+    Start,
+    End,
+}
+
+pub fn parse_search_time_filter_bound(
+    value: &str,
+    now: i64,
+    bound: SearchTimeBound,
+) -> Option<i64> {
+    let text = value.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Ok(timestamp) = text.parse::<i64>() {
+        return (timestamp >= 0).then_some(timestamp);
+    }
+    if let Some(timestamp) = parse_rfc3339_timestamp(text) {
+        return Some(timestamp);
+    }
+    if let Some(day_start) = parse_yyyy_mm_dd_utc_start(text) {
+        return Some(bound_day_timestamp(day_start, bound));
+    }
+
+    let normalized = text.to_ascii_lowercase();
+    match normalized.as_str() {
+        "today" => return Some(bound_day_timestamp(now.div_euclid(86_400) * 86_400, bound)),
+        "yesterday" => {
+            return Some(bound_day_timestamp(
+                now.div_euclid(86_400) * 86_400 - 86_400,
+                bound,
+            ));
+        }
+        _ => {}
+    }
+
+    let words: Vec<&str> = normalized.split_whitespace().collect();
+    let (count, unit) = match words.as_slice() {
+        ["last", unit] => (1_i64, *unit),
+        ["last", count, unit] | [count, unit, "ago"] => (count.parse::<i64>().ok()?, *unit),
+        _ => return None,
+    };
+    let seconds = match unit.trim_end_matches('s') {
+        "minute" | "min" => count.checked_mul(60)?,
+        "hour" | "hr" => count.checked_mul(3_600)?,
+        "day" => count.checked_mul(86_400)?,
+        "week" => count.checked_mul(604_800)?,
+        _ => return None,
+    };
+    if count <= 0 || seconds < 0 {
+        return None;
+    }
+    Some(now.saturating_sub(seconds))
+}
+
+fn bound_day_timestamp(day_start: i64, bound: SearchTimeBound) -> i64 {
+    match bound {
+        SearchTimeBound::Start => day_start,
+        SearchTimeBound::End => day_start + 86_399,
+    }
+}
+
+fn parse_yyyy_mm_dd_utc_start(value: &str) -> Option<i64> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10 || bytes.get(4) != Some(&b'-') || bytes.get(7) != Some(&b'-') {
+        return None;
+    }
+    let year = parse_fixed_i32(value, 0, 4)?;
+    let month = parse_fixed_u32(value, 5, 7)?;
+    let day = parse_fixed_u32(value, 8, 10)?;
+    if !(1..=12).contains(&month) || day == 0 || day > days_in_month(year, month) {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    let timestamp = days.checked_mul(86_400)?;
+    (timestamp >= 0).then_some(timestamp)
+}
+
 /// Parses the human-readable timestamp Cursor injects into user prompts as
 /// `<timestamp>…</timestamp>` (e.g. `Wednesday, Jun 10, 2026, 9:11 AM (UTC+2)`)
 /// into Unix epoch seconds.
@@ -316,6 +401,43 @@ mod tests {
         assert!(parse_rfc3339_timestamp("1969-12-31T23:59:59Z").is_none());
         assert!(parse_rfc3339_timestamp("bad").is_none());
         assert!(parse_rfc3339_timestamp("").is_none());
+    }
+
+    #[test]
+    fn parses_search_time_filters() {
+        let now = 1_800_000_000;
+        assert_eq!(parse_search_time_filter("123", now), Some(123));
+        assert_eq!(
+            parse_search_time_filter("1970-01-02T00:00:00Z", now),
+            Some(86_400)
+        );
+        assert_eq!(parse_search_time_filter("1970-01-02", now), Some(86_400));
+        assert_eq!(
+            parse_search_time_filter_bound("1970-01-02", now, SearchTimeBound::End),
+            Some(172_799)
+        );
+        assert_eq!(
+            parse_search_time_filter("last hour", now),
+            Some(now - 3_600)
+        );
+        assert_eq!(
+            parse_search_time_filter("last 2 days", now),
+            Some(now - 172_800)
+        );
+        assert_eq!(
+            parse_search_time_filter("15 minutes ago", now),
+            Some(now - 900)
+        );
+        assert_eq!(
+            parse_search_time_filter("today", now),
+            Some(now.div_euclid(86_400) * 86_400)
+        );
+        assert_eq!(
+            parse_search_time_filter_bound("today", now, SearchTimeBound::End),
+            Some(now.div_euclid(86_400) * 86_400 + 86_399)
+        );
+        assert!(parse_search_time_filter("last zero hours", now).is_none());
+        assert!(parse_search_time_filter("tomorrow", now).is_none());
     }
 
     #[test]

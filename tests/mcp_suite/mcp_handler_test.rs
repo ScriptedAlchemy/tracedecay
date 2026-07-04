@@ -10143,6 +10143,136 @@ async fn lcm_grep_accepts_string_timestamp_filters() {
 }
 
 #[tokio::test]
+async fn lcm_grep_accepts_relative_time_filters() {
+    let dir = test_temp_dir();
+    let (cg, _env) = init_test_project(dir.path()).await;
+    let now = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    seed_lcm_session_message_with_role_source_timestamp(
+        &cg,
+        "lcm-relative-timestamps",
+        "lcm-relative-timestamps-old",
+        "orchard relative timestamp old",
+        1,
+        "assistant",
+        "cli",
+        now - 7200,
+    )
+    .await;
+    seed_lcm_session_message_with_role_source_timestamp(
+        &cg,
+        "lcm-relative-timestamps",
+        "lcm-relative-timestamps-new",
+        "orchard relative timestamp new",
+        2,
+        "assistant",
+        "cli",
+        now - 300,
+    )
+    .await;
+
+    let grep = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_grep",
+        json!({
+            "provider": "cursor",
+            "query": "orchard relative timestamp",
+            "scope": "session",
+            "session_id": "lcm-relative-timestamps",
+            "since": "last hour",
+            "limit": 10
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&grep.value)).unwrap();
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["count"], 1);
+    assert_eq!(
+        payload["hits"][0]["message_id"],
+        "lcm-relative-timestamps-new"
+    );
+}
+
+#[tokio::test]
+async fn message_search_filters_by_time_aliases() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let db = open_active_project_session_db(&cg).await;
+    let session = SessionRecord {
+        provider: "cursor".to_string(),
+        session_id: "search-time-session".to_string(),
+        project_key: "project-a".to_string(),
+        project_path: cg.project_root().to_string_lossy().to_string(),
+        title: Some("Search time session".to_string()),
+        started_at: Some(1),
+        ended_at: Some(90_000),
+        transcript_path: Some("search-time-session.jsonl".to_string()),
+        metadata_json: None,
+        parent_session_id: None,
+        is_subagent: false,
+        agent_id: None,
+        parent_tool_use_id: None,
+    };
+    db.upsert_session(&session).await;
+
+    for (message_id, timestamp, text) in [
+        ("search-time-old", 10, "orchard search clock marker old"),
+        (
+            "search-time-target",
+            20,
+            "orchard search clock marker target",
+        ),
+        ("search-time-new", 90_000, "orchard search clock marker new"),
+    ] {
+        db.upsert_session_message(&SessionMessageRecord {
+            provider: "cursor".to_string(),
+            message_id: message_id.to_string(),
+            session_id: "search-time-session".to_string(),
+            role: "assistant".to_string(),
+            timestamp: Some(timestamp),
+            ordinal: timestamp,
+            text: text.to_string(),
+            kind: Some("message".to_string()),
+            model: Some("test-model".to_string()),
+            tool_names: None,
+            source_path: Some("search-time-session.jsonl".to_string()),
+            source_offset: Some(timestamp),
+            metadata_json: None,
+        })
+        .await;
+    }
+
+    let search = handle_tool_call(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "provider": "cursor",
+            "query": "orchard search clock marker",
+            "project_key": "project-a",
+            "time_from": "15",
+            "until": "1970-01-01",
+            "catch_up": false,
+            "limit": 10
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&search.value)).unwrap();
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["count"], 1);
+    assert_eq!(
+        payload["results"][0]["message"]["message_id"],
+        "search-time-target"
+    );
+}
+
+#[tokio::test]
 async fn lcm_status_uses_explicit_hermes_profile_session_db() {
     let dir = test_temp_dir();
     let (cg, _env) = init_test_project(dir.path()).await;

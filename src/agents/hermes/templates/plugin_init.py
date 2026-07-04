@@ -156,11 +156,19 @@ LCM_NATIVE_SCHEMAS = [
                 },
                 "time_from": {
                     "anyOf": [{"type": "number"}, {"type": "string"}],
-                    "description": "Optional inclusive minimum raw-message timestamp.",
+                    "description": "Optional inclusive minimum raw-message timestamp. Accepts Unix seconds, RFC3339, YYYY-MM-DD, or relative time like 'last hour'.",
                 },
                 "time_to": {
                     "anyOf": [{"type": "number"}, {"type": "string"}],
-                    "description": "Optional inclusive maximum raw-message timestamp.",
+                    "description": "Optional inclusive maximum raw-message timestamp. Accepts Unix seconds, RFC3339, YYYY-MM-DD, or relative time like 'last hour'.",
+                },
+                "since": {
+                    "anyOf": [{"type": "number"}, {"type": "string"}],
+                    "description": "Alias for time_from.",
+                },
+                "until": {
+                    "anyOf": [{"type": "number"}, {"type": "string"}],
+                    "description": "Alias for time_to.",
                 },
             },
             "required": ["query"],

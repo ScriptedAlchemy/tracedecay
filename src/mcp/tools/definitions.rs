@@ -2351,6 +2351,34 @@ fn def_message_search() -> ToolDefinition {
                     "type": "string",
                     "description": "Optional parent session id filter. Primarily useful with scope=subagents_only."
                 },
+                "since": {
+                    "oneOf": [
+                        { "type": "integer", "minimum": 0 },
+                        { "type": "string" }
+                    ],
+                    "description": "Optional inclusive minimum message timestamp. Accepts Unix seconds, RFC3339, YYYY-MM-DD, or relative time like 'last hour'."
+                },
+                "until": {
+                    "oneOf": [
+                        { "type": "integer", "minimum": 0 },
+                        { "type": "string" }
+                    ],
+                    "description": "Optional inclusive maximum message timestamp. Accepts Unix seconds, RFC3339, YYYY-MM-DD, or relative time like 'last hour'."
+                },
+                "time_from": {
+                    "oneOf": [
+                        { "type": "integer", "minimum": 0 },
+                        { "type": "string" }
+                    ],
+                    "description": "Alias for since."
+                },
+                "time_to": {
+                    "oneOf": [
+                        { "type": "integer", "minimum": 0 },
+                        { "type": "string" }
+                    ],
+                    "description": "Alias for until."
+                },
                 "scope": {
                     "type": "string",
                     "description": "Relationship scope for search results (default: all).",
@@ -2616,14 +2644,28 @@ fn def_lcm_grep() -> ToolDefinition {
                         { "type": "integer", "minimum": 0 },
                         { "type": "string" }
                     ],
-                    "description": "Optional inclusive minimum raw-message timestamp. Integer strings and timezone-aware ISO/RFC3339 strings are accepted."
+                    "description": "Optional inclusive minimum raw-message timestamp. Accepts Unix seconds, RFC3339, YYYY-MM-DD, or relative time like 'last hour'."
                 },
                 "end_time": {
                     "oneOf": [
                         { "type": "integer", "minimum": 0 },
                         { "type": "string" }
                     ],
-                    "description": "Optional inclusive maximum raw-message timestamp. Integer strings and timezone-aware ISO/RFC3339 strings are accepted."
+                    "description": "Optional inclusive maximum raw-message timestamp. Accepts Unix seconds, RFC3339, YYYY-MM-DD, or relative time like 'last hour'."
+                },
+                "since": {
+                    "oneOf": [
+                        { "type": "integer", "minimum": 0 },
+                        { "type": "string" }
+                    ],
+                    "description": "Alias for start_time."
+                },
+                "until": {
+                    "oneOf": [
+                        { "type": "integer", "minimum": 0 },
+                        { "type": "string" }
+                    ],
+                    "description": "Alias for end_time."
                 },
                 "limit": {
                     "type": "integer",

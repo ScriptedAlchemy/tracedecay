@@ -10,7 +10,7 @@ use tracedecay::sessions::cursor::{
 use tracedecay::sessions::cursor_agent::CursorAgentSummaryConfig;
 use tracedecay::sessions::lcm::{LcmDescribeRequest, LcmDescribeTarget};
 use tracedecay::sessions::source::ingest_source;
-use tracedecay::sessions::SessionSearchScope;
+use tracedecay::sessions::{SessionSearchFilters, SessionSearchScope, SessionSearchTimeRange};
 
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK};
 use crate::support::{assert_metadata_path_eq, init_git_repo, init_project, init_project_at};
@@ -735,8 +735,11 @@ async fn cursor_subagent_ingestion_is_incremental_per_file() {
             None,
             "orchard",
             10,
-            SessionSearchScope::SubagentsOnly,
-            Some("parent-session"),
+            SessionSearchFilters {
+                scope: SessionSearchScope::SubagentsOnly,
+                parent_session_id: Some("parent-session"),
+                time_range: SessionSearchTimeRange::default(),
+            },
         )
         .await;
     assert_eq!(child_hits.len(), 2);

@@ -624,6 +624,12 @@ pub enum SessionsAction {
         /// Maximum number of matches
         #[arg(long, default_value_t = 10)]
         limit: usize,
+        /// Inclusive minimum message timestamp. Accepts Unix seconds, RFC3339, YYYY-MM-DD, or relative time like "last hour"
+        #[arg(long, alias = "time-from", alias = "start-time")]
+        since: Option<String>,
+        /// Inclusive maximum message timestamp. Accepts Unix seconds, RFC3339, YYYY-MM-DD, or relative time like "last hour"
+        #[arg(long, alias = "time-to", alias = "end-time")]
+        until: Option<String>,
         /// Registered project id whose session store should be searched
         #[arg(long)]
         project_id: Option<String>,

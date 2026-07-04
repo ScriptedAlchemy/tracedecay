@@ -1550,6 +1550,8 @@ fn parses_sessions_ingest_and_search_commands() {
                     limit,
                     project_id,
                     project_path,
+                    since,
+                    until,
                 },
         }) => {
             assert_eq!(query, "needle");
@@ -1557,6 +1559,29 @@ fn parses_sessions_ingest_and_search_commands() {
             assert_eq!(limit, 5);
             assert!(project_id.is_none());
             assert!(project_path.is_none());
+            assert!(since.is_none());
+            assert!(until.is_none());
+        }
+        _ => panic!("expected sessions search command"),
+    }
+
+    let time_filtered_search = Cli::try_parse_from([
+        "tracedecay",
+        "sessions",
+        "search",
+        "needle",
+        "--since",
+        "last hour",
+        "--until",
+        "2026-07-04T00:00:00Z",
+    ])
+    .unwrap();
+    match time_filtered_search.command {
+        Some(Commands::Sessions {
+            action: SessionsAction::Search { since, until, .. },
+        }) => {
+            assert_eq!(since.as_deref(), Some("last hour"));
+            assert_eq!(until.as_deref(), Some("2026-07-04T00:00:00Z"));
         }
         _ => panic!("expected sessions search command"),
     }

@@ -169,6 +169,31 @@ pub struct SessionMessageSearchResult {
     pub score: f64,
 }
 
+/// Inclusive timestamp bounds for session-message full-text search.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSearchTimeRange {
+    pub start_time: Option<i64>,
+    pub end_time: Option<i64>,
+}
+
+/// Relationship and time filters for session-message full-text search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionSearchFilters<'a> {
+    pub scope: SessionSearchScope,
+    pub parent_session_id: Option<&'a str>,
+    pub time_range: SessionSearchTimeRange,
+}
+
+impl Default for SessionSearchFilters<'_> {
+    fn default() -> Self {
+        Self {
+            scope: SessionSearchScope::All,
+            parent_session_id: None,
+            time_range: SessionSearchTimeRange::default(),
+        }
+    }
+}
+
 /// Scope filter for session-message full-text search.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionSearchScope {

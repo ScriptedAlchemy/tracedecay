@@ -2,7 +2,9 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay::global_db::{AnalyticsEventInsert, AnalyticsEventQuery, GlobalDb};
 use tracedecay::sessions::lcm::LcmStorageKind;
-use tracedecay::sessions::{SessionRecord, SessionSearchScope};
+use tracedecay::sessions::{
+    SessionRecord, SessionSearchFilters, SessionSearchScope, SessionSearchTimeRange,
+};
 
 use crate::common::{
     global_message as sample_message, global_session as sample_session,
@@ -740,6 +742,61 @@ async fn search_session_messages_applies_hyphen_filter_before_limit() {
 }
 
 #[tokio::test]
+async fn search_session_messages_filters_by_message_timestamp() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_isolated_db(&tmp).await;
+    let session = sample_session("cursor", "cursor-time", "project-a");
+    db.upsert_session(&session).await;
+
+    let mut old = sample_message(
+        "cursor",
+        "old-time-msg",
+        "cursor-time",
+        "the orchard clock marker appears before the window",
+    );
+    old.timestamp = Some(10);
+    db.upsert_session_message(&old).await;
+
+    let mut target = sample_message(
+        "cursor",
+        "target-time-msg",
+        "cursor-time",
+        "the orchard clock marker appears inside the window",
+    );
+    target.timestamp = Some(20);
+    db.upsert_session_message(&target).await;
+
+    let mut new = sample_message(
+        "cursor",
+        "new-time-msg",
+        "cursor-time",
+        "the orchard clock marker appears after the window",
+    );
+    new.timestamp = Some(30);
+    db.upsert_session_message(&new).await;
+
+    let results = db
+        .search_session_messages_filtered(
+            "cursor",
+            Some("project-a"),
+            "orchard clock marker",
+            10,
+            SessionSearchFilters {
+                scope: SessionSearchScope::All,
+                parent_session_id: None,
+                time_range: SessionSearchTimeRange {
+                    start_time: Some(15),
+                    end_time: Some(25),
+                },
+            },
+        )
+        .await;
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].message.message_id, "target-time-msg");
+}
+
+#[tokio::test]
 async fn open_at_upgrades_existing_sessions_table_with_parent_columns() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("global.db");
@@ -842,8 +899,11 @@ async fn search_session_messages_filters_parent_and_subagent_scope() {
             Some("project-a"),
             "orchard dispatch",
             10,
-            SessionSearchScope::ParentsOnly,
-            None,
+            SessionSearchFilters {
+                scope: SessionSearchScope::ParentsOnly,
+                parent_session_id: None,
+                time_range: SessionSearchTimeRange::default(),
+            },
         )
         .await;
     assert_eq!(parents_only.len(), 1);
@@ -855,8 +915,11 @@ async fn search_session_messages_filters_parent_and_subagent_scope() {
             Some("project-a"),
             "orchard dispatch",
             10,
-            SessionSearchScope::SubagentsOnly,
-            Some("parent"),
+            SessionSearchFilters {
+                scope: SessionSearchScope::SubagentsOnly,
+                parent_session_id: Some("parent"),
+                time_range: SessionSearchTimeRange::default(),
+            },
         )
         .await;
     assert_eq!(subagents_only.len(), 1);

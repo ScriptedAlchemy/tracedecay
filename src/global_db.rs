@@ -16,7 +16,7 @@ use crate::sessions::{
         LcmSourceRef, LcmSummaryNode, LcmSummaryNodeDraft, LcmSummaryRequest,
         LcmSummarySourceMessage, LcmSummarySourceRange,
     },
-    SessionMessageRecord, SessionMessageSearchResult, SessionRecord, SessionSearchScope,
+    SessionMessageRecord, SessionMessageSearchResult, SessionRecord, SessionSearchFilters,
 };
 
 const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;
@@ -3178,8 +3178,7 @@ impl GlobalDb {
             project_key,
             query,
             limit,
-            SessionSearchScope::All,
-            None,
+            SessionSearchFilters::default(),
         )
         .await
     }
@@ -3191,16 +3190,14 @@ impl GlobalDb {
         project_key: Option<&str>,
         query: &str,
         limit: usize,
-        scope: SessionSearchScope,
-        parent_session_id: Option<&str>,
+        filters: SessionSearchFilters<'_>,
     ) -> Vec<SessionMessageSearchResult> {
         self.search_session_messages_filtered_inner(
             Some(provider),
             project_key,
             query,
             limit,
-            scope,
-            parent_session_id,
+            filters,
         )
         .await
     }
@@ -3211,18 +3208,10 @@ impl GlobalDb {
         project_key: Option<&str>,
         query: &str,
         limit: usize,
-        scope: SessionSearchScope,
-        parent_session_id: Option<&str>,
+        filters: SessionSearchFilters<'_>,
     ) -> Vec<SessionMessageSearchResult> {
-        self.search_session_messages_filtered_inner(
-            None,
-            project_key,
-            query,
-            limit,
-            scope,
-            parent_session_id,
-        )
-        .await
+        self.search_session_messages_filtered_inner(None, project_key, query, limit, filters)
+            .await
     }
 
     async fn search_session_messages_filtered_inner(
@@ -3231,8 +3220,7 @@ impl GlobalDb {
         project_key: Option<&str>,
         query: &str,
         limit: usize,
-        scope: SessionSearchScope,
-        parent_session_id: Option<&str>,
+        filters: SessionSearchFilters<'_>,
     ) -> Vec<SessionMessageSearchResult> {
         let fts_query = session_fts_query(query);
         if fts_query.is_empty() || limit == 0 {
@@ -3265,14 +3253,36 @@ impl GlobalDb {
             query_params.push(Value::Text(project_key.to_string()));
             let _ = write!(sql, " AND s.project_key = ?{}", query_params.len());
         }
-        if let Some(parent_session_id) = parent_session_id {
+        if let Some(parent_session_id) = filters.parent_session_id {
             query_params.push(Value::Text(parent_session_id.to_string()));
             let _ = write!(sql, " AND s.parent_session_id = ?{}", query_params.len());
         }
-        if matches!(scope, SessionSearchScope::ParentsOnly) {
+        if let Some(start_time) = filters.time_range.start_time {
+            query_params.push(Value::Integer(start_time));
+            let _ = write!(
+                sql,
+                " AND m.timestamp IS NOT NULL AND m.timestamp >= ?{}",
+                query_params.len()
+            );
+        }
+        if let Some(end_time) = filters.time_range.end_time {
+            query_params.push(Value::Integer(end_time));
+            let _ = write!(
+                sql,
+                " AND m.timestamp IS NOT NULL AND m.timestamp <= ?{}",
+                query_params.len()
+            );
+        }
+        if matches!(
+            filters.scope,
+            crate::sessions::SessionSearchScope::ParentsOnly
+        ) {
             sql.push_str(" AND s.is_subagent = 0");
         }
-        if matches!(scope, SessionSearchScope::SubagentsOnly) {
+        if matches!(
+            filters.scope,
+            crate::sessions::SessionSearchScope::SubagentsOnly
+        ) {
             sql.push_str(" AND s.is_subagent = 1");
         }
         for term in &literal_terms {
