@@ -103,7 +103,7 @@ impl StdioLspClient {
         let stderr_capture = Arc::new(Mutex::new(Vec::new()));
         let stderr_task = spawn_stderr_capture(stderr, Arc::clone(&stderr_capture));
 
-        write_message_with_timeout(
+        let send_initialize = write_message_with_timeout(
             &mut stdin,
             json!({
                 "jsonrpc": "2.0",
@@ -128,20 +128,30 @@ impl StdioLspClient {
             }),
             timeouts.message_io,
         )
-        .await?;
-        let initialize_result = tokio::time::timeout(
-            timeouts.initialize_response,
-            wait_for_initialize(&mut reader),
-        )
         .await;
-        if let Err(err) = initialize_result.unwrap_or_else(|_| {
-            Err(TraceDecayError::Config {
-                message: format!(
-                    "LSP server '{command}' initialize timed out after {} ms",
-                    timeouts.initialize_response.as_millis()
-                ),
-            })
-        }) {
+        // A server that dies immediately can fail the initialize *request*
+        // write (broken pipe — on Windows this races the spawn under load)
+        // just as easily as the initialize *response* wait. Route both
+        // failures through the same stderr-enriched classification so the
+        // crash reason (e.g. a toolchain's "unknown binary" complaint) is
+        // never dropped.
+        let initialize_result = match send_initialize {
+            Ok(()) => tokio::time::timeout(
+                timeouts.initialize_response,
+                wait_for_initialize(&mut reader),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                Err(TraceDecayError::Config {
+                    message: format!(
+                        "LSP server '{command}' initialize timed out after {} ms",
+                        timeouts.initialize_response.as_millis()
+                    ),
+                })
+            }),
+            Err(err) => Err(err),
+        };
+        if let Err(err) = initialize_result {
             let _ = child.start_kill();
             let _ = child.wait().await;
             let _ = stderr_task.await;
