@@ -309,6 +309,14 @@ fn is_zero(value: &i64) -> bool {
 /// writers agreeing even when the path no longer exists.
 pub fn normalize_worktree(path: &str) -> String {
     let mut normalized = path.trim().replace('\\', "/");
+    if let Some(stripped) = normalized.strip_prefix("//?/UNC/") {
+        normalized = format!("//{stripped}");
+    } else if let Some(stripped) = normalized.strip_prefix("//?/") {
+        normalized = stripped.to_string();
+    }
+    if let Some(stripped) = normalized.strip_prefix("/private/var/") {
+        normalized = format!("/var/{stripped}");
+    }
     while normalized.len() > 1 && normalized.ends_with('/') {
         normalized.pop();
     }
@@ -503,6 +511,7 @@ async fn record_span_observation_in_transaction(
     observation: &SpanObservation,
     merge_gap_secs: i64,
 ) -> Result<i64, GitCorrelationError> {
+    let worktree = normalize_worktree(&observation.worktree);
     // `branch IS ?` is NULL-safe: a detached-HEAD observation only extends a
     // detached-HEAD span, never a named-branch span.
     let mut rows = conn
@@ -517,7 +526,7 @@ async fn record_span_observation_in_transaction(
                 observation.provider.as_str(),
                 observation.session_id.as_str(),
                 opt_text(observation.branch.as_deref()),
-                observation.worktree.as_str(),
+                worktree.as_str(),
             ],
         )
         .await?;
@@ -555,7 +564,7 @@ async fn record_span_observation_in_transaction(
             observation.session_id.as_str(),
             opt_text(observation.thread_id.as_deref()),
             opt_text(observation.branch.as_deref()),
-            observation.worktree.as_str(),
+            worktree.as_str(),
             observation.ts,
             observation.source.as_str(),
         ],
@@ -571,6 +580,7 @@ pub(crate) async fn upsert_commit_session(
     conn: &Connection,
     record: &CommitSessionRecord,
 ) -> Result<bool, GitCorrelationError> {
+    let worktree = record.worktree.as_deref().map(normalize_worktree);
     let inserted = conn
         .execute(
             "INSERT OR IGNORE INTO commit_sessions (
@@ -583,7 +593,7 @@ pub(crate) async fn upsert_commit_session(
                 record.provider.as_str(),
                 record.session_id.as_str(),
                 opt_text(record.branch.as_deref()),
-                opt_text(record.worktree.as_deref()),
+                opt_text(worktree.as_deref()),
                 record.committed_at,
                 record.span_overlap_kind.as_str(),
                 record.span_id.map_or(Value::Null, Value::Integer),
@@ -1709,6 +1719,8 @@ mod tests {
         assert_eq!(normalize_worktree("/repo/wt///"), "/repo/wt");
         assert_eq!(normalize_worktree("/"), "/");
         assert_eq!(normalize_worktree("C:\\repo\\wt\\"), "C:/repo/wt");
+        assert_eq!(normalize_worktree("//?/C:/repo/wt/"), "C:/repo/wt");
+        assert_eq!(normalize_worktree("/private/var/tmp/repo"), "/var/tmp/repo");
     }
 
     #[test]
