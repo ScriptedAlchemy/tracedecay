@@ -1676,7 +1676,7 @@ fn render_body_md(value: &Value) -> String {
 
     let mut md = Md::new();
     let matches = value.get("matches").and_then(Value::as_array);
-    let count = matches.map_or(0, |m| m.len());
+    let count = matches.map_or(0, std::vec::Vec::len);
     md.heading(2, &format!("Body matches ({count})"));
 
     let Some(matches) = matches else {

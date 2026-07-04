@@ -396,7 +396,8 @@ fn is_scalar(v: &Value) -> bool {
 }
 
 /// Rounds a float to at most two decimals, trimming trailing zeros so
-/// integers stay integer-looking. Fixes 16-digit score noise (similar/branch_search).
+/// integers stay integer-looking. Fixes 16-digit score noise
+/// (`similar/branch_search`).
 fn format_score(f: f64) -> String {
     if f.is_finite() && f.fract() == 0.0 && f.abs() < 1e15 {
         return format!("{}", f as i64);
@@ -440,12 +441,13 @@ fn scalar_str_keyed(key: &str, v: &Value) -> String {
 /// JSON. Arrays of objects become `name (file:line)`-style summaries; plain
 /// objects become compact `k=v` strings; arrays of scalars are comma-joined.
 fn nested_cell_str(v: &Value) -> String {
+    const MAX_ITEMS: usize = 3;
+
     match v {
         Value::Array(arr) => {
             if arr.is_empty() {
                 return "none".to_string();
             }
-            const MAX_ITEMS: usize = 3;
             let shown: Vec<String> = arr
                 .iter()
                 .take(MAX_ITEMS)

@@ -406,7 +406,7 @@ fn hex_value(byte: u8) -> Option<u8> {
 /// socket.
 pub async fn run_serve(path_arg: Option<String>, timings: bool) -> Result<()> {
     let original_cwd = std::env::current_dir().ok();
-    let (resolver, error, peeked_line) = match resolve_serve_startup(path_arg).await {
+    let (resolver, error, peeked_line) = match Box::pin(resolve_serve_startup(path_arg)).await {
         ServeStartup::Ready {
             cg,
             peeked_line,
@@ -437,7 +437,7 @@ pub async fn run_serve(path_arg: Option<String>, timings: bool) -> Result<()> {
     if let Some(line) = peeked_line {
         transport.push_replay(line);
     }
-    match run_degraded_mcp_server(&mut transport, &resolver, &error).await? {
+    match Box::pin(run_degraded_mcp_server(&mut transport, &resolver, &error)).await? {
         DegradedServeOutcome::Closed => Ok(()),
         DegradedServeOutcome::Recovered { cg, pending_line } => {
             // Keep serving on the SAME transport: requests pipelined behind
@@ -574,7 +574,7 @@ pub async fn resolve_serve_startup(path_arg: Option<String>) -> ServeStartup {
     // the MCP `initialize` request's workspace roots; the resolver remembers
     // them so degraded retries can keep consulting them.
     resolver.initialize_roots = read_initialize_roots(&mut peeked_line).await;
-    match resolver.resolve_once_with_origin().await {
+    match Box::pin(resolver.resolve_once_with_origin()).await {
         Ok((cg, origin)) => ServeStartup::Ready {
             cg: Box::new(cg),
             peeked_line,
@@ -637,7 +637,7 @@ impl ServeProjectResolver {
     /// walk-up (an intervening `tracedecay init` can create an enclosing
     /// project), the remembered initialize roots, then the global registry.
     async fn resolve_once(&self) -> Result<TraceDecay> {
-        self.resolve_once_with_origin()
+        Box::pin(self.resolve_once_with_origin())
             .await
             .map(|(cg, _origin)| cg)
     }
@@ -763,7 +763,7 @@ pub async fn run_degraded_mcp_server(
             continue;
         }
         if crate::mcp::degraded::is_tools_call_line(trimmed) {
-            if let Ok(cg) = resolver.resolve_once().await {
+            if let Ok(cg) = Box::pin(resolver.resolve_once()).await {
                 eprintln!(
                     "[tracedecay] serve: project resolution recovered for '{}'; leaving degraded MCP mode",
                     cg.project_root().display()

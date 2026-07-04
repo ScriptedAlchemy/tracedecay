@@ -473,7 +473,7 @@ struct StalenessBannerInputs {
 ///   progress / scheduled" note (or nothing if a refresh just completed);
 ///   NEVER instruct `tracedecay sync`.
 /// - Auto-repair impossible (fallback store, or auto-sync fully disabled):
-///   fall back to the manual `Run \`tracedecay sync\`` instruction.
+///   fall back to the manual `tracedecay sync` instruction.
 fn staleness_banner(inputs: StalenessBannerInputs) -> Option<String> {
     let age_phrase = format_index_age_phrase(inputs.age_secs);
     let stale_mins = inputs.age_secs / 60;
@@ -1321,7 +1321,7 @@ impl McpServer {
     /// Single-flighted three ways: the `read_cooldown_secs` stamp, the
     /// `background_refresh_running` flag, and the underlying cross-process
     /// sync lock. At most one refresh runs at a time.
-    async fn maybe_spawn_read_refresh(&self, cg: &Arc<TraceDecay>) {
+    fn maybe_spawn_read_refresh(&self, cg: &Arc<TraceDecay>) {
         if !self.sync_config.read_refresh {
             return;
         }
@@ -1387,25 +1387,22 @@ impl McpServer {
             handle.block_on(async move {
                 // Prefer diff-scoping off the last synced commit.
                 let scoped = match cg.last_synced_commit().await {
-                    Some(base) => cg.stale_files_since_commit(&base, escalation).await,
+                    Some(base) => cg.stale_files_since_commit(&base, escalation),
                     None => None,
                 };
-                let result = match scoped {
-                    Some(files) => {
-                        if files.is_empty() {
-                            Ok(())
-                        } else {
-                            cg.sync_if_stale_silent(&files).await
-                        }
+                let result = if let Some(files) = scoped {
+                    if files.is_empty() {
+                        Ok(())
+                    } else {
+                        cg.sync_if_stale_silent(&files).await
                     }
-                    None => {
-                        // Fallback: full tree walk.
-                        let stale = cg.find_stale_files().await;
-                        if stale.is_empty() {
-                            Ok(())
-                        } else {
-                            cg.sync_if_stale_silent(&stale).await
-                        }
+                } else {
+                    // Fallback: full tree walk.
+                    let stale = cg.find_stale_files().await;
+                    if stale.is_empty() {
+                        Ok(())
+                    } else {
+                        cg.sync_if_stale_silent(&stale).await
                     }
                 };
                 if let Err(e) = result {
@@ -2373,7 +2370,7 @@ impl McpServer {
             // read sees fresh data. This heals read-only sessions that never
             // touch an edit tool without ever making a query wait behind a
             // project walk.
-            self.maybe_spawn_read_refresh(&cg).await;
+            self.maybe_spawn_read_refresh(&cg);
         }
 
         self.stats.tool_calls.fetch_add(1, Ordering::Relaxed);
@@ -3092,7 +3089,7 @@ mod freshness_tests {
         // Assert it does not block by bounding the call duration well under a
         // real sync (~hundreds of ms); the spawn does the work off-thread.
         let start = std::time::Instant::now();
-        server.maybe_spawn_read_refresh(&cg_snapshot).await;
+        server.maybe_spawn_read_refresh(&cg_snapshot);
         let elapsed = start.elapsed();
         assert!(
             elapsed < Duration::from_millis(100),
@@ -3113,7 +3110,7 @@ mod freshness_tests {
         // spawned. We verify by confirming the stamp does not change to a new
         // value on a back-to-back call within the cooldown window.
         let stamp_after_first = server.last_background_refresh_at.load(Ordering::Acquire);
-        server.maybe_spawn_read_refresh(&cg_snapshot).await;
+        server.maybe_spawn_read_refresh(&cg_snapshot);
         let stamp_after_second = server.last_background_refresh_at.load(Ordering::Acquire);
         assert_eq!(
             stamp_after_first, stamp_after_second,

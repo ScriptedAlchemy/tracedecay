@@ -744,7 +744,7 @@ fn is_build_diagnostics_command(command: &str) -> bool {
 }
 
 /// True when a Write/Edit event targets a harness-memory location where a
-/// durable fact belongs in TraceDecay memory instead: `*/.claude/**/memory/*.md`,
+/// durable fact belongs in `TraceDecay` memory instead: `*/.claude/**/memory/*.md`,
 /// any `MEMORY.md`, or any `CLAUDE.md`.
 fn is_memory_store_edit(input: &ToolHintInput) -> bool {
     let is_edit_tool = input.tool_name.as_deref().is_some_and(|name| {

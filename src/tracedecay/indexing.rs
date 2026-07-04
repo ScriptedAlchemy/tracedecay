@@ -1217,7 +1217,7 @@ impl TraceDecay {
     ///   signalling a full sync rather than an oversized targeted pass.
     ///
     /// Does not touch the DB; the watcher wires it into `sync_if_stale_silent`.
-    pub async fn stale_files_since_commit(
+    pub fn stale_files_since_commit(
         &self,
         base_commit: &str,
         escalation_limit: usize,
@@ -1389,7 +1389,6 @@ mod freshness_tests {
 
         let changed = cg
             .stale_files_since_commit(&base, 500)
-            .await
             .expect("diff succeeds");
         assert!(
             changed.contains(&"src/b.rs".to_string()),
@@ -1402,7 +1401,7 @@ mod freshness_tests {
         let (cg, _dir) = init_repo_with_commit().await;
         // A syntactically valid but unreachable commit id.
         let bogus = "0".repeat(40);
-        assert!(cg.stale_files_since_commit(&bogus, 500).await.is_none());
+        assert!(cg.stale_files_since_commit(&bogus, 500).is_none());
     }
 
     #[tokio::test]
@@ -1418,6 +1417,6 @@ mod freshness_tests {
         git(root, &["commit", "-q", "-m", "many"]);
 
         // escalation_limit below the number of changed files → None.
-        assert!(cg.stale_files_since_commit(&base, 2).await.is_none());
+        assert!(cg.stale_files_since_commit(&base, 2).is_none());
     }
 }

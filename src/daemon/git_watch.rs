@@ -35,6 +35,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
+use notify::event::EventAttributes;
 use notify::{EventKind, RecursiveMode, Watcher};
 use tokio::sync::{Mutex, Notify, Semaphore};
 use tokio::time::Instant;
@@ -45,13 +47,13 @@ use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use super::log_daemon_event;
 
 /// Degraded watchers fall back to polling git metadata every 5 minutes.
-const DEGRADED_POLL_INTERVAL: Duration = Duration::from_secs(300);
+const DEGRADED_POLL_INTERVAL: Duration = Duration::from_mins(5);
 /// A heartbeat older than this is considered stale by the backstop/doctor.
 /// Two debounce+max cycles of slack over the default so a healthy but busy
 /// watcher is never treated as dead.
 const HEARTBEAT_STALE_SECS: u64 = 120;
 /// Cap on the supervised-restart backoff.
-const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(60);
+const RESTART_BACKOFF_MAX: Duration = Duration::from_mins(1);
 
 /// Per-project health, readable by the backstop and `tracedecay doctor`.
 ///
@@ -320,7 +322,7 @@ impl GitWatcher {
         );
     }
 
-    /// A test-facing snapshot of every registered project's watch health.
+    /// A doctor-facing snapshot of every registered project's watch health.
     #[cfg(test)]
     pub async fn health_report(&self) -> Vec<(PathBuf, ProjectHealthSnapshot)> {
         let projects = self.inner.projects.lock().await;
@@ -518,8 +520,8 @@ async fn debounce_loop(inner: &Arc<GitWatcherInner>, state: &Arc<WatchState>, co
             // event (marker removal wakes us) or a short recheck tick.
             if operation_in_flight(common) {
                 tokio::select! {
-                    _ = state.wake.notified() => { state.health.beat(); continue; }
-                    _ = tokio::time::sleep(Duration::from_secs(1)) => { continue; }
+                    () = state.wake.notified() => { state.health.beat(); continue; }
+                    () = tokio::time::sleep(Duration::from_secs(1)) => { continue; }
                 }
             }
 
@@ -535,8 +537,8 @@ async fn debounce_loop(inner: &Arc<GitWatcherInner>, state: &Arc<WatchState>, co
             }
             let sleep_for = fire_at - now;
             tokio::select! {
-                _ = state.wake.notified() => { state.health.beat(); }
-                _ = tokio::time::sleep(sleep_for) => {}
+                () = state.wake.notified() => { state.health.beat(); }
+                () = tokio::time::sleep(sleep_for) => {}
             }
         }
 
@@ -665,13 +667,12 @@ async fn execute_plan(
 /// `indexing::stamp_last_synced_commit`), so this awaits them directly on the
 /// caller's task under the daemon-wide sync semaphore — no nested runtime.
 async fn sync_project(root: &Path, opts: &TraceDecayOpenOptions, escalation: usize) -> bool {
-    let cg = match TraceDecay::open_with_options(root, opts.clone()).await {
-        Ok(cg) => cg,
-        Err(_) => return false,
+    let Ok(cg) = TraceDecay::open_with_options(root, opts.clone()).await else {
+        return false;
     };
     let base = cg.last_synced_commit().await;
     let result = match base {
-        Some(base) => match cg.stale_files_since_commit(&base, escalation).await {
+        Some(base) => match cg.stale_files_since_commit(&base, escalation) {
             Some(files) if files.is_empty() => Ok(()),
             Some(files) => cg.sync_if_stale_silent(&files).await,
             // Base missing/unreachable or over the escalation limit → full.
@@ -727,7 +728,7 @@ async fn run_gc(root: &Path, opts: &TraceDecayOpenOptions, config: &SyncConfig) 
     let root_owned = root.to_path_buf();
     let branch_gc_days = config.branch_gc_days;
     let orphan_db_gc_days = config.orphan_db_gc_days;
-    let report = match tokio::task::spawn_blocking(move || {
+    let Ok(report) = tokio::task::spawn_blocking(move || {
         crate::branch::gc_dead_branch_stores(
             &root_owned,
             &data_root,
@@ -736,9 +737,8 @@ async fn run_gc(root: &Path, opts: &TraceDecayOpenOptions, config: &SyncConfig) 
         )
     })
     .await
-    {
-        Ok(report) => report,
-        Err(_) => return,
+    else {
+        return;
     };
     if !report.removed_tracked.is_empty() || !report.removed_orphan_dbs.is_empty() {
         log_daemon_event(
@@ -821,7 +821,7 @@ mod backstop {
         ticker.tick().await;
 
         let mut last_gc: Option<Instant> = None;
-        let gc_period = Duration::from_secs(86_400);
+        let gc_period = Duration::from_hours(24);
 
         loop {
             ticker.tick().await;
@@ -892,9 +892,8 @@ mod backstop {
     /// backstop). The read-only open/read futures are `Send`, so they are
     /// awaited directly (see [`super::sync_project`]).
     async fn store_is_stale(root: &Path, opts: &TraceDecayOpenOptions, interval_secs: u64) -> bool {
-        let cg = match TraceDecay::open_read_only_with_options(root, opts.clone()).await {
-            Ok(cg) => cg,
-            Err(_) => return false,
+        let Ok(cg) = TraceDecay::open_read_only_with_options(root, opts.clone()).await else {
+            return false;
         };
         let last = cg.last_sync_timestamp().await;
         let age = super::now_secs() as i64 - last;
@@ -939,14 +938,14 @@ mod tests {
         let create = notify::Event {
             kind: EventKind::Create(notify::event::CreateKind::File),
             paths: vec![PathBuf::from("/repo/.git/refs/heads/feat/x")],
-            attrs: Default::default(),
+            attrs: EventAttributes::default(),
         };
         classify_and_mark(&state, &create);
         // Simulate a worktree delete.
         let remove = notify::Event {
             kind: EventKind::Remove(notify::event::RemoveKind::Folder),
             paths: vec![PathBuf::from("/repo/.git/worktrees/wt1")],
-            attrs: Default::default(),
+            attrs: EventAttributes::default(),
         };
         classify_and_mark(&state, &remove);
 
@@ -1005,8 +1004,7 @@ mod tests {
             .args(args)
             .current_dir(dir)
             .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+            .is_ok_and(|s| s.success());
         assert!(ok, "git {args:?} failed in {}", dir.display());
     }
 
@@ -1140,7 +1138,7 @@ mod tests {
                     notify::event::DataChange::Content,
                 )),
                 paths: vec![canonical.join(format!(".git/refs/heads/feat/{i}"))],
-                attrs: Default::default(),
+                attrs: EventAttributes::default(),
             };
             classify_and_mark(&state, &event);
         }

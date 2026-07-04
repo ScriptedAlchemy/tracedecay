@@ -100,7 +100,7 @@ async fn init_indexed_repo() -> (IsolatedEnv, PathBuf) {
 async fn watcher_sync(project: &Path, escalation: usize) {
     let cg = TraceDecay::open(project).await.unwrap();
     match cg.last_synced_commit().await {
-        Some(base) => match cg.stale_files_since_commit(&base, escalation).await {
+        Some(base) => match cg.stale_files_since_commit(&base, escalation) {
             Some(files) if files.is_empty() => {}
             Some(files) => cg.sync_if_stale_silent(&files).await.unwrap(),
             None => {
@@ -275,7 +275,6 @@ async fn fifty_commit_rebase_needs_one_sync() {
     // One coalesced diff covers all 50 commits (under the escalation limit).
     let files = cg
         .stale_files_since_commit(&base, 500)
-        .await
         .expect("50 files is within the escalation limit → one bounded diff");
     assert_eq!(files.len(), 50, "one diff should surface all 50 new files");
     cg.sync_if_stale_silent(&files).await.unwrap();
@@ -285,7 +284,7 @@ async fn fifty_commit_rebase_needs_one_sync() {
     // nothing to do: the base advanced past the whole rebase in one sync.
     let cg = TraceDecay::open(&project).await.unwrap();
     let base2 = cg.last_synced_commit().await.expect("base advanced");
-    let followup = cg.stale_files_since_commit(&base2, 500).await;
+    let followup = cg.stale_files_since_commit(&base2, 500);
     assert!(
         followup.map(|f| f.is_empty()).unwrap_or(true),
         "no second sync should be needed after the coalesced pass"

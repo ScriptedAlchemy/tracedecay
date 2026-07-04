@@ -877,8 +877,8 @@ mod tests {
     }
 
     /// Creates a temp git repo on `main` with one commit, plus a tracedecay dir
-    /// holding a stub default-branch DB. Returns (tempdir, project_root,
-    /// tracedecay_dir).
+    /// holding a stub default-branch DB. Returns `(tempdir, project_root,
+    /// tracedecay_dir)`.
     fn setup_repo_with_meta() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let base = tempfile::tempdir().unwrap();
         let project_root = git_test_root(base.path());
@@ -996,7 +996,7 @@ mod tests {
         std::fs::write(&stale_orphan, b"junk").unwrap();
         let stale_wal = branches_dir.join("orphan_stale.db-wal");
         std::fs::write(&stale_wal, b"wal").unwrap();
-        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 86_400);
+        let old = std::time::SystemTime::now() - std::time::Duration::from_hours(720);
         set_mtime(&stale_orphan, old);
 
         // Fresh orphan: just created, must survive.
