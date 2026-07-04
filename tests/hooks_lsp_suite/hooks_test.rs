@@ -802,7 +802,9 @@ fn test_build_cursor_session_context_initialized_includes_freshness() {
     assert!(context.contains("<EXTREMELY_IMPORTANT>"));
     assert!(context.contains("tracedecay:using-tracedecay"));
     assert!(context.contains("Grep is faster for this"));
-    assert!(context.contains("tracedecay_callers"));
+    assert!(context.contains("ToolSearch"));
+    assert!(context.contains("GRAPH BEFORE GREP"));
+    assert!(context.contains("SUBAGENT-STOP"));
 }
 
 #[test]
@@ -811,7 +813,9 @@ fn test_build_codex_session_context_carries_full_steering() {
     // keep the full tool-routing steering.
     let context = tracedecay::hooks::build_codex_session_context(true, Some("last indexed 2m ago"));
     assert!(context.contains("tracedecay_context"));
-    assert!(context.contains("tracedecay_callers"));
+    assert!(context.contains("ToolSearch"));
+    assert!(context.contains("GRAPH BEFORE GREP"));
+    assert!(context.contains("SUBAGENT-STOP"));
     assert!(context.contains("last indexed 2m ago"));
     assert!(context.contains("tracedecay_project_search"));
     assert!(context.contains("tracedecay_message_search"));
