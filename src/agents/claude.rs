@@ -431,11 +431,16 @@ fn register_marketplace(home: &Path, deploy_dir: &Path) -> Result<()> {
     if !known.is_object() {
         known = json!({});
     }
+    // Claude Code's marketplace schema requires `installLocation` and
+    // `lastUpdated` alongside `source`; without them `claude plugin install`
+    // rejects the record as corrupted and the plugin silently never loads.
     known[MARKETPLACE_NAME] = json!({
         "source": {
             "source": "directory",
             "path": deploy_dir.to_string_lossy(),
-        }
+        },
+        "installLocation": deploy_dir.to_string_lossy(),
+        "lastUpdated": crate::timeutil::now_iso_utc(),
     });
     write_json_file(&path, &known)?;
     eprintln!(
@@ -1180,13 +1185,24 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
 
     // Marketplace registration.
     let known = load_json_file(&known_marketplaces_path(home));
-    let registered = known
-        .get(MARKETPLACE_NAME)
+    let entry = known.get(MARKETPLACE_NAME);
+    let registered = entry
         .and_then(|m| m.get("source"))
         .and_then(|s| s.get("source"))
         .and_then(|v| v.as_str())
         == Some("directory");
-    if registered {
+    let schema_complete = entry.is_some_and(|m| {
+        m.get("installLocation")
+            .is_some_and(serde_json::Value::is_string)
+            && m.get("lastUpdated")
+                .is_some_and(serde_json::Value::is_string)
+    });
+    if registered && !schema_complete {
+        dc.fail(&format!(
+            "Marketplace entry in {} is missing installLocation/lastUpdated — Claude Code treats it as corrupted; run `tracedecay install --agent claude` to rewrite it",
+            known_marketplaces_path(home).display()
+        ));
+    } else if registered {
         dc.pass(&format!(
             "Marketplace registered in {}",
             known_marketplaces_path(home).display()

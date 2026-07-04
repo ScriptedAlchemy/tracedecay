@@ -495,6 +495,23 @@ fn test_uninstall_removes_deployed_bundle_and_lone_marketplace_file() {
         known_path.exists(),
         "known_marketplaces.json should exist after install"
     );
+    // Claude Code's marketplace schema requires these fields; without them
+    // `claude plugin install` rejects the entry as corrupted and the plugin
+    // silently never loads.
+    let known: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&known_path).unwrap()).unwrap();
+    let entry = &known["tracedecay"];
+    assert_eq!(
+        entry["installLocation"].as_str(),
+        Some(deploy_dir.to_string_lossy().as_ref()),
+        "marketplace entry must carry installLocation"
+    );
+    assert!(
+        entry["lastUpdated"]
+            .as_str()
+            .is_some_and(|ts| ts.ends_with('Z')),
+        "marketplace entry must carry an ISO-8601 lastUpdated: {entry}"
+    );
 
     ClaudeIntegration.uninstall(&ctx).unwrap();
 
