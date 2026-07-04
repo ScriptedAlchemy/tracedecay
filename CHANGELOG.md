@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.28](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.27...v0.0.28) - 2026-07-04
+
+### Fixed
+
+- *(agents)* memory digest export lifecycle ([#266](https://github.com/ScriptedAlchemy/tracedecay/pull/266))
+
 ## [0.0.27](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.26...v0.0.27) - 2026-07-04
 
 ### Other
