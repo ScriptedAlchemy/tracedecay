@@ -30,6 +30,8 @@ pub use diagnostics::{BranchDiagnostics, TrackedBranchDiagnostic};
 #[doc(hidden)]
 pub use locking::{try_acquire_sync_lock, SyncLockGuard};
 
+pub(crate) use lifecycle::git_remote_url;
+
 /// Central orchestrator that coordinates all subsystems of the code graph.
 ///
 /// Provides a high-level API for initializing, indexing, querying, and
