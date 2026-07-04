@@ -132,6 +132,7 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
     "tracedecay:tracedecay_retrieve",
     "tracedecay:tracedecay_runtime",
     "tracedecay:tracedecay_search",
+    "tracedecay:tracedecay_sessions_for",
     "tracedecay:tracedecay_signature",
     "tracedecay:tracedecay_signature_search",
     "tracedecay:tracedecay_similar",

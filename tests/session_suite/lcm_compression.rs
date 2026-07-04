@@ -1663,6 +1663,7 @@ async fn structured_active_content_replay_preserves_shape_while_grep_snippet_sta
             role: None,
             start_time: None,
             end_time: None,
+            git_filter: Default::default(),
         })
         .await
         .unwrap();

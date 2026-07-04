@@ -1,0 +1,395 @@
+//! Integration coverage for the historical session↔git correlation backfill
+//! (`tracedecay sessions git-backfill`).
+//!
+//! Seeds a `sessions.db` with two sessions — one spanning a mid-session branch
+//! switch — against a real git repo carrying commits on both branches, runs
+//! the backfill core directly (no binary spawn), and asserts `sessions_for`
+//! returns the expected branch/commit attribution, including the branch-switch
+//! case. A fake [`GitReflogSource`] supplies the branch timeline so the switch
+//! lands deterministically relative to each session's activity window, while
+//! commit times come from the real repo.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use tempfile::TempDir;
+
+use tracedecay::global_db::GlobalDb;
+use tracedecay::sessions::git_correlation::{
+    normalize_worktree, run_backfill, BackfillOptions, BranchTimelineEntry, GitRefFilter,
+    GitReflogSource, SessionsForQuery,
+};
+use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
+
+use crate::common;
+
+const T_BASE: i64 = 1_780_000_000;
+
+fn run_git(dir: &Path, args: &[&str], date: Option<i64>) {
+    let mut command = Command::new(common::git_program());
+    command.args(args).current_dir(dir);
+    if let Some(ts) = date {
+        let value = format!("{ts} +0000");
+        command
+            .env("GIT_AUTHOR_DATE", &value)
+            .env("GIT_COMMITTER_DATE", &value);
+    }
+    let status = command
+        .status()
+        .unwrap_or_else(|e| panic!("git {args:?} should spawn: {e}"));
+    assert!(status.success(), "git {args:?} should succeed");
+}
+
+/// Builds a repo on `main` with one commit at `T_BASE + 100`, a `feature`
+/// branch with a commit at `T_BASE + 400`, and a second `main` commit at
+/// `T_BASE + 700`. Returns `(base, repo_root, main_shas, feature_shas)`.
+fn build_repo() -> (TempDir, PathBuf, Vec<String>, Vec<String>) {
+    let base = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+    let repo = base.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("repo dir: {e}"));
+    run_git(&repo, &["init", "-b", "main"], None);
+    run_git(&repo, &["config", "user.email", "t@t.com"], None);
+    run_git(&repo, &["config", "user.name", "Test"], None);
+
+    std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+    run_git(&repo, &["add", "."], None);
+    run_git(&repo, &["commit", "-m", "main one"], Some(T_BASE + 100));
+
+    run_git(&repo, &["checkout", "-b", "feature"], None);
+    std::fs::write(repo.join("b.txt"), "two\n").unwrap();
+    run_git(&repo, &["add", "."], None);
+    run_git(&repo, &["commit", "-m", "feature one"], Some(T_BASE + 400));
+
+    run_git(&repo, &["checkout", "main"], None);
+    std::fs::write(repo.join("a.txt"), "one-two\n").unwrap();
+    run_git(&repo, &["add", "."], None);
+    run_git(&repo, &["commit", "-m", "main two"], Some(T_BASE + 700));
+
+    let main_shas = rev_list(&repo, "main");
+    let feature_shas = rev_list(&repo, "feature");
+    (base, repo, main_shas, feature_shas)
+}
+
+fn rev_list(repo: &Path, branch: &str) -> Vec<String> {
+    let out = Command::new(common::git_program())
+        .args(["rev-list", branch])
+        .current_dir(repo)
+        .output()
+        .unwrap_or_else(|e| panic!("rev-list {branch}: {e}"));
+    assert!(out.status.success(), "rev-list {branch} should succeed");
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+fn session(session_id: &str, project_path: &str, started: i64, ended: i64) -> SessionRecord {
+    SessionRecord {
+        provider: "claude".to_string(),
+        session_id: session_id.to_string(),
+        project_key: project_path.to_string(),
+        project_path: project_path.to_string(),
+        title: Some(format!("Session {session_id}")),
+        started_at: Some(started),
+        ended_at: Some(ended),
+        transcript_path: Some(format!("{session_id}.jsonl")),
+        metadata_json: None,
+        parent_session_id: None,
+        is_subagent: false,
+        agent_id: None,
+        parent_tool_use_id: None,
+    }
+}
+
+fn message(session_id: &str, message_id: &str, ts: i64) -> SessionMessageRecord {
+    SessionMessageRecord {
+        provider: "claude".to_string(),
+        message_id: message_id.to_string(),
+        session_id: session_id.to_string(),
+        role: "assistant".to_string(),
+        timestamp: Some(ts),
+        ordinal: 1,
+        text: "work".to_string(),
+        kind: Some("message".to_string()),
+        model: Some("test-model".to_string()),
+        tool_names: None,
+        source_path: Some(format!("{session_id}.jsonl")),
+        source_offset: Some(0),
+        metadata_json: None,
+    }
+}
+
+/// Reflog stub: every worktree reports the same timeline and current branch.
+struct FakeGit {
+    timeline: Vec<BranchTimelineEntry>,
+    current: Option<String>,
+    real_repo: PathBuf,
+}
+
+impl GitReflogSource for FakeGit {
+    fn reflog(&self, _worktree: &Path) -> Option<String> {
+        // Rendered newest-first, the shape branch_timeline_from_reflog parses.
+        let mut lines: Vec<String> = self
+            .timeline
+            .iter()
+            .map(|(ts, branch)| {
+                let target = branch.clone().unwrap_or_else(|| "a1b2c3d4e5f6".to_string());
+                format!("abc123 HEAD@{{{ts}}}: checkout: moving from prev to {target}")
+            })
+            .collect();
+        lines.reverse();
+        Some(lines.join("\n"))
+    }
+
+    fn current_branch(&self, _worktree: &Path) -> Option<String> {
+        self.current.clone()
+    }
+
+    fn commit_log(&self, _worktree: &Path, branch: &str, since: i64) -> Option<String> {
+        // Delegate to the real repo so commit shas/times are authentic.
+        let out = Command::new(common::git_program())
+            .args([
+                "log",
+                branch,
+                "--pretty=%H %ct",
+                &format!("--since={since}"),
+            ])
+            .current_dir(&self.real_repo)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        String::from_utf8(out.stdout).ok()
+    }
+}
+
+async fn open_seeded_db(repo: &Path) -> (TempDir, GlobalDb, String) {
+    let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("db tmpdir: {e}"));
+    let db_path = tmp.path().join("sessions.db");
+    let db = GlobalDb::open_at(&db_path)
+        .await
+        .unwrap_or_else(|| panic!("open sessions.db"));
+    let project = repo.to_string_lossy().to_string();
+
+    // s_switch spans the whole run: main → feature → main.
+    assert!(
+        db.upsert_session(&session("s_switch", &project, T_BASE, T_BASE + 900))
+            .await
+    );
+    assert!(
+        db.upsert_session_message(&message("s_switch", "m1", T_BASE + 50))
+            .await
+    );
+    assert!(
+        db.upsert_session_message(&message("s_switch", "m2", T_BASE + 850))
+            .await
+    );
+
+    // s_main only overlaps the first main stretch.
+    assert!(
+        db.upsert_session(&session("s_main", &project, T_BASE + 60, T_BASE + 250))
+            .await
+    );
+    assert!(
+        db.upsert_session_message(&message("s_main", "m3", T_BASE + 200))
+            .await
+    );
+
+    (tmp, db, project)
+}
+
+#[tokio::test]
+async fn backfill_attributes_branch_switch_and_commits() {
+    let (_base, repo, main_shas, feature_shas) = build_repo();
+    let worktree = normalize_worktree(&repo.to_string_lossy());
+    let (_db_tmp, db, _project) = open_seeded_db(&repo).await;
+
+    // HEAD held main until +300, switched to feature at +300, back to main at
+    // +600. current_branch is the floor before the first entry (main).
+    let git = FakeGit {
+        timeline: vec![
+            (T_BASE + 300, Some("feature".to_string())),
+            (T_BASE + 600, Some("main".to_string())),
+        ],
+        current: Some("main".to_string()),
+        real_repo: repo.clone(),
+    };
+    let opts = BackfillOptions {
+        since: T_BASE - 1,
+        ..Default::default()
+    };
+
+    let stats = run_backfill(&db, &[], &git, &opts)
+        .await
+        .unwrap_or_else(|e| panic!("backfill: {e}"));
+    assert_eq!(stats.sessions_scanned, 2);
+    assert_eq!(
+        stats.skipped_total(),
+        0,
+        "both sessions map to the repo worktree"
+    );
+    assert!(stats.spans_written >= 2);
+
+    // s_switch touched both branches; s_main only main.
+    let feature_hits = db
+        .git_sessions_for(&SessionsForQuery {
+            git_ref: GitRefFilter::Branch("feature".to_string()),
+            since: None,
+            until: None,
+            limit: 20,
+        })
+        .await
+        .unwrap();
+    let feature_ids: Vec<&str> = feature_hits.iter().map(|h| h.session_id.as_str()).collect();
+    assert_eq!(
+        feature_ids,
+        vec!["s_switch"],
+        "only the switching session hit feature"
+    );
+    assert_eq!(feature_hits[0].worktree.as_deref(), Some(worktree.as_str()));
+
+    let main_hits = db
+        .git_sessions_for(&SessionsForQuery {
+            git_ref: GitRefFilter::Branch("main".to_string()),
+            since: None,
+            until: None,
+            limit: 20,
+        })
+        .await
+        .unwrap();
+    let mut main_ids: Vec<String> = main_hits.iter().map(|h| h.session_id.clone()).collect();
+    main_ids.sort();
+    assert_eq!(main_ids, vec!["s_main".to_string(), "s_switch".to_string()]);
+
+    // The feature commit falls in s_switch's feature segment [+300, +600].
+    let feature_sha = feature_shas
+        .iter()
+        .find(|sha| !main_shas.contains(sha))
+        .expect("feature-only commit");
+    let commit_hits = db
+        .git_sessions_for(&SessionsForQuery {
+            git_ref: GitRefFilter::Commit(feature_sha.clone()),
+            since: None,
+            until: None,
+            limit: 20,
+        })
+        .await
+        .unwrap();
+    let commit_ids: Vec<&str> = commit_hits.iter().map(|h| h.session_id.as_str()).collect();
+    assert_eq!(
+        commit_ids,
+        vec!["s_switch"],
+        "feature commit attributed to the switching session"
+    );
+    assert_eq!(
+        commit_hits[0].commit_sha.as_deref(),
+        Some(feature_sha.as_str())
+    );
+}
+
+#[tokio::test]
+async fn backfill_is_idempotent_and_dry_run_writes_nothing() {
+    let (_base, repo, _main, _feature) = build_repo();
+    let (_db_tmp, db, _project) = open_seeded_db(&repo).await;
+    let git = FakeGit {
+        timeline: vec![
+            (T_BASE + 300, Some("feature".to_string())),
+            (T_BASE + 600, Some("main".to_string())),
+        ],
+        current: Some("main".to_string()),
+        real_repo: repo.clone(),
+    };
+    let opts = BackfillOptions {
+        since: T_BASE - 1,
+        ..Default::default()
+    };
+
+    // Dry run writes nothing: no spans, so sessions_for is empty afterward.
+    let dry = run_backfill(
+        &db,
+        &[],
+        &git,
+        &BackfillOptions {
+            dry_run: true,
+            ..opts.clone()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(dry.sessions_scanned, 2);
+    let after_dry = db
+        .git_sessions_for(&SessionsForQuery {
+            git_ref: GitRefFilter::Branch("main".to_string()),
+            since: None,
+            until: None,
+            limit: 20,
+        })
+        .await
+        .unwrap();
+    assert!(after_dry.is_empty(), "dry-run must not write spans");
+
+    // First real run writes; second run writes nothing new.
+    let first = run_backfill(&db, &[], &git, &opts).await.unwrap();
+    assert!(first.commits_attributed >= 1);
+    let second = run_backfill(&db, &[], &git, &opts).await.unwrap();
+    assert_eq!(
+        second.commits_attributed, 0,
+        "re-run must not re-attribute commits (INSERT OR IGNORE)"
+    );
+
+    // Span rows also converge: the main-branch session set is unchanged.
+    let hits = db
+        .git_sessions_for(&SessionsForQuery {
+            git_ref: GitRefFilter::Branch("main".to_string()),
+            since: None,
+            until: None,
+            limit: 20,
+        })
+        .await
+        .unwrap();
+    let mut ids: Vec<String> = hits.iter().map(|h| h.session_id.clone()).collect();
+    ids.sort();
+    assert_eq!(ids, vec!["s_main".to_string(), "s_switch".to_string()]);
+}
+
+#[tokio::test]
+async fn backfill_skips_non_worktree_sessions() {
+    let (_base, repo, _main, _feature) = build_repo();
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("sessions.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+
+    // A session whose project_path is not a git repo.
+    let not_repo = tmp.path().join("plain-dir").to_string_lossy().to_string();
+    std::fs::create_dir_all(&not_repo).unwrap();
+    assert!(
+        db.upsert_session(&session("s_orphan", &not_repo, T_BASE, T_BASE + 100))
+            .await
+    );
+    assert!(
+        db.upsert_session_message(&message("s_orphan", "m1", T_BASE + 50))
+            .await
+    );
+
+    let git = FakeGit {
+        timeline: vec![],
+        current: Some("main".to_string()),
+        real_repo: repo.clone(),
+    };
+    let stats = run_backfill(
+        &db,
+        &[],
+        &git,
+        &BackfillOptions {
+            since: T_BASE - 1,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(stats.sessions_scanned, 1);
+    assert_eq!(stats.skipped_not_worktree, 1);
+    assert_eq!(stats.spans_written, 0);
+}

@@ -701,6 +701,11 @@ pub struct McpServer {
     ledger_writes_started: Arc<AtomicU64>,
     ledger_writes_finished: Arc<AtomicU64>,
     ledger_write_notify: Arc<tokio::sync::Notify>,
+    /// In-process debounce for live hook-route span observations, so a burst
+    /// of tool-use events for one session/branch/worktree writes at most once
+    /// per [`crate::sessions::git_correlation::DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS`].
+    span_observation_debounce:
+        std::sync::Mutex<crate::sessions::git_correlation::SpanObservationDebounce>,
 }
 
 impl McpServer {
@@ -794,6 +799,9 @@ impl McpServer {
             ledger_writes_started: Arc::new(AtomicU64::new(0)),
             ledger_writes_finished: Arc::new(AtomicU64::new(0)),
             ledger_write_notify: Arc::new(tokio::sync::Notify::new()),
+            span_observation_debounce: std::sync::Mutex::new(
+                crate::sessions::git_correlation::SpanObservationDebounce::new(),
+            ),
         });
 
         tokio::task::spawn_blocking(move || {
@@ -873,6 +881,24 @@ impl McpServer {
                 return None;
             }
         }
+    }
+
+    /// Resolves the registered project for a hook route `cwd`, first by the
+    /// parent-directory alias walk (see
+    /// [`Self::registered_project_containing_path`]) and, when that misses,
+    /// by git-common-dir identity. A linked worktree lives at a sibling path,
+    /// so the alias walk never reaches its main checkout; identity resolution
+    /// maps it back to the registered project through the shared common dir.
+    async fn registered_project_for_route_cwd(&self, cwd: &Path) -> Option<String> {
+        if let Some(root) = self.registered_project_containing_path(cwd).await {
+            return Some(root);
+        }
+        let registry = self.registry_db.as_deref()?;
+        let git_common_dir = crate::worktree::git_common_dir(cwd);
+        let context = registry
+            .project_registry_context_by_identity(cwd, git_common_dir.as_deref())
+            .await?;
+        Some(context.project.canonical_root)
     }
 
     /// Detects mid-session branch drift and reopens the served instance
@@ -1694,6 +1720,7 @@ impl McpServer {
         self.update_hook_workspace_route(&event, route_cache).await;
         let current_branch = crate::branch::current_branch(&root);
         self.record_hook_route_analytics(&root, &event, current_branch.as_deref());
+        self.record_hook_span_observation(&event).await;
         let plan = hook_events::plan_hook_event(&event, &root, current_branch.as_deref());
         self.run_hook_event_plan(cg, &root, plan).await;
     }
@@ -2432,6 +2459,112 @@ impl McpServer {
         self.spawn_observed_ledger_write(async move {
             if let Err(e) = gdb.append_analytics_event(&event).await {
                 eprintln!("[tracedecay] hook route analytics insert failed: {e}");
+            }
+        });
+    }
+
+    /// Records a live session↔git span from one hook route notification.
+    ///
+    /// Route metadata carries `(session_id, thread_id, cwd, worktree,
+    /// branch)`; when the route names a session and resolves to a registered
+    /// project, this folds one [`SpanObservation`] into that project's
+    /// `sessions.db` span table (see [`crate::sessions::git_correlation`]).
+    /// Mid-session branch/worktree switches are handled by the span table
+    /// itself — the observation always carries the *current* branch.
+    ///
+    /// Fail-open like [`Self::update_hook_workspace_route`]: any resolution or
+    /// DB error is dropped. An in-process debounce keyed by
+    /// `(provider, session, branch, worktree)` collapses a burst of tool-use
+    /// events to one write per
+    /// [`DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS`](crate::sessions::git_correlation::DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS)
+    /// so the notification hot path never blocks on repeated writes (spans
+    /// merge regardless, so a dropped observation only widens a span slightly
+    /// less).
+    async fn record_hook_span_observation(&self, event: &hook_events::HookEvent) {
+        use crate::sessions::git_correlation::{
+            self as gc, SpanObservation, SpanSource, DEFAULT_SPAN_MERGE_GAP_SECS,
+            DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
+        };
+
+        let Some(route) = event.route.as_ref() else {
+            return;
+        };
+        let Some(session_id) = route
+            .session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return;
+        };
+        // Resolve the project for this route the same way route caching does;
+        // spans belong to that project's store, not this server's checkout.
+        let route_cwd = route.cwd.as_deref().or(event.cwd.as_deref());
+        let Some(cwd) = route_cwd else {
+            return;
+        };
+        let Some(project_root) = self.registered_project_for_route_cwd(cwd).await else {
+            return;
+        };
+        let project_root = PathBuf::from(project_root);
+
+        // Worktree preference: the routed worktree, else the cwd's git
+        // worktree root, else the resolved project root. Never fabricated.
+        let worktree_raw = route
+            .worktree
+            .as_deref()
+            .map(Path::to_path_buf)
+            .or_else(|| crate::worktree::git_worktree_root(cwd))
+            .unwrap_or_else(|| project_root.clone());
+        let worktree = gc::normalize_worktree(&worktree_raw.to_string_lossy());
+
+        let branch = route
+            .branch
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let thread_id = route
+            .thread_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let ts = crate::tracedecay::current_timestamp();
+
+        // Hook routes are provider-agnostic: leave provider empty.
+        let key = gc::span_debounce_key("", session_id, branch.as_deref(), &worktree);
+        let should_record = self
+            .span_observation_debounce
+            .lock()
+            .map_or(true, |mut debounce| {
+                debounce.should_record(&key, ts, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS)
+            });
+        if !should_record {
+            return;
+        }
+
+        let observation = SpanObservation {
+            provider: String::new(),
+            session_id: session_id.to_string(),
+            thread_id,
+            branch,
+            worktree,
+            ts,
+            source: SpanSource::HookRoute,
+        };
+        self.spawn_observed_ledger_write(async move {
+            let Ok(db_path) = crate::storage::resolve_project_session_db_path(&project_root) else {
+                return;
+            };
+            let Some(db) = GlobalDb::open_at(&db_path).await else {
+                return;
+            };
+            if let Err(e) = db
+                .git_record_span_observation(&observation, DEFAULT_SPAN_MERGE_GAP_SECS)
+                .await
+            {
+                eprintln!("[tracedecay] hook route span record failed: {e}");
             }
         });
     }

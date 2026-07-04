@@ -123,6 +123,7 @@ async fn durable_analytics_rows(
                 project_id: Some(project_id.to_string()),
                 session_id: None,
                 event_kind: None,
+                since: None,
                 limit: ANALYTICS_EVENT_LIMIT,
             })
             .await

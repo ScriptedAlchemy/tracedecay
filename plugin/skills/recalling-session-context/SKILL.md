@@ -16,10 +16,11 @@ This skill owns the **FTS → LCM** lane of `tracedecay_message_search`: `messag
 3. **Lossless replay → `tracedecay_lcm_load_session`** (`session_id`, `after_store_id` + `limit` for stable pagination, `roles`, `content_offset`/`content_limit`): ordered raw messages of one session; page with `next_cursor` instead of asking for everything at once.
 4. **Summary-DAG drill-down:** `tracedecay_lcm_describe` (`session_id`) for the session's raw/summary shape; `tracedecay_lcm_expand` (`target.kind`: `raw_message`|`summary_node`|`external_payload`) to open one node, paging sources via `source_offset`/`source_limit`; `tracedecay_lcm_expand_query` (`query`) to assemble bounded retrieval context for a prompt in one call.
 5. **Store inspection → `tracedecay_lcm_status`** (counts, token estimates, DAG depth/compression ratio) when you need to know what the store contains before searching it.
+6. **Git-scoped session lookup → `tracedecay_sessions_for`** (`git_ref`: `branch`|`worktree`|`commit`, `value`, optional `since`/`until`, `limit`): which sessions were active on a branch or in a worktree, or which conversations produced a commit; feed the returned session ids back into rungs 2–4.
 
 ## Guardrails
 
-- Steps 1–5 are read-only. `tracedecay_lcm_compress`, `tracedecay_lcm_preflight`, and `tracedecay_lcm_session_boundary` are **lifecycle-integration tools for host agents** — never invoke them casually during recall.
+- Steps 1–6 are read-only. `tracedecay_lcm_compress`, `tracedecay_lcm_preflight`, and `tracedecay_lcm_session_boundary` are **lifecycle-integration tools for host agents** — never invoke them casually during recall.
 - For multi-step recall, dispatch scoped read-only subagents by session id, time window, provider, role, or query variant. Subagents must not call lifecycle or repair tools; the parent agent validates cited messages/summaries and produces the final timeline.
 - If the LCM store itself looks wrong (missing sessions, broken FTS, stale counts) → `tracedecay_lcm_doctor` (`mode: "diagnose"` first; `repair`/`clean` mutate and need explicit user intent).
 - All LCM tools default to `storage_scope: "project_local"`; only pass `hermes_profile` (with an absolute `hermes_home`) when the user asks about a Hermes profile store.
