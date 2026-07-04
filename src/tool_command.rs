@@ -299,9 +299,7 @@ fn print_tool_output(result_value: &Value, raw_json: bool) {
     }
 }
 
-/// Joins every `content[*].text` block in an MCP tool result, separated by a
-/// blank line. Some handlers prepend warning/notice blocks ahead of the real
-/// payload, so printing only `content[0].text` can hide the useful output.
+/// Joins every text block in an MCP tool result, separated by a blank line.
 fn join_content_text(result_value: &Value) -> String {
     result_value
         .get("content")

@@ -41,6 +41,18 @@ Expected: Returns matching symbols with IDs, file paths, line numbers, and signa
 
 ---
 
+## tracedecay_grep
+
+> Search indexed code for the literal string "mcpServers".
+
+Test:
+```
+tracedecay_grep(pattern="mcpServers", fixed_strings=true, path_glob="src/**/*.rs", context_lines=1)
+```
+Expected: Returns matching source lines with file paths, line numbers, and enclosing symbol metadata. Use this for literal strings, regexes, and config keys inside indexed code; use `tracedecay_search` for symbol names.
+
+---
+
 ## tracedecay_context
 
 > Build context for the task: "understand how the MCP server handles incoming tool calls"

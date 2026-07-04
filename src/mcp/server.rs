@@ -450,6 +450,68 @@ fn humanize_age(secs: i64) -> String {
     }
 }
 
+/// Inputs to the D7 overall-staleness banner decision, factored out so the
+/// branch logic is unit-testable without a live server.
+#[derive(Debug, Clone, Copy)]
+struct StalenessBannerInputs {
+    age_secs: i64,
+    /// `SyncConfig.auto_watch || SyncConfig.read_refresh`.
+    auto_sync_on: bool,
+    /// Serving a read-only fallback/ancestor store (`fallback_warning().is_some()`).
+    fallback_store: bool,
+    /// A background refresh is currently in flight.
+    refresh_running: bool,
+    /// A background refresh completed within `read_cooldown_secs`.
+    refreshed_recently: bool,
+}
+
+/// Decide the D7 overall-staleness banner. Returns `None` when no banner
+/// should be emitted. The age guard (`> 3600s`) is applied by the caller.
+///
+/// Rules:
+/// - Auto-sync on and not a fallback store: emit an informational "refresh in
+///   progress / scheduled" note (or nothing if a refresh just completed);
+///   NEVER instruct `tracedecay sync`.
+/// - Auto-repair impossible (fallback store, or auto-sync fully disabled):
+///   fall back to the manual `tracedecay sync` instruction.
+fn staleness_banner(inputs: StalenessBannerInputs) -> Option<String> {
+    let age_phrase = format_index_age_phrase(inputs.age_secs);
+    let stale_mins = inputs.age_secs / 60;
+    if inputs.auto_sync_on && !inputs.fallback_store {
+        if inputs.refresh_running {
+            Some(format!(
+                "Note: index refresh in progress (was {stale_mins}m stale); \
+                 very recent edits may not appear yet."
+            ))
+        } else if inputs.refreshed_recently {
+            None
+        } else {
+            Some(format!(
+                "Note: index refresh scheduled (was {stale_mins}m stale); \
+                 very recent edits may not appear yet."
+            ))
+        }
+    } else {
+        Some(format!(
+            "WARNING: Index last synced {age_phrase} ago. \
+             Run `tracedecay sync` to update."
+        ))
+    }
+}
+
+/// Format the index-age phrase used by the overall-staleness banner (D7),
+/// preserving the pre-existing `"Xd Yh"` / `"Xh Ym"` shape. `age_secs` is
+/// assumed `> 3600` (the banner's guard); shorter ages still format sensibly.
+fn format_index_age_phrase(age_secs: i64) -> String {
+    let hours = age_secs / 3600;
+    let mins = (age_secs % 3600) / 60;
+    if hours >= 24 {
+        format!("{}d {}h", hours / 24, hours % 24)
+    } else {
+        format!("{hours}h {mins}m")
+    }
+}
+
 fn tool_result_has_semantic_error(value: &Value) -> bool {
     value
         .get("content")
@@ -632,7 +694,9 @@ pub struct McpServer {
     resource_read_counts: std::sync::Mutex<HashMap<String, u64>>,
     tool_call_counts: std::sync::Mutex<HashMap<String, u64>>,
     /// Approximate token count per indexed file (`file_path` -> tokens).
-    file_token_map: std::sync::Mutex<HashMap<String, u64>>,
+    /// `Arc` so the detached D4 background-refresh task can hold a cheap
+    /// clone and swap in the freshly synced map on completion.
+    file_token_map: Arc<std::sync::Mutex<HashMap<String, u64>>>,
     /// Running total of tokens saved by serving from the graph.
     tokens_saved: AtomicU64,
     /// Tokens already flushed to the worldwide counter this session.
@@ -688,6 +752,36 @@ pub struct McpServer {
     /// walk and index sync. The detached transcript-ingest spawn is tracked
     /// separately by [`Self::transcript_ingest_done`].
     startup_catch_up_done: AtomicBool,
+    /// Guards the one-shot startup catch-up spawn (D1). `compare_exchange`d
+    /// from `false` to `true` by the first caller so the catch-up runs at
+    /// most once per server even if two `new_with_dbs` paths race. Distinct
+    /// from [`startup_catch_up_done`](Self::startup_catch_up_done), which
+    /// tracks *completion* rather than *dispatch*.
+    startup_catch_up_started: AtomicBool,
+    /// `true` while a detached sync-on-read refresh (D4) is in flight.
+    /// Single-flights the background refresh: `compare_exchange`d to `true`
+    /// before spawning and cleared on completion. Also read by the D7
+    /// staleness banner so an in-progress refresh emits the informational
+    /// "refresh in progress" note instead of the manual-sync warning.
+    /// `Arc` so the detached refresh task holds a cheap clone to clear it on
+    /// completion.
+    background_refresh_running: Arc<AtomicBool>,
+    /// UNIX timestamp (secs) of the most recent sync-on-read background
+    /// refresh spawn (D4). Gates the read-refresh cooldown independently of
+    /// [`last_staleness_check_at`](Self::last_staleness_check_at), which
+    /// gates the *blocking* edit-tool path — the two cooldowns must not
+    /// share a stamp or one path would starve the other.
+    last_background_refresh_at: AtomicI64,
+    /// UNIX timestamp (secs) at which the most recent background refresh (D4)
+    /// *completed*. `0` = never. Read by the D7 staleness banner so a refresh
+    /// that finished within `read_cooldown_secs` suppresses the banner
+    /// entirely (the index is as fresh as auto-sync can make it). `Arc` so
+    /// the detached refresh task can stamp it on completion.
+    last_background_refresh_done_at: Arc<AtomicI64>,
+    /// The `[sync]` config resolved once at construction from the project
+    /// root (plus `TRACEDECAY_SYNC_*` env overrides). Cached so the read
+    /// hot path never re-reads the config file per `tools/call`.
+    sync_config: crate::config::SyncConfig,
     /// Flipped to `true` when the detached transcript-ingest task spawned
     /// inside [`Self::run_startup_catch_up_sync`] completes (success or
     /// timeout). Stored as `Arc<AtomicBool>` so the spawned task can hold a
@@ -701,6 +795,11 @@ pub struct McpServer {
     ledger_writes_started: Arc<AtomicU64>,
     ledger_writes_finished: Arc<AtomicU64>,
     ledger_write_notify: Arc<tokio::sync::Notify>,
+    /// In-process debounce for live hook-route span observations, so a burst
+    /// of tool-use events for one session/branch/worktree writes at most once
+    /// per [`crate::sessions::git_correlation::DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS`].
+    span_observation_debounce:
+        std::sync::Mutex<crate::sessions::git_correlation::SpanObservationDebounce>,
 }
 
 impl McpServer {
@@ -763,13 +862,17 @@ impl McpServer {
             .flatten()
         };
 
+        // Resolve the [sync] config once (D1/D4/D7 all read it). Loading it
+        // here keeps the per-call read path free of config-file IO.
+        let sync_config = crate::config::load_sync_config(cg.project_root());
+
         let server = Arc::new(Self {
             cg: tokio::sync::RwLock::new(Arc::new(cg)),
             stats: ServerStats::new(),
             method_call_counts: std::sync::Mutex::new(HashMap::new()),
             resource_read_counts: std::sync::Mutex::new(HashMap::new()),
             tool_call_counts: std::sync::Mutex::new(HashMap::new()),
-            file_token_map: std::sync::Mutex::new(file_token_map),
+            file_token_map: Arc::new(std::sync::Mutex::new(file_token_map)),
             tokens_saved: AtomicU64::new(persisted),
             last_flushed_tokens: AtomicU64::new(persisted),
             last_flush_at: AtomicI64::new(0),
@@ -790,10 +893,18 @@ impl McpServer {
             last_automation_notice_check_at: AtomicI64::new(0),
             worktree_mismatch,
             startup_catch_up_done: AtomicBool::new(true),
+            startup_catch_up_started: AtomicBool::new(false),
+            background_refresh_running: Arc::new(AtomicBool::new(false)),
+            last_background_refresh_at: AtomicI64::new(0),
+            last_background_refresh_done_at: Arc::new(AtomicI64::new(0)),
+            sync_config,
             transcript_ingest_done: Arc::new(AtomicBool::new(true)),
             ledger_writes_started: Arc::new(AtomicU64::new(0)),
             ledger_writes_finished: Arc::new(AtomicU64::new(0)),
             ledger_write_notify: Arc::new(tokio::sync::Notify::new()),
+            span_observation_debounce: std::sync::Mutex::new(
+                crate::sessions::git_correlation::SpanObservationDebounce::new(),
+            ),
         });
 
         tokio::task::spawn_blocking(move || {
@@ -802,6 +913,39 @@ impl McpServer {
                 crate::tracedecay::current_timestamp(),
             );
         });
+
+        // D1: startup catch-up sync. Reconciles changes made while the server
+        // was down (terminal `git pull`, IDE edits before launch, another
+        // tool's writes) so read-only sessions start fresh instead of serving
+        // a stale index forever. `run_startup_catch_up_sync` is non-blocking-
+        // safe (detached transcript ingest, flags flipped on every exit path),
+        // so we spawn it detached and return immediately.
+        //
+        // Gated on `SyncConfig.session_start_sync` (default true) and single-
+        // flighted by `startup_catch_up_started` so it runs at most once per
+        // server even if two `new_with_dbs` paths overlap.
+        if server.sync_config.session_start_sync
+            && server
+                .startup_catch_up_started
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            let s = Arc::clone(&server);
+            // `run_startup_catch_up_sync` drives `sync_if_stale_silent`, whose
+            // future is `!Send` (indexing.rs holds `gix` objects across an
+            // await while stamping `last_synced_commit`). Confine it to a
+            // blocking thread via `spawn_blocking` + `block_on`, where the
+            // `Send` bound does not apply, instead of `tokio::spawn`. Still
+            // fully detached — returns immediately. (Followup: once the
+            // indexing.rs helpers drop their gix handles before awaiting, this
+            // can revert to a plain `tokio::spawn`.)
+            let handle = tokio::runtime::Handle::current();
+            tokio::task::spawn_blocking(move || {
+                handle.block_on(async move {
+                    s.run_startup_catch_up_sync().await;
+                });
+            });
+        }
 
         server
     }
@@ -873,6 +1017,24 @@ impl McpServer {
                 return None;
             }
         }
+    }
+
+    /// Resolves the registered project for a hook route `cwd`, first by the
+    /// parent-directory alias walk (see
+    /// [`Self::registered_project_containing_path`]) and, when that misses,
+    /// by git-common-dir identity. A linked worktree lives at a sibling path,
+    /// so the alias walk never reaches its main checkout; identity resolution
+    /// maps it back to the registered project through the shared common dir.
+    async fn registered_project_for_route_cwd(&self, cwd: &Path) -> Option<String> {
+        if let Some(root) = self.registered_project_containing_path(cwd).await {
+            return Some(root);
+        }
+        let registry = self.registry_db.as_deref()?;
+        let git_common_dir = crate::worktree::git_common_dir(cwd);
+        let context = registry
+            .project_registry_context_by_identity(cwd, git_common_dir.as_deref())
+            .await?;
+        Some(context.project.canonical_root)
     }
 
     /// Detects mid-session branch drift and reopens the served instance
@@ -1171,6 +1333,148 @@ impl McpServer {
         // between our cooldown windows, in which case `stale` is empty
         // here but our in-memory `file_token_map` is still pre-sync.
         self.refresh_file_token_map().await;
+    }
+
+    /// D4: sync-on-read entry point for read (non-edit) tools. NEVER blocks.
+    ///
+    /// If read-refresh is enabled and the read cooldown has elapsed since the
+    /// last background spawn, this `compare_exchange`s
+    /// [`background_refresh_running`](Self::background_refresh_running) to
+    /// `true` and spawns a detached refresh, then returns immediately so the
+    /// caller serves the current answer with zero added latency. The *next*
+    /// read observes the freshly synced index.
+    ///
+    /// Single-flighted three ways: the `read_cooldown_secs` stamp, the
+    /// `background_refresh_running` flag, and the underlying cross-process
+    /// sync lock. At most one refresh runs at a time.
+    fn maybe_spawn_read_refresh(&self, cg: &Arc<TraceDecay>) {
+        if !self.sync_config.read_refresh {
+            return;
+        }
+        // A checkout racing this call would diff the new branch against the
+        // old branch's DB; `tools/call` reopens onto the live branch before
+        // dispatch, so this only fires on an in-flight race. Skip it — the
+        // next call runs on the reopened snapshot.
+        if cg.branch_drifted() {
+            return;
+        }
+
+        let now = crate::tracedecay::current_timestamp();
+        let cooldown = self.sync_config.read_cooldown_secs as i64;
+        let previous = self.last_background_refresh_at.load(Ordering::Acquire);
+        if previous != 0 && now.saturating_sub(previous) < cooldown {
+            return;
+        }
+        // Reserve the cooldown slot. If another read call won the race, bail.
+        if self
+            .last_background_refresh_at
+            .compare_exchange(previous, now, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        // Reserve the single-flight slot. If a refresh is already running
+        // (e.g. a slow prior spawn that outlived its cooldown), don't stack.
+        if self
+            .background_refresh_running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+
+        self.spawn_read_refresh_task(Arc::clone(cg), self.sync_config.full_sync_escalation_files);
+    }
+
+    /// Spawns the detached D4 refresh task. The task owns cheap `Arc` clones
+    /// of the background-refresh flag, the completion stamp, and the shared
+    /// file-token map, so no `Arc<Self>` receiver is needed. Prefers diff-
+    /// scoping off `last_synced_commit`; falls back to the full tree walk
+    /// when no base commit is stamped or the diff escalates past the limit.
+    ///
+    /// The caller MUST have already set `background_refresh_running` to
+    /// `true`; this task clears it on completion.
+    fn spawn_read_refresh_task(&self, cg: Arc<TraceDecay>, escalation: usize) {
+        let running = Arc::clone(&self.background_refresh_running);
+        let done_at = Arc::clone(&self.last_background_refresh_done_at);
+        let token_map = Arc::clone(&self.file_token_map);
+        let handle = tokio::runtime::Handle::current();
+        // The diff-scoping helpers (`last_synced_commit` /
+        // `stale_files_since_commit`) hold `gix` objects (`Repository`,
+        // `Commit`) across their internal `.await`, so their futures are
+        // `!Send` and cannot be driven by `tokio::spawn` directly. Confine
+        // the whole refresh to a dedicated blocking thread via
+        // `spawn_blocking` + `block_on`, where the `Send` bound does not
+        // apply. This never blocks the caller — `spawn_blocking` returns a
+        // detached handle immediately. (See followup: the underlying
+        // indexing.rs helpers should drop their gix handles before awaiting
+        // so this indirection can be removed.)
+        tokio::task::spawn_blocking(move || {
+            handle.block_on(async move {
+                // Prefer diff-scoping off the last synced commit.
+                let scoped = match cg.last_synced_commit().await {
+                    Some(base) => cg.stale_files_since_commit(&base, escalation),
+                    None => None,
+                };
+                let result = if let Some(files) = scoped {
+                    if files.is_empty() {
+                        Ok(())
+                    } else {
+                        cg.sync_if_stale_silent(&files).await
+                    }
+                } else {
+                    // Fallback: full tree walk.
+                    let stale = cg.find_stale_files().await;
+                    if stale.is_empty() {
+                        Ok(())
+                    } else {
+                        cg.sync_if_stale_silent(&stale).await
+                    }
+                };
+                if let Err(e) = result {
+                    eprintln!("[tracedecay] background read refresh failed: {e}");
+                }
+                // Refresh the shared file-token map from the (now-synced) DB.
+                if let Ok(fresh) = cg.get_file_token_map().await {
+                    if let Ok(mut guard) = token_map.lock() {
+                        *guard = fresh;
+                    }
+                }
+                done_at.store(crate::tracedecay::current_timestamp(), Ordering::Release);
+                running.store(false, Ordering::Release);
+            });
+        });
+    }
+
+    /// D1/daemon hook: refresh the index if this cached project server's last
+    /// sync is older than `threshold_secs`. Called by the daemon on a
+    /// `project_server` cache hit so a long-lived cached server heals like a
+    /// freshly launched one. Non-blocking: it kicks the same detached D4
+    /// refresh and returns immediately.
+    pub async fn refresh_if_session_stale(&self, threshold_secs: u64) {
+        if !self.sync_config.read_refresh && !self.sync_config.auto_watch {
+            return;
+        }
+        let cg = self.cg_snapshot().await;
+        if cg.branch_drifted() {
+            return;
+        }
+        let now = crate::tracedecay::current_timestamp();
+        let last_sync = cg.last_sync_timestamp().await;
+        if last_sync != 0 && now.saturating_sub(last_sync) < threshold_secs as i64 {
+            return;
+        }
+        // Single-flight against the read-refresh machinery.
+        if self
+            .background_refresh_running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        self.last_background_refresh_at
+            .store(now, Ordering::Release);
+        self.spawn_read_refresh_task(cg, self.sync_config.full_sync_escalation_files);
     }
 
     /// Returns a compact one-line notice when automation runs have staged
@@ -1694,6 +1998,7 @@ impl McpServer {
         self.update_hook_workspace_route(&event, route_cache).await;
         let current_branch = crate::branch::current_branch(&root);
         self.record_hook_route_analytics(&root, &event, current_branch.as_deref());
+        self.record_hook_span_observation(&event).await;
         let plan = hook_events::plan_hook_event(&event, &root, current_branch.as_deref());
         self.run_hook_event_plan(cg, &root, plan).await;
     }
@@ -2085,6 +2390,14 @@ impl McpServer {
         // search into sync operations.
         if needs_lazy_sync_before_dispatch(tool_name) {
             self.maybe_sync_if_stale().await;
+        } else {
+            // D4: sync-on-read (never blocking). Read tools serve the current
+            // answer IMMEDIATELY and, when the read-refresh cooldown has
+            // elapsed, kick a single-flighted background refresh so the *next*
+            // read sees fresh data. This heals read-only sessions that never
+            // touch an edit tool without ever making a query wait behind a
+            // project walk.
+            self.maybe_spawn_read_refresh(&cg);
         }
 
         self.stats.tool_calls.fetch_add(1, Ordering::Relaxed);
@@ -2319,33 +2632,50 @@ impl McpServer {
                 // sync metadata even though no file gets a fresh `indexed_at`,
                 // so a per-file fallback fires the warning forever on quiet
                 // repos (#86).
+                //
+                // D7 staleness-warning UX: with auto-sync on (the normal
+                // case), a stale index self-heals — the D4 background refresh
+                // above was already kicked for this read. So instead of the
+                // old "Run `tracedecay sync`" nag, we emit an informational
+                // "refresh in progress" note (or nothing at all if a refresh
+                // just completed). The manual-sync instruction is reserved
+                // for the cases where auto-repair genuinely can't help:
+                //   - serving a read-only fallback/ancestor store, or
+                //   - the user disabled both auto_watch and read_refresh.
                 {
                     let last_time = cg.last_sync_timestamp().await;
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs() as i64;
+                    let now = crate::tracedecay::current_timestamp();
                     let age_secs = now - last_time;
                     if last_time > 0 && age_secs > 3600 {
-                        let hours = age_secs / 3600;
-                        let mins = (age_secs % 3600) / 60;
-                        let warning = if hours >= 24 {
-                            format!(
-                                "WARNING: Index last synced {}d {}h ago. Run `tracedecay sync` to update.",
-                                hours / 24,
-                                hours % 24
-                            )
-                        } else {
-                            format!(
-                                "WARNING: Index last synced {hours}h {mins}m ago. Run `tracedecay sync` to update."
-                            )
+                        let refreshed_recently = {
+                            let done = self.last_background_refresh_done_at.load(Ordering::Acquire);
+                            done > 0
+                                && now.saturating_sub(done)
+                                    < self.sync_config.read_cooldown_secs as i64
                         };
-                        if let Some(content) = result
-                            .value
-                            .get_mut("content")
-                            .and_then(|c| c.as_array_mut())
-                        {
-                            content.insert(0, json!({"type": "text", "text": &warning}));
+                        let banner = staleness_banner(StalenessBannerInputs {
+                            age_secs,
+                            // Auto-sync is "on" when either the daemon watcher
+                            // or sync-on-read can repair this.
+                            auto_sync_on: self.sync_config.auto_watch
+                                || self.sync_config.read_refresh,
+                            // A read-only fallback store can never be written,
+                            // so no background refresh can heal it.
+                            fallback_store: cg.fallback_warning().is_some(),
+                            refresh_running: self
+                                .background_refresh_running
+                                .load(Ordering::Acquire),
+                            refreshed_recently,
+                        });
+
+                        if let Some(banner) = banner {
+                            if let Some(content) = result
+                                .value
+                                .get_mut("content")
+                                .and_then(|c| c.as_array_mut())
+                            {
+                                content.insert(0, json!({"type": "text", "text": &banner}));
+                            }
                         }
                     }
                 }
@@ -2432,6 +2762,112 @@ impl McpServer {
         self.spawn_observed_ledger_write(async move {
             if let Err(e) = gdb.append_analytics_event(&event).await {
                 eprintln!("[tracedecay] hook route analytics insert failed: {e}");
+            }
+        });
+    }
+
+    /// Records a live session↔git span from one hook route notification.
+    ///
+    /// Route metadata carries `(session_id, thread_id, cwd, worktree,
+    /// branch)`; when the route names a session and resolves to a registered
+    /// project, this folds one [`SpanObservation`] into that project's
+    /// `sessions.db` span table (see [`crate::sessions::git_correlation`]).
+    /// Mid-session branch/worktree switches are handled by the span table
+    /// itself — the observation always carries the *current* branch.
+    ///
+    /// Fail-open like [`Self::update_hook_workspace_route`]: any resolution or
+    /// DB error is dropped. An in-process debounce keyed by
+    /// `(provider, session, branch, worktree)` collapses a burst of tool-use
+    /// events to one write per
+    /// [`DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS`](crate::sessions::git_correlation::DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS)
+    /// so the notification hot path never blocks on repeated writes (spans
+    /// merge regardless, so a dropped observation only widens a span slightly
+    /// less).
+    async fn record_hook_span_observation(&self, event: &hook_events::HookEvent) {
+        use crate::sessions::git_correlation::{
+            self as gc, SpanObservation, SpanSource, DEFAULT_SPAN_MERGE_GAP_SECS,
+            DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
+        };
+
+        let Some(route) = event.route.as_ref() else {
+            return;
+        };
+        let Some(session_id) = route
+            .session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return;
+        };
+        // Resolve the project for this route the same way route caching does;
+        // spans belong to that project's store, not this server's checkout.
+        let route_cwd = route.cwd.as_deref().or(event.cwd.as_deref());
+        let Some(cwd) = route_cwd else {
+            return;
+        };
+        let Some(project_root) = self.registered_project_for_route_cwd(cwd).await else {
+            return;
+        };
+        let project_root = PathBuf::from(project_root);
+
+        // Worktree preference: the routed worktree, else the cwd's git
+        // worktree root, else the resolved project root. Never fabricated.
+        let worktree_raw = route
+            .worktree
+            .as_deref()
+            .map(Path::to_path_buf)
+            .or_else(|| crate::worktree::git_worktree_root(cwd))
+            .unwrap_or_else(|| project_root.clone());
+        let worktree = gc::normalize_worktree(&worktree_raw.to_string_lossy());
+
+        let branch = route
+            .branch
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let thread_id = route
+            .thread_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let ts = crate::tracedecay::current_timestamp();
+
+        // Hook routes are provider-agnostic: leave provider empty.
+        let key = gc::span_debounce_key("", session_id, branch.as_deref(), &worktree);
+        let should_record = self
+            .span_observation_debounce
+            .lock()
+            .map_or(true, |mut debounce| {
+                debounce.should_record(&key, ts, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS)
+            });
+        if !should_record {
+            return;
+        }
+
+        let observation = SpanObservation {
+            provider: String::new(),
+            session_id: session_id.to_string(),
+            thread_id,
+            branch,
+            worktree,
+            ts,
+            source: SpanSource::HookRoute,
+        };
+        self.spawn_observed_ledger_write(async move {
+            let Ok(db_path) = crate::storage::resolve_project_session_db_path(&project_root) else {
+                return;
+            };
+            let Some(db) = GlobalDb::open_at(&db_path).await else {
+                return;
+            };
+            if let Err(e) = db
+                .git_record_span_observation(&observation, DEFAULT_SPAN_MERGE_GAP_SECS)
+                .await
+            {
+                eprintln!("[tracedecay] hook route span record failed: {e}");
             }
         });
     }
@@ -2604,5 +3040,236 @@ mod staleness_banner_tests {
                 "{tool} should still get the normal lazy freshness check"
             );
         }
+    }
+}
+
+/// D7 (staleness UX) + D1/D4 (startup catch-up + sync-on-read) behavioural
+/// tests. The pure-logic banner tests need no server; the server tests build
+/// a real indexed `TraceDecay` over a temp git repo, mirroring the
+/// `indexing.rs` test idiom.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod freshness_tests {
+    use super::{format_index_age_phrase, staleness_banner, McpServer, StalenessBannerInputs};
+    use crate::tracedecay::TraceDecay;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+    use tempfile::TempDir;
+
+    fn git(root: &std::path::Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .output()
+            .expect("git runs")
+            .status
+            .success();
+        assert!(ok, "git {args:?} failed");
+    }
+
+    async fn init_indexed_repo() -> (TraceDecay, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        git(root, &["config", "user.email", "t@t.com"]);
+        git(root, &["config", "user.name", "T"]);
+        std::fs::write(root.join(".gitignore"), ".tracedecay/\n").unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.rs"), "pub fn a() {}\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "initial"]);
+        let cg = TraceDecay::init(root).await.expect("init");
+        cg.index_all().await.expect("index");
+        (cg, dir)
+    }
+
+    // ---- D7 pure-logic banner tests (test c) --------------------------
+
+    #[test]
+    fn format_index_age_phrase_preserves_shape() {
+        // 2h 5m
+        assert_eq!(format_index_age_phrase(2 * 3600 + 5 * 60), "2h 5m");
+        // 1d 3h
+        assert_eq!(format_index_age_phrase(27 * 3600), "1d 3h");
+    }
+
+    #[test]
+    fn banner_says_refresh_in_progress_when_auto_sync_on() {
+        let banner = staleness_banner(StalenessBannerInputs {
+            age_secs: 2 * 3600,
+            auto_sync_on: true,
+            fallback_store: false,
+            refresh_running: true,
+            refreshed_recently: false,
+        })
+        .expect("banner expected");
+        assert!(banner.contains("refresh in progress"), "{banner}");
+        assert!(!banner.contains("tracedecay sync"), "{banner}");
+        assert!(!banner.starts_with("WARNING"), "{banner}");
+    }
+
+    #[test]
+    fn banner_says_scheduled_when_auto_sync_on_and_idle() {
+        let banner = staleness_banner(StalenessBannerInputs {
+            age_secs: 2 * 3600,
+            auto_sync_on: true,
+            fallback_store: false,
+            refresh_running: false,
+            refreshed_recently: false,
+        })
+        .expect("banner expected");
+        assert!(banner.contains("refresh scheduled"), "{banner}");
+        assert!(!banner.contains("tracedecay sync"), "{banner}");
+    }
+
+    #[test]
+    fn banner_suppressed_shortly_after_refresh() {
+        let banner = staleness_banner(StalenessBannerInputs {
+            age_secs: 2 * 3600,
+            auto_sync_on: true,
+            fallback_store: false,
+            refresh_running: false,
+            refreshed_recently: true,
+        });
+        assert!(banner.is_none(), "expected no banner, got {banner:?}");
+    }
+
+    #[test]
+    fn banner_instructs_manual_sync_only_on_fallback_store() {
+        let banner = staleness_banner(StalenessBannerInputs {
+            age_secs: 2 * 3600,
+            auto_sync_on: true,
+            fallback_store: true,
+            refresh_running: true,
+            refreshed_recently: false,
+        })
+        .expect("banner expected");
+        assert!(banner.starts_with("WARNING"), "{banner}");
+        assert!(banner.contains("Run `tracedecay sync`"), "{banner}");
+    }
+
+    #[test]
+    fn banner_instructs_manual_sync_when_auto_sync_disabled() {
+        let banner = staleness_banner(StalenessBannerInputs {
+            age_secs: 2 * 3600,
+            auto_sync_on: false,
+            fallback_store: false,
+            refresh_running: false,
+            refreshed_recently: false,
+        })
+        .expect("banner expected");
+        assert!(banner.contains("Run `tracedecay sync`"), "{banner}");
+    }
+
+    // ---- D1: startup catch-up runs exactly once (test b) --------------
+
+    #[tokio::test]
+    async fn startup_catch_up_spawned_once_per_server() {
+        let (cg, _dir) = init_indexed_repo().await;
+        let server = McpServer::new(cg, None).await;
+        // The D1 spawn should have claimed the one-shot flag.
+        assert!(
+            server.startup_catch_up_started.load(Ordering::Acquire),
+            "startup catch-up should have been dispatched by new_with_dbs"
+        );
+        assert!(
+            server
+                .wait_for_startup_catch_up(Duration::from_secs(30))
+                .await,
+            "startup catch-up should settle"
+        );
+        assert!(server.startup_catch_up_done());
+
+        // The one-shot flag is already claimed; a hypothetical second
+        // new_with_dbs-style dispatch would be refused by the same
+        // compare_exchange. Assert the flag can't be re-claimed.
+        assert!(
+            server
+                .startup_catch_up_started
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err(),
+            "startup catch-up flag must stay claimed (runs at most once)"
+        );
+    }
+
+    // ---- D4: sync-on-read never blocks + single-flight (tests a, d) ---
+
+    #[tokio::test]
+    async fn read_refresh_is_non_blocking_and_single_flighted() {
+        let (cg, dir) = init_indexed_repo().await;
+        let root = dir.path().to_path_buf();
+        let server = McpServer::new(cg, None).await;
+        assert!(
+            server
+                .wait_for_startup_catch_up(Duration::from_secs(30))
+                .await
+        );
+        // Reset the read cooldown so the next spawn is eligible regardless of
+        // any startup timing.
+        server
+            .last_background_refresh_at
+            .store(0, Ordering::Release);
+        server
+            .background_refresh_running
+            .store(false, Ordering::Release);
+
+        // Make the tree stale: a new committed source file, as the
+        // diff-scoped refresh contract tracks git history.
+        std::fs::write(root.join("src/b.rs"), "pub fn b() {}\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "add b"]);
+
+        let cg_snapshot = server.cg_snapshot().await;
+
+        // First read-refresh: returns immediately (we never await the sync).
+        // Assert it does not block by bounding the call duration well under a
+        // real sync (~hundreds of ms); the spawn does the work off-thread.
+        let start = std::time::Instant::now();
+        server.maybe_spawn_read_refresh(&cg_snapshot);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "maybe_spawn_read_refresh must not block on the sync (took {elapsed:?})"
+        );
+        // The refresh should have been claimed (running flag set) — proving a
+        // task was spawned rather than run inline.
+        // (It may already have finished on a very fast machine; in that case
+        // the cooldown stamp still advanced, which we assert below.)
+        assert_ne!(
+            server.last_background_refresh_at.load(Ordering::Acquire),
+            0,
+            "cooldown stamp must advance when a refresh is kicked"
+        );
+
+        // Second immediate read-refresh: single-flighted. Because the cooldown
+        // stamp just advanced (and/or a refresh is running), no second task is
+        // spawned. We verify by confirming the stamp does not change to a new
+        // value on a back-to-back call within the cooldown window.
+        let stamp_after_first = server.last_background_refresh_at.load(Ordering::Acquire);
+        server.maybe_spawn_read_refresh(&cg_snapshot);
+        let stamp_after_second = server.last_background_refresh_at.load(Ordering::Acquire);
+        assert_eq!(
+            stamp_after_first, stamp_after_second,
+            "second read within cooldown must not re-kick (single-flight)"
+        );
+
+        // Let the background refresh complete, then confirm the index caught
+        // the new file — a SUBSEQUENT read sees fresh data.
+        for _ in 0..200 {
+            if !server.background_refresh_running.load(Ordering::Acquire)
+                && server
+                    .last_background_refresh_done_at
+                    .load(Ordering::Acquire)
+                    > 0
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let fresh = server.cg_snapshot().await.find_stale_files().await;
+        assert!(
+            fresh.is_empty(),
+            "after the background refresh, src/b.rs should be indexed; still stale: {fresh:?}"
+        );
     }
 }

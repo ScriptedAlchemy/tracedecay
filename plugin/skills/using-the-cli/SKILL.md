@@ -19,8 +19,31 @@ The `tracedecay` binary exposes every MCP tool as a shell command. MCP and CLI h
 - Tool names work with or without the `tracedecay_` prefix (`tool search` ≡ `tool tracedecay_search`).
 - `--json` prints raw JSON; `--args '{"key":"value"}'` passes a whole JSON argument object; any value starting with `@` is read from that file (handy for multi-line replacement bodies, e.g. `--new-body @/tmp/body.txt`).
 - `--project <path>` picks the project root explicitly; otherwise the nearest initialised project walking up from cwd is used.
-- Truncated responses emit the same `handle` envelope as MCP — dereference with `tracedecay tool retrieve --handle rh_…`.
+- Truncated responses emit the same `handle` envelope as MCP — dereference with `tracedecay tool retrieve --handle rh_…` (see *Retrieving truncated responses* below).
 - The required/optional flags for the common tools are catalogued in [references/tool-arg-catalog.md](references/tool-arg-catalog.md).
+
+## Retrieving truncated responses
+
+TraceDecay truncates large tool responses and emits a **handle** envelope
+instead of the full body. The original text is cached in the active-project
+store; dereference it rather than re-running the source tool — this works
+identically over MCP (`tracedecay_retrieve`) and the CLI
+(`tracedecay tool retrieve`).
+
+- A prior response ended with a `handle` (e.g. `rh_…`) and the missing detail
+  is actually needed → **dereference the handle → `tracedecay_retrieve`**
+  (`handle` copied exactly). It returns the exact cached original text; it does
+  not re-run the tool or re-read a file/session/node. Do not re-run the broad
+  query, guess, or read a file again.
+- You do NOT need the truncated tail → leave it; retrieval costs tokens.
+- Handles are local, project-scoped, and expire; if `retrieve` reports an
+  expired/unknown handle, re-run the original tool with a **narrower** query
+  (see `tracedecay:using-tracedecay`) rather than retrying the stale handle. If
+  the truncated response used a `project-id`/`project-path` selector, pass the
+  same selector to `retrieve`.
+- To open one session/summary node instead of a cached tool body → expand it
+  with `tracedecay_lcm_expand`; `tracedecay:managing-session-context` drives the
+  LCM store and past-session retrieval.
 
 ## When to switch
 
@@ -37,7 +60,16 @@ After falling back, diagnose the MCP side with `tracedecay doctor` and `tracedec
 - CLI editing tools (`str_replace`, `replace_symbol`, …) mutate the working tree exactly like their MCP twins — apply the same care as `tracedecay:editing-safely`.
 - If the CLI also fails (binary missing or project not initialised), fall back to plain tools and suggest `tracedecay init` / `tracedecay doctor` to the user.
 
-## Output
+## If tools are deferred or MCP fails
 
-- The same result the MCP tool would have returned, plus a note that the CLI fallback was used and why.
-- If any result includes a `tracedecay_metrics:` line, report the savings to the user.
+- This skill *is* the MCP-failure path: run `tracedecay tool <name> --key value`
+  for any tool whose MCP call errored, timed out, or was never configured.
+- Deferred (names listed without schemas) but MCP otherwise healthy: load once
+  with ToolSearch — `select:tracedecay_retrieve,tracedecay_runtime` (add the
+  tools the parent skill needs) — then call normally instead of shelling out.
+
+## Deliverable
+
+Do not end this workflow without: the same result the MCP tool would have
+returned, plus a note that the CLI fallback was used and why. Report any
+`tracedecay_metrics:` line to the user.

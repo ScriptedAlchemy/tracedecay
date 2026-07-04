@@ -613,6 +613,7 @@ or `delegate`. This is a mandate, not a preference — you cannot rationalize yo
 way out of it.\n\n\
 | The moment you are in | Do this first |\n\
 |---|---|\n\
+| Searching for literal/regex code text | `tracedecay_grep` |\n\
 | Searching for a symbol or concept | `tracedecay_search` (names) or `tracedecay_context` (concepts) |\n\
 | About to read a source file | `tracedecay_outline` -> `tracedecay_body` -> `tracedecay_read` slices |\n\
 | \"Who calls X\" / \"what does X call\" / \"trace this\" | `tracedecay_callers` / `tracedecay_callees` |\n\
@@ -621,7 +622,7 @@ way out of it.\n\n\
 | A prior decision or past conversation is referenced | `tracedecay_message_search` / `tracedecay_lcm_expand_query` |\n\n\
 | Red-flag thought | Reality |\n\
 |---|---|\n\
-| \"Grep is faster for this\" | `tracedecay_search` is one call and pre-ranked. |\n\
+| \"Grep is faster for this\" | `tracedecay_grep` handles literal/regex code search; `tracedecay_search` is pre-ranked for names. |\n\
 | \"I'll just read the whole file\" | `tracedecay_outline` / `tracedecay_body` answer at a fraction of the tokens. |\n\
 | \"This is a simple lookup\" | Simple lookups are exactly what the graph is for. |\n\
 | \"I already know this codebase\" | The graph is fresher than your memory. Check it. |\n\n\

@@ -3,9 +3,10 @@
 //! Each agent sends its own event schema and expects its own output shape, so
 //! handlers stay agent-specific while shared plumbing lives here.
 
-use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -24,7 +25,8 @@ pub mod tool_hints;
 
 pub use claude::{
     claude_session_context_for_event, evaluate_hook_decision, hook_claude_post_tool_use,
-    hook_claude_session_start, hook_pre_tool_use, hook_prompt_submit, hook_stop,
+    hook_claude_session_start, hook_claude_subagent_start, hook_pre_tool_use, hook_prompt_submit,
+    hook_stop,
 };
 pub use codex::{
     codex_additional_context_json, codex_apply_patch_rel_paths, codex_project_root_from_event,
@@ -34,12 +36,13 @@ pub use codex::{
     hook_codex_user_prompt_submit, record_codex_subagent_start,
 };
 pub use cursor::{
-    cursor_after_file_edit_rel_paths, cursor_post_tool_use_decision,
-    cursor_project_root_from_event, cursor_session_start_json, cursor_should_run_sync,
-    evaluate_cursor_post_tool_use, evaluate_cursor_subagent_start, hook_cursor_after_file_edit,
-    hook_cursor_after_shell, hook_cursor_before_submit_prompt, hook_cursor_post_tool_use,
-    hook_cursor_pre_compact, hook_cursor_session_end, hook_cursor_session_start, hook_cursor_stop,
-    hook_cursor_subagent_start, hook_cursor_workspace_open, CURSOR_CATCH_UP_INGEST_MAX_BYTES,
+    cursor_after_file_edit_rel_paths, cursor_before_submit_prompt_json,
+    cursor_post_tool_use_decision, cursor_project_root_from_event, cursor_session_start_json,
+    cursor_should_run_sync, evaluate_cursor_post_tool_use, evaluate_cursor_subagent_start,
+    hook_cursor_after_file_edit, hook_cursor_after_shell, hook_cursor_before_submit_prompt,
+    hook_cursor_post_tool_use, hook_cursor_pre_compact, hook_cursor_session_end,
+    hook_cursor_session_start, hook_cursor_stop, hook_cursor_subagent_start,
+    hook_cursor_workspace_open, CURSOR_CATCH_UP_INGEST_MAX_BYTES,
 };
 pub use cursor_compact::{cursor_pre_compact_for_event_with_config, CursorPreCompactOutcome};
 pub use cursor_shell::{
@@ -61,7 +64,7 @@ pub use steering::{
 
 pub(crate) use cursor_shell::shell_words;
 
-use tool_hints::{HintAgent, HintCategory, ToolHint};
+use tool_hints::{HintAgent, ToolHint};
 
 macro_rules! read_hook_event {
     () => {{
@@ -77,11 +80,13 @@ macro_rules! read_hook_event {
 pub(crate) use read_hook_event;
 
 const TRACEDECAY_RESEARCH_BLOCK_REASON: &str = "STOP: Use tracedecay MCP tools \
-(tracedecay_context, tracedecay_search, tracedecay_callees, tracedecay_callers, \
-tracedecay_impact, tracedecay_files, tracedecay_affected) instead of agents for \
-code research. TraceDecay is faster and more precise for symbol relationships, \
-call paths, and code structure. Only use agents for code exploration if you \
-have already tried tracedecay and it cannot answer the question.";
+(tracedecay_context, tracedecay_grep, tracedecay_search, tracedecay_callees, \
+tracedecay_callers, tracedecay_impact, tracedecay_files, tracedecay_affected) \
+instead of agents for code research. Route literal/regex text to tracedecay_grep, \
+symbol names to tracedecay_search, and concepts to tracedecay_context. TraceDecay \
+is faster and more precise for symbol relationships, call paths, and code structure. \
+Only use agents for code exploration if you have already tried tracedecay and it \
+cannot answer the question.";
 
 const HOOK_ANALYTICS_FILENAME: &str = "hook_analytics.jsonl";
 
@@ -151,6 +156,30 @@ fn now_unix_secs() -> i64 {
         .map_or(0, |d| d.as_secs() as i64)
 }
 
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> &'static Mutex<()> {
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    ENV_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// Mints a unique id for one hint candidate so its `hint_candidate` row and its
+/// single terminal row (`hint_emitted` / `hint_escalated` / `suppressed_duplicate`
+/// / `suppressed_budget` / `missing_session` / `dropped_no_root`) can be correlated
+/// in `analytics_events`. The crate has no
+/// uuid dependency, so we combine a millisecond timestamp with a process-local
+/// monotonic counter — unique within a process, and effectively unique across the
+/// short-lived hook processes that each mint at most a handful of ids.
+fn mint_hint_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "h-{:x}-{:x}-{:x}",
+        now_unix_millis(),
+        std::process::id(),
+        seq
+    )
+}
+
 fn record_hook_invoked(root: Option<&Path>, agent: HintAgent, hook_name: &str, event_json: &str) {
     let parsed: Value = serde_json::from_str(event_json).unwrap_or(Value::Null);
     record_hook_analytics(
@@ -194,6 +223,7 @@ fn record_hint_analytics(
     event: &str,
     agent: HintAgent,
     session_id: Option<&str>,
+    hint_id: &str,
     hint: &ToolHint,
 ) {
     record_hook_analytics(
@@ -203,6 +233,7 @@ fn record_hint_analytics(
             "agent": agent.as_key(),
             "session_id": session_id,
             "category": hint.category.as_key(),
+            "hint_id": hint_id,
         }),
     );
 }
@@ -227,12 +258,19 @@ fn record_hint_emitted(
     root: Option<&Path>,
     agent: HintAgent,
     session_id: Option<&str>,
+    hint_id: &str,
     hint: &ToolHint,
 ) {
-    if session_id.is_none() {
-        record_hint_analytics(root, "missing_session", agent, None, hint);
-    }
-    record_hint_analytics(root, "hint_emitted", agent, session_id, hint);
+    // Exactly one terminal event per candidate. A missing session id is its own
+    // terminal outcome (the hint still surfaces to the agent, but it can never be
+    // deduped), so we record `missing_session` instead of also emitting
+    // `hint_emitted` — double terminals corrupt the per-candidate outcome count.
+    let event = if session_id.is_none() {
+        "missing_session"
+    } else {
+        "hint_emitted"
+    };
+    record_hint_analytics(root, event, agent, session_id, hint_id, hint);
 }
 
 fn hook_route_metadata_from_event(
@@ -283,73 +321,99 @@ fn hook_route_session_id(parsed: &Value) -> Option<String> {
     )
 }
 
+/// Dedupes a hint for a project without a pre-minted candidate id. Callers that
+/// do not record their own `hint_candidate` (e.g. the Claude post-tool-use
+/// surface) use this shape; it mints an id so the terminal row still correlates
+/// via `hint_id`. Callers that already recorded a `hint_candidate` must instead
+/// use [`deduped_project_hint_with_id`] so the terminal shares that id.
 fn deduped_project_hint(
     root: Option<PathBuf>,
     agent: HintAgent,
     session_id: Option<String>,
     hint: ToolHint,
 ) -> Option<ToolHint> {
+    let hint_id = mint_hint_id();
+    deduped_project_hint_with_id(root, agent, session_id, &hint_id, hint)
+}
+
+fn deduped_project_hint_with_id(
+    root: Option<PathBuf>,
+    agent: HintAgent,
+    session_id: Option<String>,
+    hint_id: &str,
+    hint: ToolHint,
+) -> Option<ToolHint> {
     let Some(root) = root else {
-        record_hint_emitted(None, agent, session_id.as_deref(), &hint);
+        record_hint_emitted(None, agent, session_id.as_deref(), hint_id, &hint);
         return Some(hint);
     };
     let Some(session_id) = session_id else {
-        record_hint_emitted(Some(&root), agent, None, &hint);
+        record_hint_emitted(Some(&root), agent, None, hint_id, &hint);
         return Some(hint);
     };
-    if !remember_hint_in_process(&root, agent, &session_id, hint.category) {
-        record_hint_analytics(
-            Some(&root),
-            "suppressed_duplicate",
-            agent,
-            Some(&session_id),
-            &hint,
-        );
-        return None;
-    }
+    // Without a resolvable data dir we cannot count budget/escalation across
+    // fires, so fall back to emitting the raw hint once per candidate.
     let Ok(layout) = crate::storage::resolve_layout_for_current_profile(&root) else {
-        record_hint_emitted(Some(&root), agent, Some(&session_id), &hint);
+        record_hint_emitted(Some(&root), agent, Some(&session_id), hint_id, &hint);
         return Some(hint);
     };
     if !layout.data_root.is_dir() {
-        record_hint_emitted(Some(&root), agent, Some(&session_id), &hint);
+        record_hint_emitted(Some(&root), agent, Some(&session_id), hint_id, &hint);
         return Some(hint);
     }
     let path = layout.data_root.join("tool_hints_seen.json");
     let mut dedupe = tool_hints::ToolHintDedupe::load_or_default(&path);
-    if !dedupe.should_emit(&session_id, hint.category) {
-        record_hint_analytics(
-            Some(&root),
-            "suppressed_duplicate",
-            agent,
-            Some(&session_id),
-            &hint,
-        );
-        return None;
+    match dedupe.decide(&session_id, hint.category) {
+        tool_hints::HintDecision::Emit => {
+            let _ = dedupe.save(&path);
+            record_hint_analytics(
+                Some(&root),
+                "hint_emitted",
+                agent,
+                Some(&session_id),
+                hint_id,
+                &hint,
+            );
+            Some(hint)
+        }
+        tool_hints::HintDecision::Escalate => {
+            let _ = dedupe.save(&path);
+            let escalated = hint.escalated();
+            record_hint_analytics(
+                Some(&root),
+                "hint_escalated",
+                agent,
+                Some(&session_id),
+                hint_id,
+                &escalated,
+            );
+            Some(escalated)
+        }
+        tool_hints::HintDecision::SuppressedBudget => {
+            let _ = dedupe.save(&path);
+            record_hint_analytics(
+                Some(&root),
+                "suppressed_budget",
+                agent,
+                Some(&session_id),
+                hint_id,
+                &hint,
+            );
+            None
+        }
+        tool_hints::HintDecision::SuppressedDuplicate => {
+            let _ = dedupe.save(&path);
+            record_hint_analytics(
+                Some(&root),
+                "suppressed_duplicate",
+                agent,
+                Some(&session_id),
+                hint_id,
+                &hint,
+            );
+            None
+        }
     }
-    let _ = dedupe.save(&path);
-    record_hint_analytics(Some(&root), "hint_emitted", agent, Some(&session_id), &hint);
-    Some(hint)
-}
-
-fn remember_hint_in_process(
-    root: &Path,
-    agent: HintAgent,
-    session_id: &str,
-    category: HintCategory,
-) -> bool {
-    static MEMORY: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    let key = format!(
-        "{}\0{}\0{}\0{}",
-        root.display(),
-        agent.as_key(),
-        session_id,
-        category.as_key()
-    );
-    let Ok(mut memory) = MEMORY.get_or_init(|| Mutex::new(HashSet::new())).lock() else {
-        return true;
-    };
-    memory.insert(key)
 }
 
 fn nearest_project_like_root(start: &Path) -> Option<PathBuf> {
@@ -480,6 +544,363 @@ pub(crate) fn read_stdin_to_string() -> std::io::Result<String> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
     Ok(input)
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod hint_analytics_tests {
+    use super::tool_hints::{HintCategory, MAX_HINTS_PER_SESSION};
+    use super::{
+        deduped_project_hint_with_id, mint_hint_id, record_hint_emitted, HintAgent, Path, PathBuf,
+        ToolHint, Value,
+    };
+    use crate::config::USER_DATA_DIR_ENV;
+    use std::collections::HashSet;
+
+    /// Terminal event kinds a single `hint_candidate` may resolve to. Every
+    /// candidate must be followed by exactly one of these.
+    const TERMINAL_EVENTS: &[&str] = &[
+        "hint_emitted",
+        "hint_escalated",
+        "suppressed_duplicate",
+        "suppressed_budget",
+        "dropped_no_root",
+        "missing_session",
+    ];
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set_path(key: &'static str, value: &Path) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    fn test_hint() -> ToolHint {
+        ToolHint {
+            category: HintCategory::Impact,
+            message: "use tracedecay_impact".to_string(),
+            context: "context".to_string(),
+            nonblocking: true,
+        }
+    }
+
+    /// Enrolls `project_root` in the profile store and materializes its data dir
+    /// so `deduped_project_hint` reaches the on-disk dedupe branch.
+    fn enroll_project(project_root: &Path, project_id: &str) -> PathBuf {
+        crate::storage::write_enrollment_marker(
+            project_root,
+            &crate::storage::EnrollmentMarker {
+                project_id: project_id.to_string(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )
+        .unwrap();
+        let layout = crate::storage::resolve_layout_for_current_profile(project_root).unwrap();
+        std::fs::create_dir_all(&layout.data_root).unwrap();
+        layout.data_root
+    }
+
+    /// Reads every recorded analytics row visible to a project: its own store
+    /// file plus the user-level fallback file.
+    fn recorded_rows(data_root: &Path, profile_root: &Path) -> Vec<Value> {
+        let mut rows = Vec::new();
+        for path in [
+            data_root.join(super::HOOK_ANALYTICS_FILENAME),
+            profile_root.join(super::HOOK_ANALYTICS_FILENAME),
+        ] {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                for line in text.lines() {
+                    if let Ok(row) = serde_json::from_str::<Value>(line) {
+                        rows.push(row);
+                    }
+                }
+            }
+        }
+        rows
+    }
+
+    fn event_kind(row: &Value) -> &str {
+        row.get("event").and_then(Value::as_str).unwrap_or_default()
+    }
+
+    fn hint_id(row: &Value) -> &str {
+        row.get("hint_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+    }
+
+    /// Rows carrying a specific `hint_id`, in insertion order.
+    fn events_for<'a>(rows: &'a [Value], id: &str) -> Vec<&'a Value> {
+        rows.iter().filter(|row| hint_id(row) == id).collect()
+    }
+
+    #[test]
+    fn mint_hint_id_is_unique_across_calls() {
+        let ids: HashSet<String> = (0..256).map(|_| mint_hint_id()).collect();
+        assert_eq!(ids.len(), 256, "hint ids must be unique");
+    }
+
+    #[test]
+    fn record_hint_emitted_missing_session_is_single_terminal() {
+        let _lock = super::test_env_lock().lock().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let profile = tempfile::tempdir().unwrap();
+        let project_root = project.path().canonicalize().unwrap();
+        let profile_root = profile.path().canonicalize().unwrap();
+        let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
+        let data_root = enroll_project(&project_root, "proj_missing_session");
+        let hint = test_hint();
+        let id = mint_hint_id();
+
+        record_hint_emitted(Some(&project_root), HintAgent::Cursor, None, &id, &hint);
+
+        let rows = recorded_rows(&data_root, &profile_root);
+        let seq: Vec<&str> = events_for(&rows, &id)
+            .iter()
+            .map(|row| event_kind(row))
+            .collect();
+        // Exactly one terminal, and it is `missing_session` (never also
+        // `hint_emitted`) so the per-candidate outcome count stays 1.
+        assert_eq!(seq, vec!["missing_session"], "single terminal expected");
+    }
+
+    /// Walks each terminal branch of the hint pipeline and asserts that the
+    /// candidate resolves to exactly one terminal event carrying the same
+    /// `hint_id`, and that the row is attributed to the project when a root is
+    /// known.
+    #[test]
+    fn every_hint_branch_yields_exactly_one_terminal_with_hint_id() {
+        let _lock = super::test_env_lock().lock().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let profile = tempfile::tempdir().unwrap();
+        let project_root = project.path().canonicalize().unwrap();
+        let profile_root = profile.path().canonicalize().unwrap();
+        let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
+        let data_root = enroll_project(&project_root, "proj_terminal_invariant");
+
+        let project_key = crate::global_db::GlobalDb::canonical_project_key(&project_root);
+
+        // Branch: root known, session known → on-disk dedupe emits once.
+        let emit_id = mint_hint_id();
+        assert!(deduped_project_hint_with_id(
+            Some(project_root.clone()),
+            HintAgent::Cursor,
+            Some("session-emit".to_string()),
+            &emit_id,
+            test_hint(),
+        )
+        .is_some());
+
+        // Branch: same (session, category) again → suppressed as duplicate.
+        let dup_id = mint_hint_id();
+        assert!(deduped_project_hint_with_id(
+            Some(project_root.clone()),
+            HintAgent::Cursor,
+            Some("session-emit".to_string()),
+            &dup_id,
+            test_hint(),
+        )
+        .is_none());
+
+        // Branch: root known, session missing → single `missing_session` terminal.
+        let no_session_id = mint_hint_id();
+        assert!(deduped_project_hint_with_id(
+            Some(project_root.clone()),
+            HintAgent::Cursor,
+            None,
+            &no_session_id,
+            test_hint(),
+        )
+        .is_some());
+
+        // Branch: no root at all → emits with no attribution.
+        let no_root_id = mint_hint_id();
+        assert!(deduped_project_hint_with_id(
+            None,
+            HintAgent::Cursor,
+            Some("session-noroot".to_string()),
+            &no_root_id,
+            test_hint(),
+        )
+        .is_some());
+
+        let rows = recorded_rows(&data_root, &profile_root);
+
+        let cases = [
+            (&emit_id, "hint_emitted", true),
+            (&dup_id, "suppressed_duplicate", true),
+            (&no_session_id, "missing_session", true),
+            (&no_root_id, "hint_emitted", false),
+        ];
+        for (id, expected_terminal, expect_attribution) in cases {
+            let matched = events_for(&rows, id);
+            let terminals: Vec<&str> = matched
+                .iter()
+                .map(|row| event_kind(row))
+                .filter(|kind| TERMINAL_EVENTS.contains(kind))
+                .collect();
+            assert_eq!(
+                terminals,
+                vec![expected_terminal],
+                "hint_id {id} must have exactly one terminal ({expected_terminal})"
+            );
+            for row in &matched {
+                assert_eq!(hint_id(row), id.as_str(), "hint_id must be carried");
+                let attributed = row
+                    .get("project_root")
+                    .and_then(Value::as_str)
+                    .map(|root| crate::global_db::GlobalDb::canonical_project_key(Path::new(root)));
+                if expect_attribution {
+                    assert_eq!(
+                        attributed.as_deref(),
+                        Some(project_key.as_str()),
+                        "row for {id} must carry the canonical project key"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A hint over the per-session budget resolves to a single `suppressed_budget`
+    /// terminal, and no hint is returned to the caller.
+    #[test]
+    fn budget_exhaustion_records_suppressed_budget_terminal() {
+        let _lock = super::test_env_lock().lock().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let profile = tempfile::tempdir().unwrap();
+        let project_root = project.path().canonicalize().unwrap();
+        let profile_root = profile.path().canonicalize().unwrap();
+        let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
+        let data_root = enroll_project(&project_root, "proj_budget");
+
+        let session = "session-budget".to_string();
+        // Fill the budget with distinct categories.
+        let categories = [
+            HintCategory::Search,
+            HintCategory::FileRead,
+            HintCategory::Impact,
+        ];
+        assert_eq!(categories.len(), MAX_HINTS_PER_SESSION);
+        for category in categories {
+            let hint = ToolHint {
+                category,
+                message: "m".to_string(),
+                context: "c".to_string(),
+                nonblocking: true,
+            };
+            assert!(deduped_project_hint_with_id(
+                Some(project_root.clone()),
+                HintAgent::Cursor,
+                Some(session.clone()),
+                &mint_hint_id(),
+                hint,
+            )
+            .is_some());
+        }
+
+        // A fourth, not-yet-seen category is over budget (test_hint's Impact is
+        // already spent above, so use a distinct category to isolate the budget
+        // branch from the duplicate branch).
+        let over_id = mint_hint_id();
+        let over = deduped_project_hint_with_id(
+            Some(project_root.clone()),
+            HintAgent::Cursor,
+            Some(session.clone()),
+            &over_id,
+            ToolHint {
+                category: HintCategory::CallGraph,
+                message: "m".to_string(),
+                context: "c".to_string(),
+                nonblocking: true,
+            },
+        );
+        assert!(over.is_none(), "over-budget hint must be suppressed");
+
+        let rows = recorded_rows(&data_root, &profile_root);
+        let terminals: Vec<&str> = events_for(&rows, &over_id)
+            .iter()
+            .map(|row| event_kind(row))
+            .filter(|kind| TERMINAL_EVENTS.contains(kind))
+            .collect();
+        assert_eq!(terminals, vec!["suppressed_budget"]);
+    }
+
+    /// Repeated native usage past the escalation threshold surfaces exactly one
+    /// stronger re-hint recorded as `hint_escalated`, with the escalation prefix.
+    #[test]
+    fn repeated_usage_records_hint_escalated_terminal() {
+        let _lock = super::test_env_lock().lock().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let profile = tempfile::tempdir().unwrap();
+        let project_root = project.path().canonicalize().unwrap();
+        let profile_root = profile.path().canonicalize().unwrap();
+        let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
+        let data_root = enroll_project(&project_root, "proj_escalate");
+
+        let session = "session-escalate".to_string();
+        let emit = |id: &str| {
+            deduped_project_hint_with_id(
+                Some(project_root.clone()),
+                HintAgent::Cursor,
+                Some(session.clone()),
+                id,
+                test_hint(),
+            )
+        };
+
+        // First fire emits; the next fires below the threshold are silent; the
+        // threshold fire escalates.
+        assert!(emit(&mint_hint_id()).is_some(), "first fire emits");
+        assert!(
+            emit(&mint_hint_id()).is_none(),
+            "below-threshold fire silent"
+        );
+        assert!(
+            emit(&mint_hint_id()).is_none(),
+            "below-threshold fire silent"
+        );
+
+        let escalate_id = mint_hint_id();
+        let escalated = emit(&escalate_id).expect("threshold fire escalates");
+        assert!(
+            escalated.message.starts_with("Repeated native"),
+            "escalation must carry the stronger prefix: {}",
+            escalated.message
+        );
+
+        // A further fire is permanently silent.
+        assert!(
+            emit(&mint_hint_id()).is_none(),
+            "post-escalation fire silent"
+        );
+
+        let rows = recorded_rows(&data_root, &profile_root);
+        let terminals: Vec<&str> = events_for(&rows, &escalate_id)
+            .iter()
+            .map(|row| event_kind(row))
+            .filter(|kind| TERMINAL_EVENTS.contains(kind))
+            .collect();
+        assert_eq!(terminals, vec!["hint_escalated"]);
+    }
 }
 
 #[cfg(test)]

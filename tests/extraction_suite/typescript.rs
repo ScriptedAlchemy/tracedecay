@@ -810,3 +810,226 @@ enum Direction {
     assert_eq!(enums.len(), 1);
     assert_eq!(enums[0].visibility, Visibility::Private); // not exported
 }
+
+// ── Test-framework attribution (describe/it/test) ───────────────────────────
+
+/// Helper: collect Function nodes emitted for a source.
+fn ts_functions(result: &ExtractionResult) -> Vec<&Node> {
+    result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Function)
+        .collect()
+}
+
+/// Helper: does any Calls unresolved ref from `from_id` target `name`?
+fn has_call_ref(result: &ExtractionResult, from_id: &str, name: &str) -> bool {
+    result.unresolved_refs.iter().any(|r| {
+        r.reference_kind == EdgeKind::Calls && r.from_node_id == from_id && r.reference_name == name
+    })
+}
+
+/// Helper: find a Contains edge source->target.
+fn has_contains(result: &ExtractionResult, source: &str, target: &str) -> bool {
+    result
+        .edges
+        .iter()
+        .any(|e| e.kind == EdgeKind::Contains && e.source == source && e.target == target)
+}
+
+#[test]
+fn test_ts_describe_it_creates_function_named_by_title_with_calls() {
+    // Nested describe > describe > it, where it() calls an imported function.
+    let source = r#"
+import { add } from "./math";
+
+describe('math', () => {
+  describe('add', () => {
+    it('adds two numbers', () => {
+      const result = add(1, 2);
+    });
+  });
+});
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract("math.test.ts", source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let fns = ts_functions(&result);
+    // Three test nodes: the two describes and the it.
+    let describe_math = fns
+        .iter()
+        .find(|f| f.name == "math")
+        .expect("math describe");
+    let describe_add = fns.iter().find(|f| f.name == "add").expect("add describe");
+    let it_node = fns
+        .iter()
+        .find(|f| f.name == "adds two numbers")
+        .expect("it title node");
+
+    // The it-callback's call site is attributed to the it node, not the describe.
+    assert!(
+        has_call_ref(&result, &it_node.id, "add"),
+        "it node should have a Calls ref to add; refs: {:?}",
+        result.unresolved_refs
+    );
+
+    // Contains chain: math > add > it.
+    assert!(
+        has_contains(&result, &describe_math.id, &describe_add.id),
+        "math describe should contain add describe"
+    );
+    assert!(
+        has_contains(&result, &describe_add.id, &it_node.id),
+        "add describe should contain the it node"
+    );
+
+    // The test nodes are marked public/callable.
+    assert_eq!(it_node.visibility, Visibility::Pub);
+}
+
+#[test]
+fn test_ts_helper_inside_describe_is_extracted() {
+    let source = r#"
+describe('suite', () => {
+  function makeUser(name: string) {
+    return build(name);
+  }
+  it('uses helper', () => {
+    const u = makeUser('a');
+  });
+});
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract("s.test.ts", source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    // Helper function inside describe becomes its own Function node.
+    let helper = ts_functions(&result)
+        .into_iter()
+        .find(|f| f.name == "makeUser")
+        .expect("makeUser helper node");
+
+    // The helper's own body call (build) is attributed to the helper,
+    // NOT double-counted onto the describe test node.
+    assert!(
+        has_call_ref(&result, &helper.id, "build"),
+        "helper should own its build() call"
+    );
+    let describe = ts_functions(&result)
+        .into_iter()
+        .find(|f| f.name == "suite")
+        .expect("suite describe");
+    assert!(
+        !has_call_ref(&result, &describe.id, "build"),
+        "describe should not double-count the helper's build() call"
+    );
+
+    // The it node still captures the makeUser() call site.
+    let it_node = ts_functions(&result)
+        .into_iter()
+        .find(|f| f.name == "uses helper")
+        .expect("it node");
+    assert!(has_call_ref(&result, &it_node.id, "makeUser"));
+}
+
+#[test]
+fn test_ts_test_modifiers_and_titles() {
+    let source = r#"
+describe('mods', () => {
+  it.only('focused', () => { focused(); });
+  test.skip('skipped', () => { skipped(); });
+  it.each([1, 2])('param', (n) => { paramd(n); });
+  test.each([1])('curried')('curried title', () => { curriedFn(); });
+  it('async case', async () => { await asyncFn(); });
+  it('expr body', () => exprCall());
+});
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract("mods.test.ts", source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let fns = ts_functions(&result);
+    let by_name = |name: &str| fns.iter().find(|f| f.name == name).copied();
+
+    let focused = by_name("focused").expect("it.only title -> focused");
+    assert!(has_call_ref(&result, &focused.id, "focused"));
+
+    let skipped = by_name("skipped").expect("test.skip title -> skipped");
+    assert!(has_call_ref(&result, &skipped.id, "skipped"));
+
+    let param = by_name("param").expect("it.each title -> param");
+    assert!(has_call_ref(&result, &param.id, "paramd"));
+
+    // Curried test.each([...])('title', fn) uses the SECOND arg list's title.
+    let curried = by_name("curried title").expect("curried title node");
+    assert!(has_call_ref(&result, &curried.id, "curriedFn"));
+
+    let async_case = by_name("async case").expect("async case node");
+    assert!(async_case.is_async, "async callback should mark node async");
+    assert!(has_call_ref(&result, &async_case.id, "asyncFn"));
+
+    // Expression-bodied callback still attributes its call.
+    let expr = by_name("expr body").expect("expr body node");
+    assert!(
+        has_call_ref(&result, &expr.id, "exprCall"),
+        "expression-bodied it callback should attribute exprCall"
+    );
+}
+
+#[test]
+fn test_ts_it_todo_has_no_callback_but_creates_node() {
+    let source = r#"
+describe('todos', () => {
+  it.todo('later');
+});
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract("todo.test.ts", source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    // it.todo has no callback -> a node is still emitted for the title,
+    // but no calls are attributed.
+    let later = ts_functions(&result)
+        .into_iter()
+        .find(|f| f.name == "later");
+    assert!(later.is_some(), "it.todo should still emit a titled node");
+}
+
+#[test]
+fn test_ts_function_expression_callback_and_template_title() {
+    let source = r#"
+describe('fnexpr', function () {
+  it(`templated ${'x'} title`, function () { fromFnExpr(); });
+});
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract("fnexpr.test.ts", source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    // The template-literal title is captured (backticks stripped).
+    let node = ts_functions(&result)
+        .into_iter()
+        .find(|f| f.name.contains("templated"))
+        .expect("templated title node");
+    assert!(has_call_ref(&result, &node.id, "fromFnExpr"));
+}
+
+#[test]
+fn test_ts_expression_bodied_arrow_extracts_calls() {
+    // FIX 3: expression-bodied arrow (no statement_block) still extracts calls.
+    let source = r#"
+export const compute = (x: number) => transform(x);
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract("compute.ts", source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let arrow = result
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::ArrowFunction && n.name == "compute")
+        .expect("compute arrow");
+    assert!(
+        has_call_ref(&result, &arrow.id, "transform"),
+        "expression-bodied arrow should attribute transform() call"
+    );
+}

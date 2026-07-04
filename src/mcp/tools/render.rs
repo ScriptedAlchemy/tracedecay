@@ -5,6 +5,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use crate::display::format_relative_time;
 use crate::mcp::response_handles::{
     note_response_handle_store_skipped_no_project_root, observe_response_truncation,
     store_response_handle, ResponseHandleRecord, RESPONSE_HANDLE_TTL_SECS, RESPONSE_RETRIEVE_TOOL,
@@ -384,25 +385,126 @@ fn is_id_key(k: &str) -> bool {
     matches!(k, "id" | "node_id" | "qualified_name" | "signature") || k.ends_with("_id")
 }
 
+/// True for keys that carry a UNIX epoch timestamp worth humanizing
+/// (e.g. `created_at`, `last_sync_time`, `expires_at`).
+fn is_timestamp_key(k: &str) -> bool {
+    k.ends_with("_at") || k.ends_with("_time") || k == "timestamp"
+}
+
 fn is_scalar(v: &Value) -> bool {
     !v.is_array() && !v.is_object()
+}
+
+/// Rounds a float to at most two decimals, trimming trailing zeros so
+/// integers stay integer-looking. Fixes 16-digit score noise
+/// (`similar/branch_search`).
+fn format_score(f: f64) -> String {
+    if f.is_finite() && f.fract() == 0.0 && f.abs() < 1e15 {
+        return format!("{}", f as i64);
+    }
+    let s = format!("{f:.2}");
+    let trimmed = s.trim_end_matches('0').trim_end_matches('.');
+    trimmed.to_string()
 }
 
 fn scalar_str(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
+        Value::Number(n) => {
+            if let Some(f) = n.as_f64() {
+                if n.as_i64().is_none() && n.as_u64().is_none() {
+                    return format_score(f);
+                }
+            }
+            n.to_string()
+        }
         Value::Bool(b) => b.to_string(),
         Value::Null => String::new(),
         _ => serde_json::to_string(v).unwrap_or_default(),
     }
 }
 
+/// Key-aware scalar rendering: humanizes epoch timestamps for `*_at`/`*_time`
+/// keys and otherwise defers to [`scalar_str`] (which rounds floats).
+fn scalar_str_keyed(key: &str, v: &Value) -> String {
+    if is_timestamp_key(key) {
+        if let Some(ts) = v.as_u64() {
+            if ts > 100_000_000 {
+                return format!("{} ({ts})", format_relative_time(ts));
+            }
+        }
+    }
+    scalar_str(v)
+}
+
+/// Renders a nested JSON value into a single table cell without dumping raw
+/// JSON. Arrays of objects become `name (file:line)`-style summaries; plain
+/// objects become compact `k=v` strings; arrays of scalars are comma-joined.
+fn nested_cell_str(v: &Value) -> String {
+    const MAX_ITEMS: usize = 3;
+
+    match v {
+        Value::Array(arr) => {
+            if arr.is_empty() {
+                return "none".to_string();
+            }
+            let shown: Vec<String> = arr
+                .iter()
+                .take(MAX_ITEMS)
+                .map(|e| match e {
+                    Value::Object(obj) => summarize_object(obj),
+                    _ => scalar_str(e),
+                })
+                .collect();
+            if arr.len() > MAX_ITEMS {
+                format!(
+                    "{} … (+{} more, {} total)",
+                    shown.join("; "),
+                    arr.len() - MAX_ITEMS,
+                    arr.len()
+                )
+            } else {
+                shown.join("; ")
+            }
+        }
+        Value::Object(obj) => summarize_object(obj),
+        _ => scalar_str(v),
+    }
+}
+
+/// Compact one-line summary of an object for a table cell. Prefers a
+/// `name (file:line)` shape when those keys exist, else `k=v` pairs.
+fn summarize_object(obj: &serde_json::Map<String, Value>) -> String {
+    let name = obj
+        .get("name")
+        .and_then(Value::as_str)
+        .or_else(|| obj.get("id").and_then(Value::as_str));
+    let file = obj.get("file").and_then(Value::as_str);
+    let line = obj.get("line").and_then(Value::as_i64);
+    if let Some(name) = name {
+        return match (file, line) {
+            (Some(f), Some(l)) => format!("{name} ({f}:{l})"),
+            (Some(f), None) => format!("{name} ({f})"),
+            _ => name.to_string(),
+        };
+    }
+    let pairs: Vec<String> = obj
+        .iter()
+        .filter(|(_, v)| is_scalar(v))
+        .map(|(k, v)| format!("{k}={}", scalar_str(v)))
+        .collect();
+    if pairs.is_empty() {
+        "{…}".to_string()
+    } else {
+        pairs.join(", ")
+    }
+}
+
 fn cell_str(key: &str, v: &Value) -> String {
     let s = if is_scalar(v) {
-        scalar_str(v)
+        scalar_str_keyed(key, v)
     } else {
-        serde_json::to_string(v).unwrap_or_default()
+        nested_cell_str(v)
     };
     if is_id_key(key) && !s.is_empty() {
         format!("`{s}`")
@@ -431,26 +533,7 @@ fn render_array(md: &mut Md, arr: &[Value], depth: u8) {
         return;
     }
     if arr.iter().all(Value::is_object) {
-        let mut cols: Vec<String> = Vec::new();
-        for e in arr {
-            if let Some(obj) = e.as_object() {
-                for k in obj.keys() {
-                    if !cols.contains(k) {
-                        cols.push(k.clone());
-                    }
-                }
-            }
-        }
-        let headers: Vec<&str> = cols.iter().map(String::as_str).collect();
-        let rows: Vec<Vec<String>> = arr
-            .iter()
-            .map(|e| {
-                cols.iter()
-                    .map(|c| cell_str(c, e.get(c).unwrap_or(&Value::Null)))
-                    .collect()
-            })
-            .collect();
-        md.table(&headers, &rows);
+        render_object_array_table(md, arr);
     } else {
         for e in arr {
             if is_scalar(e) {
@@ -461,6 +544,81 @@ fn render_array(md: &mut Md, arr: &[Value], depth: u8) {
             }
         }
     }
+}
+
+/// Preferred left-to-right ordering for well-known columns; everything else
+/// sorts alphabetically after these.
+const PREFERRED_COLUMNS: &[&str] = &["name", "kind", "file", "line", "id", "signature"];
+
+fn column_rank(col: &str) -> (usize, &str) {
+    match PREFERRED_COLUMNS.iter().position(|c| *c == col) {
+        Some(i) => (i, col),
+        None => (PREFERRED_COLUMNS.len(), col),
+    }
+}
+
+/// Renders an array of objects as a markdown table with three refinements:
+/// columns are ordered (preferred keys first, rest alphabetical), columns that
+/// are empty in every row are dropped, and columns whose value is constant
+/// across every row are hoisted into a header line (`edge_kind: calls`) rather
+/// than repeated in each cell.
+fn render_object_array_table(md: &mut Md, arr: &[Value]) {
+    // Collect the union of keys.
+    let mut cols: Vec<String> = Vec::new();
+    for e in arr {
+        if let Some(obj) = e.as_object() {
+            for k in obj.keys() {
+                if !cols.contains(k) {
+                    cols.push(k.clone());
+                }
+            }
+        }
+    }
+    cols.sort_by(|a, b| column_rank(a).cmp(&column_rank(b)));
+
+    // Precompute each cell's rendered string once.
+    let rendered: Vec<Vec<String>> = arr
+        .iter()
+        .map(|e| {
+            cols.iter()
+                .map(|c| cell_str(c, e.get(c).unwrap_or(&Value::Null)))
+                .collect()
+        })
+        .collect();
+
+    // Drop columns empty in every row; hoist columns constant across all rows.
+    let mut hoisted: Vec<(String, String)> = Vec::new();
+    let mut keep: Vec<usize> = Vec::new();
+    for (ci, col) in cols.iter().enumerate() {
+        let all_empty = rendered.iter().all(|row| row[ci].is_empty());
+        if all_empty {
+            continue;
+        }
+        let first = &rendered[0][ci];
+        let constant = rendered.len() > 1 && rendered.iter().all(|row| &row[ci] == first);
+        if constant {
+            hoisted.push((col.clone(), first.clone()));
+        } else {
+            keep.push(ci);
+        }
+    }
+
+    for (col, val) in &hoisted {
+        md.field(col, val);
+    }
+    if !hoisted.is_empty() && !keep.is_empty() {
+        md.blank();
+    }
+
+    if keep.is_empty() {
+        return;
+    }
+    let headers: Vec<&str> = keep.iter().map(|&ci| cols[ci].as_str()).collect();
+    let rows: Vec<Vec<String>> = rendered
+        .iter()
+        .map(|row| keep.iter().map(|&ci| row[ci].clone()).collect())
+        .collect();
+    md.table(&headers, &rows);
 }
 
 fn compact_path_array(arr: &[Value]) -> Option<String> {
@@ -492,14 +650,29 @@ fn looks_like_path(value: &str) -> bool {
         && (trimmed.contains('/') || trimmed.contains('\\'))
 }
 
+fn is_empty_collection(v: &Value) -> bool {
+    matches!(v, Value::Array(a) if a.is_empty()) || matches!(v, Value::Object(o) if o.is_empty())
+}
+
 fn render_object(md: &mut Md, map: &serde_json::Map<String, Value>, depth: u8) {
     for (k, v) in map {
         if is_scalar(v) {
-            md.field(k, &cell_str(k, v));
+            let cell = cell_str(k, v);
+            // Omit empty scalar fields entirely (no bare "**docstring:** ").
+            if cell.is_empty() {
+                continue;
+            }
+            md.field(k, &cell);
         }
     }
     for (k, v) in map {
         if is_scalar(v) {
+            continue;
+        }
+        // Empty collections collapse to a single "section: none" line rather
+        // than a bare heading with no body.
+        if is_empty_collection(v) {
+            md.line(&format!("{k}: none"));
             continue;
         }
         md.blank().heading(depth.min(6), k);
@@ -716,7 +889,9 @@ mod tests {
             {"id": "function:def", "name": "bar", "line": 20}
         ]);
         let out = generic_md(&v);
-        assert!(out.contains("| id | line | name |"));
+        // Preferred column order follows PREFERRED_COLUMNS
+        // (name, kind, file, line, id, ...), so `line` sorts ahead of `id`.
+        assert!(out.contains("| name | line | id |"), "got: {out}");
         assert!(out.contains("`function:abc`"), "id should be backticked");
         assert!(out.contains("foo"));
     }
@@ -732,7 +907,8 @@ mod tests {
         assert!(out.contains("**total:** 3"));
         assert!(out.contains("**name:** demo"));
         assert!(out.contains("## items"));
-        assert!(out.contains("| count | file |"));
+        // `file` is a preferred column so it sorts ahead of `count`.
+        assert!(out.contains("| file | count |"), "got: {out}");
     }
 
     #[test]
@@ -765,6 +941,146 @@ mod tests {
 
         assert!(out.contains("- first warning"));
         assert!(out.contains("- second warning"));
+    }
+
+    #[test]
+    fn format_score_rounds_and_trims() {
+        assert_eq!(format_score(0.123_456_789_012_345), "0.12");
+        assert_eq!(format_score(1.0), "1");
+        assert_eq!(format_score(1.5), "1.5");
+        assert_eq!(format_score(2.50), "2.5");
+        assert_eq!(format_score(0.0), "0");
+    }
+
+    #[test]
+    fn generic_md_rounds_float_scores() {
+        // 16-digit similarity scores must not leak into the table.
+        let v = json!([{ "name": "foo", "score": 0.876_543_210_987_654_3 }]);
+        let out = generic_md(&v);
+        assert!(out.contains("0.88"), "got: {out}");
+        assert!(!out.contains("0.8765432"), "raw float leaked: {out}");
+    }
+
+    #[test]
+    fn generic_md_humanizes_timestamp_keys() {
+        let v = json!({ "created_at": 100_000_100u64 });
+        let out = generic_md(&v);
+        assert!(out.contains("ago"), "expected relative age, got: {out}");
+        assert!(
+            out.contains("100000100"),
+            "should keep raw epoch too: {out}"
+        );
+    }
+
+    #[test]
+    fn generic_md_leaves_small_numbers_untouched_for_timestamp_keys() {
+        // A tiny value under the epoch threshold is not a real timestamp.
+        let v = json!({ "wait_time": 5 });
+        let out = generic_md(&v);
+        assert!(out.contains("**wait_time:** 5"), "got: {out}");
+    }
+
+    #[test]
+    fn nested_array_of_objects_becomes_summary_cell() {
+        let v = json!([{
+            "name": "outer",
+            "callers": [
+                { "name": "a", "file": "x.rs", "line": 1 },
+                { "name": "b", "file": "y.rs", "line": 2 }
+            ]
+        }]);
+        let out = generic_md(&v);
+        assert!(out.contains("a (x.rs:1)"), "got: {out}");
+        assert!(out.contains("b (y.rs:2)"), "got: {out}");
+        assert!(!out.contains("[{"), "raw JSON leaked into cell: {out}");
+    }
+
+    #[test]
+    fn nested_array_summary_truncates_with_count() {
+        let v = json!([{
+            "name": "outer",
+            "items": [
+                {"name": "a"}, {"name": "b"}, {"name": "c"}, {"name": "d"}
+            ]
+        }]);
+        let out = generic_md(&v);
+        assert!(out.contains("+1 more"), "got: {out}");
+        assert!(out.contains("4 total"), "got: {out}");
+    }
+
+    #[test]
+    fn nested_object_becomes_kv_cell() {
+        let v = json!([{ "name": "row", "meta": { "a": 1, "b": "two" } }]);
+        let out = generic_md(&v);
+        assert!(out.contains("a=1"), "got: {out}");
+        assert!(out.contains("b=two"), "got: {out}");
+        assert!(!out.contains("{\"a\""), "raw JSON leaked: {out}");
+    }
+
+    #[test]
+    fn table_columns_use_preferred_order() {
+        let v = json!([{ "line": 5, "name": "foo", "file": "a.rs", "extra": "z", "kind": "fn" }]);
+        let out = generic_md(&v);
+        let header = out.lines().find(|l| l.starts_with("| name")).unwrap();
+        // name, kind, file, line come first; unknown `extra` sorts after.
+        assert_eq!(
+            header, "| name | kind | file | line | extra |",
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn table_drops_all_empty_columns() {
+        let v = json!([
+            { "name": "foo", "doc": "", "line": 1 },
+            { "name": "bar", "doc": "", "line": 2 }
+        ]);
+        let out = generic_md(&v);
+        assert!(
+            !out.contains("doc"),
+            "empty column should be dropped: {out}"
+        );
+        assert!(out.contains("| name | line |"), "got: {out}");
+    }
+
+    #[test]
+    fn table_hoists_constant_columns() {
+        let v = json!([
+            { "name": "foo", "edge_kind": "calls" },
+            { "name": "bar", "edge_kind": "calls" }
+        ]);
+        let out = generic_md(&v);
+        assert!(
+            out.contains("**edge_kind:** calls"),
+            "constant not hoisted: {out}"
+        );
+        // It should not also appear as a table column.
+        assert!(
+            !out.contains("| edge_kind"),
+            "constant leaked into table: {out}"
+        );
+        assert!(out.contains("| name |"), "got: {out}");
+    }
+
+    #[test]
+    fn object_omits_empty_scalar_fields() {
+        let v = json!({ "name": "x", "docstring": "" });
+        let out = generic_md(&v);
+        assert!(out.contains("**name:** x"), "got: {out}");
+        assert!(
+            !out.contains("docstring"),
+            "empty scalar should be omitted: {out}"
+        );
+    }
+
+    #[test]
+    fn object_collapses_empty_collections_to_one_line() {
+        let v = json!({ "name": "x", "callers": [], "meta": {} });
+        let out = generic_md(&v);
+        assert!(out.contains("callers: none"), "got: {out}");
+        assert!(out.contains("meta: none"), "got: {out}");
+        // No bare heading for the empty collection.
+        assert!(!out.contains("## callers"), "got: {out}");
     }
 
     #[test]

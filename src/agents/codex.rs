@@ -1482,6 +1482,48 @@ fn codex_hook_present(hooks: &serde_json::Value, event: &str, command: &str) -> 
 mod tests {
     use super::*;
 
+    /// The repo-local `hooks-codex.json` ships an empty `hooks` object plus a
+    /// self-documenting `description`. Rendering the global bundle must fill the
+    /// object from `CODEX_MANAGED_HOOKS` while leaving the description intact,
+    /// and must never invent hooks the managed table does not declare.
+    #[test]
+    fn codex_plugin_hooks_fills_empty_seed_and_preserves_description() {
+        let raw = codex_embedded_plugin_files()
+            .into_iter()
+            .find_map(|(relative, contents)| (relative == "hooks/hooks.json").then_some(contents))
+            .expect("codex bundle ships hooks/hooks.json");
+
+        // The seed template is genuinely empty (it is not dead weight: it is the
+        // base the renderer mutates in place).
+        let seed: serde_json::Value = serde_json::from_str(raw).unwrap();
+        assert_eq!(seed["hooks"], json!({}));
+        assert!(
+            seed["description"]
+                .as_str()
+                .unwrap()
+                .contains("no lifecycle hooks"),
+            "empty seed must carry a self-documenting description"
+        );
+
+        let rendered = codex_plugin_hooks(raw, "/usr/local/bin/tracedecay").unwrap();
+        let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        // The description survives rendering (Codex's loader ignores it).
+        assert_eq!(value["description"], seed["description"]);
+        let hooks = value["hooks"].as_object().unwrap();
+        for managed in CODEX_MANAGED_HOOKS {
+            assert!(
+                hooks.contains_key(managed.event),
+                "rendered global bundle missing managed event {}",
+                managed.event
+            );
+        }
+        assert_eq!(
+            hooks.len(),
+            CODEX_MANAGED_HOOKS.len(),
+            "rendered bundle must register exactly the managed hooks"
+        );
+    }
+
     #[test]
     fn native_memories_injection_detection_covers_config_shapes() {
         let parse = |raw: &str| toml::from_str::<toml::Value>(raw).unwrap();
@@ -1653,7 +1695,7 @@ trusted_hash = "sha256:compact"
             .map(|(relative, _)| relative.to_string())
             .collect();
 
-        // Every skill dir under plugin/skills is deployed by Codex (all 29).
+        // Every skill dir under plugin/skills is deployed by Codex (all 13).
         let skills_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/skills");
         let mut skill_dirs: Vec<String> = std::fs::read_dir(&skills_root)
             .expect("plugin/skills should be readable")
@@ -1662,7 +1704,7 @@ trusted_hash = "sha256:compact"
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
         skill_dirs.sort();
-        assert_eq!(skill_dirs.len(), 30, "expected 30 shared skill dirs");
+        assert_eq!(skill_dirs.len(), 13, "expected 13 shared skill dirs");
         // Every file under plugin/skills/ (SKILL.md *and* any support files) is
         // deployed — the recursive embed leaves nothing on disk unwired.
         for relative in skill_tree_files(&skills_root) {

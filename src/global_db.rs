@@ -95,6 +95,8 @@ pub struct AnalyticsEventQuery {
     pub project_id: Option<String>,
     pub session_id: Option<String>,
     pub event_kind: Option<String>,
+    /// Inclusive lower bound on `timestamp` (unix seconds). `None` = unbounded.
+    pub since: Option<i64>,
     pub limit: usize,
 }
 
@@ -1018,6 +1020,9 @@ impl GlobalDb {
         crate::sessions::lcm::schema::ensure_lcm_schema(&db.conn)
             .await
             .ok()?;
+        crate::sessions::git_correlation::ensure_git_correlation_schema(&db.conn)
+            .await
+            .ok()?;
         // One-off self-heal: re-derive timestamps and token-usage counters
         // for legacy messages ingested before extraction existed.
         // Marker-guarded (runs once per store) and fail-open, like the LCM
@@ -1531,6 +1536,42 @@ impl GlobalDb {
         projects
     }
 
+    /// Returns registered code projects whose `last_seen_at` is within the last
+    /// `since_secs` seconds, most-recently-seen first, capped at `limit`.
+    ///
+    /// Used by the git-metadata watcher to register only projects seen recently
+    /// (e.g. within 14 days), bounded by `watch_max_projects`.
+    pub async fn code_projects_seen_within(
+        &self,
+        since_secs: i64,
+        limit: usize,
+    ) -> Vec<CodeProjectRecord> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let cutoff = crate::tracedecay::current_timestamp().saturating_sub(since_secs);
+        let Ok(mut rows) = self
+            .conn
+            .query(
+                "SELECT project_id, canonical_root, display_root, git_common_dir,
+                        git_remote_url, default_branch, created_at, last_seen_at
+                 FROM code_projects
+                 WHERE last_seen_at >= ?1
+                 ORDER BY last_seen_at DESC, project_id
+                 LIMIT ?2",
+                params![cutoff, limit],
+            )
+            .await
+        else {
+            return Vec::new();
+        };
+        let mut projects = Vec::new();
+        while let Ok(Some(row)) = rows.next().await {
+            if let Some(project) = row_to_code_project(&row, 0) {
+                projects.push(project);
+            }
+        }
+        projects
+    }
+
     /// Removes registered code-project rows by exact project id.
     ///
     /// Dependent registry rows in `project_aliases`, `store_instances`,
@@ -1880,11 +1921,9 @@ impl GlobalDb {
     /// filter by canonical project path. Returns zeros on any DB error.
     pub async fn sum_savings(&self, project: Option<&str>, since: i64) -> SavingsTotal {
         let project = project.map(|p| Self::canonical_project_key(Path::new(p)));
-        let sql_with_project =
-            "SELECT COALESCE(SUM(CASE WHEN before_tokens > after_tokens THEN before_tokens - after_tokens ELSE 0 END), 0), COUNT(*) \
+        let sql_with_project = "SELECT COALESCE(SUM(CASE WHEN before_tokens > after_tokens THEN before_tokens - after_tokens ELSE 0 END), 0), COUNT(*) \
              FROM savings_ledger WHERE project_path = ?1 AND ts >= ?2";
-        let sql_all =
-            "SELECT COALESCE(SUM(CASE WHEN before_tokens > after_tokens THEN before_tokens - after_tokens ELSE 0 END), 0), COUNT(*) \
+        let sql_all = "SELECT COALESCE(SUM(CASE WHEN before_tokens > after_tokens THEN before_tokens - after_tokens ELSE 0 END), 0), COUNT(*) \
              FROM savings_ledger WHERE ts >= ?1";
 
         let rows = match project.as_deref() {
@@ -1912,14 +1951,12 @@ impl GlobalDb {
     /// Group ledger entries by UTC calendar day. Newest-first.
     pub async fn savings_history(&self, project: Option<&str>, since: i64) -> Vec<SavingsDay> {
         let project = project.map(|p| Self::canonical_project_key(Path::new(p)));
-        let sql_with_project =
-            "SELECT (ts/86400)*86400 AS day, \
+        let sql_with_project = "SELECT (ts/86400)*86400 AS day, \
                     COALESCE(SUM(CASE WHEN before_tokens > after_tokens THEN before_tokens - after_tokens ELSE 0 END), 0), \
                     COUNT(*) \
              FROM savings_ledger WHERE project_path = ?1 AND ts >= ?2 \
              GROUP BY day ORDER BY day DESC";
-        let sql_all =
-            "SELECT (ts/86400)*86400 AS day, \
+        let sql_all = "SELECT (ts/86400)*86400 AS day, \
                     COALESCE(SUM(CASE WHEN before_tokens > after_tokens THEN before_tokens - after_tokens ELSE 0 END), 0), \
                     COUNT(*) \
              FROM savings_ledger WHERE ts >= ?1 \
@@ -2240,6 +2277,10 @@ impl GlobalDb {
             ("event_kind", query.event_kind.as_deref()),
         ] {
             push_optional_analytics_filter(&mut clauses, &mut values, column, value);
+        }
+        if let Some(since) = query.since {
+            values.push(Value::Integer(since));
+            clauses.push(format!("timestamp >= ?{}", values.len()));
         }
         if !clauses.is_empty() {
             sql.push_str(" WHERE ");
@@ -3165,6 +3206,83 @@ impl GlobalDb {
             .await
     }
 
+    // ── Session ↔ git correlation ────────────────────────────────────
+
+    /// Folds one live/backfilled git observation into the span table.
+    /// See [`crate::sessions::git_correlation::record_span_observation`].
+    pub async fn git_record_span_observation(
+        &self,
+        observation: &crate::sessions::git_correlation::SpanObservation,
+        merge_gap_secs: i64,
+    ) -> Result<i64, crate::sessions::git_correlation::GitCorrelationError> {
+        crate::sessions::git_correlation::record_span_observation(
+            &self.conn,
+            observation,
+            merge_gap_secs,
+        )
+        .await
+    }
+
+    /// Attributes one commit to one session (idempotent).
+    /// See [`crate::sessions::git_correlation::upsert_commit_session`].
+    pub async fn git_upsert_commit_session(
+        &self,
+        record: &crate::sessions::git_correlation::CommitSessionRecord,
+    ) -> Result<bool, crate::sessions::git_correlation::GitCorrelationError> {
+        crate::sessions::git_correlation::upsert_commit_session(&self.conn, record).await
+    }
+
+    /// Runs the commit-attribution sweep, delegating branch-scoped git log
+    /// reads to `scan`. See
+    /// [`crate::sessions::git_correlation::run_commit_attribution_sweep`].
+    pub async fn git_run_commit_attribution_sweep<F>(
+        &self,
+        gap_secs: i64,
+        scan: F,
+    ) -> Result<usize, crate::sessions::git_correlation::GitCorrelationError>
+    where
+        F: FnMut(
+            &crate::sessions::git_correlation::SpanScanTarget,
+        ) -> Vec<crate::sessions::git_correlation::ScannedCommit>,
+    {
+        crate::sessions::git_correlation::run_commit_attribution_sweep(&self.conn, gap_secs, scan)
+            .await
+    }
+
+    /// Returns sessions correlated with a branch, worktree, or commit.
+    /// See [`crate::sessions::git_correlation::sessions_for`].
+    pub async fn git_sessions_for(
+        &self,
+        query: &crate::sessions::git_correlation::SessionsForQuery,
+    ) -> Result<
+        Vec<crate::sessions::git_correlation::SessionGitCorrelationHit>,
+        crate::sessions::git_correlation::GitCorrelationError,
+    > {
+        crate::sessions::git_correlation::sessions_for(&self.conn, query).await
+    }
+
+    /// Resolves the `(provider, session_id)` pairs matching a git-scope filter.
+    /// See [`crate::sessions::git_correlation::session_ids_for_scope`].
+    pub async fn git_session_ids_for_scope(
+        &self,
+        filter: &crate::sessions::git_correlation::GitScopeFilter,
+    ) -> Result<Option<Vec<(String, String)>>, crate::sessions::git_correlation::GitCorrelationError>
+    {
+        crate::sessions::git_correlation::session_ids_for_scope(&self.conn, filter).await
+    }
+
+    /// Lists per-session activity windows for the historical git-correlation
+    /// backfill: each row carries the session's declared `started_at`/`ended_at`
+    /// plus the min/max `session_messages.timestamp`, so the caller can derive
+    /// coarse activity windows without a second query per session. Ordered
+    /// newest-first (by the latest known activity), capped at `limit`.
+    pub async fn session_activity_rows(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<crate::sessions::git_correlation::SessionActivityRow>, String> {
+        crate::sessions::git_correlation::session_activity_rows(&self.conn, limit).await
+    }
+
     /// Searches message text for a provider, optionally constrained to one project.
     pub async fn search_session_messages(
         &self,
@@ -3198,6 +3316,32 @@ impl GlobalDb {
             query,
             limit,
             filters,
+            None,
+        )
+        .await
+    }
+
+    /// Like [`Self::search_session_messages_filtered`], additionally scoping
+    /// hits to sessions correlated with a git branch/worktree/commit via
+    /// EXISTS pushdown against the git-correlation tables. Pass `provider =
+    /// None` to search all providers. A git-scoped call against a store
+    /// predating the correlation schema returns no hits.
+    pub async fn search_session_messages_git_scoped(
+        &self,
+        provider: Option<&str>,
+        project_key: Option<&str>,
+        query: &str,
+        limit: usize,
+        filters: SessionSearchFilters<'_>,
+        git_filter: &crate::sessions::git_correlation::GitScopeFilter,
+    ) -> Vec<SessionMessageSearchResult> {
+        self.search_session_messages_filtered_inner(
+            provider,
+            project_key,
+            query,
+            limit,
+            filters,
+            Some(git_filter),
         )
         .await
     }
@@ -3210,7 +3354,7 @@ impl GlobalDb {
         limit: usize,
         filters: SessionSearchFilters<'_>,
     ) -> Vec<SessionMessageSearchResult> {
-        self.search_session_messages_filtered_inner(None, project_key, query, limit, filters)
+        self.search_session_messages_filtered_inner(None, project_key, query, limit, filters, None)
             .await
     }
 
@@ -3221,7 +3365,20 @@ impl GlobalDb {
         query: &str,
         limit: usize,
         filters: SessionSearchFilters<'_>,
+        git_filter: Option<&crate::sessions::git_correlation::GitScopeFilter>,
     ) -> Vec<SessionMessageSearchResult> {
+        // A git-scoped search against a store written before the correlation
+        // schema existed can never match; report empty rather than issuing a
+        // `no such table` EXISTS subquery.
+        if let Some(filter) = git_filter {
+            if !filter.is_empty()
+                && !crate::sessions::git_correlation::tables_present(&self.conn)
+                    .await
+                    .unwrap_or(false)
+            {
+                return Vec::new();
+            }
+        }
         let fts_query = session_fts_query(query);
         if fts_query.is_empty() || limit == 0 {
             return Vec::new();
@@ -3284,6 +3441,19 @@ impl GlobalDb {
             crate::sessions::SessionSearchScope::SubagentsOnly
         ) {
             sql.push_str(" AND s.is_subagent = 1");
+        }
+        // Reuse the shared scoping SQL (also used by the lcm/grep path) so the
+        // branch/worktree/commit EXISTS semantics stay in one place. Its
+        // anonymous `?` placeholders bind to the next sequential positions,
+        // which — since the predicate and its values are appended together in
+        // order — line up with the numbered placeholders that follow.
+        if let Some(filter) = git_filter {
+            if let Some((predicate, predicate_values)) =
+                crate::sessions::git_correlation::git_scope_exists_predicate(filter, "m.session_id")
+            {
+                let _ = write!(sql, " AND {predicate}");
+                query_params.extend(predicate_values);
+            }
         }
         for term in &literal_terms {
             query_params.push(Value::Text(term.clone()));
@@ -3598,7 +3768,7 @@ impl GlobalDb {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -3652,5 +3822,48 @@ mod tests {
         )
         .await
         .is_some());
+    }
+
+    #[tokio::test]
+    async fn code_projects_seen_within_applies_window_and_limit() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = GlobalDb::open_at(&dir.path().join("global.db"))
+            .await
+            .expect("open global db");
+
+        let now = crate::tracedecay::current_timestamp();
+        // (project_id, last_seen_at)
+        let rows = [
+            ("proj_recent", now - 60),       // 1 min ago  -> in window
+            ("proj_mid", now - 3 * 86_400),  // 3 days ago -> in window
+            ("proj_old", now - 30 * 86_400), // 30 days ago-> outside 14d window
+        ];
+        for (project_id, last_seen) in rows {
+            db.conn
+                .execute(
+                    "INSERT INTO code_projects
+                     (project_id, canonical_root, display_root, git_common_dir,
+                      git_remote_url, default_branch, created_at, last_seen_at)
+                     VALUES (?1, ?2, ?3, NULL, NULL, NULL, ?4, ?4)",
+                    params![
+                        project_id,
+                        format!("/root/{project_id}"),
+                        project_id,
+                        last_seen
+                    ],
+                )
+                .await
+                .unwrap();
+        }
+
+        // 14-day window keeps the two recent projects, most-recent first.
+        let within = db.code_projects_seen_within(14 * 86_400, 10).await;
+        let ids: Vec<&str> = within.iter().map(|p| p.project_id.as_str()).collect();
+        assert_eq!(ids, vec!["proj_recent", "proj_mid"]);
+
+        // Limit caps the result even when more projects are in-window.
+        let capped = db.code_projects_seen_within(14 * 86_400, 1).await;
+        let capped_ids: Vec<&str> = capped.iter().map(|p| p.project_id.as_str()).collect();
+        assert_eq!(capped_ids, vec!["proj_recent"]);
     }
 }

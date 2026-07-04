@@ -5,20 +5,31 @@ alwaysApply: true
 
 # Use tracedecay before native code tools
 
-If the workspace is indexed, TraceDecay is the first stop for codebase questions. Treat this as a procedure, not a preference:
+If there is even a 1% chance this workspace has a TraceDecay index, the graph, memory store, and session archive are the first stop — before the first Grep, Glob, Read, `gh pr diff`, test run, or memory-file write. Graph before grep. Facts before files. Invoke `tracedecay:using-tracedecay` and follow its moment table. For project/store identity use `tracedecay_active_project` / `tracedecay_storage_status` (the resolved active project store), never repo-local DB probing.
 
-- **Starting a task or code question:** invoke `tracedecay:using-tracedecay` and follow its moment table before the first Grep/Glob/Read.
-- **About to Grep/Glob/codebase-search for a symbol or concept:** call `tracedecay_search` or `tracedecay_context` first, then follow `tracedecay:exploring-code`.
-- **About to open or Read a source file:** use `tracedecay_outline`, `tracedecay_body`, or `tracedecay_read` slices first. Full-file Read is the fallback, not the default.
-- **Asked about callers, callees, dependencies, or blast radius:** use `tracedecay:tracing-functions` or `tracedecay:assessing-impact` before guessing.
-- **About to add a helper or edit source:** use `tracedecay:editing-safely` for duplicate probes, refactor recon, and anchored edits.
-- **Reviewing a diff, auditing risk, or drafting change text:** use `tracedecay:reviewing-changes`.
-- **Architecture, health, status, config, TODOs, runtime:** use `tracedecay:code-health`.
-- **Prior decisions or past conversations:** use `tracedecay:project-memory` for durable facts (recall and curation) and `tracedecay:recalling-session-context` for raw transcript recall; fact mutation lives in `tracedecay:project-memory`.
-- **Durable memory:** when a durable decision, user preference, correction, or pitfall surfaces, store it proactively with `tracedecay_fact_store` (action "add") with calibrated trust. Do not store secrets/credentials, transient errors, environment-specific failures, one-off narratives, or task progress.
-- **Active project/store questions:** use `tracedecay_active_project` or `tracedecay_storage_status` for resolved active project routing instead of inferring from marker files or direct DB paths.
-- **Truncated MCP responses:** if a response has `truncated: true` plus `handle`, narrow the query first; call `tracedecay_retrieve` only when omitted details are needed.
-- **MCP errors/timeouts:** use the CLI fallback (`tracedecay tool <name> --key value`; see `tracedecay:using-the-cli`) instead of querying `.tracedecay` databases directly or abandoning tracedecay.
-- Fall back to plain file reads, search, or shell only for non-indexed content or after tracedecay has pinpointed the exact files.
+## Moment to mandatory action
 
-Red flags: "Grep is faster", "I'll just read the whole file", "this is a simple lookup", "I already know the codebase", or "I'll use the skill after exploring" are rationalizations. Stop and use the matching TraceDecay workflow first.
+| The moment you are in | Do this instead |
+|---|---|
+| Grep/rg a literal string, regex, or config key | `tracedecay_grep` — `tracedecay:exploring-code` |
+| Search a symbol/concept, or open a source file | `tracedecay_search` / `tracedecay_context`, then outline→body→read — `tracedecay:exploring-code` |
+| "Who calls X" / "what does X call" / "trace this" | `tracedecay:tracing-functions` |
+| What breaks / which tests to run | `tracedecay:assessing-impact` |
+| `gh pr diff` or read a raw diff to review | `tracedecay_pr_context` / `tracedecay_diff_context` (offline) — `tracedecay:reviewing-changes` |
+| Write a helper, rename, or mass-edit | `tracedecay:editing-safely` |
+| Build/type errors, or run cargo check/tsc | `tracedecay:fixing-build-and-type-errors` |
+| Write MEMORY.md/CLAUDE.md, or a past decision | `tracedecay:project-memory` (`fact_store`) |
+| Architecture, tech debt, index/project status | `tracedecay:code-health` |
+| An MCP call failed | `tracedecay:using-the-cli` — `tracedecay tool <name>`, never abandon over transport |
+
+## Red flags — these thoughts mean STOP, you are rationalizing
+
+- "Grep is faster" — `tracedecay_grep` runs the same match and returns the enclosing symbol.
+- "I'll just read the whole file" — `outline`/`body` answer at a fraction of the tokens.
+- "This repo probably isn't indexed" — check `tracedecay_status`; guessing is the rationalization.
+- "I'll use gh for the PR diff" — `pr_context` computes changed symbols offline; gh is for comments/CI only.
+- "I'll jot this in MEMORY.md" — durable facts go to `fact_store` (add); MEMORY.md is not memory.
+- "The index might be stale, sync first" — hooks auto-sync; never run manual sync.
+- "The MCP call might fail" — `tracedecay tool <name>` always works. Transport ≠ capability.
+
+If an MCP call errors or times out, fall back to `tracedecay tool <name> --key value` (see `tracedecay:using-the-cli`) — never query `.tracedecay` databases directly or abandon tracedecay. Fall back to plain Grep/Read only for non-indexed content or after the graph pinpoints exact files.

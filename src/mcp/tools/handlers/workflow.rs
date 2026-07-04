@@ -16,7 +16,7 @@ use tokio::time::timeout;
 use crate::diagnose::{parse_cargo_output, Severity};
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::{is_test_file, TraceDecay};
-use crate::types::{Node, NodeKind};
+use crate::types::Node;
 
 use super::super::render;
 use super::super::ToolResult;
@@ -400,7 +400,7 @@ async fn add_indirect_test_targets(
 }
 
 fn is_callable(node: &Node) -> bool {
-    matches!(node.kind, NodeKind::Function | NodeKind::Method)
+    node.kind.is_callable_kind()
 }
 
 fn select_test_targets(

@@ -340,6 +340,9 @@ impl TraceDecay {
         let now_str = current_timestamp().to_string();
         self.db.set_metadata("last_full_sync_at", &now_str).await?;
         self.db.set_metadata("last_sync_at", &now_str).await?;
+        // Stamp HEAD so the watcher can diff-scope future syncs (best-effort).
+        self.stamp_last_synced_commit().await;
+        self.touch_branch_meta_synced();
         self.db
             .set_metadata("last_sync_duration_ms", &duration_ms.to_string())
             .await?;
@@ -570,6 +573,11 @@ impl TraceDecay {
         self.db
             .set_metadata("last_sync_at", &current_timestamp().to_string())
             .await?;
+        // Advance the watcher's diff base even for targeted file syncs: if
+        // HEAD is unchanged, re-stamping the same commit is idempotent; if a
+        // hook-driven edit accompanied a commit, this keeps the base accurate.
+        self.stamp_last_synced_commit().await;
+        self.touch_branch_meta_synced();
         self.db
             .set_metadata(
                 "last_sync_duration_ms",
@@ -982,6 +990,9 @@ impl TraceDecay {
         self.db
             .set_metadata("last_sync_at", &current_timestamp().to_string())
             .await?;
+        // Stamp HEAD so the watcher can diff-scope future syncs (best-effort).
+        self.stamp_last_synced_commit().await;
+        self.touch_branch_meta_synced();
         self.db
             .set_metadata("last_sync_duration_ms", &duration_ms.to_string())
             .await?;
@@ -1146,6 +1157,141 @@ impl TraceDecay {
         };
         walk.filter_map(std::result::Result::ok).count()
     }
+
+    /// Stamps the current git HEAD commit id into the `last_synced_commit`
+    /// metadata key so the git-metadata watcher can diff-scope future syncs
+    /// (see [`stale_files_since_commit`](Self::stale_files_since_commit)).
+    ///
+    /// Called on the success path of every sync alongside `last_sync_at`. On
+    /// any gix error (not a repo, detached/unborn HEAD, unreadable object)
+    /// this is a silent no-op — a missing/stale stamp only forces the watcher
+    /// to fall back to a full tree walk, never a failed sync.
+    /// Best-effort branch-meta freshness stamp on every successful sync, so
+    /// `branch_list` reflects real sync recency rather than branch-add time
+    /// only. No-op when the active branch cannot be resolved (detached HEAD)
+    /// or the branch is untracked.
+    fn touch_branch_meta_synced(&self) {
+        if let Some(branch) = crate::branch::current_branch(&self.project_root) {
+            crate::branch_meta::update_synced_timestamp(&self.store_layout.data_root, &branch);
+        }
+    }
+
+    async fn stamp_last_synced_commit(&self) {
+        // Scope the gix values so they drop before the `.await`:
+        // `gix::Repository`/`Commit` are `!Send`, and holding them across the
+        // await would make every sync future `!Send`, breaking `tokio::spawn`
+        // of anything that syncs (sync-on-read, scheduler, git watcher).
+        let hex_oid = {
+            let Ok(repo) = gix::open(&self.project_root) else {
+                return;
+            };
+            let Ok(head) = repo.head_commit() else {
+                return;
+            };
+            head.id().to_hex().to_string()
+        };
+        let _ = self.db.set_metadata("last_synced_commit", &hex_oid).await;
+    }
+
+    /// Returns the git HEAD commit id recorded at the last successful sync,
+    /// or `None` if it was never stamped (e.g. index predates this feature,
+    /// or HEAD could not be resolved at sync time).
+    pub async fn last_synced_commit(&self) -> Option<String> {
+        self.db
+            .get_metadata("last_synced_commit")
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// Computes the repo-relative paths changed between `base_commit` and the
+    /// current git HEAD via a gix tree diff (both directions, including
+    /// deletions), for diff-scoped incremental syncs by the watcher.
+    ///
+    /// Returns:
+    /// - `Some(paths)` (forward-slash normalized) on a successful bounded diff;
+    /// - `None` when `base_commit` is missing/unreachable (force-push, gc) — the
+    ///   caller must fall back to a full [`find_stale_files`](Self::find_stale_files)
+    ///   tree walk / [`sync`](Self::sync);
+    /// - `None` when the changed-file count exceeds `escalation_limit`, again
+    ///   signalling a full sync rather than an oversized targeted pass.
+    ///
+    /// Does not touch the DB; the watcher wires it into `sync_if_stale_silent`.
+    pub fn stale_files_since_commit(
+        &self,
+        base_commit: &str,
+        escalation_limit: usize,
+    ) -> Option<Vec<String>> {
+        let repo = gix::open(&self.project_root).ok()?;
+
+        let base_tree = repo
+            .rev_parse_single(base_commit)
+            .ok()?
+            .object()
+            .ok()?
+            .peel_to_tree()
+            .ok()?;
+
+        let head_tree = repo.head_commit().ok()?.tree().ok()?;
+
+        let mut changed: HashSet<String> = HashSet::new();
+        base_tree
+            .changes()
+            .ok()?
+            .for_each_to_obtain_tree(&head_tree, |change| {
+                use gix::object::tree::diff::Change;
+                {
+                    let mut push = |loc: &gix::bstr::BStr, mode: &gix::object::tree::EntryMode| {
+                        if !mode.is_tree() {
+                            changed.insert(loc.to_string());
+                        }
+                    };
+                    match &change {
+                        Change::Addition {
+                            location,
+                            entry_mode,
+                            ..
+                        }
+                        | Change::Modification {
+                            location,
+                            entry_mode,
+                            ..
+                        }
+                        | Change::Deletion {
+                            location,
+                            entry_mode,
+                            ..
+                        } => push(location, entry_mode),
+                        Change::Rewrite {
+                            source_location,
+                            source_entry_mode,
+                            location,
+                            entry_mode,
+                            ..
+                        } => {
+                            push(source_location, source_entry_mode);
+                            push(location, entry_mode);
+                        }
+                    }
+                }
+                // Stop early once the change set is clearly a full-sync case;
+                // the caller escalates on `None` anyway.
+                if changed.len() > escalation_limit {
+                    Ok::<_, std::convert::Infallible>(std::ops::ControlFlow::Break(()))
+                } else {
+                    Ok(std::ops::ControlFlow::Continue(()))
+                }
+            })
+            .ok()?;
+
+        // Too many changes → let the caller do a full sync instead.
+        if changed.len() > escalation_limit {
+            return None;
+        }
+
+        let paths: Vec<String> = changed.into_iter().collect();
+        Some(normalize_rel_paths(&paths))
+    }
 }
 
 #[cfg(test)]
@@ -1174,5 +1320,103 @@ mod path_normalization_tests {
         ];
         let out = normalize_rel_paths(&input);
         assert_eq!(out, vec!["src/a.rs", "src/b.rs", "lib/nested/c.rs"]);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod freshness_tests {
+    use crate::tracedecay::TraceDecay;
+    use std::path::Path;
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .status()
+            .expect("git command runs");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn head_oid(dir: &Path) -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("git rev-parse runs");
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    async fn init_repo_with_commit() -> (TraceDecay, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.rs"), "pub fn a() {}\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "initial"]);
+
+        let cg = TraceDecay::init(root).await.expect("init");
+        cg.index_all().await.expect("index");
+        (cg, dir)
+    }
+
+    #[tokio::test]
+    async fn last_synced_commit_stamped_after_index() {
+        let (cg, dir) = init_repo_with_commit().await;
+        let stamped = cg.last_synced_commit().await;
+        assert_eq!(stamped.as_deref(), Some(head_oid(dir.path()).as_str()));
+    }
+
+    #[tokio::test]
+    async fn stale_files_since_commit_reports_changed_file() {
+        let (cg, dir) = init_repo_with_commit().await;
+        let root = dir.path();
+        let base = head_oid(root);
+
+        std::fs::write(root.join("src/b.rs"), "pub fn b() {}\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "add b"]);
+
+        let changed = cg
+            .stale_files_since_commit(&base, 500)
+            .expect("diff succeeds");
+        assert!(
+            changed.contains(&"src/b.rs".to_string()),
+            "expected src/b.rs in {changed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_files_since_commit_none_when_base_missing() {
+        let (cg, _dir) = init_repo_with_commit().await;
+        // A syntactically valid but unreachable commit id.
+        let bogus = "0".repeat(40);
+        assert!(cg.stale_files_since_commit(&bogus, 500).is_none());
+    }
+
+    #[tokio::test]
+    async fn stale_files_since_commit_none_when_over_escalation_limit() {
+        let (cg, dir) = init_repo_with_commit().await;
+        let root = dir.path();
+        let base = head_oid(root);
+
+        for i in 0..5 {
+            std::fs::write(root.join(format!("src/f{i}.rs")), "pub fn f() {}\n").unwrap();
+        }
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "many"]);
+
+        // escalation_limit below the number of changed files → None.
+        assert!(cg.stale_files_since_commit(&base, 2).is_none());
     }
 }

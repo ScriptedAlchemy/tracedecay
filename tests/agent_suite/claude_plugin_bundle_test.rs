@@ -29,14 +29,13 @@ fn bundle_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin")
 }
 
-/// The 30 skills the bundle ships (also the codex skill set): the 13
-/// foundational model-invocable skills (recalling+curating-project-memory
-/// merged into `project-memory`), the 4 memory skills, plus the 13
-/// `tracedecay-*` workflow skills, kept in sync across every skill-bundling
-/// surface.
+/// The 13 model-invocable skills the bundle ships (also the codex skill set),
+/// kept in sync across every skill-bundling surface. The `tracedecay-*`
+/// workflow dispatcher skills were removed (their behavior lives in the native
+/// slash commands), the memory write/read skills were folded into
+/// `project-memory`, and `recalling-session-context`/`retrieving-cached-context`
+/// were folded into `managing-session-context`/`using-the-cli`.
 const EXPECTED_SKILLS: &[&str] = &[
-    // 13 foundational (recalling+curating-project-memory merged into
-    // project-memory)
     "assessing-impact",
     "code-health",
     "diagnosing-analytics",
@@ -44,31 +43,12 @@ const EXPECTED_SKILLS: &[&str] = &[
     "exploring-code",
     "fixing-build-and-type-errors",
     "inspecting-managed-skills",
+    "managing-session-context",
     "project-memory",
-    "recalling-session-context",
     "reviewing-changes",
     "tracing-functions",
     "using-the-cli",
     "using-tracedecay",
-    // 4 memory
-    "managing-session-context",
-    "retrieving-cached-context",
-    "retrieving-project-memory",
-    "storing-project-memory",
-    // 13 workflow
-    "tracedecay-audit-safety",
-    "tracedecay-check-health",
-    "tracedecay-clean-dead-code",
-    "tracedecay-compare-branches",
-    "tracedecay-curate-memory",
-    "tracedecay-draft-commit",
-    "tracedecay-find-impact",
-    "tracedecay-fix-build",
-    "tracedecay-map-architecture",
-    "tracedecay-port-code",
-    "tracedecay-recall-memory",
-    "tracedecay-review-diff",
-    "tracedecay-test-changes",
 ];
 
 /// The 13 slash commands the bundle ships.
@@ -260,7 +240,10 @@ fn claude_bundle_hooks_wire_the_expected_lifecycle_events() {
         .and_then(Value::as_object)
         .unwrap_or_else(|| panic!("{} must declare a hooks object", hooks_path.display()));
 
-    // (event, expected subcommand, expected matcher).
+    // (event, expected subcommand, expected matcher). The PostToolUse matcher
+    // is derived from the tool lists so the on-disk JSON is validated against
+    // the single source of truth and can never silently drift.
+    let post_matcher = tracedecay::hooks::claude_post_tool_use_matcher();
     let expected: &[(&str, &str, Option<&str>)] = &[
         ("PreToolUse", "hook-pre-tool-use", Some("Agent")),
         ("UserPromptSubmit", "hook-prompt-submit", None),
@@ -269,8 +252,9 @@ fn claude_bundle_hooks_wire_the_expected_lifecycle_events() {
         (
             "PostToolUse",
             "hook-claude-post-tool-use",
-            Some("Edit|MultiEdit|Write|NotebookEdit|Bash"),
+            Some(post_matcher.as_str()),
         ),
+        ("SubagentStart", "hook-claude-subagent-start", None),
     ];
 
     let actual_events: BTreeSet<String> = hooks.keys().cloned().collect();
@@ -281,7 +265,7 @@ fn claude_bundle_hooks_wire_the_expected_lifecycle_events() {
     assert_eq!(
         actual_events,
         expected_events,
-        "{} must declare exactly the 5 expected lifecycle events",
+        "{} must declare exactly the 6 expected lifecycle events",
         hooks_path.display()
     );
 
@@ -356,7 +340,7 @@ fn claude_bundle_ships_exactly_the_expected_skills() {
     assert_eq!(
         sorted_subdir_names(&skills_root),
         expected,
-        "claude-plugin/skills must contain exactly the expected 29 skill directories"
+        "claude-plugin/skills must contain exactly the expected 13 skill directories"
     );
 }
 

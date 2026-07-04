@@ -87,14 +87,22 @@ and the specific scans the user asked for — don't run every tool by reflex.
   `tracedecay:editing-safely` / `tracedecay:reviewing-changes`, verification
   to `tracedecay:assessing-impact`. Memory recall belongs to
   `tracedecay:project-memory`; past-session recall to
-  `tracedecay:recalling-session-context`.
+  `tracedecay:managing-session-context`.
 
-## Output
+## If tools are deferred or MCP fails
 
-- The composite score + weak dimensions with ranked worst offenders and a
-  prioritized fix list; the layered module map with dependency
-  hotspots/violations; the per-dimension session delta; or the status
-  numbers, config values (with file + line), marker list, or runtime snapshot
-  the user asked for. Pairs with the `docs-canvas` plugin if installed.
-- If any result includes a `tracedecay_metrics:` line, report the savings to
-  the user.
+- Deferred (names listed without schemas): load once with ToolSearch —
+  `select:tracedecay_health,tracedecay_gini,tracedecay_dsm,tracedecay_status,tracedecay_active_project`
+  (one batched call, add others needed) — then call normally.
+- MCP error/timeout/disconnect: same tool, same args, via shell:
+  `tracedecay tool <name> --key value` (see `tracedecay:using-the-cli`). Never
+  query `.tracedecay` databases directly; never abandon the graph over transport.
+
+## Deliverable
+
+Do not end this workflow without: the composite score + weak dimensions with
+ranked worst offenders and a prioritized fix list; the layered module map with
+dependency hotspots/violations; the per-dimension session delta; or the status
+numbers, config values (with file + line), marker list, or runtime snapshot
+the user asked for. Pairs with the `docs-canvas` plugin if installed. Report
+any `tracedecay_metrics:` line to the user.

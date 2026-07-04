@@ -21,6 +21,10 @@ Codex.
   encrypted Codex compaction placeholders with auxiliary app-server summaries
   backed by the visible source messages in TraceDecay's LCM DAG.
 
+The source `hooks/hooks-codex.json` is an empty, self-documenting seed for
+repo-local bundles. Global Codex installs populate `hooks/hooks.json` from the
+managed hook table at install time.
+
 Codex skips newly installed or changed command hooks until they are trusted —
 run `/hooks` in Codex to review and trust the tracedecay hooks.
 
@@ -33,6 +37,17 @@ Every MCP tool is also available from the shell as `tracedecay tool <name>`
 parameters). The bundled `using-the-cli` skill and injected steering use that
 CLI fallback when MCP transport errors or times out, instead of querying
 `.tracedecay` databases.
+
+For literal strings, regexes, and config keys inside indexed code, use
+`tracedecay_grep`; reserve `tracedecay_search` for symbol names and
+`tracedecay_context` for concept-level discovery.
+
+Before running `cargo check`/`tsc`/`clippy` in the shell, or when shell output
+shows compile errors, the injected steering routes the moment to tracedecay
+diagnostics: paste captured output into `tracedecay_diagnose`, or run
+`tracedecay_diagnostics` for fresh structured errors mapped to the enclosing
+symbols and callers. The bundled `fixing-build-and-type-errors` skill covers
+this workflow.
 
 The `PostCompact` hook starts `codex app-server` as a short-lived child process
 and sets `TRACEDECAY_CODEX_SUMMARY_CHILD=1` to prevent recursive summary hooks.

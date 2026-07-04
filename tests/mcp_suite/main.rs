@@ -11,6 +11,8 @@
 mod common;
 
 mod fixture;
+mod git_correlation_test;
+mod mcp_cli_parity_test;
 mod mcp_cli_serve_test;
 mod mcp_dashboard_tool_test;
 mod mcp_handler_test;

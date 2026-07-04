@@ -190,7 +190,7 @@ This is the default. It registers the MCP server in `~/.claude/settings.json`, g
 - `UserPromptSubmit` resets the per-turn token-savings counter.
 - `Stop` ingests new session transcript data and prints a cost receipt.
 - `SessionStart` reports index freshness (or a `tracedecay init` nudge) and, when the session restarts from compaction, injects the LCM context-recovery hint.
-- `PostToolUse` (matcher `Edit|MultiEdit|Write|NotebookEdit|Bash`) notifies the daemon so edits and shell commands trigger targeted incremental sync.
+- `PostToolUse` (matcher `Edit|MultiEdit|Write|NotebookEdit|Grep|Glob|Read|Bash`) notifies the daemon so edits and shell commands trigger targeted incremental sync, and broad search/read tools get routed toward TraceDecay equivalents.
 
 The install also ships three read-only custom subagents into `~/.claude/agents/` — `code-explorer`, `code-health-auditor`, and `session-historian` — the same tracedecay subagents the Cursor plugin bundles. They are only replaced or removed when the file is tracedecay-managed; a same-named agent you authored yourself is left untouched. `tracedecay update-plugin` refreshes installed copies.
 
@@ -313,7 +313,7 @@ Cursor install is plugin-based:
 - Cursor install no longer writes `.cursor/mcp.json`, `.cursor/hooks.json`, `.cursor/rules/tracedecay.mdc`, or `.cursor/permissions.json`; approvals are left to Cursor approval/run-mode behavior.
 - The plugin bundles Cursor-specific, fail-open hooks. File and shell hooks notify the TraceDecay daemon; if no daemon is available they return success without indexing:
   - `sessionStart` injects context steering the Agent toward tracedecay MCP tools and reports index freshness (suggests `tracedecay init` when uninitialized).
-  - `postToolUse` (unmatched) injects a nonblocking `additional_context` hint after broad search/read tools (Grep, Glob, Read, semantic search, shell `rg`) so Cursor can switch to `tracedecay_context`, `tracedecay_search`, `tracedecay_outline`, or `tracedecay_files`; each hint category fires at most once per session.
+  - `postToolUse` (unmatched) injects a nonblocking `additional_context` hint after broad search/read tools (Grep, Glob, Read, semantic search, shell `rg`) so Cursor can switch to `tracedecay_grep`, `tracedecay_context`, `tracedecay_search`, `tracedecay_outline`, or `tracedecay_files`; each hint category fires at most once per session.
   - `beforeSubmitPrompt` resets the local token counter and ingests the current Cursor transcript into the active project session store when `transcript_path` is present.
   - `afterFileEdit` (unmatched, so every Agent edit tool counts) sends the edited path(s) to the daemon, whose MCP server runs a **targeted single-file** sync — not a full-tree scan — so it stays cheap on large codebases even when the Agent edits many files per turn.
   - `afterShellExecution` sends shell command effects to the daemon, whose MCP server makes branch handling automatic: Agent-run `git checkout`/`switch`/`worktree add` bootstraps/maintains tracedecay branch tracking (`branch add`), while other state-changing git commands (pull/merge/rebase/reset/cherry-pick/stash apply|pop) trigger a coalesced incremental sync.
@@ -565,6 +565,7 @@ When running as an MCP server, tracedecay exposes more than 70 tools that AI age
 | Tool | What it does |
 |------|-------------|
 | `tracedecay_context` | Given a task description, returns relevant symbols, relationships, and code snippets. This is the go-to starting point for any coding task. |
+| `tracedecay_grep` | Search indexed code content by literal string or regex, with each hit annotated by its enclosing symbol. |
 | `tracedecay_search` | Find symbols by name. Supports filtering by kind (function, class, method, etc.). |
 | `tracedecay_node` | Get full details for a specific symbol: source code, location, complexity metrics, and relationships. |
 | `tracedecay_files` | List indexed files, optionally filtered by directory or glob pattern. |

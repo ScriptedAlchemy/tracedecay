@@ -1552,6 +1552,9 @@ fn parses_sessions_ingest_and_search_commands() {
                     project_path,
                     since,
                     until,
+                    branch,
+                    worktree,
+                    commit,
                 },
         }) => {
             assert_eq!(query, "needle");
@@ -1561,6 +1564,9 @@ fn parses_sessions_ingest_and_search_commands() {
             assert!(project_path.is_none());
             assert!(since.is_none());
             assert!(until.is_none());
+            assert!(branch.is_none());
+            assert!(worktree.is_none());
+            assert!(commit.is_none());
         }
         _ => panic!("expected sessions search command"),
     }

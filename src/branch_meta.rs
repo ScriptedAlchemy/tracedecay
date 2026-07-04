@@ -152,6 +152,26 @@ pub fn save_branch_meta(data_dir: &Path, meta: &BranchMeta) -> std::io::Result<(
     std::fs::write(path, json)
 }
 
+/// Advances the `last_synced_at` timestamp for `branch` in the project's
+/// branch metadata, best-effort.
+///
+/// This is the entry point every successful sync path calls so `branch_list`
+/// reflects real sync activity (previously `last_synced_at` only moved at
+/// branch-add finalize, making the list misleading). It silently no-ops when
+/// there is no branch metadata (single-DB mode / pre-branch projects) or when
+/// `branch` is untracked — a sync of an untracked branch has no entry to touch,
+/// and forcing one here would race branch-add's own bookkeeping.
+pub fn update_synced_timestamp(tracedecay_dir: &Path, branch: &str) {
+    let Some(mut meta) = load_branch_meta(tracedecay_dir) else {
+        return;
+    };
+    if !meta.is_tracked(branch) {
+        return;
+    }
+    meta.touch_synced(branch);
+    let _ = save_branch_meta(tracedecay_dir, &meta);
+}
+
 /// Returns the path to the `branches/` subdirectory, creating it if needed.
 pub fn ensure_branches_dir(data_dir: &Path) -> std::io::Result<PathBuf> {
     let dir = data_dir.join("branches");
@@ -232,6 +252,46 @@ mod tests {
         assert!(parse("{not valid json").is_err());
         assert!(parse(r#"{"default_branch": 5}"#).is_err());
         assert!(parse("[]").is_err());
+    }
+
+    #[test]
+    fn update_synced_timestamp_advances_tracked_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut meta = BranchMeta::new("main");
+        meta.add_branch("feature/foo", "branches/feature_foo.db", "main");
+        // Backdate so the advance is observable regardless of same-second timing.
+        meta.branches.get_mut("feature/foo").unwrap().last_synced_at = "1000".to_string();
+        save_branch_meta(dir.path(), &meta).unwrap();
+
+        update_synced_timestamp(dir.path(), "feature/foo");
+
+        let reloaded = load_branch_meta(dir.path()).unwrap();
+        let synced: u64 = reloaded.branches["feature/foo"]
+            .last_synced_at
+            .parse()
+            .unwrap();
+        assert!(synced > 1000, "last_synced_at should advance, got {synced}");
+    }
+
+    #[test]
+    fn update_synced_timestamp_noops_for_unknown_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = BranchMeta::new("main");
+        save_branch_meta(dir.path(), &meta).unwrap();
+
+        // Untracked branch: must not create an entry or error.
+        update_synced_timestamp(dir.path(), "does/not/exist");
+
+        let reloaded = load_branch_meta(dir.path()).unwrap();
+        assert!(!reloaded.is_tracked("does/not/exist"));
+    }
+
+    #[test]
+    fn update_synced_timestamp_noops_without_meta() {
+        let dir = tempfile::tempdir().unwrap();
+        // No branch-meta.json present; must silently no-op.
+        update_synced_timestamp(dir.path(), "main");
+        assert!(load_branch_meta(dir.path()).is_none());
     }
 
     #[test]

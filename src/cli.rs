@@ -213,6 +213,9 @@ pub enum Commands {
     /// Claude Code PostToolUse hook handler for incremental sync (called by Claude Code)
     #[command(name = "hook-claude-post-tool-use", hide = true)]
     HookClaudePostToolUse,
+    /// Claude Code SubagentStart hook handler (called by Claude Code, not by users directly)
+    #[command(name = "hook-claude-subagent-start", hide = true)]
+    HookClaudeSubagentStart,
     /// Kiro PreToolUse hook handler (called by Kiro, not by users directly)
     #[command(name = "hook-kiro-pre-tool-use", hide = true)]
     HookKiroPreToolUse,
@@ -636,6 +639,35 @@ pub enum SessionsAction {
         /// Registered project root path or alias whose session store should be searched
         #[arg(long, conflicts_with = "project_id")]
         project_path: Option<String>,
+        /// Only sessions correlated with this git branch
+        #[arg(long)]
+        branch: Option<String>,
+        /// Only sessions correlated with this worktree path
+        #[arg(long)]
+        worktree: Option<String>,
+        /// Only sessions that produced this commit (full or >=6-char prefix)
+        #[arg(long)]
+        commit: Option<String>,
+    },
+    /// Backfill the session↔git correlation index from historical session,
+    /// analytics, and reflog signals
+    GitBackfill {
+        /// Registered project id whose session store should be backfilled
+        #[arg(long)]
+        project_id: Option<String>,
+        /// Registered project root path or alias whose session store should be backfilled
+        #[arg(long, conflicts_with = "project_id")]
+        project_path: Option<String>,
+        /// Lower bound on session activity and commit times (ISO-8601 or unix
+        /// seconds); defaults to 90 days ago
+        #[arg(long)]
+        since: Option<String>,
+        /// Maximum number of sessions to scan
+        #[arg(long, default_value_t = 500)]
+        limit_sessions: usize,
+        /// Derive and report counts without writing to the session store
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 

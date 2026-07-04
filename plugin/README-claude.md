@@ -16,7 +16,9 @@ Claude Code.
 - **Lifecycle hooks** (`hooks/hooks.json`): `SessionStart`,
   `UserPromptSubmit`, `Stop`, `PreToolUse`, and `PostToolUse` handlers that
   inject index status and tool-routing steering, keep the graph/session store
-  warm, and redirect explore-agent calls toward the tracedecay tools.
+  warm, redirect explore-agent calls toward the tracedecay tools, and nudge
+  Grep/Glob/Read-style searches toward `tracedecay_grep`, `tracedecay_search`,
+  `tracedecay_context`, and bounded graph reads.
 
 ## Install
 

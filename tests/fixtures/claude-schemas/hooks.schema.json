@@ -22,6 +22,7 @@
         "Notification": { "$ref": "#/$defs/matcherGroupArray" },
         "UserPromptSubmit": { "$ref": "#/$defs/matcherGroupArray" },
         "Stop": { "$ref": "#/$defs/matcherGroupArray" },
+        "SubagentStart": { "$ref": "#/$defs/matcherGroupArray" },
         "SubagentStop": { "$ref": "#/$defs/matcherGroupArray" },
         "PreCompact": { "$ref": "#/$defs/matcherGroupArray" },
         "SessionStart": { "$ref": "#/$defs/matcherGroupArray" },

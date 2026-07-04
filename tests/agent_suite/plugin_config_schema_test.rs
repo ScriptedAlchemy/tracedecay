@@ -69,7 +69,16 @@ fn cursor_bundle_hooks_config_matches_the_hooks_schema() {
 /// `plugin/hooks/hooks-codex.json`) and shares the Claude/Codex `.mcp.json`.
 #[test]
 fn codex_bundle_configs_match_the_schemas_when_present() {
-    let hooks_validator = compile(HOOKS_SCHEMA);
+    // `hooks-codex.json` ships an empty `hooks` object plus a top-level
+    // `description` explaining that repo-local Codex bundles carry no hooks and
+    // the global bundle populates them at install time. Cursor's vendored
+    // hooks schema sets `additionalProperties: false`, so allow exactly that
+    // one self-documenting key (Codex's hook loader reads only `hooks.*` and
+    // ignores it). Same escape hatch as the Codex manifest's `interface` block.
+    let mut hooks_schema: Value =
+        serde_json::from_str(HOOKS_SCHEMA).expect("vendored hooks schema parses");
+    hooks_schema["properties"]["description"] = json!({ "type": "string" });
+    let hooks_validator = compile_schema(&hooks_schema);
     assert!(
         validate_if_present(&hooks_validator, "plugin/hooks/hooks-codex.json"),
         "plugin/hooks/hooks-codex.json must exist"

@@ -656,6 +656,70 @@ fn main() {
     )
 }
 
+/// Builds a TypeScript project whose only tests are written with the
+/// `describe`/`it` framework style (no `#[test]`-style annotations). Exercises
+/// the TS test-attribution path: the `it` callback becomes an executable
+/// Function node that calls the source under test, so `tracedecay_test_risk`
+/// must attribute the source as directly unit-tested and `tracedecay_test_map`
+/// must list the `it` title as the covering test.
+async fn setup_ts_describe_it_project() -> (TestTraceDecay, TestProject) {
+    let dir = test_temp_dir();
+    let project = dir.path();
+    let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
+    let home = project.join("home");
+    let home_guard = HomeEnvGuard::set(&home);
+    let global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
+    fs::create_dir_all(project.join("src")).unwrap();
+
+    fs::write(
+        project.join("package.json"),
+        r#"{
+  "name": "ts-describe-it-fixture",
+  "version": "0.1.0"
+}
+"#,
+    )
+    .unwrap();
+
+    // Source under test.
+    fs::write(
+        project.join("src/math.ts"),
+        r#"
+export function add(a: number, b: number): number {
+    return a + b;
+}
+"#,
+    )
+    .unwrap();
+
+    // Test written in describe/it style. The it() callback directly calls add().
+    fs::write(
+        project.join("src/math.test.ts"),
+        r#"
+import { add } from "./math";
+
+describe('math', () => {
+  it('adds two numbers', () => {
+    const result = add(1, 2);
+  });
+});
+"#,
+    )
+    .unwrap();
+
+    let cg = fixture::init_project_from_template(project).await.unwrap();
+    cg.index_all().await.unwrap();
+    (
+        TestTraceDecay::new(cg),
+        TestProject {
+            dir: Some(dir),
+            _env_lock: env_lock,
+            _home_guard: home_guard,
+            _global_db_guard: global_db_guard,
+        },
+    )
+}
+
 /// Extracts the text content from a `ToolResult` value (the standard
 /// `content[0].text` envelope).
 fn extract_text(value: &Value) -> &str {
@@ -1671,6 +1735,319 @@ async fn test_search() {
     assert!(
         text.contains("helper"),
         "search results should contain 'helper'"
+    );
+}
+
+#[tokio::test]
+async fn test_grep_literal_hit_is_enriched_with_symbol() {
+    let (cg, _dir) = setup_project().await;
+    // `format!("Hello, {}!", name)` lives inside `format_greeting` in utils.rs.
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_grep",
+        json!({"pattern": "Hello, {}!", "fixed_strings": true}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&result.value);
+    let results = payload["results"].as_array().unwrap();
+    assert!(!results.is_empty(), "expected a literal hit: {payload}");
+    let hit = results
+        .iter()
+        .find(|hit| hit["file"].as_str() == Some("src/utils.rs"))
+        .unwrap_or_else(|| panic!("expected a hit in src/utils.rs: {payload}"));
+    assert!(hit["text"].as_str().unwrap().contains("Hello, {}!"));
+    // Graph enrichment: the hit resolves to its enclosing symbol + node id so
+    // the natural next call is `tracedecay_body`.
+    assert_eq!(hit["symbol"].as_str(), Some("format_greeting"));
+    assert!(
+        hit["node_id"].as_str().is_some_and(|id| !id.is_empty()),
+        "hit should carry a node_id for tracedecay_body: {payload}"
+    );
+    // The touched file should be surfaced for token-savings accounting.
+    assert!(
+        result.touched_files.contains(&"src/utils.rs".to_string()),
+        "grep should report matched files as touched: {:?}",
+        result.touched_files
+    );
+}
+
+#[tokio::test]
+async fn test_grep_regex_hit() {
+    let (cg, _dir) = setup_project().await;
+    // Regex: a `pub fn` declaration returning `String`.
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_grep",
+        json!({"pattern": r"pub fn \w+\(\) -> String"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&result.value);
+    let results = payload["results"].as_array().unwrap();
+    assert!(
+        results
+            .iter()
+            .any(|hit| hit["text"].as_str().unwrap().contains("pub fn helper")),
+        "regex should match the helper declaration: {payload}"
+    );
+}
+
+#[tokio::test]
+async fn test_grep_no_match_reports_empty() {
+    let (cg, _dir) = setup_project().await;
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_grep",
+        json!({"pattern": "zzz_no_such_token_anywhere_zzz"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&result.value);
+    assert_eq!(payload["results"].as_array().map(Vec::len), Some(0));
+    assert_eq!(payload["match_count"], 0);
+    assert!(payload["files_scanned"].as_u64().unwrap() > 0);
+}
+
+#[tokio::test]
+async fn test_grep_respects_gitignore() {
+    let (cg, _dir) = setup_project().await;
+    let root = cg.project_root().to_path_buf();
+    fs::write(root.join(".gitignore"), "ignored_dir/\n").unwrap();
+    fs::create_dir_all(root.join("ignored_dir")).unwrap();
+    fs::write(
+        root.join("ignored_dir/secret.txt"),
+        "UNIQUE_GITIGNORE_TOKEN\n",
+    )
+    .unwrap();
+    fs::write(root.join("tracked.txt"), "UNIQUE_GITIGNORE_TOKEN\n").unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_grep",
+        json!({"pattern": "UNIQUE_GITIGNORE_TOKEN"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&result.value);
+    let files: Vec<&str> = payload["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hit| hit["file"].as_str().unwrap())
+        .collect();
+    assert!(
+        files.contains(&"tracked.txt"),
+        "tracked file should match: {payload}"
+    );
+    assert!(
+        !files.iter().any(|f| f.starts_with("ignored_dir")),
+        "gitignored file must be skipped: {payload}"
+    );
+}
+
+#[tokio::test]
+async fn test_grep_skips_binary_files() {
+    let (cg, _dir) = setup_project().await;
+    let root = cg.project_root().to_path_buf();
+    // A NUL byte makes this file "binary"; the matching text must not surface.
+    fs::write(root.join("blob.bin"), b"BINARY_MARKER\0BINARY_MARKER").unwrap();
+    fs::write(root.join("plain.txt"), "BINARY_MARKER\n").unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_grep",
+        json!({"pattern": "BINARY_MARKER"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&result.value);
+    let files: Vec<&str> = payload["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hit| hit["file"].as_str().unwrap())
+        .collect();
+    assert!(files.contains(&"plain.txt"), "text file should match");
+    assert!(
+        !files.contains(&"blob.bin"),
+        "binary file must be skipped: {payload}"
+    );
+}
+
+#[tokio::test]
+async fn test_grep_path_glob_filters_files() {
+    let (cg, _dir) = setup_project().await;
+    let root = cg.project_root().to_path_buf();
+    fs::write(root.join("notes.md"), "GLOB_TOKEN in markdown\n").unwrap();
+    fs::write(root.join("src/extra.rs"), "// GLOB_TOKEN in rust\n").unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_grep",
+        json!({"pattern": "GLOB_TOKEN", "path_glob": "*.md"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&result.value);
+    let files: Vec<&str> = payload["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hit| hit["file"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        files,
+        vec!["notes.md"],
+        "glob should restrict to *.md: {payload}"
+    );
+}
+
+#[tokio::test]
+async fn test_grep_enforces_max_results_cap() {
+    let (cg, _dir) = setup_project().await;
+    let root = cg.project_root().to_path_buf();
+    let mut body = String::new();
+    for _ in 0..10 {
+        body.push_str("CAP_TOKEN line\n");
+    }
+    fs::write(root.join("many.txt"), body).unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_grep",
+        json!({"pattern": "CAP_TOKEN", "max_results": 3}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&result.value);
+    assert_eq!(
+        payload["results"].as_array().map(Vec::len),
+        Some(3),
+        "results must honor max_results: {payload}"
+    );
+    assert_eq!(
+        payload["truncated"], true,
+        "cap should mark truncated: {payload}"
+    );
+}
+
+#[tokio::test]
+async fn test_grep_case_sensitivity() {
+    let (cg, _dir) = setup_project().await;
+    let root = cg.project_root().to_path_buf();
+    fs::write(root.join("case.txt"), "MixedCaseToken here\n").unwrap();
+
+    // Default: case-insensitive.
+    let insensitive = handle_tool_call(
+        &cg,
+        "tracedecay_grep",
+        json!({"pattern": "mixedcasetoken"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !extract_json(&insensitive.value)["results"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "default search should be case-insensitive"
+    );
+
+    // case_sensitive: no match for the wrong case.
+    let sensitive = handle_tool_call(
+        &cg,
+        "tracedecay_grep",
+        json!({"pattern": "mixedcasetoken", "case_sensitive": true}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        extract_json(&sensitive.value)["results"]
+            .as_array()
+            .map(Vec::len),
+        Some(0),
+        "case-sensitive search should not match a different case"
+    );
+}
+
+#[tokio::test]
+async fn test_grep_markdown_routing_hint() {
+    let (cg, _dir) = setup_project().await;
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_grep",
+        json!({"pattern": "helper", "format": "markdown"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    assert!(text.contains("Grep Results"), "markdown heading: {text}");
+    assert!(
+        text.contains("tracedecay_body"),
+        "markdown should point the agent at tracedecay_body: {text}"
+    );
+}
+
+#[tokio::test]
+async fn test_grep_context_lines() {
+    let (cg, _dir) = setup_project().await;
+    let root = cg.project_root().to_path_buf();
+    fs::write(
+        root.join("ctx.txt"),
+        "line_before\nCONTEXT_TARGET\nline_after\n",
+    )
+    .unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_grep",
+        json!({"pattern": "CONTEXT_TARGET", "context_lines": 1}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&result.value);
+    let hit = payload["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|hit| hit["file"].as_str() == Some("ctx.txt"))
+        .unwrap();
+    assert_eq!(hit["before"][0], "line_before");
+    assert_eq!(hit["after"][0], "line_after");
+}
+
+#[tokio::test]
+async fn test_grep_missing_pattern_errors() {
+    let (cg, _dir) = setup_project().await;
+    let err = handle_tool_call(&cg, "tracedecay_grep", json!({}), None, None)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("pattern"),
+        "missing pattern should be reported: {err}"
     );
 }
 
@@ -5613,6 +5990,76 @@ async fn test_test_risk_distinguishes_direct_and_closure_attribution() {
             .is_some_and(|note| note.contains("closure")),
         "confidence note should explain the conservative closure signal, got: {}",
         text
+    );
+    close_test_graph(cg).await;
+}
+
+#[tokio::test]
+async fn test_test_risk_attributes_ts_describe_it_tests() {
+    let (cg, _dir) = setup_ts_describe_it_project().await;
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_test_risk",
+        json!({ "limit": 10, "include_tested": true }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+    let summary = &parsed["summary"];
+
+    // Only `add` is a source function (the it-callback lives in a .test.ts file
+    // and is excluded from the denominator). It is directly unit-attributed via
+    // the describe/it callback.
+    assert_eq!(
+        summary["total_functions"].as_u64(),
+        Some(1),
+        "only add() should count as a source function, got: {text}"
+    );
+    assert_eq!(
+        summary["attribution"]["direct_unit_attributed"].as_u64(),
+        Some(1),
+        "add() should be direct-unit attributed via the it() callback, got: {text}"
+    );
+
+    let risks = parsed["risks"].as_array().expect("risks array");
+    let add = risks
+        .iter()
+        .find(|item| item["name"].as_str() == Some("add"))
+        .expect("add should appear in risk output");
+    assert_eq!(add["has_test"].as_bool(), Some(true));
+    assert_eq!(add["attribution_method"].as_str(), Some("direct_unit"));
+    close_test_graph(cg).await;
+}
+
+#[tokio::test]
+async fn test_test_map_lists_ts_it_title_as_covering_test() {
+    let (cg, _dir) = setup_ts_describe_it_project().await;
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_test_map",
+        json!({ "file": "src/math.ts" }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+
+    let coverage = parsed["coverage"].as_array().expect("coverage array");
+    let add_cov = coverage
+        .iter()
+        .find(|c| c["source_name"].as_str() == Some("add"))
+        .expect("add should be covered, got: {text}");
+    let tests = add_cov["tests"].as_array().expect("tests array");
+    assert!(
+        tests
+            .iter()
+            .any(|t| t["test_name"].as_str() == Some("adds two numbers")),
+        "test_map should list the it title as the covering test, got: {text}"
     );
     close_test_graph(cg).await;
 }

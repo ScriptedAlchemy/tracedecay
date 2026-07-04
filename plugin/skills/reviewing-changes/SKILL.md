@@ -1,84 +1,73 @@
 ---
 name: reviewing-changes
-description: 'Use when reviewing a PR, branch, or working-tree diff, auditing ship-blocking risk (panic/unsafe/todo sites, dead code, untested hotspots), cleaning up dead or duplicate code, or drafting commit messages, PR descriptions, and changelogs from semantic diff context.'
+description: 'Use when reviewing a PR, branch, or working-tree diff, auditing ship risk (panic/unsafe/todo, dead code, untested hotspots), or drafting commit/PR/changelog text. Trigger before "gh pr diff" — pr_context/diff_context compute changed symbols offline. Do NOT use for pure test selection (tracedecay:assessing-impact).'
 ---
 
 # Reviewing changes
 
+```
+NO REVIEW BY READING RAW DIFFS. Semantic change context comes first:
+diff_context for the working tree, pr_context for ref-to-ref — both offline.
+```
+
+Announce: "Using tracedecay:reviewing-changes for <diff/PR>."
+
 ## Diff review
 
-1. **Get changed files** — working tree, or `git diff --name-only
-   <base>...HEAD` (default base `main`).
-2. **Semantic change summary:** working tree / file list →
-   `tracedecay_diff_context` (`files`): modified symbols + dependents +
-   affected tests; ref-to-ref PR → `tracedecay_pr_context` (`base_ref`,
-   `head_ref`).
-3. **Go deeper only if needed:** `tracedecay_impact` (`node_id`) to widen the
-   blast radius on a high-risk changed symbol; `tracedecay_affected`
-   (`files`) only when step 2's test set is not enough.
-4. **Quality scan of just the changed files → `tracedecay_simplify_scan`**
-   (`files`): duplications, dead code, coupling, complexity hotspots.
-5. **Risk surfacing:** `tracedecay_test_risk` on changed paths;
-   `tracedecay_unsafe_patterns` on changed files.
+1. Changed files: working tree as-is, or `git diff --name-only <base>...HEAD`.
+2. Semantic summary — one call:
+   - Working tree / file list → `tracedecay_diff_context` (`files`).
+   - PR / ref-to-ref → `tracedecay_pr_context` (`base_ref`, `head_ref`).
+   Both return modified symbols + dependents + affected tests from the local
+   graph. Use `gh` only for review comments/CI status — never for the diff
+   analysis itself.
+3. Deepen only where needed: `tracedecay_impact` on a high-risk changed
+   symbol; `tracedecay_affected` only if step 2's test set is insufficient.
+4. Quality scan of just the changed files → `tracedecay_simplify_scan`.
+5. Risk: `tracedecay_test_risk` on changed paths; `tracedecay_unsafe_patterns`
+   on changed files (`exclude_tests: true` for production-only — unwrap/panic
+   in tests is normal, and an `unsafe { }` block is an attention site, not
+   automatically a finding).
 
-## Safety audit (ship-readiness sweep)
+## Safety audit (ship-readiness) and dead-code cleanup
 
-1. **Panic & unsafe sites → `tracedecay_unsafe_patterns`** (`kinds?` to
-   narrow to `unwrap`/`unsafe`, `exclude_tests: true` for production-only,
-   `path?`): each hit carries file, line, kind, enclosing symbol, `in_test`.
-2. **Unfinished work → `tracedecay_todos`** (`kinds:
-   ["FIXME","HACK","XXX","UNIMPLEMENTED"]`).
-3. **Unreachable code → `tracedecay_dead_code`** (`include_public: true` for
-   workspace-internal audits) and **`tracedecay_unused_imports`**.
-4. **Risky and untested → `tracedecay_test_risk`**: high-complexity,
-   high-fan-in symbols with weak coverage.
-5. **Rank:** production panic/unsafe in hot paths first (cross-check fan-in
-   with `tracedecay_callers`), then UNIMPLEMENTED/HACK markers, then untested
-   high-risk symbols, then dead code and imports.
-
-## Dead-code cleanup
-
-1. Discover with `tracedecay_dead_code` / `tracedecay_unused_imports` /
-   `tracedecay_redundancy`; focused pass → `tracedecay_simplify_scan` (`files`).
-2. **Before deleting anything → confirm zero real callers** with
-   `tracedecay_callers` / `tracedecay_rename_preview`. Be conservative with
-   `pub` items (they may be used outside the indexed scope). Never delete a
-   symbol whose callers/references are non-empty.
-3. Apply edits via `tracedecay:editing-safely`; verify with
-   `tracedecay_diagnostics` and the affected tests
-   (`tracedecay:assessing-impact`). Optionally bracket the cleanup with the
-   session-health delta in `tracedecay:code-health`.
+Read [references/safety-audit.md](references/safety-audit.md) for the full
+sweep (`tracedecay_unsafe_patterns` → `tracedecay_todos` →
+`tracedecay_dead_code`/`tracedecay_unused_imports` → `tracedecay_test_risk` →
+ranking) and the delete-safely protocol (zero-caller confirmation with
+`tracedecay_callers` before any deletion; conservative on `pub`).
 
 ## Drafting commit & PR text
 
-1. **Commit message → `tracedecay_commit_context`** (`staged_only`): changed
-   symbols + file roles + recent commit style.
-2. **PR description → `tracedecay_pr_context`** (`base_ref`, `head_ref`):
-   Summary / Impact / Tests.
-3. **Release notes → `tracedecay_changelog`** (`from_ref`, `to_ref`);
-   sanity-check with `tracedecay_branch_diff`.
-4. Drafts text only — leave `git commit` / `gh pr create` to the user or a
-   dedicated git workflow.
+| Deliverable | Call |
+|---|---|
+| Commit message | `tracedecay_commit_context` (`staged_only`) — changed symbols + recent commit style |
+| PR description | `tracedecay_pr_context` → Summary / Impact / Tests |
+| Release notes | `tracedecay_changelog` (`from_ref`, `to_ref`); sanity-check `tracedecay_branch_diff` |
 
-## Guardrails
+Drafts text only — `git commit` / `gh pr create` stay with the user.
 
-- Review and audit are read-only; do not edit or run tests from those flows —
-  hand edits to `tracedecay:editing-safely` and verification to
-  `tracedecay:assessing-impact`.
-- `unwrap`/`panic!` inside tests is normal — respect `exclude_tests` /
-  `in_test` before flagging. An `unsafe { }` block is a review-attention
-  site, not automatically a finding to "fix".
-- For large diffs, use scoped read-only subagents by file group or risk
-  category; require cited findings — the parent agent owns severity,
-  deduplication, and the final call.
-- If diff context is truncated with a `handle`, narrow by file/symbol first;
-  call `tracedecay_retrieve` only when the omitted risk detail is needed.
+## Rules
 
-## Output
+- Review and audit are read-only. Edits → `tracedecay:editing-safely`;
+  verification → `tracedecay:assessing-impact`.
+- Large diffs: scoped read-only subagents per file group or risk category with
+  cited findings; the parent owns severity and dedup.
+- Truncated with a `handle`? Narrow by file/symbol first; `tracedecay_retrieve`
+  only when the omitted risk detail is needed.
 
-- Findings grouped **Critical / Warning / Note** with file + enclosing
-  symbol, the impacted areas and test set, removed/consolidated items, or the
-  drafted commit/PR/changelog text. Pairs with the `pr-review-canvas` plugin
-  if installed.
-- If any result includes a `tracedecay_metrics:` line, report the savings to
-  the user.
+## If tools are deferred or MCP fails
+
+- Deferred: one ToolSearch call —
+  `select:tracedecay_diff_context,tracedecay_pr_context,tracedecay_simplify_scan,tracedecay_unsafe_patterns,tracedecay_test_risk`.
+- MCP error: `tracedecay tool pr_context --base-ref main --head-ref HEAD` etc.
+  (see `tracedecay:using-the-cli`). gh being unauthenticated or offline is NOT
+  a blocker — pr_context/diff_context never touch the network.
+
+## Deliverable
+
+Do not end without findings grouped Critical / Warning / Note, each with file
++ enclosing symbol, plus the impacted areas and test set — or the drafted
+commit/PR/changelog text when that was the ask. An empty review must state
+what was scanned (tools + scope), not just "looks good". Report any
+`tracedecay_metrics:` line.

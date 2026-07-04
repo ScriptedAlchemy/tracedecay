@@ -237,7 +237,10 @@ fn record_tool_family(families: &mut BTreeMap<String, FamilyCounts>, tool: &str,
     {
         increment_family_usage(families, "code_context");
     }
-    if normalized.contains("tracedecay_search") || normalized.contains("find_exact_symbol") {
+    if normalized.contains("tracedecay_search")
+        || normalized.contains("tracedecay_grep")
+        || normalized.contains("find_exact_symbol")
+    {
         increment_family_usage(families, "code_search");
     }
     if normalized.contains("tracedecay_call") || normalized.contains("tracedecay_graph") {
@@ -252,10 +255,16 @@ fn record_tool_family(families: &mut BTreeMap<String, FamilyCounts>, tool: &str,
     }
     if matches!(normalized.as_str(), "grep" | "rg" | "glob" | "search")
         || (matches!(normalized.as_str(), "bash" | "shell" | "exec_command")
-            && (text.contains(" rg ") || text.contains("grep") || text.contains("find ")))
+            && (looks_like_search_command(&text)
+                || text.contains("grep")
+                || text.contains("find ")))
     {
         increment_family_relevance(families, "code_search");
     }
+}
+
+fn looks_like_search_command(text: &str) -> bool {
+    text.starts_with("rg ") || text.contains(" rg ")
 }
 
 fn increment_family_usage(families: &mut BTreeMap<String, FamilyCounts>, family: &str) {
@@ -586,8 +595,12 @@ fn is_cache_version(value: &str) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
-    use super::{infer_usage_events, UsageCategory, UsageEvent, UsageKind};
+    use super::{
+        infer_usage_events, underused_tool_family_signals, ToolUsageObservation, UsageCategory,
+        UsageEvent, UsageKind,
+    };
 
     fn assert_usage_event(
         events: &[UsageEvent],
@@ -619,6 +632,22 @@ mod tests {
             "read",
             UsageCategory::BroadFileSearch,
         );
+    }
+
+    #[test]
+    fn tracedecay_grep_counts_as_code_search_usage() {
+        let families = underused_tool_family_signals([ToolUsageObservation {
+            tool_names: Some("rg,mcp__tracedecay__tracedecay_grep"),
+            metadata_json: None,
+            text: Some("rg -n \"mcpServers\" src"),
+        }]);
+        let code_search = families
+            .iter()
+            .find(|family| family.family == "code_search")
+            .expect("code_search family should be present");
+        assert_eq!(code_search.usage_events, 1);
+        assert_eq!(code_search.relevant_events, 1);
+        assert!(!code_search.underused);
     }
 
     #[test]

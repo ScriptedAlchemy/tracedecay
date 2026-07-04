@@ -1,144 +1,64 @@
 ---
 name: project-memory
-description: 'Use when recalling prior decisions, durable facts, user/project preferences, or past project context before answering or planning; or when reviewing, updating, merging, deleting, pruning, or repairing tracedecay memory facts and dashboard curation.'
+description: 'Use when about to save or recall anything durable: before writing MEMORY.md, auto-memory, or CLAUDE.md, before answering from a stale summary, or before web-searching what a prior session already answered. Covers store, recall, curation. Do NOT use for raw transcript replay. Never stores secrets.'
 ---
 
 # Project memory
 
-One skill for both halves of project memory. **Recall** is read-only and where
-you start; **Curate** mutates stored facts and requires explicit approval before
-any destructive action. Prefer TraceDecay-native registered-project selectors
-whenever a recall or curation spans or targets a project other than the active
-checkout.
+```
+DURABLE FACTS LIVE IN fact_store, NOT IN MEMORY.md OR CLAUDE.md.
+RECALL BEFORE RE-DERIVING; STORE WITHOUT BEING ASKED.
+```
 
-## Recall (read-only, start here)
+Announce: "Using tracedecay:project-memory to <recall/store/curate>."
 
-Recall memory **before** reaching for external or web search — prior sessions
-often already answered the question, and a memory hit is cheaper and
-project-specific.
+## Route the moment
 
-1. **Durable facts → `tracedecay_fact_store`** with `action: "search"` (or
-   `"probe"` / `"reason"`), plus `query` and `min_trust`.
-2. **Past conversations → `tracedecay_message_search`** (`query`, optional
-   `provider`, `limit`) over ingested Cursor/Codex/agent transcripts (active
-   project FTS index). This skill owns the **FTS → fact** lane: use
-   `message_search` to surface durable project facts. For raw conversation
-   recall — scoped/role/time-filtered grep, lossless replay, or summary-DAG
-   drill-down — hand off to `tracedecay:recalling-session-context`, which owns
-   the **FTS → LCM** lane.
-3. **If the user rates a recalled fact → `tracedecay_fact_feedback`**
-   (`helpful` / `unhelpful`) to tune its trust score.
-4. **Persist a new durable decision → `tracedecay_fact_store`** `action: "add"`
-   (`content`, `category`, `tags`, `trust`) proactively whenever a durable
-   decision, user preference, correction, or pitfall surfaces — do not wait for
-   the user to ask. The add path already rejects secrets and reports
-   near-duplicates/conflicts.
+| Moment | Action |
+|---|---|
+| Need a prior decision/preference/pitfall | `tracedecay_fact_store` `action:"search"` (`query`, `min_trust`) — before web search, before asking the user |
+| Prior conversations, not facts | `tracedecay_message_search` (`query`, `limit`) — this skill owns FTS→fact; raw replay/scoped grep → `tracedecay:managing-session-context` |
+| A durable decision/correction/pitfall just surfaced | `tracedecay_fact_store` `action:"add"` (`content`, `category`, `tags`, `trust`) — proactively, do NOT wait to be asked, and do NOT write MEMORY.md instead |
+| User rates a recalled fact | `tracedecay_fact_feedback` (`helpful`/`unhelpful`) |
+| User asks to clean/merge/delete memory | Curation flow below |
 
-Do NOT capture: secrets/credentials, transient errors, environment-specific
-failures, one-off narratives, task progress, or soon-stale session outcomes —
-recover those from transcripts via `tracedecay:recalling-session-context`.
+Trust calibration for adds: `0.85+` independently verified decisions, `~0.7`
+ordinary well-sourced facts, `~0.5` plausible-but-uncertain. The add path
+already rejects secrets and reports near-duplicates/conflicts — act on those
+flags; never rephrase a rejected secret to bypass filtering.
 
-## Curate (mutation, requires approval)
+Do NOT capture: secrets/credentials/PII, transient errors,
+environment-specific failures, one-off narratives, task progress, or
+soon-stale session outcomes — those belong to session transcripts.
 
-Destructive curation is a parent-agent responsibility. Use subagents only for
-scoped inspection or recommendation work, with explicit project selectors and
-non-overlapping ownership; do not delegate delete/apply/merge/retention actions
-to subagents. Begin read-only, gather evidence, propose a mutation plan, then
-write only narrow durable changes.
+## Curation (mutation — parent agent only, approval required)
 
-1. **Resolve scope:** confirm the active project root/store before touching
-   memory. Project-bound profiles use the user-level TraceDecay store scoped to
-   the current project by default.
-2. **Start read-mostly:** `tracedecay_fact_store` with `action: "get"`,
-   `"contradict"`, `"search"`, `"list"`, `"probe"`, `"related"`, or `"reason"`;
-   note that search/list/probe/related/reason may update retrieval/access
-   metadata. Use `tracedecay_memory_status` only when the user asks for memory
-   counts/health because it may repair vectors/banks. Use `tracedecay_dashboard`
-   (`action: "start"`) only when they want visual curation.
-3. **Run native dry-run:** prefer `tracedecay memory curate` or
-   `POST /api/plugins/holographic/curate` with `{"dry_run": true}`. Dry-run is
-   the default and returns `actions`, `hygiene_candidates`, `counts`,
-   `coverage`, `provider`, and `mode`.
-4. **Inventory candidates:** group facts into add, update, merge/dedupe, stale,
-   contradiction, secret-like, transient, supersession, and possible
-   hard-delete buckets. Keep fact ids, source/provenance, trust, tags,
-   entities, evidence links, and counterevidence with each candidate.
-5. **Research gaps:** use TraceDecay graph/search plus LCM/session/message tools
-   to mine past sessions, raw messages, summary DAGs, branch/PR context, docs,
-   and tests. Scoped subagents may research bounded read-only questions only;
-   the parent agent is the sole memory writer and must review raw findings
-   before trusting them.
-6. **Propose changes:** summarize durable additions, stale-fact updates,
-   trust/tag/source changes, dedupe merges, and delete candidates. Prefer
-   update/merge over removal when useful provenance should survive.
-7. **Apply narrowly → `tracedecay_fact_store`** `action: "add"` / `"update"` /
-   `"remove"` for reviewed operations (or `POST
-   /api/plugins/holographic/curate/apply` / `tracedecay memory curate
-   --llm-ops <file> --apply`). Require explicit approval immediately before
-   every `remove`, dashboard hard delete, or merge loser removal, showing fact
-   id, content/source summary, reason, and permanent-delete warning.
-8. **Verify read-only:** re-run search/list/probe/related/contradict/get as
-   appropriate, inspect apply results/oplog when used, and report final facts
-   changed, skipped, or still needing human judgment.
+Read [references/curation.md](references/curation.md) for the full protocol:
+read-mostly inventory → native dry-run (`tracedecay memory curate`) →
+candidate buckets → narrow apply (`fact_store` add/update/remove) → read-only
+verify (`tracedecay_memory_status` for counts/health). Hard rules that always
+apply:
 
-## Guardrails
+- Deletion is permanent (no soft-delete, no undo). Explicit approval
+  immediately before every `remove`, hard delete, or merge-loser removal,
+  showing fact id, content summary, and reason. Prefer update/merge when
+  provenance should survive.
+- Subagents may inspect and recommend only — never let a subagent call
+  add/update/remove/feedback, apply curation ops, or run memory repair.
+- Do not lower trust merely for age; cite newer evidence or a contradiction.
 
-- `tracedecay_message_search` and `fact_store` search/get/contradict are
-  read-only recall. Search/list/probe/related/reason are read-mostly but can
-  update access/retrieval counters. `fact_store` add/update/remove,
-  `fact_feedback`, `memory_status` repair, and `dashboard` start/stop mutate
-  state or launch a local process; respect host approval/run-mode.
-- Deletion is permanent: there is no archive, soft-delete, restore, or undo
-  path. Prefer update/merge when useful provenance should survive; delete only
-  approved stale, duplicate, wrong, secret-like, or user-requested facts.
-- Never store secrets, credentials, API keys, or PII. Do not lower trust merely
-  because a fact is old; cite the newer evidence or contradiction.
-- Dashboard curation can apply hard deletes. Use preview/dry-run first when
-  available and surface high-risk delete/merge operations before applying them.
-  `POST /api/plugins/holographic/curate` with `dry_run=false` applies
-  deterministic duplicate deletion; `POST /api/plugins/holographic/curate/apply`
-  applies explicit delete/merge ops.
-- Do not let subagents call add/update/remove/feedback tools, apply curation
-  ops, start dashboard mutation flows, or run memory health repair. Ask them for
-  cited evidence, candidate facts, suspected duplicates, and stale/conflicting
-  claims, then perform parent-agent validation before writing.
-- Hygiene candidates (`secret_like`, `transient`, `supersession`) are review
-  evidence, not deterministic apply operations. External LLM plans must use
-  strict JSON `{"ops": [...]}` and pass the TraceDecay evidence guard; rejected
-  low-confidence or out-of-scope ops must stay skipped.
+## If tools are deferred or MCP fails
 
-## Memorize a subject
+- Deferred: one ToolSearch call —
+  `select:tracedecay_fact_store,tracedecay_message_search,tracedecay_fact_feedback`.
+- MCP error: `tracedecay tool fact_store --action search --query …` (see
+  `tracedecay:using-the-cli`). An MCP failure is not a reason to write
+  MEMORY.md — the CLI reaches the same store.
 
-Use only when the user explicitly asks to memorize or remember a subject, code
-area, branch, PR, or decision set.
+## Deliverable
 
-1. **Research read-only:** TraceDecay graph/search, LCM/session/message tools,
-   docs, existing fact searches, and relevant branch/PR context.
-2. **Filter:** keep durable, scoped facts with citations. Reject secrets,
-   credentials, PII, large code blobs, transient branch state, and uncited
-   speculation.
-3. **Calibrate trust:** `0.85+` for independently verified decisions, about
-   `0.7` for ordinary well-sourced facts, about `0.5` for plausible but
-   uncertain facts. Do not ask for approval solely because trust is low.
-4. **Dedupe before writing:** search `tracedecay_fact_store` with the subject
-   plus candidate, matching category, `limit: 10`, `min_trust: 0.5`; skip
-   near-duplicates and ask before replacing contradictory facts.
-5. **Store accepted facts → `tracedecay_fact_store`** `action: "add"` with
-   content, category, source, tags, entities, trust, and metadata containing
-   subject/confidence/citations. Act on `near_duplicate`, `possible_conflict`,
-   and `rejected_secret_like`; never rephrase a rejected secret to bypass
-   filtering.
-
-## Handoff
-
-- Raw session messages, scoped grep, or summary-DAG replay →
-  `tracedecay:recalling-session-context`.
-- Index/server status without memory mutation → `tracedecay:code-health`.
-
-## Output
-
-- Recall: the relevant prior context/decisions/messages found, with source.
-- Curate: facts searched/changed, confirmations requested, final verification
-  result, and any skipped high-risk candidates.
-- If any result includes a `tracedecay_metrics:` line, report the savings to the
-  user.
+Recall: the prior context/decisions found, with source and trust — or an
+explicit "no stored fact matches", after which storing the fresh answer is the
+default next step. Store: the fact id(s) written and any duplicate/conflict
+flags handled. Curate: facts changed/skipped, approvals obtained,
+verification result. Report any `tracedecay_metrics:` line.

@@ -36,6 +36,8 @@ const HOOK_EVENT_NOTIFY_TIMEOUT: Duration = Duration::from_millis(750);
 #[cfg(unix)]
 const DAEMON_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(45);
 
+#[cfg(unix)]
+mod git_watch;
 mod service;
 pub use service::{
     daemon_reachable, default_socket_path, install_service, installed_service_socket_path,
@@ -496,6 +498,156 @@ fn quote_log_value(value: &str) -> String {
 
 fn log_daemon_event(event: &str, fields: &[(&str, String)]) {
     eprintln!("{}", format_daemon_log_line(event, fields));
+}
+
+/// A single git-watcher lifecycle event recovered from the daemon log, for the
+/// `tracedecay doctor` watcher-health section.
+#[cfg(unix)]
+#[derive(Debug, Clone)]
+pub struct WatcherEvent {
+    /// The `git_watch_*` event name (`started`, `synced`, `degraded`, `restart`).
+    pub event: String,
+    /// The `project=` field, when present.
+    pub project: Option<String>,
+    /// The `action=`/`reason=` field, when present (context for the event).
+    pub detail: Option<String>,
+}
+
+/// Parses one daemon log line into a [`WatcherEvent`] when it is a `git_watch_*`
+/// event. Mirrors [`format_daemon_log_line`] (space-separated `key=value`, values
+/// optionally double-quoted). Returns `None` for non-watcher lines.
+#[cfg(unix)]
+fn parse_watcher_log_line(line: &str) -> Option<WatcherEvent> {
+    let idx = line.find("event=")?;
+    let rest = &line[idx + "event=".len()..];
+    let mut fields = parse_log_fields(rest);
+    let event = fields.remove("__first__")?;
+    if !event.starts_with("git_watch_") {
+        return None;
+    }
+    let detail = fields
+        .remove("action")
+        .or_else(|| fields.remove("reason"))
+        .or_else(|| fields.remove("branch"));
+    Some(WatcherEvent {
+        event,
+        project: fields.remove("project"),
+        detail,
+    })
+}
+
+/// Splits a `key=value key="quoted value" …` tail into a map. The leading value
+/// (the event name, which has no key) is stored under `__first__`.
+#[cfg(unix)]
+fn parse_log_fields(rest: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let bytes = rest.as_bytes();
+    let mut i = 0;
+    let mut first = true;
+    while i < bytes.len() {
+        while i < bytes.len() && bytes[i] == b' ' {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        if first {
+            // Leading unkeyed event-name token.
+            let start = i;
+            while i < bytes.len() && bytes[i] != b' ' {
+                i += 1;
+            }
+            out.insert("__first__".to_string(), unquote(&rest[start..i]));
+            first = false;
+            continue;
+        }
+        // key
+        let key_start = i;
+        while i < bytes.len() && bytes[i] != b'=' && bytes[i] != b' ' {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b'=' {
+            break;
+        }
+        let key = rest[key_start..i].to_string();
+        i += 1; // skip '='
+        let value = if i < bytes.len() && bytes[i] == b'"' {
+            i += 1;
+            let val_start = i;
+            while i < bytes.len() && bytes[i] != b'"' {
+                if bytes[i] == b'\\' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            let v = rest[val_start..i.min(rest.len())].to_string();
+            if i < bytes.len() {
+                i += 1; // closing quote
+            }
+            v.replace("\\\"", "\"").replace("\\\\", "\\")
+        } else {
+            let val_start = i;
+            while i < bytes.len() && bytes[i] != b' ' {
+                i += 1;
+            }
+            rest[val_start..i].to_string()
+        };
+        out.insert(key, value);
+    }
+    out
+}
+
+#[cfg(unix)]
+fn unquote(s: &str) -> String {
+    s.trim_matches('"').to_string()
+}
+
+/// Reads recent `git_watch_*` events from the daemon log and returns the most
+/// recent event per project. Read-only; used by `tracedecay doctor`.
+///
+/// Source is platform-specific: systemd user journal on Linux, the launchd
+/// `daemon.err.log` on macOS. Returns an empty map when no log source is
+/// readable (the doctor treats that as "no watcher telemetry available").
+#[cfg(unix)]
+pub fn recent_watcher_events(max_lines: usize) -> HashMap<String, WatcherEvent> {
+    let text = read_daemon_log_tail(max_lines);
+    let mut latest: HashMap<String, WatcherEvent> = HashMap::new();
+    for line in text.lines() {
+        if let Some(ev) = parse_watcher_log_line(line) {
+            let key = ev.project.clone().unwrap_or_else(|| "<global>".to_string());
+            latest.insert(key, ev);
+        }
+    }
+    latest
+}
+
+/// Best-effort read of the tail of the daemon log across service runners.
+#[cfg(unix)]
+fn read_daemon_log_tail(max_lines: usize) -> String {
+    // macOS launchd: a plain err-log file next to the data dir.
+    if let Some(data_dir) = crate::config::user_data_dir() {
+        let err_log = data_dir.join("daemon.err.log");
+        if let Ok(contents) = std::fs::read_to_string(&err_log) {
+            let lines: Vec<&str> = contents.lines().collect();
+            let start = lines.len().saturating_sub(max_lines);
+            return lines[start..].join("\n");
+        }
+    }
+    // Linux systemd: pull recent journal lines for the user unit.
+    let output = std::process::Command::new("journalctl")
+        .args([
+            "--user",
+            "-u",
+            SERVICE_NAME,
+            "--no-pager",
+            "-n",
+            &max_lines.to_string(),
+        ])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).into_owned(),
+        _ => String::new(),
+    }
 }
 
 #[cfg(unix)]
@@ -1113,7 +1265,13 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         "daemon_listening",
         &[("socket", socket_path.display().to_string())],
     );
-    let engine = DaemonEngine::default();
+    // Install the git-metadata watcher (design D3/D5). The daemon has no single
+    // project root, so it uses the default `[sync]` config plus env overrides.
+    // When `auto_watch` is off the watcher is inert.
+    let git_watcher =
+        git_watch::GitWatcher::new(crate::config::SyncConfig::default().with_env_overrides());
+    git_watcher.spawn(crate::global_db::global_db_path()).await;
+    let engine = DaemonEngine::default().with_git_watcher(git_watcher);
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
     loop {
@@ -1206,6 +1364,10 @@ struct DaemonEngine {
     /// Client versions whose skew was already logged. Proxy clients reconnect
     /// per request, so without this the mismatch would flood the daemon log.
     logged_client_version_skews: Arc<tokio::sync::Mutex<HashSet<String>>>,
+    /// Git-metadata watcher (design D3/D5). Default-constructed inert; the real
+    /// config-driven watcher is installed by `run_foreground_unix` via
+    /// [`DaemonEngine::with_git_watcher`] before the accept loop starts.
+    git_watcher: git_watch::GitWatcher,
 }
 
 #[cfg(unix)]
@@ -1229,6 +1391,13 @@ impl ProjectServerKey {
 
 #[cfg(unix)]
 impl DaemonEngine {
+    /// Installs the config-driven git-metadata watcher on this engine. Called
+    /// once by `run_foreground_unix` before the accept loop.
+    fn with_git_watcher(mut self, watcher: git_watch::GitWatcher) -> Self {
+        self.git_watcher = watcher;
+        self
+    }
+
     /// Returns the client version to log for this handshake, once per distinct
     /// skewed version; repeat connections from the same client return `None`.
     async fn client_version_skew_to_log(&self, handshake: &DaemonHandshake) -> Option<String> {
@@ -1276,6 +1445,11 @@ impl DaemonEngine {
         if let Some(server) = servers.get(&key) {
             let server = Arc::clone(server);
             drop(servers);
+            // A freshly-handshaken project should be watched even on a cache
+            // hit (the watcher may have started after this server was cached).
+            self.git_watcher
+                .ensure_watching(&canonical_project_path)
+                .await;
             Box::pin(self.ensure_automation_scheduler(
                 key,
                 canonical_project_path,
@@ -1302,6 +1476,9 @@ impl DaemonEngine {
         .await;
         servers.insert(key.clone(), Arc::clone(&server));
         drop(servers);
+        self.git_watcher
+            .ensure_watching(&canonical_project_path)
+            .await;
         Box::pin(self.ensure_automation_scheduler(key, canonical_project_path, handshake.clone()))
             .await;
         Ok(server)
