@@ -17,11 +17,7 @@ pub const CURSOR_PLUGIN_SKILLS: &[&str] = &[
     "inspecting-managed-skills",
     "managing-session-context",
     "project-memory",
-    "recalling-session-context",
-    "retrieving-cached-context",
-    "retrieving-project-memory",
     "reviewing-changes",
-    "storing-project-memory",
     "tracing-functions",
     "using-the-cli",
     "using-tracedecay",
@@ -37,6 +33,12 @@ pub(super) fn append_tracedecay_bootstrap_context(s: &mut String) {
          skill; follow it before native search or broad file reads.\n\n",
     );
     s.push_str(TRACEDECAY_BOOTSTRAP_SKILL);
+    s.push_str(
+        "\nCore TraceDecay MCP tools: tracedecay_context, tracedecay_grep, \
+         tracedecay_search, tracedecay_callers, tracedecay_callees, \
+         tracedecay_impact, tracedecay_project_search, tracedecay_message_search, \
+         tracedecay_fact_store.\n",
+    );
     s.push_str("\n</EXTREMELY_IMPORTANT>\n");
 }
 
@@ -117,12 +119,21 @@ pub fn build_codex_session_context_for_workspace(
             } else {
                 s.push_str(
                     "After initialization, use tracedecay MCP tools (tracedecay_context, \
-                     tracedecay_search, tracedecay_callers, tracedecay_callees, \
-                     tracedecay_impact, tracedecay_files, tracedecay_affected) before broad \
-                     file reads or shell search for codebase exploration, symbol lookup, call \
-                     graphs, and impact analysis.\n",
+                     tracedecay_grep, tracedecay_search, tracedecay_callers, \
+                     tracedecay_callees, tracedecay_impact, tracedecay_files, \
+                     tracedecay_affected) before broad file reads or shell search for codebase \
+                     exploration, symbol lookup, call graphs, and impact analysis. Route \
+                     searches by target: literal or regex text -> tracedecay_grep; symbol name \
+                     -> tracedecay_search; concept -> tracedecay_context; files by role/path \
+                     -> tracedecay_files.\n",
                 );
             }
+            s.push_str(
+                "Before running cargo check/tsc/clippy in the shell, or when shell output shows \
+                 compile errors, use tracedecay diagnostics instead of eyeballing raw output: \
+                 paste captured output into tracedecay_diagnose, or run tracedecay_diagnostics \
+                 for fresh structured errors mapped to the enclosing symbols and callers.\n",
+            );
             s.push_str(
                 "If a tracedecay MCP call errors, times out, or the server is disconnected, every tool \
                  is also a shell command: `tracedecay tool <name> --key value` (`tracedecay \
@@ -266,6 +277,41 @@ mod tests {
     fn non_compact_session_start_events_do_not_get_recovery_hint() {
         let event = serde_json::json!({ "source": "resume" }).to_string();
         assert!(!session_start_from_compaction(&event));
+    }
+
+    #[test]
+    fn codex_session_context_carries_diagnostics_moment() {
+        // Both the initialized and unindexed surfaces must route the shell
+        // compile/type-check moment to tracedecay diagnostics.
+        for status in [
+            HookWorkspaceStatus::Initialized,
+            HookWorkspaceStatus::UnindexedProject,
+        ] {
+            let context = build_codex_session_context_for_workspace(status, None);
+            assert!(
+                context.contains("tracedecay_diagnostics"),
+                "missing tracedecay_diagnostics for {status:?}"
+            );
+            assert!(
+                context.contains("tracedecay_diagnose"),
+                "missing tracedecay_diagnose for {status:?}"
+            );
+            assert!(
+                context.contains("cargo check"),
+                "missing compile-moment cue for {status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn codex_unindexed_context_routes_grep_search_context() {
+        // Content/symbol/concept routing must survive on the unindexed surface,
+        // which cannot lean on the bootstrap skill for the tool ladder.
+        let context =
+            build_codex_session_context_for_workspace(HookWorkspaceStatus::UnindexedProject, None);
+        assert!(context.contains("literal or regex text -> tracedecay_grep"));
+        assert!(context.contains("symbol name -> tracedecay_search"));
+        assert!(context.contains("concept -> tracedecay_context"));
     }
 
     #[test]

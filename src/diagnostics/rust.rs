@@ -114,7 +114,10 @@ impl Driver for CargoDriver {
 /// Private cargo target dir for diagnostics. Created lazily by cargo on first
 /// run and kept outside the project tree so diagnostics never create
 /// project-local `.tracedecay` folders.
-fn target_dir_for(project_root: &Path) -> PathBuf {
+///
+/// `pub(crate)` so the MCP handler can probe whether it is cold (never built)
+/// and decide whether to prewarm rather than block for minutes.
+pub(crate) fn target_dir_for(project_root: &Path) -> PathBuf {
     std::env::temp_dir()
         .join("tracedecay-target")
         .join(crate::storage::default_profile_project_id(project_root))

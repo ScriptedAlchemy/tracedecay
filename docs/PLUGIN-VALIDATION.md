@@ -48,6 +48,7 @@ JSON artifacts in the bundles are validated against vendored JSON Schemas in
 | `plugin/.codex-plugin/plugin.json` | `cursor-schemas/plugin.schema.json` + `interface` extension | `tests/agent_suite/plugin_manifest_schema_test.rs` |
 | `plugin/.claude-plugin/plugin.json` | `claude-schemas/plugin.schema.json` | `tests/agent_suite/claude_plugin_schema_test.rs` |
 | `plugin/.claude-plugin/marketplace.json` | `claude-schemas/marketplace.schema.json` | `tests/agent_suite/claude_plugin_schema_test.rs` |
+| `plugin/.mcp.json` | `cursor-schemas/mcp.schema.json` | `tests/agent_suite/plugin_config_schema_test.rs` |
 | `plugin/mcp-cursor.json` (deploys as `mcp.json`) | `cursor-schemas/mcp.schema.json` | `tests/agent_suite/plugin_config_schema_test.rs` |
 | `plugin/hooks/hooks-cursor.json` and `plugin/hooks/hooks-codex.json` | `cursor-schemas/hooks.schema.json` | `tests/agent_suite/plugin_config_schema_test.rs` |
 | `plugin/hooks/hooks-claude.json` | `claude-schemas/hooks.schema.json` | `tests/agent_suite/claude_plugin_schema_test.rs` |
@@ -67,10 +68,12 @@ that host manifests share the same plugin `name`. The config-schema tests
 include negative cases proving the mcp/hooks schemas actually reject
 malformed configs (missing `command`, unknown fields, typo'd event names).
 
-The Cursor plugin schema declares `additionalProperties: false`, and Codex
+The Cursor plugin/hooks schemas declare `additionalProperties: false`. Codex
 marketplaces read an `interface` display-metadata block that Cursor's schema
-doesn't define. The Codex manifest is therefore validated against the Cursor
-schema plus exactly that one extra key, derived in the test.
+doesn't define, and the repo-local Codex hook seed carries a top-level
+`description` explaining why its `hooks` object is empty. Those two Codex
+surfaces are validated against the Cursor schemas plus exactly those
+host-specific keys, derived in the tests.
 
 ### 2. Skill contract tests (cargo test)
 

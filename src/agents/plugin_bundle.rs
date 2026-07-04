@@ -5,13 +5,14 @@
 //! agent format.
 //!
 //! Layout of `plugin/`:
-//! - `plugin/skills/*/SKILL.md` — the 17 shared model-invocable skills **plus**
-//!   the 13 canonical (`claude`/`codex`) workflow dispatcher skills (30 total).
-//!   Cursor deploys only the 17 model-invocable skills (not the dispatcher
-//!   skills); its explicit dispatch is native commands (below).
+//! - `plugin/skills/*/SKILL.md` — the 13 shared model-invocable skills. All
+//!   three hosts deploy the full set; the workflow dispatcher skills were
+//!   removed (their behavior lives in the native slash commands below), so no
+//!   host filters the skill set today. The `cursor_skill_files` filter is kept
+//!   as a guard against a dispatcher skill being reintroduced.
 //! - `plugin/overlays/cursor/commands/tracedecay-*.md` — Cursor 1.6+ native
 //!   slash commands, one per workflow slug, deployed to `commands/<slug>.md`.
-//!   These replace the old Cursor dispatcher *skills*.
+//!   These provide the explicit workflow dispatch (no dispatcher *skills*).
 //! - `plugin/agents/*.md` — Claude-form subagents (deployed by Claude).
 //! - `plugin/overlays/cursor/agents/*.md` — Cursor-form subagents.
 //! - `plugin/commands/*.md` — Claude slash commands.
@@ -325,7 +326,9 @@ mod tests {
     fn each_host_composes_the_expected_file_count() {
         // Skill files are embedded recursively (SKILL.md + support files), so
         // the skill count is derived from the generated set rather than a
-        // frozen literal. Cursor drops the `tracedecay-*` dispatcher skills.
+        // frozen literal. The `tracedecay-*` dispatcher skills were removed, so
+        // Cursor's subset now equals the full skill set; the filter is kept as a
+        // guard against a dispatcher skill ever being reintroduced.
         let all_skills = GENERATED_SKILL_FILES.len();
         let cursor_skills = cursor_skill_files().count();
 

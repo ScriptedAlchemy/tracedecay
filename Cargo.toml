@@ -135,12 +135,17 @@ self-replace = "1"
 memmap2 = "0.9"
 crossterm = "0.28"
 fs2 = "0.4"
+reflink-copy = "0.1"
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 tree-sitter-hlsl = { version = "0.2.0", optional = true }
 amari-holographic = "0.23.0"
 regex = "1.12.3"
 open = "5.3"
 tiktoken-rs = { version = "0.12", optional = true }
+# Raw filesystem watcher for the daemon git-metadata watcher (src/daemon/git_watch.rs).
+# We deliberately use the raw watcher (not notify-debouncer-full) and debounce
+# ourselves so a monorepo's git-ref churn coalesces into a single sync.
+notify = "6"
 
 [target.'cfg(not(windows))'.dependencies]
 flate2 = "1"

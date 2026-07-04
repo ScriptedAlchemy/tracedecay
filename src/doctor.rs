@@ -53,6 +53,7 @@ pub async fn run_doctor(agent_filter: Option<&str>) {
 
     check_global_db(&mut dc);
     check_stale_stores(&mut dc).await;
+    check_watcher(&mut dc);
     check_user_config(&mut dc);
     check_external_tools(&mut dc);
 
@@ -559,6 +560,69 @@ pub(crate) fn orphan_store_manifest_report(
         })
         .count();
     (orphan_count, report.issues)
+}
+
+/// Reports git-metadata watcher health (design D3/D5).
+///
+/// The watcher lives in the daemon; its per-project state is only in-process, so
+/// this section sources telemetry the read-only way: recent `git_watch_*` events
+/// from the daemon log (systemd journal on Linux, launchd err-log on macOS). It
+/// reports whether the watcher is active vs degraded (mtime-poll fallback) per
+/// project. Absent telemetry is reported as info, not a failure — the watcher is
+/// a best-effort freshness aid backed by the on-read/hook sync paths.
+fn check_watcher(dc: &mut DoctorCounters) {
+    eprintln!("\n\x1b[1mWatcher\x1b[0m");
+
+    let config = crate::config::SyncConfig::default().with_env_overrides();
+    if !config.auto_watch {
+        dc.info("Git-metadata watcher disabled (`sync.auto_watch = false`)");
+        return;
+    }
+
+    if !crate::daemon::daemon_reachable() {
+        dc.info("Daemon not running — watcher inactive; sync happens on hook/read events");
+        return;
+    }
+
+    #[cfg(unix)]
+    {
+        let events = crate::daemon::recent_watcher_events(2000);
+        if events.is_empty() {
+            dc.info("Daemon running; no recent watcher telemetry in the log yet");
+            return;
+        }
+        let mut degraded = 0usize;
+        let mut active = 0usize;
+        let mut projects: Vec<_> = events.into_iter().collect();
+        projects.sort_by(|a, b| a.0.cmp(&b.0));
+        for (project, ev) in projects {
+            match ev.event.as_str() {
+                "git_watch_degraded" => {
+                    degraded += 1;
+                    dc.warn(&format!(
+                        "{project}: degraded (mtime-poll fallback){}",
+                        ev.detail.map(|d| format!(" — {d}")).unwrap_or_default()
+                    ));
+                }
+                "git_watch_restart" => {
+                    dc.warn(&format!("{project}: watcher restarting after failure"));
+                }
+                _ => {
+                    active += 1;
+                    dc.pass(&format!(
+                        "{project}: active ({})",
+                        ev.detail.unwrap_or_else(|| ev.event.clone())
+                    ));
+                }
+            }
+        }
+        if degraded == 0 && active > 0 {
+            dc.info(&format!("{active} project(s) watched, none degraded"));
+        }
+    }
+
+    #[cfg(not(unix))]
+    dc.info("Git-metadata watcher is only available on Unix daemons");
 }
 
 /// Check user config file.

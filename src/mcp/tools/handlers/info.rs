@@ -1657,7 +1657,7 @@ pub(super) async fn handle_body(
         "matches": matches,
     });
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-        render::generic_md(&output)
+        render_body_md(&output)
     });
     Ok(ToolResult::new(
         json!({
@@ -1665,6 +1665,44 @@ pub(super) async fn handle_body(
         }),
         touched,
     ))
+}
+
+/// Renders `tracedecay_body` matches like `render_read_md` rather than dumping
+/// source into a table cell with newlines collapsed: each match gets a heading,
+/// a location line, an optional signature, a token count, and a fenced code
+/// block tagged with the file's language extension.
+fn render_body_md(value: &Value) -> String {
+    use crate::context::read_modes::estimate_tokens;
+
+    let mut md = Md::new();
+    let matches = value.get("matches").and_then(Value::as_array);
+    let count = matches.map_or(0, std::vec::Vec::len);
+    md.heading(2, &format!("Body matches ({count})"));
+
+    let Some(matches) = matches else {
+        return md.render();
+    };
+    for m in matches {
+        let name = render::field_str(m, "name");
+        let kind = render::field_str(m, "kind");
+        let file = render::field_str(m, "file");
+        let start = render::field_i64(m, "start_line");
+        let end = render::field_i64(m, "end_line");
+        let signature = render::field_str(m, "signature");
+        let body = render::field_str(m, "body");
+
+        md.blank();
+        md.heading(3, &format!("{name} ({kind})"));
+        md.field("location", &format!("{file}:{start}-{end}"));
+        if !signature.is_empty() {
+            md.field("signature", signature);
+        }
+        md.field("tokens", &estimate_tokens(body).to_string());
+        md.blank();
+        let lang = file.rsplit_once('.').map_or("", |(_, ext)| ext);
+        md.code(lang, body);
+    }
+    md.render()
 }
 
 async fn body_candidates(

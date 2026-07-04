@@ -447,7 +447,10 @@ pub async fn prepare_branch_tracking_in_layout(
         }
     })?;
     let new_db_path = branches_dir.join(format!("{stem}.db"));
-    if let Err(e) = std::fs::copy(&parent_db, &new_db_path) {
+    // Only the main `.db` is copied here; the parent's -wal/-shm are already
+    // checkpointed into it, so a single-file clone is a complete copy. We hold
+    // the branch-add lock, so the parent is not being written mid-clone.
+    if let Err(e) = clone_or_copy_db(&parent_db, &new_db_path) {
         remove_branch_db_files(&new_db_path);
         return Err(e.into());
     }
@@ -551,6 +554,188 @@ fn remove_branch_db_files(db_path: &Path) {
     let _ = std::fs::remove_file(&sidecar);
 }
 
+/// Clones `src` to `dst` using a reflink (copy-on-write, FICLONE) when the
+/// filesystem supports it (btrfs/xfs/APFS), so a ~110MB branch-add DB copy is
+/// an instant metadata operation. Falls back to a byte copy on ANY reflink
+/// error (unsupported FS, cross-device, older kernel), so the destination is
+/// always a complete, independent copy either way.
+fn clone_or_copy_db(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if reflink_copy::reflink(src, dst).is_ok() {
+        return Ok(());
+    }
+    // A failed reflink can leave a partial/zero-length destination behind;
+    // remove it so the byte copy starts clean.
+    let _ = std::fs::remove_file(dst);
+    std::fs::copy(src, dst).map(|_| ())
+}
+
+/// Returns true if `branch` currently exists as a local `refs/heads/*` ref.
+///
+/// Thin alias over [`local_branch_exists`] under the name the branch-store GC
+/// design refers to; keeping both avoids churning existing call sites.
+pub fn is_branch_ref_present(project_root: &Path, branch: &str) -> bool {
+    local_branch_exists(project_root, branch)
+}
+
+/// Result of a dead/orphan branch-store GC pass.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct GcReport {
+    /// Names of tracked branches whose DB + metadata entry were removed because
+    /// their git ref is gone and their last sync predates the grace window.
+    pub removed_tracked: Vec<String>,
+    /// Paths of orphan `branches/*.db` files (not referenced by any meta entry)
+    /// that were deleted because their mtime predates the grace window.
+    pub removed_orphan_dbs: Vec<PathBuf>,
+}
+
+/// Parses a `last_synced_at` / `created_at` unix-seconds string defensively.
+/// Returns 0 (epoch, i.e. maximally stale) when unparseable so a corrupt
+/// timestamp never protects a dead store from collection.
+fn parse_unix_secs(ts: &str) -> u64 {
+    ts.trim().parse::<u64>().unwrap_or(0)
+}
+
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Garbage-collects dead and orphaned branch stores.
+///
+/// Two independent sweeps, both age-gated so an in-flight branch that has not
+/// yet synced or a just-deleted-then-recreated ref is never collected:
+///
+/// (a) **Tracked, ref-gone branches** — for each tracked non-default branch
+///     whose git ref no longer exists AND whose `last_synced_at` is older than
+///     `branch_gc_days`, remove its DB files and metadata entry. The default
+///     branch is never removed.
+/// (b) **Orphan DBs** — `branches/*.db` files not referenced by any meta entry
+///     whose mtime is older than `orphan_db_gc_days` are deleted along with
+///     their `-wal`/`-shm` sidecars.
+///
+/// The whole pass holds the branch-add lock so it never races a concurrent
+/// branch-add (which is creating files GC would otherwise see as orphans).
+/// If the lock cannot be acquired promptly, GC is skipped this round and an
+/// empty report is returned — the daemon retries on its next tick. Logging is
+/// the caller's responsibility; this function is silent.
+pub fn gc_dead_branch_stores(
+    project_root: &Path,
+    tracedecay_dir: &Path,
+    branch_gc_days: u64,
+    orphan_db_gc_days: u64,
+) -> GcReport {
+    let mut report = GcReport::default();
+
+    // Serialize against branch-add so we don't delete a DB it is mid-creation.
+    let Ok(_lock) = try_acquire_branch_add_lock(tracedecay_dir) else {
+        return report;
+    };
+
+    let now = now_unix_secs();
+
+    // (a) Tracked branches whose ref is gone and whose last sync is stale.
+    if let Some(mut meta) = crate::branch_meta::load_branch_meta(tracedecay_dir) {
+        let branch_grace = branch_gc_days.saturating_mul(86_400);
+        let default_branch = meta.default_branch.clone();
+        let candidates: Vec<(String, PathBuf, u64)> = meta
+            .branches
+            .iter()
+            .filter(|(name, _)| **name != default_branch)
+            .map(|(name, entry)| {
+                (
+                    name.clone(),
+                    tracedecay_dir.join(&entry.db_file),
+                    parse_unix_secs(&entry.last_synced_at),
+                )
+            })
+            .collect();
+
+        let mut removed_any = false;
+        for (name, db_path, last_synced) in candidates {
+            // Never collect a branch whose ref still resolves, and never one
+            // synced within the grace window (`<= now` age guards a clock skew
+            // where last_synced is in the future).
+            if is_branch_ref_present(project_root, &name) {
+                continue;
+            }
+            let age = now.saturating_sub(last_synced);
+            if age < branch_grace {
+                continue;
+            }
+            remove_branch_db_files(&db_path);
+            meta.remove_branch(&name);
+            report.removed_tracked.push(name);
+            removed_any = true;
+        }
+        if removed_any {
+            let _ = crate::branch_meta::save_branch_meta(tracedecay_dir, &meta);
+        }
+
+        // (b) Orphan DBs: files under branches/ not referenced by any surviving
+        // meta entry. Recompute the referenced set AFTER the removals above so
+        // a just-removed branch's DB (already deleted) is not double-counted.
+        let referenced: std::collections::HashSet<PathBuf> = meta
+            .branches
+            .values()
+            .map(|entry| tracedecay_dir.join(&entry.db_file))
+            .collect();
+        report.removed_orphan_dbs =
+            sweep_orphan_dbs(tracedecay_dir, &referenced, orphan_db_gc_days, now);
+    } else {
+        // No branch metadata: every branches/*.db is an orphan candidate.
+        report.removed_orphan_dbs = sweep_orphan_dbs(
+            tracedecay_dir,
+            &std::collections::HashSet::new(),
+            orphan_db_gc_days,
+            now,
+        );
+    }
+
+    report
+}
+
+/// Deletes stale `branches/*.db` files (+ sidecars) not in `referenced`.
+fn sweep_orphan_dbs(
+    tracedecay_dir: &Path,
+    referenced: &std::collections::HashSet<PathBuf>,
+    orphan_db_gc_days: u64,
+    now: u64,
+) -> Vec<PathBuf> {
+    let mut removed = Vec::new();
+    let branches_dir = tracedecay_dir.join("branches");
+    let Ok(entries) = std::fs::read_dir(&branches_dir) else {
+        return removed;
+    };
+    let orphan_grace = orphan_db_gc_days.saturating_mul(86_400);
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Only main `.db` files are stores; sidecars are removed alongside.
+        if path.extension().and_then(|e| e.to_str()) != Some("db") {
+            continue;
+        }
+        if referenced.contains(&path) {
+            continue;
+        }
+        // Age-gate on mtime; a freshly-created orphan (e.g. a branch-add whose
+        // meta save is momentarily lagging) is kept until it ages out.
+        let mtime_secs = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs());
+        let age = now.saturating_sub(mtime_secs);
+        if age < orphan_grace {
+            continue;
+        }
+        remove_branch_db_files(&path);
+        removed.push(path);
+    }
+    removed
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -622,5 +807,215 @@ mod tests {
         let dir = Path::new("/nonexistent-branches-dir-for-test");
         assert!(unique_branch_db_stem(&meta, dir, "..").is_none());
         assert!(unique_branch_db_stem(&meta, dir, "///").is_none());
+    }
+
+    // --- git test harness (mirrors src/mcp/hook_events.rs tests) ------------
+
+    fn git_program() -> std::ffi::OsString {
+        use std::sync::OnceLock;
+        static GIT: OnceLock<std::ffi::OsString> = OnceLock::new();
+        GIT.get_or_init(|| {
+            if let Some(explicit) = std::env::var_os("GIT") {
+                return explicit;
+            }
+            let exe_name = if cfg!(windows) { "git.exe" } else { "git" };
+            if let Some(paths) = std::env::var_os("PATH") {
+                for dir in std::env::split_paths(&paths) {
+                    let candidate = dir.join(exe_name);
+                    if candidate.is_file() {
+                        return candidate.into_os_string();
+                    }
+                }
+            }
+            std::ffi::OsString::from("git")
+        })
+        .clone()
+    }
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        assert!(cwd.is_dir(), "git cwd {cwd:?} should exist");
+        let git = git_program();
+        let mut last_err: Option<std::io::Error> = None;
+        let mut output = None;
+        for attempt in 0..5 {
+            match std::process::Command::new(&git)
+                .args(args)
+                .current_dir(cwd)
+                .output()
+            {
+                Ok(out) => {
+                    output = Some(out);
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound && attempt < 4 => {
+                    last_err = Some(e);
+                    std::thread::sleep(std::time::Duration::from_millis(20 * (attempt + 1)));
+                }
+                Err(e) => panic!("git {args:?} should run (program {git:?}): {e}"),
+            }
+        }
+        let output =
+            output.unwrap_or_else(|| panic!("git {args:?} should run after retries: {last_err:?}"));
+        assert!(
+            output.status.success(),
+            "git {:?} failed\nstdout:\n{}\nstderr:\n{}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(windows)]
+    fn git_test_root(path: &Path) -> PathBuf {
+        path.to_path_buf()
+    }
+
+    #[cfg(not(windows))]
+    fn git_test_root(path: &Path) -> PathBuf {
+        path.canonicalize()
+            .unwrap_or_else(|e| panic!("tempdir should canonicalize: {e}"))
+    }
+
+    /// Creates a temp git repo on `main` with one commit, plus a tracedecay dir
+    /// holding a stub default-branch DB. Returns `(tempdir, project_root,
+    /// tracedecay_dir)`.
+    fn setup_repo_with_meta() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let base = tempfile::tempdir().unwrap();
+        let project_root = git_test_root(base.path());
+        std::fs::write(project_root.join("f.txt"), "x\n").unwrap();
+        run_git(&project_root, &["init", "-b", "main"]);
+        run_git(&project_root, &["config", "user.email", "t@t.com"]);
+        run_git(&project_root, &["config", "user.name", "T"]);
+        run_git(&project_root, &["add", "."]);
+        run_git(&project_root, &["commit", "-m", "initial"]);
+
+        let tracedecay_dir = project_root.join(".tracedecay");
+        std::fs::create_dir_all(&tracedecay_dir).unwrap();
+        std::fs::write(tracedecay_dir.join("tracedecay.db"), b"maindb").unwrap();
+        let meta = crate::branch_meta::BranchMeta::new("main");
+        crate::branch_meta::save_branch_meta(&tracedecay_dir, &meta).unwrap();
+        (base, project_root, tracedecay_dir)
+    }
+
+    /// Writes a tracked branch entry with a stub DB and an explicit
+    /// `last_synced_at` (unix secs), creating the git ref when `create_ref`.
+    fn add_tracked_branch(
+        project_root: &Path,
+        tracedecay_dir: &Path,
+        name: &str,
+        last_synced: u64,
+        create_ref: bool,
+    ) -> PathBuf {
+        if create_ref {
+            run_git(project_root, &["branch", name]);
+        }
+        let stem = sanitize_branch_name(name);
+        let branches_dir = crate::branch_meta::ensure_branches_dir(tracedecay_dir).unwrap();
+        let db_path = branches_dir.join(format!("{stem}.db"));
+        std::fs::write(&db_path, b"branchdb").unwrap();
+        let mut meta = crate::branch_meta::load_branch_meta(tracedecay_dir).unwrap();
+        meta.add_branch(name, &format!("branches/{stem}.db"), "main");
+        meta.branches.get_mut(name).unwrap().last_synced_at = last_synced.to_string();
+        crate::branch_meta::save_branch_meta(tracedecay_dir, &meta).unwrap();
+        db_path
+    }
+
+    #[test]
+    fn clone_or_copy_db_produces_identical_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.db");
+        let dst = dir.path().join("dst.db");
+        let payload: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&src, &payload).unwrap();
+
+        clone_or_copy_db(&src, &dst).unwrap();
+
+        let copied = std::fs::read(&dst).unwrap();
+        assert_eq!(copied, payload, "reflink-or-copy must be byte-identical");
+    }
+
+    #[test]
+    fn gc_removes_dead_stale_branch() {
+        let (_base, project_root, td) = setup_repo_with_meta();
+        // Ref-gone (never created) and last synced long ago (> 14d).
+        let stale = now_unix_secs() - 20 * 86_400;
+        let db = add_tracked_branch(&project_root, &td, "gone", stale, false);
+        assert!(db.exists());
+
+        let report = gc_dead_branch_stores(&project_root, &td, 14, 7);
+
+        assert_eq!(report.removed_tracked, vec!["gone".to_string()]);
+        assert!(!db.exists(), "dead branch DB should be deleted");
+        let meta = crate::branch_meta::load_branch_meta(&td).unwrap();
+        assert!(!meta.is_tracked("gone"));
+    }
+
+    #[test]
+    fn gc_keeps_default_branch() {
+        let (_base, project_root, td) = setup_repo_with_meta();
+        // Delete the git ref for main so only the never-remove-default guard
+        // protects it; also backdate would require touching main's entry.
+        run_git(&project_root, &["checkout", "--detach"]);
+        // Force main's ref away is unnecessary — GC skips default by name.
+        let report = gc_dead_branch_stores(&project_root, &td, 14, 7);
+        assert!(report.removed_tracked.is_empty());
+        let meta = crate::branch_meta::load_branch_meta(&td).unwrap();
+        assert!(meta.is_tracked("main"));
+        assert!(td.join("tracedecay.db").exists());
+    }
+
+    #[test]
+    fn gc_keeps_fresh_dead_branch() {
+        let (_base, project_root, td) = setup_repo_with_meta();
+        // Ref gone but synced just now: within grace, keep it.
+        let db = add_tracked_branch(&project_root, &td, "recent", now_unix_secs(), false);
+        let report = gc_dead_branch_stores(&project_root, &td, 14, 7);
+        assert!(report.removed_tracked.is_empty());
+        assert!(db.exists());
+    }
+
+    #[test]
+    fn gc_keeps_branch_with_live_ref() {
+        let (_base, project_root, td) = setup_repo_with_meta();
+        // Ref exists AND stale: still keep it, ref presence wins.
+        let stale = now_unix_secs() - 100 * 86_400;
+        let db = add_tracked_branch(&project_root, &td, "live", stale, true);
+        assert!(is_branch_ref_present(&project_root, "live"));
+        let report = gc_dead_branch_stores(&project_root, &td, 14, 7);
+        assert!(report.removed_tracked.is_empty());
+        assert!(db.exists());
+    }
+
+    #[test]
+    fn gc_deletes_stale_orphan_db_keeps_fresh() {
+        let (_base, project_root, td) = setup_repo_with_meta();
+        let branches_dir = crate::branch_meta::ensure_branches_dir(&td).unwrap();
+
+        // Stale orphan: not in meta, mtime backdated > 7d.
+        let stale_orphan = branches_dir.join("orphan_stale.db");
+        std::fs::write(&stale_orphan, b"junk").unwrap();
+        let stale_wal = branches_dir.join("orphan_stale.db-wal");
+        std::fs::write(&stale_wal, b"wal").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_hours(720);
+        set_mtime(&stale_orphan, old);
+
+        // Fresh orphan: just created, must survive.
+        let fresh_orphan = branches_dir.join("orphan_fresh.db");
+        std::fs::write(&fresh_orphan, b"junk").unwrap();
+
+        let report = gc_dead_branch_stores(&project_root, &td, 14, 7);
+
+        assert!(!stale_orphan.exists(), "stale orphan should be deleted");
+        assert!(!stale_wal.exists(), "orphan sidecar should be deleted");
+        assert!(fresh_orphan.exists(), "fresh orphan should be kept");
+        assert!(report.removed_orphan_dbs.contains(&stale_orphan));
+        assert!(!report.removed_orphan_dbs.contains(&fresh_orphan));
+    }
+
+    fn set_mtime(path: &Path, when: std::time::SystemTime) {
+        // Best-effort mtime backdate via filetime-free approach: re-open and use
+        // the standard library's set_modified (stable since 1.75).
+        let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.set_modified(when).unwrap();
     }
 }

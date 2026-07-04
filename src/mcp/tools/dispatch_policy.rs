@@ -2,6 +2,7 @@
 
 pub(super) const REGISTERED_PROJECT_READER_TOOL_NAMES: &[&str] = &[
     "tracedecay_search",
+    "tracedecay_grep",
     "tracedecay_context",
     "tracedecay_retrieve",
     "tracedecay_callers",

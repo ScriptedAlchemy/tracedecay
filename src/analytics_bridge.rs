@@ -217,7 +217,7 @@ fn hook_row_to_analytics_event(
         tool_category: None,
         skill_name: None,
         hint_category: text_field(&row, "category"),
-        hint_id: None,
+        hint_id: text_field(&row, "hint_id"),
         outcome: Some("observed".to_string()),
         metadata_json: Some(row.to_string()),
     })
@@ -378,6 +378,22 @@ mod tests {
         assert_eq!(event.session_id.as_deref(), Some("s1"));
         assert_eq!(event.timestamp, 1_783_000_000);
         assert!(event.project_id.ends_with("repo"));
+    }
+
+    #[test]
+    fn maps_hint_row_with_hint_id() {
+        let line = r#"{"agent":"cursor","event":"hint_emitted","category":"search","hint_id":"h-abc","project_root":"/repo","session_id":"s1","ts_unix_ms":1783000000000}"#;
+        let Some(event) = hook_row_to_analytics_event(line, None) else {
+            panic!("row should map");
+        };
+        assert_eq!(event.hint_category.as_deref(), Some("search"));
+        assert_eq!(event.hint_id.as_deref(), Some("h-abc"));
+
+        let line = r#"{"agent":"cursor","event":"hint_emitted","category":"search","project_root":"/repo","session_id":"s1","ts_unix_ms":1783000000000}"#;
+        let Some(event) = hook_row_to_analytics_event(line, None) else {
+            panic!("row should map");
+        };
+        assert!(event.hint_id.is_none());
     }
 
     #[test]

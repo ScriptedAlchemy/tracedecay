@@ -96,6 +96,67 @@ pub async fn run_all(project_root: &Path, scope: &Scope) -> Result<Vec<Diagnosti
     Ok(all)
 }
 
+/// Whether the Rust diagnostics build is "cold" — i.e. the private cargo
+/// target dir does not exist yet or is effectively empty. The first
+/// `cargo check` against a cold tree builds every dependency from scratch and
+/// can block for minutes on a large workspace; the MCP layer uses this to
+/// offer a non-blocking prewarm instead of freezing the agent.
+///
+/// Returns `false` for projects without a `Cargo.toml` (nothing to warm) and
+/// once the target dir has any build artifacts (subsequent checks are fast).
+pub fn is_rust_diagnostics_cold(project_root: &Path) -> bool {
+    if !project_root.join("Cargo.toml").exists() {
+        return false;
+    }
+    let target_dir = rust::target_dir_for(project_root);
+    dir_is_missing_or_empty(&target_dir)
+}
+
+/// True when `path` does not exist, is not a directory, or contains no
+/// entries. Any read error is treated as "cold" so we err toward prewarming
+/// rather than blocking.
+fn dir_is_missing_or_empty(path: &Path) -> bool {
+    match std::fs::read_dir(path) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(_) => true,
+    }
+}
+
+/// Path to the private Rust diagnostics cargo target dir. Exposed so callers
+/// can surface it in prewarm status messages.
+pub fn rust_diagnostics_target_dir(project_root: &Path) -> PathBuf {
+    rust::target_dir_for(project_root)
+}
+
+/// Spawn a detached `cargo check` into the private diagnostics target dir so a
+/// later `tracedecay_diagnostics` call finds a warm tree. Returns immediately;
+/// the child keeps running after this process would normally reap it (stdio is
+/// discarded and it is intentionally NOT `kill_on_drop`, unlike the foreground
+/// driver, so it survives the request that started it).
+pub fn spawn_rust_diagnostics_prewarm(project_root: &Path) -> Result<()> {
+    use std::process::{Command, Stdio};
+
+    let target_dir = rust::target_dir_for(project_root);
+    if let Some(parent) = target_dir.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    Command::new("cargo")
+        .arg("check")
+        .arg("--message-format=json")
+        .arg("--target-dir")
+        .arg(&target_dir)
+        .current_dir(project_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_child| ())
+        .map_err(|e| crate::errors::TraceDecayError::Config {
+            message: format!("failed to spawn cargo prewarm: {e}"),
+        })
+}
+
 fn canonicalise_file(file_name: &str, project_root: &Path) -> String {
     let abs = if Path::new(file_name).is_absolute() {
         PathBuf::from(file_name)

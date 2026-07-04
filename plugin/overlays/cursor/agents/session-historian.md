@@ -15,7 +15,7 @@ Read-only recall subagent. Retrieve what past sessions said, did, and decided fo
 2. Narrow with `tracedecay_lcm_grep` (scope/role/time filters), then replay with `tracedecay_lcm_load_session` (paginate via `after_store_id`, never dump whole sessions).
 3. Drill into summaries with `tracedecay_lcm_describe` / `tracedecay_lcm_expand` / `tracedecay_lcm_expand_query`; inspect the store with `tracedecay_lcm_status`.
 4. For durable decisions/facts, search `tracedecay_fact_store` (`action: "search"`, plus `"probe"`/`"reason"` when useful).
-5. Follow the full ladder in the `tracedecay:recalling-session-context` skill.
+5. Follow the full ladder in the `tracedecay:managing-session-context` skill.
 
 ## Rules
 

@@ -20,9 +20,9 @@ use super::steering::{
 };
 use super::tool_hints::{decide_hint, HintAgent, ToolHint, ToolHintInput};
 use super::{
-    deduped_project_hint, event_session_id, format_tool_hint, hook_route_metadata_from_event,
-    nearest_project_like_root, read_hook_event, record_hint_analytics, record_hook_invoked,
-    rel_under_root, text_field,
+    append_tool_hint, deduped_project_hint_with_id, event_session_id, format_tool_hint,
+    hook_route_metadata_from_event, mint_hint_id, nearest_project_like_root, prompt_like_text,
+    read_hook_event, record_hint_analytics, record_hook_invoked, rel_under_root, text_field,
 };
 
 /// Largest tail the `beforeSubmitPrompt` hot path will read in one call. Larger
@@ -79,9 +79,14 @@ pub fn hook_cursor_post_tool_use() -> i32 {
 ///
 /// Resets the project-local counter for a new prompt turn and does at most a
 /// small, time-boxed *tail* ingest of newly-appended transcript lines (the bulk
-/// catch-up lives on the lower-frequency `sessionStart` / `stop` hooks). The
-/// output uses Cursor's documented `beforeSubmitPrompt` shape and never blocks
-/// submission, even if the tail ingest times out.
+/// catch-up lives on the lower-frequency `sessionStart` / `stop` hooks). It also
+/// injects the same prompt-shaped steering Codex's `UserPromptSubmit` hook does
+/// — a deduped `decide_hint` for the prompt plus prompt-relevance-gated memory
+/// recall — through Cursor's `additional_context` channel. `postToolUse` hints
+/// still ride *after* a tool runs (Cursor's only tool-hint surface); this
+/// closes the gap so prompt-shaped triggers steer identically on both agents.
+/// The output uses Cursor's documented `beforeSubmitPrompt` shape and never
+/// blocks submission, even if the tail ingest or hint injection times out.
 pub async fn hook_cursor_before_submit_prompt() -> i32 {
     let event = read_hook_event!();
     let root = cursor_project_root_from_event(&event);
@@ -98,8 +103,73 @@ pub async fn hook_cursor_before_submit_prompt() -> i32 {
         CURSOR_HOT_INGEST_BUDGET,
     )
     .await;
-    println!("{}", serde_json::json!({ "continue": true }));
+    let context = cursor_before_submit_prompt_context(&event).await;
+    println!("{}", cursor_before_submit_prompt_json(context.as_deref()));
     0
+}
+
+/// Builds the Cursor `beforeSubmitPrompt` output JSON. Always keeps
+/// `continue: true` (submission is never blocked) and attaches
+/// `additional_context` only when there is steering to inject.
+pub fn cursor_before_submit_prompt_json(additional_context: Option<&str>) -> String {
+    match additional_context.filter(|text| !text.trim().is_empty()) {
+        Some(context) => {
+            serde_json::json!({ "continue": true, "additional_context": context }).to_string()
+        }
+        None => serde_json::json!({ "continue": true }).to_string(),
+    }
+}
+
+/// Assembles the prompt-shaped steering for a Cursor `beforeSubmitPrompt` event:
+/// a deduped prompt hint (`decide_hint`) followed by prompt-relevance-gated
+/// memory recall, mirroring [`super::codex::codex_user_prompt_submit_context_for_event`].
+/// Returns `None` when neither surfaces anything (fail-open: no context key).
+pub(super) async fn cursor_before_submit_prompt_context(event_json: &str) -> Option<String> {
+    let mut context = String::new();
+    if let Some(hint) = cursor_prompt_hint(event_json) {
+        append_tool_hint(&mut context, &hint);
+    }
+    if let Some(recall) = cursor_prompt_memory_recall(event_json).await {
+        append_context_block(&mut context, &recall);
+    }
+    (!context.trim().is_empty()).then_some(context)
+}
+
+/// Deduped prompt-hint decision for a Cursor `beforeSubmitPrompt` event, mirroring
+/// [`super::codex::codex_prompt_hint`]. Runs the same prompt-path `decide_hint`
+/// (session recall, project context, call graph, impact categories) and suppresses
+/// hints already emitted for the session / in uninitialized workspaces.
+fn cursor_prompt_hint(event_json: &str) -> Option<ToolHint> {
+    let parsed = serde_json::from_str::<Value>(event_json).ok()?;
+    let hint = decide_hint(&ToolHintInput {
+        agent: HintAgent::Cursor,
+        session_id: event_session_id(&parsed),
+        tool_name: None,
+        command: None,
+        prompt: prompt_like_text(&parsed),
+        subagent_type: None,
+        file_path: None,
+        hints_enabled: true,
+    })?;
+    let root = cursor_project_root_candidate_from_parsed_event(&parsed);
+    let hint_id = mint_hint_id();
+    record_hint_analytics(
+        root.as_deref(),
+        "hint_candidate",
+        HintAgent::Cursor,
+        event_session_id(&parsed).as_deref(),
+        &hint_id,
+        &hint,
+    );
+    deduped_cursor_hint(event_json, &hint_id, hint)
+}
+
+async fn cursor_prompt_memory_recall(event_json: &str) -> Option<String> {
+    let parsed = serde_json::from_str::<Value>(event_json).ok()?;
+    let root = cursor_project_root_from_parsed_event(&parsed)?;
+    let prompt = prompt_like_text(&parsed)?;
+    let session_id = event_session_id(&parsed);
+    memory_inject::prompt_memory_recall(&root, session_id.as_deref(), &prompt).await
 }
 
 /// Cursor `sessionEnd` hook handler (fire-and-forget).
@@ -302,14 +372,16 @@ pub fn cursor_post_tool_use_decision(event_json: &str) -> Option<String> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
     let hint = decide_hint(&cursor_tool_hint_input(&parsed))?;
     let root = cursor_project_root_candidate_from_parsed_event(&parsed);
+    let hint_id = mint_hint_id();
     record_hint_analytics(
         root.as_deref(),
         "hint_candidate",
         HintAgent::Cursor,
         event_session_id(&parsed).as_deref(),
+        &hint_id,
         &hint,
     );
-    let hint = deduped_cursor_hint(event_json, hint)?;
+    let hint = deduped_cursor_hint(event_json, &hint_id, hint)?;
     Some(
         serde_json::json!({
             "additional_context": format_tool_hint(&hint),
@@ -327,25 +399,44 @@ pub fn cursor_post_tool_use_decision(event_json: &str) -> Option<String> {
 /// tracedecay tools there would be misleading). When no session id is present
 /// the hint is emitted as-is — dedupe is impossible but the hint is still
 /// useful (fail-open).
-fn deduped_cursor_hint(event_json: &str, hint: ToolHint) -> Option<ToolHint> {
-    let parsed: Value = serde_json::from_str(event_json).ok()?;
-    let root = cursor_project_root_candidate_from_parsed_event(&parsed)?;
+fn deduped_cursor_hint(event_json: &str, hint_id: &str, hint: ToolHint) -> Option<ToolHint> {
+    let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
+        // The candidate was already recorded against `hint_id`; close its outcome
+        // with a terminal event instead of dropping it silently.
+        record_hint_analytics(
+            None,
+            "dropped_no_root",
+            HintAgent::Cursor,
+            None,
+            hint_id,
+            &hint,
+        );
+        return None;
+    };
+    let session_id = event_session_id(&parsed);
+    let Some(root) = cursor_project_root_candidate_from_parsed_event(&parsed) else {
+        record_hint_analytics(
+            None,
+            "dropped_no_root",
+            HintAgent::Cursor,
+            session_id.as_deref(),
+            hint_id,
+            &hint,
+        );
+        return None;
+    };
     if !crate::tracedecay::TraceDecay::is_initialized(&root) {
         record_hint_analytics(
             Some(&root),
             "suppressed_uninitialized",
             HintAgent::Cursor,
-            event_session_id(&parsed).as_deref(),
+            session_id.as_deref(),
+            hint_id,
             &hint,
         );
         return None;
     }
-    deduped_project_hint(
-        Some(root),
-        HintAgent::Cursor,
-        event_session_id(&parsed),
-        hint,
-    )
+    deduped_project_hint_with_id(Some(root), HintAgent::Cursor, session_id, hint_id, hint)
 }
 
 pub fn cursor_project_root_from_event(event_json: &str) -> Option<PathBuf> {
@@ -632,5 +723,102 @@ fn cursor_tool_hint_input(parsed: &Value) -> ToolHintInput {
         file_path: text_field(tool_input, &["file_path", "filePath", "path"])
             .or_else(|| text_field(parsed, &["file_path", "filePath", "path"])),
         hints_enabled: true,
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::super::tool_hints::HintCategory;
+    use super::*;
+    use crate::config::USER_DATA_DIR_ENV;
+
+    #[test]
+    fn cursor_before_submit_prompt_json_attaches_context_only_when_present() {
+        // No steering: bare `continue: true`, no `additional_context` key.
+        let empty = cursor_before_submit_prompt_json(None);
+        let parsed: Value = serde_json::from_str(&empty).unwrap();
+        assert_eq!(parsed["continue"], Value::Bool(true));
+        assert!(parsed.get("additional_context").is_none());
+
+        // Whitespace-only context is treated as no steering (fail-open).
+        let blank = cursor_before_submit_prompt_json(Some("  \n"));
+        let parsed: Value = serde_json::from_str(&blank).unwrap();
+        assert!(parsed.get("additional_context").is_none());
+
+        // Real steering rides `additional_context` while still allowing submission.
+        let filled =
+            cursor_before_submit_prompt_json(Some("tracedecay hint: use tracedecay_impact"));
+        let parsed: Value = serde_json::from_str(&filled).unwrap();
+        assert_eq!(parsed["continue"], Value::Bool(true));
+        assert_eq!(
+            parsed["additional_context"].as_str().unwrap(),
+            "tracedecay hint: use tracedecay_impact"
+        );
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set_path(key: &'static str, value: &Path) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    /// The `beforeSubmitPrompt` surface must run the same prompt-path `decide_hint`
+    /// Codex's `UserPromptSubmit` hook does, and share the per-session hint dedupe
+    /// so a prompt-shaped trigger steers identically on both agents.
+    #[test]
+    fn cursor_prompt_hint_runs_decide_hint_and_dedupes_per_session() {
+        let _lock = crate::hooks::test_env_lock().lock().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let profile = tempfile::tempdir().unwrap();
+        let project_root = project.path().canonicalize().unwrap();
+        let profile_root = profile.path().canonicalize().unwrap();
+        let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
+        crate::storage::write_enrollment_marker(
+            &project_root,
+            &crate::storage::EnrollmentMarker {
+                project_id: "proj_hook_cursor_prompt".to_string(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )
+        .unwrap();
+        let layout = crate::storage::resolve_layout_for_current_profile(&project_root).unwrap();
+        std::fs::create_dir_all(&layout.data_root).unwrap();
+        let event = serde_json::json!({
+            "hook_event_name": "beforeSubmitPrompt",
+            "session_id": "cursor-session-1",
+            "cwd": project_root,
+            "workspace_roots": [project_root],
+            "prompt": "Please explain the impact of changing parse_user"
+        })
+        .to_string();
+
+        let first = cursor_prompt_hint(&event).unwrap();
+        assert_eq!(first.category, HintCategory::Impact);
+
+        assert!(
+            cursor_prompt_hint(&event).is_none(),
+            "Cursor prompt hints must reuse the shared per-session hint dedupe"
+        );
     }
 }

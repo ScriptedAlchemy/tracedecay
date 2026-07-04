@@ -65,8 +65,18 @@ store databases directly.
 - If the MCP transport is down, every command above still works — they are
   plain CLI subcommands (see `tracedecay:using-the-cli`).
 
-## Output
+## If tools are deferred or MCP fails
 
-- Headline counts (events, MCP tool calls, tracedecay calls, hook calls) with
-  the exact command used, plus any gaps found: unattributed hook rows, stale
-  or missing sources, providers with hooks firing but zero tool usage.
+- This skill is already CLI-first: the `tracedecay analytics` / `doctor` /
+  `sessions` subcommands run over shell and need no MCP transport.
+- The `tracedecay tool lcm_status` / `lcm_doctor` calls also work via MCP; if
+  those tools are deferred, load once with ToolSearch —
+  `select:tracedecay_lcm_status,tracedecay_lcm_doctor` — or just use the CLI
+  form shown above (see `tracedecay:using-the-cli`).
+
+## Deliverable
+
+Do not end this workflow without: headline counts (events, MCP tool calls,
+tracedecay calls, hook calls) with the exact command used, plus any gaps
+found: unattributed hook rows, stale or missing sources, providers with hooks
+firing but zero tool usage. Report any `tracedecay_metrics:` line to the user.

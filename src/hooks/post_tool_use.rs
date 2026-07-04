@@ -20,10 +20,21 @@ pub const CLAUDE_POST_TOOL_USE_EDIT_TOOLS: &[&str] =
     &["Edit", "MultiEdit", "Write", "NotebookEdit"];
 pub const CLAUDE_POST_TOOL_USE_SHELL_TOOLS: &[&str] = &["Bash"];
 
-/// `Edit|MultiEdit|Write|NotebookEdit|Bash` — the Claude settings.json matcher.
+/// Native Claude Code search/read tools whose `PostToolUse` events we observe
+/// only to emit a soft tracedecay hint. Unlike the edit/shell lists these do
+/// not drive daemon sync — they are pure hint surfaces so native `Grep`,
+/// `Glob`, and `Read` usage becomes visible to telemetry and hintable.
+/// `Bash` is deliberately absent here: it is already matched as a shell tool
+/// and its hint is derived from the command text on the shell path.
+pub const CLAUDE_POST_TOOL_USE_HINT_TOOLS: &[&str] = &["Grep", "Glob", "Read"];
+
+/// `Edit|MultiEdit|Write|NotebookEdit|Grep|Glob|Read|Bash` — the Claude
+/// settings.json matcher, derived from the edit, hint, and shell tool lists so
+/// the matcher and the handler predicates can never drift.
 pub fn claude_post_tool_use_matcher() -> String {
     CLAUDE_POST_TOOL_USE_EDIT_TOOLS
         .iter()
+        .chain(CLAUDE_POST_TOOL_USE_HINT_TOOLS)
         .chain(CLAUDE_POST_TOOL_USE_SHELL_TOOLS)
         .copied()
         .collect::<Vec<_>>()
@@ -116,7 +127,26 @@ fn tool_input_command(parsed: &Value) -> &str {
         .unwrap_or_default()
 }
 
-fn is_claude_edit_tool(tool_name: &str) -> bool {
+/// The `tool_input.command` string, if any (Bash's shell command). Empty when
+/// absent. Shared with the Claude hint path so it reads the command from the
+/// same place the daemon-sync path does.
+pub(super) fn tool_input_command_str(parsed: &Value) -> Option<String> {
+    let command = tool_input_command(parsed);
+    (!command.is_empty()).then(|| command.to_string())
+}
+
+/// The `tool_input.file_path` string, if any (Grep/Glob/Read/Edit targets).
+/// Empty when absent.
+pub(super) fn tool_input_file_path_str(parsed: &Value) -> Option<String> {
+    parsed
+        .get("tool_input")
+        .and_then(|ti| ti.get("file_path"))
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+}
+
+pub(super) fn is_claude_edit_tool(tool_name: &str) -> bool {
     CLAUDE_POST_TOOL_USE_EDIT_TOOLS
         .iter()
         .any(|tool| tool.eq_ignore_ascii_case(tool_name))
@@ -124,6 +154,14 @@ fn is_claude_edit_tool(tool_name: &str) -> bool {
 
 fn is_claude_bash_tool(tool_name: &str) -> bool {
     CLAUDE_POST_TOOL_USE_SHELL_TOOLS
+        .iter()
+        .any(|tool| tool.eq_ignore_ascii_case(tool_name))
+}
+
+/// True when `tool_name` is one of the native search/read tools we observe
+/// only to emit a soft tracedecay hint ([`CLAUDE_POST_TOOL_USE_HINT_TOOLS`]).
+pub(super) fn is_claude_hint_tool(tool_name: &str) -> bool {
+    CLAUDE_POST_TOOL_USE_HINT_TOOLS
         .iter()
         .any(|tool| tool.eq_ignore_ascii_case(tool_name))
 }
@@ -190,18 +228,48 @@ mod tests {
     }
 
     #[test]
+    fn claude_hint_tools_are_recognized_and_disjoint_from_edit_and_shell() {
+        for tool in ["Grep", "Glob", "Read", "read", "GREP"] {
+            assert!(is_claude_hint_tool(tool), "{tool} should count as a hint");
+            assert!(!is_claude_edit_tool(tool), "{tool} is not an edit tool");
+            assert!(!is_claude_bash_tool(tool), "{tool} is not a shell tool");
+        }
+        assert!(!is_claude_hint_tool("Edit"));
+        assert!(!is_claude_hint_tool("Bash"));
+    }
+
+    #[test]
     fn claude_post_tool_use_matcher_derives_from_tool_lists() {
         assert_eq!(
             claude_post_tool_use_matcher(),
-            "Edit|MultiEdit|Write|NotebookEdit|Bash"
+            "Edit|MultiEdit|Write|NotebookEdit|Grep|Glob|Read|Bash"
         );
         for tool in CLAUDE_POST_TOOL_USE_EDIT_TOOLS {
             assert!(is_claude_edit_tool(tool), "{tool} should count as an edit");
+            assert!(!is_claude_bash_tool(tool));
+            assert!(!is_claude_hint_tool(tool));
+        }
+        for tool in CLAUDE_POST_TOOL_USE_HINT_TOOLS {
+            assert!(is_claude_hint_tool(tool), "{tool} should count as a hint");
+            assert!(!is_claude_edit_tool(tool));
             assert!(!is_claude_bash_tool(tool));
         }
         for tool in CLAUDE_POST_TOOL_USE_SHELL_TOOLS {
             assert!(is_claude_bash_tool(tool), "{tool} should count as shell");
             assert!(!is_claude_edit_tool(tool));
+            assert!(!is_claude_hint_tool(tool));
+        }
+        // Every matcher alternative maps to exactly one predicate.
+        for tool in claude_post_tool_use_matcher().split('|') {
+            let matches = [
+                is_claude_edit_tool(tool),
+                is_claude_hint_tool(tool),
+                is_claude_bash_tool(tool),
+            ]
+            .into_iter()
+            .filter(|hit| *hit)
+            .count();
+            assert_eq!(matches, 1, "{tool} must map to exactly one predicate");
         }
     }
 

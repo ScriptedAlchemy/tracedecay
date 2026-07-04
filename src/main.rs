@@ -493,6 +493,7 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
         | Commands::HookStop
         | Commands::HookClaudeSessionStart
         | Commands::HookClaudePostToolUse
+        | Commands::HookClaudeSubagentStart
         | Commands::HookKiroPreToolUse
         | Commands::HookKiroPromptSubmit
         | Commands::HookKiroPostToolUse
@@ -737,6 +738,7 @@ fn should_skip_startup_maintenance(command: &Commands) -> bool {
             | Commands::HookStop
             | Commands::HookClaudeSessionStart
             | Commands::HookClaudePostToolUse
+            | Commands::HookClaudeSubagentStart
             | Commands::HookKiroPreToolUse
             | Commands::HookKiroPromptSubmit
             | Commands::HookKiroPostToolUse

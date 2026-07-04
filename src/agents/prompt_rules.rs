@@ -18,10 +18,11 @@ pub(crate) const SKILL_INDEX_START: &str = "<!-- TRACEDECAY MANAGED SKILLS START
 /// Canonical rules paragraphs shared by the standard hosts.
 const STANDARD_PARAGRAPHS: &[&str] = &[
     "Before reading source files or scanning the codebase, use the tracedecay MCP tools \
-     (`tracedecay_context`, `tracedecay_search`, `tracedecay_callers`, `tracedecay_callees`, \
-     `tracedecay_impact`, `tracedecay_node`, `tracedecay_files`, `tracedecay_affected`). \
-     They provide instant semantic results from a pre-built knowledge graph and are \
-     faster than file reads.",
+     (`tracedecay_context`, `tracedecay_grep`, `tracedecay_search`, `tracedecay_callers`, \
+     `tracedecay_callees`, `tracedecay_impact`, `tracedecay_node`, `tracedecay_files`, \
+     `tracedecay_affected`). Route literal/regex text to `tracedecay_grep`, symbol names \
+     to `tracedecay_search`, and concepts to `tracedecay_context`. They provide instant \
+     semantic results from a pre-built knowledge graph and are faster than file reads.",
     "For project/storage identity questions, use `tracedecay_active_project` \
      or `tracedecay_storage_status` instead of inferring from repo-local marker \
      files or direct DB paths.",

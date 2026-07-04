@@ -1536,6 +1536,42 @@ impl GlobalDb {
         projects
     }
 
+    /// Returns registered code projects whose `last_seen_at` is within the last
+    /// `since_secs` seconds, most-recently-seen first, capped at `limit`.
+    ///
+    /// Used by the git-metadata watcher to register only projects seen recently
+    /// (e.g. within 14 days), bounded by `watch_max_projects`.
+    pub async fn code_projects_seen_within(
+        &self,
+        since_secs: i64,
+        limit: usize,
+    ) -> Vec<CodeProjectRecord> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let cutoff = crate::tracedecay::current_timestamp().saturating_sub(since_secs);
+        let Ok(mut rows) = self
+            .conn
+            .query(
+                "SELECT project_id, canonical_root, display_root, git_common_dir,
+                        git_remote_url, default_branch, created_at, last_seen_at
+                 FROM code_projects
+                 WHERE last_seen_at >= ?1
+                 ORDER BY last_seen_at DESC, project_id
+                 LIMIT ?2",
+                params![cutoff, limit],
+            )
+            .await
+        else {
+            return Vec::new();
+        };
+        let mut projects = Vec::new();
+        while let Ok(Some(row)) = rows.next().await {
+            if let Some(project) = row_to_code_project(&row, 0) {
+                projects.push(project);
+            }
+        }
+        projects
+    }
+
     /// Removes registered code-project rows by exact project id.
     ///
     /// Dependent registry rows in `project_aliases`, `store_instances`,
@@ -3732,7 +3768,7 @@ impl GlobalDb {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -3786,5 +3822,48 @@ mod tests {
         )
         .await
         .is_some());
+    }
+
+    #[tokio::test]
+    async fn code_projects_seen_within_applies_window_and_limit() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = GlobalDb::open_at(&dir.path().join("global.db"))
+            .await
+            .expect("open global db");
+
+        let now = crate::tracedecay::current_timestamp();
+        // (project_id, last_seen_at)
+        let rows = [
+            ("proj_recent", now - 60),       // 1 min ago  -> in window
+            ("proj_mid", now - 3 * 86_400),  // 3 days ago -> in window
+            ("proj_old", now - 30 * 86_400), // 30 days ago-> outside 14d window
+        ];
+        for (project_id, last_seen) in rows {
+            db.conn
+                .execute(
+                    "INSERT INTO code_projects
+                     (project_id, canonical_root, display_root, git_common_dir,
+                      git_remote_url, default_branch, created_at, last_seen_at)
+                     VALUES (?1, ?2, ?3, NULL, NULL, NULL, ?4, ?4)",
+                    params![
+                        project_id,
+                        format!("/root/{project_id}"),
+                        project_id,
+                        last_seen
+                    ],
+                )
+                .await
+                .unwrap();
+        }
+
+        // 14-day window keeps the two recent projects, most-recent first.
+        let within = db.code_projects_seen_within(14 * 86_400, 10).await;
+        let ids: Vec<&str> = within.iter().map(|p| p.project_id.as_str()).collect();
+        assert_eq!(ids, vec!["proj_recent", "proj_mid"]);
+
+        // Limit caps the result even when more projects are in-window.
+        let capped = db.code_projects_seen_within(14 * 86_400, 1).await;
+        let capped_ids: Vec<&str> = capped.iter().map(|p| p.project_id.as_str()).collect();
+        assert_eq!(capped_ids, vec!["proj_recent"]);
     }
 }

@@ -1,6 +1,6 @@
 ---
 name: editing-safely
-description: 'Use when editing or writing source: before adding any new helper (duplicate probe), for anchored/structural edits, mechanical refactors like renames or signature/field changes, or porting code between modules or languages. Missed call sites and duplicate helpers start here.'
+description: 'Use before writing a new function or helper (it may already exist), and before any rename, signature, or field change — the graph lists every call site.'
 ---
 
 # Editing safely
@@ -92,9 +92,17 @@ Run this read-only recon in one shot for a symbol or `Struct::field` with
   `tracedecay:fixing-build-and-type-errors`, then run the affected tests via
   `tracedecay:assessing-impact`.
 
-## Output
+## If tools are deferred or MCP fails
 
-- The recon checklist (sites grouped by file), the files/symbols changed, the
-  helper reused (or its confirmed absence), and the verification result.
-- If any result includes a `tracedecay_metrics:` line, report the savings to
-  the user.
+- Deferred (names listed without schemas): load once with ToolSearch —
+  `select:tracedecay_search,tracedecay_similar,tracedecay_rename_preview,tracedecay_str_replace,tracedecay_replace_symbol`
+  (one batched call, add others needed) — then call normally.
+- MCP error/timeout/disconnect: same tool, same args, via shell:
+  `tracedecay tool <name> --key value` (see `tracedecay:using-the-cli`). Never
+  query `.tracedecay` databases directly; never abandon the graph over transport.
+
+## Deliverable
+
+Do not end this workflow without: the recon checklist (sites grouped by file),
+the files/symbols changed, the helper reused (or its confirmed absence), and
+the verification result. Report any `tracedecay_metrics:` line to the user.

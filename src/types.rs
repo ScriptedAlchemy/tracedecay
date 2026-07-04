@@ -230,6 +230,21 @@ impl NodeKind {
             _ => None,
         }
     }
+
+    /// Returns `true` if this node kind represents a callable definition that
+    /// should participate in test-coverage / attribution accounting.
+    ///
+    /// This includes free functions and methods across all languages, plus
+    /// TypeScript/JavaScript arrow functions (`const f = () => {}`), which are
+    /// the dominant way tests and helpers are written in TS test suites. Without
+    /// arrow functions the TS coverage denominators silently exclude most of the
+    /// callable universe.
+    pub fn is_callable_kind(&self) -> bool {
+        matches!(
+            self,
+            NodeKind::Function | NodeKind::Method | NodeKind::ArrowFunction
+        )
+    }
 }
 
 /// Kinds of edges in the code graph.

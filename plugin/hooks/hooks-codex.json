@@ -1,3 +1,4 @@
 {
+  "description": "Seed template for the Codex hooks bundle. The `hooks` object is intentionally empty here: repo-local Codex bundles ship no lifecycle hooks (those come from the global personal plugin), and the global bundle populates this object at install time from the CODEX_MANAGED_HOOKS table in src/agents/codex.rs. Codex's hook loader reads only `hooks.*` and ignores this field.",
   "hooks": {}
 }

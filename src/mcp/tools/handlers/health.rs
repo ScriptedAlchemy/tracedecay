@@ -773,7 +773,7 @@ pub(super) async fn handle_test_risk(
     // Collect all function/method IDs to check for #[test] annotations.
     let fn_ids: Vec<String> = all_nodes
         .iter()
-        .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
+        .filter(|n| n.kind.is_callable_kind())
         .map(|n| n.id.clone())
         .collect();
     let test_annotated_fns = cg.get_test_annotated_node_ids(&fn_ids).await?;
@@ -785,7 +785,7 @@ pub(super) async fn handle_test_risk(
     let eligible_fns: Vec<_> = all_nodes
         .iter()
         .filter(|n| {
-            matches!(n.kind, NodeKind::Function | NodeKind::Method)
+            n.kind.is_callable_kind()
                 && !crate::tracedecay::is_test_file(&n.file_path)
                 && !n.name.starts_with("test_")
                 && !n.name.starts_with("test")
@@ -850,7 +850,7 @@ pub(super) async fn handle_test_risk(
     let skipped_count = all_nodes
         .iter()
         .filter(|n| {
-            matches!(n.kind, NodeKind::Function | NodeKind::Method)
+            n.kind.is_callable_kind()
                 && skip_coverage.contains(&n.id)
                 && !crate::tracedecay::is_test_file(&n.file_path)
                 && !n.qualified_name.contains("::tests::")
@@ -1014,7 +1014,7 @@ pub(super) async fn handle_test_map(
     let mut all_test_files: HashSet<String> = HashSet::new();
 
     for node in &source_nodes {
-        if !matches!(node.kind, NodeKind::Function | NodeKind::Method) {
+        if !node.kind.is_callable_kind() {
             continue;
         }
 

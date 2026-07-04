@@ -26,7 +26,18 @@ The daemon automation loop (skill writer, memory curator, session reflector) dra
 - Reviewing session-reflection fact proposals → `tracedecay automation facts list|view|apply|reject` (CLI).
 - Memory fact curation → `tracedecay:project-memory`.
 
-## Output
+## If tools are deferred or MCP fails
 
-- The requested skill list, skill body, artifact payload, or Hermes bridge report, plus the exact CLI command for any lifecycle action the user should take next.
-- If any result includes a `tracedecay_metrics:` line, report the savings to the user.
+- Deferred (names listed without schemas): load once with ToolSearch —
+  `select:tracedecay_skill_list,tracedecay_skill_view,tracedecay_automation_run_artifact_view,tracedecay_hermes_skill_bridge`
+  — then call normally.
+- MCP error/timeout/disconnect: same tool, same args, via shell:
+  `tracedecay tool skill_list --key value` (see `tracedecay:using-the-cli`).
+  Never query `.tracedecay` databases directly; never abandon the graph over transport.
+
+## Deliverable
+
+Do not end this workflow without: the requested skill list, skill body,
+artifact payload, or Hermes bridge report, plus the exact CLI command for any
+lifecycle action the user should take next. Report any `tracedecay_metrics:`
+line to the user.

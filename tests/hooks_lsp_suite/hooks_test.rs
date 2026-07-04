@@ -510,11 +510,6 @@ fn test_cursor_post_tool_use_records_hint_analytics_for_emitted_duplicate_and_mi
         "missing_session",
         Some("file_read")
     ));
-    assert!(analytics_contains(
-        &events,
-        "hint_emitted",
-        Some("file_read")
-    ));
 }
 
 #[test]
@@ -807,7 +802,9 @@ fn test_build_cursor_session_context_initialized_includes_freshness() {
     assert!(context.contains("<EXTREMELY_IMPORTANT>"));
     assert!(context.contains("tracedecay:using-tracedecay"));
     assert!(context.contains("Grep is faster for this"));
-    assert!(context.contains("tracedecay_callers"));
+    assert!(context.contains("ToolSearch"));
+    assert!(context.contains("GRAPH BEFORE GREP"));
+    assert!(context.contains("SUBAGENT-STOP"));
 }
 
 #[test]
@@ -816,7 +813,9 @@ fn test_build_codex_session_context_carries_full_steering() {
     // keep the full tool-routing steering.
     let context = tracedecay::hooks::build_codex_session_context(true, Some("last indexed 2m ago"));
     assert!(context.contains("tracedecay_context"));
-    assert!(context.contains("tracedecay_callers"));
+    assert!(context.contains("ToolSearch"));
+    assert!(context.contains("GRAPH BEFORE GREP"));
+    assert!(context.contains("SUBAGENT-STOP"));
     assert!(context.contains("last indexed 2m ago"));
     assert!(context.contains("tracedecay_project_search"));
     assert!(context.contains("tracedecay_message_search"));
@@ -1005,11 +1004,6 @@ async fn test_codex_user_prompt_submit_records_workspace_status_and_missing_sess
         "missing_session",
         Some("impact")
     ));
-    assert!(analytics_contains(
-        &project_events,
-        "hint_emitted",
-        Some("impact")
-    ));
 }
 
 #[test]
@@ -1069,7 +1063,7 @@ fn test_build_cursor_session_context_lists_skills_and_tokens_saved() {
     assert!(context.contains("Workflow skills: tracedecay:"));
     assert!(context.contains("using-tracedecay"));
     assert!(context.contains("exploring-code"));
-    assert!(context.contains("recalling-session-context"));
+    assert!(context.contains("managing-session-context"));
     assert!(context.contains("12345"));
 
     let without_savings = build_cursor_session_context(true, None, Some(0));

@@ -201,9 +201,13 @@ pub fn context_description(node_count: u64, budget: u8) -> String {
         "Build an AI-ready context for a task description. Returns relevant symbols, \
          relationships, up to three untracked project memory matches when available, \
          and optionally code snippets.\n\n\
-         CALL BUDGET: {budget} calls maximum for this project ({node_count} nodes). \
-         Stop after {budget} calls. If the question is not fully answered, synthesise \
-         from what you have — do not exceed the budget."
+         CALL BUDGET (applies to tracedecay_context ONLY): {budget} calls maximum for \
+         this project ({node_count} nodes). The narrow follow-up tools — tracedecay_search, \
+         tracedecay_grep, tracedecay_callers, tracedecay_callees, tracedecay_body, \
+         tracedecay_read, tracedecay_outline — are cheap and UNBUDGETED; call them freely. \
+         When the context budget is spent, keep going with those narrow tracedecay tools to \
+         drill in; do NOT fall back to native grep/glob/file reads. Only re-run \
+         tracedecay_context if you genuinely need another broad semantic sweep."
     )
 }
 
@@ -230,6 +234,7 @@ pub fn get_tool_definitions_with_budget(node_count: u64, budget: u8) -> Vec<Tool
 pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     let mut definitions = vec![
         def_search(),
+        def_grep(),
         def_retrieve(),
         def_context(),
         def_callers(),
@@ -370,6 +375,7 @@ fn add_registered_project_selector_properties(definitions: &mut [ToolDefinition]
 const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     // graph
     "tracedecay_search",
+    "tracedecay_grep",
     "tracedecay_context",
     "tracedecay_callers",
     "tracedecay_callees",
@@ -686,6 +692,49 @@ fn def_search() -> ToolDefinition {
     )
 }
 
+fn def_grep() -> ToolDefinition {
+    // alwaysLoad: content/text search is the single most common native-tool
+    // reflex (grep/rg). Keeping it in the always-loaded set means the model
+    // never has to ToolSearch for it before reaching for Bash grep, which is
+    // the main leak we're plugging. Paired with tracedecay_callers below, this
+    // brings the always-loaded set to 7 (the agreed cap).
+    def_always_load(
+        "tracedecay_grep",
+        "Grep Content",
+        "grep, ripgrep, rg, text search, find string. Literal/regex content search over the project working tree (respects .gitignore, skips binary files), graph-enriched: each hit resolves the enclosing symbol so the natural next call is tracedecay_body. Routing: use this for literal/regex content search (string literals, config keys, error messages); for symbol names use tracedecay_search; for concepts use tracedecay_context. Defaults to the active project; pass project_id/project_path only when intentionally searching another registered project.",
+        json!({
+            "type": "object",
+            "properties": with_project_selector_properties(json!({
+                "pattern": {
+                    "type": "string",
+                    "description": "Content to search for. Treated as a regular expression unless fixed_strings is true."
+                },
+                "fixed_strings": {
+                    "type": "boolean",
+                    "description": "Treat pattern as a literal string instead of a regex (default: false)."
+                },
+                "case_sensitive": {
+                    "type": "boolean",
+                    "description": "Match case-sensitively (default: false = case-insensitive)."
+                },
+                "path_glob": {
+                    "type": "string",
+                    "description": "Optional glob restricting which files are searched, matched against project-relative paths (e.g. 'src/**/*.rs')."
+                },
+                "context_lines": {
+                    "type": "number",
+                    "description": "Lines of surrounding context to include per hit (default: 0, max: 3)."
+                },
+                "max_results": {
+                    "type": "number",
+                    "description": "Maximum number of matching lines to return (default: 50, max: 200)."
+                }
+            })),
+            "required": ["pattern"]
+        }),
+    )
+}
+
 fn def_retrieve() -> ToolDefinition {
     def(
         "tracedecay_retrieve",
@@ -997,11 +1046,21 @@ fn def_signature() -> ToolDefinition {
 // ── Deferred tools (discovered via ToolSearch on demand) ────────────────
 
 fn def_callers() -> ToolDefinition {
-    def_node_depth_tool(
+    // alwaysLoad: "who calls this / find references" is the second-most-common
+    // native reflex after grep. It only needs a node_id, so keeping it loaded
+    // lets the model chain straight from a search/context hit into a caller
+    // trace. This is the 7th (and final) always-loaded tool — see def_grep.
+    def_always_load(
         "tracedecay_callers",
         "Callers",
-        "Find all callers of a given node (function, method, etc.) up to a specified depth.",
-        "The unique node ID to find callers for",
+        "Who calls this, find references, find usages, call sites. Find all callers of a given node (function, method, etc.) up to a specified depth.",
+        required_object_schema(
+            json!({
+                "node_id": string_property("The unique node ID to find callers for"),
+                "max_depth": number_property("Maximum traversal depth (default: 3)")
+            }),
+            &["node_id"],
+        ),
     )
 }
 
@@ -1009,7 +1068,8 @@ fn def_callees() -> ToolDefinition {
     def_required_object(
         "tracedecay_callees",
         "Callees",
-        "Find all callees of a given node (function, method, etc.) up to a \
+        "What does this call, outgoing calls, dependencies of a function. \
+         Find all callees of a given node (function, method, etc.) up to a \
          specified depth. When a callee resolves to a trait method, the \
          concrete impl methods reachable through that trait are also \
          returned, tagged with `dispatch_via_trait: true` and a `dispatch_from` \
@@ -1075,7 +1135,7 @@ fn def_affected() -> ToolDefinition {
     def(
         "tracedecay_affected",
         "Affected Tests",
-        "Find test files affected by changed source files via dependency graph traversal.",
+        "Which tests to run, run affected tests, tests impacted by a change. Find test files affected by changed source files via dependency graph traversal.",
         json!({
             "type": "object",
             "properties": {
@@ -1394,7 +1454,7 @@ fn def_changelog() -> ToolDefinition {
     def(
         "tracedecay_changelog",
         "Changelog",
-        "Generate a semantic diff/changelog between two git refs, categorizing symbols as added, removed, or modified.",
+        "git log, git history, git blame, diff between refs. Generate a semantic diff/changelog between two git refs, categorizing symbols as added, removed, or modified.",
         json!({
             "type": "object",
             "properties": {
@@ -1470,7 +1530,7 @@ fn def_commit_context() -> ToolDefinition {
     def(
         "tracedecay_commit_context",
         "Commit Context",
-        "Semantic summary of uncommitted changes for drafting a commit message. Returns changed symbols, file roles, and recent commit style.",
+        "git diff, git status, git log style, staged changes for a commit message. Semantic summary of uncommitted changes for drafting a commit message. Returns changed symbols, file roles, and recent commit style.",
         json!({
             "type": "object",
             "properties": {
@@ -1527,7 +1587,7 @@ fn def_test_map() -> ToolDefinition {
     def(
         "tracedecay_test_map",
         "Test Map",
-        "Map source symbols to their test functions by walking the call graph up to depth 3. A listed test may be a direct caller or a transitive caller reached through up to two intermediate functions; coverage here is static attribution (the symbol is reachable from a test), not executed line/branch coverage. Pair with tracedecay_test_risk to see the direct-vs-closure attribution_method distinction per symbol.",
+        "Which tests cover this, run tests for a symbol, test coverage. Map source symbols to their test functions by walking the call graph up to depth 3. A listed test may be a direct caller or a transitive caller reached through up to two intermediate functions; coverage here is static attribution (the symbol is reachable from a test), not executed line/branch coverage. Pair with tracedecay_test_risk to see the direct-vs-closure attribution_method distinction per symbol.",
         json!({
             "type": "object",
             "properties": {
@@ -3421,7 +3481,8 @@ fn def_diagnostics() -> ToolDefinition {
     def(
         "tracedecay_diagnostics",
         "Compile / Type-Check Diagnostics",
-        "Run the project's type-checker (cargo check for Rust, tsc for \
+        "cargo check, tsc, type error, compile error, build failure, clippy. \
+         Run the project's type-checker (cargo check for Rust, tsc for \
          TypeScript, pyright for Python) and return structured errors and \
          warnings. Each diagnostic includes file, line range, level, code, \
          message, driver, and the enclosing graph node when one can be \
@@ -3431,9 +3492,12 @@ fn def_diagnostics() -> ToolDefinition {
          we don't race with the user's interactive cargo runs. The first \
          call against a fresh tree builds dependencies from scratch, which \
          can take several minutes on large workspaces; subsequent calls \
-         are sub-second. Build scripts and proc macros from the project \
-         execute as part of cargo check — same trust model as running it \
-         manually.",
+         are sub-second. Set config knob diagnostics_prewarm (env \
+         TRACEDECAY_DIAGNOSTICS_PREWARM=1, off by default) to make that first \
+         cold call spawn the build detached and return status 'warming' \
+         immediately instead of blocking — re-call once it is warm. Build \
+         scripts and proc macros from the project execute as part of cargo \
+         check — same trust model as running it manually.",
         json!({
             "type": "object",
             "properties": {
@@ -3739,6 +3803,30 @@ mod tests {
             desc.contains("5000 nodes"),
             "description should contain node count: {desc}"
         );
+    }
+
+    #[test]
+    fn test_context_description_scopes_budget_and_frees_narrow_tools() {
+        let desc = context_description(5000, 4);
+        assert!(
+            desc.contains("tracedecay_context ONLY"),
+            "budget must be scoped to tracedecay_context so agents don't abandon after one call: {desc}"
+        );
+        assert!(
+            desc.contains("UNBUDGETED"),
+            "description must tell agents the narrow tools are unbudgeted: {desc}"
+        );
+        for narrow in [
+            "tracedecay_search",
+            "tracedecay_grep",
+            "tracedecay_callers",
+            "tracedecay_body",
+        ] {
+            assert!(
+                desc.contains(narrow),
+                "description should name the narrow follow-up tool {narrow}: {desc}"
+            );
+        }
     }
 
     #[test]

@@ -1,19 +1,55 @@
 ---
 name: managing-session-context
-description: 'Use when driving the LCM compression lifecycle for a host — preflight, compression, session-boundary reporting, or diagnosing/repairing the LCM store. For past-session recall see recalling-session-context.'
+description: 'Use the moment you need anything from a PAST agent session — transcript recall, scoped/time grep, lossless replay, summary-DAG drill-down, or compaction recovery — and when driving the host LCM lifecycle (preflight, compression, boundary, or repair). Reach here before trusting a compacted summary.'
 ---
 
 # Managing session context
 
-This skill owns the **LCM compression and maintenance lifecycle** — the write
-and health side of the session store. It is the counterpart to
-`tracedecay:recalling-session-context`, which owns retrieval (grep, replay,
-summary-DAG expansion). These lifecycle tools are **host-agent integration
-tools**: invoke them when the host is managing its own context window or when
-the user explicitly asks to compress, repair, or inspect the LCM store — not
-casually during recall.
+One skill for both sides of the session store: **retrieval** (read-only, where
+you start when you need past-session content) and the **LCM compression and
+maintenance lifecycle** (the write/health side). Retrieval is cheap and safe;
+lifecycle tools are **host-agent integration tools** — invoke them only when the
+host is managing its own context window or the user explicitly asks to compress,
+repair, or inspect the store, never casually during recall.
 
-## Lifecycle tools
+For durable *decisions and facts* (rather than raw conversation), start with
+`tracedecay:project-memory` instead — it owns the FTS → fact lane of
+`tracedecay_message_search`; this skill owns the FTS → LCM lane.
+
+## Retrieval ladder (read-only, start here)
+
+Climb cheapest-first; stop as soon as the question is answered.
+
+1. **Fast full-text recall → `tracedecay_message_search`** (`query`, optional
+   `provider`, `scope`: `all`|`parents_only`|`subagents_only`, `limit`): FTS
+   over ingested transcripts; returns messages with their session ids — the
+   entry point into the ladder below.
+2. **Scoped/filtered grep → `tracedecay_lcm_grep`** (`query`, `scope`:
+   `current`|`session`|`all` — `current`/`session` require `session_id`; `role`,
+   `source`, `start_time`/`end_time`, `sort`: `recency`|`relevance`|`hybrid`):
+   bounded raw-message snippets plus summary text when recall needs
+   role/time/session precision.
+3. **Lossless replay → `tracedecay_lcm_load_session`** (`session_id`,
+   `after_store_id` + `limit` for stable pagination, `roles`,
+   `content_offset`/`content_limit`): ordered raw messages of one session; page
+   with `next_cursor` instead of asking for everything at once.
+4. **Summary-DAG drill-down:** `tracedecay_lcm_describe` (`session_id`) for the
+   session's raw/summary shape; `tracedecay_lcm_expand` (`target.kind`:
+   `raw_message`|`summary_node`|`external_payload`) to open one node, paging
+   sources via `source_offset`/`source_limit`; `tracedecay_lcm_expand_query`
+   (`query`) to assemble bounded retrieval context for a prompt in one call.
+5. **Store inspection → `tracedecay_lcm_status`** (counts, token estimates, DAG
+   depth/compression ratio) when you need to know what the store contains before
+   searching it.
+6. **Git-scoped session lookup → `tracedecay_sessions_for`** (`git_ref`:
+   `branch`|`worktree`|`commit`, `value`, optional `since`/`until`, `limit`):
+   find sessions active on a branch or worktree, or sessions that produced a
+   commit; feed returned session ids back into grep/replay/drill-down above.
+
+After a compaction, if prior-session context seems missing, run this ladder
+before assuming the compacted summary is complete.
+
+## Lifecycle tools (mutating — host/lifecycle intent only)
 
 All take `--provider` and (except doctor/status) `--session-id`. All default to
 `storage_scope: "project_local"`; pass `hermes_profile` with an absolute
@@ -42,7 +78,7 @@ All take `--provider` and (except doctor/status) `--session-id`. All default to
    depth distribution + compression ratio, payload byte totals, and GC status.
    Read-only; `deep: true` adds an on-disk integrity sweep.
 
-## Typical flow
+## Typical lifecycle flow
 
 Preflight → (if it requests compression) compress → status to confirm the ratio
 moved. On a real host session change, call session_boundary. If counts look
@@ -52,25 +88,40 @@ on explicit user intent.
 
 ## Guardrails
 
-- `preflight`, `status`, and doctor `diagnose`/`retention` are read-only.
+- Retrieval (steps 1–5 above), `preflight`, `status`, and doctor
+  `diagnose`/`retention` are read-only (grep/status may touch access counters).
   `compress`, `session_boundary`, and doctor `repair`/`clean`/`gc` + `apply`
   **mutate** durable session state — run them only with clear lifecycle or user
-  intent, never speculatively.
-- `provider` is required and `all` is rejected for these lifecycle tools; target
+  intent, never speculatively during recall.
+- `provider` is required and `all` is rejected for the lifecycle tools; target
   one provider at a time.
-- Do not let subagents drive compression, boundaries, or repair; those are
-  parent-agent/host responsibilities.
-- Keep token knobs conservative; over-aggressive compression loses replay
-  fidelity that `tracedecay:recalling-session-context` depends on.
+- For multi-step recall, dispatch scoped read-only subagents by session id, time
+  window, provider, role, or query variant. Subagents must not drive
+  compression, boundaries, or repair; the parent agent validates cited
+  messages/summaries and produces the final timeline.
+- Keep token knobs conservative; over-aggressive compression loses the replay
+  fidelity the retrieval ladder depends on.
 
 ## Handoff
 
-- Retrieving past-session content (grep, replay, summary-DAG expansion) → `tracedecay:recalling-session-context`.
+- Durable decisions/facts and persisting new ones → `tracedecay:project-memory`.
+- Dereferencing a truncated response handle → `tracedecay:using-the-cli`.
 - CLI fallback when MCP transport fails → `tracedecay:using-the-cli`.
 
-## Output
+## If tools are deferred or MCP fails
 
-- The lifecycle action taken (preflight decision, compression result, boundary
-  outcome, or store counts), whether it was read-only or mutating, and the
-  resulting compression ratio / health signals.
-- If any result includes a `tracedecay_metrics:` line, report the savings to the user.
+- Deferred (names listed without schemas): load once with ToolSearch —
+  `select:tracedecay_message_search,tracedecay_lcm_grep,tracedecay_lcm_load_session,tracedecay_lcm_status,tracedecay_lcm_compress,tracedecay_sessions_for`
+  (one batched call, add others needed) — then call normally.
+- MCP error/timeout/disconnect: same tool, same args, via shell:
+  `tracedecay tool <name> --key value` (see `tracedecay:using-the-cli`). Never
+  query `.tracedecay` databases directly; never abandon the graph over transport.
+
+## Deliverable
+
+Do not end this workflow without: (recall) the messages/summaries found with
+session ids and timestamps, and which rung answered the question; or
+(lifecycle) the action taken (preflight decision, compression result, boundary
+outcome, or store counts), whether it was read-only or mutating, and the
+resulting compression ratio / health signals. Report any `tracedecay_metrics:`
+line to the user.

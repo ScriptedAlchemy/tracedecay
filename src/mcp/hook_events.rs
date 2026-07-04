@@ -15,6 +15,7 @@ pub(crate) enum HookEventKind {
     FileEdit,
     Shell,
     WorkspaceOpen,
+    SessionStart,
     IncrementalSync,
 }
 
@@ -24,6 +25,7 @@ impl HookEventKind {
             "afterFileEdit" | "postToolUseEdit" => Some(Self::FileEdit),
             "afterShellExecution" | "postToolUseShell" => Some(Self::Shell),
             "workspaceOpen" => Some(Self::WorkspaceOpen),
+            "sessionStart" => Some(Self::SessionStart),
             "postToolUse" => Some(Self::IncrementalSync),
             _ => None,
         }
@@ -34,6 +36,7 @@ impl HookEventKind {
             Self::FileEdit => "file_edit",
             Self::Shell => "shell",
             Self::WorkspaceOpen => "workspace_open",
+            Self::SessionStart => "session_start",
             Self::IncrementalSync => "incremental_sync",
         }
     }
@@ -98,6 +101,9 @@ pub(crate) fn plan_hook_event(
                 agent: event.agent,
             })
             .unwrap_or(HookEventPlan::DebouncedIncrementalSync(event.agent)),
+        HookEventKind::SessionStart => {
+            plan_session_start_hook_event(event, project_root, current_branch)
+        }
         HookEventKind::IncrementalSync if !event.rel_paths.is_empty() => {
             HookEventPlan::SyncFiles(event.rel_paths.clone())
         }
@@ -189,6 +195,67 @@ fn plan_shell_hook_event(
         }
         crate::hooks::CursorShellSyncPlan::Noop => HookEventPlan::Noop,
     }
+}
+
+/// Plans the sync for a `sessionStart` hook.
+///
+/// In the main checkout this mirrors `WorkspaceOpen`: sync the current branch,
+/// or fall back to a debounced incremental sync when the branch is unknown.
+///
+/// When the event `cwd` is a *linked* git worktree (a harness-created
+/// `.claude/worktrees/*` session tree whose `.git` is a gitdir pointer rather
+/// than a real directory), we additionally plan `AddBranchAt` against the
+/// resolved worktree root so the session gets its own writable branch store
+/// instead of the read-only fallback-ancestor DB. The downstream
+/// `add_hook_branch_tracking` returns `AlreadyTracked` cheaply and
+/// idempotently, so re-planning `AddBranchAt` for an already-tracked worktree
+/// branch is a no-op — we do not need branch-meta visibility here.
+fn plan_session_start_hook_event(
+    event: &HookEvent,
+    project_root: &Path,
+    current_branch: Option<&str>,
+) -> HookEventPlan {
+    let cwd = event.cwd.as_deref().unwrap_or(project_root);
+    if let Some(plan) = plan_linked_worktree_branch_add(event, cwd, project_root) {
+        return plan;
+    }
+    current_branch
+        .filter(|branch| !branch.is_empty())
+        .map(|branch| HookEventPlan::SyncCurrentBranch {
+            branch: branch.to_string(),
+            agent: event.agent,
+        })
+        .unwrap_or(HookEventPlan::DebouncedIncrementalSync(event.agent))
+}
+
+/// When `cwd` resolves to a linked git worktree that belongs to `project_root`,
+/// returns an `AddBranchAt` plan for the worktree root and its current branch.
+/// Returns `None` for the main checkout, a non-git cwd, or an unrelated repo.
+fn plan_linked_worktree_branch_add(
+    event: &HookEvent,
+    cwd: &Path,
+    project_root: &Path,
+) -> Option<HookEventPlan> {
+    let worktree_root = crate::worktree::git_worktree_root(cwd)?;
+    // A linked worktree's git common dir lives outside its own working tree
+    // (it points back at the main checkout's `.git`). In the main checkout the
+    // common dir is `<root>/.git`, so the two paths match and we bail out.
+    let common_dir = crate::worktree::git_common_dir(&worktree_root)?;
+    if path_is_inside(&common_dir, &worktree_root) {
+        return None;
+    }
+    if !git_roots_share_common_dir(&worktree_root, project_root) {
+        return None;
+    }
+    let branch = crate::branch::current_branch(&worktree_root)?;
+    if branch.is_empty() {
+        return None;
+    }
+    Some(HookEventPlan::AddBranchAt {
+        root: worktree_root,
+        branch,
+        agent: event.agent,
+    })
 }
 
 fn hook_project_root(cwd: &Path, project_root: &Path) -> Option<PathBuf> {
@@ -688,6 +755,71 @@ mod tests {
             plan_hook_event(&event, &project_root, Some("main")),
             &worktree_root,
             "feature/session",
+        );
+    }
+
+    #[test]
+    fn round_trips_session_start_wire_name_and_key() {
+        assert_eq!(
+            HookEventKind::from_wire("sessionStart"),
+            Some(HookEventKind::SessionStart)
+        );
+        assert_eq!(HookEventKind::SessionStart.as_key(), "session_start");
+    }
+
+    #[test]
+    fn plans_session_start_from_main_checkout_as_current_branch_sync() {
+        let (_base, project_root, _worktree_root) = setup_linked_session_worktree();
+
+        let params = json!({
+            "agent": "claude",
+            "event": "sessionStart",
+            "cwd": project_root,
+        });
+        let event = parse_or_panic(&params);
+
+        assert_eq!(
+            plan_hook_event(&event, &project_root, Some("main")),
+            HookEventPlan::SyncCurrentBranch {
+                branch: "main".to_string(),
+                agent: HookAgent::Claude,
+            }
+        );
+    }
+
+    #[test]
+    fn plans_session_start_from_linked_worktree_as_branch_add() {
+        let (_base, project_root, worktree_root) = setup_linked_session_worktree();
+
+        let params = json!({
+            "agent": "codex",
+            "event": "sessionStart",
+            "cwd": worktree_root,
+        });
+        let event = parse_or_panic(&params);
+
+        // The session cwd is the linked worktree, so even though the main
+        // checkout reports `main`, the plan tracks the worktree's own branch
+        // at the worktree root.
+        assert_add_branch_at(
+            plan_hook_event(&event, &project_root, Some("main")),
+            &worktree_root,
+            "feature/session",
+        );
+    }
+
+    #[test]
+    fn plans_session_start_with_empty_branch_as_debounced_incremental_sync() {
+        let params = json!({
+            "agent": "claude",
+            "event": "sessionStart",
+            "cwd": "/tmp/project",
+        });
+        let event = parse_or_panic(&params);
+
+        assert_eq!(
+            plan_hook_event(&event, Path::new("/tmp/project"), Some("")),
+            HookEventPlan::DebouncedIncrementalSync(HookAgent::Claude)
         );
     }
 

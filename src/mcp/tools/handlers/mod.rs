@@ -10,6 +10,7 @@ mod dependency_hints;
 pub mod edit;
 pub mod git;
 pub mod graph;
+pub mod grep;
 pub mod health;
 pub mod info;
 pub mod memory;
@@ -275,6 +276,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
     let cg = selected_cg.as_ref().unwrap_or(cg);
     match tool_name {
         "tracedecay_search" => graph::handle_search(cg, args, selected_scope_prefix).await,
+        "tracedecay_grep" => grep::handle_grep(cg, args, selected_scope_prefix).await,
         "tracedecay_retrieve" => handle_retrieve(cg, &args),
         "tracedecay_context" => graph::handle_context(cg, args, selected_scope_prefix).await,
         "tracedecay_callers" => graph::handle_callers(cg, args).await,
@@ -1018,7 +1020,7 @@ mod tests {
         // host CLI capabilities they need; agents should never see a tool that
         // will instantly fail. The count and per-tool checks below adapt to
         // the host's capability set.
-        let expected_total = 98 + usize::from(super::super::definitions::ast_grep_available());
+        let expected_total = 99 + usize::from(super::super::definitions::ast_grep_available());
         assert_eq!(tools.len(), expected_total);
 
         let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
@@ -1219,10 +1221,21 @@ mod tests {
             always_load.contains(&"tracedecay_storage_status"),
             "tracedecay_storage_status must be alwaysLoad"
         );
+        // grep and callers cover the two most common native-tool reflexes
+        // (content search and "who calls this"), so they join the always-loaded
+        // set to keep the model from ToolSearch-ing before reaching for Bash.
+        assert!(
+            always_load.contains(&"tracedecay_grep"),
+            "tracedecay_grep must be alwaysLoad"
+        );
+        assert!(
+            always_load.contains(&"tracedecay_callers"),
+            "tracedecay_callers must be alwaysLoad"
+        );
         assert_eq!(
             always_load.len(),
-            5,
-            "exactly 5 tools should be alwaysLoad, got {:?}",
+            7,
+            "exactly 7 tools should be alwaysLoad (cap), got {:?}",
             always_load
         );
     }

@@ -56,13 +56,26 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Edit|MultiEdit|Write|NotebookEdit|Bash",
+        "matcher": "Edit|MultiEdit|Write|NotebookEdit|Grep|Glob|Read|Bash",
         "hooks": [
           {
             "type": "command",
             "command": "__TRACEDECAY_BIN__",
             "args": [
               "hook-claude-post-tool-use"
+            ]
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__TRACEDECAY_BIN__",
+            "args": [
+              "hook-claude-subagent-start"
             ]
           }
         ]

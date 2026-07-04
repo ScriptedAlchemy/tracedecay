@@ -40,6 +40,10 @@ parameters). The bundled `using-the-cli` skill and always-applied rule use
 that CLI fallback when MCP transport errors or times out, instead of querying
 `.tracedecay` databases.
 
+For literal strings, regexes, and config keys inside indexed code, use
+`tracedecay_grep`; reserve `tracedecay_search` for symbol names and
+`tracedecay_context` for concept-level discovery.
+
 For sessions resumed from compacted context, the `sessionStart` hook adds a
 short recovery hint through Cursor's `additional_context` channel so the agent
 knows to query TraceDecay LCM/session recall before assuming the compacted
@@ -100,6 +104,7 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
     "tracedecay:tracedecay_find_exact_symbol",
     "tracedecay:tracedecay_gini",
     "tracedecay:tracedecay_god_class",
+    "tracedecay:tracedecay_grep",
     "tracedecay:tracedecay_health",
     "tracedecay:tracedecay_hermes_skill_bridge",
     "tracedecay:tracedecay_hotspots",

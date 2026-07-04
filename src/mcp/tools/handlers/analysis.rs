@@ -297,7 +297,7 @@ pub(super) async fn handle_circular(cg: &TraceDecay, args: Value) -> Result<Tool
     });
 
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-        render::generic_md(&output)
+        render_circular_md(&cycles)
     });
     Ok(ToolResult::new(
         json!({
@@ -305,6 +305,31 @@ pub(super) async fn handle_circular(cg: &TraceDecay, args: Value) -> Result<Tool
         }),
         vec![],
     ))
+}
+
+/// Renders file-level dependency cycles as arrow chains that preserve cycle
+/// order (`a.rs -> b.rs -> a.rs`) instead of collapsing the members into a
+/// directory tree, which destroys the cyclic relationship. Each SCC's member
+/// files are joined with ` -> ` and the first is repeated at the end to close
+/// the loop.
+fn render_circular_md(cycles: &[Vec<String>]) -> String {
+    use std::fmt::Write as _;
+
+    if cycles.is_empty() {
+        return "No circular dependencies found.\n".to_string();
+    }
+    let mut out = String::new();
+    let _ = writeln!(out, "# Circular Dependencies ({})\n", cycles.len());
+    for (i, cycle) in cycles.iter().enumerate() {
+        if cycle.is_empty() {
+            continue;
+        }
+        let mut chain = cycle.join(" -> ");
+        // Close the loop by repeating the entry file.
+        let _ = write!(chain, " -> {}", cycle[0]);
+        let _ = writeln!(out, "{}. {chain}", i + 1);
+    }
+    out
 }
 
 /// Handles `tracedecay_hotspots` tool calls.
@@ -1551,11 +1576,64 @@ async fn enclosing_diagnostic_node(
     }))
 }
 
+/// Whether the diagnostics prewarm behaviour is enabled. Off by default: the
+/// first `tracedecay_diagnostics` call on a cold Rust tree otherwise blocks for
+/// minutes while cargo builds every dependency, which agents rationally avoid.
+/// When enabled (config knob `diagnostics_prewarm`, surfaced as the
+/// `TRACEDECAY_DIAGNOSTICS_PREWARM` env var), a cold tree instead kicks a
+/// detached `cargo check` and returns a `warming` status immediately.
+fn diagnostics_prewarm_enabled(config_flag: bool) -> bool {
+    prewarm_enabled_from(crate::config::env_bool("DIAGNOSTICS_PREWARM"), config_flag)
+}
+
+/// Pure precedence for the `diagnostics_prewarm` knob: a parseable
+/// `TRACEDECAY_DIAGNOSTICS_PREWARM` env value wins; unset or unparseable env
+/// falls through to the project config field (matching the
+/// `SyncConfig::with_env_overrides` convention). Split out from the env read
+/// so it is testable without mutating process env.
+fn prewarm_enabled_from(env_value: Option<bool>, config_flag: bool) -> bool {
+    env_value.unwrap_or(config_flag)
+}
+
+/// Build the early-return `warming` payload for a cold prewarm. Factored out so
+/// the warming path is unit-testable without spawning cargo.
+fn diagnostics_warming_result(project_root: &std::path::Path) -> ToolResult {
+    let target_dir = crate::diagnostics::rust_diagnostics_target_dir(project_root);
+    let payload = json!({
+        "status": "warming",
+        "message": format!(
+            "dependency build started (~minutes); re-call tracedecay_diagnostics after \
+             it finishes, or run `cargo check` in your shell meanwhile. Build target: {}",
+            target_dir.display()
+        ),
+        "target_dir": target_dir.display().to_string(),
+        "diagnostic_count": 0,
+    });
+    let text = render::generic_md(&payload);
+    ToolResult::new(
+        json!({ "content": [{ "type": "text", "text": text }] }),
+        vec![],
+    )
+}
+
 pub(super) async fn handle_diagnostics(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     use crate::diagnostics::run_all;
 
     let (scope_str, scope) = diagnostics_scope_arg(&args)?;
     let project_root = cg.project_root().to_path_buf();
+
+    // Cold-start avoidance: on a fresh tree the first cargo check builds every
+    // dependency and blocks for minutes. When prewarm is enabled, spawn that
+    // build detached and return a `warming` status immediately so the agent can
+    // keep working and re-call once it is warm. Default-off preserves the
+    // original blocking behaviour for callers who want the answer inline.
+    if diagnostics_prewarm_enabled(cg.get_config().diagnostics_prewarm)
+        && crate::diagnostics::is_rust_diagnostics_cold(&project_root)
+    {
+        crate::diagnostics::spawn_rust_diagnostics_prewarm(&project_root)?;
+        return Ok(diagnostics_warming_result(&project_root));
+    }
+
     let mut diagnostics = run_all(&project_root, &scope).await?;
 
     if let crate::diagnostics::Scope::File { path } = &scope {
@@ -2225,4 +2303,80 @@ fn line_is_comment(source: &str, byte: usize) -> bool {
     let line = &source[line_start..];
     let trimmed = line.trim_start();
     trimmed.starts_with("//")
+}
+
+#[cfg(test)]
+mod circular_render_tests {
+    use super::render_circular_md;
+
+    #[test]
+    fn renders_arrow_chain_closing_the_loop() {
+        let cycles = vec![vec!["a.rs".to_string(), "b.rs".to_string()]];
+        let out = render_circular_md(&cycles);
+        assert!(out.contains("a.rs -> b.rs -> a.rs"), "got: {out}");
+        assert!(out.contains("Circular Dependencies (1)"), "got: {out}");
+    }
+
+    #[test]
+    fn renders_empty_state() {
+        let out = render_circular_md(&[]);
+        assert!(out.contains("No circular dependencies found"), "got: {out}");
+    }
+
+    #[test]
+    fn numbers_multiple_cycles() {
+        let cycles = vec![
+            vec!["a.rs".to_string(), "b.rs".to_string()],
+            vec!["c.rs".to_string(), "d.rs".to_string(), "e.rs".to_string()],
+        ];
+        let out = render_circular_md(&cycles);
+        assert!(out.contains("1. a.rs -> b.rs -> a.rs"), "got: {out}");
+        assert!(
+            out.contains("2. c.rs -> d.rs -> e.rs -> c.rs"),
+            "got: {out}"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod diagnostics_warming_tests {
+    use super::{diagnostics_warming_result, prewarm_enabled_from};
+    use std::path::Path;
+
+    #[test]
+    fn prewarm_follows_config_when_env_unset() {
+        assert!(!prewarm_enabled_from(None, false));
+        assert!(prewarm_enabled_from(None, true));
+    }
+
+    #[test]
+    fn parseable_env_wins_over_config() {
+        assert!(prewarm_enabled_from(Some(true), false));
+        assert!(
+            !prewarm_enabled_from(Some(false), true),
+            "an explicit env off must beat a config on"
+        );
+    }
+
+    #[test]
+    fn warming_result_reports_status_and_target_dir() {
+        let root = Path::new("/tmp/tracedecay-warming-proj");
+        let result = diagnostics_warming_result(root);
+        let text = result.value["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("warming"),
+            "status should be surfaced: {text}"
+        );
+        assert!(
+            text.to_lowercase().contains("re-call"),
+            "should tell the agent to re-call: {text}"
+        );
+        // The private diagnostics target dir is namespaced by project id, so the
+        // message must not leak a repo-local `target/`.
+        assert!(
+            text.contains("tracedecay-target"),
+            "should point at the private diagnostics target dir: {text}"
+        );
+    }
 }

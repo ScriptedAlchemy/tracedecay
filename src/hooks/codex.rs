@@ -17,8 +17,8 @@ use super::steering::{
 };
 use super::tool_hints::{decide_hint, HintAgent, HintCategory, ToolHint, ToolHintInput};
 use super::{
-    append_tool_hint, deduped_project_hint, event_cwd_from_parsed, event_session_id,
-    format_tool_hint, is_project_like_workspace, prompt_like_text, read_hook_event,
+    append_tool_hint, deduped_project_hint_with_id, event_cwd_from_parsed, event_session_id,
+    format_tool_hint, is_project_like_workspace, mint_hint_id, prompt_like_text, read_hook_event,
     record_hint_analytics, record_hook_analytics, record_hook_invoked,
     record_workspace_status_analytics, rel_under_root, text_field,
 };
@@ -26,13 +26,17 @@ use super::{
 const CODEX_SUBAGENT_START_CONTEXT: &str = "tracedecay MCP tools subagent context: this looks \
 like a new/no-history subagent or code-research subagent. Use `tracedecay:using-tracedecay` \
 and the matching TraceDecay workflow before broad file reads: `tracedecay:exploring-code` with \
-`tracedecay_context` for code exploration, `tracedecay_outline` or `tracedecay_body` before \
+`tracedecay_context` for code exploration, `tracedecay_grep` for literal/regex code search, \
+`tracedecay_search` for symbol names, `tracedecay_outline` or `tracedecay_body` before \
 whole-file reads, `tracedecay:tracing-functions` with `tracedecay_find_exact_symbol`, \
 `tracedecay_callers`, and `tracedecay_callees` when asked to trace functions, find callers, \
 or inspect setup/helper/fixture dependencies, `tracedecay:assessing-impact` with \
 `tracedecay_affected` and `tracedecay_test_map` before guessing affected tests, \
-`tracedecay:project-memory` when project decisions/preferences matter, and \
-`tracedecay:recalling-session-context` with `tracedecay_message_search`, \
+`tracedecay:fixing-build-and-type-errors` before running `cargo check`/`tsc`/`clippy` \
+in the shell or when shell output shows compile errors — paste captured output into \
+`tracedecay_diagnose`, or run `tracedecay_diagnostics` for fresh structured errors \
+mapped to symbols, `tracedecay:project-memory` when project decisions/preferences matter, and \
+`tracedecay:managing-session-context` with `tracedecay_message_search`, \
 `tracedecay_lcm_expand_query`, and `tracedecay_lcm_describe` when prior conversation context \
 may be missing.";
 
@@ -247,14 +251,16 @@ pub fn evaluate_codex_subagent_start(event_json: &str) -> Option<String> {
             nonblocking: true,
         };
         let root = codex_project_root_from_event(event_json);
+        let hint_id = mint_hint_id();
         record_hint_analytics(
             root.as_deref(),
             "hint_candidate",
             HintAgent::Codex,
             event_session_id(&parsed).as_deref(),
+            &hint_id,
             &dedupe_hint,
         );
-        let _ = deduped_codex_hint(event_json, &parsed, dedupe_hint)?;
+        let _ = deduped_codex_hint(event_json, &parsed, &hint_id, dedupe_hint)?;
         let context = codex_subagent_start_context(hint, needs_context);
         return Some(codex_additional_context_json("SubagentStart", &context));
     }
@@ -519,11 +525,17 @@ async fn reset_counter_for_codex_event(event_json: &str) {
     }
 }
 
-fn deduped_codex_hint(event_json: &str, parsed: &Value, hint: ToolHint) -> Option<ToolHint> {
-    deduped_project_hint(
+fn deduped_codex_hint(
+    event_json: &str,
+    parsed: &Value,
+    hint_id: &str,
+    hint: ToolHint,
+) -> Option<ToolHint> {
+    deduped_project_hint_with_id(
         codex_project_root_from_event(event_json),
         HintAgent::Codex,
         event_session_id(parsed),
+        hint_id,
         hint,
     )
 }
@@ -541,14 +553,16 @@ fn codex_prompt_hint(event_json: &str) -> Option<ToolHint> {
         hints_enabled: true,
     })?;
     let root = codex_project_root_from_event(event_json);
+    let hint_id = mint_hint_id();
     record_hint_analytics(
         root.as_deref(),
         "hint_candidate",
         HintAgent::Codex,
         event_session_id(&parsed).as_deref(),
+        &hint_id,
         &hint,
     );
-    deduped_codex_hint(event_json, &parsed, hint)
+    deduped_codex_hint(event_json, &parsed, &hint_id, hint)
 }
 
 #[cfg(test)]
@@ -556,7 +570,19 @@ fn codex_prompt_hint(event_json: &str) -> Option<ToolHint> {
 mod tests {
     use super::*;
     use crate::config::USER_DATA_DIR_ENV;
-    use std::sync::{Mutex, OnceLock};
+
+    #[test]
+    fn codex_subagent_start_context_carries_diagnostics_moment() {
+        // Subagents must route the shell compile/type-check moment to tracedecay
+        // diagnostics and name the fixing-build skill, matching session steering.
+        assert!(CODEX_SUBAGENT_START_CONTEXT.contains("fixing-build-and-type-errors"));
+        assert!(CODEX_SUBAGENT_START_CONTEXT.contains("tracedecay_diagnose"));
+        assert!(CODEX_SUBAGENT_START_CONTEXT.contains("tracedecay_diagnostics"));
+        assert!(CODEX_SUBAGENT_START_CONTEXT.contains("cargo check"));
+        // The consolidated skill ladder and grep routing stay intact.
+        assert!(CODEX_SUBAGENT_START_CONTEXT.contains("tracedecay_grep"));
+        assert!(CODEX_SUBAGENT_START_CONTEXT.contains("exploring-code"));
+    }
 
     #[test]
     fn codex_subagent_output_merges_memory_digest_into_additional_context() {
@@ -616,14 +642,9 @@ mod tests {
         }
     }
 
-    fn env_lock() -> &'static Mutex<()> {
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        ENV_LOCK.get_or_init(|| Mutex::new(()))
-    }
-
     #[test]
     fn codex_prompt_hints_dedupe_by_session_and_category() {
-        let _lock = env_lock().lock().unwrap();
+        let _lock = crate::hooks::test_env_lock().lock().unwrap();
         let project = tempfile::tempdir().unwrap();
         let profile = tempfile::tempdir().unwrap();
         let project_root = project.path().canonicalize().unwrap();

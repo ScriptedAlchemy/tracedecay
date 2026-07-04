@@ -80,10 +80,220 @@ pub struct TraceDecayConfig {
     /// Whether to respect `.gitignore` rules when scanning files.
     #[serde(default = "default_git_ignore")]
     pub git_ignore: bool,
+    /// Whether a cold `tracedecay_diagnostics` call prewarms in the background
+    /// (detached dependency build + immediate `warming` status) instead of
+    /// blocking for minutes. `TRACEDECAY_DIAGNOSTICS_PREWARM` overrides when it
+    /// parses as a bool (env wins). Off by default.
+    #[serde(default)]
+    pub diagnostics_prewarm: bool,
+    /// Index-freshness auto-sync settings (git-metadata watcher, serve-stale,
+    /// branch lifecycle). Absent in older `config.json` files, so defaulted.
+    #[serde(default)]
+    pub sync: SyncConfig,
 }
 
 fn default_git_ignore() -> bool {
     true
+}
+
+fn default_sync_auto_watch() -> bool {
+    true
+}
+fn default_sync_watch_debounce_ms() -> u64 {
+    2000
+}
+fn default_sync_watch_max_delay_ms() -> u64 {
+    30000
+}
+fn default_sync_watch_max_projects() -> usize {
+    32
+}
+fn default_sync_read_refresh() -> bool {
+    true
+}
+fn default_sync_read_cooldown_secs() -> u64 {
+    30
+}
+fn default_sync_session_start_sync() -> bool {
+    true
+}
+fn default_sync_session_start_stale_threshold_secs() -> u64 {
+    600
+}
+fn default_sync_backstop_interval_mins() -> u64 {
+    15
+}
+fn default_sync_full_sync_escalation_files() -> usize {
+    500
+}
+fn default_sync_max_concurrent_syncs() -> usize {
+    2
+}
+fn default_sync_branch_gc_days() -> u64 {
+    14
+}
+fn default_sync_orphan_db_gc_days() -> u64 {
+    7
+}
+fn default_sync_auto_init() -> bool {
+    false
+}
+
+/// Auto-sync / index-freshness knobs, exposed as the `[sync]` table in
+/// `config.json` and overridable via `TRACEDECAY_SYNC_*` environment
+/// variables (see [`SyncConfig::with_env_overrides`]).
+///
+/// Every field carries a `#[serde(default = ...)]` so that a partial JSON
+/// object (only some keys present) still deserializes, and a missing `sync`
+/// key entirely falls back to [`SyncConfig::default`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SyncConfig {
+    /// Enable the daemon git-metadata watcher.
+    #[serde(default = "default_sync_auto_watch")]
+    pub auto_watch: bool,
+    /// Per-project quiet-period debounce before a watcher-triggered sync (ms).
+    #[serde(default = "default_sync_watch_debounce_ms")]
+    pub watch_debounce_ms: u64,
+    /// Maximum time a watcher-triggered sync can be deferred by debounce (ms).
+    #[serde(default = "default_sync_watch_max_delay_ms")]
+    pub watch_max_delay_ms: u64,
+    /// Maximum number of recently-seen projects the watcher registers.
+    #[serde(default = "default_sync_watch_max_projects")]
+    pub watch_max_projects: usize,
+    /// Enable non-blocking sync-on-read for query tools.
+    #[serde(default = "default_sync_read_refresh")]
+    pub read_refresh: bool,
+    /// Cooldown between read-triggered background refreshes (seconds).
+    #[serde(default = "default_sync_read_cooldown_secs")]
+    pub read_cooldown_secs: u64,
+    /// Fire a catch-up sync on session start.
+    #[serde(default = "default_sync_session_start_sync")]
+    pub session_start_sync: bool,
+    /// Staleness threshold above which session-start sync runs (seconds).
+    #[serde(default = "default_sync_session_start_stale_threshold_secs")]
+    pub session_start_stale_threshold_secs: u64,
+    /// Daemon backstop scheduler interval (minutes); 0 disables it.
+    #[serde(default = "default_sync_backstop_interval_mins")]
+    pub backstop_interval_mins: u64,
+    /// Diff-scoped syncs above this many changed files escalate to a full sync.
+    #[serde(default = "default_sync_full_sync_escalation_files")]
+    pub full_sync_escalation_files: usize,
+    /// Daemon-wide cap on concurrent syncs.
+    #[serde(default = "default_sync_max_concurrent_syncs")]
+    pub max_concurrent_syncs: usize,
+    /// Grace period before a dead tracked-branch store is GC'd (days).
+    #[serde(default = "default_sync_branch_gc_days")]
+    pub branch_gc_days: u64,
+    /// Grace period before an orphan branch DB is GC'd (days).
+    #[serde(default = "default_sync_orphan_db_gc_days")]
+    pub orphan_db_gc_days: u64,
+    /// Auto-initialise never-indexed repos on first contact.
+    #[serde(default = "default_sync_auto_init")]
+    pub auto_init: bool,
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self {
+            auto_watch: default_sync_auto_watch(),
+            watch_debounce_ms: default_sync_watch_debounce_ms(),
+            watch_max_delay_ms: default_sync_watch_max_delay_ms(),
+            watch_max_projects: default_sync_watch_max_projects(),
+            read_refresh: default_sync_read_refresh(),
+            read_cooldown_secs: default_sync_read_cooldown_secs(),
+            session_start_sync: default_sync_session_start_sync(),
+            session_start_stale_threshold_secs: default_sync_session_start_stale_threshold_secs(),
+            backstop_interval_mins: default_sync_backstop_interval_mins(),
+            full_sync_escalation_files: default_sync_full_sync_escalation_files(),
+            max_concurrent_syncs: default_sync_max_concurrent_syncs(),
+            branch_gc_days: default_sync_branch_gc_days(),
+            orphan_db_gc_days: default_sync_orphan_db_gc_days(),
+            auto_init: default_sync_auto_init(),
+        }
+    }
+}
+
+/// Parses a boolean env value: `1`/`true` => true, `0`/`false` => false
+/// (case-insensitive). Any other value is ignored (returns `None`).
+fn parse_env_bool(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" => Some(true),
+        "0" | "false" => Some(false),
+        _ => None,
+    }
+}
+
+/// Reads a `TRACEDECAY_<suffix>` env var and parses it as a bool.
+pub(crate) fn env_bool(suffix: &str) -> Option<bool> {
+    brand_env(suffix).as_deref().and_then(parse_env_bool)
+}
+
+/// Reads a `TRACEDECAY_<suffix>` env var and parses it as an integer of the
+/// caller's choosing.
+fn env_parse<T: std::str::FromStr>(suffix: &str) -> Option<T> {
+    brand_env(suffix)
+        .as_deref()
+        .and_then(|raw| raw.trim().parse::<T>().ok())
+}
+
+impl SyncConfig {
+    /// Applies `TRACEDECAY_SYNC_*` environment overrides on top of `self`,
+    /// leaving any field whose env var is unset or unparsable untouched.
+    #[must_use]
+    pub fn with_env_overrides(mut self) -> Self {
+        if let Some(value) = env_bool("SYNC_AUTO_WATCH") {
+            self.auto_watch = value;
+        }
+        if let Some(value) = env_parse("SYNC_WATCH_DEBOUNCE_MS") {
+            self.watch_debounce_ms = value;
+        }
+        if let Some(value) = env_parse("SYNC_WATCH_MAX_DELAY_MS") {
+            self.watch_max_delay_ms = value;
+        }
+        if let Some(value) = env_parse("SYNC_WATCH_MAX_PROJECTS") {
+            self.watch_max_projects = value;
+        }
+        if let Some(value) = env_bool("SYNC_READ_REFRESH") {
+            self.read_refresh = value;
+        }
+        if let Some(value) = env_parse("SYNC_READ_COOLDOWN_SECS") {
+            self.read_cooldown_secs = value;
+        }
+        if let Some(value) = env_bool("SYNC_SESSION_START_SYNC") {
+            self.session_start_sync = value;
+        }
+        if let Some(value) = env_parse("SYNC_SESSION_START_STALE_THRESHOLD_SECS") {
+            self.session_start_stale_threshold_secs = value;
+        }
+        if let Some(value) = env_parse("SYNC_BACKSTOP_INTERVAL_MINS") {
+            self.backstop_interval_mins = value;
+        }
+        if let Some(value) = env_parse("SYNC_FULL_SYNC_ESCALATION_FILES") {
+            self.full_sync_escalation_files = value;
+        }
+        if let Some(value) = env_parse("SYNC_MAX_CONCURRENT_SYNCS") {
+            self.max_concurrent_syncs = value;
+        }
+        if let Some(value) = env_parse("SYNC_BRANCH_GC_DAYS") {
+            self.branch_gc_days = value;
+        }
+        if let Some(value) = env_parse("SYNC_ORPHAN_DB_GC_DAYS") {
+            self.orphan_db_gc_days = value;
+        }
+        if let Some(value) = env_bool("SYNC_AUTO_INIT") {
+            self.auto_init = value;
+        }
+        self
+    }
+}
+
+/// Loads the `[sync]` config for a project (falling back to defaults on any
+/// load error) and applies `TRACEDECAY_SYNC_*` environment overrides.
+pub fn load_sync_config(project_root: &Path) -> SyncConfig {
+    load_config(project_root)
+        .map(|config| config.sync)
+        .unwrap_or_default()
+        .with_env_overrides()
 }
 
 impl Default for TraceDecayConfig {
@@ -100,6 +310,8 @@ impl Default for TraceDecayConfig {
             extract_docstrings: true,
             track_call_sites: true,
             git_ignore: default_git_ignore(),
+            diagnostics_prewarm: false,
+            sync: SyncConfig::default(),
         }
     }
 }
@@ -815,5 +1027,100 @@ mod tests {
         let ignored = is_ignored_by_explicit_global_excludes(&repo, &git_config);
 
         assert_eq!(ignored, Some(true));
+    }
+
+    #[test]
+    fn sync_config_defaults_round_trip() {
+        let config = TraceDecayConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: TraceDecayConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config.sync, parsed.sync);
+        assert_eq!(parsed.sync, super::SyncConfig::default());
+        // Spot-check a few of the documented defaults.
+        assert!(parsed.sync.auto_watch);
+        assert_eq!(parsed.sync.watch_debounce_ms, 2000);
+        assert_eq!(parsed.sync.full_sync_escalation_files, 500);
+        assert_eq!(parsed.sync.max_concurrent_syncs, 2);
+        assert!(!parsed.sync.auto_init);
+    }
+
+    #[test]
+    fn diagnostics_prewarm_round_trips_and_defaults_off() {
+        let config = TraceDecayConfig::default();
+        assert!(!config.diagnostics_prewarm, "prewarm must default off");
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: TraceDecayConfig = serde_json::from_str(&json).unwrap();
+        assert!(!parsed.diagnostics_prewarm);
+
+        // Explicit true round-trips, and old configs without the key default.
+        let mut on = config.clone();
+        on.diagnostics_prewarm = true;
+        let parsed: TraceDecayConfig =
+            serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
+        assert!(parsed.diagnostics_prewarm);
+        let legacy = r#"{
+            "version": 1,
+            "root_dir": "/tmp/proj",
+            "exclude": [],
+            "max_file_size": 1048576,
+            "extract_docstrings": true,
+            "track_call_sites": true
+        }"#;
+        let parsed: TraceDecayConfig = serde_json::from_str(legacy).unwrap();
+        assert!(!parsed.diagnostics_prewarm);
+    }
+
+    #[test]
+    fn config_without_sync_key_deserializes_to_default_sync() {
+        // Old config.json files predate the `sync` table; the field-level
+        // `#[serde(default)]` must fill it in.
+        let json = r#"{
+            "version": 1,
+            "root_dir": "/tmp/proj",
+            "exclude": [],
+            "max_file_size": 1048576,
+            "extract_docstrings": true,
+            "track_call_sites": true
+        }"#;
+        let parsed: TraceDecayConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.sync, super::SyncConfig::default());
+    }
+
+    #[test]
+    fn partial_sync_table_fills_missing_fields_with_defaults() {
+        // Only two sync keys present; every other field must default.
+        let json = r#"{
+            "version": 1,
+            "root_dir": "/tmp/proj",
+            "exclude": [],
+            "max_file_size": 1048576,
+            "extract_docstrings": true,
+            "track_call_sites": true,
+            "sync": { "auto_watch": false, "backstop_interval_mins": 99 }
+        }"#;
+        let parsed: TraceDecayConfig = serde_json::from_str(json).unwrap();
+        assert!(!parsed.sync.auto_watch);
+        assert_eq!(parsed.sync.backstop_interval_mins, 99);
+        // Untouched fields keep their defaults.
+        assert_eq!(parsed.sync.watch_debounce_ms, 2000);
+        assert_eq!(parsed.sync.max_concurrent_syncs, 2);
+        assert!(parsed.sync.read_refresh);
+    }
+
+    #[test]
+    fn sync_config_env_overrides_bool_and_int() {
+        let _lock = USER_DATA_DIR_ENV_LOCK.lock().unwrap();
+        let _watch = EnvRestore::set("TRACEDECAY_SYNC_AUTO_WATCH", "false");
+        let _debounce = EnvRestore::set("TRACEDECAY_SYNC_WATCH_DEBOUNCE_MS", "5000");
+        // Unparsable ints/bools are ignored (field keeps its base value).
+        let _bad = EnvRestore::set("TRACEDECAY_SYNC_MAX_CONCURRENT_SYNCS", "not-a-number");
+
+        let overridden = super::SyncConfig::default().with_env_overrides();
+        assert!(!overridden.auto_watch);
+        assert_eq!(overridden.watch_debounce_ms, 5000);
+        assert_eq!(
+            overridden.max_concurrent_syncs,
+            super::SyncConfig::default().max_concurrent_syncs
+        );
     }
 }
