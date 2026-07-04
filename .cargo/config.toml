@@ -1,3 +1,8 @@
+[build]
+# Keep this portable. On this machine, `target` is an ignored symlink to
+# `/scratch/cargo-target/tracedecay`; in CI and packages it remains local.
+target-dir = "target"
+
 [env]
 # Disable C/C++ assertions in vendored tree-sitter grammars so that grammar
 # bugs (e.g. the tree-sitter-markdown autolink assertion) produce a failed
