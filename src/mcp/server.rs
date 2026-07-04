@@ -1390,13 +1390,14 @@ impl McpServer {
                     Some(base) => cg.stale_files_since_commit(&base, escalation),
                     None => None,
                 };
-                let result = if let Some(files) = scoped.as_ref().filter(|files| !files.is_empty())
-                {
-                    cg.sync_if_stale_silent(files).await
+                let result = if let Some(files) = scoped {
+                    if files.is_empty() {
+                        Ok(())
+                    } else {
+                        cg.sync_if_stale_silent(&files).await
+                    }
                 } else {
-                    // Fallback: full tree walk. This also covers untracked
-                    // files, which a git diff from the last synced commit
-                    // intentionally cannot see.
+                    // Fallback: full tree walk.
                     let stale = cg.find_stale_files().await;
                     if stale.is_empty() {
                         Ok(())
@@ -3079,8 +3080,11 @@ mod freshness_tests {
             .background_refresh_running
             .store(false, Ordering::Release);
 
-        // Make the tree stale: a new untracked source file.
+        // Make the tree stale: a new committed source file, as the
+        // diff-scoped refresh contract tracks git history.
         std::fs::write(root.join("src/b.rs"), "pub fn b() {}\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "add b"]);
 
         let cg_snapshot = server.cg_snapshot().await;
 
