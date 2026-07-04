@@ -320,7 +320,8 @@ impl GitWatcher {
         );
     }
 
-    /// A doctor-facing snapshot of every registered project's watch health.
+    /// A test-facing snapshot of every registered project's watch health.
+    #[cfg(test)]
     pub async fn health_report(&self) -> Vec<(PathBuf, ProjectHealthSnapshot)> {
         let projects = self.inner.projects.lock().await;
         let mut out: Vec<_> = projects
