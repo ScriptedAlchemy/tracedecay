@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.26](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.25...v0.0.26) - 2026-07-04
+
+### Added
+
+- *(analytics)* adoption analytics, diagnostics skill, hook replay ([#260](https://github.com/ScriptedAlchemy/tracedecay/pull/260))
+
+### Fixed
+
+- *(automation)* satisfy clippy in job_webhook reset tests ([#261](https://github.com/ScriptedAlchemy/tracedecay/pull/261))
+- *(jobs)* treat a webhook reset after a full response as delivered ([#259](https://github.com/ScriptedAlchemy/tracedecay/pull/259))
+
+### Other
+
+- Default TraceDecay tool output to markdown ([#262](https://github.com/ScriptedAlchemy/tracedecay/pull/262))
+- *(plugin)* deslop merged plugin cleanup ([#256](https://github.com/ScriptedAlchemy/tracedecay/pull/256))
+
 ## [0.0.25](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.24...v0.0.25) - 2026-07-03
 
 ### Added
