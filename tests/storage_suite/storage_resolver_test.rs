@@ -783,6 +783,138 @@ async fn same_remote_clone_is_not_considered_initialized_without_local_identity(
 }
 
 #[tokio::test]
+async fn renamed_checkout_session_db_follows_registered_store() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let remote = dir.path().join("remote.git");
+    let original = dir.path().join("repo");
+    let renamed = dir.path().join("repo-renamed");
+    let home = test_home(&dir);
+    let _home_guard = HomeGuard::set(&home);
+
+    git(dir.path(), &["init", "--bare", remote.to_str().unwrap()]);
+    git(
+        dir.path(),
+        &[
+            "clone",
+            remote.to_str().unwrap(),
+            original.to_str().unwrap(),
+        ],
+    );
+    fs::create_dir_all(original.join("src")).unwrap();
+    fs::write(original.join("src/lib.rs"), "pub fn main_only() {}\n").unwrap();
+    git(&original, &["config", "user.email", "test@example.com"]);
+    git(&original, &["config", "user.name", "TraceDecay Test"]);
+    git(&original, &["add", "."]);
+    git(&original, &["commit", "-m", "initial"]);
+    git(&original, &["push", "origin", "HEAD:master"]);
+
+    let cg = TraceDecay::init(&original).await.unwrap();
+    let registered_session_db = cg.store_layout().sessions_db_path.clone();
+    drop(cg);
+
+    // Move the whole checkout on disk; both its canonical root and git common
+    // dir change, so registry identity resolution can no longer match by path.
+    fs::rename(&original, &renamed).unwrap();
+
+    let resolved = resolved_project_session_db_path(&renamed)
+        .await
+        .expect("renamed checkout should resolve a session DB path");
+    assert_path_eq(&resolved, &registered_session_db);
+    assert_ne!(
+        normalize_test_path(&resolved),
+        normalize_test_path(&project_session_db_path(&renamed)),
+        "renamed checkout must not fork a fresh default-path session DB",
+    );
+}
+
+#[tokio::test]
+async fn same_remote_clone_session_db_does_not_borrow_registered_store() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let remote = dir.path().join("remote.git");
+    let project = dir.path().join("repo");
+    let clone = dir.path().join("repo-clone");
+    let home = test_home(&dir);
+    let _home_guard = HomeGuard::set(&home);
+
+    git(dir.path(), &["init", "--bare", remote.to_str().unwrap()]);
+    git(
+        dir.path(),
+        &["clone", remote.to_str().unwrap(), project.to_str().unwrap()],
+    );
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn main_only() {}\n").unwrap();
+    git(&project, &["config", "user.email", "test@example.com"]);
+    git(&project, &["config", "user.name", "TraceDecay Test"]);
+    git(&project, &["add", "."]);
+    git(&project, &["commit", "-m", "initial"]);
+    git(&project, &["push", "origin", "HEAD:master"]);
+    git(
+        dir.path(),
+        &["clone", remote.to_str().unwrap(), clone.to_str().unwrap()],
+    );
+
+    let cg = TraceDecay::init(&project).await.unwrap();
+    let registered_session_db = cg.store_layout().sessions_db_path.clone();
+    drop(cg);
+
+    // The original checkout still exists on disk, so the same-remote clone must
+    // not inherit its registered session store even though the remote is unique
+    // in the registry.
+    let resolved = resolved_project_session_db_path(&clone)
+        .await
+        .expect("clone should still resolve a default session DB path");
+    assert_ne!(
+        normalize_test_path(&resolved),
+        normalize_test_path(&registered_session_db),
+        "a separate same-remote clone must not borrow another checkout's session store",
+    );
+    assert_path_eq(&resolved, project_session_db_path(&clone));
+}
+
+#[tokio::test]
+async fn ambiguous_remote_session_db_falls_back_to_default_path() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let remote = dir.path().join("remote.git");
+    let one = dir.path().join("repo-one");
+    let two = dir.path().join("repo-two");
+    let renamed_one = dir.path().join("repo-one-renamed");
+    let home = test_home(&dir);
+    let _home_guard = HomeGuard::set(&home);
+
+    git(dir.path(), &["init", "--bare", remote.to_str().unwrap()]);
+    git(
+        dir.path(),
+        &["clone", remote.to_str().unwrap(), one.to_str().unwrap()],
+    );
+    fs::create_dir_all(one.join("src")).unwrap();
+    fs::write(one.join("src/lib.rs"), "pub fn main_only() {}\n").unwrap();
+    git(&one, &["config", "user.email", "test@example.com"]);
+    git(&one, &["config", "user.name", "TraceDecay Test"]);
+    git(&one, &["add", "."]);
+    git(&one, &["commit", "-m", "initial"]);
+    git(&one, &["push", "origin", "HEAD:master"]);
+    git(
+        dir.path(),
+        &["clone", remote.to_str().unwrap(), two.to_str().unwrap()],
+    );
+
+    // Two registered checkouts share the same remote, so remote-based fallback
+    // is ambiguous and must be declined even after one checkout is renamed.
+    TraceDecay::init(&one).await.unwrap();
+    TraceDecay::init(&two).await.unwrap();
+
+    fs::rename(&one, &renamed_one).unwrap();
+
+    let resolved = resolved_project_session_db_path(&renamed_one)
+        .await
+        .expect("ambiguous-remote checkout should still resolve a default path");
+    assert_path_eq(&resolved, project_session_db_path(&renamed_one));
+}
+
+#[tokio::test]
 async fn nested_linked_worktree_does_not_discover_parent_checkout_marker() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();

@@ -78,9 +78,31 @@ async fn registry_profile_session_db_path(project_root: &Path) -> Option<PathBuf
     let profile_root = crate::storage::default_profile_root().ok()?;
     let global = GlobalDb::open().await?;
     let git_common_dir = crate::worktree::git_common_dir(project_root);
-    let resolution = global
+    // Mirror the graph store's identity-then-unique-remote fallback
+    // (`resolve_store_layout_for_project` in tracedecay/lifecycle.rs) so a
+    // renamed/moved checkout keeps routing its session history to the store it
+    // was originally registered under, instead of silently forking a fresh
+    // session DB at a new default path.
+    let resolution = if let Some(resolution) = global
         .resolve_project_store_by_identity(project_root, git_common_dir.as_deref())
-        .await?;
+        .await
+    {
+        resolution
+    } else {
+        let remote = crate::tracedecay::git_remote_url(project_root)?;
+        let resolution = global
+            .resolve_unique_project_store_by_git_remote(&remote)
+            .await?;
+        // Remote uniqueness alone cannot tell a renamed checkout (whose
+        // original registered location no longer exists on disk) apart from
+        // a second, still-present clone of the same remote. Only borrow the
+        // registered store when the original checkout is gone, so a live
+        // clone never inherits another checkout's session history.
+        if registered_checkout_present(&resolution.project) {
+            return None;
+        }
+        resolution
+    };
     if resolution.store.storage_mode != "profile_sharded" {
         return None;
     }
@@ -89,6 +111,23 @@ async fn registry_profile_session_db_path(project_root: &Path) -> Option<PathBuf
             .join(resolution.store.store_relpath)
             .join(PROJECT_SESSION_DB_FILENAME),
     )
+}
+
+/// Returns `true` when the checkout a registered project was recorded at still
+/// exists on disk. A renamed/moved checkout leaves neither its canonical root
+/// nor its git common dir behind, whereas a separate clone of the same remote
+/// leaves the original checkout in place.
+fn registered_checkout_present(project: &crate::global_db::CodeProjectRecord) -> bool {
+    let roots = [
+        Some(project.canonical_root.as_str()),
+        Some(project.display_root.as_str()),
+        project.git_common_dir.as_deref(),
+    ];
+    roots
+        .into_iter()
+        .flatten()
+        .filter(|root| !root.is_empty())
+        .any(|root| Path::new(root).exists())
 }
 
 fn is_hermes_profile_home(path: &Path) -> bool {
