@@ -73,6 +73,7 @@ impl AgentIntegration for ClaudeIntegration {
             crate::automation::skill_targets::SkillInstallTarget::Claude,
         )?;
         install_clean_local_config();
+        sync_claude_plugin_cache(&ctx.home);
 
         eprintln!();
         eprintln!("Setup complete. Next steps:");
@@ -150,6 +151,7 @@ impl AgentIntegration for ClaudeIntegration {
         write_json_file(&settings_path, &settings)?;
 
         migrate_off_config_managed(&ctx.home);
+        sync_claude_plugin_cache(&ctx.home);
 
         Ok(UpdatePluginOutcome::Refreshed(vec![deploy_dir]))
     }
@@ -448,6 +450,50 @@ fn register_marketplace(home: &Path, deploy_dir: &Path) -> Result<()> {
         path.display()
     );
     Ok(())
+}
+
+/// Sync Claude Code's own plugin registry with the refreshed marketplace
+/// bundle.
+///
+/// Claude Code copies installed plugins into a versioned cache
+/// (`~/.claude/plugins/cache/...`) recorded in `installed_plugins.json`, so
+/// refreshing the marketplace directory alone leaves running installs on the
+/// stale cached version. Drive Claude Code's own CLI (`claude plugin
+/// install|update`) instead of writing its internal files, so the cache and
+/// registry always follow Claude Code's current contract. Best-effort: only
+/// runs against the real user home (temp-home installs in tests skip it),
+/// and a missing/failed `claude` CLI degrades to the existing restart hint.
+fn sync_claude_plugin_cache(home: &Path) {
+    let is_real_home = dirs::home_dir().is_some_and(|real| real == home);
+    if !is_real_home {
+        return;
+    }
+    let registry = load_json_file(&home.join(".claude/plugins/installed_plugins.json"));
+    let installed = registry
+        .get("plugins")
+        .and_then(|plugins| plugins.get(PLUGIN_IDENTIFIER))
+        .is_some();
+    let action = if installed { "update" } else { "install" };
+    let output = std::process::Command::new("claude")
+        .args(["plugin", action, PLUGIN_IDENTIFIER])
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            eprintln!(
+                "\x1b[32m\u{2714}\x1b[0m Synced Claude Code plugin cache (claude plugin {action})"
+            );
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!(
+                "  Could not sync Claude Code plugin cache (claude plugin {action}): {}",
+                stderr.trim().lines().last().unwrap_or("unknown error")
+            );
+        }
+        Err(err) => {
+            eprintln!("  Could not run claude plugin {action}: {err}");
+        }
+    }
 }
 
 /// Remove the tracedecay marketplace entry from `known_marketplaces.json`,
