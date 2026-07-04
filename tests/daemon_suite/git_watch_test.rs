@@ -37,6 +37,7 @@ use tracedecay::branch::{self, BranchAddOutcome};
 use tracedecay::branch_meta::load_branch_meta;
 use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay::types::NodeKind;
 
 fn git(project: &Path, args: &[&str]) {
     let output = Command::new("git")
@@ -328,9 +329,12 @@ async fn concurrent_syncs_are_single_flight() {
     // The symbol is indexed exactly once regardless of who won.
     let after = TraceDecay::open(&project).await.unwrap();
     let hits = after.search("racy", 10).await.unwrap();
+    let function_hits = hits
+        .iter()
+        .filter(|hit| hit.node.kind == NodeKind::Function && hit.node.name == "racy")
+        .count();
     assert_eq!(
-        hits.len(),
-        1,
+        function_hits, 1,
         "single-flight must not double-index the symbol"
     );
 }

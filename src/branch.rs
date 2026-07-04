@@ -661,7 +661,7 @@ pub fn gc_dead_branch_stores(
                 continue;
             }
             let age = now.saturating_sub(last_synced);
-            if age <= branch_grace {
+            if age < branch_grace {
                 continue;
             }
             remove_branch_db_files(&db_path);
@@ -727,7 +727,7 @@ fn sweep_orphan_dbs(
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map_or(0, |d| d.as_secs());
         let age = now.saturating_sub(mtime_secs);
-        if age <= orphan_grace {
+        if age < orphan_grace {
             continue;
         }
         remove_branch_db_files(&path);
