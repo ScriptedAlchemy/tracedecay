@@ -295,12 +295,26 @@ fn print_tool_output(result_value: &Value, raw_json: bool) {
             serde_json::to_string_pretty(result_value).unwrap_or_default()
         );
     } else {
-        let text = result_value
-            .pointer("/content/0/text")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        println!("{text}");
+        println!("{}", join_content_text(result_value));
     }
+}
+
+/// Joins every `content[*].text` block in an MCP tool result, separated by a
+/// blank line. Some handlers prepend warning/notice blocks ahead of the real
+/// payload, so printing only `content[0].text` can hide the useful output.
+fn join_content_text(result_value: &Value) -> String {
+    result_value
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|block| block.get("text").and_then(Value::as_str))
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        })
+        .unwrap_or_default()
 }
 
 /// Parse CLI args against the tool's JSON Schema. Returns the JSON object to
@@ -986,5 +1000,42 @@ mod tests {
             "CLI PROFILE_SCOPED_LCM_TOOLS allowlist references tools no longer registered as \
              profile-scoped in the MCP registry: {stale_in_cli:?}"
         );
+    }
+
+    #[test]
+    fn join_content_text_returns_single_block() {
+        let value = json!({ "content": [{ "type": "text", "text": "only payload" }] });
+        assert_eq!(join_content_text(&value), "only payload");
+    }
+
+    #[test]
+    fn join_content_text_joins_warning_and_payload() {
+        let value = json!({
+            "content": [
+                { "type": "text", "text": "warning: index is stale" },
+                { "type": "text", "text": "actual payload\ntracedecay_metrics: 123" }
+            ]
+        });
+        assert_eq!(
+            join_content_text(&value),
+            "warning: index is stale\n\nactual payload\ntracedecay_metrics: 123"
+        );
+    }
+
+    #[test]
+    fn join_content_text_skips_empty_blocks() {
+        let value = json!({
+            "content": [
+                { "type": "text", "text": "" },
+                { "type": "text", "text": "payload" }
+            ]
+        });
+        assert_eq!(join_content_text(&value), "payload");
+    }
+
+    #[test]
+    fn join_content_text_empty_when_no_content() {
+        assert_eq!(join_content_text(&json!({})), "");
+        assert_eq!(join_content_text(&json!({ "content": [] })), "");
     }
 }
