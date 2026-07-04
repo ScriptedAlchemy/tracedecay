@@ -34,8 +34,20 @@ use crate::errors::Result;
 /// pretty-printed JSON with a trailing newline. Shared by every host installer
 /// (Claude/Cursor/Codex), which all render the same manifest round-trip.
 pub(crate) fn stamp_manifest_version(raw: &str) -> Result<String> {
+    stamp_manifest_version_with(raw, |_| {})
+}
+
+/// Stamp the version and let the host apply manifest edits on the parsed
+/// `Value` before the single serialize — hosts that post-process the manifest
+/// (e.g. Codex stripping `hooks` from repo-local bundles) avoid a second
+/// parse/pretty-print round-trip and cannot drift from this output contract.
+pub(crate) fn stamp_manifest_version_with(
+    raw: &str,
+    mutate: impl FnOnce(&mut serde_json::Value),
+) -> Result<String> {
     let mut manifest: serde_json::Value = serde_json::from_str(raw)?;
     manifest["version"] = serde_json::json!(env!("CARGO_PKG_VERSION"));
+    mutate(&mut manifest);
     Ok(format!("{}\n", serde_json::to_string_pretty(&manifest)?))
 }
 
