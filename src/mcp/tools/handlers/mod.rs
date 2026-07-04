@@ -431,6 +431,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
             )
             .await
         }
+        "tracedecay_sessions_for" => session::handle_sessions_for(cg, args).await,
         "tracedecay_lcm_status" => {
             session::handle_lcm_status(session::LcmHandlerContext::active(cg), args).await
         }
@@ -1101,6 +1102,7 @@ mod tests {
         assert!(tool_names.contains(&"tracedecay_memory_status"));
         assert!(tool_names.contains(&"tracedecay_dashboard"));
         assert!(tool_names.contains(&"tracedecay_message_search"));
+        assert!(tool_names.contains(&"tracedecay_sessions_for"));
         assert!(tool_names.contains(&"tracedecay_lcm_status"));
         assert!(tool_names.contains(&"tracedecay_lcm_doctor"));
         assert!(tool_names.contains(&"tracedecay_lcm_load_session"));

@@ -60,6 +60,15 @@ fn read_json(path: &Path) -> serde_json::Value {
     serde_json::from_str(&contents).unwrap()
 }
 
+fn permission_allowlist(settings: &serde_json::Value) -> Vec<&str> {
+    settings["permissions"]["allow"]
+        .as_array()
+        .expect("permissions.allow should be an array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect()
+}
+
 // ===========================================================================
 // Install content verification
 // ===========================================================================
@@ -176,9 +185,6 @@ fn test_install_creates_settings_with_permissions() {
     }
 }
 
-/// The install must write the plugin-namespace permission entries
-/// (`mcp__plugin_tracedecay_tracedecay__*`) — those are what the plugin MCP
-/// server matches against. Without them every tool call prompts interactively.
 #[test]
 fn test_install_writes_plugin_namespace_permissions() {
     let dir = TempDir::new().unwrap();
@@ -187,12 +193,7 @@ fn test_install_writes_plugin_namespace_permissions() {
     ClaudeIntegration.install(&ctx).unwrap();
 
     let settings = read_json(&home.join(".claude/settings.json"));
-    let allow_strs: Vec<String> = settings["permissions"]["allow"]
-        .as_array()
-        .expect("permissions.allow should be an array")
-        .iter()
-        .filter_map(|v| v.as_str().map(str::to_string))
-        .collect();
+    let allow_strs = permission_allowlist(&settings);
 
     let plugin_perms = expected_plugin_tool_perms();
     assert!(
@@ -201,22 +202,18 @@ fn test_install_writes_plugin_namespace_permissions() {
     );
     for perm in &plugin_perms {
         assert!(
-            allow_strs.contains(perm),
+            allow_strs.contains(&perm.as_str()),
             "permissions.allow should contain plugin-namespace entry {perm}"
         );
     }
 }
 
-/// A user carrying only legacy `mcp__tracedecay__<tool>` entries must have each
-/// mapped to its plugin-namespace twin on install, without the legacy entry
-/// being removed.
 #[test]
 fn test_install_migrates_legacy_permissions_to_plugin_twins() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let claude_dir = home.join(".claude");
     std::fs::create_dir_all(&claude_dir).unwrap();
-    // Seed settings.json with a legacy entry and nothing else tracedecay.
     std::fs::write(
         claude_dir.join("settings.json"),
         serde_json::to_string_pretty(&serde_json::json!({
@@ -226,37 +223,28 @@ fn test_install_migrates_legacy_permissions_to_plugin_twins() {
     )
     .unwrap();
 
-    // Install with an empty caller tool_permissions set so the ONLY source of a
-    // twin for `search` is the legacy-entry migration path.
     let mut ctx = make_install_ctx(home);
     ctx.tool_permissions = Vec::new();
     ClaudeIntegration.install(&ctx).unwrap();
 
     let settings = read_json(&claude_dir.join("settings.json"));
-    let allow_strs: Vec<String> = settings["permissions"]["allow"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|v| v.as_str().map(str::to_string))
-        .collect();
+    let allow_strs = permission_allowlist(&settings);
 
     assert!(
-        allow_strs.contains(&"mcp__tracedecay__search".to_string()),
+        allow_strs.contains(&"mcp__tracedecay__search"),
         "legacy entry must be preserved (not removed)"
     );
+    let plugin_search = format!("{PLUGIN_PERM_PREFIX}search");
     assert!(
-        allow_strs.contains(&format!("{PLUGIN_PERM_PREFIX}search")),
+        allow_strs.contains(&plugin_search.as_str()),
         "legacy mcp__tracedecay__search must gain its plugin-namespace twin"
     );
     assert!(
-        allow_strs.contains(&"Bash(*)".to_string()),
+        allow_strs.contains(&"Bash(*)"),
         "unrelated permission must be preserved"
     );
 }
 
-/// The moment-trigger routing must be present in the managed CLAUDE.md block:
-/// the "before your FIRST Grep/…" lead, the ToolSearch/deferred-tools hint, and
-/// the content/symbol/concept routing tools.
 #[test]
 fn test_install_claude_md_has_moment_triggers() {
     let dir = TempDir::new().unwrap();

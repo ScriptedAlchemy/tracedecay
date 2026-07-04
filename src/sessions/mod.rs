@@ -12,6 +12,7 @@ pub mod codex;
 pub mod codex_app_server;
 pub mod cursor;
 pub mod cursor_agent;
+pub mod git_correlation;
 pub mod hermes;
 pub mod kiro;
 pub mod lcm;
@@ -79,13 +80,86 @@ pub async fn ingest_global_sources_for_provider(
     } else {
         stats
     };
-    if provider.is_none() || provider == Some(SessionProvider::Hermes) {
+    let stats = if provider.is_none() || provider == Some(SessionProvider::Hermes) {
         // Hermes stores many sessions in one SQLite file per profile, so it
         // plugs in beside the file-based sources rather than `TranscriptSource`.
         stats.merge(hermes::ingest_for_project(db, project_root).await)
     } else {
         stats
+    };
+    // Now that messages have landed, attribute any commits that fell inside a
+    // recorded session span. Fail-open: a git or DB hiccup never blocks ingest.
+    attribute_commits_after_ingest(db).await;
+    stats
+}
+
+/// Runs the bounded commit-attribution sweep against the correlation store.
+/// For each `(branch, worktree)` pair touched since the last sweep, scans that
+/// branch's git log inside the pair's span window (widened by the merge gap)
+/// and attributes overlapping commits to their sessions. Fail-open.
+async fn attribute_commits_after_ingest(db: &GlobalDb) {
+    let gap = git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS;
+    let result = db
+        .git_run_commit_attribution_sweep(gap, |target| git_scan_commits(target, gap))
+        .await;
+    if let Err(err) = result {
+        tracing::debug!(error = %err, "commit attribution sweep skipped");
     }
+}
+
+/// Reads commits on one span target's branch within its (gap-widened) window
+/// via `git log`. Returns an empty list on any error so the sweep simply
+/// attributes nothing for that target rather than failing. The worktree value
+/// is a recorded span path; if it no longer exists on disk the scan yields
+/// nothing.
+fn git_scan_commits(
+    target: &git_correlation::SpanScanTarget,
+    gap_secs: i64,
+) -> Vec<git_correlation::ScannedCommit> {
+    let worktree = Path::new(&target.worktree);
+    if !worktree.is_dir() {
+        return Vec::new();
+    }
+    let since = target.window_start.saturating_sub(gap_secs);
+    let until = target.window_end.saturating_add(gap_secs);
+    let mut command = std::process::Command::new(crate::git::git_program());
+    command
+        .current_dir(worktree)
+        .arg("log")
+        .arg(format!("--since={since}"))
+        .arg(format!("--until={until}"))
+        .arg("--pretty=format:%H %ct");
+    // Scope to the recorded branch when known; detached-HEAD spans scan HEAD.
+    match target.branch.as_deref() {
+        Some(branch) if !branch.is_empty() => {
+            command.arg(branch);
+        }
+        _ => {}
+    }
+    let Ok(output) = command.output() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    parse_git_log_commits(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Parses `%H %ct` lines from `git log` into scanned commits, skipping
+/// malformed rows.
+fn parse_git_log_commits(stdout: &str) -> Vec<git_correlation::ScannedCommit> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let (sha, ts) = line.trim().split_once(' ')?;
+            let committed_at: i64 = ts.trim().parse().ok()?;
+            let sha = sha.trim().to_ascii_lowercase();
+            if sha.is_empty() {
+                return None;
+            }
+            Some(git_correlation::ScannedCommit { sha, committed_at })
+        })
+        .collect()
 }
 
 fn push_file_source(sources: &mut Vec<Box<dyn TranscriptSource>>, provider: SessionProvider) {
@@ -200,4 +274,40 @@ pub enum SessionSearchScope {
     All,
     ParentsOnly,
     SubagentsOnly,
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod git_scan_tests {
+    use super::*;
+
+    #[test]
+    fn parse_git_log_commits_reads_sha_and_time_skipping_malformed() {
+        let stdout = concat!(
+            "ABCDEF1234567890 1700000000\n",
+            "\n",
+            "missing-time\n",
+            "cafebabe not-a-number\n",
+            "deadbeefdeadbeef 1700000200\n",
+        );
+        let commits = parse_git_log_commits(stdout);
+        assert_eq!(
+            commits,
+            vec![
+                git_correlation::ScannedCommit {
+                    sha: "abcdef1234567890".to_string(),
+                    committed_at: 1_700_000_000,
+                },
+                git_correlation::ScannedCommit {
+                    sha: "deadbeefdeadbeef".to_string(),
+                    committed_at: 1_700_000_200,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_git_log_commits_empty_is_empty() {
+        assert!(parse_git_log_commits("").is_empty());
+    }
 }
