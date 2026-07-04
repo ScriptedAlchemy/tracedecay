@@ -41,6 +41,10 @@ Climb cheapest-first; stop as soon as the question is answered.
 5. **Store inspection → `tracedecay_lcm_status`** (counts, token estimates, DAG
    depth/compression ratio) when you need to know what the store contains before
    searching it.
+6. **Git-scoped session lookup → `tracedecay_sessions_for`** (`git_ref`:
+   `branch`|`worktree`|`commit`, `value`, optional `since`/`until`, `limit`):
+   find sessions active on a branch or worktree, or sessions that produced a
+   commit; feed returned session ids back into grep/replay/drill-down above.
 
 After a compaction, if prior-session context seems missing, run this ladder
 before assuming the compacted summary is complete.
@@ -107,7 +111,7 @@ on explicit user intent.
 ## If tools are deferred or MCP fails
 
 - Deferred (names listed without schemas): load once with ToolSearch —
-  `select:tracedecay_message_search,tracedecay_lcm_grep,tracedecay_lcm_load_session,tracedecay_lcm_status,tracedecay_lcm_compress`
+  `select:tracedecay_message_search,tracedecay_lcm_grep,tracedecay_lcm_load_session,tracedecay_lcm_status,tracedecay_lcm_compress,tracedecay_sessions_for`
   (one batched call, add others needed) — then call normally.
 - MCP error/timeout/disconnect: same tool, same args, via shell:
   `tracedecay tool <name> --key value` (see `tracedecay:using-the-cli`). Never
