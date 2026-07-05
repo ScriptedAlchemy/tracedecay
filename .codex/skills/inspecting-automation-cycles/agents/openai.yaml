@@ -1,0 +1,4 @@
+interface:
+  display_name: "Inspecting Automation Cycles"
+  short_description: "Audit automation runs and artifacts"
+  default_prompt: "Use $inspecting-automation-cycles to audit recent TraceDecay automation runs."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Writing Agent-Managed Skills"
+  short_description: "Draft and validate managed skills"
+  default_prompt: "Use $writing-agent-managed-skills to improve a TraceDecay managed skill draft."

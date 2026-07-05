@@ -1,0 +1,4 @@
+interface:
+  display_name: "Interpreting TraceDecay Diagnostics"
+  short_description: "Map diagnostics to owners and fixes"
+  default_prompt: "Use $interpreting-tracedecay-diagnostics to interpret TraceDecay compiler diagnostics and pick verification."
