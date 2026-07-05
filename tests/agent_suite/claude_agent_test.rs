@@ -77,6 +77,7 @@ fn permission_allowlist(settings: &serde_json::Value) -> Vec<&str> {
 fn test_install_deploys_plugin_mcp_server() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_install_ctx(home);
     ClaudeIntegration.install(&ctx).unwrap();
 
@@ -104,6 +105,7 @@ fn test_install_deploys_plugin_mcp_server() {
 fn test_install_deploys_plugin_hooks() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_install_ctx(home);
     ClaudeIntegration.install(&ctx).unwrap();
 
@@ -168,6 +170,7 @@ fn test_install_deploys_plugin_hooks() {
 fn test_install_creates_settings_with_permissions() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_install_ctx(home);
     ClaudeIntegration.install(&ctx).unwrap();
 
@@ -279,6 +282,7 @@ fn test_install_claude_md_has_moment_triggers() {
 fn test_install_creates_claude_md_with_rules() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_install_ctx(home);
     ClaudeIntegration.install(&ctx).unwrap();
 
@@ -309,6 +313,7 @@ fn test_install_creates_claude_md_with_rules() {
 fn test_claude_md_contains_explore_agent_paragraph() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
 
     // Pre-populate CLAUDE.md with existing content
     let claude_dir = home.join(".claude");
@@ -337,6 +342,7 @@ fn test_claude_md_contains_explore_agent_paragraph() {
 fn test_uninstall_removes_explore_agent_paragraph() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
 
     // Pre-populate CLAUDE.md with existing content
     let claude_dir = home.join(".claude");
@@ -372,6 +378,7 @@ fn test_uninstall_removes_explore_agent_paragraph() {
 fn test_install_idempotent_claude_md() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_install_ctx(home);
 
     ClaudeIntegration.install(&ctx).unwrap();
@@ -390,6 +397,7 @@ fn test_install_idempotent_claude_md() {
 fn test_install_preserves_existing_claude_json() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
 
     // Pre-populate .claude.json with an extra key
     std::fs::write(home.join(".claude.json"), r#"{"foo": "bar"}"#).unwrap();
@@ -417,6 +425,7 @@ fn test_install_preserves_existing_claude_json() {
 fn test_install_preserves_existing_settings() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
 
     // Pre-populate settings.json with an existing hook
     let claude_dir = home.join(".claude");
@@ -476,6 +485,7 @@ fn test_install_preserves_existing_settings() {
 fn test_install_migrates_off_config_managed_integration() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let claude_dir = home.join(".claude");
     std::fs::create_dir_all(&claude_dir).unwrap();
 
@@ -569,6 +579,7 @@ fn test_install_migrates_off_config_managed_integration() {
 fn test_uninstall_removes_mcp_from_claude_json() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_install_ctx(home);
     ClaudeIntegration.install(&ctx).unwrap();
     ClaudeIntegration.uninstall(&ctx).unwrap();
@@ -592,6 +603,7 @@ fn test_uninstall_removes_mcp_from_claude_json() {
 fn test_uninstall_removes_deployed_bundle_and_lone_marketplace_file() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_install_ctx(home);
 
     // Install deploys the plugin bundle and registers the marketplace.
@@ -642,6 +654,7 @@ fn test_uninstall_removes_deployed_bundle_and_lone_marketplace_file() {
 fn test_uninstall_removes_hook_from_settings() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_install_ctx(home);
     ClaudeIntegration.install(&ctx).unwrap();
     ClaudeIntegration.uninstall(&ctx).unwrap();
@@ -678,6 +691,7 @@ fn test_uninstall_removes_hook_from_settings() {
 fn test_uninstall_removes_permissions_from_settings() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_install_ctx(home);
     ClaudeIntegration.install(&ctx).unwrap();
     ClaudeIntegration.uninstall(&ctx).unwrap();
@@ -705,6 +719,7 @@ fn test_uninstall_removes_permissions_from_settings() {
 fn test_uninstall_preserves_other_permissions() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
 
     // Install first so all files are set up
     let ctx = make_install_ctx(home);
@@ -739,6 +754,7 @@ fn test_uninstall_preserves_other_permissions() {
 fn test_uninstall_removes_claude_md_rules() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_install_ctx(home);
     ClaudeIntegration.install(&ctx).unwrap();
 
@@ -761,6 +777,7 @@ fn test_uninstall_removes_claude_md_rules() {
 fn test_uninstall_preserves_other_claude_md_content() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
 
     // Create CLAUDE.md with pre-existing content
     let claude_dir = home.join(".claude");
@@ -892,6 +909,7 @@ fn test_healthcheck_detects_missing_permissions() {
 fn test_healthcheck_detects_stale_permissions() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_install_ctx_with_real_bin(home);
     ClaudeIntegration.install(&ctx).unwrap();
 
@@ -919,6 +937,7 @@ fn test_healthcheck_detects_stale_permissions() {
 fn test_healthcheck_detects_missing_claude_md() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_install_ctx_with_real_bin(home);
     ClaudeIntegration.install(&ctx).unwrap();
 
@@ -941,6 +960,7 @@ fn test_healthcheck_detects_missing_claude_md() {
 fn test_healthcheck_clean_local_config() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let project = dir.path().join("myproject");
     std::fs::create_dir_all(&project).unwrap();
 
@@ -974,6 +994,7 @@ fn test_healthcheck_clean_local_config() {
 fn test_healthcheck_local_settings_cleanup() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let project = dir.path().join("myproject");
     let local_claude = project.join(".claude");
     std::fs::create_dir_all(&local_claude).unwrap();
@@ -1021,6 +1042,7 @@ fn test_healthcheck_local_settings_cleanup() {
 fn test_has_tracedecay_after_install() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_install_ctx(home);
     ClaudeIntegration.install(&ctx).unwrap();
 

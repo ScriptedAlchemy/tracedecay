@@ -146,6 +146,9 @@ async fn sessions_for_and_scoped_search_end_to_end() {
 
     let profile_root = base.join("profile");
     std::fs::create_dir_all(&profile_root).unwrap_or_else(|e| panic!("create profile root: {e}"));
+    let profile_root = profile_root
+        .canonicalize()
+        .unwrap_or_else(|e| panic!("canonicalize profile root: {e}"));
     let cg = TraceDecay::init_with_options(
         &project_root,
         TraceDecayOpenOptions {

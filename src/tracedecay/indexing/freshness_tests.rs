@@ -1,3 +1,4 @@
+use crate::config::PinnedUserDataDir;
 use crate::tracedecay::TraceDecay;
 use std::path::Path;
 use std::process::Command;
@@ -28,7 +29,8 @@ fn head_oid(dir: &Path) -> String {
     String::from_utf8(out.stdout).unwrap().trim().to_string()
 }
 
-async fn init_repo_with_commit() -> (TraceDecay, TempDir) {
+async fn init_repo_with_commit() -> (TraceDecay, TempDir, PinnedUserDataDir) {
+    let pin = PinnedUserDataDir::new();
     let dir = TempDir::new().unwrap();
     let root = dir.path();
     git(root, &["init", "-q", "-b", "main"]);
@@ -39,19 +41,19 @@ async fn init_repo_with_commit() -> (TraceDecay, TempDir) {
 
     let cg = TraceDecay::init(root).await.expect("init");
     cg.index_all().await.expect("index");
-    (cg, dir)
+    (cg, dir, pin)
 }
 
 #[tokio::test]
 async fn last_synced_commit_stamped_after_index() {
-    let (cg, dir) = init_repo_with_commit().await;
+    let (cg, dir, _pin) = init_repo_with_commit().await;
     let stamped = cg.last_synced_commit().await;
     assert_eq!(stamped.as_deref(), Some(head_oid(dir.path()).as_str()));
 }
 
 #[tokio::test]
 async fn stale_files_since_commit_reports_changed_file() {
-    let (cg, dir) = init_repo_with_commit().await;
+    let (cg, dir, _pin) = init_repo_with_commit().await;
     let root = dir.path();
     let base = head_oid(root);
 
@@ -70,7 +72,7 @@ async fn stale_files_since_commit_reports_changed_file() {
 
 #[tokio::test]
 async fn stale_files_since_commit_none_when_base_missing() {
-    let (cg, _dir) = init_repo_with_commit().await;
+    let (cg, _dir, _pin) = init_repo_with_commit().await;
     // A syntactically valid but unreachable commit id.
     let bogus = "0".repeat(40);
     assert!(cg.stale_files_since_commit(&bogus, 500).is_none());
@@ -78,7 +80,7 @@ async fn stale_files_since_commit_none_when_base_missing() {
 
 #[tokio::test]
 async fn stale_files_since_commit_none_when_over_escalation_limit() {
-    let (cg, dir) = init_repo_with_commit().await;
+    let (cg, dir, _pin) = init_repo_with_commit().await;
     let root = dir.path();
     let base = head_oid(root);
 

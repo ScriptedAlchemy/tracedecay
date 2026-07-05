@@ -47,6 +47,7 @@ fn opencode_prompt_path(home: &Path) -> std::path::PathBuf {
 fn test_install_creates_opencode_json() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
     OpenCodeIntegration.install(&ctx).unwrap();
 
@@ -79,6 +80,7 @@ fn test_install_creates_opencode_json() {
 fn test_install_creates_opencode_md_with_rules() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
     OpenCodeIntegration.install(&ctx).unwrap();
 
@@ -100,6 +102,7 @@ fn test_install_creates_opencode_md_with_rules() {
 fn test_install_preserves_existing_opencode_json() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
 
     // Pre-populate opencode.json with existing content
     let config_path = opencode_config_path(home);
@@ -133,6 +136,7 @@ fn test_install_preserves_existing_opencode_json() {
 fn test_install_idempotent_opencode_json() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
 
     OpenCodeIntegration.install(&ctx).unwrap();
@@ -148,6 +152,7 @@ fn test_install_idempotent_opencode_json() {
 fn test_install_idempotent_opencode_md() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
 
     OpenCodeIntegration.install(&ctx).unwrap();
@@ -167,6 +172,7 @@ fn test_install_idempotent_opencode_md() {
 fn test_install_preserves_existing_opencode_md_content() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
 
     // Create AGENTS.md with pre-existing content
     let config_dir = home.join(".config/opencode");
@@ -199,6 +205,7 @@ fn test_install_preserves_existing_opencode_md_content() {
 fn test_uninstall_removes_mcp_from_config() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
 
     OpenCodeIntegration.install(&ctx).unwrap();
@@ -220,6 +227,7 @@ fn test_uninstall_removes_mcp_from_config() {
 fn test_uninstall_removes_empty_config_file() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
 
     OpenCodeIntegration.install(&ctx).unwrap();
@@ -237,6 +245,7 @@ fn test_uninstall_removes_empty_config_file() {
 fn test_uninstall_preserves_other_mcp_servers() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
 
     // Pre-populate with another server
     let config_path = opencode_config_path(home);
@@ -271,6 +280,7 @@ fn test_uninstall_preserves_other_mcp_servers() {
 fn test_uninstall_removes_opencode_md_rules() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
 
     OpenCodeIntegration.install(&ctx).unwrap();
@@ -293,6 +303,7 @@ fn test_uninstall_removes_opencode_md_rules() {
 fn test_uninstall_preserves_other_opencode_md_content() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
 
     // Create AGENTS.md with pre-existing content
     let config_dir = home.join(".config/opencode");
@@ -324,6 +335,7 @@ fn test_uninstall_preserves_other_opencode_md_content() {
 fn test_uninstall_without_install_does_not_crash() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
     // Should not panic or error
     OpenCodeIntegration.uninstall(&ctx).unwrap();
@@ -333,6 +345,7 @@ fn test_uninstall_without_install_does_not_crash() {
 fn test_uninstall_config_with_no_tracedecay_is_noop() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
 
     // Create opencode.json without tracedecay
     let config_path = opencode_config_path(home);
@@ -359,6 +372,7 @@ fn test_uninstall_config_with_no_tracedecay_is_noop() {
 fn test_healthcheck_clean_install_no_issues() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
     OpenCodeIntegration.install(&ctx).unwrap();
 
@@ -445,6 +459,7 @@ fn test_healthcheck_detects_missing_serve_arg() {
 fn test_healthcheck_detects_missing_opencode_md() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
     OpenCodeIntegration.install(&ctx).unwrap();
 
@@ -468,6 +483,7 @@ fn test_healthcheck_detects_missing_opencode_md() {
 fn test_healthcheck_detects_missing_tracedecay_rules_in_opencode_md() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
     OpenCodeIntegration.install(&ctx).unwrap();
 
@@ -530,6 +546,7 @@ fn test_has_tracedecay_before_install() {
 fn test_has_tracedecay_after_install() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
     OpenCodeIntegration.install(&ctx).unwrap();
     assert!(
@@ -542,6 +559,7 @@ fn test_has_tracedecay_after_install() {
 fn test_has_tracedecay_after_uninstall() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
     OpenCodeIntegration.install(&ctx).unwrap();
     OpenCodeIntegration.uninstall(&ctx).unwrap();

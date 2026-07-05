@@ -5,14 +5,12 @@
 
 use std::path::Path;
 
-use crate::common::{EnvVarGuard, PROCESS_ENV_LOCK};
 use crate::plugin_validation_support::{
     is_kebab_case_skill_name, load_skill_docs, load_skill_docs_from, relative_files_under,
     repo_path, SkillDoc,
 };
 use tempfile::TempDir;
 use tracedecay::agents::{expected_tool_perms, get_integration, InstallContext};
-use tracedecay::config::USER_DATA_DIR_ENV;
 
 const CODEX_SKILL_ROOT: &str = "plugin/skills";
 const MAX_BUNDLED_SKILL_METADATA_CHARS: usize = 6_000;
@@ -45,9 +43,8 @@ fn codex_plugin_skills_match_codex_skill_creator_quick_validate_rules() {
 
 #[test]
 fn generated_codex_plugin_skills_are_byte_copies_of_the_source_bundle() {
-    let _env_lock = install_env_lock();
     let home = TempDir::new().expect("temp home");
-    let _data_dir_guard = pinned_profile_storage(home.path());
+    let _agent_env = crate::common::AgentEnvLock::pin(home.path());
     let codex = get_integration("codex").expect("codex integration");
     codex
         .install(&install_ctx(home.path()))
@@ -82,9 +79,8 @@ fn cursor_plugin_skills_match_cursor_skill_contract() {
 
 #[test]
 fn generated_cursor_plugin_skills_are_byte_copies_of_the_source_bundle() {
-    let _env_lock = install_env_lock();
     let home = TempDir::new().expect("temp home");
-    let _data_dir_guard = pinned_profile_storage(home.path());
+    let _agent_env = crate::common::AgentEnvLock::pin(home.path());
     let cursor = get_integration("cursor").expect("cursor integration");
     cursor
         .install(&install_ctx(home.path()))
@@ -116,17 +112,6 @@ fn produced_plugin_skills_meet_the_metadata_budget_and_openai_contract() {
         let skill_dir = skill.path.parent().expect("skill path has parent");
         assert_openai_yaml_contract_if_present(skill_dir);
     }
-}
-
-fn install_env_lock() -> tokio::sync::MutexGuard<'static, ()> {
-    PROCESS_ENV_LOCK.blocking_lock()
-}
-
-/// Pins TraceDecay profile storage to the temp home so an ambient
-/// `TRACEDECAY_DATA_DIR` with active managed skills cannot leak an
-/// `agent-managed` overlay into the generated bundle.
-fn pinned_profile_storage(home: &Path) -> EnvVarGuard {
-    EnvVarGuard::set(USER_DATA_DIR_ENV, home.join(".tracedecay"))
 }
 
 fn install_ctx(home: &Path) -> InstallContext {

@@ -102,6 +102,7 @@ fn assert_hook(
 fn test_install_creates_global_mcp_steering_agent_and_default() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
 
     KiroIntegration.install(&ctx).unwrap();
@@ -293,6 +294,7 @@ async fn test_install_preserves_user_managed_agent_while_updating_skill_index() 
 fn test_install_preserves_existing_mcp_config_and_writes_backup() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let mcp_path = home.join(".kiro/settings/mcp.json");
     std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
     std::fs::write(
@@ -318,6 +320,7 @@ fn test_install_preserves_existing_mcp_config_and_writes_backup() {
 fn test_install_and_uninstall_preserve_existing_steering_content() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
 
     let user_steering_path = home.join(".kiro/steering/team.md");
@@ -352,6 +355,7 @@ fn test_install_and_uninstall_preserve_existing_steering_content() {
 fn test_uninstall_preserves_user_steering_after_tracedecay_block() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
 
     KiroIntegration.install(&ctx).unwrap();
@@ -381,6 +385,7 @@ fn test_uninstall_preserves_user_steering_after_tracedecay_block() {
 fn test_install_replaces_legacy_marker_block_and_uninstall_removes_it() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
 
     let steering_path = home.join(".kiro/steering/tracedecay.md");
@@ -428,6 +433,7 @@ fn test_install_replaces_legacy_marker_block_and_uninstall_removes_it() {
 fn test_uninstall_removes_legacy_marker_block_preserving_user_content() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
 
     let steering_path = home.join(".kiro/steering/tracedecay.md");
@@ -454,6 +460,7 @@ fn test_uninstall_removes_legacy_marker_block_preserving_user_content() {
 fn test_uninstall_removes_tracedecay_and_preserves_other_mcp_servers() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
 
     let mcp_path = home.join(".kiro/settings/mcp.json");
@@ -487,6 +494,7 @@ fn test_uninstall_removes_tracedecay_and_preserves_other_mcp_servers() {
 fn test_install_and_uninstall_preserve_user_managed_custom_agent() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
 
     let agent_path = home.join(".kiro/agents/tracedecay.json");
@@ -525,6 +533,7 @@ fn test_install_and_uninstall_preserve_user_managed_custom_agent() {
 fn test_install_preserves_existing_custom_default_agent_choice() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
 
     let cli_path = home.join(".kiro/settings/cli.json");
@@ -547,6 +556,7 @@ fn test_install_preserves_existing_custom_default_agent_choice() {
 fn test_install_replaces_builtin_default_agent_choice() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
 
     let cli_path = home.join(".kiro/settings/cli.json");
@@ -563,6 +573,7 @@ fn test_install_replaces_builtin_default_agent_choice() {
 fn test_has_tracedecay_tracks_global_mcp_entry() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
 
     assert!(!KiroIntegration.has_tracedecay(home));
@@ -578,6 +589,7 @@ fn test_has_tracedecay_tracks_global_mcp_entry() {
 fn test_healthcheck_clean_install_has_no_issues_or_warnings() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
 
     KiroIntegration.install(&ctx).unwrap();
@@ -597,6 +609,7 @@ fn test_healthcheck_clean_install_has_no_issues_or_warnings() {
 fn test_healthcheck_fails_when_steering_lacks_owned_end_marker() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
 
     KiroIntegration.install(&ctx).unwrap();
@@ -625,6 +638,7 @@ fn test_healthcheck_fails_when_steering_lacks_owned_end_marker() {
 fn test_healthcheck_warns_when_agent_tool_policy_is_not_permissive() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
 
     KiroIntegration.install(&ctx).unwrap();
@@ -657,6 +671,7 @@ fn test_healthcheck_fails_when_workspace_mcp_disables_tracedecay() {
     let home_dir = TempDir::new().unwrap();
     let project_dir = TempDir::new().unwrap();
     let home = home_dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let project = project_dir.path();
     let ctx = make_ctx(home);
 
@@ -688,6 +703,7 @@ fn test_healthcheck_fails_when_workspace_mcp_shadows_global_command() {
     let home_dir = TempDir::new().unwrap();
     let project_dir = TempDir::new().unwrap();
     let home = home_dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let project = project_dir.path();
     let ctx = make_ctx(home);
 

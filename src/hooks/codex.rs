@@ -644,7 +644,7 @@ mod tests {
 
     #[test]
     fn codex_prompt_hints_dedupe_by_session_and_category() {
-        let _lock = crate::hooks::test_env_lock().lock().unwrap();
+        let _lock = crate::hooks::lock_test_env();
         let project = tempfile::tempdir().unwrap();
         let profile = tempfile::tempdir().unwrap();
         let project_root = project.path().canonicalize().unwrap();

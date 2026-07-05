@@ -810,6 +810,66 @@ pub fn is_excluded(file_path: &str, config: &TraceDecayConfig) -> bool {
     false
 }
 
+/// Serializes lib unit tests that mutate process-wide storage env vars
+/// (`TRACEDECAY_DATA_DIR` and related HOME/profile pins). Parallel tests
+/// otherwise race on profile resolution and hook analytics paths.
+#[cfg(test)]
+pub static USER_DATA_DIR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquires [`USER_DATA_DIR_TEST_LOCK`], recovering even when poisoned.
+#[cfg(test)]
+pub fn lock_user_data_dir_test_env() -> std::sync::MutexGuard<'static, ()> {
+    USER_DATA_DIR_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Pins [`USER_DATA_DIR_ENV`] to an isolated temp profile while holding
+/// [`USER_DATA_DIR_TEST_LOCK`], so parallel lib tests cannot race profile
+/// resolution during `TraceDecay::init` / indexing.
+#[cfg(test)]
+pub struct PinnedUserDataDir {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    _root: tempfile::TempDir,
+    previous: Option<OsString>,
+}
+
+#[cfg(test)]
+impl PinnedUserDataDir {
+    pub fn new() -> Self {
+        let lock = lock_user_data_dir_test_env();
+        let root = tempfile::TempDir::new()
+            .unwrap_or_else(|err| panic!("failed to create temp profile dir: {err}"));
+        let profile = root.path().join(TRACEDECAY_DIR);
+        fs::create_dir_all(&profile)
+            .unwrap_or_else(|err| panic!("failed to create isolated profile root: {err}"));
+        let previous = std::env::var_os(USER_DATA_DIR_ENV);
+        std::env::set_var(USER_DATA_DIR_ENV, &profile);
+        Self {
+            _lock: lock,
+            _root: root,
+            previous,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Default for PinnedUserDataDir {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+impl Drop for PinnedUserDataDir {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(previous) => std::env::set_var(USER_DATA_DIR_ENV, previous),
+            None => std::env::remove_var(USER_DATA_DIR_ENV),
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests;

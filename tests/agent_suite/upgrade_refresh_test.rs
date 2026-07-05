@@ -24,6 +24,7 @@ fn make_install_ctx(home: &Path) -> InstallContext {
 fn claude_json_upgrade_refresh_is_idempotent_and_preserves_unknown_keys() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_install_ctx(home);
     let claude_json = home.join(".claude.json");
 

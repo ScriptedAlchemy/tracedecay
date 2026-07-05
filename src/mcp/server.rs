@@ -1372,7 +1372,7 @@ impl McpServer {
             return;
         }
 
-        self.spawn_read_refresh_task(Arc::clone(cg), self.sync_config.full_sync_escalation_files);
+        self.spawn_read_refresh_task(cg, self.sync_config.full_sync_escalation_files);
     }
 
     /// Spawns the detached D4 refresh task. The task owns cheap `Arc` clones
@@ -1383,7 +1383,7 @@ impl McpServer {
     ///
     /// The caller MUST have already set `background_refresh_running` to
     /// `true`; this task clears it on completion.
-    fn spawn_read_refresh_task(&self, cg: Arc<TraceDecay>, escalation: usize) {
+    fn spawn_read_refresh_task(&self, cg: &Arc<TraceDecay>, escalation: usize) {
         let running = Arc::clone(&self.background_refresh_running);
         let done_at = Arc::clone(&self.last_background_refresh_done_at);
         let token_map = Arc::clone(&self.file_token_map);
@@ -1461,7 +1461,7 @@ impl McpServer {
         }
         self.last_background_refresh_at
             .store(now, Ordering::Release);
-        self.spawn_read_refresh_task(cg, self.sync_config.full_sync_escalation_files);
+        self.spawn_read_refresh_task(&cg, self.sync_config.full_sync_escalation_files);
     }
 
     /// Returns a compact one-line notice when automation runs have staged

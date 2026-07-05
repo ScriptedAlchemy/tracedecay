@@ -67,6 +67,16 @@ pub const GLOBAL_DB_ENV: &str = "TRACEDECAY_GLOBAL_DB";
 /// a test needs finer-grained control over which env vars it swaps.
 pub static GLOBAL_DB_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Acquires `mutex`, recovering the guard even when a prior holder panicked.
+pub fn lock_recovering_poison<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|err| err.into_inner())
+}
+
+/// Serializes tests that pin [`GLOBAL_DB_ENV`], tolerating a poisoned lock.
+pub fn lock_global_db_env() -> std::sync::MutexGuard<'static, ()> {
+    lock_recovering_poison(&GLOBAL_DB_ENV_LOCK)
+}
+
 /// Serializes [`IsolatedEnv`] users within one test binary: storage isolation
 /// swaps process-wide env vars (`HOME`, `TRACEDECAY_DATA_DIR`, ...), so tests
 /// must not overlap.
@@ -191,6 +201,30 @@ impl TraceDecayStorageEnvGuard {
 
 pub fn isolated_tracedecay_storage(tmp: &TempDir) -> TraceDecayStorageEnvGuard {
     TraceDecayStorageEnvGuard::for_tempdir(tmp)
+}
+
+/// Serializes in-process agent install/uninstall tests and pins
+/// [`USER_DATA_DIR_ENV`] to that test's home.
+///
+/// Without this, concurrent `cargo test` cases can point each other at the same
+/// managed-skill target file and race during atomic rewrites. Field order keeps
+/// the env pin alive until just before the lock is released.
+pub struct AgentEnvLock {
+    _pin: EnvVarGuard,
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+}
+
+impl AgentEnvLock {
+    /// Pins [`USER_DATA_DIR_ENV`] to `<home>/.tracedecay` while holding
+    /// [`PROCESS_ENV_LOCK`].
+    pub fn pin(home: impl AsRef<Path>) -> Self {
+        let lock = PROCESS_ENV_LOCK.blocking_lock();
+        let pin = EnvVarGuard::set(USER_DATA_DIR_ENV, home.as_ref().join(".tracedecay"));
+        Self {
+            _pin: pin,
+            _lock: lock,
+        }
+    }
 }
 
 fn canonicalize_test_dir(path: &Path) -> PathBuf {

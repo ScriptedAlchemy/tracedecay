@@ -58,6 +58,7 @@ fn cli_config_path(home: &Path) -> std::path::PathBuf {
 fn test_install_creates_vscode_settings_with_mcp_server() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
     CopilotIntegration.install(&ctx).unwrap();
 
@@ -94,6 +95,7 @@ fn test_install_creates_vscode_settings_with_mcp_server() {
 fn test_install_creates_cli_config_with_mcp_server() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
     CopilotIntegration.install(&ctx).unwrap();
 
@@ -125,6 +127,7 @@ fn test_install_creates_cli_config_with_mcp_server() {
 fn test_install_preserves_existing_vscode_settings() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
 
     // Pre-populate VS Code settings with other content
     let settings_path = vscode_settings_path(home);
@@ -153,6 +156,7 @@ fn test_install_preserves_existing_vscode_settings() {
 fn test_install_preserves_existing_cli_config() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
 
     // Pre-populate CLI config with another MCP server
     let cli_path = cli_config_path(home);
@@ -181,6 +185,7 @@ fn test_install_preserves_existing_cli_config() {
 fn test_install_idempotent_vscode() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
 
     CopilotIntegration.install(&ctx).unwrap();
@@ -201,6 +206,7 @@ fn test_install_idempotent_vscode() {
 fn test_install_idempotent_cli() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
 
     CopilotIntegration.install(&ctx).unwrap();
@@ -223,6 +229,7 @@ fn test_install_idempotent_cli() {
 fn test_uninstall_removes_vscode_mcp_entry() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
 
     CopilotIntegration.install(&ctx).unwrap();
@@ -250,6 +257,7 @@ fn test_uninstall_removes_vscode_mcp_entry() {
 fn test_uninstall_cleans_empty_mcp_objects() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
 
     CopilotIntegration.install(&ctx).unwrap();
@@ -269,6 +277,7 @@ fn test_uninstall_cleans_empty_mcp_objects() {
 fn test_uninstall_removes_cli_config() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
 
     CopilotIntegration.install(&ctx).unwrap();
@@ -293,6 +302,7 @@ fn test_uninstall_removes_cli_config() {
 fn test_uninstall_preserves_other_cli_servers() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
 
     // Pre-populate CLI config with another server
     let cli_path = cli_config_path(home);
@@ -327,6 +337,7 @@ fn test_uninstall_preserves_other_cli_servers() {
 fn test_uninstall_preserves_other_vscode_settings() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
 
     // Pre-populate VS Code settings
     let settings_path = vscode_settings_path(home);
@@ -348,6 +359,7 @@ fn test_uninstall_preserves_other_vscode_settings() {
 fn test_uninstall_without_install_does_not_crash() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
     // Should not panic or error
     CopilotIntegration.uninstall(&ctx).unwrap();
@@ -357,6 +369,7 @@ fn test_uninstall_without_install_does_not_crash() {
 fn test_uninstall_cli_with_no_tracedecay_is_noop() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
 
     // Create a CLI config without tracedecay
     let cli_path = cli_config_path(home);
@@ -383,6 +396,7 @@ fn test_uninstall_cli_with_no_tracedecay_is_noop() {
 fn test_healthcheck_clean_install_no_issues() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
     CopilotIntegration.install(&ctx).unwrap();
 
@@ -595,6 +609,7 @@ fn test_has_tracedecay_before_install() {
 fn test_has_tracedecay_after_install() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
     CopilotIntegration.install(&ctx).unwrap();
     assert!(
@@ -607,6 +622,7 @@ fn test_has_tracedecay_after_install() {
 fn test_has_tracedecay_after_uninstall() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
     let ctx = make_ctx(home);
     CopilotIntegration.install(&ctx).unwrap();
     CopilotIntegration.uninstall(&ctx).unwrap();

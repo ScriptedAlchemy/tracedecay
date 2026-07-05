@@ -788,7 +788,7 @@ mod tests {
     /// so a prompt-shaped trigger steers identically on both agents.
     #[test]
     fn cursor_prompt_hint_runs_decide_hint_and_dedupes_per_session() {
-        let _lock = crate::hooks::test_env_lock().lock().unwrap();
+        let _lock = crate::hooks::lock_test_env();
         let project = tempfile::tempdir().unwrap();
         let profile = tempfile::tempdir().unwrap();
         let project_root = project.path().canonicalize().unwrap();

@@ -251,12 +251,10 @@ pub fn parse_duration(s: &str) -> Option<std::time::Duration> {
 )]
 mod tests {
     use super::*;
-    use crate::config::USER_DATA_DIR_ENV;
+    use crate::config::{lock_user_data_dir_test_env, USER_DATA_DIR_ENV};
     use std::ffi::OsString;
     use std::time::Duration;
     use tempfile::TempDir;
-
-    static USER_DATA_DIR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     struct EnvRestore {
         key: &'static str,
@@ -307,7 +305,7 @@ mod tests {
 
     #[test]
     fn save_preserves_existing_corrupt_config_file() {
-        let _lock = USER_DATA_DIR_ENV_LOCK.lock().unwrap();
+        let _lock = lock_user_data_dir_test_env();
         let temp = TempDir::new().unwrap();
         let _env = EnvRestore::set(USER_DATA_DIR_ENV, temp.path());
         let path = config_path().expect("config path should resolve");
@@ -327,7 +325,7 @@ mod tests {
 
     #[test]
     fn save_preserves_unknown_config_keys() {
-        let _lock = USER_DATA_DIR_ENV_LOCK.lock().unwrap();
+        let _lock = lock_user_data_dir_test_env();
         let temp = TempDir::new().unwrap();
         let _env = EnvRestore::set(USER_DATA_DIR_ENV, temp.path());
         let path = config_path().expect("config path should resolve");

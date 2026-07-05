@@ -1,4 +1,5 @@
 use super::{format_index_age_phrase, staleness_banner, McpServer, StalenessBannerInputs};
+use crate::config::PinnedUserDataDir;
 use crate::tracedecay::TraceDecay;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -15,7 +16,8 @@ fn git(root: &std::path::Path, args: &[&str]) {
     assert!(ok, "git {args:?} failed");
 }
 
-async fn init_indexed_repo() -> (TraceDecay, TempDir) {
+async fn init_indexed_repo() -> (TraceDecay, TempDir, PinnedUserDataDir) {
+    let pin = PinnedUserDataDir::new();
     let dir = TempDir::new().unwrap();
     let root = dir.path();
     git(root, &["init", "-q", "-b", "main"]);
@@ -28,7 +30,7 @@ async fn init_indexed_repo() -> (TraceDecay, TempDir) {
     git(root, &["commit", "-q", "-m", "initial"]);
     let cg = TraceDecay::init(root).await.expect("init");
     cg.index_all().await.expect("index");
-    (cg, dir)
+    (cg, dir, pin)
 }
 
 // ---- D7 pure-logic banner tests (test c) --------------------------
@@ -113,7 +115,7 @@ fn banner_instructs_manual_sync_when_auto_sync_disabled() {
 
 #[tokio::test]
 async fn startup_catch_up_spawned_once_per_server() {
-    let (cg, _dir) = init_indexed_repo().await;
+    let (cg, _dir, _pin) = init_indexed_repo().await;
     let server = McpServer::new(cg, None).await;
     // The D1 spawn should have claimed the one-shot flag.
     assert!(
@@ -144,7 +146,7 @@ async fn startup_catch_up_spawned_once_per_server() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_refresh_is_non_blocking_and_single_flighted() {
-    let (cg, dir) = init_indexed_repo().await;
+    let (cg, dir, _pin) = init_indexed_repo().await;
     let root = dir.path().to_path_buf();
     let mut config = crate::config::load_config(&root).expect("load config");
     config.sync.session_start_sync = false;

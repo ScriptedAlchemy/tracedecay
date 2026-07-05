@@ -659,3 +659,11 @@ fn clipped_handle_for_log(handle: &str) -> String {
         clipped
     }
 }
+
+/// Serializes lib unit tests that store response handles under the
+/// process-global profile root (`TRACEDECAY_DATA_DIR`). Uses the shared
+/// user-data-dir test lock so env mutation cannot race profile resolution.
+#[cfg(test)]
+pub(crate) fn lock_response_handle_store() -> std::sync::MutexGuard<'static, ()> {
+    crate::config::lock_user_data_dir_test_env()
+}

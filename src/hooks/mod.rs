@@ -6,8 +6,6 @@
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(test)]
-use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -157,9 +155,8 @@ fn now_unix_secs() -> i64 {
 }
 
 #[cfg(test)]
-pub(crate) fn test_env_lock() -> &'static Mutex<()> {
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    ENV_LOCK.get_or_init(|| Mutex::new(()))
+pub(crate) fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
+    crate::config::lock_user_data_dir_test_env()
 }
 
 /// Mints a unique id for one hint candidate so its `hint_candidate` row and its
@@ -661,7 +658,7 @@ mod hint_analytics_tests {
 
     #[test]
     fn record_hint_emitted_missing_session_is_single_terminal() {
-        let _lock = super::test_env_lock().lock().unwrap();
+        let _lock = super::lock_test_env();
         let project = tempfile::tempdir().unwrap();
         let profile = tempfile::tempdir().unwrap();
         let project_root = project.path().canonicalize().unwrap();
@@ -689,7 +686,7 @@ mod hint_analytics_tests {
     /// known.
     #[test]
     fn every_hint_branch_yields_exactly_one_terminal_with_hint_id() {
-        let _lock = super::test_env_lock().lock().unwrap();
+        let _lock = super::lock_test_env();
         let project = tempfile::tempdir().unwrap();
         let profile = tempfile::tempdir().unwrap();
         let project_root = project.path().canonicalize().unwrap();
@@ -784,7 +781,7 @@ mod hint_analytics_tests {
     /// terminal, and no hint is returned to the caller.
     #[test]
     fn budget_exhaustion_records_suppressed_budget_terminal() {
-        let _lock = super::test_env_lock().lock().unwrap();
+        let _lock = super::lock_test_env();
         let project = tempfile::tempdir().unwrap();
         let profile = tempfile::tempdir().unwrap();
         let project_root = project.path().canonicalize().unwrap();
@@ -848,7 +845,7 @@ mod hint_analytics_tests {
     /// stronger re-hint recorded as `hint_escalated`, with the escalation prefix.
     #[test]
     fn repeated_usage_records_hint_escalated_terminal() {
-        let _lock = super::test_env_lock().lock().unwrap();
+        let _lock = super::lock_test_env();
         let project = tempfile::tempdir().unwrap();
         let profile = tempfile::tempdir().unwrap();
         let project_root = project.path().canonicalize().unwrap();
