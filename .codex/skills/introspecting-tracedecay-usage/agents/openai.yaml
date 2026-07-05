@@ -1,4 +1,4 @@
 interface:
-  display_name: "Introspecting TraceDecay Usage"
+  display_name: "TraceDecay Dev: Introspecting TraceDecay Usage"
   short_description: "Turn TraceDecay evidence into fixes"
   default_prompt: "Use $introspecting-tracedecay-usage to audit TraceDecay usage evidence and choose the smallest durable improvement."

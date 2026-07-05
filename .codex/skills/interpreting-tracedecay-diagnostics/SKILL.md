@@ -1,9 +1,9 @@
 ---
 name: interpreting-tracedecay-diagnostics
-description: Use when interpreting TraceDecay compiler diagnostics, `tracedecay tool diagnose`, `tracedecay tool diagnostics`, mapped errors, affected symbols, or build/type failure output.
+description: 'TraceDecay Dev: Use when interpreting TraceDecay compiler diagnostics, `tracedecay tool diagnose`, `tracedecay tool diagnostics`, mapped errors, affected symbols, or build/type failure output.'
 ---
 
-# Interpreting TraceDecay Diagnostics
+# TraceDecay Dev: Interpreting TraceDecay Diagnostics
 
 TraceDecay diagnostics turn raw compiler output into mapped symbols, callers,
 and likely test scope. Use them before eyeballing cargo, clippy, tsc, or

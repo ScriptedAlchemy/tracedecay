@@ -1,9 +1,9 @@
 ---
 name: writing-agent-managed-skills
-description: 'Use when creating, revising, validating, approving, installing, or auditing TraceDecay agent-managed automation skills and skill-writer drafts.'
+description: 'TraceDecay Dev: Use when creating, revising, validating, approving, installing, or auditing TraceDecay agent-managed automation skills and skill-writer drafts.'
 ---
 
-# Writing Agent-Managed Skills
+# TraceDecay Dev: Writing Agent-Managed Skills
 
 Agent-managed skills are profile-owned drafts produced by automation. Treat
 them as generated artifacts with lifecycle state, validation evidence, and

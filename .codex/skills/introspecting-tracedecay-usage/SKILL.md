@@ -1,9 +1,9 @@
 ---
 name: introspecting-tracedecay-usage
-description: Use when turning TraceDecay's own analytics, session history, automation runs, managed skills, memory facts, diagnostics, or code-health signals into repo improvements, evals, or bundled skill updates.
+description: "TraceDecay Dev: Use when turning TraceDecay's own analytics, session history, automation runs, managed skills, memory facts, diagnostics, or code-health signals into repo improvements, evals, or bundled skill updates."
 ---
 
-# Introspecting TraceDecay Usage
+# TraceDecay Dev: Introspecting TraceDecay Usage
 
 Use this skill for TraceDecay self-improvement driven by real agent behavior,
 not guesswork. Keep the pass evidence-first: logs and summaries identify the

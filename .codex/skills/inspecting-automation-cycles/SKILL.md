@@ -1,9 +1,9 @@
 ---
 name: inspecting-automation-cycles
-description: 'Use when auditing TraceDecay automation loops, skipped runs, memory-curator/session-reflector/skill-writer output, pending approvals, or run artifacts.'
+description: 'TraceDecay Dev: Use when auditing TraceDecay automation loops, skipped runs, memory-curator/session-reflector/skill-writer output, pending approvals, or run artifacts.'
 ---
 
-# Inspecting Automation Cycles
+# TraceDecay Dev: Inspecting Automation Cycles
 
 TraceDecay automation is a loop, not a single artifact: config schedules jobs,
 runs produce artifacts, dashboards queue approvals, and usage analytics prove

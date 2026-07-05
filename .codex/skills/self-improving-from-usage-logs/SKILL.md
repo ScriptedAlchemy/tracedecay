@@ -1,9 +1,9 @@
 ---
 name: self-improving-from-usage-logs
-description: 'Use when mining TraceDecay session logs, analytics, diagnostics, automation artifacts, or agent transcripts to improve TraceDecay code, tools, or packaged skills.'
+description: 'TraceDecay Dev: Use when mining TraceDecay session logs, analytics, diagnostics, automation artifacts, or agent transcripts to improve TraceDecay code, tools, or packaged skills.'
 ---
 
-# Self-Improving From Usage Logs
+# TraceDecay Dev: Self-Improving From Usage Logs
 
 Use real agent behavior as an eval surface: logs reveal where tools are
 confusing, silent, too hard to discover, or missing a safe command.

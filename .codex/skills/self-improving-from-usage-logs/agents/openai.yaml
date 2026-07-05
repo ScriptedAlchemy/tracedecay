@@ -1,4 +1,4 @@
 interface:
-  display_name: "Self-Improving From Usage Logs"
+  display_name: "TraceDecay Dev: Self-Improving From Usage Logs"
   short_description: "Turn TraceDecay logs into fixes"
   default_prompt: "Use $self-improving-from-usage-logs to find and fix TraceDecay adoption gaps."
