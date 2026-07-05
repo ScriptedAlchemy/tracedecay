@@ -122,6 +122,9 @@ struct WatchState {
     health: ProjectHealth,
     /// Handle to the supervised task so drop cancels it on shutdown.
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Test-only: `debounce_loop` signals once before its first `wake` wait.
+    #[cfg(test)]
+    entered_debounce: Notify,
 }
 
 #[derive(Debug, Default)]
@@ -306,6 +309,8 @@ impl GitWatcher {
             wake: Notify::new(),
             health: ProjectHealth::default(),
             task: Mutex::new(None),
+            #[cfg(test)]
+            entered_debounce: Notify::new(),
         });
         projects.insert(canonical.clone(), Arc::clone(&state));
         drop(projects);
@@ -496,6 +501,9 @@ fn classify_and_mark(state: &Arc<WatchState>, event: &notify::Event) {
 async fn debounce_loop(inner: &Arc<GitWatcherInner>, state: &Arc<WatchState>, common: &Path) {
     let quiet = Duration::from_millis(inner.config.watch_debounce_ms);
     let max_delay = Duration::from_millis(inner.config.watch_max_delay_ms);
+
+    #[cfg(test)]
+    state.entered_debounce.notify_one();
 
     loop {
         // Sleep until the first event arrives.
