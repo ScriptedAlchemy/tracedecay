@@ -14,7 +14,7 @@ use tracedecay::sessions::git_correlation::{
     CommitSessionRecord, SpanObservation, SpanOverlapKind, SpanSource, DEFAULT_SPAN_MERGE_GAP_SECS,
 };
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
-use tracedecay::tracedecay::TraceDecay;
+use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 use crate::common;
 
@@ -140,18 +140,21 @@ fn session_ids(payload: &Value) -> Vec<String> {
 /// a mid-session branch switch, then drives the query surface end to end.
 #[tokio::test]
 async fn sessions_for_and_scoped_search_end_to_end() {
-    // Hold the shared isolated-env lock (via `IsolatedEnv`) so this test's
-    // process-wide storage env never races other env-mutating tests running in
-    // parallel under the same test binary.
-    let (_env, isolated_project) = common::IsolatedEnv::acquire().await;
-    let base = isolated_project
-        .parent()
-        .unwrap_or_else(|| panic!("isolated project has a parent"));
+    let dir = common::tempdir_or_panic();
+    let base = dir.path();
     let (project_root, worktree_root) = setup_linked_worktree_under(base);
 
-    let cg = TraceDecay::init(&project_root)
-        .await
-        .unwrap_or_else(|e| panic!("init project: {e}"));
+    let profile_root = base.join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap_or_else(|e| panic!("create profile root: {e}"));
+    let cg = TraceDecay::init_with_options(
+        &project_root,
+        TraceDecayOpenOptions {
+            profile_root: Some(profile_root),
+            global_db_path: Some(base.join("global.db")),
+        },
+    )
+    .await
+    .unwrap_or_else(|e| panic!("init project: {e}"));
     let project_key = cg.project_root().to_string_lossy().to_string();
     let main_worktree = project_root.to_string_lossy().to_string();
     let feature_worktree = worktree_root.to_string_lossy().to_string();

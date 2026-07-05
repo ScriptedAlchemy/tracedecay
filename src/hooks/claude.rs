@@ -288,8 +288,15 @@ async fn claude_session_project_root(parsed: &Value) -> Option<std::path::PathBu
 async fn claude_session_root_from_global_registry(
     cwd: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
-    let canonical_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     let gdb = crate::global_db::GlobalDb::open().await?;
+    claude_session_root_from_global_registry_db(cwd, &gdb).await
+}
+
+async fn claude_session_root_from_global_registry_db(
+    cwd: &std::path::Path,
+    gdb: &crate::global_db::GlobalDb,
+) -> Option<std::path::PathBuf> {
+    let canonical_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     let mut best: Option<std::path::PathBuf> = None;
     for path in gdb.list_project_paths().await {
         let project_path = std::path::PathBuf::from(&path);
@@ -601,60 +608,25 @@ mod tests {
         assert!(CLAUDE_SUBAGENT_START_CONTEXT.contains("concept->context"));
     }
 
-    /// RAII guard that pins an env var for the duration of a test and restores
-    /// it on drop, so global-DB env isolation does not leak across tests.
-    struct EnvGuard {
-        key: &'static str,
-        previous: Option<std::ffi::OsString>,
-    }
-
-    impl EnvGuard {
-        fn set(key: &'static str, value: &std::path::Path) -> Self {
-            let previous = std::env::var_os(key);
-            unsafe {
-                std::env::set_var(key, value);
-            }
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.previous {
-                    Some(value) => std::env::set_var(self.key, value),
-                    None => std::env::remove_var(self.key),
-                }
-            }
-        }
-    }
-
     /// Regression for a global-store-only project (no repo-local `.tracedecay/`,
     /// like the tracedecay repo itself): the cwd walk-up
     /// (`codex_project_root_from_parsed_event`) finds nothing, but the project is
     /// registered and initialized in the global DB, so the registry fallback must
     /// resolve it — otherwise `SessionStart`/`SubagentStart` wrongly print the
     /// init nudge for a project the MCP server serves fine.
-    // The env-serialization guard is a `std::sync::Mutex` shared with sync
-    // tests; it must stay held across the `.await`s below so no other test
-    // mutates `TRACEDECAY_GLOBAL_DB` mid-test. Tests run single-threaded per
-    // lock, so there is no real deadlock risk from holding it across an await.
-    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn session_root_falls_back_to_global_registry_for_global_only_project() {
-        let _lock = crate::hooks::test_env_lock().lock().unwrap();
         let gdb_dir = tempfile::tempdir().unwrap();
         let gdb_path = gdb_dir.path().join("global.db");
-        let _gdb_env = EnvGuard::set("TRACEDECAY_GLOBAL_DB", &gdb_path);
+        let gdb = crate::global_db::GlobalDb::open_at(&gdb_path)
+            .await
+            .unwrap();
 
         let project_dir = tempfile::tempdir().unwrap();
         let project_root = project_dir.path().canonicalize().unwrap();
         // Register + initialize the project in the global DB only. An enrollment
         // marker makes `is_initialized` true without a repo-local project db.
-        {
-            let gdb = crate::global_db::GlobalDb::open().await.unwrap();
-            gdb.upsert(&project_root, 0).await;
-        }
+        gdb.upsert(&project_root, 0).await;
         crate::storage::write_enrollment_marker(
             &project_root,
             &crate::storage::EnrollmentMarker {
@@ -667,7 +639,7 @@ mod tests {
         // cwd inside the registered project resolves back to its root.
         let nested = project_root.join("crates/inner");
         std::fs::create_dir_all(&nested).unwrap();
-        let resolved = claude_session_root_from_global_registry(&nested).await;
+        let resolved = claude_session_root_from_global_registry_db(&nested, &gdb).await;
         assert_eq!(
             resolved
                 .as_deref()
@@ -680,7 +652,7 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         let outside_root = outside.path().canonicalize().unwrap();
         assert!(
-            claude_session_root_from_global_registry(&outside_root)
+            claude_session_root_from_global_registry_db(&outside_root, &gdb)
                 .await
                 .is_none(),
             "a cwd outside every registered project must not resolve"
