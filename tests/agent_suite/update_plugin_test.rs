@@ -884,6 +884,63 @@ fn codex_update_plugin_reports_not_installed_without_bundle_or_legacy_config() {
     assert!(!home.path().join("plugins").exists());
 }
 
+#[test]
+fn codex_update_plugin_ignores_plugin_only_config_without_legacy_mcp() {
+    let home = TempDir::new().unwrap();
+    let _agent_env = AgentEnvLock::pin(&home);
+    let project_root = home.path().join("workspace");
+    let codex_dir = home.path().join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    let config = codex_dir.join("config.toml");
+    std::fs::write(
+        &config,
+        r#"
+[plugins."tracedecay@personal"]
+enabled = true
+
+[hooks.state."tracedecay@personal:hooks/hooks.json:post_tool_use:0:0"]
+trusted_hash = "sha256:post"
+"#,
+    )
+    .unwrap();
+    let before = bytes(&config);
+    let codex = get_integration("codex").unwrap();
+
+    let outcome = codex
+        .update_plugin(&ctx_with_project(home.path(), NEW_BIN, &project_root))
+        .unwrap();
+
+    assert!(matches!(outcome, UpdatePluginOutcome::NotInstalled));
+    assert_eq!(bytes(&config), before);
+    assert!(!home.path().join("plugins/tracedecay").exists());
+}
+
+#[test]
+fn codex_update_plugin_errors_on_malformed_legacy_mcp_config() {
+    let home = TempDir::new().unwrap();
+    let _agent_env = AgentEnvLock::pin(&home);
+    let project_root = home.path().join("workspace");
+    let codex_dir = home.path().join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    std::fs::write(
+        codex_dir.join("config.toml"),
+        "[mcp_servers.tracedecay\ncommand = \"/old/bin/tracedecay\"\n",
+    )
+    .unwrap();
+    let codex = get_integration("codex").unwrap();
+
+    let err = match codex.update_plugin(&ctx_with_project(home.path(), NEW_BIN, &project_root)) {
+        Ok(_) => panic!("malformed legacy MCP config must not be treated as absent"),
+        Err(err) => err,
+    };
+
+    assert!(
+        err.to_string().contains("config.toml"),
+        "error should identify the malformed Codex config: {err}"
+    );
+    assert!(!home.path().join("plugins/tracedecay").exists());
+}
+
 // ---------------------------------------------------------------------------
 // Kiro
 // ---------------------------------------------------------------------------

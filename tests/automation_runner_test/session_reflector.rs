@@ -357,7 +357,7 @@ async fn session_reflector_runner_validates_fact_proposals_without_applying() {
 }
 
 #[tokio::test]
-async fn session_reflector_runner_auto_applies_facts_when_memory_auto_apply_is_enabled() {
+async fn session_reflector_runner_auto_applies_facts_when_dashboard_approval_is_required() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
@@ -379,7 +379,7 @@ async fn session_reflector_runner_auto_applies_facts_when_memory_auto_apply_is_e
         backend: AutomationBackend::CodexAppServer,
         host_mode: AutomationHostMode::Standalone,
         model: Some("configured-model".to_string()),
-        require_dashboard_approval: false,
+        require_dashboard_approval: true,
         auto_apply_memory_ops: true,
         tasks: AutomationTaskSet {
             session_reflector: AutomationTaskConfig {
@@ -418,6 +418,16 @@ async fn session_reflector_runner_auto_applies_facts_when_memory_auto_apply_is_e
     assert_eq!(
         run.report["session_fact_apply_policy"]["mutates_store"],
         json!(true)
+    );
+    assert_eq!(
+        run.report["session_fact_apply_policy"]["autonomous_memory_apply"],
+        json!(true)
+    );
+    assert!(
+        run.report["session_fact_apply_policy"]
+            .get("require_dashboard_approval")
+            .is_none(),
+        "memory apply policy should not expose stale dashboard approval terminology"
     );
     assert_eq!(
         run.ledger_record

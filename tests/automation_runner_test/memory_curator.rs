@@ -128,7 +128,7 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     );
     assert_eq!(
         run.ledger_record.validation_report.as_ref().unwrap()["apply_policy"]["decision"],
-        json!("requires_dashboard_approval")
+        json!("memory_auto_apply_disabled")
     );
     assert_eq!(
         run.ledger_record.validation_report.as_ref().unwrap()["apply_policy"]
@@ -140,8 +140,14 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
         json!(false)
     );
     assert_eq!(
-        run.report["automation_apply_policy"]["approval_required"],
-        json!(true)
+        run.report["automation_apply_policy"]["autonomous_memory_apply"],
+        json!(false)
+    );
+    assert!(
+        run.report["automation_apply_policy"]
+            .get("approval_required")
+            .is_none(),
+        "memory apply policy should not expose approval terminology"
     );
     assert_eq!(
         run.ledger_record.report_ref.as_ref().unwrap()["run_id"],
@@ -692,7 +698,7 @@ async fn memory_curator_runner_artifacts_mark_handoff_ready_for_accepted_only_ex
 }
 
 #[tokio::test]
-async fn memory_curator_runner_auto_apply_is_blocked_by_dashboard_approval() {
+async fn memory_curator_runner_auto_applies_even_when_dashboard_approval_is_required() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     seed_duplicate_facts(&cg).await;
@@ -739,7 +745,7 @@ async fn memory_curator_runner_auto_apply_is_blocked_by_dashboard_approval() {
     assert_eq!(backend.calls(), 1);
     assert_eq!(
         run.report["automation_apply_policy"]["decision"],
-        json!("requires_dashboard_approval")
+        json!("auto_apply_allowed")
     );
     assert_eq!(
         run.report["automation_apply_policy"]["auto_apply_memory_ops"],
@@ -747,12 +753,26 @@ async fn memory_curator_runner_auto_apply_is_blocked_by_dashboard_approval() {
     );
     assert_eq!(
         run.report["automation_apply_policy"]["mutates_store"],
-        json!(false)
+        json!(true)
     );
-    assert_eq!(run.report["llm_apply"]["applied"], Value::Null);
+    assert_eq!(
+        run.report["automation_apply_policy"]["autonomous_memory_apply"],
+        json!(true)
+    );
     assert!(
-        fact_exists(&cg, 102).await,
-        "dashboard approval must block permanent delete auto-apply"
+        run.report["automation_apply_policy"]
+            .get("require_dashboard_approval")
+            .is_none(),
+        "memory apply policy should not expose stale dashboard approval terminology"
+    );
+    assert_eq!(run.report["llm_apply"]["applied"], json!(1));
+    assert_eq!(
+        run.report["llm_apply"]["results"][0]["status"],
+        json!("deleted")
+    );
+    assert!(
+        !fact_exists(&cg, 102).await,
+        "memory curation auto-apply should not be blocked by dashboard approval"
     );
 }
 

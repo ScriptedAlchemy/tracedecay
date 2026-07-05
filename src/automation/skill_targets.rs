@@ -128,10 +128,20 @@ pub fn export_native_skill_overlay(
             });
         }
 
+        let manifest_exported = exported
+            .iter()
+            .cloned()
+            .map(|mut entry| {
+                if let Ok(relative) = entry.path.strip_prefix(&stage_root) {
+                    entry.path = overlay_root.join(relative);
+                }
+                entry
+            })
+            .collect();
         let manifest = NativeSkillManifest {
             version: 1,
             target,
-            exported: exported.clone(),
+            exported: manifest_exported,
         };
         fs::write(
             stage_root.join(NATIVE_MANIFEST_FILE),

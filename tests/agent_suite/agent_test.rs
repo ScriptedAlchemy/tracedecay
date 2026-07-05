@@ -8,7 +8,7 @@ use tempfile::TempDir;
 use tracedecay::agents::*;
 use tracedecay::automation::managed_skills::{
     approve_managed_skill, create_managed_skill_draft, ManagedSkillDraft, ManagedSkillProvenance,
-    ManagedSkillSource,
+    ManagedSkillSource, SkillInstallTarget,
 };
 use tracedecay::branch_meta;
 use tracedecay::config::USER_DATA_DIR_ENV;
@@ -3948,12 +3948,11 @@ async fn test_cursor_install_exports_active_managed_skills() {
     let home = dir.path();
     let profile_root = home.join(".tracedecay");
     let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
-    create_managed_skill_draft(
-        &profile_root,
-        managed_skill_draft("repo-hygiene", "Repo Hygiene"),
-    )
-    .await
-    .unwrap();
+    let mut draft = managed_skill_draft("repo-hygiene", "Repo Hygiene");
+    draft.targets = vec![SkillInstallTarget::Cursor];
+    create_managed_skill_draft(&profile_root, draft)
+        .await
+        .unwrap();
     approve_managed_skill(&profile_root, "repo-hygiene")
         .await
         .unwrap();

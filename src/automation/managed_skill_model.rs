@@ -56,7 +56,6 @@ impl SkillInstallTarget {
 
 pub fn default_managed_skill_targets() -> Vec<SkillInstallTarget> {
     vec![
-        SkillInstallTarget::Cursor,
         SkillInstallTarget::Codex,
         SkillInstallTarget::Claude,
         SkillInstallTarget::Agents,
@@ -64,6 +63,21 @@ pub fn default_managed_skill_targets() -> Vec<SkillInstallTarget> {
         SkillInstallTarget::Kimi,
         SkillInstallTarget::Kiro,
     ]
+}
+
+fn managed_skill_description(summary: &str) -> String {
+    let trimmed = summary.trim();
+    if trimmed
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("use when"))
+        || trimmed
+            .get(..19)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("use this skill when"))
+    {
+        trimmed.to_string()
+    } else {
+        format!("Use when {trimmed}")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -283,6 +297,12 @@ impl ManagedSkill {
     pub fn render_skill_markdown(&self) -> String {
         let mut output = String::new();
         output.push_str("---\n");
+        let _ = writeln!(output, "name: {}", self.metadata.id);
+        let _ = writeln!(
+            output,
+            "description: {}",
+            frontmatter_string(&managed_skill_description(&self.metadata.summary))
+        );
         let _ = writeln!(output, "id: {}", self.metadata.id);
         let _ = writeln!(
             output,

@@ -358,6 +358,12 @@ fn table_drops_all_empty_columns() {
 }
 
 #[test]
+fn table_with_no_visible_columns_is_not_blank() {
+    let out = generic_md(&json!([{ "id": null }, { "id": null }]));
+    assert!(out.contains("No visible fields."), "got: {out}");
+}
+
+#[test]
 fn table_hoists_constant_columns() {
     let v = json!([
         { "name": "foo", "edge_kind": "calls" },

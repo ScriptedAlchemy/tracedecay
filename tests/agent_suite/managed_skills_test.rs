@@ -108,6 +108,8 @@ fn validates_minimum_metadata_and_renders_frontmatter() {
     let skill = draft().materialize().unwrap();
     let markdown = skill.render_skill_markdown();
     for key in [
+        "name: repo-hygiene",
+        r#"description: "Use when Keep repository maintenance guidance current.""#,
         "id: repo-hygiene",
         r#"title: "Repository hygiene""#,
         r#"summary: "Keep repository maintenance guidance current.""#,

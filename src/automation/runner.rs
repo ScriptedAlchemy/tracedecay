@@ -333,7 +333,7 @@ async fn finalize_session_reflector_success(
         &rejected_facts,
     )
     .await?;
-    let auto_apply_facts = config.auto_apply_memory_ops && !config.require_dashboard_approval;
+    let auto_apply_facts = config.auto_apply_memory_ops;
     let applied_fact_proposals = if auto_apply_facts {
         auto_apply_session_fact_proposals(cg, dashboard_root, std::mem::take(&mut proposal_records))
             .await?
@@ -359,15 +359,13 @@ async fn finalize_session_reflector_success(
     let session_fact_apply_policy = json!({
         "decision": if auto_apply_facts && accepted_count > 0 {
             "auto_apply_allowed"
-        } else if config.require_dashboard_approval && accepted_count > 0 {
-            "requires_dashboard_approval"
         } else if accepted_count > 0 {
-            "proposal_only"
+            "memory_auto_apply_disabled"
         } else {
             "no_valid_facts"
         },
         "auto_apply_memory_ops": config.auto_apply_memory_ops,
-        "require_dashboard_approval": config.require_dashboard_approval,
+        "autonomous_memory_apply": !applied_proposal_ids.is_empty(),
         "mutates_store": !applied_proposal_ids.is_empty(),
         "applied_proposal_ids": applied_proposal_ids,
         "applied_fact_ids": applied_fact_ids,

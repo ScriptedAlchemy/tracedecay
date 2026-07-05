@@ -262,26 +262,20 @@ fn memory_curation_apply_policy(config: &AutomationConfig, accepted_ops: Option<
         .map_or_else(|| &[] as &[Value], Vec::as_slice);
     let destructive = memory_destructive_op_counts(ops);
     let accepted_count = ops.len();
-    let mutates_store =
-        accepted_count > 0 && config.auto_apply_memory_ops && !config.require_dashboard_approval;
+    let mutates_store = accepted_count > 0 && config.auto_apply_memory_ops;
     let decision = if accepted_count == 0 {
         "no_valid_ops"
     } else if mutates_store {
         "auto_apply_allowed"
-    } else if config.require_dashboard_approval {
-        "requires_dashboard_approval"
     } else {
-        "dry_run_only"
+        "memory_auto_apply_disabled"
     };
     let apply_instructions = match decision {
         "auto_apply_allowed" => {
-            "Accepted memory curation ops were applied because auto-apply is enabled and dashboard approval is not required."
+            "Accepted memory curation ops were applied because memory auto-apply is enabled."
         }
-        "requires_dashboard_approval" => {
-            "Review accepted memory curation ops in the dashboard before applying permanent deletes or merge losers."
-        }
-        "dry_run_only" => {
-            "Re-run with an explicit apply policy before mutating the memory store."
+        "memory_auto_apply_disabled" => {
+            "Enable memory auto-apply before mutating the memory store."
         }
         _ => "No accepted memory curation ops require apply.",
     };
@@ -290,8 +284,7 @@ fn memory_curation_apply_policy(config: &AutomationConfig, accepted_ops: Option<
         "dry_run_first": true,
         "mutates_store": mutates_store,
         "auto_apply_memory_ops": config.auto_apply_memory_ops,
-        "require_dashboard_approval": config.require_dashboard_approval,
-        "approval_required": accepted_count > 0 && !mutates_store,
+        "autonomous_memory_apply": mutates_store,
         "accepted_count": accepted_count,
         "permanent_delete_count": destructive.permanent_delete_count,
         "merge_loser_count": destructive.merge_loser_count,

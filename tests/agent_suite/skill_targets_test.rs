@@ -41,21 +41,52 @@ fn targeted_draft(id: &str, title: &str, targets: Vec<SkillInstallTarget>) -> Ma
     }
 }
 
+#[test]
+fn managed_skill_defaults_do_not_target_cursor() {
+    let targets = default_managed_skill_targets();
+    assert_eq!(
+        targets,
+        vec![
+            SkillInstallTarget::Codex,
+            SkillInstallTarget::Claude,
+            SkillInstallTarget::Agents,
+            SkillInstallTarget::OpenCode,
+            SkillInstallTarget::Kimi,
+            SkillInstallTarget::Kiro,
+        ]
+    );
+    assert!(!targets.contains(&SkillInstallTarget::Cursor));
+}
+
 #[tokio::test]
 async fn native_overlay_exports_only_active_skills_and_prunes_generated_namespace() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let plugin_root = temp.path().join("cursor-plugin");
 
-    create_managed_skill_draft(&profile_root, draft("repo-hygiene", "Repository hygiene"))
-        .await
-        .unwrap();
+    create_managed_skill_draft(
+        &profile_root,
+        targeted_draft(
+            "repo-hygiene",
+            "Repository hygiene",
+            vec![SkillInstallTarget::Cursor],
+        ),
+    )
+    .await
+    .unwrap();
     approve_managed_skill(&profile_root, "repo-hygiene")
         .await
         .unwrap();
-    create_managed_skill_draft(&profile_root, draft("pending-flow", "Pending flow"))
-        .await
-        .unwrap();
+    create_managed_skill_draft(
+        &profile_root,
+        targeted_draft(
+            "pending-flow",
+            "Pending flow",
+            vec![SkillInstallTarget::Cursor],
+        ),
+    )
+    .await
+    .unwrap();
 
     std::fs::create_dir_all(plugin_root.join("skills/static-skill")).unwrap();
     std::fs::write(
@@ -91,6 +122,18 @@ async fn native_overlay_exports_only_active_skills_and_prunes_generated_namespac
     assert!(plugin_root
         .join("skills/agent-managed/.tracedecay-managed-skills.json")
         .is_file());
+    let manifest = std::fs::read_to_string(
+        plugin_root.join("skills/agent-managed/.tracedecay-managed-skills.json"),
+    )
+    .unwrap();
+    let manifest: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+    let exported_path = manifest["exported"][0]["path"].as_str().unwrap();
+    let exported_path_normalized = exported_path.replace('\\', "/");
+    assert!(exported_path_normalized.ends_with("skills/agent-managed/repo-hygiene/SKILL.md"));
+    assert!(
+        !exported_path.contains(".agent-managed.tmp"),
+        "manifest must expose final overlay paths: {exported_path}"
+    );
 
     disable_managed_skill(&profile_root, "repo-hygiene")
         .await
@@ -111,9 +154,16 @@ async fn codex_native_overlay_uses_agent_managed_namespace() {
     let profile_root = temp.path().join("profile");
     let plugin_root = temp.path().join("codex-plugin");
 
-    create_managed_skill_draft(&profile_root, draft("repo-hygiene", "Repository hygiene"))
-        .await
-        .unwrap();
+    create_managed_skill_draft(
+        &profile_root,
+        targeted_draft(
+            "repo-hygiene",
+            "Repository hygiene",
+            vec![SkillInstallTarget::Codex],
+        ),
+    )
+    .await
+    .unwrap();
     approve_managed_skill(&profile_root, "repo-hygiene")
         .await
         .unwrap();
@@ -171,6 +221,11 @@ async fn codex_plugin_artifact_exports_shareable_bundle_with_managed_skills() {
     assert!(!plugin_root
         .join("skills/agent-managed/cursor-only/SKILL.md")
         .exists());
+    let codex_skill =
+        std::fs::read_to_string(plugin_root.join("skills/agent-managed/codex-only/SKILL.md"))
+            .unwrap();
+    assert!(codex_skill.contains("name: codex-only"));
+    assert!(codex_skill.contains(r#"description: "Use when Codex only summary""#));
 
     let mcp = std::fs::read_to_string(plugin_root.join(".mcp.json")).unwrap();
     assert!(mcp.contains("\"command\": \"tracedecay-bin\""));
@@ -254,15 +309,29 @@ async fn prompt_index_preserves_user_content_and_routes_full_body_through_mcp() 
     let profile_root = temp.path().join("profile");
     let prompt_path = temp.path().join("AGENTS.md");
 
-    create_managed_skill_draft(&profile_root, draft("repo-hygiene", "Repository hygiene"))
-        .await
-        .unwrap();
+    create_managed_skill_draft(
+        &profile_root,
+        targeted_draft(
+            "repo-hygiene",
+            "Repository hygiene",
+            vec![SkillInstallTarget::Agents, SkillInstallTarget::Claude],
+        ),
+    )
+    .await
+    .unwrap();
     approve_managed_skill(&profile_root, "repo-hygiene")
         .await
         .unwrap();
-    create_managed_skill_draft(&profile_root, draft("pending-flow", "Pending flow"))
-        .await
-        .unwrap();
+    create_managed_skill_draft(
+        &profile_root,
+        targeted_draft(
+            "pending-flow",
+            "Pending flow",
+            vec![SkillInstallTarget::Agents],
+        ),
+    )
+    .await
+    .unwrap();
 
     std::fs::write(&prompt_path, "# User rules\n\nKeep this line.\n").unwrap();
     let summary =
@@ -424,9 +493,16 @@ async fn native_overlay_keeps_previous_export_when_rebuild_fails() {
     let profile_root = temp.path().join("profile");
     let plugin_root = temp.path().join("cursor-plugin");
 
-    create_managed_skill_draft(&profile_root, draft("repo-hygiene", "Repository hygiene"))
-        .await
-        .unwrap();
+    create_managed_skill_draft(
+        &profile_root,
+        targeted_draft(
+            "repo-hygiene",
+            "Repository hygiene",
+            vec![SkillInstallTarget::Claude, SkillInstallTarget::Cursor],
+        ),
+    )
+    .await
+    .unwrap();
     approve_managed_skill(&profile_root, "repo-hygiene")
         .await
         .unwrap();
@@ -495,9 +571,16 @@ async fn lifecycle_export_sweep_deploys_and_retracts_across_detected_agents() {
     let claude_md = install_fake_claude(&home);
     let cursor_plugin = install_fake_cursor_plugin(&home);
 
-    create_managed_skill_draft(&profile_root, draft("repo-hygiene", "Repository hygiene"))
-        .await
-        .unwrap();
+    create_managed_skill_draft(
+        &profile_root,
+        targeted_draft(
+            "repo-hygiene",
+            "Repository hygiene",
+            vec![SkillInstallTarget::Claude, SkillInstallTarget::Cursor],
+        ),
+    )
+    .await
+    .unwrap();
     approve_managed_skill(&profile_root, "repo-hygiene")
         .await
         .unwrap();
@@ -546,9 +629,16 @@ async fn lifecycle_export_sweep_isolates_per_agent_failures() {
     std::fs::remove_file(&claude_md).unwrap();
     std::fs::create_dir_all(&claude_md).unwrap();
 
-    create_managed_skill_draft(&profile_root, draft("repo-hygiene", "Repository hygiene"))
-        .await
-        .unwrap();
+    create_managed_skill_draft(
+        &profile_root,
+        targeted_draft(
+            "repo-hygiene",
+            "Repository hygiene",
+            vec![SkillInstallTarget::Claude, SkillInstallTarget::Cursor],
+        ),
+    )
+    .await
+    .unwrap();
     approve_managed_skill(&profile_root, "repo-hygiene")
         .await
         .unwrap();

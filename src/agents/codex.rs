@@ -88,7 +88,7 @@ impl AgentIntegration for CodexIntegration {
     fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
         let cached_dirs = codex_plugin_cached_install_dirs(&ctx.home);
         let plugin_dir = codex_plugin_install_dir(&ctx.home);
-        let legacy_config_install = codex_legacy_config_has_tracedecay(&ctx.home);
+        let legacy_config_install = codex_legacy_config_has_tracedecay(&ctx.home)?;
         let mut refreshed = Vec::new();
         if !cached_dirs.is_empty() {
             let target = install_codex_cached_plugin(&ctx.home, &ctx.tracedecay_bin)?;
@@ -246,19 +246,19 @@ impl AgentIntegration for CodexIntegration {
     }
 }
 
-fn codex_legacy_config_has_tracedecay(home: &Path) -> bool {
+fn codex_legacy_config_has_tracedecay(home: &Path) -> Result<bool> {
     codex_config_has_tracedecay_mcp_server(&codex_config_path(home))
 }
 
-fn codex_config_has_tracedecay_mcp_server(config_path: &Path) -> bool {
+fn codex_config_has_tracedecay_mcp_server(config_path: &Path) -> Result<bool> {
     if !config_path.exists() {
-        return false;
+        return Ok(false);
     }
-    super::load_toml_file(config_path).is_ok_and(|toml| {
-        toml.get("mcp_servers")
-            .and_then(|v| v.get("tracedecay"))
-            .is_some()
-    })
+    let toml = super::load_toml_file(config_path)?;
+    Ok(toml
+        .get("mcp_servers")
+        .and_then(|v| v.get("tracedecay"))
+        .is_some())
 }
 
 // ---------------------------------------------------------------------------
@@ -438,8 +438,16 @@ pub fn remove_legacy_codex_native_automation(home: &Path) -> Result<bool> {
 }
 
 fn uninstall_tracedecay_mcp_if_present(config_path: &Path) {
-    if !codex_config_has_tracedecay_mcp_server(config_path) {
-        return;
+    match codex_config_has_tracedecay_mcp_server(config_path) {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(err) => {
+            eprintln!(
+                "  Could not inspect project-local Codex MCP config at {}: {err}",
+                config_path.display()
+            );
+            return;
+        }
     }
     if let Err(err) = uninstall_mcp_server(config_path) {
         eprintln!(

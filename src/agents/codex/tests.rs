@@ -169,7 +169,7 @@ trusted_hash = "sha256:post"
     .expect("config should write");
 
     assert!(
-        !codex_legacy_config_has_tracedecay(home.path()),
+        !codex_legacy_config_has_tracedecay(home.path()).expect("config should parse"),
         "plugin and hook entries are not legacy direct MCP config"
     );
 }
@@ -189,7 +189,7 @@ args = ["serve"]
     )
     .expect("config should write");
 
-    assert!(codex_legacy_config_has_tracedecay(home.path()));
+    assert!(codex_legacy_config_has_tracedecay(home.path()).expect("config should parse"));
 }
 
 #[test]

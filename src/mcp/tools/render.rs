@@ -611,6 +611,9 @@ fn render_object_array_table(md: &mut Md, arr: &[Value]) {
     }
 
     if keep.is_empty() {
+        if hoisted.is_empty() {
+            md.empty_note("No visible fields.");
+        }
         return;
     }
     let headers: Vec<&str> = keep.iter().map(|&ci| cols[ci].as_str()).collect();
