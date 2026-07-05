@@ -481,6 +481,43 @@ async fn upsert_session_round_trips_and_updates() {
 }
 
 #[tokio::test]
+async fn session_message_count_filters_by_project_key() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_isolated_db(&tmp).await;
+    for (provider, session_id, project_key, message_id) in [
+        ("codex", "session-a", "project-a", "message-a"),
+        ("claude", "session-b", "project-a", "message-b"),
+        ("cursor", "session-c", "project-b", "message-c"),
+    ] {
+        db.upsert_session(&sample_session(provider, session_id, project_key))
+            .await;
+        assert!(
+            db.upsert_session_message(&sample_message(
+                provider,
+                message_id,
+                session_id,
+                "TraceDecay diagnostics fixture.",
+            ))
+            .await
+        );
+    }
+
+    assert_eq!(db.session_message_count().await.unwrap(), 3);
+    assert_eq!(
+        db.session_message_count_for_project("project-a")
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        db.session_message_count_for_project("missing-project")
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
 async fn upsert_session_message_round_trips_and_updates() {
     let tmp = TempDir::new().unwrap();
     let db_path = isolated_db_path(&tmp);

@@ -650,7 +650,7 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
             sessions_cmd::handle_sessions_action(action).await?;
         }
         Commands::Analytics { action } => match action {
-            AnalyticsAction::Diagnostics { all, no_sync } => {
+            AnalyticsAction::Diagnostics { all, no_sync, .. } => {
                 tracedecay::analytics_bridge::run_analytics_diagnostics(all, no_sync).await?;
             }
             AnalyticsAction::Sync => {

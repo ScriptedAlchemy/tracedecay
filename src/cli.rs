@@ -599,6 +599,9 @@ pub enum AnalyticsAction {
         /// Skip the hook-JSONL import pass before summarizing
         #[arg(long)]
         no_sync: bool,
+        /// Keep compatibility with JSON-capable diagnostics commands.
+        #[arg(long)]
+        json: bool,
     },
     /// Import hook_analytics.jsonl rows into the durable analytics_events table
     Sync,

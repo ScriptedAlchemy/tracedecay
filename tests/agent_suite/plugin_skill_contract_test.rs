@@ -13,6 +13,7 @@ use tempfile::TempDir;
 use tracedecay::agents::{expected_tool_perms, get_integration, InstallContext};
 
 const CODEX_SKILL_ROOT: &str = "plugin/skills";
+const REPO_LOCAL_SKILL_ROOT: &str = ".codex/skills";
 const MAX_BUNDLED_SKILL_METADATA_CHARS: usize = 6_000;
 const CODEX_QUICK_VALIDATE_ALLOWED_FRONTMATTER: &[&str] = &[
     "allowed-tools",
@@ -64,6 +65,55 @@ fn generated_codex_plugin_skills_are_byte_copies_of_the_source_bundle() {
         "generated Codex plugin bundle must ship the same bundled skills as the source bundle"
     );
     assert_skill_trees_byte_identical(&source_root, &installed_root);
+}
+
+#[test]
+fn repo_local_usage_introspection_skill_routes_through_all_required_audit_lanes() {
+    let skills = load_skill_docs(REPO_LOCAL_SKILL_ROOT);
+    let skill = skills
+        .iter()
+        .find(|skill| skill.name == "introspecting-tracedecay-usage")
+        .expect("repo-local skills should teach usage-driven TraceDecay self-improvement");
+    let body = &skill.body;
+    for required in [
+        "tracedecay:diagnosing-analytics",
+        "tracedecay:managing-session-context",
+        "tracedecay:inspecting-managed-skills",
+        "tracedecay:project-memory",
+        "tracedecay:code-health",
+        "tracedecay analytics diagnostics",
+        "tracedecay_skill_list",
+        "tracedecay_lcm_status",
+        "tracedecay_message_search",
+        "tracedecay_fact_store",
+    ] {
+        assert!(
+            body.contains(required),
+            "{} should mention {required}",
+            skill.path.display()
+        );
+    }
+}
+
+#[test]
+fn repo_local_usage_driven_operator_skills_are_not_template_stubs() {
+    let skills = load_skill_docs(REPO_LOCAL_SKILL_ROOT);
+    for skill_name in [
+        "inspecting-automation-cycles",
+        "interpreting-tracedecay-diagnostics",
+        "self-improving-from-usage-logs",
+        "writing-agent-managed-skills",
+    ] {
+        let skill = skills
+            .iter()
+            .find(|skill| skill.name == skill_name)
+            .unwrap_or_else(|| panic!("missing bundled operator skill {skill_name}"));
+        assert!(
+            !skill.raw.contains("[TODO"),
+            "{} should not contain skill template TODOs",
+            skill.path.display()
+        );
+    }
 }
 
 #[test]

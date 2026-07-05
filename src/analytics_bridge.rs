@@ -268,6 +268,8 @@ pub async fn run_analytics_diagnostics(
     all_projects: bool,
     no_sync: bool,
 ) -> crate::errors::Result<()> {
+    const EVENT_SAMPLE_LIMIT: usize = 10_000;
+
     let project_root = cli_project_root();
     let gdb = open_global_db().await?;
 
@@ -290,7 +292,7 @@ pub async fn run_analytics_diagnostics(
             session_id: None,
             event_kind: None,
             since: None,
-            limit: 10_000,
+            limit: EVENT_SAMPLE_LIMIT,
         })
         .await
         .map_err(cli_error)?;
@@ -314,9 +316,12 @@ pub async fn run_analytics_diagnostics(
         hook_filter_root,
     );
 
-    let message_count = match project_root.as_deref() {
-        Some(root) => project_session_message_count(root).await,
-        None => 0,
+    let message_count = match project_filter.as_deref() {
+        Some(project_key) => gdb
+            .session_message_count_for_project(project_key)
+            .await
+            .unwrap_or(0),
+        None => gdb.session_message_count().await.unwrap_or(0),
     };
 
     let durable = if event_rows.is_empty() {
@@ -340,24 +345,17 @@ pub async fn run_analytics_diagnostics(
             crate::global_db::global_db_path()
                 .map_or(Value::Null, |path| json!(path.display().to_string())),
         );
+        summary.insert("event_sample_limit".to_string(), json!(EVENT_SAMPLE_LIMIT));
+        summary.insert(
+            "event_count_may_be_truncated".to_string(),
+            json!(event_rows.len() >= EVENT_SAMPLE_LIMIT),
+        );
     }
     println!(
         "{}",
         serde_json::to_string_pretty(&summary).unwrap_or_default()
     );
     Ok(())
-}
-
-async fn project_session_message_count(project_root: &Path) -> i64 {
-    let Some(db_path) =
-        crate::sessions::cursor::resolved_project_session_db_path(project_root).await
-    else {
-        return 0;
-    };
-    let Some(db) = GlobalDb::open_at(&db_path).await else {
-        return 0;
-    };
-    db.session_message_count().await.unwrap_or(0)
 }
 
 #[cfg(test)]

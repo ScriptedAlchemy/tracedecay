@@ -2272,6 +2272,30 @@ impl GlobalDb {
             .map_err(|e| format!("failed to decode session message count: {e}"))
     }
 
+    pub async fn session_message_count_for_project(
+        &self,
+        project_key: &str,
+    ) -> Result<i64, String> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT COUNT(*)
+                 FROM session_messages m
+                 JOIN sessions s ON s.provider = m.provider AND s.session_id = m.session_id
+                 WHERE s.project_key = ?1",
+                libsql::params![project_key],
+            )
+            .await
+            .map_err(|e| format!("failed to count project session messages: {e}"))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|e| format!("failed to read project session message count: {e}"))?
+            .ok_or_else(|| "project session message count returned no row".to_string())?;
+        row.get::<i64>(0)
+            .map_err(|e| format!("failed to decode project session message count: {e}"))
+    }
+
     pub async fn query_analytics_events(
         &self,
         query: &AnalyticsEventQuery,
