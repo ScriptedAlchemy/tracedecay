@@ -4,7 +4,7 @@
 //! file-backed [`crate::sessions::source`] drivers and the Hermes `SQLite` sweep
 //! both depend on them so they do not need to import from each other.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
@@ -126,29 +126,57 @@ pub(crate) fn paths_equal(a: &Path, b: &Path) -> bool {
 }
 
 pub(crate) fn path_belongs_to_project(path: &Path, project_root: &Path) -> bool {
-    if paths_equal(path, project_root) {
-        return true;
+    ProjectRootMatcher::new(project_root).contains(path)
+}
+
+/// A project root with its git worktree/common-dir resolutions computed once,
+/// so repeated membership tests (e.g. one per discovered workflow run) do not
+/// re-run `git_worktree_root`/`git_common_dir` on the fixed project side. A
+/// single [`ProjectRootMatcher::contains`] call is exactly equivalent to
+/// [`path_belongs_to_project`], which is a thin wrapper over it.
+pub(crate) struct ProjectRootMatcher {
+    root: PathBuf,
+    worktree: Option<PathBuf>,
+    common_dir: Option<PathBuf>,
+}
+
+impl ProjectRootMatcher {
+    /// Resolve the fixed project-side git identity once.
+    pub(crate) fn new(project_root: &Path) -> Self {
+        Self {
+            root: project_root.to_path_buf(),
+            worktree: crate::worktree::git_worktree_root(project_root),
+            common_dir: crate::worktree::git_common_dir(project_root),
+        }
     }
 
-    let path_worktree = crate::worktree::git_worktree_root(path);
-    let project_worktree = crate::worktree::git_worktree_root(project_root);
-    if let (Some(path_worktree), Some(project_worktree)) =
-        (path_worktree.as_ref(), project_worktree.as_ref())
-    {
-        if paths_equal(path_worktree, project_worktree) {
+    /// True when `path` belongs to this project: it is the root, shares the
+    /// project's git worktree or common dir, or discovers back to the root.
+    /// Only the varying `path` side is git-resolved here.
+    pub(crate) fn contains(&self, path: &Path) -> bool {
+        if paths_equal(path, &self.root) {
             return true;
         }
-        let path_common = crate::worktree::git_common_dir(path);
-        let project_common = crate::worktree::git_common_dir(project_root);
-        return path_common
-            .as_ref()
-            .zip(project_common.as_ref())
-            .is_some_and(|(path_common, project_common)| paths_equal(path_common, project_common));
-    }
 
-    crate::config::discover_project_root(path)
-        .as_ref()
-        .is_some_and(|discovered| paths_equal(discovered, project_root))
+        if let (Some(path_worktree), Some(project_worktree)) = (
+            crate::worktree::git_worktree_root(path).as_ref(),
+            self.worktree.as_ref(),
+        ) {
+            if paths_equal(path_worktree, project_worktree) {
+                return true;
+            }
+            return crate::worktree::git_common_dir(path)
+                .as_ref()
+                .zip(self.common_dir.as_ref())
+                .is_some_and(|(path_common, project_common)| {
+                    paths_equal(path_common, project_common)
+                });
+        }
+
+        crate::config::discover_project_root(path)
+            .as_ref()
+            .is_some_and(|discovered| paths_equal(discovered, &self.root))
+    }
 }
 
 #[cfg(windows)]
@@ -166,6 +194,20 @@ fn normalized_paths_equal(a: &Path, b: &Path) -> bool {
 #[cfg(not(windows))]
 fn normalized_paths_equal(a: &Path, b: &Path) -> bool {
     a == b
+}
+
+/// Collapse internal whitespace/newlines to single spaces and clip to at most
+/// `max` characters, appending a single-character `…` when truncation occurred.
+/// Shared by the workflow surfaces (run/agent summaries, result summaries,
+/// unfinished-run evidence) so a multi-line blob never smears a table, bullet,
+/// or stored column.
+pub(crate) fn one_line_truncated(text: &str, max: usize) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= max {
+        return collapsed;
+    }
+    let truncated: String = collapsed.chars().take(max).collect();
+    format!("{truncated}…")
 }
 
 /// Collapse whitespace and clip to a short preview suitable for a session title.
@@ -411,7 +453,14 @@ pub(crate) fn title_from_messages(messages: &[SessionMessageRecord]) -> Option<S
 mod tests {
     use serde_json::json;
 
+    use super::one_line_truncated;
     use super::usage_counters_from;
+
+    #[test]
+    fn one_line_truncated_collapses_and_clips() {
+        assert_eq!(one_line_truncated("a\n b\t c", 100), "a b c");
+        assert_eq!(one_line_truncated("abcdef", 3), "abc…");
+    }
 
     #[test]
     fn usage_counters_keep_cache_only_rows_actual() {

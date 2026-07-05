@@ -731,6 +731,9 @@ fn should_skip_startup_maintenance(command: &Commands) -> bool {
             | Commands::Lsp { .. }
             | Commands::Doctor { .. }
             | Commands::Analytics { .. }
+            | Commands::Sessions {
+                action: SessionsAction::Unfinished { .. },
+            }
             | Commands::Migrate { .. }
             | Commands::Projects { .. }
             | Commands::HookPreToolUse
@@ -806,6 +809,9 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
             | Commands::Migrate { .. }
             | Commands::Projects { .. }
             | Commands::Tool { .. }
+            | Commands::Sessions {
+                action: SessionsAction::Unfinished { .. },
+            }
             | Commands::Daemon { .. }
     )
 }

@@ -309,6 +309,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_dashboard(),
         def_message_search(),
         def_sessions_for(),
+        def_workflows(),
         def_lcm_status(),
         def_lcm_doctor(),
         def_lcm_load_session(),
@@ -2463,7 +2464,9 @@ fn def_message_search() -> ToolDefinition {
                 },
                 "branch": git_scope_branch_schema(),
                 "worktree": git_scope_worktree_schema(),
-                "commit": git_scope_commit_schema()
+                "commit": git_scope_commit_schema(),
+                "workflow_run": workflow_run_scope_schema(),
+                "workflow_agent": workflow_agent_scope_schema()
             },
             "required": ["query"]
         }),
@@ -2532,6 +2535,65 @@ fn def_sessions_for() -> ToolDefinition {
             "required": ["git_ref", "value"]
         }),
     )
+}
+
+fn def_workflows() -> ToolDefinition {
+    def(
+        "tracedecay_workflows",
+        "Workflow Runs",
+        "Recover Claude Code workflow runs (multi-agent `wf_*` orchestrations) and their per-phase agents from the active project. Three modes, chosen by which argument is set: (1) list runs for a parent thread via session_id, or every run on a branch/worktree/commit via branch/worktree/commit (a run inherits its parent session's git spans); (2) show one run's result summary, phases, and agent roster via run_id; (3) drill into one agent's transcript via run_id + agent_label. Read-only; runs that never ran leave no rows.",
+        json!({
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "Parent thread/session id: list the workflow runs it spawned (newest first). Mutually exclusive with run_id and the git filters."
+                },
+                "run_id": {
+                    "type": "string",
+                    "description": "A `wf_*` run id: show that run's summary, phases, and agents. Combine with agent_label to drill into one agent."
+                },
+                "agent_label": {
+                    "type": "string",
+                    "description": "With run_id, drill into a single agent of that run by its label (e.g. 'mine:claude-transcripts')."
+                },
+                "branch": {
+                    "type": "string",
+                    "description": "List workflow runs whose parent session was active on this git branch (via the session-git correlation index)."
+                },
+                "worktree": {
+                    "type": "string",
+                    "description": "List workflow runs whose parent session was active in this git worktree root path."
+                },
+                "commit": {
+                    "type": "string",
+                    "description": "List workflow runs whose parent session was attributed to this commit sha (full or >=6-char hex prefix)."
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "description": "Maximum runs or agents to return (default: 20)."
+                }
+            }
+        }),
+    )
+}
+
+/// Optional `workflow_run` narrowing filter shared by `tracedecay_message_search`:
+/// scopes hits to the transcripts of one workflow run's agents.
+fn workflow_run_scope_schema() -> Value {
+    json!({
+        "type": "string",
+        "description": "Optional workflow run id (`wf_*`) filter: only messages from sessions that spawned this workflow run (via the workflow-run index). Pair with agent_label to scope to one agent."
+    })
+}
+
+fn workflow_agent_scope_schema() -> Value {
+    json!({
+        "type": "string",
+        "description": "Optional workflow agent label filter, used with workflow_run to scope to a single agent of that run."
+    })
 }
 
 fn lcm_storage_scope_schema() -> Value {

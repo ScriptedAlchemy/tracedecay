@@ -21,6 +21,21 @@ use crate::sessions::{
 
 const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;
 
+/// Scopes a `tracedecay_message_search` to the agent transcripts of one
+/// workflow run, mirroring `GitScopeFilter` as a search-only concern. The run's
+/// messages are the messages of its agents (rows in `workflow_agents`); see
+/// [`GlobalDb::search_session_messages_workflow_scoped`] for the EXISTS
+/// pushdown. Serializes so the applied filter echoes cleanly into the payload.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct WorkflowScopeFilter {
+    /// The `wf_*` run whose agents' messages to keep.
+    pub run_id: String,
+    /// When set, narrows the scope to just this one agent of the run
+    /// (matched on `workflow_agents.agent_label`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_label: Option<String>,
+}
+
 /// Total savings + call count for a project (or all projects when `project` is None).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SavingsTotal {
@@ -1021,6 +1036,9 @@ impl GlobalDb {
             .await
             .ok()?;
         crate::sessions::git_correlation::ensure_git_correlation_schema(&db.conn)
+            .await
+            .ok()?;
+        crate::sessions::workflow_index::ensure_workflow_index_schema(&db.conn)
             .await
             .ok()?;
         // One-off self-heal: re-derive timestamps and token-usage counters
@@ -3271,6 +3289,80 @@ impl GlobalDb {
         crate::sessions::git_correlation::session_ids_for_scope(&self.conn, filter).await
     }
 
+    // ── Workflow-run index ───────────────────────────────────────────
+
+    /// Inserts or updates one indexed workflow run (idempotent on `run_id`).
+    /// See [`crate::sessions::workflow_index::upsert_run`].
+    pub async fn workflow_upsert_run(
+        &self,
+        run: &crate::sessions::workflow_index::WorkflowRun,
+    ) -> Result<(), crate::sessions::workflow_index::WorkflowIndexError> {
+        crate::sessions::workflow_index::upsert_run(&self.conn, run).await
+    }
+
+    /// Inserts or updates one workflow agent (idempotent on
+    /// `(run_id, agent_label, agent_id)`).
+    /// See [`crate::sessions::workflow_index::upsert_agent`].
+    pub async fn workflow_upsert_agent(
+        &self,
+        agent: &crate::sessions::workflow_index::WorkflowAgent,
+    ) -> Result<(), crate::sessions::workflow_index::WorkflowIndexError> {
+        crate::sessions::workflow_index::upsert_agent(&self.conn, agent).await
+    }
+
+    /// Lists workflow runs spawned by one parent session, newest-first.
+    /// See [`crate::sessions::workflow_index::runs_for_session`].
+    pub async fn workflow_runs_for_session(
+        &self,
+        parent_session_id: &str,
+        limit: usize,
+    ) -> Result<
+        Vec<crate::sessions::workflow_index::WorkflowRun>,
+        crate::sessions::workflow_index::WorkflowIndexError,
+    > {
+        crate::sessions::workflow_index::runs_for_session(&self.conn, parent_session_id, limit)
+            .await
+    }
+
+    /// Fetches one workflow run by its `wf_*` id.
+    /// See [`crate::sessions::workflow_index::run_for_id`].
+    pub async fn workflow_run_for_id(
+        &self,
+        run_id: &str,
+    ) -> Result<
+        Option<crate::sessions::workflow_index::WorkflowRun>,
+        crate::sessions::workflow_index::WorkflowIndexError,
+    > {
+        crate::sessions::workflow_index::run_for_id(&self.conn, run_id).await
+    }
+
+    /// Lists the agents of one workflow run in phase order.
+    /// See [`crate::sessions::workflow_index::agents_for_run`].
+    pub async fn workflow_agents_for_run(
+        &self,
+        run_id: &str,
+        limit: usize,
+    ) -> Result<
+        Vec<crate::sessions::workflow_index::WorkflowAgent>,
+        crate::sessions::workflow_index::WorkflowIndexError,
+    > {
+        crate::sessions::workflow_index::agents_for_run(&self.conn, run_id, limit).await
+    }
+
+    /// Lists workflow runs that ran on a git branch/worktree/commit, joined
+    /// through their parent session's git spans.
+    /// See [`crate::sessions::workflow_index::runs_for_git_scope`].
+    pub async fn workflow_runs_for_git_scope(
+        &self,
+        filter: &crate::sessions::git_correlation::GitScopeFilter,
+        limit: usize,
+    ) -> Result<
+        Vec<crate::sessions::workflow_index::WorkflowRun>,
+        crate::sessions::workflow_index::WorkflowIndexError,
+    > {
+        crate::sessions::workflow_index::runs_for_git_scope(&self.conn, filter, limit).await
+    }
+
     /// Lists per-session activity windows for the historical git-correlation
     /// backfill: each row carries the session's declared `started_at`/`ended_at`
     /// plus the min/max `session_messages.timestamp`, so the caller can derive
@@ -3317,6 +3409,7 @@ impl GlobalDb {
             limit,
             filters,
             None,
+            None,
         )
         .await
     }
@@ -3342,6 +3435,37 @@ impl GlobalDb {
             limit,
             filters,
             Some(git_filter),
+            None,
+        )
+        .await
+    }
+
+    /// Like [`Self::search_session_messages_filtered`], additionally scoping
+    /// hits to the agent transcripts of one workflow run via EXISTS pushdown
+    /// against `workflow_agents`. A run's agents are matched either by the
+    /// transcript file the message came from (`workflow_agents.transcript_path
+    /// = session_messages.source_path`) or, as a fallback, by the agent's own
+    /// session id (`workflow_agents.agent_session_id = session_messages.session_id`),
+    /// so the scope holds whichever key the ingest recorded. When
+    /// `filter.agent_label` is set the scope narrows to that one agent. A call
+    /// against a store predating the workflow-index schema returns no hits.
+    pub async fn search_session_messages_workflow_scoped(
+        &self,
+        provider: Option<&str>,
+        project_key: Option<&str>,
+        query: &str,
+        limit: usize,
+        filters: SessionSearchFilters<'_>,
+        workflow_filter: &WorkflowScopeFilter,
+    ) -> Vec<SessionMessageSearchResult> {
+        self.search_session_messages_filtered_inner(
+            provider,
+            project_key,
+            query,
+            limit,
+            filters,
+            None,
+            Some(workflow_filter),
         )
         .await
     }
@@ -3354,10 +3478,19 @@ impl GlobalDb {
         limit: usize,
         filters: SessionSearchFilters<'_>,
     ) -> Vec<SessionMessageSearchResult> {
-        self.search_session_messages_filtered_inner(None, project_key, query, limit, filters, None)
-            .await
+        self.search_session_messages_filtered_inner(
+            None,
+            project_key,
+            query,
+            limit,
+            filters,
+            None,
+            None,
+        )
+        .await
     }
 
+    #[allow(clippy::too_many_arguments)] // internal fan-in of independent scope/time/git/workflow filters
     async fn search_session_messages_filtered_inner(
         &self,
         provider: Option<&str>,
@@ -3366,6 +3499,7 @@ impl GlobalDb {
         limit: usize,
         filters: SessionSearchFilters<'_>,
         git_filter: Option<&crate::sessions::git_correlation::GitScopeFilter>,
+        workflow_filter: Option<&WorkflowScopeFilter>,
     ) -> Vec<SessionMessageSearchResult> {
         // A git-scoped search against a store written before the correlation
         // schema existed can never match; report empty rather than issuing a
@@ -3378,6 +3512,16 @@ impl GlobalDb {
             {
                 return Vec::new();
             }
+        }
+        // Likewise a workflow-scoped search against a store predating the
+        // workflow-index schema can never match: short-circuit to empty rather
+        // than hitting `no such table: workflow_agents`.
+        if workflow_filter.is_some()
+            && !crate::sessions::workflow_index::tables_present(&self.conn)
+                .await
+                .unwrap_or(false)
+        {
+            return Vec::new();
         }
         let fts_query = session_fts_query(query);
         if fts_query.is_empty() || limit == 0 {
@@ -3454,6 +3598,24 @@ impl GlobalDb {
                 let _ = write!(sql, " AND {predicate}");
                 query_params.extend(predicate_values);
             }
+        }
+        // Workflow-run scoping: reuse the shared EXISTS predicate (also used
+        // by future lcm/grep paths) so run/agent correlation semantics stay in
+        // one place. Renumber its `?1`, `?2`, … slots to follow the query's
+        // existing numbered placeholders, then append the bind values in order.
+        if let Some(filter) = workflow_filter {
+            let (mut predicate, predicate_values) =
+                crate::sessions::workflow_index::workflow_scope_exists_predicate(
+                    filter,
+                    "m.source_path",
+                    "m.session_id",
+                );
+            let base = query_params.len();
+            for slot in (1..=predicate_values.len()).rev() {
+                predicate = predicate.replace(&format!("?{slot}"), &format!("?{}", base + slot));
+            }
+            let _ = write!(sql, " AND {predicate}");
+            query_params.extend(predicate_values);
         }
         for term in &literal_terms {
             query_params.push(Value::Text(term.clone()));

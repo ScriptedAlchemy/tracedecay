@@ -21,6 +21,9 @@ pub mod shared;
 pub mod source;
 pub(crate) mod transcript_backfill;
 pub mod vibe;
+pub mod workflow_index;
+pub mod workflow_ingest;
+pub mod workflow_state;
 
 pub use providers::{ProviderScope, SessionProvider};
 
@@ -90,6 +93,11 @@ pub async fn ingest_global_sources_for_provider(
     // Now that messages have landed, attribute any commits that fell inside a
     // recorded session span. Fail-open: a git or DB hiccup never blocks ingest.
     attribute_commits_after_ingest(db).await;
+    // Index Claude Code workflow runs + their agents last, so the parent
+    // sessions' git spans already exist and each run inherits them. Fail-open:
+    // a workflow-ingest hiccup only logs at debug, never blocks session ingest.
+    // Runs live in their own tables, so they do not affect `stats`.
+    let _ = workflow_ingest::ingest_workflow_runs(db, project_root).await;
     stats
 }
 

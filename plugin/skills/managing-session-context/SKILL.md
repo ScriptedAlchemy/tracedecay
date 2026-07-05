@@ -45,6 +45,14 @@ Climb cheapest-first; stop as soon as the question is answered.
    `branch`|`worktree`|`commit`, `value`, optional `since`/`until`, `limit`):
    find sessions active on a branch or worktree, or sessions that produced a
    commit; feed returned session ids back into grep/replay/drill-down above.
+7. **Workflow-run recovery → `tracedecay_workflows`**: recover multi-agent
+   workflow (`wf_*`) runs and their per-phase agents. List runs for a thread
+   with `session_id`, or every run on a branch/worktree/commit with
+   `branch`/`worktree`/`commit` (a run inherits its parent session's git
+   spans). Show one run's result summary + phases + agent roster with
+   `run_id`, then drill into a single agent with `run_id` + `agent_label`.
+   To read that agent's messages, scope `tracedecay_message_search` with
+   `workflow_run` (+ optional `workflow_agent`), or replay via rungs 3–4.
 
 After a compaction, if prior-session context seems missing, run this ladder
 before assuming the compacted summary is complete.

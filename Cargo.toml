@@ -162,6 +162,7 @@ cc = "1"
 tempfile = "3"
 sha2 = "0.11"
 hex = "0.4"
+filetime = "0.2"
 criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 # test-util enables tokio::test(start_paused = true) so timer-driven unit
 # tests (daemon restart-grace windows) run on virtual time instead of real

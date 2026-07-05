@@ -4836,6 +4836,7 @@ dependencies = [
  "criterion",
  "crossterm",
  "dirs",
+ "filetime",
  "flate2",
  "fs2",
  "getrandom 0.2.17",

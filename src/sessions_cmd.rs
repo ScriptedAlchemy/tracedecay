@@ -139,6 +139,48 @@ pub(crate) async fn handle_sessions_action(
         } => {
             run_git_backfill(project_id, project_path, since, limit_sessions, dry_run).await?;
         }
+        SessionsAction::Unfinished {
+            limit,
+            json,
+            project_id,
+            project_path,
+        } => {
+            let project_path = resolve_cli_project_root(None, project_id, project_path).await?;
+            let db = tracedecay::sessions::cursor::open_project_session_db(&project_path)
+                .await
+                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                    message: format!(
+                        "could not open project session database for {}",
+                        project_path.display()
+                    ),
+                })?;
+            let items = tracedecay::sessions::workflow_state::list_unfinished(&db, limit)
+                .await
+                .map_err(|message| tracedecay::errors::TraceDecayError::Config { message })?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&items).map_err(|e| {
+                        tracedecay::errors::TraceDecayError::Config {
+                            message: e.to_string(),
+                        }
+                    })?
+                );
+            } else {
+                for item in items {
+                    let task_id = item.task_id.as_deref().unwrap_or("-");
+                    println!(
+                        "{}\t{}\t{}\t{}\t{}\t{}",
+                        item.status,
+                        item.provider,
+                        item.session_id,
+                        task_id,
+                        item.message_id,
+                        item.evidence
+                    );
+                }
+            }
+        }
     }
     Ok(())
 }

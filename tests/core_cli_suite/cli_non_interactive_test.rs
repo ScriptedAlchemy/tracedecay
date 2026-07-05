@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::common::{create_runtime, sample_node};
+use crate::common::{create_runtime, global_session, message_record, sample_node};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
@@ -18,8 +18,9 @@ use tracedecay::migrate::manifest::{
     MigrationManifest, MigrationProtocol,
 };
 use tracedecay::storage::{
-    read_enrollment_marker, write_enrollment_marker, EnrollmentMarker, StorageMode, StoreKind,
-    StoreManifest, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION,
+    default_profile_project_id, profile_sharded_data_root, read_enrollment_marker,
+    write_enrollment_marker, EnrollmentMarker, StorageMode, StoreKind, StoreManifest,
+    SESSIONS_DB_FILENAME, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION,
 };
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
@@ -167,6 +168,59 @@ fn init_accepts_relative_current_directory() {
         !project_root.join(".tracedecay/tracedecay.db").exists(),
         "default init must use the profile-sharded store, not a repo-local graph DB"
     );
+}
+
+#[test]
+fn sessions_unfinished_lists_workflow_state_evidence() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let project_root = canonical_temp_path(project.path());
+    std::fs::write(project_root.join("lib.rs"), "pub fn indexed() {}\n").unwrap();
+    init_project_in_process(home.path(), &project_root);
+    let project_id = default_profile_project_id(&project_root);
+    let sessions_db_path = profile_sharded_data_root(&profile_root(home.path()), &project_id)
+        .join(SESSIONS_DB_FILENAME);
+
+    create_runtime().block_on(async {
+        let db = GlobalDb::open_at(&sessions_db_path)
+            .await
+            .expect("session db");
+        assert!(
+            db.upsert_session(&global_session("claude", "session-1", "proj_cli"))
+                .await
+        );
+        assert!(
+            db.upsert_session_message(&message_record(
+                "claude",
+                "message-1",
+                "session-1",
+                "assistant",
+                1,
+                "Blocked: waiting on missing deploy credentials",
+                "message",
+                None,
+                Some("/tmp/project/transcript.jsonl"),
+                Some(1),
+                Some(r#"{"task_id":"task-7"}"#),
+            ))
+            .await
+        );
+    });
+
+    let mut command = tracedecay_command(home.path(), &project_root);
+    command.args(["sessions", "unfinished", "--json"]);
+    let output = run_with_timeout(command, cli_timeout());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "sessions unfinished should succeed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(stdout.contains(r#""status": "blocked""#), "{stdout}");
+    assert!(stdout.contains(r#""session_id": "session-1""#), "{stdout}");
+    assert!(stdout.contains(r#""task_id": "task-7""#), "{stdout}");
+    assert!(stdout.contains("missing deploy credentials"), "{stdout}");
 }
 
 fn write_profile_sharded_fixture(home: &std::path::Path, project: &std::path::Path) {

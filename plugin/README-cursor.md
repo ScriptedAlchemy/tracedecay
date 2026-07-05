@@ -151,7 +151,8 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
     "tracedecay:tracedecay_todos",
     "tracedecay:tracedecay_type_hierarchy",
     "tracedecay:tracedecay_unsafe_patterns",
-    "tracedecay:tracedecay_unused_imports"
+    "tracedecay:tracedecay_unused_imports",
+    "tracedecay:tracedecay_workflows"
   ]
 }
 ```

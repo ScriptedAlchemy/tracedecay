@@ -669,6 +669,21 @@ pub enum SessionsAction {
         #[arg(long)]
         dry_run: bool,
     },
+    /// List unfinished workflow/task evidence from ingested session messages
+    Unfinished {
+        /// Maximum evidence rows
+        #[arg(long, default_value_t = 25)]
+        limit: usize,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Registered project id whose session store should be searched
+        #[arg(long)]
+        project_id: Option<String>,
+        /// Registered project root path or alias whose session store should be searched
+        #[arg(long, conflicts_with = "project_id")]
+        project_path: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

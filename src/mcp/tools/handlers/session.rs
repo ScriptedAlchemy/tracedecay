@@ -6,9 +6,12 @@ use std::sync::{LazyLock, Mutex};
 use serde_json::{json, Map, Value};
 
 use super::super::render::{self, truncated_json_envelope_with_handle, Md};
-use super::support::{profile_root_for_global_db, project_registry_context, safe_profile_relpath};
+use super::support::{
+    argument_error, profile_root_for_global_db, project_registry_context, safe_profile_relpath,
+    string_arg, tool_json_with_md,
+};
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{GlobalDb, ProjectRegistryContext};
+use crate::global_db::{GlobalDb, ProjectRegistryContext, WorkflowScopeFilter};
 use crate::mcp::response_handles::{
     observe_response_truncation, store_response_handle, RESPONSE_RETRIEVE_TOOL,
 };
@@ -43,22 +46,6 @@ fn tool_json(project_root: Option<&Path>, args: &Value, value: &Value) -> ToolRe
     tool_json_with_md(project_root, args, value, || render::generic_md(value))
 }
 
-/// Like [`tool_json`] but renders the markdown (default-format) body with a
-/// caller-supplied closure instead of the generic key/value renderer. The
-/// `format:"json"` path is unaffected — it always serializes `value` compactly.
-fn tool_json_with_md<F: FnOnce() -> String>(
-    project_root: Option<&Path>,
-    args: &Value,
-    value: &Value,
-    md: F,
-) -> ToolResult {
-    let text = render::finalize(project_root, args, value, md);
-    ToolResult::new(
-        json!({ "content": [{ "type": "text", "text": text }] }),
-        Vec::new(),
-    )
-}
-
 const MESSAGE_SEARCH_SNIPPET_CHARS: usize = 240;
 
 /// Renders `tracedecay_message_search` results as compact markdown. Each hit
@@ -80,6 +67,9 @@ fn render_message_search_md(value: &Value) -> String {
     if let Some(summary) = git_filter_summary(value) {
         md.field("git filter", &summary);
     }
+    if let Some(summary) = workflow_filter_summary(value) {
+        md.field("workflow filter", &summary);
+    }
     let results = value.get("results").and_then(Value::as_array);
     match results {
         Some(results) if !results.is_empty() => {
@@ -93,6 +83,25 @@ fn render_message_search_md(value: &Value) -> String {
         }
     }
     md.render()
+}
+
+/// One-line `scoped to run wf_… agent …` summary of an applied workflow-run
+/// filter, or `None` when none was applied. Reads the `workflow_run` /
+/// `workflow_agent` keys echoed into the payload by the message-search handler.
+fn workflow_filter_summary(value: &Value) -> Option<String> {
+    if !value
+        .get("workflow_filter_applied")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let run_id = value.get("workflow_run").and_then(Value::as_str)?;
+    let mut summary = format!("scoped to run `{run_id}`");
+    if let Some(agent) = value.get("workflow_agent").and_then(Value::as_str) {
+        let _ = write!(summary, " agent `{agent}`");
+    }
+    Some(summary)
 }
 
 /// One-line `branch=… worktree=… commit=…` summary of the applied git-scope
@@ -1046,23 +1055,10 @@ fn truncate_chars(value: &str, max_chars: usize) -> (String, bool) {
     (text, truncated)
 }
 
-fn string_arg<'a>(args: &'a Value, name: &str) -> Option<&'a str> {
-    args.get(name)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-}
-
 fn required_string_arg<'a>(args: &'a Value, name: &str) -> Result<&'a str> {
     string_arg(args, name).ok_or_else(|| TraceDecayError::Config {
         message: format!("missing required parameter: {name}"),
     })
-}
-
-fn argument_error(message: impl Into<String>) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: message.into(),
-    }
 }
 
 fn bounded_usize_arg(args: &Value, name: &str, min: usize, max: usize) -> Result<Option<usize>> {
@@ -1971,6 +1967,14 @@ pub(super) async fn handle_message_search(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|parent_session_id| !parent_session_id.is_empty());
+    // Workflow-run scoping narrows a search to the agent transcripts of one
+    // run via an EXISTS pushdown against `workflow_agents` (see
+    // `search_session_messages_workflow_scoped`), so a hit is kept only when it
+    // belongs to an agent of the run — not the whole parent thread.
+    // `workflow_agent`, when set, pins the scope to a single agent. Both are
+    // echoed in the payload so callers see the applied filter.
+    let workflow_run = string_arg(&args, "workflow_run");
+    let workflow_agent = string_arg(&args, "workflow_agent");
     let include_subagents = args
         .get("include_subagents")
         .and_then(Value::as_bool)
@@ -2033,7 +2037,37 @@ pub(super) async fn handle_message_search(
         )
         .await;
     }
-    let results = if git_filter_applied {
+    // Build the workflow-run scope filter and, separately, resolve the run's
+    // parent thread purely for the echoed `workflow_run_parent_session` field
+    // (the scope itself is authoritative via the `workflow_agents` EXISTS
+    // pushdown, so an unknown/orphan parent no longer needs a sentinel).
+    let workflow_scope = workflow_run.map(|run_id| WorkflowScopeFilter {
+        run_id: run_id.to_string(),
+        agent_label: workflow_agent.map(str::to_string),
+    });
+    let workflow_filter_applied = workflow_scope.is_some();
+    let resolved_workflow_parent: Option<String> = match workflow_run {
+        Some(run_id) => match db.workflow_run_for_id(run_id).await {
+            Ok(Some(run)) if !run.parent_session_id.is_empty() => Some(run.parent_session_id),
+            _ => None,
+        },
+        None => None,
+    };
+    let results = if let Some(workflow_filter) = &workflow_scope {
+        db.search_session_messages_workflow_scoped(
+            requested_provider,
+            project_key,
+            query,
+            limit,
+            SessionSearchFilters {
+                scope,
+                parent_session_id,
+                time_range,
+            },
+            workflow_filter,
+        )
+        .await
+    } else if git_filter_applied {
         db.search_session_messages_git_scoped(
             requested_provider,
             project_key,
@@ -2103,6 +2137,25 @@ pub(super) async fn handle_message_search(
                 serde_json::to_value(&git_filter).unwrap_or(Value::Null),
             );
             map.insert("git_filter_applied".to_string(), Value::Bool(true));
+        }
+    }
+    if workflow_filter_applied {
+        if let Some(map) = payload.as_object_mut() {
+            map.insert(
+                "workflow_run".to_string(),
+                workflow_run.map_or(Value::Null, |run| Value::String(run.to_string())),
+            );
+            if let Some(label) = workflow_agent {
+                map.insert(
+                    "workflow_agent".to_string(),
+                    Value::String(label.to_string()),
+                );
+            }
+            map.insert(
+                "workflow_run_parent_session".to_string(),
+                resolved_workflow_parent.map_or(Value::Null, Value::String),
+            );
+            map.insert("workflow_filter_applied".to_string(), Value::Bool(true));
         }
     }
     Ok(tool_json_with_md(

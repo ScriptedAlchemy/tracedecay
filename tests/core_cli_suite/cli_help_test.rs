@@ -70,6 +70,7 @@ fn nested_subcommands_accept_help() {
         &["daemon", "install-service", "--help"],
         &["sessions", "ingest", "--help"],
         &["sessions", "search", "--help"],
+        &["sessions", "unfinished", "--help"],
         &["projects", "list", "--help"],
         &["projects", "search", "--help"],
         &["projects", "context", "--help"],

@@ -43,7 +43,7 @@ const CLAUDE_MESSAGE_LOCATION_KEYS: TranscriptLocationMetadataKeys =
 const MAX_SCAN_DEPTH: u8 = 6;
 /// `cwd` should appear on an early line; scan a few in case the first is a
 /// `summary`/meta line without one.
-const CWD_PROBE_LINES: usize = 8;
+pub(crate) const CWD_PROBE_LINES: usize = 8;
 
 /// Claude Code transcript locator + parser.
 pub struct ClaudeSource {
@@ -181,7 +181,7 @@ fn claude_subagent_identity(path: &Path) -> Option<ClaudeSubagentInfo> {
 }
 
 /// Reads the session `cwd` from an early line of a Claude transcript.
-fn transcript_cwd(path: &Path) -> Option<PathBuf> {
+pub(crate) fn transcript_cwd(path: &Path) -> Option<PathBuf> {
     use std::io::BufRead;
     let file = std::fs::File::open(path).ok()?;
     let reader = std::io::BufReader::new(file);

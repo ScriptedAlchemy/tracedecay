@@ -6,10 +6,44 @@
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
+use super::super::render;
+use super::super::ToolResult;
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::{CodeProjectRecord, GlobalDb, ProjectRegistryContext};
+
+/// Trimmed, non-empty string argument by key, or `None` when absent, non-string,
+/// or blank after trimming.
+pub(super) fn string_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+/// Builds a `Config` error from a message, for argument-validation failures.
+pub(super) fn argument_error(message: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: message.into(),
+    }
+}
+
+/// Wraps a JSON payload in a text `ToolResult`, rendering the default-format
+/// (markdown) body with a caller-supplied closure. The `format:"json"` path is
+/// unaffected — [`render::finalize`] serializes `value` compactly there.
+pub(super) fn tool_json_with_md<F: FnOnce() -> String>(
+    project_root: Option<&Path>,
+    args: &Value,
+    value: &Value,
+    md: F,
+) -> ToolResult {
+    let text = render::finalize(project_root, args, value, md);
+    ToolResult::new(
+        json!({ "content": [{ "type": "text", "text": text }] }),
+        Vec::new(),
+    )
+}
 
 /// Extracts the `node_id` parameter from tool arguments, accepting `id` as a
 /// fallback alias. LLMs occasionally shorten `node_id` to `id`; this avoids a

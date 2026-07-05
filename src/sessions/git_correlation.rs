@@ -727,48 +727,70 @@ async fn commit_session_ids(
     Ok(ids)
 }
 
-/// One EXISTS predicate string plus its bound values for a git-scope
-/// constraint, correlated to an outer message row via `session_column`
-/// (e.g. `m.session_id` or `r.session_id`). The predicate uses anonymous `?`
-/// placeholders, so callers append the returned values in order. Returns
-/// `None` when the filter is empty.
+/// Individual EXISTS clauses for git-scope filters, each with its bound
+/// values. Callers combine with ` AND ` (message search) or ` OR ` (workflow
+/// runs on a git ref).
 ///
 /// Span rows may carry `provider = ''` (raw hook routes are provider-agnostic),
 /// so scoping matches on `session_id` alone rather than also constraining the
 /// provider.
+pub(crate) fn git_scope_exists_clauses(
+    filter: &GitScopeFilter,
+    session_column: &str,
+) -> Vec<(String, Vec<Value>)> {
+    let mut clauses = Vec::new();
+    if let Some(branch) = &filter.branch {
+        clauses.push((
+            format!(
+                "EXISTS (SELECT 1 FROM session_git_spans g \
+                 WHERE g.session_id = {session_column} AND g.branch = ?)"
+            ),
+            vec![Value::Text(branch.clone())],
+        ));
+    }
+    if let Some(worktree) = &filter.worktree {
+        clauses.push((
+            format!(
+                "EXISTS (SELECT 1 FROM session_git_spans g \
+                 WHERE g.session_id = {session_column} AND g.worktree = ?)"
+            ),
+            vec![Value::Text(worktree.clone())],
+        ));
+    }
+    if let Some(commit) = &filter.commit {
+        clauses.push((
+            format!(
+                "EXISTS (SELECT 1 FROM commit_sessions c \
+                 WHERE c.session_id = {session_column} \
+                 AND (c.commit_sha = ? OR c.commit_sha LIKE ?))"
+            ),
+            vec![
+                Value::Text(commit.clone()),
+                Value::Text(format!("{commit}%")),
+            ],
+        ));
+    }
+    clauses
+}
+
+/// One AND-combined EXISTS predicate plus bound values for a git-scope
+/// constraint, correlated to an outer row via `session_column` (e.g.
+/// `m.session_id`). Returns `None` when the filter is empty.
 pub(crate) fn git_scope_exists_predicate(
     filter: &GitScopeFilter,
     session_column: &str,
 ) -> Option<(String, Vec<Value>)> {
-    if filter.is_empty() {
+    let clauses = git_scope_exists_clauses(filter, session_column);
+    if clauses.is_empty() {
         return None;
     }
-    let mut clauses: Vec<String> = Vec::new();
-    let mut values: Vec<Value> = Vec::new();
-    if let Some(branch) = &filter.branch {
-        clauses.push(format!(
-            "EXISTS (SELECT 1 FROM session_git_spans g \
-             WHERE g.session_id = {session_column} AND g.branch = ?)"
-        ));
-        values.push(Value::Text(branch.clone()));
-    }
-    if let Some(worktree) = &filter.worktree {
-        clauses.push(format!(
-            "EXISTS (SELECT 1 FROM session_git_spans g \
-             WHERE g.session_id = {session_column} AND g.worktree = ?)"
-        ));
-        values.push(Value::Text(worktree.clone()));
-    }
-    if let Some(commit) = &filter.commit {
-        clauses.push(format!(
-            "EXISTS (SELECT 1 FROM commit_sessions c \
-             WHERE c.session_id = {session_column} \
-             AND (c.commit_sha = ? OR c.commit_sha LIKE ?))"
-        ));
-        values.push(Value::Text(commit.clone()));
-        values.push(Value::Text(format!("{commit}%")));
-    }
-    Some((clauses.join(" AND "), values))
+    let sql = clauses
+        .iter()
+        .map(|(clause, _)| clause.as_str())
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let values = clauses.into_iter().flat_map(|(_, values)| values).collect();
+    Some((sql, values))
 }
 
 /// True when the git-correlation tables exist in `conn`'s database. Search
