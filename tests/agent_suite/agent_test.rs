@@ -209,7 +209,8 @@ fn managed_skill_draft(id: &str, title: &str) -> ManagedSkillDraft {
 }
 
 fn tracedecay_command(project: &Path, home: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+    let tracedecay_bin = Path::new(env!("CARGO_BIN_EXE_tracedecay"));
+    let mut command = Command::new(tracedecay_bin);
     command
         .current_dir(project)
         .env("HOME", home)
@@ -218,6 +219,9 @@ fn tracedecay_command(project: &Path, home: &Path) -> Command {
         .env(USER_DATA_DIR_ENV, home.join(".tracedecay"))
         .env("KIRO_HOME", home.join(".kiro"))
         .env("VIBE_HOME", home.join(".vibe"));
+    if let Some(bin_dir) = tracedecay_bin.parent() {
+        command.env("PATH", std::env::join_paths([bin_dir]).unwrap());
+    }
     command
 }
 
@@ -271,15 +275,10 @@ fn seed_memory_digest_target(
 }
 
 fn expected_tracedecay_bin() -> String {
-    let path_match = std::env::var_os("PATH").and_then(|path| {
-        std::env::split_paths(&path).find_map(|dir| {
-            let candidate = dir.join("tracedecay");
-            candidate
-                .exists()
-                .then(|| candidate.to_string_lossy().replace('\\', "/"))
-        })
-    });
-    path_match.unwrap_or_else(|| env!("CARGO_BIN_EXE_tracedecay").replace('\\', "/"))
+    std::fs::canonicalize(env!("CARGO_BIN_EXE_tracedecay"))
+        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_BIN_EXE_tracedecay")))
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 /// Python snippet that py_compiles the generated plugin sources inside the
