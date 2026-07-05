@@ -10,36 +10,48 @@
 //! - `-h` / `--help` — print the tool's parameters and exit.
 //! - `--json` — print the raw JSON-RPC `result.value`; default is the
 //!   human-readable text inside `content[0].text`.
+//! - `--dry-run` — parse and validate the arguments, print the resolved
+//!   arguments object as pretty JSON, and exit without dispatching the tool.
 //! - `--project <path>` — project root to open. Defaults to the nearest
 //!   initialised project walking up from cwd (falling back to cwd). We use
 //!   `--project` (not `-p`) because several MCP tools have a `path` argument
 //!   that filters files within the project.
-//! - `--args <json>` — escape hatch. Treats the JSON value as the entire
+//! - `--args <json|file|->` — escape hatch. Treats the value as the entire
 //!   argument object; mutually exclusive with `--key value` flags. Use for
 //!   complex shapes like `tracedecay_multi_str_replace`'s array-of-pairs.
-//!   `--args @/path.json` reads the JSON object from that file, sidestepping
-//!   the kernel's 128 KiB per-argv-string cap for large payloads.
+//!   As a whole-payload argument it follows the same convention as
+//!   `memory curate --llm-ops`: inline JSON, `-` for stdin, or a file path
+//!   (`--args payload.json`; a leading `@` also works for symmetry with
+//!   per-key values). Reading from a file or stdin sidesteps the kernel's
+//!   128 KiB per-argv-string cap for large payloads.
 //!
-//! Any value starting with `@` is read from the file at that path, which makes
-//! multi-line strings (replacements, ast-grep patterns, decision text) ergonomic.
+//! For per-`--key` values, a leading `@` opts into file/stdin reading
+//! (`--key @path`, `--key @-`) — the sigil is required there because a bare
+//! value is a literal. This makes multi-line strings (replacements, ast-grep
+//! patterns, decision text) ergonomic. stdin is read once and memoized, so it
+//! can be referenced by more than one field in a single invocation.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 #[cfg(unix)]
 use tracedecay::daemon::call_default_tool;
 use tracedecay::daemon::DaemonHandshake;
 use tracedecay::errors::{Result, TraceDecayError};
 use tracedecay::mcp::tools::{
-    get_tool_definitions, handle_profile_scoped_lcm_tool_call, render_tool_cli_help, ToolDefinition,
+    get_tool_definitions, handle_profile_scoped_lcm_tool_call, render_tool_cli_help,
+    short_tool_name, ToolDefinition, RESERVED_FLAGS_FOOTER,
 };
 
-/// Old CLI command names that don't match the MCP tool name. Keeps muscle
-/// memory working for the seven removed top-level commands. The right-hand
-/// side is the canonical MCP suffix (without the `tracedecay_` prefix).
-const NAME_ALIASES: &[(&str, &str)] = &[("query", "search")];
+mod args;
+use args::{canonical_tool_name, nearest_tool_name, parse_invocation, ParsedInvocation};
+#[cfg(test)]
+use args::{edit_distance, finalize_arrays, parse_invocation_with_stdin};
+#[cfg(test)]
+use serde_json::Map;
+
 const PROFILE_SCOPED_LCM_TOOLS: &[&str] = &[
     "tracedecay_lcm_status",
     "tracedecay_lcm_doctor",
@@ -85,9 +97,12 @@ pub(crate) async fn run(
 
     let canonical = canonical_tool_name(&raw_name);
     let Some(def) = defs.iter().find(|d| d.name == canonical) else {
+        let suggestion = nearest_tool_name(&canonical, &defs)
+            .map(|name| format!(" Did you mean '{name}'?"))
+            .unwrap_or_default();
         return Err(TraceDecayError::Config {
             message: format!(
-                "unknown tool: '{raw_name}'. Run `tracedecay tool` to list available tools."
+                "unknown tool: '{raw_name}'.{suggestion} Run `tracedecay tool` to list available tools."
             ),
         });
     };
@@ -101,8 +116,17 @@ pub(crate) async fn run(
         tool_args,
         project: parsed_project,
         raw_json,
+        dry_run,
         show_help: _,
     } = parsed;
+
+    if dry_run {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&tool_args).unwrap_or_default()
+        );
+        return Ok(());
+    }
 
     if is_profile_scoped_lcm_dispatch(&def.name, &tool_args) {
         return dispatch_daemon_tool(
@@ -122,30 +146,6 @@ pub(crate) async fn run(
         raw_json,
     )
     .await
-}
-
-/// Result of CLI argument parsing: the JSON value to hand to the MCP handler,
-/// plus the reserved-flag side-effects.
-#[cfg_attr(test, derive(Debug))]
-struct ParsedInvocation {
-    tool_args: Value,
-    project: Option<String>,
-    raw_json: bool,
-    show_help: bool,
-}
-
-/// Normalize a user-supplied tool name to the canonical `tracedecay_<suffix>`
-/// form used by the MCP registry. Accepts aliases (e.g. `query` → `search`),
-/// strips a leading `tracedecay_` if present, and converts dashes to
-/// underscores so `dead-code` and `dead_code` both work.
-fn canonical_tool_name(raw: &str) -> String {
-    let trimmed = raw.strip_prefix("tracedecay_").unwrap_or(raw);
-    let normalized = trimmed.replace('-', "_");
-    let mapped = NAME_ALIASES
-        .iter()
-        .find(|(k, _)| *k == normalized)
-        .map_or(normalized.as_str(), |(_, v)| *v);
-    format!("tracedecay_{mapped}")
 }
 
 fn is_profile_scoped_lcm_dispatch(tool_name: &str, tool_args: &Value) -> bool {
@@ -318,268 +318,6 @@ fn join_content_text(result_value: &Value) -> String {
         .unwrap_or_default()
 }
 
-/// Parse CLI args against the tool's JSON Schema. Returns the JSON object to
-/// hand to the handler, plus side-effects from reserved flags.
-fn parse_invocation(def: &ToolDefinition, args: &[String]) -> Result<ParsedInvocation> {
-    let schema_properties = def
-        .input_schema
-        .get("properties")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-
-    let required: Vec<String> = def
-        .input_schema
-        .get("required")
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let mut out = ParsedInvocation {
-        tool_args: Value::Object(Map::new()),
-        project: None,
-        raw_json: false,
-        show_help: false,
-    };
-
-    let mut explicit_args: Option<Value> = None;
-    let mut collected: Map<String, Value> = Map::new();
-    let mut positionals: Vec<String> = Vec::new();
-
-    let mut iter = args.iter();
-    while let Some(raw) = iter.next() {
-        match raw.as_str() {
-            "-h" | "--help" => {
-                out.show_help = true;
-                return Ok(out);
-            }
-            "--json" => out.raw_json = true,
-            "--project" => {
-                out.project = Some(take_value(&mut iter, "--project")?);
-            }
-            "--args" => {
-                // `--args @/path/payload.json` reads the JSON object from
-                // disk. Valid JSON can never start with `@`, so the prefix is
-                // unambiguous here — callers with payloads near the kernel's
-                // per-argv-string cap (MAX_ARG_STRLEN, 128 KiB on Linux) spill
-                // to a file instead of failing with E2BIG/EFAULT.
-                let json_str = resolve_at_file(&take_value(&mut iter, "--args")?)?;
-                let value: Value =
-                    serde_json::from_str(&json_str).map_err(|e| TraceDecayError::Config {
-                        message: format!("--args: invalid JSON: {e}"),
-                    })?;
-                if !value.is_object() {
-                    return Err(TraceDecayError::Config {
-                        message: "--args must be a JSON object".to_string(),
-                    });
-                }
-                explicit_args = Some(value);
-            }
-            flag if flag.starts_with("--") => {
-                let key = flag.trim_start_matches('-').replace('-', "_");
-                let raw_value = take_value(&mut iter, flag)?;
-                let resolved = resolve_at_file(&raw_value)?;
-                let prop_schema = schema_properties.get(&key);
-                let coerced = coerce_value(&key, prop_schema, &resolved)?;
-                merge_value(&mut collected, &key, coerced);
-            }
-            _ => positionals.push(raw.clone()),
-        }
-    }
-
-    if let Some(value) = explicit_args {
-        if !collected.is_empty() || !positionals.is_empty() {
-            return Err(TraceDecayError::Config {
-                message: "--args cannot be combined with other tool flags or positionals"
-                    .to_string(),
-            });
-        }
-        out.tool_args = value;
-        return Ok(out);
-    }
-
-    // Bind positionals to required string properties, in the order they appear
-    // in the schema's `required` array, skipping any that were already set.
-    if !positionals.is_empty() {
-        let mut positional_iter = positionals.into_iter();
-        for req in &required {
-            if collected.contains_key(req) {
-                continue;
-            }
-            let Some(prop) = schema_properties.get(req) else {
-                continue;
-            };
-            let Some(value) = positional_iter.next() else {
-                break;
-            };
-            let resolved = resolve_at_file(&value)?;
-            let coerced = coerce_value(req, Some(prop), &resolved)?;
-            collected.insert(req.clone(), coerced);
-        }
-        let leftover: Vec<String> = positional_iter.collect();
-        if !leftover.is_empty() {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "unexpected positional argument(s): {} — use --key value flags or \
-                     run `tracedecay tool {} --help`",
-                    leftover.join(" "),
-                    def.name.trim_start_matches("tracedecay_")
-                ),
-            });
-        }
-    }
-
-    for req in &required {
-        if !collected.contains_key(req) {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "missing required parameter `--{}` for tool `{}`",
-                    req.replace('_', "-"),
-                    def.name.trim_start_matches("tracedecay_")
-                ),
-            });
-        }
-    }
-
-    finalize_arrays(def, &mut collected);
-    out.tool_args = Value::Object(collected);
-    Ok(out)
-}
-
-/// Coerce a CLI string value to the JSON type declared in the property schema.
-/// Falls back to a JSON string when the schema is absent or specifies an
-/// unknown type.
-fn coerce_value(key: &str, prop_schema: Option<&Value>, raw: &str) -> Result<Value> {
-    let ty = prop_schema
-        .and_then(|p| p.get("type"))
-        .and_then(Value::as_str)
-        .unwrap_or("string");
-
-    match ty {
-        "string" => Ok(Value::String(raw.to_string())),
-        "boolean" => match raw {
-            "true" | "1" | "yes" | "on" => Ok(Value::Bool(true)),
-            "false" | "0" | "no" | "off" => Ok(Value::Bool(false)),
-            other => Err(TraceDecayError::Config {
-                message: format!(
-                    "--{}: expected a boolean (true/false), got `{other}`",
-                    key.replace('_', "-")
-                ),
-            }),
-        },
-        "integer" => raw
-            .parse::<i64>()
-            .map(Value::from)
-            .map_err(|_| TraceDecayError::Config {
-                message: format!("--{}: expected integer, got `{raw}`", key.replace('_', "-")),
-            }),
-        // `serde_json::Number::from_f64(25.0).as_u64()` returns `None`, so MCP
-        // handlers that read counts via `.as_u64()` would silently fall back
-        // to defaults. Prefer integer storage when the input is whole.
-        "number" => {
-            if let Ok(i) = raw.parse::<i64>() {
-                Ok(Value::from(i))
-            } else {
-                raw.parse::<f64>()
-                    .ok()
-                    .and_then(serde_json::Number::from_f64)
-                    .map(Value::Number)
-                    .ok_or_else(|| TraceDecayError::Config {
-                        message: format!(
-                            "--{}: expected a finite number, got `{raw}`",
-                            key.replace('_', "-")
-                        ),
-                    })
-            }
-        }
-        "array" => Ok(Value::String(raw.to_string())),
-        _ => Ok(Value::String(raw.to_string())),
-    }
-}
-
-/// Insert `value` into `map` under `key`. If the key is already present and
-/// the schema-declared shape is an array, append the new value to a sibling
-/// array rather than overwriting — this is how repeated `--keywords foo
-/// --keywords bar` accumulates.
-///
-/// Called after [`coerce_value`], so the value is already the right JSON type
-/// (or a string we'll wrap in an array on first sight of a second occurrence).
-fn merge_value(map: &mut Map<String, Value>, key: &str, value: Value) {
-    if let Some(existing) = map.get_mut(key) {
-        match existing {
-            Value::Array(arr) => arr.push(value),
-            _ => {
-                let prev = std::mem::replace(existing, Value::Null);
-                *existing = Value::Array(vec![prev, value]);
-            }
-        }
-    } else {
-        map.insert(key.to_string(), value);
-    }
-}
-
-/// Promote any `array<string>` properties from a single string into a real
-/// array: split on commas if the user passed `--keywords foo,bar`, or wrap a
-/// single-occurrence string in a one-element array. Runs after parsing so we
-/// can see whether the user passed the flag once or many times.
-fn finalize_arrays(def: &ToolDefinition, map: &mut Map<String, Value>) {
-    let Some(props) = def
-        .input_schema
-        .get("properties")
-        .and_then(Value::as_object)
-    else {
-        return;
-    };
-    for (key, schema) in props {
-        let is_array = schema.get("type").and_then(Value::as_str) == Some("array");
-        if !is_array {
-            continue;
-        }
-        if let Some(value) = map.get_mut(key) {
-            match value {
-                Value::String(s) => {
-                    let parts: Vec<Value> = if s.contains(',') {
-                        s.split(',')
-                            .map(|p| Value::String(p.trim().to_string()))
-                            .collect()
-                    } else {
-                        vec![Value::String(std::mem::take(s))]
-                    };
-                    *value = Value::Array(parts);
-                }
-                Value::Array(_) => {}
-                _ => {}
-            }
-        }
-    }
-}
-
-/// Consume the next argument as a flag value or return a `missing value` error.
-fn take_value(iter: &mut std::slice::Iter<'_, String>, flag: &str) -> Result<String> {
-    iter.next().cloned().ok_or_else(|| TraceDecayError::Config {
-        message: format!("flag `{flag}` requires a value"),
-    })
-}
-
-/// Read a value from disk when it starts with `@`. The leading `@` is
-/// stripped; the rest is treated as a path (relative to cwd). Plain values
-/// pass through unchanged. To pass a literal `@` as the first character, use
-/// `--args` instead.
-fn resolve_at_file(raw: &str) -> Result<String> {
-    if let Some(path) = raw.strip_prefix('@') {
-        let buf = PathBuf::from(path);
-        std::fs::read_to_string(&buf).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to read @{path}: {e}"),
-        })
-    } else {
-        Ok(raw.to_string())
-    }
-}
-
 /// Print a grouped list of every available tool. Tools annotated as
 /// `alwaysLoad` come first since they're the most commonly used; everything
 /// else is alphabetized.
@@ -601,15 +339,17 @@ fn print_tool_list(defs: &[ToolDefinition]) {
         groups.entry(group).or_default().push(def);
     }
 
-    println!("Available tools — run `tracedecay tool <name> --help` for parameters,");
-    println!("then invoke with `tracedecay tool <name> --key value [--json]`.\n");
+    println!("Available tools — run `tracedecay tool <name> --help` for parameters, then");
+    println!("invoke with `tracedecay tool <name> --args '<json>'` (the same JSON arguments");
+    println!("object as the MCP tool; `--args -` reads a heredoc from stdin) or, for quick");
+    println!("scalar calls, `--key value` flags.\n");
 
     if !always.is_empty() {
         println!("[always-loaded]");
         for def in &always {
             println!(
                 "  {:<32}  {}",
-                short_name(&def.name),
+                short_tool_name(&def.name),
                 first_line(&def.description)
             );
         }
@@ -622,20 +362,14 @@ fn print_tool_list(defs: &[ToolDefinition]) {
         for def in list {
             println!(
                 "  {:<32}  {}",
-                short_name(&def.name),
+                short_tool_name(&def.name),
                 first_line(&def.description)
             );
         }
         println!();
     }
 
-    println!("Reserved flags: --json (raw payload), --project <path>, --args <json|@file>.");
-    println!("Values starting with @ are read from that file; see `tracedecay tool --help`.");
-}
-
-/// Display name without the `tracedecay_` prefix.
-fn short_name(full: &str) -> &str {
-    full.trim_start_matches("tracedecay_")
+    println!("{RESERVED_FLAGS_FOOTER}");
 }
 
 /// First line of a (possibly multi-line) description, truncated for layout.

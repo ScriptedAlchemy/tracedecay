@@ -32,4 +32,4 @@ If there is even a 1% chance this workspace has a TraceDecay index, the graph, m
 - "The index might be stale, sync first" — hooks auto-sync; never run manual sync.
 - "The MCP call might fail" — `tracedecay tool <name>` always works. Transport ≠ capability.
 
-If an MCP call errors or times out, fall back to `tracedecay tool <name> --key value` (see `tracedecay:using-the-cli`) — never query `.tracedecay` databases directly or abandon tracedecay. Fall back to plain Grep/Read only for non-indexed content or after the graph pinpoints exact files.
+If an MCP call errors or times out, fall back to `tracedecay tool <name> --args '<json>'` — the same JSON arguments object as the MCP tool (see `tracedecay:using-the-cli`) — never query `.tracedecay` databases directly or abandon tracedecay. Fall back to plain Grep/Read only for non-indexed content or after the graph pinpoints exact files.

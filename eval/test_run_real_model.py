@@ -19,6 +19,11 @@ BENCHMARK_SPEC = importlib.util.spec_from_file_location("run_benchmarks", BENCHM
 run_benchmarks = importlib.util.module_from_spec(BENCHMARK_SPEC)
 BENCHMARK_SPEC.loader.exec_module(run_benchmarks)
 
+SCORE_PATH = MODULE_PATH.parent / "hermetic" / "score.py"
+SCORE_SPEC = importlib.util.spec_from_file_location("hermetic_score", SCORE_PATH)
+hermetic_score = importlib.util.module_from_spec(SCORE_SPEC)
+SCORE_SPEC.loader.exec_module(hermetic_score)
+
 
 class HermesHomeSelectionTest(unittest.TestCase):
     def test_default_profile_uses_unique_temp_hermes_home(self):
@@ -254,6 +259,93 @@ class BenchmarkRunnerTest(unittest.TestCase):
                     run_benchmarks.clone_repo("missing", "https://example.invalid/repo.git", skip_clone=True)
 
         run_mock.assert_not_called()
+
+
+class HermeticScoreTest(unittest.TestCase):
+    def test_expected_cli_fragments_can_pass_without_mcp_tool_use(self):
+        scenario = {
+            "id": "cli-fallback",
+            "expected_cli": ["tracedecay tool diff_context", "--args -"],
+            "anti_tools": ["grep"],
+        }
+
+        result = hermetic_score.evaluate_scenario(
+            scenario,
+            session_id=None,
+            transcript=None,
+            td_tools=[],
+            native_tools=["Bash"],
+            commands=[
+                "git diff --name-only | jq -R -s '{files: split(\"\\n\")[:-1]}' | "
+                "tracedecay tool diff_context --args -"
+            ],
+        )
+
+        self.assertTrue(result["pass"], result)
+        self.assertEqual(result["expected_cli_missing"], [])
+
+    def test_expected_cli_fragments_match_prefixed_tool_aliases(self):
+        scenario = {
+            "id": "cli-prefixed-tool",
+            "expected_cli": ["tracedecay tool insert_at", "tool search"],
+        }
+
+        result = hermetic_score.evaluate_scenario(
+            scenario,
+            session_id=None,
+            transcript=None,
+            td_tools=[],
+            native_tools=["Bash"],
+            commands=[
+                "tracedecay tool tracedecay_insert_at --args '{}'",
+                "tracedecay tool tracedecay_search --args '{\"query\":\"x\"}'",
+            ],
+        )
+
+        self.assertTrue(result["pass"], result)
+        self.assertEqual(result["expected_cli_missing"], [])
+
+    def test_missing_expected_mcp_tool_fails(self):
+        scenario = {
+            "id": "mcp-first",
+            "expected_tools": ["tracedecay_diff_context"],
+        }
+
+        result = hermetic_score.evaluate_scenario(
+            scenario,
+            session_id="s1",
+            transcript=None,
+            td_tools=["tracedecay_search"],
+            native_tools=[],
+            commands=[],
+        )
+
+        self.assertFalse(result["pass"], result)
+        self.assertEqual(result["expected_tools_missing"], ["tracedecay_diff_context"])
+
+    def test_codex_jsonl_collects_tool_names_and_commands(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "codex.jsonl"
+            path.write_text(
+                json.dumps(
+                    {
+                        "type": "function_call",
+                        "name": "exec_command",
+                        "arguments": {
+                            "cmd": "tracedecay tool diff_context --args -"
+                        },
+                    }
+                )
+                + "\n"
+                + json.dumps({"tool_name": "tracedecay_search"})
+                + "\n"
+            )
+
+            td_tools, native_tools, commands = hermetic_score.count_codex_tools(path)
+
+        self.assertEqual(td_tools, ["tracedecay_search"])
+        self.assertIn("exec_command", native_tools)
+        self.assertEqual(commands, ["tracedecay tool diff_context --args -"])
 
 
 if __name__ == "__main__":

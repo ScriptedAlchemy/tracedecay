@@ -14,8 +14,10 @@ Quick start:
 MCP tool discovery flow:
   1. `tracedecay tool` lists every MCP tool with one-line summaries.
   2. `tracedecay tool <name> --help` prints that tool's parameters.
-  3. `tracedecay tool <name> --key value [--json]` invokes it; use
-     --args '<json>' or --args @file.json for complex payloads.
+  3. `tracedecay tool <name> --args '<json>'` invokes it with the same JSON
+     arguments object as the MCP tool; use --args - (a quoted heredoc) or
+     --args @file.json when the payload has quotes, newlines, or non-scalar
+     values. Quick scalar calls also work as `--key value` flags.
 
 Most read commands accept --json for machine-readable output. Project-scoped
 commands resolve the nearest initialised project walking up from the current
@@ -79,27 +81,38 @@ arguments and the same payloads, no MCP client required. This is the fallback \
 path when an MCP transport fails and the primary path for scripts, hooks, and \
 subagents that only have shell access.
 
-Discovery flow: `tracedecay tool` (no name) lists every tool grouped by \
-category; `tracedecay tool <name> --help` prints that tool's parameters; then \
-invoke with alternating `--key value` flags.";
+The arguments are the tool's MCP `arguments` object: pass it whole with \
+`--args` (inline JSON, `-` for stdin via a quoted heredoc, or a file path). \
+For quick scalar-only calls, top-level fields may also be spelled as `--key \
+value` flags. Discovery flow: `tracedecay tool` (no name) lists every tool \
+grouped by category; `tracedecay tool <name> --help` prints that tool's \
+parameters (with enum values, array shapes, and a generated --args example).";
 
 pub(crate) const TOOL_AFTER_HELP: &str = "\
 Examples:
   tracedecay tool                                    List every tool, grouped
   tracedecay tool search --help                      One tool's parameters
-  tracedecay tool search \"parse config\" --limit 5    Invoke with flags
+  tracedecay tool search \"parse config\" --limit 5    Quick scalar call via flags
   tracedecay tool context \"how does auth work\" --json
   tracedecay tool find_exact_symbol --name handle_tool_call
   tracedecay tool str_replace --path src/lib.rs --old-str @old.txt --new-str @new.txt
-  tracedecay tool multi_str_replace --args @edits.json
+  tracedecay tool multi_str_replace --args - <<'JSON'   Whole MCP arguments object
+  {\"path\":\"src/lib.rs\",\"replacements\":[[\"old\",\"new\"]]}
+  JSON
+  tracedecay tool multi_str_replace --args @edits.json  …or from a file
+  tracedecay tool multi_str_replace --args - --dry-run  Validate without applying
 
 Notes:
   - Tool names work with or without the tracedecay_ prefix; dashes and
     underscores are interchangeable (dead-code == dead_code).
+  - --args <json|-|@file|file> passes the whole MCP arguments object. Use the
+    `--args -` heredoc form (or a file) whenever the payload has quotes,
+    newlines, or non-scalar values, and for payloads near/over the ~128 KiB
+    per-argument shell limit.
+  - --dry-run parses, validates, and prints the resolved arguments object
+    without dispatching the tool — pre-flight destructive edits with it.
   - --json prints the raw JSON payload instead of the human text rendering.
-  - Any value starting with @ is read from that file. --args @file.json passes
-    an entire JSON argument object — required for array/object parameters and
-    for payloads larger than the ~128 KiB per-argument shell limit.
+  - Any per-key value starting with @ is read from that file (@- is stdin).
   - --project <path> targets another project; the default is the nearest
     initialised project walking up from the current directory.
   - Exit code is non-zero on unknown tools, bad arguments, or handler errors.

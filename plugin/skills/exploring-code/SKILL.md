@@ -65,7 +65,7 @@ For other git branches without switching checkout — `tracedecay_branch_list` /
   `select:tracedecay_context,tracedecay_search,tracedecay_grep,tracedecay_outline,tracedecay_body,tracedecay_read`
   (one batched call, add others needed) — then call normally.
 - MCP error/timeout/disconnect: same tool, same args, via shell:
-  `tracedecay tool <name> --key value` (see `tracedecay:using-the-cli`). Never
+  `tracedecay tool <name>` (see `tracedecay:using-the-cli`). Never
   query `.tracedecay` databases directly; never abandon the graph over transport.
 
 ## Deliverable

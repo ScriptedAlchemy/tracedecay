@@ -122,7 +122,7 @@ on explicit user intent.
   `select:tracedecay_message_search,tracedecay_lcm_grep,tracedecay_lcm_load_session,tracedecay_lcm_status,tracedecay_lcm_compress,tracedecay_sessions_for`
   (one batched call, add others needed) — then call normally.
 - MCP error/timeout/disconnect: same tool, same args, via shell:
-  `tracedecay tool <name> --key value` (see `tracedecay:using-the-cli`). Never
+  `tracedecay tool <name>` (see `tracedecay:using-the-cli`). Never
   query `.tracedecay` databases directly; never abandon the graph over transport.
 
 ## Deliverable

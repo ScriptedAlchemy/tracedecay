@@ -12,9 +12,11 @@ call graph traversal, impact analysis, affected files, and architectural navigat
 
 If a tracedecay tool invocation fails, times out, or the plugin is unavailable,
 every tool is also available directly as a shell command:
-`tracedecay tool <name> --key value` (`tracedecay tool` lists all tools,
-`tracedecay tool <name> --help` shows parameters). Hermes tool calls already run
-through this CLI under the hood, so a direct shell invocation follows the same
+`tracedecay tool <name> --args '<json>'` — the same JSON arguments object as the
+MCP tool; pipe it via `--args -` (a quoted heredoc) when it contains quotes or
+newlines (`tracedecay tool` lists all tools, `tracedecay tool <name> --help`
+shows parameters). Hermes tool calls already run through this CLI under the hood
+(passing `--args <json>`), so a direct shell invocation follows the same
 execution path without the plugin wrapper. Fall back to it instead of querying
 `.tracedecay` databases directly or abandoning tracedecay.
 

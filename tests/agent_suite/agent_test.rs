@@ -275,10 +275,15 @@ fn seed_memory_digest_target(
 }
 
 fn expected_tracedecay_bin() -> String {
-    std::fs::canonicalize(env!("CARGO_BIN_EXE_tracedecay"))
+    let path = std::fs::canonicalize(env!("CARGO_BIN_EXE_tracedecay"))
         .unwrap_or_else(|_| PathBuf::from(env!("CARGO_BIN_EXE_tracedecay")))
         .to_string_lossy()
-        .replace('\\', "/")
+        .replace('\\', "/");
+    if cfg!(windows) {
+        path.strip_prefix("//?/").unwrap_or(&path).to_string()
+    } else {
+        path
+    }
 }
 
 fn expected_tracedecay_bin_variants() -> Vec<String> {
@@ -303,23 +308,6 @@ fn contains_expected_tracedecay_bin(body: &str) -> bool {
     expected_tracedecay_bin_variants().iter().any(|expected| {
         body.contains(expected) || slash_body.contains(&expected.replace('\\', "/"))
     })
-}
-
-fn comparable_command_path(command: &str) -> String {
-    command
-        .strip_prefix("//?/")
-        .unwrap_or(command)
-        .replace('\\', "/")
-}
-
-fn assert_command_eq(actual: &serde_json::Value, expected: &str) {
-    let actual = actual
-        .as_str()
-        .unwrap_or_else(|| panic!("command should be a string: {actual}"));
-    assert_eq!(
-        comparable_command_path(actual),
-        comparable_command_path(expected)
-    );
 }
 
 fn comparable_command_path(command: &str) -> String {

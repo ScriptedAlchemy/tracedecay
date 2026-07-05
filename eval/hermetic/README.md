@@ -8,12 +8,13 @@ sessions depend on the real `~/.claude`, `~/.tracedecay`, and
 
 ```bash
 # One-shot: build + isolate + install + index + one trivial scenario.
-eval/hermetic/run.sh smoke --debug --keep
+eval/hermetic/run.sh smoke --agent claude --model sonnet --debug --keep
+eval/hermetic/run.sh smoke --agent codex --debug --keep
 
 # Full corpus against a reusable env:
-ENV=$(eval/hermetic/run.sh setup --debug)
+ENV=$(eval/hermetic/run.sh setup --agent claude --debug)
 eval/hermetic/run.sh index --env-dir "$ENV" --project /path/to/repo
-eval/hermetic/run.sh run   --env-dir "$ENV" --corpus my-corpus.jsonl --model sonnet
+eval/hermetic/run.sh run   --agent claude --env-dir "$ENV" --corpus my-corpus.jsonl --model sonnet
 eval/hermetic/run.sh teardown --env-dir "$ENV"
 ```
 
@@ -37,6 +38,7 @@ A `PATH` override alone only fixes (1). The harness must control all three.
 | Concern | Lever | Evidence |
 | --- | --- | --- |
 | Claude config, transcripts, plugin bundle | `CLAUDE_CONFIG_DIR` | Smoke test: a throwaway `CLAUDE_CONFIG_DIR` gets its own `projects/`, `sessions/`, `.claude.json`; the session transcript lands at `<config>/projects/<slug>/<session_id>.jsonl`. |
+| Codex config, auth copy, plugin cache, sessions | `CODEX_HOME` | Codex mode copies only `auth.json`, installs the staged plugin source, runs `codex plugin add tracedecay@personal`, and stores `codex exec --json` output under `<env>/results/`. |
 | Where the installer writes the plugin | `HOME` (installer uses `home_dir()` → `$HOME`, then `$HOME/.claude`) | `src/agents/mod.rs::home_dir()` reads `$HOME`; `src/agents/claude.rs` writes `ctx.home/.claude/plugins/marketplaces/tracedecay`. |
 | tracedecay graph/data home | `TRACEDECAY_DATA_DIR` | `src/config.rs::user_data_dir()` returns `$TRACEDECAY_DATA_DIR` when set, else `~/.tracedecay`. |
 | tracedecay daemon socket | derives from the data dir; also pinned via `TRACEDECAY_DAEMON_SOCKET` | `src/daemon/service.rs::default_socket_path()` = `tracedecay_data_dir()/daemon.sock`, overridable by `TRACEDECAY_DAEMON_SOCKET`. Isolating the data dir already isolates the socket, so the harness never fights the real daemon. |
@@ -72,6 +74,7 @@ warns loudly if it does not.
   bin/tracedecay          staged dev binary (baked into hooks + first on PATH)
   home/                   fake $HOME
   home/.claude/           == CLAUDE_CONFIG_DIR (plugin bundle, transcripts)
+  home/.codex/            == CODEX_HOME (auth copy, plugin cache, sessions)
   tracedecay-data/        == TRACEDECAY_DATA_DIR (graph db, daemon.sock, logs)
   results/                results.jsonl, summary.md, per-scenario json/stderr
   env.sh                  sourceable export block (for reuse and manual debugging)
@@ -88,19 +91,63 @@ One JSON object per line (the schema used by the session scratchpad corpora):
 ```json
 {"id":"ev-001","category":"context","project_dir":"/abs/path/to/repo",
  "prompt":"...","expected_tools":["tracedecay_context"],
- "anti_tools":["Grep","Glob"],"providers":["sonnet"],"success":"..."}
+ "expected_cli":["tracedecay tool diff_context","--args -"],
+ "anti_tools":["Grep","Glob"],"providers":["sonnet","codex"],"success":"..."}
 ```
 
-`run` executes each `prompt` via `claude -p --output-format json` inside
-`project_dir` (falling back to the indexed default project if the dir is
-missing), recovers the `session_id`, reads that session's transcript from the
-isolated config, and counts `tool_use` blocks. `score.py` classifies each tool
-as tracedecay (name contains `tracedecay`) or native.
+Required fields: `id`, `category`, `project_dir`, `prompt`, `expected_tools[]`,
+`expected_cli[]`, `anti_tools[]`, `providers[]`, `success` (one-sentence pass
+criterion).
 
-A scenario **passes** when at least one tracedecay tool was used and no
-`anti_tools` appear. This is a deliberately simple end-state judge — the harness
-exists to guarantee *isolation*, not to be a sophisticated grader; layer a
-stricter judge on top of `results.jsonl` if needed.
+Optional per-scenario fields:
+
+- **`setup_cmd`** — shell command run in `project_dir` before the agent session
+  (restore fixture state between reps).
+- **`verify_cmd`** — shell command run in `project_dir` after the session with
+  the staged dev binary first on `PATH`; non-zero exit fails the scenario.
+- **`attempt_tool`** — tool-name fragment; captured commands containing
+  `tracedecay tool` plus this fragment are counted as `tool_cmd_attempts`.
+
+`project_dir` may be an absolute path or **`fixture:<name>`**, resolved at run
+time to `<env>/fixtures/<name>` (staged copies of `eval/hermetic/fixtures/*`).
+Use `run.sh fixtures --env-dir "$ENV"` to copy and index fixtures without a
+full corpus run; `run --reps N` re-stages fixtures automatically before each
+rep after the first.
+
+`run` executes each `prompt` through the selected `--agent` inside
+`project_dir` (falling back to the indexed default project if the dir is
+missing). Claude mode recovers the `session_id` and reads the isolated
+transcript. Codex mode scores the captured `codex exec --json` stream.
+`score.py` classifies MCP tools and CLI commands separately.
+
+A scenario **passes** when every `expected_tools` fragment appears in MCP tool
+names, every `expected_cli` fragment appears in captured command strings, and no
+`anti_tools` appear. When `verify_cmd` is set, its exit status is also
+required (`verify_pass`). If no expectations are listed, the fallback pass
+criterion is at least one tracedecay MCP tool and no anti-tool use. This is a
+deliberately simple end-state judge — the harness exists to guarantee
+*isolation*, not to be a sophisticated grader; layer a stricter judge on top of
+`results.jsonl` if needed.
+
+Each scored row in `results.jsonl` also records derived fields: **`verify_pass`**
+(whether `verify_cmd` succeeded, or `null` if unset), **`tool_cmd_attempts`**
+(matching CLI invocations for `attempt_tool`), **`self_corrected`**
+(`pass && tool_cmd_attempts > 1`), and **`rep`** (repetition index when
+`run --reps N` is used).
+
+The args-ergonomics corpus compares MCP-first behavior with CLI fallback:
+
+```bash
+ENV=$(eval/hermetic/run.sh setup --agent claude --debug)
+eval/hermetic/run.sh index --env-dir "$ENV" --project /path/to/tracedecay-worktree
+eval/hermetic/run.sh run --agent claude --env-dir "$ENV" \
+  --corpus eval/hermetic/corpora/tool-args-ergonomics.jsonl --model sonnet
+
+ENV=$(eval/hermetic/run.sh setup --agent codex --debug)
+eval/hermetic/run.sh index --env-dir "$ENV" --project /path/to/tracedecay-worktree
+eval/hermetic/run.sh run --agent codex --env-dir "$ENV" \
+  --corpus eval/hermetic/corpora/tool-args-ergonomics.jsonl
+```
 
 Outputs land in `<env>/results/`: `results.jsonl` (one scored object per
 scenario) and `summary.md` (pass count + per-scenario table).
@@ -113,12 +160,9 @@ scenario) and `summary.md` (pass count + per-scenario table).
   free; reuse an env dir with `--keep` across corpus runs.
 - **Network / model backend.** Evals hit the real Anthropic API using the copied
   credential. There is no offline mode.
-- **Codex.** `codex exec` uses `CODEX_HOME` for its config, and
-  `tracedecay install --agent codex` exists, so a `--codex` mode is feasible.
-  It is intentionally **left as follow-up**: codex-exec auth handling and the
-  codex plugin-bundle deploy path need their own validation pass, out of scope
-  for the claude-focused smoke here. The scaffolding (`CODEX_HOME` env, staged
-  binary, isolated data dir) transfers directly when added.
+- **Codex auth.** Codex mode copies only `~/.codex/auth.json` into the isolated
+  `CODEX_HOME`. If Codex changes auth storage, `codex exec` will fail closed in
+  the eval env instead of mutating the user's real config.
 - **Global cargo caches** (`~/.cargo/registry`) are shared — only the *output*
   (`CARGO_TARGET_DIR=<worktree>/target`) is worktree-scoped. The build cannot
   corrupt the user's install because it never writes to `~/.cargo/bin`.

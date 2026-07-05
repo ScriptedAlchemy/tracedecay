@@ -34,7 +34,7 @@ tracedecay tools may be **deferred** — listed by name only, uncallable until
 their schemas load. First need → ONE batched ToolSearch call:
 `select:tracedecay_context,tracedecay_search,tracedecay_grep,tracedecay_outline,tracedecay_body`
 (add others per the skill you enter). If any MCP call errors or times out, the
-same tool runs as `tracedecay tool <name> --key value` — see
+same tool runs as `tracedecay tool <name> --args '<json>'` — see
 `tracedecay:using-the-cli`. Transport failure never justifies grep.
 
 ## Moment to mandatory action

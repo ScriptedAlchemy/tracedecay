@@ -125,20 +125,32 @@ pub fn render_tool_cli_help(def: &ToolDefinition) -> String {
     let _ = writeln!(out, "Parameters:");
     let mut entries: Vec<(&String, &Value)> = props.iter().collect();
     entries.sort_by_key(|(k, _)| (*k).clone());
-    for (key, schema) in entries {
+    let mut has_non_scalar = false;
+    for (key, schema) in &entries {
         let ty = schema
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or("string");
+        if matches!(ty, "array" | "object") {
+            has_non_scalar = true;
+        }
         let req = if required.contains(&key.as_str()) {
             "required"
         } else {
             "optional"
         };
-        let desc = schema
+        let mut desc = schema
             .get("description")
             .and_then(Value::as_str)
-            .unwrap_or("");
+            .unwrap_or("")
+            .to_string();
+        if let Some(constraint) = param_shape_note(schema, ty) {
+            if desc.is_empty() {
+                desc = constraint;
+            } else {
+                let _ = write!(desc, " ({constraint})");
+            }
+        }
         let _ = writeln!(
             out,
             "  --{:<26} {:<8} {:<8}  {}",
@@ -149,18 +161,117 @@ pub fn render_tool_cli_help(def: &ToolDefinition) -> String {
         );
     }
     let _ = writeln!(out);
-    let _ = writeln!(
-        out,
-        "Reserved flags: --json, --project <path>, --args <json|@file>, -h/--help"
-    );
-    let _ = writeln!(
-        out,
-        "Any value starting with @ is read from that file (multi-line payloads)."
-    );
+
+    // Tools with array/object params can't be driven with scalar flags alone;
+    // show the ready-to-copy heredoc form built from the schema itself.
+    if has_non_scalar {
+        let _ = writeln!(out, "Example (whole MCP arguments object via stdin):");
+        let _ = writeln!(out, "  tracedecay tool {short} --args - <<'JSON'");
+        let _ = writeln!(out, "  {}", example_args_object(props, &required));
+        let _ = writeln!(out, "  JSON");
+        let _ = writeln!(out);
+    }
+
+    let _ = writeln!(out, "{RESERVED_FLAGS_FOOTER}");
     out
 }
 
-fn short_tool_name(full: &str) -> &str {
+/// The reserved-flag footnote shared by per-tool help; the tool list and the
+/// `tracedecay tool --help` trailer restate the same two facts.
+pub const RESERVED_FLAGS_FOOTER: &str = "\
+Reserved flags: --args <json|-|@file|file> (whole MCP arguments object; `-` reads stdin),\n\
+  --dry-run (validate + print the resolved arguments, don't invoke), --json (raw payload),\n\
+  --project <path>, -h/--help.\n\
+Per-key values starting with @ are read from that file; @- reads stdin.";
+
+/// Enum values or array item shapes worth stating inline so the help is
+/// sufficient for one-shot construction.
+fn param_shape_note(schema: &Value, ty: &str) -> Option<String> {
+    if let Some(allowed) = schema.get("enum").and_then(Value::as_array) {
+        let values: Vec<&str> = allowed.iter().filter_map(Value::as_str).collect();
+        if !values.is_empty() {
+            return Some(format!("one of: {}", values.join(" | ")));
+        }
+    }
+    if ty == "array" {
+        let items_type = schema
+            .get("items")
+            .and_then(|items| items.get("type"))
+            .and_then(Value::as_str)?;
+        return Some(match items_type {
+            "array" => "array of arrays — pass JSON via --args".to_string(),
+            "object" => "array of objects — pass JSON via --args".to_string(),
+            other => format!("array of {other}s"),
+        });
+    }
+    None
+}
+
+/// A mechanical `--args` example object: every required property plus the
+/// non-scalar optional ones, with placeholder values derived from the schema.
+fn example_args_object(props: &serde_json::Map<String, Value>, required: &[&str]) -> String {
+    let mut example = serde_json::Map::new();
+    let mut entries: Vec<(&String, &Value)> = props.iter().collect();
+    entries.sort_by_key(|(key, _)| (!required.contains(&key.as_str()), (*key).clone()));
+    for (key, schema) in entries {
+        let ty = schema
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("string");
+        if !required.contains(&key.as_str()) && !matches!(ty, "array" | "object") {
+            continue;
+        }
+        example.insert(key.clone(), placeholder_value(key, schema, ty));
+    }
+    serde_json::to_string(&Value::Object(example)).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn placeholder_value(key: &str, schema: &Value, ty: &str) -> Value {
+    match ty {
+        "boolean" => Value::Bool(true),
+        "integer" | "number" => Value::from(10),
+        "array" => {
+            let items = schema.get("items");
+            let items_type = items
+                .and_then(|items| items.get("type"))
+                .and_then(Value::as_str)
+                .unwrap_or("string");
+            let element = match items_type {
+                "array" => {
+                    let inner = items
+                        .and_then(|items| items.get("items"))
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    let inner_type = inner
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .unwrap_or("string");
+                    Value::Array(vec![
+                        placeholder_value(key, &inner, inner_type),
+                        placeholder_value(key, &inner, inner_type),
+                    ])
+                }
+                "object" => Value::Object(serde_json::Map::new()),
+                other => placeholder_value(key, items.unwrap_or(&Value::Null), other),
+            };
+            Value::Array(vec![element])
+        }
+        "object" => Value::Object(serde_json::Map::new()),
+        _ => {
+            if let Some(first) = schema
+                .get("enum")
+                .and_then(Value::as_array)
+                .and_then(|values| values.first())
+            {
+                first.clone()
+            } else {
+                Value::String(format!("<{key}>"))
+            }
+        }
+    }
+}
+
+pub fn short_tool_name(full: &str) -> &str {
     full.strip_prefix("tracedecay_").unwrap_or(full)
 }
 

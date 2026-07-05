@@ -801,7 +801,7 @@ fn first_touch_store_tool_cli_invokes_daemon_with_init_permission() {
             "fact_store",
             "--json",
             "--args",
-            r#"{"action":"add","content":"first touch via daemon","fact_type":"decision"}"#,
+            r#"{"action":"add","content":"first touch via daemon","category":"decision"}"#,
         ])
         .output()
         .expect("tracedecay tool should run");
@@ -905,7 +905,7 @@ fn daemon_first_touch_init_does_not_mask_existing_profile_config_errors() {
             "fact_store",
             "--json",
             "--args",
-            r#"{"action":"add","content":"do not hide config errors","fact_type":"decision"}"#,
+            r#"{"action":"add","content":"do not hide config errors","category":"decision"}"#,
         ])
         .output()
         .expect("tracedecay tool should run");

@@ -805,17 +805,31 @@ fn normalize_path_separators(path: &str) -> String {
     path.replace('\\', "/")
 }
 
+#[macro_export]
+macro_rules! cli_fallback_args_invocation_lit {
+    () => {
+        "`tracedecay tool <name> --args '<json>'` — the same JSON arguments object as the MCP tool; \
+pipe it via `--args -` (a quoted heredoc) when it contains quotes or newlines"
+    };
+}
+
+/// Shared `--args` invocation phrase for CLI-fallback steering surfaces.
+pub(crate) const CLI_FALLBACK_ARGS_INVOCATION: &str = cli_fallback_args_invocation_lit!();
+
 /// CLI-fallback steering paragraph shared by every host's prompt rules.
 ///
 /// Mirrors the guidance in the MCP server instructions and the bundled
 /// `using-the-cli` skill: when the MCP transport fails, agents should fall
 /// back to the `tracedecay tool` CLI instead of abandoning tracedecay or
 /// poking at `.tracedecay` databases directly.
-pub(crate) const CLI_FALLBACK_PROMPT_RULES: &str = "If a tracedecay MCP call errors, times out, \
-or the server is disconnected, every tool is also available as a shell command: \
-`tracedecay tool <name> --key value` (`tracedecay tool` lists all tools, \
-`tracedecay tool <name> --help` shows parameters). Fall back to that CLI instead of \
-querying `.tracedecay` databases directly or abandoning tracedecay.";
+pub(crate) const CLI_FALLBACK_PROMPT_RULES: &str = concat!(
+    "If a tracedecay MCP call errors, times out, \
+or the server is disconnected, every tool is also available as a shell command: ",
+    cli_fallback_args_invocation_lit!(),
+    " \
+(`tracedecay tool` lists all tools, `tracedecay tool <name> --help` shows parameters). \
+Fall back to that CLI instead of querying `.tracedecay` databases directly or abandoning tracedecay."
+);
 
 /// True when a `SKILL.md`'s contents carry a tracedecay authorship marker,
 /// marking the skill dir as tracedecay-owned (and therefore safe to sweep when

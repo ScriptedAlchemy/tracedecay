@@ -95,7 +95,7 @@ and the specific scans the user asked for — don't run every tool by reflex.
   `select:tracedecay_health,tracedecay_gini,tracedecay_dsm,tracedecay_status,tracedecay_active_project`
   (one batched call, add others needed) — then call normally.
 - MCP error/timeout/disconnect: same tool, same args, via shell:
-  `tracedecay tool <name> --key value` (see `tracedecay:using-the-cli`). Never
+  `tracedecay tool <name>` (see `tracedecay:using-the-cli`). Never
   query `.tracedecay` databases directly; never abandon the graph over transport.
 
 ## Deliverable

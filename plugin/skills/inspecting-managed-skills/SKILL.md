@@ -32,7 +32,7 @@ The daemon automation loop (skill writer, memory curator, session reflector) dra
   `select:tracedecay_skill_list,tracedecay_skill_view,tracedecay_automation_run_artifact_view,tracedecay_hermes_skill_bridge`
   — then call normally.
 - MCP error/timeout/disconnect: same tool, same args, via shell:
-  `tracedecay tool skill_list --key value` (see `tracedecay:using-the-cli`).
+  `tracedecay tool skill_list` (see `tracedecay:using-the-cli`).
   Never query `.tracedecay` databases directly; never abandon the graph over transport.
 
 ## Deliverable

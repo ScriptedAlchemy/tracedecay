@@ -134,13 +134,8 @@ pub fn build_codex_session_context_for_workspace(
                  paste captured output into tracedecay_diagnose, or run tracedecay_diagnostics \
                  for fresh structured errors mapped to the enclosing symbols and callers.\n",
             );
-            s.push_str(
-                "If a tracedecay MCP call errors, times out, or the server is disconnected, every tool \
-                 is also a shell command: `tracedecay tool <name> --key value` (`tracedecay \
-                 tool` lists tools, `tracedecay tool <name> --help` shows parameters). Use \
-                 that CLI instead of querying .tracedecay databases directly or abandoning \
-                 tracedecay.\n",
-            );
+            s.push_str(crate::agents::CLI_FALLBACK_PROMPT_RULES);
+            s.push('\n');
             append_codex_recall_and_registry_guidance(&mut s);
             match status {
                 HookWorkspaceStatus::Initialized => match staleness_hint {

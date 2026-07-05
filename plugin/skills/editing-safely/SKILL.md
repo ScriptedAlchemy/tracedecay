@@ -98,7 +98,7 @@ Run this read-only recon in one shot for a symbol or `Struct::field` with
   `select:tracedecay_search,tracedecay_similar,tracedecay_rename_preview,tracedecay_str_replace,tracedecay_replace_symbol`
   (one batched call, add others needed) — then call normally.
 - MCP error/timeout/disconnect: same tool, same args, via shell:
-  `tracedecay tool <name> --key value` (see `tracedecay:using-the-cli`). Never
+  `tracedecay tool <name>` (see `tracedecay:using-the-cli`). Never
   query `.tracedecay` databases directly; never abandon the graph over transport.
 
 ## Deliverable

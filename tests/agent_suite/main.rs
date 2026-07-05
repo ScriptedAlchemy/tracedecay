@@ -13,6 +13,7 @@ mod agent_test;
 mod claude_agent_test;
 mod claude_plugin_bundle_test;
 mod claude_plugin_schema_test;
+mod cli_args_contract_test;
 mod copilot_agent_test;
 mod kiro_agent_test;
 mod managed_skill_archive_test;

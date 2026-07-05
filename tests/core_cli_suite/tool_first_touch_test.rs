@@ -48,7 +48,7 @@ fn fact_store_creates_profile_store_on_first_touch() {
             "fact_store",
             "--json",
             "--args",
-            r#"{"action":"add","content":"first touch creates the store","fact_type":"decision"}"#,
+            r#"{"action":"add","content":"first touch creates the store","category":"decision"}"#,
         ],
     );
     assert!(
