@@ -114,8 +114,17 @@ async fn codex_prompt_memory_recall(event_json: &str) -> Option<String> {
 /// Builds Codex session/prompt context.
 async fn codex_session_context_for_event(event_json: &str) -> (String, HookWorkspaceStatus) {
     let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
-    let root = codex_project_root_from_parsed_event(&parsed);
     let cwd = event_cwd_from_parsed(&parsed);
+    // On a sync miss, fall back to the git-identity resolver so a renamed /
+    // global-only repo (registered store, no repo-local marker) still resolves
+    // its root and reports Initialized instead of the UnindexedProject nudge.
+    let root = match codex_project_root_from_parsed_event(&parsed) {
+        Some(r) => Some(r),
+        None => match cwd.as_deref() {
+            Some(cwd) => crate::config::discover_project_root_with_identity(cwd).await,
+            None => None,
+        },
+    };
     let session_id = event_session_id(&parsed);
     let status = codex_workspace_status(root.as_deref(), cwd.as_deref());
     record_workspace_status_analytics(root.as_deref(), status, session_id.as_deref());
@@ -673,6 +682,71 @@ mod tests {
         assert!(
             codex_prompt_hint(&event).is_none(),
             "Codex should use shared per-session hint dedupe for prompt hints"
+        );
+    }
+
+    /// A renamed / global-only repo (registered store, no repo-local marker or
+    /// path-hash store) must resolve via the identity fallback in
+    /// `codex_session_context_for_event` and report Initialized, NOT the
+    /// UnindexedProject nudge. A project-like cwd with no store must still nudge
+    /// (the fix must not mask the real UnindexedProject status).
+    #[tokio::test]
+    async fn codex_session_context_resolves_global_only_and_preserves_nudge() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let profile_root = crate::storage::default_profile_root().unwrap();
+        let gdb = crate::global_db::GlobalDb::open().await.unwrap();
+
+        let project_dir = tempfile::tempdir().unwrap();
+        let project_root = project_dir.path().canonicalize().unwrap();
+
+        // Register by canonical path only (no enrollment marker) so resolution
+        // must use the GlobalDb identity branch.
+        let project_id = "proj_codex_identity";
+        gdb.upsert_code_project(project_id, &project_root, None, None, None)
+            .await
+            .unwrap();
+        gdb.upsert_store_instance(crate::global_db::StoreInstanceUpsert {
+            store_id: "store_codex_identity".to_string(),
+            project_id: project_id.to_string(),
+            store_kind: "code_project".to_string(),
+            storage_mode: "profile_sharded".to_string(),
+            store_relpath: format!("projects/{project_id}"),
+            manifest_relpath: Some(format!("projects/{project_id}/store_manifest.json")),
+            last_verified_at: Some(100),
+            last_write_at: Some(101),
+        })
+        .await
+        .unwrap();
+        let layout = crate::storage::profile_sharded_layout(
+            &project_root,
+            &profile_root,
+            &crate::storage::EnrollmentMarker {
+                project_id: project_id.to_string(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )
+        .unwrap();
+        std::fs::create_dir_all(layout.graph_db_path.parent().unwrap()).unwrap();
+        std::fs::write(&layout.graph_db_path, b"").unwrap();
+
+        let event = serde_json::json!({ "cwd": project_root.to_string_lossy() }).to_string();
+        let (_context, status) = codex_session_context_for_event(&event).await;
+        assert_eq!(
+            status,
+            HookWorkspaceStatus::Initialized,
+            "a registered, graph-db-backed global-only repo must report Initialized"
+        );
+
+        // A project-like cwd with no store on disk must still report Unindexed.
+        let unindexed = tempfile::tempdir().unwrap();
+        let unindexed_root = unindexed.path().canonicalize().unwrap();
+        std::fs::write(unindexed_root.join("Cargo.toml"), b"[package]\n").unwrap();
+        let bogus = serde_json::json!({ "cwd": unindexed_root.to_string_lossy() }).to_string();
+        let (_bogus_context, bogus_status) = codex_session_context_for_event(&bogus).await;
+        assert_eq!(
+            bogus_status,
+            HookWorkspaceStatus::UnindexedProject,
+            "an unindexed project-like cwd must still report UnindexedProject"
         );
     }
 }

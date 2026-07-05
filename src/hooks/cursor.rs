@@ -259,7 +259,18 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
 /// for the resolved workspace. Never blocks session creation.
 pub async fn hook_cursor_session_start() -> i32 {
     let event = read_hook_event!();
-    let root = cursor_project_root_from_event(&event);
+    let mut root = cursor_project_root_from_event(&event);
+    // On a sync miss, fall back to the git-identity resolver so a renamed /
+    // global-only repo (registered store, no repo-local marker) still resolves
+    // its root; cursor_session_context_for_root already gates on
+    // has_initialized_store, so the Initialized line is emitted once root binds.
+    if root.is_none() {
+        if let Ok(parsed) = serde_json::from_str::<Value>(&event) {
+            if let Some(cwd) = cursor_event_cwd(&parsed) {
+                root = crate::config::discover_project_root_with_identity(&cwd).await;
+            }
+        }
+    }
     record_hook_invoked(root.as_deref(), HintAgent::Cursor, "sessionStart", &event);
     ingest_cursor_transcript_for_event(
         &event,

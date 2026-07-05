@@ -306,3 +306,113 @@ fn sync_config_env_overrides_bool_and_int() {
         super::SyncConfig::default().max_concurrent_syncs
     );
 }
+
+/// The identity-aware wrapper must resolve a project whose store is reachable
+/// ONLY through the git-identity/`GlobalDb` layer (registered by canonical path,
+/// no repo-local enrollment marker, no path-hash store) — the exact renamed /
+/// global-only repo scenario. It must also leave the sync fast path unchanged
+/// and return `None` for a bare directory with no store at all.
+#[tokio::test]
+async fn discover_project_root_with_identity_resolves_global_only_store() {
+    let _profile = super::PinnedUserDataDir::new();
+    let profile_root = crate::storage::default_profile_root().unwrap();
+
+    // Point the process at a real (pinned-profile) global DB so the default
+    // TraceDecayOpenOptions used by has_initialized_store opens it.
+    let gdb = crate::global_db::GlobalDb::open().await.unwrap();
+
+    let project_dir = TempDir::new().unwrap();
+    let project_root = project_dir.path().canonicalize().unwrap();
+
+    // Register the project by canonical path only (no enrollment marker), so
+    // resolution must go through the GlobalDb identity branch, not the marker
+    // short-circuit.
+    let project_id = "proj_identity_only";
+    gdb.upsert_code_project(project_id, &project_root, None, None, None)
+        .await
+        .unwrap();
+    gdb.upsert_store_instance(crate::global_db::StoreInstanceUpsert {
+        store_id: "store_identity_only".to_string(),
+        project_id: project_id.to_string(),
+        store_kind: "code_project".to_string(),
+        storage_mode: "profile_sharded".to_string(),
+        store_relpath: format!("projects/{project_id}"),
+        manifest_relpath: Some(format!("projects/{project_id}/store_manifest.json")),
+        last_verified_at: Some(100),
+        last_write_at: Some(101),
+    })
+    .await
+    .unwrap();
+
+    // Create the REAL graph db the identity resolver will look for. The layout
+    // is deterministic in the project_id, so this matches whatever
+    // has_initialized_store computes for the GlobalDb-resolved project.
+    let layout = crate::storage::profile_sharded_layout(
+        &project_root,
+        &profile_root,
+        &crate::storage::EnrollmentMarker {
+            project_id: project_id.to_string(),
+            storage_mode: crate::storage::StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    fs::create_dir_all(layout.graph_db_path.parent().unwrap()).unwrap();
+    fs::write(&layout.graph_db_path, b"").unwrap();
+
+    // Sanity: the sync path-hash resolver cannot see this store (no marker, no
+    // repo-local db, and the default path-hash store id differs from the
+    // registered project_id).
+    assert!(
+        super::discover_project_root(&project_root).is_none(),
+        "sync discover_project_root must not see a global-only store"
+    );
+
+    // The identity wrapper resolves it, from the root and from a nested cwd.
+    assert_eq!(
+        super::discover_project_root_with_identity(&project_root).await,
+        Some(project_root.clone()),
+        "identity wrapper must resolve a global-only registered store"
+    );
+    let nested = project_root.join("crates/inner");
+    fs::create_dir_all(&nested).unwrap();
+    assert_eq!(
+        super::discover_project_root_with_identity(&nested)
+            .await
+            .map(|p| p.canonicalize().unwrap()),
+        Some(project_root.clone()),
+        "identity wrapper must walk up from a nested cwd to the registered root"
+    );
+
+    // A bare directory with no store resolves to nothing.
+    let bare = TempDir::new().unwrap();
+    let bare_root = bare.path().canonicalize().unwrap();
+    assert!(
+        super::discover_project_root_with_identity(&bare_root)
+            .await
+            .is_none(),
+        "a directory with no store must not resolve"
+    );
+}
+
+/// The identity wrapper's fast path must be byte-identical to the sync
+/// `discover_project_root` for a dir that the sync resolver already recognizes
+/// (repo-local db present), so the two cannot diverge.
+#[tokio::test]
+async fn discover_project_root_with_identity_preserves_sync_fast_path() {
+    let _profile = super::PinnedUserDataDir::new();
+    let project_dir = TempDir::new().unwrap();
+    let project_root = project_dir.path().canonicalize().unwrap();
+
+    // A repo-local project db makes the sync resolver return the dir directly.
+    let db_dir = super::get_tracedecay_dir(&project_root);
+    fs::create_dir_all(&db_dir).unwrap();
+    fs::write(super::get_project_db_path(&project_root), b"").unwrap();
+
+    let sync = super::discover_project_root(&project_root);
+    assert!(sync.is_some(), "sync resolver must see a repo-local db");
+    assert_eq!(
+        super::discover_project_root_with_identity(&project_root).await,
+        sync,
+        "identity wrapper fast path must equal the sync result"
+    );
+}

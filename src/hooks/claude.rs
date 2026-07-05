@@ -305,7 +305,7 @@ async fn claude_session_root_from_global_registry_db(
         if !canonical_cwd.starts_with(&canonical_project) {
             continue;
         }
-        if !crate::tracedecay::TraceDecay::is_initialized(&canonical_project) {
+        if !crate::tracedecay::TraceDecay::has_initialized_store(&canonical_project).await {
             continue;
         }
         // Deepest ancestor wins (most specific registered project).
@@ -614,8 +614,33 @@ mod tests {
     /// registered and initialized in the global DB, so the registry fallback must
     /// resolve it — otherwise `SessionStart`/`SubagentStart` wrongly print the
     /// init nudge for a project the MCP server serves fine.
+    /// Touches a real profile-sharded graph db for `project_root` under the
+    /// current (pinned) profile so `has_initialized_store` — which requires
+    /// `graph_db_path.is_file()`, not just an enrollment marker — returns true.
+    /// Returns the graph db path so callers can later delete it to drive the
+    /// negative path.
+    fn touch_marker_graph_db(project_root: &std::path::Path) -> std::path::PathBuf {
+        crate::storage::write_enrollment_marker(
+            project_root,
+            &crate::storage::EnrollmentMarker {
+                project_id: "proj_global_only".to_string(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )
+        .unwrap();
+        let layout = crate::storage::resolve_layout_for_current_profile(project_root).unwrap();
+        std::fs::create_dir_all(layout.graph_db_path.parent().unwrap()).unwrap();
+        std::fs::write(&layout.graph_db_path, b"").unwrap();
+        layout.graph_db_path
+    }
+
     #[tokio::test]
     async fn session_root_falls_back_to_global_registry_for_global_only_project() {
+        // Pin the profile so `has_initialized_store` resolves the same graph db
+        // path we touch below, and so parallel lib tests cannot race the
+        // process-global USER_DATA_DIR env.
+        let _profile = crate::config::PinnedUserDataDir::new();
+
         let gdb_dir = tempfile::tempdir().unwrap();
         let gdb_path = gdb_dir.path().join("global.db");
         let gdb = crate::global_db::GlobalDb::open_at(&gdb_path)
@@ -624,17 +649,12 @@ mod tests {
 
         let project_dir = tempfile::tempdir().unwrap();
         let project_root = project_dir.path().canonicalize().unwrap();
-        // Register + initialize the project in the global DB only. An enrollment
-        // marker makes `is_initialized` true without a repo-local project db.
+        // Register the project in the global DB and create a REAL profile-sharded
+        // graph db (enrollment marker + touched graph_db_path) so
+        // `has_initialized_store` — not just the old path-hash `is_initialized`
+        // — reports the project initialized.
         gdb.upsert(&project_root, 0).await;
-        crate::storage::write_enrollment_marker(
-            &project_root,
-            &crate::storage::EnrollmentMarker {
-                project_id: "proj_global_only".to_string(),
-                storage_mode: crate::storage::StorageMode::ProfileSharded,
-            },
-        )
-        .unwrap();
+        let graph_db_path = touch_marker_graph_db(&project_root);
 
         // cwd inside the registered project resolves back to its root.
         let nested = project_root.join("crates/inner");
@@ -656,6 +676,65 @@ mod tests {
                 .await
                 .is_none(),
             "a cwd outside every registered project must not resolve"
+        );
+
+        // Removing the graph db drops the candidate: the guard now keys on
+        // has_initialized_store (real db on disk), not the path-hash marker.
+        std::fs::remove_file(&graph_db_path).unwrap();
+        assert!(
+            claude_session_root_from_global_registry_db(&nested, &gdb)
+                .await
+                .is_none(),
+            "a registered project without a real graph db must not resolve"
+        );
+    }
+
+    /// The observable SessionStart symptom: for a registered, graph-db-backed
+    /// project the context must report the initialized status and NOT print the
+    /// false "no project index found" nudge; for a project-like cwd with no
+    /// store the real nudge must still appear (the fix must not mask it).
+    #[tokio::test]
+    async fn session_context_reports_initialized_and_preserves_nudge() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+
+        // The global registry fallback opens the real (pinned-profile) global
+        // DB, so register the project there too.
+        let gdb = crate::global_db::GlobalDb::open().await.unwrap();
+        let project_dir = tempfile::tempdir().unwrap();
+        let project_root = project_dir.path().canonicalize().unwrap();
+        gdb.upsert(&project_root, 0).await;
+        touch_marker_graph_db(&project_root);
+
+        let event = serde_json::json!({
+            "hook_event_name": "SessionStart",
+            "cwd": project_root.to_string_lossy(),
+            "source": "startup",
+        })
+        .to_string();
+        let context = claude_session_context_for_event(&event).await;
+        assert!(
+            !context.contains("no project index found"),
+            "a registered, graph-db-backed project must not emit the init nudge: {context}"
+        );
+        assert!(
+            context.contains("tracedecay index status:"),
+            "context must report the index status line: {context}"
+        );
+
+        // A project-like cwd with no store on disk must still nudge.
+        let unindexed = tempfile::tempdir().unwrap();
+        let unindexed_root = unindexed.path().canonicalize().unwrap();
+        std::fs::write(unindexed_root.join("Cargo.toml"), b"[package]\n").unwrap();
+        let bogus_event = serde_json::json!({
+            "hook_event_name": "SessionStart",
+            "cwd": unindexed_root.to_string_lossy(),
+            "source": "startup",
+        })
+        .to_string();
+        let bogus_context = claude_session_context_for_event(&bogus_event).await;
+        assert!(
+            bogus_context.contains("no project index found"),
+            "an unindexed project-like cwd must still emit the real nudge: {bogus_context}"
         );
     }
 }
