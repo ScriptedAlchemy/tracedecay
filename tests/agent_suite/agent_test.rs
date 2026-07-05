@@ -591,7 +591,8 @@ fn assert_cursor_plugin_bundle(plugin_dir: &Path, expected_command: &str, expect
         assert!(
             hook["command"]
                 .as_str()
-                .is_some_and(|command| command.contains(expected_command)),
+                .is_some_and(|command| comparable_command_path(command)
+                    .contains(&comparable_command_path(expected_command))),
             "plugin hook commands should use the installed tracedecay binary"
         );
         assert!(
