@@ -1,4 +1,5 @@
 ---
+name: tracedecay-find-impact
 description: Find the blast radius of a change, including impacted symbols, files, and the tests to run.
 ---
 

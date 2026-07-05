@@ -1,4 +1,5 @@
 ---
+name: tracedecay-compare-branches
 description: Compare or search another git branch's code graph without switching your checkout.
 ---
 

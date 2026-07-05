@@ -37,7 +37,7 @@
 use std::collections::BTreeSet;
 
 use regex::Regex;
-use tracedecay::automation::skill_frontmatter::SkillFrontmatterValue;
+use tracedecay::automation::skill_frontmatter::{parse_skill_frontmatter, SkillFrontmatterValue};
 use tracedecay::mcp::get_tool_definitions;
 
 use crate::plugin_validation_support::{load_skill_docs_from, repo_path};
@@ -247,6 +247,36 @@ fn cursor_commands_are_hygienic_and_reference_resolve() {
             .expect("command file stem")
             .to_string();
         let raw = std::fs::read_to_string(&path).expect("read command");
+        let frontmatter = match parse_skill_frontmatter(&raw) {
+            Ok(frontmatter) => frontmatter,
+            Err(error) => {
+                violations.push(format!(
+                    "{at}: command file missing valid YAML frontmatter: {error}"
+                ));
+                continue;
+            }
+        };
+        match frontmatter.get("name").and_then(|value| value.as_scalar()) {
+            Some(name) if name == slug => {}
+            Some(name) => violations.push(format!(
+                "{at}: frontmatter name {name:?} must match command slug {slug:?}"
+            )),
+            None => violations.push(format!(
+                "{at}: command frontmatter must include scalar `name`"
+            )),
+        }
+        match frontmatter
+            .get("description")
+            .and_then(|value| value.as_scalar())
+        {
+            Some(description) if !description.trim().is_empty() => {}
+            Some(_) => violations.push(format!(
+                "{at}: command frontmatter `description` must not be empty"
+            )),
+            None => violations.push(format!(
+                "{at}: command frontmatter must include scalar `description`"
+            )),
+        }
 
         if raw.contains('\r') {
             violations.push(format!("{at}: contains CRLF line endings"));

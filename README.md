@@ -210,7 +210,7 @@ Codex installs are plugin-based. TraceDecay writes the plugin source bundle and 
 
 First-time global install writes `~/plugins/tracedecay`, updates the personal marketplace at `~/.agents/plugins/marketplace.json`, and prints `codex plugin add tracedecay@personal`. Run that command in Codex to copy the source into Codex's installed cache under `~/.codex/plugins/cache/personal/tracedecay/<version>`.
 
-TraceDecay does not write `~/.codex/AGENTS.md` or `~/.codex/hooks.json`. If you are working from a branch or release that adds Codex plugin refresh support, refresh the source bundle first and then rerun `codex plugin add tracedecay@personal` when you need Codex to recopy the bundle.
+TraceDecay does not write `~/.codex/AGENTS.md` or `~/.codex/hooks.json`. Re-running `tracedecay install --agent codex` refreshes the source bundle and any detected installed Codex cache, including legacy `caveman-home` cache installs, into the canonical `tracedecay@personal` namespace.
 
 Project-local Codex install writes the repository plugin bundle to `plugins/tracedecay` and the repository marketplace to `.agents/plugins/marketplace.json`. It does not write project `.codex/config.toml`, project `.codex/hooks.json`, or `AGENTS.md`.
 

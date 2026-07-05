@@ -335,10 +335,10 @@ writes the plugin source bundle and marketplace entry; Codex CLI installs the
 installed cache from that source. First install writes
 `~/plugins/tracedecay/`, updates `~/.agents/plugins/marketplace.json`, and prints
 `codex plugin add tracedecay@personal`. Run that command in Codex to copy the
-source into `~/.codex/plugins/cache/personal/tracedecay/<version>`. If you are
-working from a branch or release that adds Codex plugin refresh support, refresh
-the source bundle first and then rerun `codex plugin add tracedecay@personal`
-when you need Codex to recopy the bundle.
+source into `~/.codex/plugins/cache/personal/tracedecay/<version>`. Re-running
+`tracedecay install --agent codex` refreshes the source bundle and any detected
+installed Codex cache, including legacy `caveman-home` cache installs, into the
+canonical `tracedecay@personal` namespace.
 
 Skill visibility follows Codex's plugin model. `codex plugin list` and
 `codex plugin add` inspect the marketplace source bundle. Active Codex sessions

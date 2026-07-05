@@ -1,5 +1,6 @@
 {
   "name": "tracedecay",
+  "displayName": "TraceDecay",
   "version": "0.0.0",
   "description": "Cursor integration for TraceDecay semantic code intelligence: MCP server plus a `tracedecay tool` CLI fallback exposing the same tools when MCP is unavailable.",
   "author": {
@@ -16,6 +17,7 @@
     "call-graph",
     "code-health"
   ],
+  "category": "Developer Tools",
   "mcpServers": "mcp.json",
   "hooks": "hooks/hooks.json",
   "rules": [

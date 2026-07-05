@@ -1,4 +1,5 @@
 ---
+name: tracedecay-map-architecture
 description: Map repo or directory architecture, including layered modules, dependency hotspots, and structural risks.
 ---
 

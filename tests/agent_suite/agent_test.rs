@@ -322,6 +322,23 @@ fn assert_command_eq(actual: &serde_json::Value, expected: &str) {
     );
 }
 
+fn comparable_command_path(command: &str) -> String {
+    command
+        .strip_prefix("//?/")
+        .unwrap_or(command)
+        .replace('\\', "/")
+}
+
+fn assert_command_eq(actual: &serde_json::Value, expected: &str) {
+    let actual = actual
+        .as_str()
+        .unwrap_or_else(|| panic!("command should be a string: {actual}"));
+    assert_eq!(
+        comparable_command_path(actual),
+        comparable_command_path(expected)
+    );
+}
+
 /// Python snippet that py_compiles the generated plugin sources inside the
 /// same interpreter that runs a test's check script, instead of the separate
 /// `python3 -m py_compile` process `assert_python_compiles` spawns. On
@@ -395,8 +412,23 @@ fn codex_stale_cached_plugin_install_dir(home: &Path) -> std::path::PathBuf {
     home.join(".codex/plugins/cache/personal/tracedecay/0.0.4")
 }
 
+fn codex_legacy_cached_plugin_install_dir(home: &Path) -> std::path::PathBuf {
+    home.join(".codex/plugins/cache/caveman-home/tracedecay/0.0.4")
+}
+
 fn codex_personal_marketplace_path(home: &Path) -> std::path::PathBuf {
     home.join(".agents/plugins/marketplace.json")
+}
+
+fn write_codex_personal_marketplace(home: &Path, name: &str, display_name: &str) {
+    std::fs::create_dir_all(home.join(".agents/plugins")).unwrap();
+    std::fs::write(
+        codex_personal_marketplace_path(home),
+        format!(
+            r#"{{"interface":{{"displayName":"{display_name}"}},"name":"{name}","plugins":[{{"name":"tracedecay","source":{{"source":"local","path":"./plugins/tracedecay"}}}}]}}"#
+        ),
+    )
+    .unwrap();
 }
 
 fn codex_repo_marketplace_path(project: &Path) -> std::path::PathBuf {
@@ -533,12 +565,9 @@ fn assert_cursor_plugin_bundle(plugin_dir: &Path, expected_command: &str, expect
     assert_eq!(manifest["license"], "MIT");
     assert_eq!(manifest["mcpServers"], "mcp.json");
     assert_eq!(manifest["hooks"], "hooks/hooks.json");
-    // Documented manifest metadata (displayName is not a documented field and
-    // must not reappear; author/homepage/keywords are the documented ones).
-    assert!(
-        manifest.get("displayName").is_none(),
-        "displayName is not a documented plugin.json field"
-    );
+    // Documented manifest metadata shown in Cursor's plugin surfaces.
+    assert_eq!(manifest["displayName"], "TraceDecay");
+    assert_eq!(manifest["category"], "Developer Tools");
     assert!(
         manifest["author"]["name"].is_string(),
         "plugin manifest should carry a documented author object"
@@ -3392,12 +3421,7 @@ fn test_codex_install_refreshes_existing_cache_and_keeps_bootstrap_source_listab
     let bootstrap_dir = codex_plugin_install_dir(home);
     write_codex_plugin_manifest(&bootstrap_dir, "0.0.0");
     write_stale_codex_skill(&bootstrap_dir);
-    std::fs::create_dir_all(home.join(".agents/plugins")).unwrap();
-    std::fs::write(
-        codex_personal_marketplace_path(home),
-        r#"{"interface":{"displayName":"Personal"},"name":"personal","plugins":[{"name":"tracedecay","source":{"source":"local","path":"./plugins/tracedecay"}}]}"#,
-    )
-    .unwrap();
+    write_codex_personal_marketplace(home, "personal", "Personal");
 
     CodexIntegration.install(&ctx).unwrap();
 
@@ -3423,6 +3447,49 @@ fn test_codex_install_refreshes_existing_cache_and_keeps_bootstrap_source_listab
         "global Codex install should migrate managed cache installs to the current plugin version"
     );
     assert_codex_personal_marketplace_entry(home);
+}
+
+#[test]
+fn test_codex_install_migrates_legacy_caveman_home_cache_and_marketplace() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let ctx = make_install_ctx(home);
+    let legacy_plugin_dir = codex_legacy_cached_plugin_install_dir(home);
+    write_codex_plugin_manifest(&legacy_plugin_dir, "0.0.0");
+    write_stale_codex_skill(&legacy_plugin_dir);
+    write_codex_personal_marketplace(home, "caveman-home", "Caveman Home");
+
+    CodexIntegration.install(&ctx).unwrap();
+
+    let cached_plugin_dir = codex_cached_plugin_install_dir(home);
+    assert_codex_plugin_bundle(
+        &cached_plugin_dir,
+        &ctx.tracedecay_bin,
+        serde_json::json!(["serve"]),
+        true,
+    );
+    assert!(
+        !legacy_plugin_dir.exists(),
+        "global Codex install should migrate legacy caveman-home cache installs to personal"
+    );
+    assert_codex_personal_marketplace_entry(home);
+}
+
+#[test]
+fn test_codex_install_preserves_existing_marketplace_identity() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let ctx = make_install_ctx(home);
+    write_codex_personal_marketplace(home, "my-marketplace", "My Marketplace");
+
+    CodexIntegration.install(&ctx).unwrap();
+
+    assert_codex_marketplace_entry(
+        &codex_personal_marketplace_path(home),
+        "my-marketplace",
+        "My Marketplace",
+        "./plugins/tracedecay",
+    );
 }
 
 #[test]

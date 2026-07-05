@@ -1,4 +1,5 @@
 ---
+name: tracedecay-draft-commit
 description: Draft a commit message, PR description, or changelog from semantic changes; drafts text only and never commits or pushes.
 ---
 

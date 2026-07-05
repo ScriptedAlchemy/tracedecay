@@ -1,4 +1,5 @@
 ---
+name: tracedecay-check-health
 description: Check code health for the repo or a directory, including worst offenders and a prioritized fix list.
 ---
 

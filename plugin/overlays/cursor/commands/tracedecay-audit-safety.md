@@ -1,4 +1,5 @@
 ---
+name: tracedecay-audit-safety
 description: Audit the repo or a directory for ship-blocking risk, panic sites, risk markers, dead code, and untested high-risk symbols.
 ---
 

@@ -1,4 +1,5 @@
 ---
+name: tracedecay-review-diff
 description: Review the current PR or diff for impact, risk, and quality via the TraceDecay code graph.
 ---
 

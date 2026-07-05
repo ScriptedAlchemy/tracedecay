@@ -1,4 +1,5 @@
 ---
+name: tracedecay-clean-dead-code
 description: Find and safely remove dead code, unused imports, and duplication via the TraceDecay code graph.
 ---
 

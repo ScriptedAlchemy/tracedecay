@@ -103,8 +103,23 @@ fn codex_cached_plugin_dir(home: &Path) -> PathBuf {
         .join(env!("CARGO_PKG_VERSION"))
 }
 
+fn codex_legacy_cached_plugin_dir(home: &Path) -> PathBuf {
+    home.join(".codex/plugins/cache/caveman-home/tracedecay/0.0.4")
+}
+
 fn codex_marketplace_path(home: &Path) -> PathBuf {
     home.join(".agents/plugins/marketplace.json")
+}
+
+fn write_codex_marketplace(home: &Path, name: &str, display_name: &str) {
+    std::fs::create_dir_all(home.join(".agents/plugins")).unwrap();
+    std::fs::write(
+        codex_marketplace_path(home),
+        format!(
+            r#"{{"interface":{{"displayName":"{display_name}"}},"name":"{name}","plugins":[{{"name":"tracedecay","source":{{"source":"local","path":"./plugins/tracedecay"}}}}]}}"#
+        ),
+    )
+    .unwrap();
 }
 
 fn write_codex_plugin_manifest(plugin_dir: &Path, version: &str) {
@@ -535,12 +550,7 @@ fn codex_update_plugin_refreshes_cache_and_keeps_bootstrap_source_listable() {
     let bootstrap_dir = codex_bootstrap_dir(home.path());
     write_codex_plugin_manifest(&bootstrap_dir, "0.0.0");
     write_stale_codex_skill(&bootstrap_dir);
-    std::fs::create_dir_all(home.path().join(".agents/plugins")).unwrap();
-    std::fs::write(
-        codex_marketplace_path(home.path()),
-        r#"{"interface":{"displayName":"Personal"},"name":"personal","plugins":[{"name":"tracedecay","source":{"source":"local","path":"./plugins/tracedecay"}}]}"#,
-    )
-    .unwrap();
+    write_codex_marketplace(home.path(), "personal", "Personal");
 
     let codex = get_integration("codex").unwrap();
     let outcome = codex
@@ -563,6 +573,70 @@ fn codex_update_plugin_refreshes_cache_and_keeps_bootstrap_source_listable() {
     assert!(
         !bootstrap_dir.join("skills/stale-skill/SKILL.md").exists(),
         "update-plugin should refresh the bootstrap source so plugin list/add sees current skills"
+    );
+    assert_codex_marketplace_entry(&codex_marketplace_path(home.path()), "./plugins/tracedecay");
+}
+
+#[test]
+fn codex_update_plugin_migrates_legacy_caveman_home_cache_to_personal() {
+    let home = TempDir::new().unwrap();
+    let project_root = home.path().join("workspace");
+    let legacy_plugin_dir = codex_legacy_cached_plugin_dir(home.path());
+    let cached_plugin_dir = codex_cached_plugin_dir(home.path());
+    write_codex_plugin_manifest(&legacy_plugin_dir, "0.0.0");
+    write_codex_marketplace(home.path(), "caveman-home", "Caveman Home");
+
+    let codex = get_integration("codex").unwrap();
+    let outcome = codex
+        .update_plugin(&ctx_with_project(home.path(), NEW_BIN, &project_root))
+        .unwrap();
+    let UpdatePluginOutcome::Refreshed(paths) = outcome else {
+        panic!("expected codex update_plugin to migrate the legacy installed cache");
+    };
+    assert_eq!(
+        paths,
+        vec![cached_plugin_dir.clone(), codex_bootstrap_dir(home.path())]
+    );
+
+    assert_codex_bundle_contains_bin(&cached_plugin_dir, NEW_BIN, CodexScope::Global);
+    assert!(
+        !legacy_plugin_dir.exists(),
+        "update-plugin should remove the legacy caveman-home cache after migrating to personal"
+    );
+    assert_eq!(
+        read_json(&codex_marketplace_path(home.path()))["name"],
+        "personal"
+    );
+    assert_codex_marketplace_entry(&codex_marketplace_path(home.path()), "./plugins/tracedecay");
+}
+
+#[test]
+fn codex_update_plugin_preserves_existing_marketplace_identity() {
+    let home = TempDir::new().unwrap();
+    let project_root = home.path().join("workspace");
+    let cached_plugin_dir = codex_cached_plugin_dir(home.path());
+    write_codex_plugin_manifest(&cached_plugin_dir, "0.0.0");
+    write_codex_marketplace(home.path(), "my-marketplace", "My Marketplace");
+
+    let codex = get_integration("codex").unwrap();
+    let outcome = codex
+        .update_plugin(&ctx_with_project(home.path(), NEW_BIN, &project_root))
+        .unwrap();
+    let UpdatePluginOutcome::Refreshed(paths) = outcome else {
+        panic!("expected codex update_plugin to refresh the installed cache");
+    };
+    assert_eq!(
+        paths,
+        vec![cached_plugin_dir.clone(), codex_bootstrap_dir(home.path())]
+    );
+
+    assert_eq!(
+        read_json(&codex_marketplace_path(home.path()))["name"],
+        "my-marketplace"
+    );
+    assert_eq!(
+        read_json(&codex_marketplace_path(home.path()))["interface"]["displayName"],
+        "My Marketplace"
     );
     assert_codex_marketplace_entry(&codex_marketplace_path(home.path()), "./plugins/tracedecay");
 }

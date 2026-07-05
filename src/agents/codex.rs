@@ -279,19 +279,31 @@ fn codex_plugin_cached_root(home: &Path) -> PathBuf {
     home.join(".codex/plugins/cache/personal/tracedecay")
 }
 
+fn codex_plugin_legacy_cached_root(home: &Path) -> PathBuf {
+    home.join(".codex/plugins/cache/caveman-home/tracedecay")
+}
+
 fn codex_plugin_current_cached_install_dir(home: &Path) -> PathBuf {
     codex_plugin_cached_root(home).join(env!("CARGO_PKG_VERSION"))
 }
 
 fn codex_plugin_cached_install_dirs(home: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(codex_plugin_cached_root(home)) else {
-        return Vec::new();
-    };
-    let mut dirs: Vec<PathBuf> = entries
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.is_dir() && codex_plugin_dir_is_tracedecay(path))
-        .collect();
+    let mut dirs = Vec::new();
+    for root in [
+        codex_plugin_cached_root(home),
+        codex_plugin_legacy_cached_root(home),
+    ] {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
+        dirs.extend(
+            entries
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .filter(|path| path.is_dir() && codex_plugin_dir_is_tracedecay(path)),
+        );
+    }
     dirs.sort();
+    dirs.dedup();
     dirs
 }
 
@@ -722,22 +734,31 @@ fn install_codex_marketplace_entry(
     if !marketplace.is_object() {
         marketplace = json!({});
     }
-    if marketplace
-        .get("name")
-        .and_then(|value| value.as_str())
-        .is_none()
-    {
+    let existing_name = marketplace.get("name").and_then(|value| value.as_str());
+    let has_tracedecay_entry = marketplace
+        .get("plugins")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|plugins| {
+            plugins.iter().any(|entry| {
+                entry.get("name").and_then(|value| value.as_str()) == Some("tracedecay")
+            })
+        });
+    let should_write_identity =
+        existing_name.is_none() || (existing_name == Some("caveman-home") && has_tracedecay_entry);
+    if should_write_identity {
         marketplace["name"] = json!(marketplace_name);
     }
     if !marketplace
         .get("interface")
         .is_some_and(serde_json::Value::is_object)
     {
-        marketplace["interface"] = json!({ "displayName": display_name });
-    } else if marketplace["interface"]
-        .get("displayName")
-        .and_then(|value| value.as_str())
-        .is_none()
+        marketplace["interface"] = json!({});
+    }
+    if should_write_identity
+        || marketplace["interface"]
+            .get("displayName")
+            .and_then(|value| value.as_str())
+            .is_none()
     {
         marketplace["interface"]["displayName"] = json!(display_name);
     }

@@ -1,4 +1,5 @@
 ---
+name: tracedecay-test-changes
 description: Test current changes by running only affected tests and mapping failures back to source.
 ---
 
