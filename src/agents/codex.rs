@@ -88,7 +88,7 @@ impl AgentIntegration for CodexIntegration {
     fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
         let cached_dirs = codex_plugin_cached_install_dirs(&ctx.home);
         let plugin_dir = codex_plugin_install_dir(&ctx.home);
-        let legacy_config_install = codex_legacy_config_has_tracedecay(&ctx.home)?;
+        let legacy_config_install = codex_legacy_config_has_tracedecay_for_update(&ctx.home);
         let mut refreshed = Vec::new();
         if !cached_dirs.is_empty() {
             let target = install_codex_cached_plugin(&ctx.home, &ctx.tracedecay_bin)?;
@@ -248,6 +248,10 @@ impl AgentIntegration for CodexIntegration {
 
 fn codex_legacy_config_has_tracedecay(home: &Path) -> Result<bool> {
     codex_config_has_tracedecay_mcp_server(&codex_config_path(home))
+}
+
+fn codex_legacy_config_has_tracedecay_for_update(home: &Path) -> bool {
+    codex_legacy_config_has_tracedecay(home).unwrap_or(false)
 }
 
 fn codex_config_has_tracedecay_mcp_server(config_path: &Path) -> Result<bool> {

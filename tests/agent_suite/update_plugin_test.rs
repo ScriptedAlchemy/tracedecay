@@ -916,29 +916,27 @@ trusted_hash = "sha256:post"
 }
 
 #[test]
-fn codex_update_plugin_errors_on_malformed_legacy_mcp_config() {
+fn codex_update_plugin_refreshes_bundle_with_malformed_unrelated_legacy_config() {
     let home = TempDir::new().unwrap();
     let _agent_env = AgentEnvLock::pin(&home);
     let project_root = home.path().join("workspace");
+    let codex = get_integration("codex").unwrap();
+    codex.install(&ctx(home.path(), OLD_BIN)).unwrap();
+
+    let plugin_dir = codex_bootstrap_dir(home.path());
     let codex_dir = home.path().join(".codex");
     std::fs::create_dir_all(&codex_dir).unwrap();
-    std::fs::write(
-        codex_dir.join("config.toml"),
-        "[mcp_servers.tracedecay\ncommand = \"/old/bin/tracedecay\"\n",
-    )
-    .unwrap();
-    let codex = get_integration("codex").unwrap();
+    let config = codex_dir.join("config.toml");
+    std::fs::write(&config, "[mcp_servers.tracedecay\ncommand = \"/old/bin/tracedecay\"\n")
+        .unwrap();
+    let before = bytes(&config);
 
-    let err = match codex.update_plugin(&ctx_with_project(home.path(), NEW_BIN, &project_root)) {
-        Ok(_) => panic!("malformed legacy MCP config must not be treated as absent"),
-        Err(err) => err,
-    };
-
-    assert!(
-        err.to_string().contains("config.toml"),
-        "error should identify the malformed Codex config: {err}"
-    );
-    assert!(!home.path().join("plugins/tracedecay").exists());
+    let outcome = codex
+        .update_plugin(&ctx_with_project(home.path(), NEW_BIN, &project_root))
+        .unwrap();
+    assert!(matches!(outcome, UpdatePluginOutcome::Refreshed(paths) if paths == vec![plugin_dir.clone()]));
+    assert_eq!(bytes(&config), before);
+    assert_codex_bundle_contains_bin(&plugin_dir, NEW_BIN, CodexScope::Global);
 }
 
 // ---------------------------------------------------------------------------
