@@ -152,6 +152,47 @@ trusted_hash = "sha256:compact"
 }
 
 #[test]
+fn codex_legacy_mcp_detector_ignores_plugin_entries() {
+    let home = tempfile::tempdir().expect("tempdir should create");
+    let codex_dir = home.path().join(".codex");
+    std::fs::create_dir_all(&codex_dir).expect("codex dir should create");
+    std::fs::write(
+        codex_dir.join("config.toml"),
+        r#"
+[plugins."tracedecay@personal"]
+enabled = true
+
+[hooks.state."tracedecay@personal:hooks/hooks.json:post_tool_use:0:0"]
+trusted_hash = "sha256:post"
+"#,
+    )
+    .expect("config should write");
+
+    assert!(
+        !codex_legacy_config_has_tracedecay(home.path()),
+        "plugin and hook entries are not legacy direct MCP config"
+    );
+}
+
+#[test]
+fn codex_legacy_mcp_detector_finds_direct_mcp_config() {
+    let home = tempfile::tempdir().expect("tempdir should create");
+    let codex_dir = home.path().join(".codex");
+    std::fs::create_dir_all(&codex_dir).expect("codex dir should create");
+    std::fs::write(
+        codex_dir.join("config.toml"),
+        r#"
+[mcp_servers.tracedecay]
+command = "/old/bin/tracedecay"
+args = ["serve"]
+"#,
+    )
+    .expect("config should write");
+
+    assert!(codex_legacy_config_has_tracedecay(home.path()));
+}
+
+#[test]
 fn remove_legacy_codex_native_automation_deletes_stale_record() {
     let home = tempfile::tempdir().expect("tempdir should create");
     assert!(

@@ -247,11 +247,14 @@ impl AgentIntegration for CodexIntegration {
 }
 
 fn codex_legacy_config_has_tracedecay(home: &Path) -> bool {
-    let config = codex_config_path(home);
-    if !config.exists() {
+    codex_config_has_tracedecay_mcp_server(&codex_config_path(home))
+}
+
+fn codex_config_has_tracedecay_mcp_server(config_path: &Path) -> bool {
+    if !config_path.exists() {
         return false;
     }
-    super::load_toml_file(&config).is_ok_and(|toml| {
+    super::load_toml_file(config_path).is_ok_and(|toml| {
         toml.get("mcp_servers")
             .and_then(|v| v.get("tracedecay"))
             .is_some()
@@ -435,10 +438,7 @@ pub fn remove_legacy_codex_native_automation(home: &Path) -> Result<bool> {
 }
 
 fn uninstall_tracedecay_mcp_if_present(config_path: &Path) {
-    let Ok(contents) = std::fs::read_to_string(config_path) else {
-        return;
-    };
-    if !contents.contains("tracedecay") {
+    if !codex_config_has_tracedecay_mcp_server(config_path) {
         return;
     }
     if let Err(err) = uninstall_mcp_server(config_path) {
