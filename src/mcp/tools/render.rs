@@ -342,7 +342,7 @@ fn close_open_markdown_fence(markdown: &mut String) {
     }
 }
 
-fn has_open_markdown_fence(markdown: &str) -> bool {
+pub(in crate::mcp::tools) fn has_open_markdown_fence(markdown: &str) -> bool {
     markdown
         .lines()
         .filter(|line| line.trim_start().starts_with("```"))
@@ -899,7 +899,7 @@ fn render_object_array_records(md: &mut Md, arr: &[Value]) {
             if ci == title_ci || row[ci].is_empty() {
                 continue;
             }
-            let value = row[ci].replace('\n', "\n    ");
+            let value = indent_multiline_value(&row[ci]);
             md.line(&format!("  **{}:** {}", cols[ci], value));
         }
     }

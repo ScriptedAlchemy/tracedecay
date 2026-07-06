@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use super::apply_policy::{MemoryApplyDecision, MemoryApplyPolicy};
+use super::apply_policy::{value_as_usize, MemoryApplyDecision, MemoryApplyPolicy};
 use super::artifacts::sha256_json;
 use super::backend::{AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse};
 use super::config::AutomationConfig;
@@ -322,12 +322,6 @@ fn memory_curation_apply_policy(
         object.insert("apply_instructions".to_string(), json!(apply_instructions));
     }
     payload
-}
-
-fn value_as_usize(value: &Value) -> Option<usize> {
-    value
-        .as_u64()
-        .and_then(|number| usize::try_from(number).ok())
 }
 
 #[derive(Debug, Default)]

@@ -363,7 +363,7 @@ fn push_context_lane_preview(preview: &mut String, lane_key: &str, lane: &str) {
     }
     let prefix = utf8_prefix_at_or_before(lane, budget);
     preview.push_str(prefix);
-    if has_open_markdown_fence(prefix) {
+    if render::has_open_markdown_fence(prefix) {
         preview.push_str("\n```\n");
     }
     preview.push_str(CONTEXT_LANE_TRUNCATED_NOTE);
@@ -389,15 +389,6 @@ fn context_lane_budget(lane_key: &str) -> usize {
     } else {
         2_000
     }
-}
-
-fn has_open_markdown_fence(markdown: &str) -> bool {
-    markdown
-        .lines()
-        .filter(|line| line.trim_start().starts_with("```"))
-        .count()
-        % 2
-        == 1
 }
 
 fn insert_context_memory_section(
