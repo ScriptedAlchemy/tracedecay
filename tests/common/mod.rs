@@ -1,9 +1,7 @@
 #![allow(dead_code)]
 
 use std::ffi::{OsStr, OsString};
-use std::fs;
-#[cfg(not(windows))]
-use std::fs::File;
+use std::fs::{self, File};
 #[cfg(not(windows))]
 use std::io::Write;
 use std::net::TcpListener;
