@@ -1,10 +1,10 @@
 use tempfile::TempDir;
 use tracedecay::global_db::{GlobalDb, ParseOffset};
 use tracedecay::sessions::lcm::{
-    LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmError, LcmExpandQueryRequest,
-    LcmExpandRequest, LcmExpandTarget, LcmGcConfig, LcmGrepRequest, LcmGrepSort,
-    LcmLifecycleUpdate, LcmLoadSessionRequest, LcmMaintenanceDebt, LcmScope,
-    LcmSessionReplayRequest, LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft, LCM_SCHEMA_VERSION,
+    LCM_SCHEMA_VERSION, LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmError,
+    LcmExpandQueryRequest, LcmExpandRequest, LcmExpandTarget, LcmGcConfig, LcmGrepRequest,
+    LcmGrepSort, LcmLifecycleUpdate, LcmLoadSessionRequest, LcmMaintenanceDebt, LcmScope,
+    LcmSessionReplayRequest, LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft,
     MAX_DERIVED_SNIPPET_CHARS,
 };
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
@@ -343,9 +343,10 @@ async fn grep_searches_raw_snippets_and_summary_nodes() {
 
     assert!(hits.iter().any(|hit| hit.kind == "raw_message"));
     assert!(hits.iter().any(|hit| hit.kind == "summary_node"));
-    assert!(hits
-        .iter()
-        .all(|hit| hit.snippet.chars().count() <= MAX_DERIVED_SNIPPET_CHARS));
+    assert!(
+        hits.iter()
+            .all(|hit| hit.snippet.chars().count() <= MAX_DERIVED_SNIPPET_CHARS)
+    );
     assert!(!hits.iter().any(|hit| hit.snippet.contains("secret body")));
 }
 
@@ -392,9 +393,10 @@ async fn grep_tokenizes_punctuation_heavy_path_like_queries() {
         hit_ids,
         std::collections::BTreeSet::from([store_ids[0], store_ids[1]])
     );
-    assert!(hits
-        .iter()
-        .any(|hit| hit.store_id == Some(store_ids[0]) && hit.snippet.contains("src/foo.rs")));
+    assert!(
+        hits.iter()
+            .any(|hit| hit.store_id == Some(store_ids[0]) && hit.snippet.contains("src/foo.rs"))
+    );
 }
 
 #[tokio::test]
@@ -442,10 +444,10 @@ async fn grep_like_fallback_recalls_infix_hyphen_query_matches() {
         .expect("hyphenated fallback query should keep infix matches");
 
     assert!(hits.iter().any(|hit| hit.store_id == Some(store_ids[0])));
-    assert!(hits
-        .iter()
-        .any(|hit| hit.kind == "summary_node"
-            && hit.snippet.to_ascii_lowercase().contains("copilot")));
+    assert!(
+        hits.iter().any(|hit| hit.kind == "summary_node"
+            && hit.snippet.to_ascii_lowercase().contains("copilot"))
+    );
 }
 
 #[tokio::test]
@@ -480,9 +482,10 @@ async fn grep_like_fallback_recalls_infix_slash_query_matches() {
         .expect("slash fallback query should keep infix matches");
 
     assert!(hits.iter().any(|hit| hit.store_id == Some(store_ids[0])));
-    assert!(hits
-        .iter()
-        .any(|hit| hit.snippet.to_ascii_lowercase().contains("srcfoo")));
+    assert!(
+        hits.iter()
+            .any(|hit| hit.snippet.to_ascii_lowercase().contains("srcfoo"))
+    );
 }
 
 #[tokio::test]
@@ -811,10 +814,11 @@ async fn load_session_accepts_multiple_roles_and_slices_to_caller_limit() {
             .collect::<Vec<_>>(),
         vec!["role-user", "role-tool"]
     );
-    assert!(page
-        .messages
-        .iter()
-        .all(|message| message.content_range.returned_chars <= 12));
+    assert!(
+        page.messages
+            .iter()
+            .all(|message| message.content_range.returned_chars <= 12)
+    );
 }
 
 #[tokio::test]
@@ -1018,10 +1022,12 @@ async fn describe_gives_session_overview_without_full_payload_bodies() {
     assert_eq!(description.session_id, "session-1");
     assert_eq!(description.raw_message_count, 2);
     assert_eq!(description.summary_node_count, 1);
-    assert!(description
-        .summary_nodes
-        .iter()
-        .any(|node| node.node_id == summary.node_id));
+    assert!(
+        description
+            .summary_nodes
+            .iter()
+            .any(|node| node.node_id == summary.node_id)
+    );
 
     let rendered = serde_json::to_string(&description).unwrap();
     assert!(rendered.contains("tool-describe"));
@@ -1104,10 +1110,11 @@ async fn describe_node_and_external_payload_return_metadata_without_body_leaks()
         .expect("summary metadata");
     assert_eq!(node.node_id, parent.node_id);
     assert_eq!(node.source_count, 2);
-    assert!(node
-        .children
-        .iter()
-        .any(|child| child.node_id.as_deref() == Some(leaf.node_id.as_str())));
+    assert!(
+        node.children
+            .iter()
+            .any(|child| child.node_id.as_deref() == Some(leaf.node_id.as_str()))
+    );
 
     let payload_description = db
         .lcm_describe(LcmDescribeRequest {
@@ -1125,12 +1132,16 @@ async fn describe_node_and_external_payload_return_metadata_without_body_leaks()
         .as_ref()
         .expect("payload metadata");
     assert_eq!(payload_meta.payload_ref, payload_ref);
-    assert!(payload_meta
-        .content_preview
-        .contains(&payload_meta.payload_ref));
-    assert!(!payload_meta
-        .content_preview
-        .contains("external describe secret"));
+    assert!(
+        payload_meta
+            .content_preview
+            .contains(&payload_meta.payload_ref)
+    );
+    assert!(
+        !payload_meta
+            .content_preview
+            .contains("external describe secret")
+    );
 
     let rendered = serde_json::to_string(&(node_description, payload_description)).unwrap();
     assert!(!rendered.contains("parent summary body"));
@@ -1465,10 +1476,12 @@ async fn expand_query_selects_summary_and_raw_context_blocks() {
 
     assert!(response.needs_synthesis);
     assert_eq!(response.answer, None);
-    assert!(response
-        .node_ids
-        .iter()
-        .any(|node_id| node_id == &summary.node_id));
+    assert!(
+        response
+            .node_ids
+            .iter()
+            .any(|node_id| node_id == &summary.node_id)
+    );
     assert!(response.matches.iter().any(
         |item| item.kind == "summary_node" && item.node_id.as_deref() == Some(&summary.node_id)
     ));
@@ -1482,12 +1495,14 @@ async fn expand_query_selects_summary_and_raw_context_blocks() {
     assert!(response.context_blocks.iter().any(
         |block| block.kind == "raw_message" && block.content.contains("raw orchard migration")
     ));
-    assert!(response
-        .synthesis_prompt
-        .as_ref()
-        .expect("synthesis prompt")
-        .user
-        .contains("EXPANDED CONTEXT"));
+    assert!(
+        response
+            .synthesis_prompt
+            .as_ref()
+            .expect("synthesis prompt")
+            .user
+            .contains("EXPANDED CONTEXT")
+    );
 }
 
 #[tokio::test]
@@ -1531,15 +1546,19 @@ async fn expand_query_reports_context_budget_truncation() {
 
     assert!(response.context_truncated);
     assert!(response.context_budget.used_chars <= 64);
-    assert!(response
-        .context_blocks
-        .iter()
-        .any(|block| block.content_range.truncated));
+    assert!(
+        response
+            .context_blocks
+            .iter()
+            .any(|block| block.content_range.truncated)
+    );
     assert!(!response.context_pagination.is_empty());
-    assert!(response
-        .context_pagination
-        .iter()
-        .any(|page| page.has_more && page.node_id.as_deref() == Some(&summary.node_id)));
+    assert!(
+        response
+            .context_pagination
+            .iter()
+            .any(|page| page.has_more && page.node_id.as_deref() == Some(&summary.node_id))
+    );
 }
 
 #[tokio::test]

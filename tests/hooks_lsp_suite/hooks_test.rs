@@ -1,20 +1,20 @@
-use crate::common::{lock_global_db_env, lock_recovering_poison, EnvVarGuard, GLOBAL_DB_ENV};
+use crate::common::{EnvVarGuard, GLOBAL_DB_ENV, lock_global_db_env, lock_recovering_poison};
 use std::path::Path;
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::hooks::{
-    build_cursor_session_context, claude_session_context_for_event, codex_additional_context_json,
-    codex_apply_patch_rel_paths, codex_project_root_from_event, codex_subagent_start_log_line,
+    CursorShellSyncPlan, HookWorkspaceStatus, build_cursor_session_context,
+    claude_session_context_for_event, codex_additional_context_json, codex_apply_patch_rel_paths,
+    codex_project_root_from_event, codex_subagent_start_log_line,
     codex_user_prompt_submit_context_for_event, codex_workspace_status_from_event,
     cursor_branch_switch_target, cursor_project_root_from_event, cursor_session_start_json,
     cursor_shell_command_targets_project, cursor_shell_sync_plan,
     cursor_shell_sync_plan_with_current_branch, cursor_should_run_sync, cursor_staleness_hint,
     evaluate_codex_subagent_start, evaluate_cursor_post_tool_use, evaluate_cursor_subagent_start,
     evaluate_hook_decision, evaluate_kiro_pre_tool_use, is_git_state_changing_command,
-    kiro_post_tool_use_rel_paths, record_codex_subagent_start, CursorShellSyncPlan,
-    HookWorkspaceStatus,
+    kiro_post_tool_use_rel_paths, record_codex_subagent_start,
 };
 use tracedecay::storage::{
-    resolve_layout_for_current_profile, write_enrollment_marker, EnrollmentMarker, StorageMode,
+    EnrollmentMarker, StorageMode, resolve_layout_for_current_profile, write_enrollment_marker,
 };
 
 fn is_blocked(json: &str) -> bool {
@@ -200,9 +200,11 @@ fn test_block_response_uses_correct_hook_schema() {
         v["hookSpecificOutput"]["permissionDecision"].as_str(),
         Some("deny")
     );
-    assert!(v["hookSpecificOutput"]["permissionDecisionReason"]
-        .as_str()
-        .is_some());
+    assert!(
+        v["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .is_some()
+    );
 }
 
 #[test]
@@ -321,14 +323,18 @@ fn test_cursor_post_tool_use_hints_for_grep_search() {
 
     let output = evaluate_cursor_post_tool_use(input).expect("Grep should get a tracedecay hint");
     let v: serde_json::Value = serde_json::from_str(&output).unwrap();
-    assert!(v["additional_context"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("tracedecay hint:"));
-    assert!(v["additional_context"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("tracedecay_search"));
+    assert!(
+        v["additional_context"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("tracedecay hint:")
+    );
+    assert!(
+        v["additional_context"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("tracedecay_search")
+    );
     assert!(v.get("hookSpecificOutput").is_none());
     assert!(v.get("permission").is_none());
 }
@@ -346,10 +352,12 @@ fn test_cursor_post_tool_use_hints_for_shell_rg() {
 
     let output = evaluate_cursor_post_tool_use(input).expect("rg shell command should get a hint");
     let v: serde_json::Value = serde_json::from_str(&output).unwrap();
-    assert!(v["additional_context"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("tracedecay hint:"));
+    assert!(
+        v["additional_context"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("tracedecay hint:")
+    );
 }
 
 #[test]
@@ -365,10 +373,12 @@ fn test_cursor_post_tool_use_hints_for_semantic_search() {
 
     let output = evaluate_cursor_post_tool_use(input).expect("semantic search should get a hint");
     let v: serde_json::Value = serde_json::from_str(&output).unwrap();
-    assert!(v["additional_context"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("tracedecay_context"));
+    assert!(
+        v["additional_context"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("tracedecay_context")
+    );
 }
 
 #[test]
@@ -482,10 +492,12 @@ fn test_cursor_post_tool_use_records_hint_analytics_for_emitted_duplicate_and_mi
     let output = tracedecay::hooks::cursor_post_tool_use_decision(&missing_session_event)
         .expect("missing session id should still emit a useful hint");
     let v: serde_json::Value = serde_json::from_str(&output).unwrap();
-    assert!(v["additional_context"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("tracedecay hint:"));
+    assert!(
+        v["additional_context"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("tracedecay hint:")
+    );
     assert!(v.get("hookSpecificOutput").is_none());
     assert!(v.get("permission").is_none());
 
@@ -1276,14 +1288,18 @@ fn test_codex_subagent_start_redirects_explore_research_agent() {
         v["hookSpecificOutput"]["hookEventName"].as_str(),
         Some("SubagentStart")
     );
-    assert!(v["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("tracedecay MCP tools"));
-    assert!(v["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("tracedecay hint:"));
+    assert!(
+        v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("tracedecay MCP tools")
+    );
+    assert!(
+        v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("tracedecay hint:")
+    );
     // Must use the Codex output schema, not Cursor's `permission`/`user_message`.
     assert!(
         v.get("permission").is_none(),

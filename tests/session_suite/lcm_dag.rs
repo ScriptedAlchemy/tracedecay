@@ -320,9 +320,11 @@ async fn summary_expansion_marks_external_raw_sources_without_silent_empty_conte
     assert_eq!(expanded.sources.len(), 1);
     let source = &expanded.sources[0];
     assert!(!source.content.is_empty());
-    assert!(source
-        .content
-        .contains("[Externalized LCM ingest payload: kind=tool_result;"));
+    assert!(
+        source
+            .content
+            .contains("[Externalized LCM ingest payload: kind=tool_result;")
+    );
     assert!(source.content.contains(&payload_ref));
     let raw = source.raw_message.as_ref().expect("raw message source");
     assert_eq!(raw.storage_kind, LcmStorageKind::External);

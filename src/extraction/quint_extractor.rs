@@ -24,7 +24,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
 use crate::types::{
-    generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility,
+    Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility, generate_node_id,
 };
 
 pub struct QuintExtractor;
@@ -148,12 +148,12 @@ impl QuintExtractor {
         // it onto the scope stack on the next `{` so we know the depth at
         // which the matching `}` should pop it.
         let mut pending_open: Option<(String, String)> = None; // (qualified_name, id)
-                                                               // Active import collection: dotted parts seen since the `import`
-                                                               // keyword, plus the line of that keyword. Committed (i.e. emits a
-                                                               // Uses edge) when we hit any token that doesn't extend the path
-                                                               // (`from`, `as`, end of stream, another keyword, a storage_modifier,
-                                                               // etc.). The shallow grammar gives us identifiers and `.` operators
-                                                               // — that's enough to reconstruct the dotted import path.
+        // Active import collection: dotted parts seen since the `import`
+        // keyword, plus the line of that keyword. Committed (i.e. emits a
+        // Uses edge) when we hit any token that doesn't extend the path
+        // (`from`, `as`, end of stream, another keyword, a storage_modifier,
+        // etc.). The shallow grammar gives us identifiers and `.` operators
+        // — that's enough to reconstruct the dotted import path.
         let mut import_collect: Option<(Vec<String>, u32)> = None;
 
         let mut cursor = root.walk();

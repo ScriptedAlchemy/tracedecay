@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tempfile::TempDir;
-use tracedecay::branch_meta::{save_branch_meta, BranchMeta};
+use tracedecay::branch_meta::{BranchMeta, save_branch_meta};
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::TraceDecay;

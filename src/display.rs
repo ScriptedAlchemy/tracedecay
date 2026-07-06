@@ -266,7 +266,7 @@ fn print_version_flags_row(country_flags: &[String], inner_width: usize) {
     let mut flags_str = String::new();
     let mut display_width = 0;
     let flag_width = 2; // emoji flags are 2 columns wide
-                        // Reserve space for title + at least 2 spaces gap
+    // Reserve space for title + at least 2 spaces gap
     let max_flags_width = available.saturating_sub(title_display_width + 2);
     for (i, flag) in capped.iter().enumerate() {
         let needed = if i == 0 { flag_width } else { 1 + flag_width };

@@ -20,11 +20,13 @@ pub fn add(a: i32, b: i32) -> i32 {
     assert_eq!(fns[0].name, "add");
     assert_eq!(fns[0].visibility, Visibility::Pub);
     assert!(fns[0].signature.as_ref().unwrap().contains("fn add"));
-    assert!(fns[0]
-        .docstring
-        .as_ref()
-        .unwrap()
-        .contains("Adds two numbers"));
+    assert!(
+        fns[0]
+            .docstring
+            .as_ref()
+            .unwrap()
+            .contains("Adds two numbers")
+    );
 }
 
 #[test]
@@ -323,18 +325,22 @@ fn test_language_registry_finds_go_extractor() {
 fn test_language_registry_finds_java_extractor() {
     let registry = LanguageRegistry::new();
     assert!(registry.extractor_for_file("Main.java").is_some());
-    assert!(registry
-        .extractor_for_file("src/com/example/App.java")
-        .is_some());
+    assert!(
+        registry
+            .extractor_for_file("src/com/example/App.java")
+            .is_some()
+    );
 }
 
 #[test]
 fn test_language_registry_finds_scala_extractor() {
     let registry = LanguageRegistry::new();
     assert!(registry.extractor_for_file("Main.scala").is_some());
-    assert!(registry
-        .extractor_for_file("src/com/example/App.scala")
-        .is_some());
+    assert!(
+        registry
+            .extractor_for_file("src/com/example/App.scala")
+            .is_some()
+    );
     assert!(registry.extractor_for_file("script.sc").is_some());
 }
 

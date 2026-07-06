@@ -2,13 +2,13 @@ use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::util::{coerce_limit, http_detail, JsonQuery};
 use super::DashboardState;
+use super::util::{JsonQuery, coerce_limit, http_detail};
 use crate::automation::fact_proposals::{
-    apply_fact_proposal, list_fact_proposals, load_fact_proposal, reject_fact_proposal,
-    FactProposalRecord, FactProposalState,
+    FactProposalRecord, FactProposalState, apply_fact_proposal, list_fact_proposals,
+    load_fact_proposal, reject_fact_proposal,
 };
 
 #[derive(Debug, Deserialize)]

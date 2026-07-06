@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::global_db::GlobalDb;
 use crate::sessions::shared::TranscriptIngestStats;
-use crate::sessions::source::{ingest_source, TranscriptSource};
+use crate::sessions::source::{TranscriptSource, ingest_source};
 
 pub mod claude;
 pub mod cline_like;

@@ -4,21 +4,21 @@
 //! Run with: `cargo test --features test-transport --test mcp_suite`
 
 use crate::common::EnvVarGuard;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use tempfile::TempDir;
-use tracedecay::branch_meta::{save_branch_meta, BranchMeta};
+use tracedecay::branch_meta::{BranchMeta, save_branch_meta};
+use tracedecay::mcp::McpServer;
 use tracedecay::mcp::handle_tool_call;
 use tracedecay::mcp::response_handles::{
-    cleanup_expired_response_handles, store_response_handle, RESPONSE_HANDLE_TTL_SECS,
+    RESPONSE_HANDLE_TTL_SECS, cleanup_expired_response_handles, store_response_handle,
 };
 use tracedecay::mcp::transport::{ChannelTransport, McpTransport};
-use tracedecay::mcp::McpServer;
 use tracedecay::storage::{resolve_layout_for_current_profile, resolve_response_handle_root};
-use tracedecay::tracedecay::{current_timestamp, TraceDecay, TraceDecayOpenOptions};
+use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -662,12 +662,14 @@ async fn test_tools_call_missing_params() {
     // Send tools/call with no params at all.
     let responses = run_server_with_messages(
         server,
-        vec![serde_json::to_string(&json!({
-            "jsonrpc": "2.0",
-            "id": 50,
-            "method": "tools/call"
-        }))
-        .unwrap()],
+        vec![
+            serde_json::to_string(&json!({
+                "jsonrpc": "2.0",
+                "id": 50,
+                "method": "tools/call"
+            }))
+            .unwrap(),
+        ],
     )
     .await;
 
@@ -752,10 +754,12 @@ async fn test_tracedecay_retrieve_missing_handle_argument_is_invalid_params_with
         resp["error"]["data"]["reason_code"],
         "missing_handle_argument"
     );
-    assert!(resp["error"]["message"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("requires the `handle` argument"));
+    assert!(
+        resp["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("requires the `handle` argument")
+    );
 }
 
 #[tokio::test]
@@ -777,10 +781,12 @@ async fn test_tracedecay_retrieve_invalid_handle_is_invalid_params_with_reason_c
     let resp = response_with_id(&responses, json!(62));
     assert_eq!(resp["error"]["code"], -32602);
     assert_eq!(resp["error"]["data"]["reason_code"], "invalid_handle");
-    assert!(resp["error"]["message"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("invalid response handle"));
+    assert!(
+        resp["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("invalid response handle")
+    );
 }
 
 #[tokio::test]
@@ -815,10 +821,12 @@ async fn test_tracedecay_retrieve_corrupt_handle_record_returns_actionable_inter
         "corrupt_handle_record"
     );
     assert_eq!(resp["error"]["data"]["retryable"], true);
-    assert!(resp["error"]["message"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("cached response handle record is unreadable"));
+    assert!(
+        resp["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("cached response handle record is unreadable")
+    );
 }
 
 #[tokio::test]
@@ -848,10 +856,12 @@ async fn test_tracedecay_retrieve_handle_read_failure_returns_actionable_interna
     assert_eq!(resp["error"]["code"], -32603);
     assert_eq!(resp["error"]["data"]["reason_code"], "handle_read_failed");
     assert_eq!(resp["error"]["data"]["retryable"], true);
-    assert!(resp["error"]["message"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("failed to read cached response handle"));
+    assert!(
+        resp["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("failed to read cached response handle")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2608,7 +2618,7 @@ fn global_accounting_env_overrides() {
     let _env_guard = SAVINGS_ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    use tracedecay::global_db::{global_accounting_mode, AccountingMode};
+    use tracedecay::global_db::{AccountingMode, global_accounting_mode};
 
     let _clear_enable = EnvVarGuard::unset("TRACEDECAY_ENABLE_GLOBAL_DB");
     let _clear_disable = EnvVarGuard::unset("TRACEDECAY_DISABLE_GLOBAL_DB");

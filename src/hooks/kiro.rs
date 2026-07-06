@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use super::claude::is_code_research_prompt;
 use super::codex::codex_project_root_from_event;
-use super::tool_hints::{decide_hint, HintAgent, ToolHintInput};
+use super::tool_hints::{HintAgent, ToolHintInput, decide_hint};
 use super::{
     event_cwd, event_cwd_from_parsed, event_session_id, hook_route_metadata_from_event,
     read_hook_event, record_hook_invoked, rel_under_root, research_block_reason,

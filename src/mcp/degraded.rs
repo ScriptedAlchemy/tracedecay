@@ -10,7 +10,7 @@
 
 use serde_json::json;
 
-use super::server::{classify_mcp_method, initialize_result, resources_list_result, McpMethod};
+use super::server::{McpMethod, classify_mcp_method, initialize_result, resources_list_result};
 use super::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
 
 /// Whether a raw input line is a `tools/call` request. The degraded loop

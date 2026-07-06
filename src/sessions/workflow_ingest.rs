@@ -12,8 +12,8 @@ use crate::accounting::parser::parse_timestamp;
 use crate::global_db::GlobalDb;
 use crate::sessions::shared::ProjectRootMatcher;
 use crate::sessions::workflow_index::{
-    bump_ingest_watermark, read_ingest_watermark, WorkflowAgent, WorkflowRun, WorkflowStatus,
-    INGEST_WATERMARK_KEY,
+    INGEST_WATERMARK_KEY, WorkflowAgent, WorkflowRun, WorkflowStatus, bump_ingest_watermark,
+    read_ingest_watermark,
 };
 
 const RESULT_SUMMARY_CAP: usize = 600;

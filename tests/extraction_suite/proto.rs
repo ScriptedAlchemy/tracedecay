@@ -47,12 +47,16 @@ fn test_proto_imports() {
         "expected 2 imports, got {}",
         imports.len()
     );
-    assert!(imports
-        .iter()
-        .any(|n| n.name == "google/protobuf/timestamp.proto"));
-    assert!(imports
-        .iter()
-        .any(|n| n.name == "google/protobuf/empty.proto"));
+    assert!(
+        imports
+            .iter()
+            .any(|n| n.name == "google/protobuf/timestamp.proto")
+    );
+    assert!(
+        imports
+            .iter()
+            .any(|n| n.name == "google/protobuf/empty.proto")
+    );
 }
 
 #[test]

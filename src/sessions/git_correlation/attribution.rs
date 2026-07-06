@@ -1,8 +1,8 @@
-use libsql::{params, Connection};
+use libsql::{Connection, params};
 
 use super::{
-    correlation_tables_present, opt_text, upsert_commit_session, CommitSessionRecord,
-    GitCorrelationError, SpanOverlapKind,
+    CommitSessionRecord, GitCorrelationError, SpanOverlapKind, correlation_tables_present,
+    opt_text, upsert_commit_session,
 };
 
 const COMMIT_SWEEP_WATERMARK_KEY: &str = "commit_attribution_watermark";

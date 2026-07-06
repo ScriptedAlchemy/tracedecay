@@ -12,9 +12,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use tempfile::TempDir;
-use tracedecay::agents::{get_integration, InstallContext, UpdatePluginOutcome};
+use tracedecay::agents::{InstallContext, UpdatePluginOutcome, get_integration};
 
-use crate::common::{tracedecay_command_with_home, AgentEnvLock, EnvVarGuard};
+use crate::common::{AgentEnvLock, EnvVarGuard, tracedecay_command_with_home};
 use crate::plugin_validation_support::{assert_schema_valid, compile_schema, relative_files_under};
 
 const OLD_BIN: &str = "/old/bin/tracedecay";
@@ -213,8 +213,10 @@ fn hermes_update_plugin_refreshes_all_profiles_without_touching_config() {
     // Artifacts re-baked with the new binary path and current version stamp.
     for plugin_dir in [&default_plugin, &work_plugin] {
         assert!(text(&plugin_dir.join("tools.py")).contains(NEW_BIN));
-        assert!(text(&plugin_dir.join("plugin.yaml"))
-            .contains(&format!("version: {}", env!("CARGO_PKG_VERSION"))));
+        assert!(
+            text(&plugin_dir.join("plugin.yaml"))
+                .contains(&format!("version: {}", env!("CARGO_PKG_VERSION")))
+        );
     }
 
     // Dashboard page refreshed where deployed, with the pin re-read from
@@ -473,10 +475,12 @@ fn claude_update_plugin_reports_not_installed_without_a_bundle() {
     let claude = get_integration("claude").unwrap();
     let outcome = claude.update_plugin(&ctx(home.path(), NEW_BIN)).unwrap();
     assert!(matches!(outcome, UpdatePluginOutcome::NotInstalled));
-    assert!(!home
-        .path()
-        .join(".claude/plugins/marketplaces/tracedecay")
-        .exists());
+    assert!(
+        !home
+            .path()
+            .join(".claude/plugins/marketplaces/tracedecay")
+            .exists()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -534,7 +538,9 @@ fn codex_update_plugin_refreshes_bundle_without_touching_config() {
         "same-name user-authored Codex skills without TraceDecay markers must be preserved"
     );
     assert_codex_bundle_contains_bin(&plugin_dir, NEW_BIN, CodexScope::Global);
-    assert!(text(&plugin_dir.join(".codex-plugin/plugin.json")).contains(env!("CARGO_PKG_VERSION")));
+    assert!(
+        text(&plugin_dir.join(".codex-plugin/plugin.json")).contains(env!("CARGO_PKG_VERSION"))
+    );
 }
 
 #[test]
@@ -784,7 +790,9 @@ fn codex_update_plugin_refreshes_repo_local_bundle_from_project_root() {
     assert_eq!(paths, vec![plugin_dir.clone()]);
     assert_eq!(text(&plugin_dir.join("user-note.txt")), "mine\n");
     assert_codex_bundle_contains_bin(&plugin_dir, NEW_BIN, CodexScope::RepoLocal);
-    assert!(text(&plugin_dir.join(".codex-plugin/plugin.json")).contains(env!("CARGO_PKG_VERSION")));
+    assert!(
+        text(&plugin_dir.join(".codex-plugin/plugin.json")).contains(env!("CARGO_PKG_VERSION"))
+    );
 }
 
 #[test]

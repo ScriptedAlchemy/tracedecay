@@ -14,7 +14,7 @@ use crate::sync;
 use crate::types::*;
 
 use super::locking::{clear_dirty_sentinel_at, try_acquire_sync_lock_at, write_dirty_sentinel_at};
-use super::{current_timestamp, IndexResult, SyncResult, TraceDecay};
+use super::{IndexResult, SyncResult, TraceDecay, current_timestamp};
 
 /// Convert any backslash in a *relative* project-root-relative path to a
 /// forward slash, matching the canonical form the walker

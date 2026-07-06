@@ -7,10 +7,10 @@ use tracedecay::branch_meta::{self, BranchMeta};
 use tracedecay::config::{TraceDecayConfig, USER_DATA_DIR_ENV};
 use tracedecay::db::Database;
 use tracedecay::hooks::{
-    cursor_branch_switch_target, cursor_shell_command_targets_project, cursor_shell_sync_plan,
-    cursor_shell_sync_plan_with_current_branch, CursorShellSyncPlan,
+    CursorShellSyncPlan, cursor_branch_switch_target, cursor_shell_command_targets_project,
+    cursor_shell_sync_plan, cursor_shell_sync_plan_with_current_branch,
 };
-use tracedecay::storage::{write_enrollment_marker, EnrollmentMarker, StorageMode};
+use tracedecay::storage::{EnrollmentMarker, StorageMode, write_enrollment_marker};
 use tracedecay::tracedecay::TraceDecay;
 
 struct HomeEnvGuard {

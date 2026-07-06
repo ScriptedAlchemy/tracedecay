@@ -411,8 +411,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        current_tracedecay_exe_from, partition_reinstall_results, post_update_binary,
-        run_install_then_refresh, RefreshPolicy, ReinstallOutcome,
+        RefreshPolicy, ReinstallOutcome, current_tracedecay_exe_from, partition_reinstall_results,
+        post_update_binary, run_install_then_refresh,
     };
     use tempfile::TempDir;
     use tracedecay::upgrade::UpgradeOutcome;
@@ -482,8 +482,8 @@ mod tests {
     /// drops it from the results entirely, so an otherwise-empty pass is AllOk
     /// and the markers advance.
     #[tokio::test]
-    async fn reinstall_agent_integrations_skips_unknown_ids(
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    async fn reinstall_agent_integrations_skips_unknown_ids()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
         let home = TempDir::new()?;
         let results = crate::agent_cmd::reinstall_agent_integrations(
             &["unknown-agent".to_string()],

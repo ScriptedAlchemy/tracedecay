@@ -65,10 +65,12 @@ fn namespace_creates_module_and_parents_children() {
     let foo = result.nodes.iter().find(|n| n.name == "Foo").unwrap();
     let bar = result.nodes.iter().find(|n| n.name == "bar").unwrap();
     assert_eq!(foo.kind, NodeKind::Module);
-    assert!(result
-        .edges
-        .iter()
-        .any(|e| e.source == foo.id && e.target == bar.id && e.kind == EdgeKind::Contains));
+    assert!(
+        result
+            .edges
+            .iter()
+            .any(|e| e.source == foo.id && e.target == bar.id && e.kind == EdgeKind::Contains)
+    );
 }
 
 #[test]
@@ -94,22 +96,32 @@ fn nested_namespaces_parent_correctly() {
         .collect();
 
     // Outer contains Inner, a, c
-    assert!(contains
-        .iter()
-        .any(|e| e.source == outer.id && e.target == inner.id));
-    assert!(contains
-        .iter()
-        .any(|e| e.source == outer.id && e.target == a.id));
-    assert!(contains
-        .iter()
-        .any(|e| e.source == outer.id && e.target == c.id));
+    assert!(
+        contains
+            .iter()
+            .any(|e| e.source == outer.id && e.target == inner.id)
+    );
+    assert!(
+        contains
+            .iter()
+            .any(|e| e.source == outer.id && e.target == a.id)
+    );
+    assert!(
+        contains
+            .iter()
+            .any(|e| e.source == outer.id && e.target == c.id)
+    );
     // Inner contains b only
-    assert!(contains
-        .iter()
-        .any(|e| e.source == inner.id && e.target == b.id));
-    assert!(!contains
-        .iter()
-        .any(|e| e.source == outer.id && e.target == b.id));
+    assert!(
+        contains
+            .iter()
+            .any(|e| e.source == inner.id && e.target == b.id)
+    );
+    assert!(
+        !contains
+            .iter()
+            .any(|e| e.source == outer.id && e.target == b.id)
+    );
 }
 
 #[test]
@@ -186,10 +198,12 @@ fn anonymous_section_emits_no_module_but_recurses_body() {
         .find(|n| n.kind == NodeKind::File)
         .unwrap();
     let hidden = result.nodes.iter().find(|n| n.name == "hidden").unwrap();
-    assert!(result
-        .edges
-        .iter()
-        .any(|e| e.source == file.id && e.target == hidden.id && e.kind == EdgeKind::Contains));
+    assert!(
+        result
+            .edges
+            .iter()
+            .any(|e| e.source == file.id && e.target == hidden.id && e.kind == EdgeKind::Contains)
+    );
 }
 
 #[test]
@@ -203,10 +217,12 @@ fn named_section_still_emits_module() {
 
     let section = result.nodes.iter().find(|n| n.name == "MySection").unwrap();
     let x = result.nodes.iter().find(|n| n.name == "x").unwrap();
-    assert!(result
-        .edges
-        .iter()
-        .any(|e| e.source == section.id && e.target == x.id));
+    assert!(
+        result
+            .edges
+            .iter()
+            .any(|e| e.source == section.id && e.target == x.id)
+    );
 }
 
 #[test]
@@ -231,12 +247,16 @@ fn anonymous_section_inside_namespace_parents_defs_to_namespace() {
         .iter()
         .find(|node| node.name == "outsideSection")
         .unwrap();
-    assert!(result
-        .edges
-        .iter()
-        .any(|e| e.source == n.id && e.target == in_sec.id && e.kind == EdgeKind::Contains));
-    assert!(result
-        .edges
-        .iter()
-        .any(|e| e.source == n.id && e.target == outside.id && e.kind == EdgeKind::Contains));
+    assert!(
+        result
+            .edges
+            .iter()
+            .any(|e| e.source == n.id && e.target == in_sec.id && e.kind == EdgeKind::Contains)
+    );
+    assert!(
+        result
+            .edges
+            .iter()
+            .any(|e| e.source == n.id && e.target == outside.id && e.kind == EdgeKind::Contains)
+    );
 }

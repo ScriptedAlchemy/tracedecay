@@ -26,8 +26,8 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
-use super::util::{qmarks, query_rows};
 use super::DashboardState;
+use super::util::{qmarks, query_rows};
 use crate::global_db::TokenCountUpsert;
 
 #[cfg(feature = "token-counting")]

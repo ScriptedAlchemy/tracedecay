@@ -1395,10 +1395,11 @@ mod tests {
 
             assert_eq!(fs::read(&target).unwrap(), b"new-binary-content");
             // Temp file should be cleaned up
-            assert!(!tmp
-                .path()
-                .join(format!(".tracedecay_upgrade_{}", std::process::id()))
-                .exists());
+            assert!(
+                !tmp.path()
+                    .join(format!(".tracedecay_upgrade_{}", std::process::id()))
+                    .exists()
+            );
         }
 
         #[test]

@@ -10,12 +10,13 @@ use serde_json::Value;
 
 use super::claude::is_code_research_prompt;
 use super::memory_inject;
-use super::post_tool_use::{notify_post_tool_use, CODEX_POST_TOOL_USE_SPEC};
+use super::post_tool_use::{CODEX_POST_TOOL_USE_SPEC, notify_post_tool_use};
 use super::steering::{
-    append_context_block, append_context_recovery_hint, build_codex_session_context_for_workspace,
-    cursor_index_signals_for_root, session_start_from_compaction, HookWorkspaceStatus,
+    HookWorkspaceStatus, append_context_block, append_context_recovery_hint,
+    build_codex_session_context_for_workspace, cursor_index_signals_for_root,
+    session_start_from_compaction,
 };
-use super::tool_hints::{decide_hint, HintAgent, HintCategory, ToolHint, ToolHintInput};
+use super::tool_hints::{HintAgent, HintCategory, ToolHint, ToolHintInput, decide_hint};
 use super::{
     append_tool_hint, deduped_project_hint_with_id, event_cwd_from_parsed, event_session_id,
     format_tool_hint, is_project_like_workspace, mint_hint_id, prompt_like_text, read_hook_event,

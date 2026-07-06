@@ -1,10 +1,11 @@
 use super::{
+    Commands, SilentReinstallAction,
     agent_cmd::{
         hermes_profile_targets, hermes_selected_profile_targets, validate_hermes_profile_flags,
         validate_hermes_project_root_flag,
     },
     is_local_install_command, should_skip_agent_install_maintenance,
-    should_skip_startup_maintenance, silent_reinstall_action, Commands, SilentReinstallAction,
+    should_skip_startup_maintenance, silent_reinstall_action,
 };
 use tempfile::TempDir;
 use tracedecay::user_config::UserConfig;
@@ -319,8 +320,10 @@ fn hermes_profile_flags_are_restricted_to_hermes() {
 
     let all_profiles_err = validate_hermes_profile_flags(Some("cursor"), &none_profile, true)
         .expect_err("non-hermes --all-profiles should fail");
-    assert!(format!("{all_profiles_err}")
-        .contains("`--all-profiles` is only supported with `--agent hermes`"));
+    assert!(
+        format!("{all_profiles_err}")
+            .contains("`--all-profiles` is only supported with `--agent hermes`")
+    );
 
     assert!(validate_hermes_profile_flags(Some("hermes"), &profile, false).is_ok());
     assert!(validate_hermes_profile_flags(Some("hermes"), &none_profile, true).is_ok());

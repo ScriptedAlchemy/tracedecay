@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::agents::safe_write_text_file;
 use crate::automation::managed_skills::{
-    managed_skill_root, validate_managed_support_files, ManagedSkill, ManagedSkillState,
-    ManagedSupportFile,
+    ManagedSkill, ManagedSkillState, ManagedSupportFile, managed_skill_root,
+    validate_managed_support_files,
 };
 use crate::config::{TRACEDECAY_DIR, USER_DATA_DIR_ENV};
 use crate::errors::{Result, TraceDecayError};

@@ -5,10 +5,10 @@
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Json;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::util::http_detail;
 use super::DashboardState;
+use super::util::http_detail;
 use crate::automation::fact_proposals::load_fact_proposal_store;
 use crate::automation::managed_skills::list_managed_skills;
 use crate::automation::outcomes::{

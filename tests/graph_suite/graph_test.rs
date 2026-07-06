@@ -995,8 +995,8 @@ async fn test_build_file_adjacency() {
 // ---------------------------------------------------------------------------
 
 use tracedecay::graph::health::{
-    acyclicity_score, compute_composite_health, dependency_depth, gini_coefficient, gini_label,
-    modularity_score, HealthDimensions,
+    HealthDimensions, acyclicity_score, compute_composite_health, dependency_depth,
+    gini_coefficient, gini_label, modularity_score,
 };
 
 // --- Gini coefficient ---

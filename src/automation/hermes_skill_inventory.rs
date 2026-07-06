@@ -8,7 +8,7 @@ use serde_json::Value;
 use crate::errors::{Result, TraceDecayError};
 
 use super::hermes_config_projection::{load_hermes_yaml_projection, yaml_bool};
-use super::skill_frontmatter::{parse_skill_frontmatter, SkillFrontmatterValue};
+use super::skill_frontmatter::{SkillFrontmatterValue, parse_skill_frontmatter};
 
 const SKILL_MD: &str = "SKILL.md";
 pub(crate) const USAGE_FILE: &str = ".usage.json";
@@ -395,8 +395,8 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn hub_skill_path_resolution_stays_inside_skills_dir(
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    fn hub_skill_path_resolution_stays_inside_skills_dir()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let skills_dir = temp.path().join("skills");
         let skill_dir = skills_dir.join("hub-skill");

@@ -491,18 +491,22 @@ fn match_commit_to_spans_filters_by_branch_worktree_and_window() {
     assert_eq!(records.len(), 2);
     let ids: Vec<i64> = records.iter().filter_map(|r| r.span_id).collect();
     assert_eq!(ids, vec![1, 2]);
-    assert!(records
-        .iter()
-        .all(|r| r.span_overlap_kind == SpanOverlapKind::WithinSpan));
+    assert!(
+        records
+            .iter()
+            .all(|r| r.span_overlap_kind == SpanOverlapKind::WithinSpan)
+    );
     assert_eq!(records[0].session_id, "s1");
     assert_eq!(records[0].worktree.as_deref(), Some("/repo"));
 
     // A just-past-the-edge commit lands in the extended window only.
     let extended = match_commit_to_spans("cafef00d", Some("main"), "/repo", 250, &spans, 60);
     assert_eq!(extended.len(), 2);
-    assert!(extended
-        .iter()
-        .all(|r| r.span_overlap_kind == SpanOverlapKind::ExtendedWindow));
+    assert!(
+        extended
+            .iter()
+            .all(|r| r.span_overlap_kind == SpanOverlapKind::ExtendedWindow)
+    );
 
     // A commit outside every window attributes nothing.
     assert!(match_commit_to_spans("beefcafe", Some("main"), "/repo", 500, &spans, 60).is_empty());

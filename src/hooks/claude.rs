@@ -6,14 +6,14 @@ use serde_json::Value;
 
 use super::codex::{codex_additional_context_json, codex_project_root_from_parsed_event};
 use super::post_tool_use::{
-    is_claude_edit_tool, is_claude_hint_tool, notify_post_tool_use, tool_input_command_str,
-    tool_input_file_path_str, CLAUDE_POST_TOOL_USE_SHELL_TOOLS, CLAUDE_POST_TOOL_USE_SPEC,
+    CLAUDE_POST_TOOL_USE_SHELL_TOOLS, CLAUDE_POST_TOOL_USE_SPEC, is_claude_edit_tool,
+    is_claude_hint_tool, notify_post_tool_use, tool_input_command_str, tool_input_file_path_str,
 };
 use super::steering::{
     append_context_recovery_hint, append_tracedecay_bootstrap_context,
     cursor_index_signals_for_root, index_status_line, session_start_from_compaction,
 };
-use super::tool_hints::{decide_hint, is_harness_memory_path, HintAgent, ToolHint, ToolHintInput};
+use super::tool_hints::{HintAgent, ToolHint, ToolHintInput, decide_hint, is_harness_memory_path};
 use super::{
     deduped_project_hint, event_cwd_from_parsed, event_session_id, format_tool_hint,
     is_project_like_workspace, prompt_like_text, read_hook_event, record_hook_analytics,

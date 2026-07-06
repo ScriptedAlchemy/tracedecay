@@ -4,7 +4,7 @@ pub(crate) use std::fs;
 pub(crate) use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-pub(crate) use serde_json::{json, Value};
+pub(crate) use serde_json::{Value, json};
 pub(crate) use tempfile::tempdir;
 
 pub(crate) use tracedecay::automation::backend::{
@@ -15,21 +15,21 @@ pub(crate) use tracedecay::automation::config::{
     AutomationTaskSet,
 };
 pub(crate) use tracedecay::automation::fact_proposals::{
-    apply_fact_proposal, list_fact_proposals, FactProposalState,
+    FactProposalState, apply_fact_proposal, list_fact_proposals,
 };
 pub(crate) use tracedecay::automation::managed_skills::{
-    approve_managed_skill, create_managed_skill_draft, load_managed_skill, ManagedSkillDraft,
-    ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState, ManagedSupportFile,
+    ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState,
+    ManagedSupportFile, approve_managed_skill, create_managed_skill_draft, load_managed_skill,
 };
 pub(crate) use tracedecay::automation::run_ledger::{
-    append_run_record, load_run_records, read_run_artifact_payload, AutomationRunLedgerRecord,
-    AutomationRunStatus, AutomationTrigger,
+    AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, append_run_record,
+    load_run_records, read_run_artifact_payload,
 };
 pub(crate) use tracedecay::automation::runner::{
-    run_combined_review_with_backend, run_memory_curator_with_backend,
-    run_session_reflector_with_backend, run_skill_writer_with_backend,
     CombinedReviewAutomationOptions, CombinedReviewDispatch, MemoryCuratorAutomationOptions,
     SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
+    run_combined_review_with_backend, run_memory_curator_with_backend,
+    run_session_reflector_with_backend, run_skill_writer_with_backend,
 };
 pub(crate) use tracedecay::errors::TraceDecayError;
 pub(crate) use tracedecay::global_db::GlobalDb;
@@ -37,7 +37,7 @@ pub(crate) use tracedecay::memory::encoding::HolographicEncoder;
 pub(crate) use tracedecay::sessions::cursor::resolve_hermes_profile_session_db_path;
 pub(crate) use tracedecay::sessions::lcm::{LcmGrepSort, LcmScope};
 pub(crate) use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
-pub(crate) use tracedecay::tracedecay::{current_timestamp, TraceDecay};
+pub(crate) use tracedecay::tracedecay::{TraceDecay, current_timestamp};
 
 pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -160,9 +160,11 @@ impl AgentTaskBackend for SkillJsonBackend {
             request.context["activation_policy"],
             json!(self.expected_activation_policy)
         );
-        assert!(request.context["skill_writer_evidence"]["hits"]
-            .as_array()
-            .is_some_and(|hits| !hits.is_empty()));
+        assert!(
+            request.context["skill_writer_evidence"]["hits"]
+                .as_array()
+                .is_some_and(|hits| !hits.is_empty())
+        );
         let evidence = &request.context["skill_writer_evidence"];
         assert!(evidence["skill_usage_summaries"].is_array());
         assert!(evidence["stale_recommendations"].is_array());
@@ -171,15 +173,21 @@ impl AgentTaskBackend for SkillJsonBackend {
             .as_array()
             .is_some_and(|skills| !skills.is_empty())
         {
-            assert!(evidence["skill_usage_summaries"]
-                .as_array()
-                .is_some_and(|summaries| !summaries.is_empty()));
-            assert!(evidence["stale_recommendations"]
-                .as_array()
-                .is_some_and(|recommendations| !recommendations.is_empty()));
-            assert!(evidence["skill_improvement_recommendations"]
-                .as_array()
-                .is_some_and(|recommendations| !recommendations.is_empty()));
+            assert!(
+                evidence["skill_usage_summaries"]
+                    .as_array()
+                    .is_some_and(|summaries| !summaries.is_empty())
+            );
+            assert!(
+                evidence["stale_recommendations"]
+                    .as_array()
+                    .is_some_and(|recommendations| !recommendations.is_empty())
+            );
+            assert!(
+                evidence["skill_improvement_recommendations"]
+                    .as_array()
+                    .is_some_and(|recommendations| !recommendations.is_empty())
+            );
         }
         if let Some(support) = evidence["existing_managed_skills"]
             .as_array()
@@ -232,9 +240,11 @@ impl AgentTaskBackend for InspectSkillWriterUsageBackend {
             .expect("skill writer evidence should include automation-run-review usage");
         assert_eq!(summary["view_count"], json!(1));
         assert_eq!(summary["last_viewed_at"], json!(1_715_000_111_i64));
-        assert!(summary["targets"]
-            .as_array()
-            .is_some_and(|targets| targets.contains(&json!("codex"))));
+        assert!(
+            summary["targets"]
+                .as_array()
+                .is_some_and(|targets| targets.contains(&json!("codex")))
+        );
         let underused = request.context["skill_writer_evidence"]["underused_tool_families"]
             .as_array()
             .expect("underused tool families should be present");
@@ -275,10 +285,10 @@ impl AgentTaskBackend for InspectSkillWriterUnderusedBackend {
         assert_eq!(code_search["usage_events"], json!(0));
         assert_eq!(code_search["missed_events"], json!(1));
         assert_eq!(code_search["underused"], json!(true));
-        let recommendations = request.context["skill_writer_evidence"]
-            ["skill_improvement_recommendations"]
-            .as_array()
-            .expect("skill improvement recommendations should be present");
+        let recommendations =
+            request.context["skill_writer_evidence"]["skill_improvement_recommendations"]
+                .as_array()
+                .expect("skill improvement recommendations should be present");
         assert!(recommendations.iter().any(|recommendation| {
             recommendation["id"] == "underused_tool_family:code_search"
                 && recommendation["recommendation"] == "add_or_patch_skill_guidance"
@@ -452,9 +462,11 @@ impl AgentTaskBackend for SessionJsonBackend {
         );
         assert!(request.prompt.contains("durable memory facts"));
         assert_eq!(request.context["apply"], json!(false));
-        assert!(request.context["session_reflection_evidence"]["hits"]
-            .as_array()
-            .is_some_and(|hits| !hits.is_empty()));
+        assert!(
+            request.context["session_reflection_evidence"]["hits"]
+                .as_array()
+                .is_some_and(|hits| !hits.is_empty())
+        );
         Ok(AgentTaskResponse {
             run_id: request.run_id.clone(),
             task: request.task,
@@ -504,12 +516,16 @@ impl AgentTaskBackend for CombinedJsonBackend {
         assert!(request.prompt.contains("managed skill creates or updates"));
         assert_eq!(request.context["apply"], json!(false));
         assert!(request.context["activation_policy"].is_string());
-        assert!(request.context["session_reflection_evidence"]["hits"]
-            .as_array()
-            .is_some_and(|hits| !hits.is_empty()));
-        assert!(request.context["skill_writer_evidence"]["hits"]
-            .as_array()
-            .is_some_and(|hits| !hits.is_empty()));
+        assert!(
+            request.context["session_reflection_evidence"]["hits"]
+                .as_array()
+                .is_some_and(|hits| !hits.is_empty())
+        );
+        assert!(
+            request.context["skill_writer_evidence"]["hits"]
+                .as_array()
+                .is_some_and(|hits| !hits.is_empty())
+        );
         Ok(AgentTaskResponse {
             run_id: request.run_id.clone(),
             task: request.task,
@@ -554,10 +570,12 @@ impl AgentTaskBackend for InspectSessionEvidenceBackend {
         let hits = evidence["hits"].as_array().expect("hits array");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0]["session_id"], json!("hermes-reflect-1"));
-        assert!(hits[0]["snippet"]
-            .as_str()
-            .unwrap()
-            .contains("profile-only banana"));
+        assert!(
+            hits[0]["snippet"]
+                .as_str()
+                .unwrap()
+                .contains("profile-only banana")
+        );
         Ok(AgentTaskResponse {
             run_id: request.run_id.clone(),
             task: request.task,
@@ -722,10 +740,12 @@ pub(crate) fn assert_noop_fallback_record(
     assert_eq!(record.accepted_count, 0);
     assert_eq!(record.rejected_count, 0);
     assert_eq!(record.proposed_ops.as_ref(), Some(&expected_output));
-    assert!(record
-        .output_hash
-        .as_deref()
-        .is_some_and(|hash| hash.starts_with("sha256:")));
+    assert!(
+        record
+            .output_hash
+            .as_deref()
+            .is_some_and(|hash| hash.starts_with("sha256:"))
+    );
     assert_eq!(
         record.fallback_status.as_deref(),
         Some("backend_failed_noop")
@@ -737,10 +757,12 @@ pub(crate) fn assert_noop_fallback_record(
     assert_eq!(record.error_retryable, Some(true));
     assert!(record.evidence_hash.is_some());
     assert!(record.input_hash.is_some());
-    assert!(record
-        .error
-        .as_deref()
-        .is_some_and(|error| error.contains("executable")));
+    assert!(
+        record
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("executable"))
+    );
 }
 
 pub(crate) async fn init_project(project_root: &Path) -> TraceDecay {

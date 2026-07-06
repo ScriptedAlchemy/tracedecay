@@ -2,8 +2,8 @@ use std::path::Path;
 
 use tempfile::TempDir;
 use tracedecay::agents::{
-    expected_tool_perms, tool_names, AgentIntegration, ClaudeIntegration, DoctorCounters,
-    HealthcheckContext, InstallContext,
+    AgentIntegration, ClaudeIntegration, DoctorCounters, HealthcheckContext, InstallContext,
+    expected_tool_perms, tool_names,
 };
 
 /// Prefix for the plugin-namespace tool permission entries the installer writes

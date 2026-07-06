@@ -1,16 +1,16 @@
 //! Dashboard endpoints for project and user settings.
 
+use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::util::{http_detail, JsonError};
 use super::DashboardState;
+use super::util::{JsonError, http_detail};
 use crate::automation::config as automation_config;
 use crate::config::{
-    load_config_from_path, save_config_to_path, TelemetryConfig, TraceDecayConfig,
+    TelemetryConfig, TraceDecayConfig, load_config_from_path, save_config_to_path,
 };
 use crate::user_config::{self, UserConfig};
 

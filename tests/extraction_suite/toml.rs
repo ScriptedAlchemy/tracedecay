@@ -70,14 +70,18 @@ fn pairs_inside_table_are_parented_to_table() {
         .iter()
         .find(|n| n.name == "version" && n.kind == NodeKind::Const)
         .unwrap();
-    assert!(result
-        .edges
-        .iter()
-        .any(|e| e.source == pkg.id && e.target == name.id && e.kind == EdgeKind::Contains));
-    assert!(result
-        .edges
-        .iter()
-        .any(|e| e.source == pkg.id && e.target == version.id && e.kind == EdgeKind::Contains));
+    assert!(
+        result
+            .edges
+            .iter()
+            .any(|e| e.source == pkg.id && e.target == name.id && e.kind == EdgeKind::Contains)
+    );
+    assert!(
+        result
+            .edges
+            .iter()
+            .any(|e| e.source == pkg.id && e.target == version.id && e.kind == EdgeKind::Contains)
+    );
 }
 
 #[test]
@@ -94,10 +98,12 @@ fn top_level_pair_parented_to_file() {
         .iter()
         .find(|n| n.name == "key" && n.kind == NodeKind::Const)
         .unwrap();
-    assert!(result
-        .edges
-        .iter()
-        .any(|e| e.source == file.id && e.target == key.id && e.kind == EdgeKind::Contains));
+    assert!(
+        result
+            .edges
+            .iter()
+            .any(|e| e.source == file.id && e.target == key.id && e.kind == EdgeKind::Contains)
+    );
 }
 
 #[test]

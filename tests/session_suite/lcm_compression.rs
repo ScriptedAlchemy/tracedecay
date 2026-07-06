@@ -1,12 +1,12 @@
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::sessions::lcm::compression_decision::{
+    AssemblyCapInput, CompressionPlanInput, OverflowRecoveryCapInput, PreflightDecisionInput,
     bounded_leaf_chunk_len, compression_plan, effective_assembly_token_cap,
-    overflow_recovery_assembly_cap, preflight_decision, AssemblyCapInput, CompressionPlanInput,
-    OverflowRecoveryCapInput, PreflightDecisionInput,
+    overflow_recovery_assembly_cap, preflight_decision,
 };
 use tracedecay::sessions::lcm::{
     LcmCompressionRequest, LcmGrepRequest, LcmGrepSort, LcmLifecycleState, LcmLifecycleUpdate,
@@ -1947,10 +1947,12 @@ async fn preflight_can_request_compression_when_ingest_protection_changes_replay
     assert_eq!(response.status, "ok");
     assert!(response.should_compress);
     assert_eq!(response.reason, "ingest_protection_changed_replay");
-    assert!(response.replay_messages[0]["content"]
-        .as_str()
-        .unwrap()
-        .contains("[Externalized LCM ingest payload"));
+    assert!(
+        response.replay_messages[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("[Externalized LCM ingest payload")
+    );
 }
 
 #[tokio::test]
@@ -2287,10 +2289,11 @@ async fn boundary_skip_starts_preflight_compression_cooldown() {
     assert_eq!(response.reason, "compression_boundary_cooldown");
     // Cooldown is lossless: fresh messages were still ingested and replayed.
     assert_eq!(response.replay_messages.len(), 1);
-    assert!(db
-        .lcm_load_raw_message("cursor", "fresh-user")
-        .await
-        .is_some());
+    assert!(
+        db.lcm_load_raw_message("cursor", "fresh-user")
+            .await
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -3941,9 +3944,11 @@ async fn non_compressing_fake_summary_falls_back_deterministically() {
     assert_eq!(response.status, "ok");
     assert_eq!(response.reason, "compressed_backlog_with_fallback_summary");
     let summary = &response.summary_nodes[0];
-    assert!(summary
-        .summary_text
-        .starts_with("[deterministic LCM summary:"));
+    assert!(
+        summary
+            .summary_text
+            .starts_with("[deterministic LCM summary:")
+    );
     assert!(summary.summary_token_count < summary.source_token_count);
 }
 
@@ -4343,9 +4348,11 @@ async fn compression_reinjects_latest_user_objective_when_tail_is_tool_heavy() {
     assert!(replay_contents.iter().any(|content| {
         content.contains("[Current user objective preserved from compacted history]")
     }));
-    assert!(replay_contents
-        .iter()
-        .any(|content| content.contains("Ship OAuth login and preserve this objective.")));
+    assert!(
+        replay_contents
+            .iter()
+            .any(|content| content.contains("Ship OAuth login and preserve this objective."))
+    );
 }
 
 #[tokio::test]
@@ -4579,10 +4586,11 @@ async fn compression_boundary_carry_over_reassigns_lcm_data() {
         Some("session-old")
     );
     assert_eq!(state.last_finalized_frontier_store_id, Some(store_ids[1]));
-    assert!(db
-        .lcm_lifecycle_state("cursor", "session-old")
-        .await
-        .is_err());
+    assert!(
+        db.lcm_lifecycle_state("cursor", "session-old")
+            .await
+            .is_err()
+    );
 
     // Carried summaries keep flowing into the new session's replay.
     let next = db
@@ -4724,8 +4732,8 @@ async fn compression_boundary_carry_over_moves_payloads_and_maintenance_debt() {
         .await
         .unwrap();
     assert!(expansion.content.starts_with("tool output"));
-    assert!(db
-        .lcm_expand(tracedecay::sessions::lcm::LcmExpandRequest {
+    assert!(
+        db.lcm_expand(tracedecay::sessions::lcm::LcmExpandRequest {
             provider: "cursor".into(),
             session_id: "session-old".into(),
             target: tracedecay::sessions::lcm::LcmExpandTarget::ExternalPayload { payload_ref },
@@ -4734,7 +4742,8 @@ async fn compression_boundary_carry_over_moves_payloads_and_maintenance_debt() {
             source_limit: None,
         })
         .await
-        .is_err());
+        .is_err()
+    );
 }
 
 // The carry-over runs in a single transaction; a rejected carry-over must
@@ -4857,10 +4866,11 @@ async fn failed_carry_over_leaves_source_session_state_intact() {
 
     // Nothing was written for the rejected target: no lifecycle rebind and
     // no boundary-skip cooldown.
-    assert!(db
-        .lcm_lifecycle_state("cursor", "session-busy")
-        .await
-        .is_err());
+    assert!(
+        db.lcm_lifecycle_state("cursor", "session-busy")
+            .await
+            .is_err()
+    );
 
     // The same source session can still carry over to an empty session.
     insert_session(&db, "cursor", "session-empty").await;

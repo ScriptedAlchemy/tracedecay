@@ -1,3 +1,4 @@
+#![allow(clippy::collapsible_if)]
 //! Consolidated daemon test suite.
 //!
 //! Covers the git-metadata watcher (design D3), the backstop scheduler (D5),

@@ -241,9 +241,11 @@ async fn open_at_creates_registry_tables_and_round_trips_registry_records() {
         .to_string_lossy()
         .to_string();
     assert!(alias_paths.contains(&canonical_project_root.as_str()));
-    assert!(alias_paths
-        .iter()
-        .any(|alias| alias.starts_with("git-common-dir:")));
+    assert!(
+        alias_paths
+            .iter()
+            .any(|alias| alias.starts_with("git-common-dir:"))
+    );
     assert_eq!(context.stores.len(), 1);
     assert_eq!(context.stores[0].store.store_id, "store_registry");
     assert_eq!(context.stores[0].graph_scopes.len(), 1);
@@ -274,10 +276,11 @@ async fn delete_code_projects_cascades_registry_rows_without_touching_legacy_pro
 
     assert_eq!(deleted, 1);
     assert!(db.get_code_project("proj_registry").await.is_none());
-    assert!(db
-        .project_registry_context_by_id("proj_registry")
-        .await
-        .is_none());
+    assert!(
+        db.project_registry_context_by_id("proj_registry")
+            .await
+            .is_none()
+    );
     assert!(db.list_code_projects(10).await.is_empty());
     assert_eq!(db.get_project_tokens(&project_root).await, 42);
     assert_eq!(db.global_tokens_saved().await, Some(42));
@@ -350,10 +353,11 @@ async fn registry_context_resolves_linked_worktree_by_git_common_dir_identity() 
     .unwrap();
     upsert_test_store(&db, "proj_worktree", "store_worktree").await;
 
-    assert!(db
-        .project_registry_context_by_alias(&linked_worktree)
-        .await
-        .is_none());
+    assert!(
+        db.project_registry_context_by_alias(&linked_worktree)
+            .await
+            .is_none()
+    );
     let context = db
         .project_registry_context_by_identity(&linked_worktree, Some(&common_dir))
         .await
@@ -397,12 +401,13 @@ async fn registry_remote_resolution_is_conservative_when_ambiguous() {
     .unwrap();
     upsert_test_store(&db, "proj_two", "store_two").await;
 
-    assert!(db
-        .resolve_unique_project_store_by_git_remote(
+    assert!(
+        db.resolve_unique_project_store_by_git_remote(
             "https://github.com/ScriptedAlchemy/tracedecay.git"
         )
         .await
-        .is_none());
+        .is_none()
+    );
     close_global_db(db).await;
 }
 

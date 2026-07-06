@@ -38,11 +38,13 @@ fn test_pascal_program_declaration() {
         .collect();
     assert_eq!(progs.len(), 1);
     assert_eq!(progs[0].name, "HelloWorld");
-    assert!(progs[0]
-        .signature
-        .as_ref()
-        .unwrap()
-        .contains("program HelloWorld"));
+    assert!(
+        progs[0]
+            .signature
+            .as_ref()
+            .unwrap()
+            .contains("program HelloWorld")
+    );
 }
 
 #[test]
@@ -762,11 +764,12 @@ end."#,
         func.docstring.is_some(),
         "Add should have a docstring from old-style comment"
     );
-    assert!(func
-        .docstring
-        .as_ref()
-        .unwrap()
-        .contains("old-style comment"));
+    assert!(
+        func.docstring
+            .as_ref()
+            .unwrap()
+            .contains("old-style comment")
+    );
 }
 
 #[test]
@@ -1060,10 +1063,12 @@ end."#;
     assert!(result.nodes.iter().any(|n| n.kind == NodeKind::File));
 
     // Should have a unit node.
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::PascalUnit && n.name == "MyUnit"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::PascalUnit && n.name == "MyUnit")
+    );
 
     // Should have uses.
     let uses: Vec<_> = result
@@ -1077,46 +1082,60 @@ end."#;
     );
 
     // Should have the class.
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Class && n.name == "TMyClass"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Class && n.name == "TMyClass")
+    );
 
     // Should have the record.
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::PascalRecord && n.name == "TMyRecord"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::PascalRecord && n.name == "TMyRecord")
+    );
 
     // Should have the type alias.
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::TypeAlias && n.name == "TMyAlias"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::TypeAlias && n.name == "TMyAlias")
+    );
 
     // Should have constants.
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Const && n.name == "MAX_VALUE"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Const && n.name == "MAX_VALUE")
+    );
 
     // Should have variables.
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Static && n.name == "GlobalVar"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Static && n.name == "GlobalVar")
+    );
 
     // Should have the property.
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Property && n.name == "Name"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Property && n.name == "Name")
+    );
 
     // Should have fields.
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Field && n.name == "FName"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Field && n.name == "FName")
+    );
 
     // Should have Contains edges.
     assert!(!result.edges.is_empty(), "Should have Contains edges");

@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::apply_policy::record_has_auto_applied_memory_ops;
 use super::artifact_feedback::{
@@ -16,7 +16,7 @@ use super::artifact_policy::TaskArtifactPolicy;
 use super::artifact_refs::{automation_run_artifact_api, automation_run_artifacts_api};
 use super::backend::{AgentTaskKind, AgentTaskRequest, AgentTaskResponse};
 use super::outcomes::{
-    outcome_eval_definitions, outcome_feedback_section, AutomationOutcomesSnapshot,
+    AutomationOutcomesSnapshot, outcome_eval_definitions, outcome_feedback_section,
 };
 use super::run_ledger::{AutomationRunArtifactKind, AutomationRunLedgerRecord};
 use super::text::truncate_chars_for_prompt;

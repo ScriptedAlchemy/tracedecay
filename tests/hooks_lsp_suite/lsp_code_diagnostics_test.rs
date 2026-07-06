@@ -49,12 +49,16 @@ fn builtin_registry_advertises_phase_one_setup_contract() {
     assert_eq!(adapter(&adapters, "typescript").args, ["--stdio"]);
     assert_eq!(adapter(&adapters, "javascript").args, ["--stdio"]);
     assert_eq!(adapter(&adapters, "python").args, ["--stdio"]);
-    assert!(adapter(&adapters, "typescript").install_options[0]
-        .command
-        .contains("typescript-language-server"));
-    assert!(adapter(&adapters, "rust").install_options[0]
-        .command
-        .contains("rust-analyzer"));
+    assert!(
+        adapter(&adapters, "typescript").install_options[0]
+            .command
+            .contains("typescript-language-server")
+    );
+    assert!(
+        adapter(&adapters, "rust").install_options[0]
+            .command
+            .contains("rust-analyzer")
+    );
 }
 
 #[test]
@@ -234,14 +238,18 @@ async fn broker_keeps_diagnostics_for_multiple_languages_in_one_snapshot() {
 
     let snapshot = broker.snapshot();
     assert_eq!(snapshot.summary.total_errors, 2);
-    assert!(snapshot
-        .diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.language == "alpha" && diagnostic.file == "src/lib.alpha"));
-    assert!(snapshot
-        .diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.language == "beta" && diagnostic.file == "src/lib.beta"));
+    assert!(
+        snapshot
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.language == "alpha" && diagnostic.file == "src/lib.alpha")
+    );
+    assert!(
+        snapshot
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.language == "beta" && diagnostic.file == "src/lib.beta")
+    );
     for language in ["alpha", "beta"] {
         assert_engine_state(&snapshot, language, lsp::broker::EngineState::Ready);
     }
@@ -273,11 +281,13 @@ async fn broker_marks_missing_lsp_command_unavailable_after_refresh_failure() {
     let snapshot = broker.snapshot();
     let status = engine_status(&snapshot, FAKE_LANGUAGE);
     assert_eq!(status.state, lsp::broker::EngineState::Unavailable);
-    assert!(status
-        .last_error
-        .as_deref()
-        .unwrap_or_default()
-        .contains("not available on PATH"));
+    assert!(
+        status
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("not available on PATH")
+    );
 }
 
 #[tokio::test]
@@ -312,11 +322,13 @@ sys.stderr.flush()
     let snapshot = broker.snapshot();
     let status = engine_status(&snapshot, FAKE_LANGUAGE);
     assert_eq!(status.state, lsp::broker::EngineState::Crashed);
-    assert!(status
-        .last_error
-        .as_deref()
-        .unwrap_or_default()
-        .contains("unknown binary"));
+    assert!(
+        status
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("unknown binary")
+    );
 }
 
 #[tokio::test]
@@ -346,11 +358,13 @@ async fn broker_bounds_lsp_initialize_hangs() {
     let snapshot = broker.snapshot();
     let status = engine_status(&snapshot, FAKE_LANGUAGE);
     assert_eq!(status.state, lsp::broker::EngineState::Crashed);
-    assert!(status
-        .last_error
-        .as_deref()
-        .unwrap_or_default()
-        .contains("timed out"));
+    assert!(
+        status
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("timed out")
+    );
 }
 
 #[tokio::test]
@@ -720,14 +734,18 @@ async fn broker_ignores_stale_refresh_completion() {
     broker.finish_refresh(stale_completed).unwrap();
 
     let snapshot = broker.snapshot();
-    assert!(snapshot
-        .diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.file == "src/latest.fake"));
-    assert!(!snapshot
-        .diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.file == "src/stale.fake"));
+    assert!(
+        snapshot
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.file == "src/latest.fake")
+    );
+    assert!(
+        !snapshot
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.file == "src/stale.fake")
+    );
 }
 
 #[tokio::test]

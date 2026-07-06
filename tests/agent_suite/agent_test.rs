@@ -2,13 +2,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
 
-use crate::common::{write_pyyaml_shim, EnvVarGuard, PYYAML_FALLBACK_PRELUDE};
+use crate::common::{EnvVarGuard, PYYAML_FALLBACK_PRELUDE, write_pyyaml_shim};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay::agents::*;
 use tracedecay::automation::managed_skills::{
-    approve_managed_skill, create_managed_skill_draft, ManagedSkillDraft, ManagedSkillProvenance,
-    ManagedSkillSource, SkillInstallTarget,
+    ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, SkillInstallTarget,
+    approve_managed_skill, create_managed_skill_draft,
 };
 use tracedecay::branch_meta;
 use tracedecay::config::USER_DATA_DIR_ENV;
@@ -2264,10 +2264,11 @@ fn test_hermes_local_install_with_profile_targets_named_profile() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    assert!(home
-        .path()
-        .join(".hermes/profiles/project/plugins/tracedecay/plugin.yaml")
-        .exists());
+    assert!(
+        home.path()
+            .join(".hermes/profiles/project/plugins/tracedecay/plugin.yaml")
+            .exists()
+    );
     assert_hermes_config_enables_tracedecay_memory(
         &home.path().join(".hermes/profiles/project/config.yaml"),
     );
@@ -2313,8 +2314,10 @@ fn test_profile_flag_is_only_valid_for_hermes_install() {
         .expect("run install with invalid --profile agent");
 
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr)
-        .contains("`--profile` is only supported with `--agent hermes`"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("`--profile` is only supported with `--agent hermes`")
+    );
 }
 
 #[test]
@@ -2362,8 +2365,10 @@ fn test_profile_flag_is_valid_for_hermes_uninstall_only() {
         .output()
         .expect("run non-Hermes uninstall with profile");
     assert!(!invalid.status.success());
-    assert!(String::from_utf8_lossy(&invalid.stderr)
-        .contains("`--profile` is only supported with `--agent hermes`"));
+    assert!(
+        String::from_utf8_lossy(&invalid.stderr)
+            .contains("`--profile` is only supported with `--agent hermes`")
+    );
 }
 
 #[test]
@@ -5756,9 +5761,11 @@ fn test_has_tracedecay_codex() {
 
     let ctx = make_install_ctx(home);
     CodexIntegration.install(&ctx).unwrap();
-    assert!(codex_plugin_install_dir(home)
-        .join(".codex-plugin/plugin.json")
-        .exists());
+    assert!(
+        codex_plugin_install_dir(home)
+            .join(".codex-plugin/plugin.json")
+            .exists()
+    );
     assert!(
         CodexIntegration.has_tracedecay(home),
         "has_tracedecay should detect tracedecay after a clean install"

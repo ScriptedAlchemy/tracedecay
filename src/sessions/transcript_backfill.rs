@@ -27,10 +27,10 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use libsql::{params, Connection};
+use libsql::{Connection, params};
 use serde_json::Value;
 
-use crate::sessions::codex::{merge_usage_counters, CodexTurnUsage};
+use crate::sessions::codex::{CodexTurnUsage, merge_usage_counters};
 use crate::sessions::cursor::TimestampCarry;
 use crate::sessions::shared::usage_counters_from;
 

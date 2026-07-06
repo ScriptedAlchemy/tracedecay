@@ -4,8 +4,8 @@ use tempfile::TempDir;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::hooks::cursor_pre_compact_for_event_with_config;
 use tracedecay::sessions::cursor::{
-    cursor_project_slug, ingest_cursor_transcript_event, ingest_cursor_transcript_event_capped,
-    open_project_session_db, project_session_db_path, CursorSweepSource,
+    CursorSweepSource, cursor_project_slug, ingest_cursor_transcript_event,
+    ingest_cursor_transcript_event_capped, open_project_session_db, project_session_db_path,
 };
 use tracedecay::sessions::cursor_agent::CursorAgentSummaryConfig;
 use tracedecay::sessions::lcm::{LcmDescribeRequest, LcmDescribeTarget};
@@ -123,10 +123,12 @@ async fn cursor_pre_compact_uses_cursor_agent_summary_for_lcm() {
         .lcm_expand_summary_node("cursor", "cursor-session", node_id)
         .await
         .expect("summary node should expand");
-    assert!(expanded
-        .summary
-        .summary_text
-        .contains("Cursor auxiliary summary: keep compaction summaries in LCM."));
+    assert!(
+        expanded
+            .summary
+            .summary_text
+            .contains("Cursor auxiliary summary: keep compaction summaries in LCM.")
+    );
     let described = db
         .lcm_describe(LcmDescribeRequest {
             provider: "cursor".to_string(),
@@ -141,11 +143,13 @@ async fn cursor_pre_compact_uses_cursor_agent_summary_for_lcm() {
         .summary_node
         .expect("summary node details should exist");
     assert_eq!(summary.source_count, 2);
-    assert!(summary
-        .metadata_json
-        .as_deref()
-        .unwrap_or_default()
-        .contains("cursor_agent"));
+    assert!(
+        summary
+            .metadata_json
+            .as_deref()
+            .unwrap_or_default()
+            .contains("cursor_agent")
+    );
 }
 
 #[tokio::test]
@@ -207,9 +211,11 @@ async fn cursor_transcript_ingest_populates_searchable_messages() {
         results[0].session.transcript_path.as_deref(),
         transcript.to_str()
     );
-    assert!(results
-        .iter()
-        .any(|hit| hit.message.tool_names.as_deref() == Some("tracedecay_context")));
+    assert!(
+        results
+            .iter()
+            .any(|hit| hit.message.tool_names.as_deref() == Some("tracedecay_context"))
+    );
     let session_metadata: serde_json::Value =
         serde_json::from_str(results[0].session.metadata_json.as_deref().unwrap()).unwrap();
     assert_metadata_path_eq(&session_metadata["cursor_event_cwd"], &project);
@@ -743,9 +749,11 @@ async fn cursor_subagent_ingestion_is_incremental_per_file() {
         )
         .await;
     assert_eq!(child_hits.len(), 2);
-    assert!(child_hits
-        .iter()
-        .all(|hit| hit.session.session_id == "worker-1"));
+    assert!(
+        child_hits
+            .iter()
+            .all(|hit| hit.session.session_id == "worker-1")
+    );
 }
 
 #[tokio::test]

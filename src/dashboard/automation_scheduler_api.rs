@@ -1,20 +1,20 @@
 //! Dashboard endpoints for automation scheduler state and coarse controls.
 
+use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::util::{http_detail, JsonError};
 use super::DashboardState;
-use crate::automation::backend::{task_key, AgentTaskKind};
-use crate::automation::config::{effective_config, load_project_config, AutomationConfig};
-use crate::automation::run_ledger::{load_run_records, AutomationRunLedgerRecord};
+use super::util::{JsonError, http_detail};
+use crate::automation::backend::{AgentTaskKind, task_key};
+use crate::automation::config::{AutomationConfig, effective_config, load_project_config};
+use crate::automation::run_ledger::{AutomationRunLedgerRecord, load_run_records};
 use crate::automation::scheduler::{
-    load_scheduler_control, load_session_activity, save_scheduler_control, schedule_decision,
-    scheduler_control_path, AutomationSchedulerControl, SessionActivity,
+    AutomationSchedulerControl, SessionActivity, load_scheduler_control, load_session_activity,
+    save_scheduler_control, schedule_decision, scheduler_control_path,
 };
-use crate::automation::staged_notice::{count_pending_automation_output, AutomationPendingCounts};
+use crate::automation::staged_notice::{AutomationPendingCounts, count_pending_automation_output};
 use crate::tracedecay::current_timestamp;
 use crate::user_config::UserConfig;
 

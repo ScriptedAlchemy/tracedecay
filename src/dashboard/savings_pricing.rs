@@ -32,7 +32,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 /// `OpenRouter` public model list (pricing metadata needs no authentication).
 const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";

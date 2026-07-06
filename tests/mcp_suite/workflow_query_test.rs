@@ -7,11 +7,11 @@
 
 use std::path::Path;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use tracedecay::global_db::GlobalDb;
 use tracedecay::sessions::git_correlation::{
-    SpanObservation, SpanSource, DEFAULT_SPAN_MERGE_GAP_SECS,
+    DEFAULT_SPAN_MERGE_GAP_SECS, SpanObservation, SpanSource,
 };
 use tracedecay::sessions::workflow_ingest::ingest_workflow_runs;
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};

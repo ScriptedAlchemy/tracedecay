@@ -138,18 +138,22 @@ async fn skill_writer_runner_stages_consolidations_without_auto_apply() {
     );
     assert_eq!(consolidation["resulting_state"], json!("archived"));
     assert_eq!(consolidation["target_update_staged"], json!(true));
-    assert!(run.report["rejected_skills"][0]["reason"]
-        .as_str()
-        .is_some_and(|reason| reason.contains("pinned")));
+    assert!(
+        run.report["rejected_skills"][0]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("pinned"))
+    );
 
-    assert!(run.report["skill_improvement_recommendations"]
-        .as_array()
-        .is_some_and(
-            |recommendations| recommendations.iter().any(|recommendation| {
-                recommendation["kind"] == "managed_skill_consolidation"
-                    && recommendation["source"] == "skill_overlap_detection"
-            })
-        ));
+    assert!(
+        run.report["skill_improvement_recommendations"]
+            .as_array()
+            .is_some_and(
+                |recommendations| recommendations.iter().any(|recommendation| {
+                    recommendation["kind"] == "managed_skill_consolidation"
+                        && recommendation["source"] == "skill_overlap_detection"
+                })
+            )
+    );
 
     let staged_source = load_managed_skill(&profile_root, "automation-run-checks")
         .await
@@ -160,10 +164,12 @@ async fn skill_writer_runner_stages_consolidations_without_auto_apply() {
         source_pending.resulting_state,
         Some(ManagedSkillState::Archived)
     );
-    assert!(source_pending
-        .staged_reason
-        .as_deref()
-        .is_some_and(|reason| reason.contains("merged into 'automation-run-review'")));
+    assert!(
+        source_pending
+            .staged_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("merged into 'automation-run-review'"))
+    );
     let staged_target = load_managed_skill(&profile_root, "automation-run-review")
         .await
         .unwrap();

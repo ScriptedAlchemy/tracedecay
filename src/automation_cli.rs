@@ -182,8 +182,8 @@ async fn handle_automation_facts_command(
     action: AutomationFactsAction,
 ) -> tracedecay::errors::Result<()> {
     use tracedecay::automation::fact_proposals::{
-        apply_fact_proposal, list_fact_proposals, load_fact_proposal, reject_fact_proposal,
-        FactProposalState,
+        FactProposalState, apply_fact_proposal, list_fact_proposals, load_fact_proposal,
+        reject_fact_proposal,
     };
 
     let path = match &action {
@@ -245,10 +245,10 @@ async fn handle_automation_skills_command(
     action: AutomationSkillsAction,
 ) -> tracedecay::errors::Result<()> {
     use tracedecay::automation::managed_skills::{
+        ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillUpdate,
         approve_managed_skill, archive_managed_skill, create_managed_skill_draft,
         disable_managed_skill, list_managed_skills, load_managed_skill, restore_managed_skill,
-        update_managed_skill, ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource,
-        ManagedSkillUpdate,
+        update_managed_skill,
     };
 
     let profile_root = tracedecay::storage::default_profile_root()?;
@@ -448,12 +448,12 @@ async fn handle_automation_run_command(
 ) -> tracedecay::errors::Result<()> {
     use tracedecay::automation::backend::CodexAppServerBackend;
     use tracedecay::automation::config::{
-        effective_config, load_project_config, AutomationBackend,
+        AutomationBackend, effective_config, load_project_config,
     };
     use tracedecay::automation::runner::{
-        run_memory_curator_with_backend, run_session_reflector_with_backend,
-        run_skill_writer_with_backend, MemoryCuratorAutomationOptions,
-        SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
+        MemoryCuratorAutomationOptions, SessionReflectorAutomationOptions,
+        SkillWriterAutomationOptions, run_memory_curator_with_backend,
+        run_session_reflector_with_backend, run_skill_writer_with_backend,
     };
 
     match action {
@@ -621,8 +621,8 @@ async fn handle_automation_config_command(
     action: AutomationConfigAction,
 ) -> tracedecay::errors::Result<()> {
     use tracedecay::automation::config::{
-        apply_project_config_patch, effective_config, load_project_config, AutomationBackend,
-        AutomationConfigPatch,
+        AutomationBackend, AutomationConfigPatch, apply_project_config_patch, effective_config,
+        load_project_config,
     };
 
     let path = match &action {

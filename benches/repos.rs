@@ -1,3 +1,4 @@
+#![allow(clippy::collapsible_if)]
 //! Definition + on-demand shallow clone of the large repositories used by the
 //! bench. Each repo is pinned to a constant ref so successive bench runs hit
 //! identical source, and cloned with `--depth 1` (via init + fetch) to avoid

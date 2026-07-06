@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 use tracedecay::agents::prompt_rules::cli_fallback_paragraph;
-use tracedecay::agents::{expected_tool_perms, get_integration, InstallContext};
+use tracedecay::agents::{InstallContext, expected_tool_perms, get_integration};
 use tracedecay::config::USER_DATA_DIR_ENV;
 
 use crate::common::{EnvVarGuard, PROCESS_ENV_LOCK};

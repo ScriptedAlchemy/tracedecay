@@ -7,12 +7,12 @@ use std::os::unix::fs::symlink;
 use tempfile::TempDir;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::migrate::inventory::{
-    build_inventory, MigrationInventory, MigrationInventoryOptions, RegistryStatus, StoreArtifact,
-    StoreBrand, StoreInventory, StoreRole, StoreStatus,
+    MigrationInventory, MigrationInventoryOptions, RegistryStatus, StoreArtifact, StoreBrand,
+    StoreInventory, StoreRole, StoreStatus, build_inventory,
 };
 use tracedecay::migrate::manifest::{
-    build_plan_manifest, load_manifest, save_manifest, MigrationManifest, MigrationPlanOptions,
-    MigrationProtocol, StoreArtifactPath, StoreArtifactPathValidationError,
+    MigrationManifest, MigrationPlanOptions, MigrationProtocol, StoreArtifactPath,
+    StoreArtifactPathValidationError, build_plan_manifest, load_manifest, save_manifest,
 };
 
 fn canonical_temp_path(path: &Path) -> PathBuf {
@@ -372,10 +372,12 @@ async fn inventory_skips_symlinked_branches_dir_by_default() {
         .expect("project store should be inventoried");
 
     assert_eq!(store.statuses, vec![StoreStatus::Ok]);
-    assert!(!store
-        .artifacts
-        .iter()
-        .any(|artifact| artifact.kind == "branch_graph_db"));
+    assert!(
+        !store
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.kind == "branch_graph_db")
+    );
     assert!(report.skipped.iter().any(|skipped| {
         skipped.path == root.join(".tracedecay/branches") && skipped.reason == "symlink"
     }));
@@ -490,10 +492,12 @@ fn explicit_roots_do_not_inventory_unrelated_registered_projects_by_default() {
         .find(|store| same_path(&store.project_root, &discovered))
         .expect("discovered store should be inventoried");
     assert_eq!(store.registry_status, RegistryStatus::Registered);
-    assert!(!report
-        .stores
-        .iter()
-        .any(|store| same_path(&store.project_root, &unrelated)));
+    assert!(
+        !report
+            .stores
+            .iter()
+            .any(|store| same_path(&store.project_root, &unrelated))
+    );
 }
 
 #[test]
@@ -524,16 +528,20 @@ fn explicit_roots_can_include_all_registered_projects_when_requested() {
         .unwrap()
     });
 
-    assert!(report
-        .stores
-        .iter()
-        .any(|store| same_path(&store.project_root, &discovered)
-            && store.registry_status == RegistryStatus::Registered));
-    assert!(report
-        .stores
-        .iter()
-        .any(|store| same_path(&store.project_root, &unrelated)
-            && store.registry_status == RegistryStatus::Registered));
+    assert!(
+        report
+            .stores
+            .iter()
+            .any(|store| same_path(&store.project_root, &discovered)
+                && store.registry_status == RegistryStatus::Registered)
+    );
+    assert!(
+        report
+            .stores
+            .iter()
+            .any(|store| same_path(&store.project_root, &unrelated)
+                && store.registry_status == RegistryStatus::Registered)
+    );
 }
 
 #[tokio::test]
@@ -605,10 +613,12 @@ async fn inventory_flags_leftover_config_tmp_for_manual_review() {
         .find(|store| store.project_root == root)
         .expect("store should be inventoried");
     assert!(store.statuses.contains(&StoreStatus::NeedsManualReview));
-    assert!(store
-        .artifacts
-        .iter()
-        .any(|artifact| artifact.kind == "config_tmp"));
+    assert!(
+        store
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.kind == "config_tmp")
+    );
 }
 
 #[cfg(unix)]
@@ -629,10 +639,12 @@ async fn inventory_reports_skipped_symlink_directories() {
     .await
     .unwrap();
 
-    assert!(report
-        .skipped
-        .iter()
-        .any(|skipped| skipped.path == alias && skipped.reason == "symlink"));
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|skipped| skipped.path == alias && skipped.reason == "symlink")
+    );
 }
 
 #[cfg(unix)]

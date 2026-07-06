@@ -8,10 +8,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
-use crate::extraction::complexity::{count_complexity, SCALA_COMPLEXITY};
+use crate::extraction::complexity::{SCALA_COMPLEXITY, count_complexity};
 use crate::extraction::traversal::find_direct_child_by_kind;
 use crate::types::{
-    generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
+    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from Scala source files using tree-sitter.

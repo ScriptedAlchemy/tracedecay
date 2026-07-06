@@ -201,7 +201,7 @@ async fn run_git_backfill(
     dry_run: bool,
 ) -> tracedecay::errors::Result<()> {
     use tracedecay::sessions::git_correlation::{
-        run_backfill, BackfillOptions, SystemGit, DEFAULT_SPAN_MERGE_GAP_SECS,
+        BackfillOptions, DEFAULT_SPAN_MERGE_GAP_SECS, SystemGit, run_backfill,
     };
 
     let project_root = resolve_cli_project_root(None, project_id, project_path).await?;

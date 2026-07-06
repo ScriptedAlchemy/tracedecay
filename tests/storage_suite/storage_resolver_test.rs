@@ -7,20 +7,20 @@ use std::process::Command;
 use std::os::unix::fs::symlink;
 use tempfile::TempDir;
 use tracedecay::branch_meta::{self, BranchMeta};
-use tracedecay::config::{discover_project_root, get_config_path, load_config};
 use tracedecay::config::{TraceDecayConfig, USER_DATA_DIR_ENV};
+use tracedecay::config::{discover_project_root, get_config_path, load_config};
 use tracedecay::db::Database;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::mcp::response_handles::{
-    retrieve_response_handle, store_response_handle, ResponseHandleLookup,
+    ResponseHandleLookup, retrieve_response_handle, store_response_handle,
 };
 use tracedecay::sessions::cursor::{project_session_db_path, resolved_project_session_db_path};
 use tracedecay::storage::{
-    default_profile_project_id, default_profile_sharded_layout, profile_sharded_layout,
-    read_enrollment_marker, read_store_manifest, resolve_layout, resolve_lcm_payload_root,
-    resolve_project_session_db_path, resolve_response_handle_root, write_store_manifest,
-    ActiveProjectContext, EnrollmentMarker, GraphScopeId, PrivateStoreIo, ProjectPath, StorageMode,
-    StoreArtifactPath, STORE_MANIFEST_FILENAME,
+    ActiveProjectContext, EnrollmentMarker, GraphScopeId, PrivateStoreIo, ProjectPath,
+    STORE_MANIFEST_FILENAME, StorageMode, StoreArtifactPath, default_profile_project_id,
+    default_profile_sharded_layout, profile_sharded_layout, read_enrollment_marker,
+    read_store_manifest, resolve_layout, resolve_lcm_payload_root, resolve_project_session_db_path,
+    resolve_response_handle_root, write_store_manifest,
 };
 use tracedecay::tracedecay::TraceDecay;
 
@@ -340,9 +340,11 @@ fn store_manifest_write_rejects_symlinked_parent_components() {
         !outside.join("proj_123").exists(),
         "manifest writer must not create directories through a symlinked parent"
     );
-    assert!(!outside
-        .join(format!("proj_123/{STORE_MANIFEST_FILENAME}"))
-        .exists());
+    assert!(
+        !outside
+            .join(format!("proj_123/{STORE_MANIFEST_FILENAME}"))
+            .exists()
+    );
 }
 
 #[test]

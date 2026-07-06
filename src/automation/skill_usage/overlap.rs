@@ -122,8 +122,8 @@ fn skill_content_text(skill: &ManagedSkill) -> String {
 #[cfg(test)]
 mod tests {
     use super::super::super::managed_skills::{
-        default_managed_skill_targets, ManagedSkillDraft, ManagedSkillProvenance,
-        ManagedSkillSource,
+        ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource,
+        default_managed_skill_targets,
     };
     use super::*;
 

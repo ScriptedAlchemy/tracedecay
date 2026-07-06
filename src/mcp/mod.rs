@@ -19,7 +19,7 @@ pub mod tools;
 pub mod transport;
 
 pub use server::McpServer;
-pub use tools::{get_tool_definitions, handle_tool_call, ToolDefinition, ToolResult};
+pub use tools::{ToolDefinition, ToolResult, get_tool_definitions, handle_tool_call};
 pub use transport::{
     ErrorCode, JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpTransport, ReplayTransport,
     StdioTransport,

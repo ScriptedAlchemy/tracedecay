@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use libsql::{Builder, OpenFlags};
 use serde::{Deserialize, Serialize};
 
-use crate::config::{self, db_filename, TRACEDECAY_DIR};
+use crate::config::{self, TRACEDECAY_DIR, db_filename};
 use crate::errors::Result;
 use crate::global_db;
 use crate::storage::{BRANCH_META_FILENAME, SESSIONS_DB_FILENAME, STORE_MANIFEST_FILENAME};

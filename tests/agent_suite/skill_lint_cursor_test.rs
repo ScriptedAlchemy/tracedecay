@@ -37,7 +37,7 @@
 use std::collections::BTreeSet;
 
 use regex::Regex;
-use tracedecay::automation::skill_frontmatter::{parse_skill_frontmatter, SkillFrontmatterValue};
+use tracedecay::automation::skill_frontmatter::{SkillFrontmatterValue, parse_skill_frontmatter};
 use tracedecay::mcp::get_tool_definitions;
 
 use crate::plugin_validation_support::{load_skill_docs_from, repo_path};

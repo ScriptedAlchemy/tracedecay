@@ -10,11 +10,11 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
 use crate::extraction::basic_common::{
-    derive_function_name, find_subroutine_ranges, for_each_top_level_line, BasicLine,
+    BasicLine, derive_function_name, find_subroutine_ranges, for_each_top_level_line,
 };
 use crate::extraction::traversal::find_direct_child_by_kind;
 use crate::types::{
-    generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
+    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from GW-BASIC source files using tree-sitter.

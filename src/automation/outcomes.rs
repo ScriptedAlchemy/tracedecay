@@ -18,12 +18,12 @@ use std::path::{Path, PathBuf};
 
 use libsql::Connection;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::backend::AgentTaskKind;
-use super::fact_proposals::{load_fact_proposal_store, FactProposalRecord, FactProposalState};
-use super::managed_skills::{list_managed_skills, ManagedSkillState};
-use super::skill_usage::{summarize_skill_usage, SkillUsageSummary};
+use super::fact_proposals::{FactProposalRecord, FactProposalState, load_fact_proposal_store};
+use super::managed_skills::{ManagedSkillState, list_managed_skills};
+use super::skill_usage::{SkillUsageSummary, summarize_skill_usage};
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::store::MemoryStore;
 use crate::memory::types::FactRecord;
@@ -745,8 +745,8 @@ mod tests {
     #[tokio::test]
     async fn refresh_skill_outcomes_persists_snapshot() {
         use super::super::managed_skills::{
-            approve_managed_skill, create_managed_skill_draft, default_managed_skill_targets,
-            ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource,
+            ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, approve_managed_skill,
+            create_managed_skill_draft, default_managed_skill_targets,
         };
 
         let temp = tempfile::tempdir().unwrap();

@@ -2,7 +2,7 @@ use std::path::Path;
 
 use tempfile::TempDir;
 use tracedecay::agents::{
-    expected_tool_perms, AgentIntegration, ClaudeIntegration, InstallContext,
+    AgentIntegration, ClaudeIntegration, InstallContext, expected_tool_perms,
 };
 
 fn make_install_ctx(home: &Path) -> InstallContext {

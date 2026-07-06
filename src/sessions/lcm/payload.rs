@@ -2,12 +2,12 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
-use libsql::{params, Connection};
+use libsql::{Connection, params};
 
 use crate::sessions::SessionMessageRecord;
 use crate::tracedecay::current_timestamp;
 
-use super::{gc, raw, util, LcmError, LcmPayloadExpansion, LcmPayloadRef};
+use super::{LcmError, LcmPayloadExpansion, LcmPayloadRef, gc, raw, util};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeleteOpts {

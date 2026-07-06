@@ -3,7 +3,7 @@
 //! Extracted from `memory_api.rs` so similarity classification, lexical overlap,
 //! PCA projection, and dedup planning can be unit-tested without an HTTP harness.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 // Similarity primitives live in `crate::memory::similarity` (shared with the
 // write-time diff check in `MemoryStore::add_fact`); re-exported so dashboard
@@ -870,12 +870,16 @@ mod tests {
         // Below the supersession similarity floor the cue pair is ignored.
         let weak_pair = vec![ScoredPair::analyze(&facts, 0.5, 1, 2)];
         let hygiene_candidates = propose_hygiene_candidates(&facts, &facts, &weak_pair, &consumed);
-        assert!(hygiene_candidates["transient"]
-            .as_array()
-            .is_some_and(std::vec::Vec::is_empty));
-        assert!(hygiene_candidates["supersession"]
-            .as_array()
-            .is_some_and(std::vec::Vec::is_empty));
+        assert!(
+            hygiene_candidates["transient"]
+                .as_array()
+                .is_some_and(std::vec::Vec::is_empty)
+        );
+        assert!(
+            hygiene_candidates["supersession"]
+                .as_array()
+                .is_some_and(std::vec::Vec::is_empty)
+        );
     }
 
     #[test]

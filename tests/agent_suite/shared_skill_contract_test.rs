@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use tracedecay::automation::skill_frontmatter::SkillFrontmatterValue;
 
 use crate::plugin_validation_support::{
-    is_kebab_case_skill_name, load_skill_docs, relative_files_under, repo_path, SkillDoc,
+    SkillDoc, is_kebab_case_skill_name, load_skill_docs, relative_files_under, repo_path,
 };
 
 const SHARED_SKILL_ROOT: &str = "plugin/skills";

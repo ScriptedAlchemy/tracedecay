@@ -134,7 +134,8 @@ pub async fn ensure_initialized_with_options(
     match TraceDecay::open_with_options(project_path, open_options.clone()).await {
         Ok(cg) => return Ok(cg),
         Err(open_err) => {
-            match TraceDecay::open_read_only_with_options(project_path, open_options).await {
+            match TraceDecay::open_read_only_with_options(project_path, open_options.clone()).await
+            {
                 Ok(cg) => {
                     cg.ensure_schema_current().await?;
                     return Ok(cg);
@@ -147,12 +148,34 @@ pub async fn ensure_initialized_with_options(
             }
         }
     }
+    if let Some(cg) = auto_initialize_git_project(project_path, open_options).await? {
+        return Ok(cg);
+    }
     Err(TraceDecayError::Config {
         message: format!(
             "no TraceDecay index found at '{}' — run 'tracedecay init' first",
             project_path.display()
         ),
     })
+}
+
+async fn auto_initialize_git_project(
+    project_path: &Path,
+    open_options: TraceDecayOpenOptions,
+) -> Result<Option<TraceDecay>> {
+    if !crate::config::load_sync_config(project_path).auto_init {
+        return Ok(None);
+    }
+    let Some(project_root) = crate::worktree::git_worktree_root(project_path) else {
+        return Ok(None);
+    };
+    eprintln!(
+        "[tracedecay] auto-initializing unindexed git repo at {}",
+        project_root.display()
+    );
+    TraceDecay::init_and_index_with_options(&project_root, open_options)
+        .await
+        .map(Some)
 }
 
 async fn initialized_project_paths(paths: Vec<String>) -> Vec<String> {
@@ -306,6 +329,9 @@ async fn resolve_project_from_roots(roots: &[std::path::PathBuf]) -> Option<std:
         }
         if let Some(discovered) = crate::config::discover_project_root(root_path) {
             return Some(discovered);
+        }
+        if let Some(git_root) = crate::worktree::git_worktree_root(root_path) {
+            return Some(git_root);
         }
     }
     None

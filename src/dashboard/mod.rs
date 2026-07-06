@@ -52,16 +52,16 @@ mod token_count;
 mod util;
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
+use axum::Router;
 use axum::body::Body;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{Method, Request, StatusCode, Uri};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{any, get, patch, post};
-use axum::Router;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
@@ -916,19 +916,21 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
 /// Plugin manifest list, mirroring the Hermes `/api/dashboard/plugins`
 /// endpoint shape closely enough for the standalone shell.
 async fn plugins_list() -> Json<Value> {
-    Json(json!(assets::DASHBOARD_PLUGINS
-        .iter()
-        .map(|plugin| {
-            json!({
-                "name": plugin.name,
-                "label": plugin.label,
-                "description": plugin.description,
-                "icon": plugin.icon,
-                "entry": "dist/index.js",
-                "css": "dist/style.css",
-                "has_api": true,
-                "source": "tracedecay",
+    Json(json!(
+        assets::DASHBOARD_PLUGINS
+            .iter()
+            .map(|plugin| {
+                json!({
+                    "name": plugin.name,
+                    "label": plugin.label,
+                    "description": plugin.description,
+                    "icon": plugin.icon,
+                    "entry": "dist/index.js",
+                    "css": "dist/style.css",
+                    "has_api": true,
+                    "source": "tracedecay",
+                })
             })
-        })
-        .collect::<Vec<_>>()))
+            .collect::<Vec<_>>()
+    ))
 }

@@ -7,7 +7,7 @@ use tree_sitter::{Node as TsNode, Parser, Tree};
 
 use crate::extraction::complexity::ComplexityMetrics;
 use crate::types::{
-    generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
+    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from Batch/CMD source files using tree-sitter.

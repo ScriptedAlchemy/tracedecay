@@ -333,7 +333,7 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        parse_hook_event, plan_hook_event, HookAgent, HookEvent, HookEventKind, HookEventPlan,
+        HookAgent, HookEvent, HookEventKind, HookEventPlan, parse_hook_event, plan_hook_event,
     };
 
     fn parse_or_panic(params: &serde_json::Value) -> HookEvent {

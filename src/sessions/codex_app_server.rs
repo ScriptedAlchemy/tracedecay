@@ -8,7 +8,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::sessions::lcm::LcmSummaryRequest;
@@ -556,8 +556,8 @@ mod tests {
     #[test]
     fn turn_summary_records_actual_model_from_app_server_events() {
         let (tx, rx) = mpsc::channel();
-        assert!(tx
-            .send(Ok(json!({
+        assert!(
+            tx.send(Ok(json!({
                 "method": "item/completed",
                 "params": {
                     "model": "gpt-5.5-codex-actual",
@@ -565,10 +565,12 @@ mod tests {
                 }
             })
             .to_string()))
-            .is_ok());
-        assert!(tx
-            .send(Ok(json!({"method": "turn/completed"}).to_string()))
-            .is_ok());
+                .is_ok()
+        );
+        assert!(
+            tx.send(Ok(json!({"method": "turn/completed"}).to_string()))
+                .is_ok()
+        );
 
         let summary = match wait_for_turn_summary(&rx, Instant::now() + Duration::from_secs(1)) {
             Ok(summary) => summary,

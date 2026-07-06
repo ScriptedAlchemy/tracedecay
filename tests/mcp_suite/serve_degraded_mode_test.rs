@@ -15,9 +15,9 @@ use tempfile::TempDir;
 
 use crate::common::canonical_existing_path;
 use crate::serve_harness::{
-    canonical_path_string, degraded_tool_error_text, init_project_direct, init_project_under,
-    init_project_with_file, json_rpc_response, register_global_project, run_serve_runtime,
-    ServeStdioSession,
+    ServeStdioSession, canonical_path_string, degraded_tool_error_text, init_project_direct,
+    init_project_under, init_project_with_file, json_rpc_response, register_global_project,
+    run_serve_runtime,
 };
 
 /// Asserts that a recovered `tracedecay_runtime` response is a real (non

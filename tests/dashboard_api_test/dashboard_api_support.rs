@@ -6,10 +6,9 @@ pub(crate) use std::process::Command;
 pub(crate) use std::thread;
 
 pub(crate) use crate::common::{
-    create_runtime, fake_codex_bin, get_json, http_agent, http_agent_with_timeout,
-    install_fake_codex_launcher, pick_free_port, response_to_json, tempdir_or_panic,
-    wait_for_dashboard, write_empty_global_db_schema, EnvVarGuard, GLOBAL_DB_ENV,
-    GLOBAL_DB_ENV_LOCK,
+    EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK, create_runtime, fake_codex_bin, get_json,
+    http_agent, http_agent_with_timeout, install_fake_codex_launcher, pick_free_port,
+    response_to_json, tempdir_or_panic, wait_for_dashboard, write_empty_global_db_schema,
 };
 pub(crate) use serde_json::Value;
 pub(crate) use tempfile::TempDir;
@@ -20,7 +19,7 @@ pub(crate) use tracedecay::global_db::GlobalDb;
 pub(crate) use tracedecay::memory::encoding::HolographicEncoder;
 pub(crate) use tracedecay::sessions::lcm::{LcmSourceRef, LcmSummaryNodeDraft};
 pub(crate) use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
-pub(crate) use tracedecay::storage::{write_enrollment_marker, EnrollmentMarker, StorageMode};
+pub(crate) use tracedecay::storage::{EnrollmentMarker, StorageMode, write_enrollment_marker};
 pub(crate) use tracedecay::tracedecay::TraceDecay;
 
 /// Longer than 200 chars on purpose: list/projection payloads truncate

@@ -13,7 +13,7 @@
 //! Each function returns the rendered body as a `String`. Token-counting and
 //! cache I/O happen one layer up, in the MCP handler.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};

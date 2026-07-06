@@ -47,14 +47,16 @@ fn code_diagnostics_dashboard_api_exposes_engines_and_applies_settings() {
         assert_eq!(rust_status["state"], "disabled");
         assert_eq!(rust_status["command"], "/opt/tracedecay-test/rust-analyzer");
         assert_eq!(rust_status["default_command"], "rust-analyzer");
-        assert!(rust_status["install_options"]
-            .as_array()
-            .unwrap_or_else(|| panic!("expected install options"))
-            .iter()
-            .any(|option| option["command"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("rust-analyzer")));
+        assert!(
+            rust_status["install_options"]
+                .as_array()
+                .unwrap_or_else(|| panic!("expected install options"))
+                .iter()
+                .any(|option| option["command"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("rust-analyzer"))
+        );
 
         let (status, refreshed) = post_json(&agent, &format!("{url}/refresh/rust"));
         assert_eq!(

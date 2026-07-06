@@ -10,8 +10,8 @@
 use std::path::Path;
 
 use crate::common::{
-    create_runtime, get_json, http_agent, message_record_at, pick_free_port, wait_for_dashboard,
-    write_empty_global_db_schema, EnvVarGuard, GLOBAL_DB_ENV_LOCK as ENV_LOCK,
+    EnvVarGuard, GLOBAL_DB_ENV_LOCK as ENV_LOCK, create_runtime, get_json, http_agent,
+    message_record_at, pick_free_port, wait_for_dashboard, write_empty_global_db_schema,
 };
 use serde_json::Value;
 use tempfile::TempDir;
@@ -506,20 +506,24 @@ fn savings_ledger_endpoints_reflect_seeded_ledger() {
         let (status, caps) = get_json(&agent, &format!("{}/api/capabilities", fixture.base_url));
         assert_eq!(status, 200);
         assert_eq!(caps["features"]["savings"], true);
-        assert!(caps["dashboards"]
-            .as_array()
-            .expect("dashboards")
-            .iter()
-            .any(|name| name == "savings"));
+        assert!(
+            caps["dashboards"]
+                .as_array()
+                .expect("dashboards")
+                .iter()
+                .any(|name| name == "savings")
+        );
         let (_, plugins) = get_json(
             &agent,
             &format!("{}/api/dashboard/plugins", fixture.base_url),
         );
-        assert!(plugins
-            .as_array()
-            .expect("plugins")
-            .iter()
-            .any(|plugin| plugin["name"] == "savings"));
+        assert!(
+            plugins
+                .as_array()
+                .expect("plugins")
+                .iter()
+                .any(|plugin| plugin["name"] == "savings")
+        );
 
         // Overview: ledger totals + lifetime counters.
         let (status, overview) = get_json(
@@ -566,9 +570,11 @@ fn savings_ledger_endpoints_reflect_seeded_ledger() {
         assert_eq!(search["saved_tokens"], 1_900);
         let by_project = ledger["by_project"].as_array().expect("by_project");
         assert_eq!(by_project.len(), 2);
-        assert!(by_project
-            .iter()
-            .any(|row| row["project"] == "/proj/a" && row["saved_tokens"] == 11_400));
+        assert!(
+            by_project
+                .iter()
+                .any(|row| row["project"] == "/proj/a" && row["saved_tokens"] == 11_400)
+        );
         let by_day = ledger["by_day"].as_array().expect("by_day");
         assert_eq!(by_day.len(), 2, "today + yesterday buckets");
 

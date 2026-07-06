@@ -17,7 +17,7 @@ use tokio::net::{UnixListener, UnixStream};
 #[cfg(unix)]
 use tokio::task::JoinHandle;
 #[cfg(unix)]
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 use crate::client_identity::DaemonClientIdentity;
 use crate::errors::{Result, TraceDecayError};
@@ -40,9 +40,9 @@ const DAEMON_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(45);
 mod git_watch;
 mod service;
 pub use service::{
-    daemon_reachable, default_socket_path, install_service, installed_service_socket_path,
-    refresh_installed_service, refresh_service, service_spec, service_status,
-    socket_path_or_default, uninstall_service, DaemonServiceSpec,
+    DaemonServiceSpec, daemon_reachable, default_socket_path, install_service,
+    installed_service_socket_path, refresh_installed_service, refresh_service, service_spec,
+    service_status, socket_path_or_default, uninstall_service,
 };
 
 /// A host whose lifecycle hooks notify the daemon.
@@ -1093,10 +1093,9 @@ async fn send_daemon_request_line(
     }
     if !matched_response {
         return Err(TraceDecayError::Config {
-            message:
-                "daemon closed the connection before returning a matching response \
+            message: "daemon closed the connection before returning a matching response \
                       — it may have been restarted (e.g. by `tracedecay update`); retry the request"
-                    .to_string(),
+                .to_string(),
         });
     }
     Ok(responses)
@@ -1722,10 +1721,10 @@ async fn run_automation_scheduler_tick(
     use crate::automation::backend::{AgentTaskKind, CodexAppServerBackend};
     use crate::automation::run_ledger::AutomationTrigger;
     use crate::automation::runner::{
-        run_combined_review_with_backend, run_memory_curator_with_backend,
-        run_session_reflector_with_backend, run_skill_writer_with_backend,
         CombinedReviewAutomationOptions, CombinedReviewDispatch, MemoryCuratorAutomationOptions,
         SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
+        run_combined_review_with_backend, run_memory_curator_with_backend,
+        run_session_reflector_with_backend, run_skill_writer_with_backend,
     };
 
     let cg = Box::pin(open_existing_project_with_options(
@@ -1926,7 +1925,7 @@ fn user_config_for_client(
 #[cfg(unix)]
 fn automation_scheduler_configured(config: &crate::automation::config::AutomationConfig) -> bool {
     use crate::automation::config::{AutomationBackend, AutomationHostMode};
-    use crate::automation::scheduler::{parse_schedule, AutomationSchedule};
+    use crate::automation::scheduler::{AutomationSchedule, parse_schedule};
 
     if !config.enabled
         || config.host_mode == AutomationHostMode::DelegatedHost
@@ -2071,7 +2070,11 @@ async fn open_project_for_handshake(
     {
         Ok(cg) => Ok(cg),
         Err(open_err) if handshake.allow_init && is_missing_index_error(&open_err) => {
-            match crate::tracedecay::TraceDecay::init_with_options(project_path, open_options).await
+            match crate::tracedecay::TraceDecay::init_and_index_with_options(
+                project_path,
+                open_options,
+            )
+            .await
             {
                 Ok(cg) => Ok(cg),
                 Err(_) => Err(open_err),

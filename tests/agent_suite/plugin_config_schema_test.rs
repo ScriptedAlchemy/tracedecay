@@ -20,7 +20,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use jsonschema::Validator;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::plugin_validation_support::{
     assert_schema_valid, compile_schema, read_json_file, repo_path,

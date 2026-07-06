@@ -1,25 +1,25 @@
 //! Dashboard endpoints for profile-owned managed automation skills.
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::util::{http_detail, JsonError};
 use super::DashboardState;
-use crate::agents::{export_managed_skills_to_agent_hosts, home_dir, ManagedSkillExportReport};
+use super::util::{JsonError, http_detail};
+use crate::agents::{ManagedSkillExportReport, export_managed_skills_to_agent_hosts, home_dir};
 use crate::automation::managed_skills::{
-    approve_managed_skill, create_managed_skill_draft, discard_pending_managed_skill_update,
-    list_managed_skills, load_managed_skill, managed_skill_dir, managed_skill_root,
-    save_managed_skill, set_managed_skill_state, stage_managed_skill_update, update_managed_skill,
     ManagedSkill, ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState,
-    ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget,
+    ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget, approve_managed_skill,
+    create_managed_skill_draft, discard_pending_managed_skill_update, list_managed_skills,
+    load_managed_skill, managed_skill_dir, managed_skill_root, save_managed_skill,
+    set_managed_skill_state, stage_managed_skill_update, update_managed_skill,
 };
 use crate::automation::skill_usage::{
-    ingest_project_analytics_events, record_skill_usage, skill_improvement_recommendations,
-    stale_skill_recommendations, summarize_skill_usage, summarize_skill_usage_for,
-    SkillUsageAction,
+    SkillUsageAction, ingest_project_analytics_events, record_skill_usage,
+    skill_improvement_recommendations, stale_skill_recommendations, summarize_skill_usage,
+    summarize_skill_usage_for,
 };
 use crate::tracedecay::current_timestamp;
 

@@ -4,7 +4,7 @@
 //! dashboard scheduler status stay coherent.
 
 use crate::support::*;
-use tracedecay::automation::scheduler::{schedule_decision, SessionActivity};
+use tracedecay::automation::scheduler::{SessionActivity, schedule_decision};
 
 fn combined_options(profile_root: &Path) -> CombinedReviewAutomationOptions {
     CombinedReviewAutomationOptions {
@@ -285,10 +285,12 @@ async fn combined_review_records_failures_for_both_tasks_when_an_array_is_missin
         assert_eq!(record.status, AutomationRunStatus::Failed);
         assert_eq!(record.trigger, AutomationTrigger::Scheduler);
         assert_eq!(record.prompt_version.as_deref(), Some("combined_review:v1"));
-        assert!(record
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("facts and skills arrays")));
+        assert!(
+            record
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("facts and skills arrays"))
+        );
     }
     let mut tasks: Vec<AgentTaskKind> = records.iter().map(|record| record.task).collect();
     tasks.sort_by_key(|task| format!("{task:?}"));

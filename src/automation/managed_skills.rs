@@ -5,10 +5,10 @@ use crate::errors::{Result, TraceDecayError};
 
 use super::managed_skill_model::current_metadata_timestamp;
 pub use super::managed_skill_model::{
-    default_managed_skill_targets, ManagedSkill, ManagedSkillDraft, ManagedSkillMetadata,
-    ManagedSkillPendingUpdate, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState,
-    ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget, MAX_MANAGED_SKILL_BODY_BYTES,
-    MAX_MANAGED_SUPPORT_FILES, MAX_MANAGED_SUPPORT_FILE_BYTES,
+    MAX_MANAGED_SKILL_BODY_BYTES, MAX_MANAGED_SUPPORT_FILE_BYTES, MAX_MANAGED_SUPPORT_FILES,
+    ManagedSkill, ManagedSkillDraft, ManagedSkillMetadata, ManagedSkillPendingUpdate,
+    ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState, ManagedSkillUpdate,
+    ManagedSupportFile, SkillInstallTarget, default_managed_skill_targets,
 };
 pub use super::managed_skill_validation::validate_managed_support_files;
 use super::managed_skill_validation::{
@@ -88,7 +88,7 @@ async fn load_pending_update(
             return Err(config_error(format!(
                 "failed to read managed skill pending update '{}': {e}",
                 path.display()
-            )))
+            )));
         }
     };
     let mut pending: ManagedSkillPendingUpdate = serde_json::from_slice(&bytes).map_err(|e| {
@@ -169,7 +169,7 @@ fn existing_support_files(dir: &Path) -> Result<Vec<PathBuf>> {
                 return Err(config_error(format!(
                     "failed to read managed skill support files '{}': {e}",
                     dir.display()
-                )))
+                )));
             }
         };
         for entry in entries {

@@ -133,7 +133,7 @@ async fn cursor_pre_compact_for_event_inner(
     ) {
         Ok(summary) => summary,
         Err(err) => {
-            return CursorPreCompactOutcome::error(format!("cursor-agent summary failed: {err}"))
+            return CursorPreCompactOutcome::error(format!("cursor-agent summary failed: {err}"));
         }
     };
 

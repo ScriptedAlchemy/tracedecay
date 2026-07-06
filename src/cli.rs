@@ -1,4 +1,4 @@
-use clap::{builder::PossibleValuesParser, Parser, Subcommand};
+use clap::{Parser, Subcommand, builder::PossibleValuesParser};
 
 mod automation;
 mod help;

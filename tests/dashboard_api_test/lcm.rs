@@ -7,11 +7,12 @@
 use std::path::Path;
 
 use crate::common::{
-    create_runtime, get_json, http_agent, message_record_at, pick_free_port, response_to_json,
-    wait_for_dashboard, write_empty_global_db_schema, EnvVarGuard, GLOBAL_DB_ENV_LOCK as ENV_LOCK,
+    EnvVarGuard, GLOBAL_DB_ENV_LOCK as ENV_LOCK, create_runtime, get_json, http_agent,
+    message_record_at, pick_free_port, response_to_json, wait_for_dashboard,
+    write_empty_global_db_schema,
 };
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay::dashboard;
 use tracedecay::global_db::GlobalDb;

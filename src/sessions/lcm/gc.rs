@@ -3,11 +3,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use libsql::{params, Connection};
+use libsql::{Connection, params};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::{payload, schema, util, LcmError, LcmGcConfig};
+use super::{LcmError, LcmGcConfig, payload, schema, util};
 
 const GC_PAYLOAD_PREFIX: &str = "[gc'd externalized payload:";
 const GC_TOOL_OUTPUT_PREFIX: &str = "[gc'd externalized tool output:";
@@ -1188,12 +1188,16 @@ mod tests {
             return Err("live payload must not be deleted".to_string());
         };
         assert_eq!(err, LcmError::StillReferenced);
-        assert!(payload::load_payload_metadata(&store.conn, &payload_ref)
-            .await
-            .is_ok());
-        assert!(payload::payload_dir(&store.storage_root)
-            .join(&payload_ref)
-            .is_file());
+        assert!(
+            payload::load_payload_metadata(&store.conn, &payload_ref)
+                .await
+                .is_ok()
+        );
+        assert!(
+            payload::payload_dir(&store.storage_root)
+                .join(&payload_ref)
+                .is_file()
+        );
         Ok(())
     }
 
@@ -1216,9 +1220,11 @@ mod tests {
         assert!(outcome.file_existed);
         assert!(outcome.file_removed);
         assert!(outcome.bytes_freed > 0);
-        assert!(payload::load_payload_metadata(&store.conn, &payload_ref)
-            .await
-            .is_err());
+        assert!(
+            payload::load_payload_metadata(&store.conn, &payload_ref)
+                .await
+                .is_err()
+        );
         assert!(!payload_path(&store, &payload_ref).exists());
 
         let second = payload::delete_external_payload(
@@ -1234,8 +1240,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_external_payload_db_only_leaves_orphan_for_crash_convergence(
-    ) -> Result<(), String> {
+    async fn delete_external_payload_db_only_leaves_orphan_for_crash_convergence()
+    -> Result<(), String> {
         let store = test_store().await?;
         let payload_ref = seed_payload(&store, "message-1", "body to delete").await?;
         drop_raw_reference(&store, &payload_ref).await?;
@@ -1307,9 +1313,11 @@ mod tests {
             return Err("corrupted payload must not be reaped".to_string());
         };
         assert_eq!(err, LcmError::PayloadIntegrityMismatch);
-        assert!(payload::load_payload_metadata(&store.conn, &payload_ref)
-            .await
-            .is_ok());
+        assert!(
+            payload::load_payload_metadata(&store.conn, &payload_ref)
+                .await
+                .is_ok()
+        );
         assert!(payload_path(&store, &payload_ref).is_file());
         Ok(())
     }
@@ -1337,13 +1345,17 @@ mod tests {
             return Err("symlink payload must be rejected before DB mutation".to_string());
         };
         assert_eq!(err, LcmError::InvalidPayloadRef);
-        assert!(payload::load_payload_metadata(&store.conn, &payload_ref)
-            .await
-            .is_ok());
-        assert!(fs::symlink_metadata(&path)
-            .map_err(|err| err.to_string())?
-            .file_type()
-            .is_symlink());
+        assert!(
+            payload::load_payload_metadata(&store.conn, &payload_ref)
+                .await
+                .is_ok()
+        );
+        assert!(
+            fs::symlink_metadata(&path)
+                .map_err(|err| err.to_string())?
+                .file_type()
+                .is_symlink()
+        );
         Ok(())
     }
 
@@ -1481,9 +1493,11 @@ mod tests {
         .await
         .map_err(|err| err.to_string())?;
         assert_eq!(first.unreferenced.count, 0);
-        assert!(payload::load_payload_metadata(&store.conn, &payload_ref)
-            .await
-            .is_ok());
+        assert!(
+            payload::load_payload_metadata(&store.conn, &payload_ref)
+                .await
+                .is_ok()
+        );
 
         let second = run_payload_gc_with_apply(
             &store.conn,
@@ -1497,12 +1511,16 @@ mod tests {
         .await
         .map_err(|err| err.to_string())?;
         assert_eq!(second.unreferenced.count, 1);
-        assert!(payload::load_payload_metadata(&store.conn, &payload_ref)
-            .await
-            .is_err());
-        assert!(!payload::payload_dir(&store.storage_root)
-            .join(&payload_ref)
-            .exists());
+        assert!(
+            payload::load_payload_metadata(&store.conn, &payload_ref)
+                .await
+                .is_err()
+        );
+        assert!(
+            !payload::payload_dir(&store.storage_root)
+                .join(&payload_ref)
+                .exists()
+        );
         Ok(())
     }
 
@@ -1529,9 +1547,11 @@ mod tests {
         .await
         .map_err(|err| err.to_string())?;
         assert_eq!(first.unreferenced.count, 0);
-        assert!(payload::load_payload_metadata(&store.conn, &payload_ref)
-            .await
-            .is_ok());
+        assert!(
+            payload::load_payload_metadata(&store.conn, &payload_ref)
+                .await
+                .is_ok()
+        );
 
         let second = run_payload_gc_with_apply(
             &store.conn,
@@ -1545,12 +1565,16 @@ mod tests {
         .await
         .map_err(|err| err.to_string())?;
         assert_eq!(second.unreferenced.count, 1);
-        assert!(payload::load_payload_metadata(&store.conn, &payload_ref)
-            .await
-            .is_err());
-        assert!(!payload::payload_dir(&store.storage_root)
-            .join(&payload_ref)
-            .exists());
+        assert!(
+            payload::load_payload_metadata(&store.conn, &payload_ref)
+                .await
+                .is_err()
+        );
+        assert!(
+            !payload::payload_dir(&store.storage_root)
+                .join(&payload_ref)
+                .exists()
+        );
         Ok(())
     }
 
@@ -1578,12 +1602,16 @@ mod tests {
         .map_err(|err| err.to_string())?;
         assert_eq!(report.status, "dry_run");
         assert_eq!(report.unreferenced.count, 1);
-        assert!(payload::load_payload_metadata(&store.conn, &payload_ref)
-            .await
-            .is_ok());
-        assert!(payload::payload_dir(&store.storage_root)
-            .join(&payload_ref)
-            .is_file());
+        assert!(
+            payload::load_payload_metadata(&store.conn, &payload_ref)
+                .await
+                .is_ok()
+        );
+        assert!(
+            payload::payload_dir(&store.storage_root)
+                .join(&payload_ref)
+                .is_file()
+        );
         Ok(())
     }
 
@@ -1644,8 +1672,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_metadata_defaults_to_report_only_and_opt_in_tombstones_after_window(
-    ) -> Result<(), String> {
+    async fn missing_metadata_defaults_to_report_only_and_opt_in_tombstones_after_window()
+    -> Result<(), String> {
         let store = test_store().await?;
         let payload_ref = seed_payload(&store, "message-1", "missing body").await?;
         fs::remove_file(payload_path(&store, &payload_ref)).map_err(|err| err.to_string())?;
@@ -1680,9 +1708,11 @@ mod tests {
         .await
         .map_err(|err| err.to_string())?;
         assert_eq!(later.missing.count, 1);
-        assert!(payload::load_payload_metadata(&store.conn, &payload_ref)
-            .await
-            .is_ok());
+        assert!(
+            payload::load_payload_metadata(&store.conn, &payload_ref)
+                .await
+                .is_ok()
+        );
 
         let cfg = LcmGcConfig {
             reap_missing_enabled: true,
@@ -1703,9 +1733,11 @@ mod tests {
         .await
         .map_err(|err| err.to_string())?;
         assert_eq!(marked.missing.count, 1);
-        assert!(payload::load_payload_metadata(&store.conn, &payload_ref)
-            .await
-            .is_ok());
+        assert!(
+            payload::load_payload_metadata(&store.conn, &payload_ref)
+                .await
+                .is_ok()
+        );
 
         let reaped = run_payload_gc_with_apply(
             &store.conn,
@@ -1719,9 +1751,11 @@ mod tests {
         .await
         .map_err(|err| err.to_string())?;
         assert_eq!(reaped.missing.count, 1);
-        assert!(payload::load_payload_metadata(&store.conn, &payload_ref)
-            .await
-            .is_err());
+        assert!(
+            payload::load_payload_metadata(&store.conn, &payload_ref)
+                .await
+                .is_err()
+        );
         let refs = referenced_payload_refs(&store.conn, PROVIDER, None)
             .await
             .map_err(|err| err.to_string())?;
@@ -1775,19 +1809,23 @@ mod tests {
         .map_err(|err| err.to_string())?;
 
         assert_eq!(report.missing.count, 0);
-        assert!(gc_mark(&store.conn, &payload_ref)
-            .await
-            .map_err(|err| err.to_string())?
-            .is_none());
-        assert!(payload::load_payload_metadata(&store.conn, &payload_ref)
-            .await
-            .is_ok());
+        assert!(
+            gc_mark(&store.conn, &payload_ref)
+                .await
+                .map_err(|err| err.to_string())?
+                .is_none()
+        );
+        assert!(
+            payload::load_payload_metadata(&store.conn, &payload_ref)
+                .await
+                .is_ok()
+        );
         Ok(())
     }
 
     #[tokio::test]
-    async fn run_payload_gc_isolates_corrupted_ref_errors_while_reaping_orphans(
-    ) -> Result<(), String> {
+    async fn run_payload_gc_isolates_corrupted_ref_errors_while_reaping_orphans()
+    -> Result<(), String> {
         let store = test_store().await?;
         let corrupted_ref = seed_payload(&store, "message-1", "trusted body").await?;
         drop_raw_reference(&store, &corrupted_ref).await?;
@@ -1837,9 +1875,11 @@ mod tests {
                 .as_deref(),
             Some("partial")
         );
-        assert!(payload::load_payload_metadata(&store.conn, &corrupted_ref)
-            .await
-            .is_ok());
+        assert!(
+            payload::load_payload_metadata(&store.conn, &corrupted_ref)
+                .await
+                .is_ok()
+        );
         assert!(!payload_path(&store, orphan_a).exists());
         assert!(!payload_path(&store, orphan_b).exists());
         Ok(())

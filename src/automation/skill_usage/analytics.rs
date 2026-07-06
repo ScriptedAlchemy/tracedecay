@@ -1,13 +1,13 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::analytics::{infer_usage_events, UsageKind};
+use crate::analytics::{UsageKind, infer_usage_events};
 use crate::errors::Result;
 use crate::global_db::{AnalyticsEventQuery, AnalyticsEventRecord, GlobalDb};
 
 use super::{
-    config_error, ledger_skill_id, load_skill_usage_ledger, save_skill_usage_ledger,
-    SkillUsageAction, SkillUsageEvent, SkillUsageRecord,
+    SkillUsageAction, SkillUsageEvent, SkillUsageRecord, config_error, ledger_skill_id,
+    load_skill_usage_ledger, save_skill_usage_ledger,
 };
 
 pub async fn ingest_analytics_events(

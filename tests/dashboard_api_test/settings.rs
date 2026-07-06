@@ -26,10 +26,12 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             exclude.iter().any(|glob| glob == "**/node_modules/**"),
             "default excludes should include node_modules: {settings}"
         );
-        assert!(settings["project"]["config_path"]
-            .as_str()
-            .unwrap_or_default()
-            .ends_with("config.json"));
+        assert!(
+            settings["project"]["config_path"]
+                .as_str()
+                .unwrap_or_default()
+                .ends_with("config.json")
+        );
 
         assert_eq!(settings["user"]["upload_enabled"], false);
         assert_eq!(settings["user"]["watcher_debounce"], "2s");
@@ -41,10 +43,12 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         );
 
         assert_eq!(settings["storage"]["storage_mode"], "profile_sharded");
-        assert!(!settings["storage"]["graph_db"]
-            .as_str()
-            .unwrap_or_default()
-            .is_empty());
+        assert!(
+            !settings["storage"]["graph_db"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty()
+        );
 
         assert_eq!(settings["version"]["version"], env!("CARGO_PKG_VERSION"));
         let channel = settings["version"]["channel"].as_str().unwrap_or_default();
@@ -116,10 +120,12 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             patch_json_body(&agent, &project_url, &json!({ "exclude": ["[invalid"] }));
         assert_eq!(status, 400, "invalid glob should 400: {invalid}");
         assert_eq!(invalid["validation_errors"][0]["field"], "exclude");
-        assert!(invalid["validation_errors"][0]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("[invalid"));
+        assert!(
+            invalid["validation_errors"][0]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("[invalid")
+        );
 
         let (status, unknown) =
             patch_json_body(&agent, &project_url, &json!({ "made_up_field": true }));

@@ -9,10 +9,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tracedecay::automation::jobs::{
-    job_schedule_decision, job_task_key, load_jobs, run_user_job_with_backend, save_jobs,
-    validate_job, AutomationJob, JobDelivery, UserJobRunOptions,
+    AutomationJob, JobDelivery, UserJobRunOptions, job_schedule_decision, job_task_key, load_jobs,
+    run_user_job_with_backend, save_jobs, validate_job,
 };
-use tracedecay::automation::scheduler::{cron_is_due, parse_schedule, AutomationSchedule};
+use tracedecay::automation::scheduler::{AutomationSchedule, cron_is_due, parse_schedule};
 
 fn sample_job(id: &str) -> AutomationJob {
     AutomationJob {
@@ -104,10 +104,12 @@ async fn job_persistence_round_trips() {
 
     let loaded = load_jobs(root).await.unwrap();
     assert_eq!(loaded, vec![job, other]);
-    assert!(load_jobs(temp.path().join("missing").as_path())
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        load_jobs(temp.path().join("missing").as_path())
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

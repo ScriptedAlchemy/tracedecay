@@ -140,7 +140,7 @@ fn default_sync_orphan_db_gc_days() -> u64 {
     7
 }
 fn default_sync_auto_init() -> bool {
-    false
+    true
 }
 
 fn default_telemetry_timings() -> bool {

@@ -13,9 +13,9 @@ use axum::response::Json;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::graph_service;
-use super::util::{coerce_limit, http_detail, JsonPath, JsonQuery};
 use super::DashboardState;
+use super::graph_service;
+use super::util::{JsonPath, JsonQuery, coerce_limit, http_detail};
 
 #[derive(Deserialize)]
 pub(crate) struct SearchParams {

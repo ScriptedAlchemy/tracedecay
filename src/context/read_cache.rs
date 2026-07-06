@@ -14,7 +14,7 @@
 //! The cache lives in the same libSQL database as the code graph and is wiped
 //! by the v8 schema's `sweep` helper after `MAX_AGE_SECS` of inactivity.
 
-use libsql::{params, Connection};
+use libsql::{Connection, params};
 use sha2::{Digest, Sha256};
 
 use crate::errors::{Result, TraceDecayError};

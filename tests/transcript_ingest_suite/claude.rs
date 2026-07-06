@@ -112,19 +112,27 @@ async fn claude_transcript_populates_searchable_messages() {
         )
         .await;
     assert_eq!(results.len(), 2);
-    assert!(results
-        .iter()
-        .any(|hit| hit.message.tool_names.as_deref() == Some("tracedecay_context")));
-    assert!(results
-        .iter()
-        .any(|hit| hit.message.model.as_deref() == Some("claude-opus-4-8")));
+    assert!(
+        results
+            .iter()
+            .any(|hit| hit.message.tool_names.as_deref() == Some("tracedecay_context"))
+    );
+    assert!(
+        results
+            .iter()
+            .any(|hit| hit.message.model.as_deref() == Some("claude-opus-4-8"))
+    );
     // The structured ISO-8601 timestamps land as epoch seconds (2026-01-01).
-    assert!(results
-        .iter()
-        .any(|hit| hit.message.timestamp == Some(1_767_225_600)));
-    assert!(results
-        .iter()
-        .any(|hit| hit.message.timestamp == Some(1_767_225_605)));
+    assert!(
+        results
+            .iter()
+            .any(|hit| hit.message.timestamp == Some(1_767_225_600))
+    );
+    assert!(
+        results
+            .iter()
+            .any(|hit| hit.message.timestamp == Some(1_767_225_605))
+    );
 
     // Anthropic-style `message.usage` counters land in metadata under the
     // keys the savings dashboard reads; non-counter fields are dropped.

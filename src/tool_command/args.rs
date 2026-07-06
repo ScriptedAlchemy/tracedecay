@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use serde_json::{Map, Value};
 
 use tracedecay::errors::{Result, TraceDecayError};
-use tracedecay::mcp::tools::{short_tool_name, ToolDefinition};
+use tracedecay::mcp::tools::{ToolDefinition, short_tool_name};
 
 /// Old CLI command names that don't match the MCP tool name. Keeps muscle
 /// memory working for the seven removed top-level commands. The right-hand
@@ -430,11 +430,7 @@ fn schema_required_keys(def: &ToolDefinition) -> Vec<String> {
 }
 
 fn max_typo_distance(name: &str) -> usize {
-    if name.len() > 6 {
-        3
-    } else {
-        2
-    }
+    if name.len() > 6 { 3 } else { 2 }
 }
 
 fn nearest_by_edit_distance(

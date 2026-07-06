@@ -2683,15 +2683,21 @@ async fn test_get_incoming_edges_bulk_returns_all_targets() {
     // 2 callers of target_x + 1 caller of target_y = 3 edges via Calls.
     assert_eq!(result.len(), 3);
     assert!(result.iter().all(|e| e.kind == EdgeKind::Calls));
-    assert!(result
-        .iter()
-        .any(|e| e.target == "target_x" && e.source == "caller_a"));
-    assert!(result
-        .iter()
-        .any(|e| e.target == "target_x" && e.source == "caller_b"));
-    assert!(result
-        .iter()
-        .any(|e| e.target == "target_y" && e.source == "caller_a"));
+    assert!(
+        result
+            .iter()
+            .any(|e| e.target == "target_x" && e.source == "caller_a")
+    );
+    assert!(
+        result
+            .iter()
+            .any(|e| e.target == "target_x" && e.source == "caller_b")
+    );
+    assert!(
+        result
+            .iter()
+            .any(|e| e.target == "target_y" && e.source == "caller_a")
+    );
 }
 
 #[tokio::test]
@@ -2755,9 +2761,10 @@ async fn test_get_nodes_by_qualified_name_returns_all_matches() {
         .await
         .expect("query failed");
     assert_eq!(hits.len(), 2);
-    assert!(hits
-        .iter()
-        .all(|n| n.qualified_name == "crate::foo::render"));
+    assert!(
+        hits.iter()
+            .all(|n| n.qualified_name == "crate::foo::render")
+    );
 
     let none = db
         .get_nodes_by_qualified_name("crate::missing")

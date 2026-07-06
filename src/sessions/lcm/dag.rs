@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use libsql::{params, Connection, Value};
+use libsql::{Connection, Value, params};
 
 use super::{
-    raw, util, LcmError, LcmExpandedSummarySource, LcmRawMessage, LcmSourceRef,
-    LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeDraft,
+    LcmError, LcmExpandedSummarySource, LcmRawMessage, LcmSourceRef, LcmSummaryExpansion,
+    LcmSummaryNode, LcmSummaryNodeDraft, raw, util,
 };
 
 pub(crate) async fn insert_summary_node(

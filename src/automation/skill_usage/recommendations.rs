@@ -1,5 +1,5 @@
 use super::super::managed_skills::{ManagedSkillSource, ManagedSkillState};
-use super::super::outcomes::{skill_outcome, SkillOutcomeRecord, SkillOutcomeVerdict};
+use super::super::outcomes::{SkillOutcomeRecord, SkillOutcomeVerdict, skill_outcome};
 use super::{SkillImprovementRecommendation, SkillStaleRecommendation, SkillUsageSummary};
 
 pub fn stale_skill_recommendations(
@@ -308,10 +308,12 @@ mod tests {
         assert!(recommendation.stale);
         assert_eq!(recommendation.recommendation, "archive_review");
         assert!(recommendation.reason.contains("since approval"));
-        assert!(recommendation
-            .evidence
-            .iter()
-            .any(|entry| entry.starts_with("approved_at=")));
+        assert!(
+            recommendation
+                .evidence
+                .iter()
+                .any(|entry| entry.starts_with("approved_at="))
+        );
     }
 
     #[test]

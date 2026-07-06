@@ -7,12 +7,12 @@ use tree_sitter::{Node as TsNode, Parser, Tree};
 
 use crate::extraction::{
     annotations::{
-        emit_annotation_usage, scan_children_for_annotation_kinds, AnnotationEmitterState,
+        AnnotationEmitterState, emit_annotation_usage, scan_children_for_annotation_kinds,
     },
-    complexity::{count_complexity, JAVA_COMPLEXITY},
+    complexity::{JAVA_COMPLEXITY, count_complexity},
 };
 use crate::types::{
-    generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
+    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from Java source files using tree-sitter.

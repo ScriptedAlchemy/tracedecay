@@ -7,7 +7,7 @@ use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::sessions::lcm::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmExpandRequest, LcmExpandTarget,
 };
-use tracedecay::sessions::source::{ingest_source, StoredCursor, TranscriptSource};
+use tracedecay::sessions::source::{StoredCursor, TranscriptSource, ingest_source};
 
 use crate::support::{assert_metadata_path_eq, create_git_repo_with_linked_worktree, setup};
 
@@ -342,16 +342,22 @@ async fn codex_rollout_populates_user_and_agent_messages_only() {
     assert_eq!(results.len(), 2);
     assert!(results.iter().any(|hit| hit.message.role == "user"));
     assert!(results.iter().any(|hit| hit.message.role == "assistant"));
-    assert!(results
-        .iter()
-        .all(|hit| hit.message.model.as_deref() == Some("gpt-5.5")));
+    assert!(
+        results
+            .iter()
+            .all(|hit| hit.message.model.as_deref() == Some("gpt-5.5"))
+    );
     // Rollout ISO-8601 timestamps land as epoch seconds (2026-01-01).
-    assert!(results
-        .iter()
-        .any(|hit| hit.message.timestamp == Some(1_767_225_601)));
-    assert!(results
-        .iter()
-        .any(|hit| hit.message.timestamp == Some(1_767_225_602)));
+    assert!(
+        results
+            .iter()
+            .any(|hit| hit.message.timestamp == Some(1_767_225_601))
+    );
+    assert!(
+        results
+            .iter()
+            .any(|hit| hit.message.timestamp == Some(1_767_225_602))
+    );
     let assistant = results
         .iter()
         .find(|hit| hit.message.role == "assistant")
@@ -636,9 +642,11 @@ async fn codex_context_compaction_creates_lcm_summary_node() {
         })
         .await
         .unwrap();
-    assert!(expansion
-        .content
-        .contains("Map the release automation state"));
+    assert!(
+        expansion
+            .content
+            .contains("Map the release automation state")
+    );
     assert!(expansion.content.contains("Release automation is mapped"));
     assert!(!expansion.content.contains("Summary body is encrypted"));
     assert_eq!(expansion.summary_sources.len(), 2);

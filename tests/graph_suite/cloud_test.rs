@@ -175,7 +175,7 @@ fn is_beta_returns_bool() {
 
 #[test]
 fn upgrade_command_always_suggests_tracedecay_upgrade() {
-    use tracedecay::cloud::{upgrade_command, InstallMethod};
+    use tracedecay::cloud::{InstallMethod, upgrade_command};
     for method in &[
         InstallMethod::Cargo,
         InstallMethod::Brew,

@@ -2492,9 +2492,11 @@ mod diagnostics_warming_tests {
         );
 
         let json_result = diagnostics_warming_result(root, &json!({ "format": "json" }));
-        let json_text = json_result.value["content"][0]["text"].as_str().unwrap();
-        let json_payload: Value =
-            serde_json::from_str(json_text).expect("format=json should stay parseable JSON");
+        let Some(json_text) = json_result.value["content"][0]["text"].as_str() else {
+            panic!("format=json should include text content");
+        };
+        let json_payload: Value = serde_json::from_str(json_text)
+            .unwrap_or_else(|err| panic!("format=json should stay parseable JSON: {err}"));
         assert_eq!(json_payload["status"], "warming");
         assert_eq!(json_payload["diagnostic_count"], 0);
     }

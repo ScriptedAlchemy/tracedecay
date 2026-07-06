@@ -3,7 +3,7 @@ use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
 
-use super::backend::{agent_task_failure_disposition, task_key, AgentTaskKind};
+use super::backend::{AgentTaskKind, agent_task_failure_disposition, task_key};
 use super::config::{
     AutomationBackend, AutomationConfig, AutomationHostMode, AutomationTaskConfig,
 };
@@ -282,7 +282,7 @@ impl AutomationTaskLock {
                                         "failed to remove stale automation lock '{}': {e}",
                                         path.display()
                                     ),
-                                })
+                                });
                             }
                         }
                     }
@@ -294,7 +294,7 @@ impl AutomationTaskLock {
                             "failed to acquire automation lock '{}': {e}",
                             path.display()
                         ),
-                    })
+                    });
                 }
             }
         }
@@ -336,7 +336,7 @@ pub fn schedule_decision(
     };
     let (interval_secs, cron) = match schedule {
         AutomationSchedule::Manual => {
-            return AutomationScheduleDecision::skipped("scheduler_schedule_manual")
+            return AutomationScheduleDecision::skipped("scheduler_schedule_manual");
         }
         AutomationSchedule::ConfiguredInterval => (task_config.interval_secs, None),
         AutomationSchedule::Interval { every_secs } => (Some(every_secs), None),
@@ -454,17 +454,17 @@ pub fn parse_schedule(schedule: Option<&str>) -> Result<AutomationSchedule> {
         "hourly" => {
             return Ok(AutomationSchedule::Interval {
                 every_secs: 60 * 60,
-            })
+            });
         }
         "daily" => {
             return Ok(AutomationSchedule::Interval {
                 every_secs: 24 * 60 * 60,
-            })
+            });
         }
         "weekly" => {
             return Ok(AutomationSchedule::Interval {
                 every_secs: 7 * 24 * 60 * 60,
-            })
+            });
         }
         _ => {}
     }
@@ -700,7 +700,7 @@ async fn lock_pid(path: &Path) -> Result<Option<u32>> {
         Err(e) => {
             return Err(TraceDecayError::Config {
                 message: format!("failed to read automation lock '{}': {e}", path.display()),
-            })
+            });
         }
     };
     Ok(contents.lines().find_map(|line| {
@@ -728,7 +728,7 @@ async fn lock_created_at(path: &Path) -> Result<Option<i64>> {
                     "failed to inspect automation lock '{}': {e}",
                     path.display()
                 ),
-            })
+            });
         }
     };
     let Ok(modified) = metadata.modified() else {

@@ -34,30 +34,30 @@ pub use codex::{
     hook_codex_user_prompt_submit, record_codex_subagent_start,
 };
 pub use cursor::{
-    cursor_after_file_edit_rel_paths, cursor_before_submit_prompt_json,
-    cursor_post_tool_use_decision, cursor_project_root_from_event, cursor_session_start_json,
-    cursor_should_run_sync, evaluate_cursor_post_tool_use, evaluate_cursor_subagent_start,
-    hook_cursor_after_file_edit, hook_cursor_after_shell, hook_cursor_before_submit_prompt,
-    hook_cursor_post_tool_use, hook_cursor_pre_compact, hook_cursor_session_end,
-    hook_cursor_session_start, hook_cursor_stop, hook_cursor_subagent_start,
-    hook_cursor_workspace_open, CURSOR_CATCH_UP_INGEST_MAX_BYTES,
+    CURSOR_CATCH_UP_INGEST_MAX_BYTES, cursor_after_file_edit_rel_paths,
+    cursor_before_submit_prompt_json, cursor_post_tool_use_decision,
+    cursor_project_root_from_event, cursor_session_start_json, cursor_should_run_sync,
+    evaluate_cursor_post_tool_use, evaluate_cursor_subagent_start, hook_cursor_after_file_edit,
+    hook_cursor_after_shell, hook_cursor_before_submit_prompt, hook_cursor_post_tool_use,
+    hook_cursor_pre_compact, hook_cursor_session_end, hook_cursor_session_start, hook_cursor_stop,
+    hook_cursor_subagent_start, hook_cursor_workspace_open,
 };
-pub use cursor_compact::{cursor_pre_compact_for_event_with_config, CursorPreCompactOutcome};
+pub use cursor_compact::{CursorPreCompactOutcome, cursor_pre_compact_for_event_with_config};
 pub use cursor_shell::{
-    cursor_branch_switch_target, cursor_shell_command_targets_project, cursor_shell_sync_plan,
-    cursor_shell_sync_plan_with_current_branch, is_git_state_changing_command,
-    resolve_worktree_add_root, CursorShellSyncPlan,
+    CursorShellSyncPlan, cursor_branch_switch_target, cursor_shell_command_targets_project,
+    cursor_shell_sync_plan, cursor_shell_sync_plan_with_current_branch,
+    is_git_state_changing_command, resolve_worktree_add_root,
 };
 pub use kiro::{
     evaluate_kiro_pre_tool_use, hook_kiro_post_tool_use, hook_kiro_pre_tool_use,
     hook_kiro_prompt_submit, kiro_post_tool_use_rel_paths,
 };
 pub use post_tool_use::{
-    claude_post_tool_use_matcher, CLAUDE_POST_TOOL_USE_EDIT_TOOLS, CLAUDE_POST_TOOL_USE_SHELL_TOOLS,
+    CLAUDE_POST_TOOL_USE_EDIT_TOOLS, CLAUDE_POST_TOOL_USE_SHELL_TOOLS, claude_post_tool_use_matcher,
 };
 pub use steering::{
-    build_codex_session_context, build_codex_session_context_for_workspace,
-    build_cursor_session_context, cursor_staleness_hint, HookWorkspaceStatus, CURSOR_PLUGIN_SKILLS,
+    CURSOR_PLUGIN_SKILLS, HookWorkspaceStatus, build_codex_session_context,
+    build_codex_session_context_for_workspace, build_cursor_session_context, cursor_staleness_hint,
 };
 
 pub(crate) use cursor_shell::shell_words;
@@ -604,8 +604,8 @@ pub(crate) fn read_stdin_to_string() -> std::io::Result<String> {
 mod hint_analytics_tests {
     use super::tool_hints::{HintCategory, MAX_HINTS_PER_SESSION};
     use super::{
-        deduped_project_hint_with_id, mint_hint_id, record_hint_emitted, record_hook_invoked,
-        HintAgent, Path, PathBuf, ToolHint, Value,
+        HintAgent, Path, PathBuf, ToolHint, Value, deduped_project_hint_with_id, mint_hint_id,
+        record_hint_emitted, record_hook_invoked,
     };
     use crate::config::USER_DATA_DIR_ENV;
     use std::collections::HashSet;
@@ -784,47 +784,55 @@ mod hint_analytics_tests {
 
         // Branch: root known, session known → on-disk dedupe emits once.
         let emit_id = mint_hint_id();
-        assert!(deduped_project_hint_with_id(
-            Some(project_root.clone()),
-            HintAgent::Cursor,
-            Some("session-emit".to_string()),
-            &emit_id,
-            test_hint(),
-        )
-        .is_some());
+        assert!(
+            deduped_project_hint_with_id(
+                Some(project_root.clone()),
+                HintAgent::Cursor,
+                Some("session-emit".to_string()),
+                &emit_id,
+                test_hint(),
+            )
+            .is_some()
+        );
 
         // Branch: same (session, category) again → suppressed as duplicate.
         let dup_id = mint_hint_id();
-        assert!(deduped_project_hint_with_id(
-            Some(project_root.clone()),
-            HintAgent::Cursor,
-            Some("session-emit".to_string()),
-            &dup_id,
-            test_hint(),
-        )
-        .is_none());
+        assert!(
+            deduped_project_hint_with_id(
+                Some(project_root.clone()),
+                HintAgent::Cursor,
+                Some("session-emit".to_string()),
+                &dup_id,
+                test_hint(),
+            )
+            .is_none()
+        );
 
         // Branch: root known, session missing → single `missing_session` terminal.
         let no_session_id = mint_hint_id();
-        assert!(deduped_project_hint_with_id(
-            Some(project_root.clone()),
-            HintAgent::Cursor,
-            None,
-            &no_session_id,
-            test_hint(),
-        )
-        .is_some());
+        assert!(
+            deduped_project_hint_with_id(
+                Some(project_root.clone()),
+                HintAgent::Cursor,
+                None,
+                &no_session_id,
+                test_hint(),
+            )
+            .is_some()
+        );
 
         // Branch: no root at all → emits with no attribution.
         let no_root_id = mint_hint_id();
-        assert!(deduped_project_hint_with_id(
-            None,
-            HintAgent::Cursor,
-            Some("session-noroot".to_string()),
-            &no_root_id,
-            test_hint(),
-        )
-        .is_some());
+        assert!(
+            deduped_project_hint_with_id(
+                None,
+                HintAgent::Cursor,
+                Some("session-noroot".to_string()),
+                &no_root_id,
+                test_hint(),
+            )
+            .is_some()
+        );
 
         let rows = recorded_rows(&data_root, &profile_root);
 
@@ -890,14 +898,16 @@ mod hint_analytics_tests {
                 context: "c".to_string(),
                 nonblocking: true,
             };
-            assert!(deduped_project_hint_with_id(
-                Some(project_root.clone()),
-                HintAgent::Cursor,
-                Some(session.clone()),
-                &mint_hint_id(),
-                hint,
-            )
-            .is_some());
+            assert!(
+                deduped_project_hint_with_id(
+                    Some(project_root.clone()),
+                    HintAgent::Cursor,
+                    Some(session.clone()),
+                    &mint_hint_id(),
+                    hint,
+                )
+                .is_some()
+            );
         }
 
         // A fourth, not-yet-seen category is over budget (test_hint's Impact is

@@ -3,8 +3,8 @@ use std::path::Path;
 
 use libsql::{Builder, Connection, Database as LibsqlDatabase};
 use tempfile::TempDir;
-use tracedecay::db::migrations::{create_schema, migrate};
 use tracedecay::db::Database;
+use tracedecay::db::migrations::{create_schema, migrate};
 
 use crate::support;
 

@@ -28,7 +28,7 @@ mod scan;
 pub use diagnostics::{BranchDiagnostics, TrackedBranchDiagnostic};
 
 #[doc(hidden)]
-pub use locking::{try_acquire_sync_lock, SyncLockGuard};
+pub use locking::{SyncLockGuard, try_acquire_sync_lock};
 
 pub(crate) use lifecycle::git_remote_url;
 

@@ -19,22 +19,22 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::artifacts::{sha256_json, write_improvement_artifacts};
 use super::backend::{
-    classify_agent_task_error_message, AgentTaskBackend, AgentTaskKind, AgentTaskRequest,
-    AgentTaskResponse,
+    AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
+    classify_agent_task_error_message,
 };
 use super::config::{AutomationBackend, AutomationConfig, AutomationHostMode};
 use super::job_webhook;
 use super::lifecycle::generated_run_id;
 use super::managed_skills::load_managed_skill;
 use super::run_ledger::{
-    append_run_record, load_run_records, AutomationRunLedgerRecord, AutomationRunStatus,
-    AutomationTrigger,
+    AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, append_run_record,
+    load_run_records,
 };
-use super::scheduler::{cron_is_due, parse_schedule, AutomationSchedule, AutomationTaskLock};
+use super::scheduler::{AutomationSchedule, AutomationTaskLock, cron_is_due, parse_schedule};
 use super::text::truncate_chars_for_prompt;
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::current_timestamp;
@@ -293,9 +293,11 @@ fn validate_relative_output_path(path: &str) -> Result<()> {
     for component in candidate.components() {
         match component {
             Component::Normal(component) => normal_components.push(component),
-            _ => return job_error(
-                "job file delivery path must be relative and stay under the dashboard directory",
-            ),
+            _ => {
+                return job_error(
+                    "job file delivery path must be relative and stay under the dashboard directory",
+                );
+            }
         }
     }
     if normal_components

@@ -1,7 +1,7 @@
 use super::{
-    db_filename, get_project_db_path, get_tracedecay_dir, is_excluded, is_excluded_dir,
-    is_ignored_by_explicit_global_excludes, is_ignored_by_git, is_included,
-    lock_user_data_dir_test_env, user_data_dir, TraceDecayConfig, USER_DATA_DIR_ENV,
+    TraceDecayConfig, USER_DATA_DIR_ENV, db_filename, get_project_db_path, get_tracedecay_dir,
+    is_excluded, is_excluded_dir, is_ignored_by_explicit_global_excludes, is_ignored_by_git,
+    is_included, lock_user_data_dir_test_env, user_data_dir,
 };
 use std::ffi::OsString;
 use std::fs;
@@ -228,7 +228,7 @@ fn sync_config_defaults_round_trip() {
     assert_eq!(parsed.sync.watch_debounce_ms, 2000);
     assert_eq!(parsed.sync.full_sync_escalation_files, 500);
     assert_eq!(parsed.sync.max_concurrent_syncs, 2);
-    assert!(!parsed.sync.auto_init);
+    assert!(parsed.sync.auto_init);
 }
 
 #[test]

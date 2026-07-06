@@ -9,12 +9,12 @@ use sha2::{Digest, Sha256};
 
 use crate::migrate::inventory::{MigrationInventory, StoreStatus};
 use crate::migrate::registry::{
-    reconstruct_registry_from_store_manifest, RegistryReconstructionReport,
+    RegistryReconstructionReport, reconstruct_registry_from_store_manifest,
 };
 use crate::storage::{
+    EnrollmentMarker, PrivateStoreIo, STORE_MANIFEST_FILENAME, StorageMode, StoreKind,
     profile_sharded_data_root, profile_sharded_layout, read_enrollment_marker, read_store_manifest,
-    validate_project_id, write_store_manifest, EnrollmentMarker, PrivateStoreIo, StorageMode,
-    StoreKind, STORE_MANIFEST_FILENAME,
+    validate_project_id, write_store_manifest,
 };
 
 pub const MIGRATION_MANIFEST_SCHEMA_VERSION: u32 = 1;
@@ -616,9 +616,11 @@ pub fn rollback_migration_manifest(
         MigrationRollbackState::CutoverIncomplete => Err(invalid_manifest(
             "rollback rejected: migration cutover is incomplete; finish apply or remove staged profile-shard artifacts manually",
         )),
-        MigrationRollbackState::DivergentTargets | MigrationRollbackState::AppliedReady => Err(invalid_manifest(
-            "rollback requires an applied manifest with no divergent target writes; registry rollback state is not available yet",
-        )),
+        MigrationRollbackState::DivergentTargets | MigrationRollbackState::AppliedReady => {
+            Err(invalid_manifest(
+                "rollback requires an applied manifest with no divergent target writes; registry rollback state is not available yet",
+            ))
+        }
     }
 }
 

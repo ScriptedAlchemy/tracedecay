@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::global_db::{AnalyticsEventInsert, GlobalDb};
 use crate::mcp::hook_events::HookEvent;

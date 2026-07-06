@@ -251,7 +251,7 @@ pub fn parse_duration(s: &str) -> Option<std::time::Duration> {
 )]
 mod tests {
     use super::*;
-    use crate::config::{lock_user_data_dir_test_env, USER_DATA_DIR_ENV};
+    use crate::config::{USER_DATA_DIR_ENV, lock_user_data_dir_test_env};
     use std::ffi::OsString;
     use std::time::Duration;
     use tempfile::TempDir;

@@ -1,9 +1,9 @@
 use tree_sitter::Node as TsNode;
 
 use super::{ExtractionState, TypeScriptExtractor};
-use crate::extraction::complexity::{count_complexity, TYPESCRIPT_COMPLEXITY};
+use crate::extraction::complexity::{TYPESCRIPT_COMPLEXITY, count_complexity};
 use crate::extraction::traversal::find_direct_child_by_kind;
-use crate::types::{generate_node_id, Edge, EdgeKind, Node, NodeKind, Visibility};
+use crate::types::{Edge, EdgeKind, Node, NodeKind, Visibility, generate_node_id};
 
 /// Root callee names that mark a call as a test-framework construct whose
 /// callback argument should be attributed as an executable test node.

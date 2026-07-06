@@ -42,9 +42,11 @@ fn test_dart_import_extraction() {
         .collect();
     assert_eq!(imports.len(), 2);
     assert!(imports.iter().any(|n| n.name == "dart:core"));
-    assert!(imports
-        .iter()
-        .any(|n| n.name == "package:flutter/material.dart"));
+    assert!(
+        imports
+            .iter()
+            .any(|n| n.name == "package:flutter/material.dart")
+    );
 }
 
 #[test]

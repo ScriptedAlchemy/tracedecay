@@ -1,3 +1,4 @@
+#![allow(clippy::collapsible_if)]
 //! Static (per-repo) query catalog used by the criterion bench.
 //!
 //! Queries are constructed once after the repo is indexed: the `QueryContext`
@@ -12,7 +13,7 @@
 //! `git stash --include-untracked` at the end of the run reverts all
 //! scratch-file churn.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use tracedecay::tracedecay::TraceDecay;
 use tracedecay::types::NodeKind;

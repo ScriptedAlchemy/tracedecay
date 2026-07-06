@@ -1,10 +1,10 @@
 use std::path::Path;
 
-use libsql::{params, Connection};
-use serde_json::{json, Map, Value};
+use libsql::{Connection, params};
+use serde_json::{Map, Value, json};
 
-use crate::sessions::shared::message_storage_text;
 use crate::sessions::SessionMessageRecord;
+use crate::sessions::shared::message_storage_text;
 
 use super::compression_decision::{
     self, AssemblyCapInput, CompressionPlanInput, CondensationCandidateDecision,
@@ -15,11 +15,11 @@ use super::extraction;
 use super::summarizer::CompressionSummarizerAdapter;
 use super::types::LcmExtractionResult;
 use super::{
-    dag, payload, raw, security, util, LcmCompressionRequest, LcmCompressionResponse, LcmError,
+    LCM_DEFAULT_FRESH_TAIL_COUNT, LcmCompressionRequest, LcmCompressionResponse, LcmError,
     LcmLifecycleState, LcmLifecycleUpdate, LcmMaintenanceDebt, LcmPreflightRequest,
     LcmPreflightResponse, LcmRawMessage, LcmSessionBoundaryRequest, LcmSessionBoundaryResponse,
-    LcmSourceRef, LcmStorageKind, LcmSummaryNode, LcmSummaryNodeDraft, LcmSummaryRequest,
-    LCM_DEFAULT_FRESH_TAIL_COUNT,
+    LcmSourceRef, LcmStorageKind, LcmSummaryNode, LcmSummaryNodeDraft, LcmSummaryRequest, dag,
+    payload, raw, security, util,
 };
 const MAX_FORCED_CATCHUP_PASSES: usize = 4;
 const MIN_SUMMARY_RESCUE_SOURCE_TOKENS: i64 = 8;

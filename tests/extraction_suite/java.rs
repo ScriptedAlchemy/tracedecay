@@ -70,11 +70,13 @@ public class Calculator {
     assert_eq!(classes.len(), 1);
     assert_eq!(classes[0].name, "Calculator");
     assert_eq!(classes[0].visibility, Visibility::Pub);
-    assert!(classes[0]
-        .docstring
-        .as_ref()
-        .unwrap()
-        .contains("simple calculator"));
+    assert!(
+        classes[0]
+            .docstring
+            .as_ref()
+            .unwrap()
+            .contains("simple calculator")
+    );
 }
 
 #[test]

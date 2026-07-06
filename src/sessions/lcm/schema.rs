@@ -1,6 +1,6 @@
-use libsql::{params, Connection};
+use libsql::{Connection, params};
 
-use super::{raw, LcmError, LcmRawMessage, LcmStorageKind};
+use super::{LcmError, LcmRawMessage, LcmStorageKind, raw};
 
 use super::util;
 
@@ -450,8 +450,8 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn ensure_lcm_schema_errors_and_rolls_back_failed_legacy_carry_forward(
-    ) -> Result<(), String> {
+    async fn ensure_lcm_schema_errors_and_rolls_back_failed_legacy_carry_forward()
+    -> Result<(), String> {
         // In-memory DB: the rollback behavior under test is purely
         // transactional, so skip the on-disk sqlite file churn.
         let db = Builder::new_local(":memory:")

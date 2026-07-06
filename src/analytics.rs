@@ -598,8 +598,8 @@ fn is_cache_version(value: &str) -> bool {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::{
-        infer_usage_events, underused_tool_family_signals, ToolUsageObservation, UsageCategory,
-        UsageEvent, UsageKind,
+        ToolUsageObservation, UsageCategory, UsageEvent, UsageKind, infer_usage_events,
+        underused_tool_family_signals,
     };
 
     fn assert_usage_event(

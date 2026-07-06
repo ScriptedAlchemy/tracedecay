@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
+use super::DashboardState;
 use super::graph_queries;
 use super::util::{i64_field, str_field};
-use super::DashboardState;
 
 /// Safety cap on the BFS visited set for `GET /path`.
 const PATH_VISITED_CAP: usize = 20_000;

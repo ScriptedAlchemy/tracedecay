@@ -13,10 +13,10 @@ use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracedecay::global_db::{AnalyticsEventQuery, GlobalDb};
 use tracedecay::storage::{
-    profile_sharded_data_root, write_enrollment_marker, EnrollmentMarker, StorageMode,
+    EnrollmentMarker, StorageMode, profile_sharded_data_root, write_enrollment_marker,
 };
 
 use crate::common::tracedecay_command_with_home;

@@ -23,15 +23,15 @@ use std::time::UNIX_EPOCH;
 
 use serde_json::Value;
 
+use crate::sessions::SessionMessageRecord;
 use crate::sessions::shared::{
+    StoredCursor, TranscriptIngestStats, TranscriptLocation, TranscriptLocationMetadataKeys,
     append_location_metadata, append_tool_calls_metadata, append_usage_metadata,
-    content_storage_text_and_tools, path_belongs_to_project, title_from_messages, StoredCursor,
-    TranscriptIngestStats, TranscriptLocation, TranscriptLocationMetadataKeys,
+    content_storage_text_and_tools, path_belongs_to_project, title_from_messages,
 };
 use crate::sessions::source::{
-    collect_files_with_ext, read_changed_file, ParsedTranscript, SessionDraft, TranscriptSource,
+    ParsedTranscript, SessionDraft, TranscriptSource, collect_files_with_ext, read_changed_file,
 };
-use crate::sessions::SessionMessageRecord;
 
 const PROVIDER: &str = "kiro";
 const KIRO_LOCATION_KEYS: TranscriptLocationMetadataKeys = TranscriptLocationMetadataKeys::new(

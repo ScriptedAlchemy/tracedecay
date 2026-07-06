@@ -90,19 +90,23 @@ mod tests {
 
     #[test]
     fn relative_and_value_imports_are_not_dependency_candidates() {
-        assert!(candidates_from_type_only_import(
-            "import type { Local } from \"./local\";",
-            "./local",
-            "src/app.ts",
-            1,
-        )
-        .is_empty());
-        assert!(candidates_from_type_only_import(
-            "import { Foo } from \"pkg\";",
-            "pkg",
-            "src/app.ts",
-            1,
-        )
-        .is_empty());
+        assert!(
+            candidates_from_type_only_import(
+                "import type { Local } from \"./local\";",
+                "./local",
+                "src/app.ts",
+                1,
+            )
+            .is_empty()
+        );
+        assert!(
+            candidates_from_type_only_import(
+                "import { Foo } from \"pkg\";",
+                "pkg",
+                "src/app.ts",
+                1,
+            )
+            .is_empty()
+        );
     }
 }

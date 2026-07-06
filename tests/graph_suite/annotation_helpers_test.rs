@@ -4,9 +4,9 @@
 mod annotations;
 
 use annotations::{
-    emit_annotation_usage, scan_children_for_annotation_kinds, AnnotationEmitterState,
+    AnnotationEmitterState, emit_annotation_usage, scan_children_for_annotation_kinds,
 };
-use tracedecay::extraction::{ts_provider, JavaExtractor, KotlinExtractor, LanguageExtractor};
+use tracedecay::extraction::{JavaExtractor, KotlinExtractor, LanguageExtractor, ts_provider};
 use tracedecay::types::{Edge, EdgeKind, Node, NodeKind, UnresolvedRef};
 use tree_sitter::{Node as TsNode, Parser};
 

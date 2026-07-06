@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use libsql::{params, Connection};
+use libsql::{Connection, params};
 
 use super::encoding::HolographicEncoder;
 use super::entities::normalize_entity;

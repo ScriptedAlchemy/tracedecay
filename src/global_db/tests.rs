@@ -43,13 +43,15 @@ async fn session_column_migration_tolerates_duplicate_column_race() {
         .await
         .unwrap();
 
-    assert!(add_session_parent_column_after_missing_check(
-        &conn,
-        "parent_session_id",
-        "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT",
-    )
-    .await
-    .is_some());
+    assert!(
+        add_session_parent_column_after_missing_check(
+            &conn,
+            "parent_session_id",
+            "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT",
+        )
+        .await
+        .is_some()
+    );
 }
 
 #[tokio::test]

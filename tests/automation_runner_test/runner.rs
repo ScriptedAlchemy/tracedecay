@@ -272,12 +272,13 @@ async fn memory_curator_runner_cleans_up_lock_file() {
     .await
     .unwrap();
 
-    assert!(!cg
-        .store_layout()
-        .dashboard_root
-        .join("automation_locks")
-        .join("memory_curator.lock")
-        .exists());
+    assert!(
+        !cg.store_layout()
+            .dashboard_root
+            .join("automation_locks")
+            .join("memory_curator.lock")
+            .exists()
+    );
 }
 
 #[tokio::test]

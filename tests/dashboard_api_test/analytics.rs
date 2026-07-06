@@ -5,8 +5,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::common::{
-    create_runtime, get_json, http_agent, message_record_at, pick_free_port, wait_for_dashboard,
-    write_empty_global_db_schema, EnvVarGuard, GLOBAL_DB_ENV_LOCK as ENV_LOCK,
+    EnvVarGuard, GLOBAL_DB_ENV_LOCK as ENV_LOCK, create_runtime, get_json, http_agent,
+    message_record_at, pick_free_port, wait_for_dashboard, write_empty_global_db_schema,
 };
 use serde_json::Value;
 use tempfile::TempDir;

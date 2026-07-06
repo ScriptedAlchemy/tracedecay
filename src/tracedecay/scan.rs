@@ -6,7 +6,7 @@ use std::path::{Component, Path};
 
 use walkdir::WalkDir;
 
-use crate::config::{is_excluded, is_excluded_dir, is_included, is_included_dir, TraceDecayConfig};
+use crate::config::{TraceDecayConfig, is_excluded, is_excluded_dir, is_included, is_included_dir};
 use crate::types::*;
 
 use super::TraceDecay;
@@ -128,7 +128,9 @@ impl TraceDecay {
                                 .is_some_and(|ext| supported_exts.contains(&ext))
                     });
                 if has_source {
-                    eprintln!("warning: gitignore-aware scan found no files; falling back to plain walk (project may be gitignored by parent repo)");
+                    eprintln!(
+                        "warning: gitignore-aware scan found no files; falling back to plain walk (project may be gitignored by parent repo)"
+                    );
                     return self.scan_files_walkdir(&supported_exts);
                 }
             }

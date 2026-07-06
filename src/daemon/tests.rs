@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
 #[cfg(unix)]
-use serde_json::json;
-#[cfg(unix)]
 use serde_json::Value;
+#[cfg(unix)]
+use serde_json::json;
 #[cfg(unix)]
 use tempfile::TempDir;
 #[cfg(unix)]
@@ -56,9 +56,9 @@ fn daemon_log_line_formats_stable_key_value_fields() {
     );
 
     assert_eq!(
-            line,
-            "[tracedecay] event=scheduler_task task=memory_curator outcome=\"not due yet\" project=\"/tmp/example project\""
-        );
+        line,
+        "[tracedecay] event=scheduler_task task=memory_curator outcome=\"not due yet\" project=\"/tmp/example project\""
+    );
 }
 
 #[test]
@@ -575,9 +575,9 @@ fn scheduler_task_start_log_uses_task_key_and_project() {
     );
 
     assert_eq!(
-            line,
-            "[tracedecay] event=scheduler_task project=\"/tmp/project with spaces\" task=skill_writer outcome=start"
-        );
+        line,
+        "[tracedecay] event=scheduler_task project=\"/tmp/project with spaces\" task=skill_writer outcome=start"
+    );
 }
 
 #[cfg(unix)]
@@ -621,9 +621,9 @@ fn scheduler_record_log_preserves_skipped_status_and_reason() {
         super::daemon_scheduler_record_log_line(std::path::Path::new("/tmp/project"), &record);
 
     assert_eq!(
-            line,
-            "[tracedecay] event=scheduler_task project=/tmp/project task=memory_curator outcome=skipped run_id=run-123 reason=scheduler_interval_not_elapsed"
-        );
+        line,
+        "[tracedecay] event=scheduler_task project=/tmp/project task=memory_curator outcome=skipped run_id=run-123 reason=scheduler_interval_not_elapsed"
+    );
 }
 
 #[cfg(unix)]
@@ -641,9 +641,9 @@ fn automation_staged_log_line_is_stable() {
     );
 
     assert_eq!(
-            line,
-            "[tracedecay] event=automation_staged project=/tmp/project pending_fact_proposals=2 pending_skills=1"
-        );
+        line,
+        "[tracedecay] event=automation_staged project=/tmp/project pending_fact_proposals=2 pending_skills=1"
+    );
 }
 
 #[test]
@@ -775,12 +775,14 @@ fn daemon_version_skew_warning_reads_initialize_server_info() {
     })
     .to_string();
     let response = |version: &str| {
-        vec![serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": { "serverInfo": { "name": "tracedecay", "version": version } }
-        })
-        .to_string()]
+        vec![
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": { "serverInfo": { "name": "tracedecay", "version": version } }
+            })
+            .to_string(),
+        ]
     };
 
     let warning = super::daemon_version_skew_warning(&initialize, &response("9.9.9"), "1.0.0")
@@ -904,7 +906,7 @@ fn automation_scheduler_loads_client_profile_config() {
 #[cfg(unix)]
 #[tokio::test]
 async fn automation_scheduler_tick_secs_loads_dashboard_project_config() {
-    use crate::automation::config::{save_project_config, AutomationConfigPatch};
+    use crate::automation::config::{AutomationConfigPatch, save_project_config};
 
     let dir = TempDir::new().expect("temp dir");
     let project = dir.path().canonicalize().expect("canonical temp dir");
@@ -971,7 +973,7 @@ async fn daemon_ensure_scheduler_skips_before_project_has_configured_work() {
 #[tokio::test]
 async fn daemon_ensure_scheduler_starts_after_project_configures_work() {
     use crate::automation::config::{
-        save_project_config, AutomationBackend, AutomationConfigPatch, AutomationTaskPatch,
+        AutomationBackend, AutomationConfigPatch, AutomationTaskPatch, save_project_config,
     };
 
     let dir = TempDir::new().expect("temp dir");
@@ -1031,10 +1033,10 @@ async fn daemon_ensure_scheduler_starts_after_project_configures_work() {
 #[tokio::test]
 async fn automation_scheduler_tick_respects_pause_control_without_backend_call() {
     use crate::automation::config::{
-        save_project_config, AutomationBackend, AutomationConfigPatch, AutomationTaskPatch,
+        AutomationBackend, AutomationConfigPatch, AutomationTaskPatch, save_project_config,
     };
     use crate::automation::run_ledger::load_run_records;
-    use crate::automation::scheduler::{save_scheduler_control, AutomationSchedulerControl};
+    use crate::automation::scheduler::{AutomationSchedulerControl, save_scheduler_control};
 
     let dir = TempDir::new().expect("temp dir");
     let project = dir.path().canonicalize().expect("canonical temp dir");

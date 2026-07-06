@@ -8,16 +8,16 @@ use std::collections::BTreeMap;
 
 use axum::extract::State;
 use axum::response::Json;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::analytics::{
-    categorize_skill, infer_usage_events, underused_tool_family_signals, ToolUsageObservation,
-    UsageKind,
+    ToolUsageObservation, UsageKind, categorize_skill, infer_usage_events,
+    underused_tool_family_signals,
 };
 use crate::global_db::{AnalyticsEventQuery, AnalyticsEventRecord, GlobalDb};
 
-use super::util::{i64_field, query_i64, query_rows, str_field};
 use super::DashboardState;
+use super::util::{i64_field, query_i64, query_rows, str_field};
 
 const HINT_CATEGORIES: &[&str] = &[
     "search",
@@ -151,11 +151,7 @@ async fn durable_analytics_rows(
     )
     .await
     .ok()?;
-    if rows.is_empty() {
-        None
-    } else {
-        Some(rows)
-    }
+    if rows.is_empty() { None } else { Some(rows) }
 }
 
 pub(crate) fn durable_analytics_event_row(event: &AnalyticsEventRecord) -> Value {

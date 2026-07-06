@@ -3,21 +3,21 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::artifacts::{sha256_json, write_improvement_artifacts};
 use super::backend::{
-    agent_task_contract, classify_agent_task_error_message, extract_json_object_prefix,
-    prompt_version, task_key, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
+    AgentTaskKind, AgentTaskRequest, AgentTaskResponse, agent_task_contract,
+    classify_agent_task_error_message, extract_json_object_prefix, prompt_version, task_key,
 };
 use super::config::{AutomationBackend, AutomationConfig, AutomationHostMode};
 use super::run_ledger::{
-    append_run_record, load_run_records, AutomationRunLedgerRecord, AutomationRunStatus,
-    AutomationTrigger,
+    AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, append_run_record,
+    load_run_records,
 };
 use super::scheduler::{
-    load_session_activity, schedule_decision, stale_lock_secs, AutomationScheduleDecision,
-    AutomationTaskLock,
+    AutomationScheduleDecision, AutomationTaskLock, load_session_activity, schedule_decision,
+    stale_lock_secs,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::current_timestamp;

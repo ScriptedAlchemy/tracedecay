@@ -176,11 +176,7 @@ fn parse_litellm_json(json: &str) -> Option<HashMap<String, ModelPricing>> {
         table.insert(model_id.clone(), pricing);
     }
 
-    if table.is_empty() {
-        None
-    } else {
-        Some(table)
-    }
+    if table.is_empty() { None } else { Some(table) }
 }
 
 /// Try to load pricing from the cache file.

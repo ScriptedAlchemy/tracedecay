@@ -9,7 +9,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, ExitStatus, Output, Stdio};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::tracedecay::TraceDecayOpenOptions;

@@ -1,13 +1,13 @@
 use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
+use crate::Spinner;
 use crate::cli::{BranchAction, MemoryAction, MigrateAction};
 use crate::global;
-use crate::Spinner;
 use tracedecay::tracedecay::TraceDecay;
 
 pub(crate) async fn handle_memory_action(action: MemoryAction) -> tracedecay::errors::Result<()> {
-    use tracedecay::dashboard::memory_curate::{run_memory_curate, MemoryCurateOptions};
+    use tracedecay::dashboard::memory_curate::{MemoryCurateOptions, run_memory_curate};
 
     match action {
         MemoryAction::Status { .. } => unreachable!("memory status is handled in main.rs dispatch"),

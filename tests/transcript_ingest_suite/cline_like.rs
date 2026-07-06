@@ -154,16 +154,22 @@ async fn assert_provider_ingests(
         )
         .await;
     assert_eq!(results.len(), 2);
-    assert!(results
-        .iter()
-        .any(|hit| hit.message.tool_names.as_deref() == Some("read_file")));
+    assert!(
+        results
+            .iter()
+            .any(|hit| hit.message.tool_names.as_deref() == Some("read_file"))
+    );
     // The `ts` fields land as per-message timestamps.
-    assert!(results
-        .iter()
-        .any(|hit| hit.message.timestamp == Some(1_800_000_000)));
-    assert!(results
-        .iter()
-        .any(|hit| hit.message.timestamp == Some(1_800_000_010)));
+    assert!(
+        results
+            .iter()
+            .any(|hit| hit.message.timestamp == Some(1_800_000_000))
+    );
+    assert!(
+        results
+            .iter()
+            .any(|hit| hit.message.timestamp == Some(1_800_000_010))
+    );
     let assistant = results
         .iter()
         .find(|hit| hit.message.tool_names.as_deref() == Some("read_file"))

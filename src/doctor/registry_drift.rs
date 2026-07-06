@@ -233,7 +233,7 @@ fn resolve_registry_manifest_path(
 mod tests {
     use super::*;
     use crate::global_db::{GlobalDb, StoreInstanceUpsert};
-    use crate::storage::{StorageMode, StoreKind, StoreManifest, STORE_MANIFEST_SCHEMA_VERSION};
+    use crate::storage::{STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest};
 
     const STORE_ID: &str = "store_reconcile_test";
     const PROJECT_ID: &str = "proj_reconcile_test";

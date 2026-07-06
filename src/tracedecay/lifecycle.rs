@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::branch;
 use crate::branch_meta::{self, BranchMeta};
-use crate::config::{db_filename, load_config_from_path, save_config_to_path, TraceDecayConfig};
+use crate::config::{TraceDecayConfig, db_filename, load_config_from_path, save_config_to_path};
 use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
 use crate::extraction::LanguageRegistry;
@@ -14,7 +14,7 @@ use crate::global_db::{GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpser
 use crate::storage::{self, StoreLayout};
 
 use super::locking::{clear_dirty_sentinel_at, has_dirty_sentinel_at};
-use super::{current_timestamp, TraceDecay, TraceDecayOpenOptions};
+use super::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
 
 impl TraceDecay {
     /// Initializes a new `TraceDecay` project at the given root.
@@ -65,6 +65,15 @@ impl TraceDecay {
         };
         ts.register_project_store_in_global_registry().await;
         Ok(ts)
+    }
+
+    pub async fn init_and_index_with_options(
+        project_root: &Path,
+        open_options: TraceDecayOpenOptions,
+    ) -> Result<Self> {
+        let cg = Self::init_with_options(project_root, open_options).await?;
+        cg.index_all().await?;
+        Ok(cg)
     }
 
     /// Returns a reference to the underlying database.

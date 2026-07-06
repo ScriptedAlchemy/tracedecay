@@ -1,3 +1,4 @@
+#![allow(clippy::collapsible_if)]
 //! Consolidated dashboard API integration tests.
 //!
 //! All `dashboard_*` integration tests live in this single binary so Windows

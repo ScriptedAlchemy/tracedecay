@@ -17,14 +17,14 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use crate::automation::skill_targets::{
-    install_managed_skills, profile_root_for_agent_home, SkillInstallTarget,
+    SkillInstallTarget, install_managed_skills, profile_root_for_agent_home,
 };
 use crate::errors::{Result, TraceDecayError};
 
 use super::{
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, UpdatePluginOutcome,
     backup_and_write_json, backup_config_file, load_json_file, load_json_file_strict,
-    safe_write_json_file, AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext,
-    UpdatePluginOutcome,
+    safe_write_json_file,
 };
 
 /// Kiro agent.

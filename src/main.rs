@@ -1,3 +1,4 @@
+#![allow(clippy::collapsible_if)]
 // Rust guideline compliant 2025-10-17
 // Updated 2026-03-23: compact bordered table for status output
 use clap::{CommandFactory, Parser};

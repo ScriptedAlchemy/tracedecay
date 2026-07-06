@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 use std::fmt::Write as _;
 
-use libsql::{params, Connection, Value};
+use libsql::{Connection, Value, params};
 use serde::{Deserialize, Serialize};
 
 /// Schema version recorded in `session_schema_migrations`.
@@ -606,7 +606,7 @@ pub(crate) async fn upsert_commit_session(
 mod attribution;
 pub(crate) use attribution::run_commit_attribution_sweep;
 pub use attribution::{
-    commit_overlap_kind, match_commit_to_spans, ScannedCommit, SpanScanTarget, SpanWindow,
+    ScannedCommit, SpanScanTarget, SpanWindow, commit_overlap_kind, match_commit_to_spans,
 };
 
 /// Returns sessions correlated with a branch, worktree, or commit, most
@@ -940,9 +940,9 @@ async fn commit_hits(
 mod backfill;
 pub(crate) use backfill::session_activity_rows;
 pub use backfill::{
-    branch_timeline_from_reflog, parse_commit_log, run_backfill, window_branch_segments,
     BackfillOptions, BackfillSkipReason, BackfillStats, BranchTimelineEntry, GitReflogSource,
-    SessionActivityRow, SystemGit, WindowBranchSegment,
+    SessionActivityRow, SystemGit, WindowBranchSegment, branch_timeline_from_reflog,
+    parse_commit_log, run_backfill, window_branch_segments,
 };
 
 #[cfg(test)]

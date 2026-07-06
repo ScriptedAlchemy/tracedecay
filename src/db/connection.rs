@@ -42,11 +42,7 @@ pub(crate) fn adaptive_cache_sizes(db_file_size: u64) -> (u64, u64) {
 /// and removes the crash at its source. Other platforms keep the adaptive
 /// mmap size for its read-throughput benefit.
 pub(crate) fn platform_safe_mmap_size(mmap: u64) -> u64 {
-    if cfg!(windows) {
-        0
-    } else {
-        mmap
-    }
+    if cfg!(windows) { 0 } else { mmap }
 }
 
 /// Env var that, when set to `1`, switches every `TraceDecay` `SQLite`

@@ -9,17 +9,17 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use tracedecay::automation::backend::{
-    agent_task_failure_disposition, backend_availability, classify_agent_task_error_message,
-    extract_json_object_prefix, AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind,
-    AgentTaskRequest, AgentTaskResponse, CodexAppServerBackend,
+    AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
+    CodexAppServerBackend, agent_task_failure_disposition, backend_availability,
+    classify_agent_task_error_message, extract_json_object_prefix,
 };
 use tracedecay::automation::config::{AutomationBackend, AutomationConfig};
 use tracedecay::sessions::codex_app_server::{
-    run_prompt_with_codex_app_server, CodexAppServerSummaryConfig,
+    CodexAppServerSummaryConfig, run_prompt_with_codex_app_server,
 };
 
 use crate::common::{
-    fake_codex_bin, install_fake_codex_launcher, windows_python_launcher, EnvVarGuard,
+    EnvVarGuard, fake_codex_bin, install_fake_codex_launcher, windows_python_launcher,
 };
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -151,8 +151,7 @@ fn extracts_first_json_object_with_trailing_explanation() {
         json!([])
     );
     assert_eq!(
-        extract_json_object_prefix("```json\n{\"facts\":[]}\n```\n\nSummary: no facts.").unwrap()
-            ["facts"],
+        extract_json_object_prefix("```json\n{\"facts\":[]}\n```\n\nSummary: no facts.").unwrap()["facts"],
         json!([])
     );
     assert_eq!(
@@ -557,10 +556,12 @@ fn backend_availability_reports_configured_codex_executable_status() {
     });
 
     assert!(!unavailable.available);
-    assert!(unavailable
-        .reason
-        .as_deref()
-        .is_some_and(|reason| reason.contains("was not found")));
+    assert!(
+        unavailable
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("was not found"))
+    );
 }
 
 #[test]

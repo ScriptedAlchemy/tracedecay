@@ -3,11 +3,11 @@ use std::sync::{Mutex, OnceLock};
 
 use axum::http::StatusCode;
 use axum::response::Json;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
+use super::DashboardState;
 use super::lcm_queries;
 use super::util::{build_fts_match, http_detail, json_error, json_object, like_pattern};
-use super::DashboardState;
 
 pub(crate) type LcmErrorResponse = (StatusCode, Json<Value>);
 pub(crate) type LcmServiceResult<T> = Result<T, LcmErrorResponse>;

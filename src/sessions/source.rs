@@ -38,13 +38,13 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::global_db::{GlobalDb, ParseOffset};
+pub use crate::sessions::shared::{NewRows, StoredCursor, TranscriptIngestStats};
 #[allow(unused_imports)]
 pub(crate) use crate::sessions::shared::{
     append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
     message_storage_text, paths_equal, preview_title, read_new_rows, title_from_messages,
     usage_counters_from,
 };
-pub use crate::sessions::shared::{NewRows, StoredCursor, TranscriptIngestStats};
 use crate::sessions::{SessionMessageRecord, SessionRecord};
 
 fn log_source_skip(path: &Path, action: &'static str, error: &impl std::fmt::Display) {
