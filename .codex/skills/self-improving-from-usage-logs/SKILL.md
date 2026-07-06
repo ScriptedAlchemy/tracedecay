@@ -42,6 +42,17 @@ confusing, silent, too hard to discover, or missing a safe command.
 - Keep code fixes smaller than the evidence. If logs show a CLI paper cut,
   ship the CLI compatibility fix before redesigning the subsystem.
 
+## Helper script
+
+Start the pass with [scripts/friction-scan.sh](scripts/friction-scan.sh): it
+turns the durable `analytics_events` log and memory store into the signals the
+Opportunity Ranking table wants — hook-vs-tool adoption ratio, per-tool error
+rates (worst first), least-invoked tools (discovery/trigger gaps), the
+seen-vs-rated feedback-loop health, and the sessions carrying the most tool
+errors to cite as evidence. It reads via the CLI where it can and drops to SQL
+only for the gaps, resolving paths from `tracedecay tool storage_status`. Add
+`--all` to scan every project.
+
 ## Deliverable
 
 Report the evidence source, repeated pattern, ranked opportunity, code or skill

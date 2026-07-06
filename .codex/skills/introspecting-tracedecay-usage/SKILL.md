@@ -57,6 +57,17 @@ failure mode, then code, tests, or bundled skills encode the fix.
 4. Verify with the narrowest relevant command, then run the matching skill
    contract or code test.
 
+## Helper script
+
+Run [scripts/project-analytics.sh](scripts/project-analytics.sh) as the fast
+first pass over Lane 1 (adoption) and Lane 4 (durable memory). It prints what
+`tracedecay analytics diagnostics` does not: a per-tool `mcp_tool_call`
+breakdown with error counts, and fact-store *adoption* — how many times facts
+were retrieved/accessed ("seen") versus rated helpful/unhelpful, the
+seen:feedback ratio, and the transport-agnostic feedback ledger. It prefers the
+CLI/tools and drops to SQL only for those gaps, resolving store paths from
+`tracedecay tool storage_status`. Add `--all` for a cross-project breakdown.
+
 ## Deliverable
 
 Report the exact commands/tools used, headline counts, cited sessions or run
