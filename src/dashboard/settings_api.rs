@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use super::util::{http_detail, JsonError};
 use super::DashboardState;
 use crate::automation::config as automation_config;
-use crate::config::{load_config, save_config, TraceDecayConfig};
+use crate::config::{load_config_from_path, save_config_to_path, TraceDecayConfig};
 use crate::user_config::{self, UserConfig};
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
@@ -72,7 +72,8 @@ pub(crate) async fn patch_project_settings(
         return Err(validation_failed(&errors));
     }
 
-    let current = load_config(&state.project_root).map_err(|err| internal_error(&err))?;
+    let current = load_config_from_path(&state.project_root, &state.config_path)
+        .map_err(|err| internal_error(&err))?;
     let updated = TraceDecayConfig {
         include: patch.include.unwrap_or_else(|| current.include.clone()),
         exclude: patch.exclude.unwrap_or_else(|| current.exclude.clone()),
@@ -86,7 +87,7 @@ pub(crate) async fn patch_project_settings(
     };
     let resync_recommended = updated != current;
     if resync_recommended {
-        save_config(&state.project_root, &updated).map_err(|err| internal_error(&err))?;
+        save_config_to_path(&state.config_path, &updated).map_err(|err| internal_error(&err))?;
     }
 
     let mut payload = settings_payload(&state).await?;
@@ -147,8 +148,9 @@ pub(crate) async fn patch_user_settings(
 }
 
 async fn settings_payload(state: &DashboardState) -> std::result::Result<Value, JsonError> {
-    let project_config = load_config(&state.project_root).map_err(|err| internal_error(&err))?;
-    let project_config_path = crate::config::get_config_path(&state.project_root);
+    let project_config = load_config_from_path(&state.project_root, &state.config_path)
+        .map_err(|err| internal_error(&err))?;
+    let project_config_path = state.config_path.clone();
     let user = UserConfig::load();
     let user_config_path = user_config::config_path()
         .map(|path| path.display().to_string())

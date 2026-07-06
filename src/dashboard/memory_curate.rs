@@ -133,6 +133,7 @@ async fn cli_state(cg: &TraceDecay) -> DashboardState {
         project_root: cg.project_root().to_path_buf(),
         storage_mode: storage_mode_label(&store_layout.storage_mode).to_string(),
         store_root: store_layout.data_root.clone(),
+        config_path: store_layout.config_path.clone(),
         dashboard_root: store_layout.dashboard_root.clone(),
         curate_preview: Arc::new(RwLock::new(None)),
         curation_activity: Arc::new(RwLock::new(Vec::new())),

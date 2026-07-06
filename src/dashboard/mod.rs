@@ -121,6 +121,11 @@ pub(crate) struct DashboardState {
     pub(crate) storage_mode: String,
     /// Resolved active project store root.
     pub(crate) store_root: PathBuf,
+    /// Identity-resolved `config.json` path for this project's store. Derived
+    /// from the resolved store layout (not the path-hash `get_config_path`), so
+    /// settings read/write hit the store the dashboard actually serves — e.g.
+    /// after the repo directory was renamed on disk.
+    pub(crate) config_path: PathBuf,
     /// Resolved dashboard sidecar root inside the active project store.
     pub(crate) dashboard_root: PathBuf,
     /// Last saved dry-run curation preview (shared across all clones of the state).
@@ -251,6 +256,7 @@ async fn build_state_inner(
     // survives server restarts (staleness is recomputed on read anyway).
     let dashboard_root = cg.store_layout().dashboard_root.clone();
     let store_root = cg.store_layout().data_root.clone();
+    let config_path = cg.store_layout().config_path.clone();
     let storage_mode = storage_mode_label(&cg.store_layout().storage_mode).to_string();
     let persisted_preview = curate_preview_store::load(&dashboard_root).await;
     let code_diagnostics_settings = lsp::settings::load_settings(&dashboard_root)
@@ -276,6 +282,7 @@ async fn build_state_inner(
         project_root: cg.project_root().to_path_buf(),
         storage_mode,
         store_root,
+        config_path,
         dashboard_root,
         curate_preview: Arc::new(RwLock::new(persisted_preview)),
         curation_activity: Arc::new(RwLock::new(Vec::new())),
