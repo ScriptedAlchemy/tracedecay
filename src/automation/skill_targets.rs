@@ -101,8 +101,10 @@ pub fn export_native_skill_overlay(
             exported: Vec::new(),
         });
     }
+    let mut native_markdown = Vec::with_capacity(skills.len());
     for skill in &skills {
         validate_managed_support_files(&skill.support_files)?;
+        native_markdown.push(skill.render_native_skill_markdown()?);
     }
 
     let stage_root = unique_overlay_sibling(&overlay_root, "tmp");
@@ -111,44 +113,49 @@ pub fn export_native_skill_overlay(
     }
     fs::create_dir_all(&stage_root)?;
     let mut exported = Vec::new();
-    let write_result = (|| -> Result<()> {
-        for skill in &skills {
-            let package_dir = stage_root.join(&skill.metadata.id);
-            fs::create_dir_all(&package_dir)?;
-            let skill_path = package_dir.join("SKILL.md");
-            fs::write(&skill_path, skill.render_skill_markdown())?;
-            for support in &skill.support_files {
-                write_support_file(&package_dir, support)?;
-            }
-            exported.push(SkillExportEntry {
-                id: skill.metadata.id.clone(),
-                title: skill.metadata.title.clone(),
-                checksum: skill.metadata.checksum.clone(),
-                path: skill_path,
-            });
-        }
-
-        let manifest_exported = exported
-            .iter()
-            .cloned()
-            .map(|mut entry| {
-                if let Ok(relative) = entry.path.strip_prefix(&stage_root) {
-                    entry.path = overlay_root.join(relative);
+    let write_result =
+        (|| -> Result<()> {
+            for (skill, skill_markdown) in skills.iter().zip(native_markdown.iter()) {
+                let package_dir = stage_root.join(&skill.metadata.id);
+                fs::create_dir_all(&package_dir)?;
+                let skill_path = package_dir.join("SKILL.md");
+                fs::write(&skill_path, skill_markdown)?;
+                for support in &skill.support_files {
+                    write_support_file(&package_dir, support)?;
                 }
-                entry
-            })
-            .collect();
-        let manifest = NativeSkillManifest {
-            version: 1,
-            target,
-            exported: manifest_exported,
-        };
-        fs::write(
-            stage_root.join(NATIVE_MANIFEST_FILE),
-            serde_json::to_vec_pretty(&manifest)?,
-        )?;
-        Ok(())
-    })();
+                exported.push(SkillExportEntry {
+                    id: skill.metadata.id.clone(),
+                    title: skill.metadata.title.clone(),
+                    checksum: skill.metadata.checksum.clone(),
+                    path: skill_path,
+                });
+            }
+
+            let mut manifest_exported = Vec::with_capacity(exported.len());
+            for mut entry in exported.iter().cloned() {
+                let relative_path = entry.path.strip_prefix(&stage_root).map_err(|err| {
+                    TraceDecayError::Config {
+                        message: format!(
+                            "native skill export path '{}' escaped stage root '{}': {err}",
+                            entry.path.display(),
+                            stage_root.display()
+                        ),
+                    }
+                })?;
+                entry.path = overlay_root.join(relative_path);
+                manifest_exported.push(entry);
+            }
+            let manifest = NativeSkillManifest {
+                version: 1,
+                target,
+                exported: manifest_exported,
+            };
+            fs::write(
+                stage_root.join(NATIVE_MANIFEST_FILE),
+                serde_json::to_vec_pretty(&manifest)?,
+            )?;
+            Ok(())
+        })();
     if let Err(err) = write_result {
         fs::remove_dir_all(&stage_root).ok();
         return Err(err);

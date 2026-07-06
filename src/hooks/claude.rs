@@ -608,17 +608,6 @@ mod tests {
         assert!(CLAUDE_SUBAGENT_START_CONTEXT.contains("concept->context"));
     }
 
-    /// Regression for a global-store-only project (no repo-local `.tracedecay/`,
-    /// like the tracedecay repo itself): the cwd walk-up
-    /// (`codex_project_root_from_parsed_event`) finds nothing, but the project is
-    /// registered and initialized in the global DB, so the registry fallback must
-    /// resolve it — otherwise `SessionStart`/`SubagentStart` wrongly print the
-    /// init nudge for a project the MCP server serves fine.
-    /// Touches a real profile-sharded graph db for `project_root` under the
-    /// current (pinned) profile so `has_initialized_store` — which requires
-    /// `graph_db_path.is_file()`, not just an enrollment marker — returns true.
-    /// Returns the graph db path so callers can later delete it to drive the
-    /// negative path.
     fn touch_marker_graph_db(project_root: &std::path::Path) -> std::path::PathBuf {
         crate::storage::write_enrollment_marker(
             project_root,
@@ -636,9 +625,6 @@ mod tests {
 
     #[tokio::test]
     async fn session_root_falls_back_to_global_registry_for_global_only_project() {
-        // Pin the profile so `has_initialized_store` resolves the same graph db
-        // path we touch below, and so parallel lib tests cannot race the
-        // process-global USER_DATA_DIR env.
         let _profile = crate::config::PinnedUserDataDir::new();
 
         let gdb_dir = tempfile::tempdir().unwrap();
@@ -649,14 +635,9 @@ mod tests {
 
         let project_dir = tempfile::tempdir().unwrap();
         let project_root = project_dir.path().canonicalize().unwrap();
-        // Register the project in the global DB and create a REAL profile-sharded
-        // graph db (enrollment marker + touched graph_db_path) so
-        // `has_initialized_store` — not just the old path-hash `is_initialized`
-        // — reports the project initialized.
         gdb.upsert(&project_root, 0).await;
         let graph_db_path = touch_marker_graph_db(&project_root);
 
-        // cwd inside the registered project resolves back to its root.
         let nested = project_root.join("crates/inner");
         std::fs::create_dir_all(&nested).unwrap();
         let resolved = claude_session_root_from_global_registry_db(&nested, &gdb).await;
@@ -668,7 +649,6 @@ mod tests {
             "a registered, initialized project must resolve for a cwd inside it"
         );
 
-        // A cwd outside every registered project resolves to nothing.
         let outside = tempfile::tempdir().unwrap();
         let outside_root = outside.path().canonicalize().unwrap();
         assert!(
@@ -678,8 +658,6 @@ mod tests {
             "a cwd outside every registered project must not resolve"
         );
 
-        // Removing the graph db drops the candidate: the guard now keys on
-        // has_initialized_store (real db on disk), not the path-hash marker.
         std::fs::remove_file(&graph_db_path).unwrap();
         assert!(
             claude_session_root_from_global_registry_db(&nested, &gdb)
@@ -689,16 +667,10 @@ mod tests {
         );
     }
 
-    /// The observable `SessionStart` symptom: for a registered, graph-db-backed
-    /// project the context must report the initialized status and NOT print the
-    /// false "no project index found" nudge; for a project-like cwd with no
-    /// store the real nudge must still appear (the fix must not mask it).
     #[tokio::test]
     async fn session_context_reports_initialized_and_preserves_nudge() {
         let _profile = crate::config::PinnedUserDataDir::new();
 
-        // The global registry fallback opens the real (pinned-profile) global
-        // DB, so register the project there too.
         let gdb = crate::global_db::GlobalDb::open().await.unwrap();
         let project_dir = tempfile::tempdir().unwrap();
         let project_root = project_dir.path().canonicalize().unwrap();
@@ -721,7 +693,6 @@ mod tests {
             "context must report the index status line: {context}"
         );
 
-        // A project-like cwd with no store on disk must still nudge.
         let unindexed = tempfile::tempdir().unwrap();
         let unindexed_root = unindexed.path().canonicalize().unwrap();
         std::fs::write(unindexed_root.join("Cargo.toml"), b"[package]\n").unwrap();

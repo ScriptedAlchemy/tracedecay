@@ -696,25 +696,9 @@ pub fn discover_project_root(start: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Identity-aware async companion to [`discover_project_root`].
-///
-/// The sync [`discover_project_root`] only recognises a project through
-/// path-hash signals: a repo-local database, an enrollment marker, or a
-/// profile-sharded store discoverable from the path itself. A project whose
-/// store is global-only — no repo-local `.tracedecay/`, e.g. after the repo
-/// directory was renamed on disk — is invisible to that walk even though the
-/// git-identity/`GlobalDb` layer binds it to a store just fine.
-///
-/// This wrapper keeps the fast sync path unchanged (so all existing callers of
-/// [`discover_project_root`] and its sync signature are untouched), and on a
-/// sync miss walks the same ancestor chain — with the identical
-/// worktree-root stop condition — but gates each candidate on the async
-/// identity resolver [`crate::tracedecay::TraceDecay::has_initialized_store`]
-/// (which routes through `resolve_store_layout_for_local_identity` ->
-/// `GlobalDb::resolve_project_store_by_identity`, requiring a real graph db on
-/// disk). Async hook SessionStart/context surfaces route through this so
-/// renamed / global-only repos resolve instead of falsely nudging "no project
-/// index found".
+/// Like [`discover_project_root`], but on a sync miss walks ancestors with
+/// [`crate::tracedecay::TraceDecay::has_initialized_store`] so renamed or
+/// global-only repos still resolve.
 pub async fn discover_project_root_with_identity(start: &Path) -> Option<PathBuf> {
     if let Some(root) = discover_project_root(start) {
         return Some(root);

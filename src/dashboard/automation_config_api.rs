@@ -36,6 +36,7 @@ pub(crate) async fn patch_config(
     save_project_config(&state.dashboard_root, &project)
         .await
         .map_err(|err| internal_error(&err))?;
+    state.reconcile_automation_scheduler();
     Ok(Json(config_payload_value(
         &state,
         &global,
@@ -49,6 +50,7 @@ pub(crate) async fn reset_config(State(state): State<DashboardState>) -> ApiResu
     clear_project_config(&state.dashboard_root)
         .await
         .map_err(|err| internal_error(&err))?;
+    state.reconcile_automation_scheduler();
     config_payload(&state, &global, None)
 }
 

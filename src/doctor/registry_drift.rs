@@ -8,6 +8,7 @@ pub(super) struct RegistryDriftFinding {
     pub(super) registry_value: String,
     pub(super) manifest_value: String,
     pub(super) manifest_path: PathBuf,
+    registry_path: Option<PathBuf>,
 }
 
 pub(super) async fn registry_drift_findings(
@@ -43,19 +44,21 @@ pub(super) async fn registry_drift_findings(
                     registry_value: store.project_id.clone(),
                     manifest_value: manifest_project_id,
                     manifest_path: manifest_path.clone(),
+                    registry_path: None,
                 });
             }
 
-            let registry_project_root = comparable_path(Path::new(&project.canonical_root));
-            let manifest_project_root = comparable_path(&manifest.project_root);
+            let registry_project_root = PathBuf::from(&project.canonical_root);
+            let manifest_project_root = manifest.project_root.clone();
             if registry_project_root != manifest_project_root {
                 findings.push(RegistryDriftFinding {
                     project_id: project.project_id.clone(),
                     store_id: store.store_id.clone(),
                     field: "project_root",
-                    registry_value: registry_project_root,
-                    manifest_value: manifest_project_root,
+                    registry_value: project.canonical_root.clone(),
+                    manifest_value: manifest_project_root.display().to_string(),
                     manifest_path,
+                    registry_path: Some(registry_project_root),
                 });
             }
         }
@@ -63,60 +66,49 @@ pub(super) async fn registry_drift_findings(
     findings
 }
 
-/// One reconciled store: the stale roots that were rewritten to the registry
-/// canonical path during the heal pass.
+/// One reconciled store root rewritten during the heal pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReconciledStoreRoot {
     pub store_id: String,
-    /// The `store_manifest.json` whose `project_root` was rewritten.
     pub manifest_path: PathBuf,
-    /// The sibling `config.json` whose `root_dir` was rewritten, when it was
-    /// also stale.
     pub config_path: Option<PathBuf>,
 }
 
-/// Reconciles stale `store_manifest.json` `project_root` (and the sibling
-/// `config.json` `root_dir`, when stale) to the registry canonical path.
-///
-/// This is the durable half of the project-rename self-heal: the `GlobalDb`
-/// registry already self-heals `canonical_root`/`display_root` to the current
-/// path on every open, but the on-disk store artifacts keep the old path. This
-/// runs ONLY in the on-demand doctor heal pass — never from resolution or
-/// registration — so it stays off the hot path.
-///
-/// Safety: a drift is healed only when the registry canonical root
-/// (`finding.registry_value`, already `comparable_path(canonical_root)`) still
-/// resolves to a path that exists on disk. That is precisely the "registry
-/// already binds the current path" precondition — after a rename the stale
-/// manifest path no longer exists while the registry canonical path does, so
-/// the existence check both proves the registry is authoritative and prevents
-/// inventing a path. Every I/O failure becomes a warning; nothing aborts.
-///
-/// Idempotent: once a manifest's `project_root` equals the canonical value the
-/// drift finding disappears, so a second pass finds nothing to do.
-pub(super) async fn reconcile_drifted_store_roots(
+#[cfg(test)]
+async fn reconcile_drifted_store_roots(
     global_db: &crate::global_db::GlobalDb,
     profile_root: &Path,
+) -> (Vec<ReconciledStoreRoot>, Vec<String>) {
+    let findings = registry_drift_findings(global_db, profile_root).await;
+    reconcile_drifted_store_roots_from_findings(&findings)
+}
+
+pub(super) fn reconcile_drifted_store_roots_from_findings(
+    findings: &[RegistryDriftFinding],
 ) -> (Vec<ReconciledStoreRoot>, Vec<String>) {
     let mut reconciled = Vec::new();
     let mut warnings = Vec::new();
 
-    for finding in registry_drift_findings(global_db, profile_root).await {
+    for finding in findings {
         if finding.field != "project_root" {
             continue;
         }
-        // SAFETY GATE: only heal when the registry canonical root exists on
-        // disk (the registry already binds the current path). Never invent a
-        // path; leave drift whose canonical root is missing as a report-only
-        // finding.
-        let canonical = Path::new(&finding.registry_value);
+        let Some(canonical) = finding.registry_path.as_deref() else {
+            continue;
+        };
         if !canonical.exists() {
             continue;
         }
 
-        match reconcile_one_store_root(&finding, canonical) {
-            Ok(Some(entry)) => reconciled.push(entry),
-            Ok(None) => {}
+        match reconcile_one_store_root(finding, canonical) {
+            Ok((entry, warning)) => {
+                if let Some(entry) = entry {
+                    reconciled.push(entry);
+                }
+                if let Some(warning) = warning {
+                    warnings.push(warning);
+                }
+            }
             Err(message) => warnings.push(message),
         }
     }
@@ -124,13 +116,10 @@ pub(super) async fn reconcile_drifted_store_roots(
     (reconciled, warnings)
 }
 
-/// Rewrites the manifest `project_root` (and sibling config `root_dir` if
-/// stale) for one drift finding. Returns `Ok(None)` when nothing needed
-/// rewriting (idempotent no-op).
 fn reconcile_one_store_root(
     finding: &RegistryDriftFinding,
     canonical: &Path,
-) -> std::result::Result<Option<ReconciledStoreRoot>, String> {
+) -> std::result::Result<(Option<ReconciledStoreRoot>, Option<String>), String> {
     let mut manifest =
         crate::storage::read_store_manifest(&finding.manifest_path).map_err(|e| {
             format!(
@@ -140,7 +129,7 @@ fn reconcile_one_store_root(
         })?;
 
     let mut manifest_rewritten = false;
-    if comparable_path(&manifest.project_root) != finding.registry_value {
+    if manifest.project_root != canonical {
         manifest.project_root = canonical.to_path_buf();
         crate::storage::write_store_manifest_to_path(&finding.manifest_path, &manifest).map_err(
             |e| {
@@ -153,51 +142,52 @@ fn reconcile_one_store_root(
         manifest_rewritten = true;
     }
 
-    // config.json is a sibling of store_manifest.json in the data_root. Heal
-    // its root_dir opportunistically when it is also stale — registry_drift
-    // does not emit a separate finding for it.
     let config_path = finding
         .manifest_path
         .parent()
         .map(|parent| parent.join(crate::config::CONFIG_FILENAME));
     let mut config_rewritten = None;
+    let mut warning = None;
     if let Some(config_path) = config_path {
         if config_path.is_file() {
-            match reconcile_config_root_dir(&config_path, canonical, &finding.registry_value) {
+            match reconcile_config_root_dir(&config_path, canonical) {
                 Ok(true) => config_rewritten = Some(config_path),
                 Ok(false) => {}
-                Err(message) => return Err(message),
+                Err(message) => {
+                    if manifest_rewritten {
+                        warning = Some(message);
+                    } else {
+                        return Err(message);
+                    }
+                }
             }
         }
     }
 
     if !manifest_rewritten && config_rewritten.is_none() {
-        return Ok(None);
+        return Ok((None, warning));
     }
 
-    Ok(Some(ReconciledStoreRoot {
-        store_id: finding.store_id.clone(),
-        manifest_path: finding.manifest_path.clone(),
-        config_path: config_rewritten,
-    }))
+    Ok((
+        Some(ReconciledStoreRoot {
+            store_id: finding.store_id.clone(),
+            manifest_path: finding.manifest_path.clone(),
+            config_path: config_rewritten,
+        }),
+        warning,
+    ))
 }
 
-/// Rewrites `config.json`'s `root_dir` to the canonical path when stale.
-/// Returns `Ok(true)` when it wrote, `Ok(false)` when already current.
 fn reconcile_config_root_dir(
     config_path: &Path,
     canonical: &Path,
-    canonical_spelling: &str,
 ) -> std::result::Result<bool, String> {
-    // `root_dir` is a free-form String; normalize both sides through
-    // comparable_path so an already-canonical (but differently spelled) value
-    // is treated as current and not needlessly rewritten.
     let mut config = crate::config::load_config_from_path(canonical, config_path)
         .map_err(|e| format!("could not read config '{}': {e}", config_path.display()))?;
-    if comparable_path(Path::new(&config.root_dir)) == canonical_spelling {
+    if Path::new(&config.root_dir) == canonical {
         return Ok(false);
     }
-    config.root_dir = canonical.to_string_lossy().to_string();
+    config.root_dir = canonical.display().to_string();
     crate::config::save_config_to_path(config_path, &config)
         .map_err(|e| format!("could not rewrite config '{}': {e}", config_path.display()))?;
     Ok(true)
@@ -242,13 +232,6 @@ fn resolve_registry_manifest_path(
     None
 }
 
-fn comparable_path(path: &Path) -> String {
-    path.canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf())
-        .to_string_lossy()
-        .to_string()
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -269,18 +252,12 @@ mod tests {
         global_db: GlobalDb,
     }
 
-    /// Builds a profile with one profile-sharded store whose on-disk manifest
-    /// (and config) still point at a stale `stale_root`, while the registry
-    /// canonical root is `current_root` (a real directory that exists).
     async fn build_fixture() -> Fixture {
         let tmp = tempfile::TempDir::new().unwrap();
         let profile_root = tmp.path().join("profile");
         let current_root = tmp.path().join("current-name");
         let stale_root = tmp.path().join("old-name");
         std::fs::create_dir_all(&current_root).unwrap();
-        // stale_root is intentionally NOT created — after a rename the old
-        // path no longer exists on disk.
-
         let data_root = profile_root.join("stores").join(STORE_ID);
         std::fs::create_dir_all(&data_root).unwrap();
         let manifest_path = data_root.join(crate::storage::STORE_MANIFEST_FILENAME);
@@ -312,7 +289,6 @@ mod tests {
         let global_db = GlobalDb::open_at(&profile_root.join("global.db"))
             .await
             .unwrap();
-        // Registry already self-healed canonical_root to the current path.
         global_db
             .upsert_code_project(PROJECT_ID, &current_root, None, None, None)
             .await
@@ -354,9 +330,6 @@ mod tests {
             .root_dir
     }
 
-    // (a) Detection alone (the report-only path) never mutates the on-disk
-    //     files — the "dry-run" analog, since the heal pass has no separate
-    //     apply flag and running reconcile IS the apply.
     #[tokio::test]
     async fn detection_does_not_mutate() {
         let fx = build_fixture().await;
@@ -368,7 +341,6 @@ mod tests {
             .collect();
         assert_eq!(root_drift.len(), 1, "should detect project_root drift");
 
-        // No write happened: the manifest and config still hold the stale root.
         assert_eq!(manifest_root(&fx.manifest_path), fx.stale_root);
         assert_eq!(
             config_root_dir(&fx.config_path),
@@ -376,8 +348,6 @@ mod tests {
         );
     }
 
-    // (c) Applying the reconcile rewrites the manifest and config to the
-    //     registry canonical (current) path; (d) a second run is a no-op.
     #[tokio::test]
     async fn reconcile_rewrites_then_is_idempotent() {
         let fx = build_fixture().await;
@@ -393,14 +363,12 @@ mod tests {
             "stale config should be reconciled too"
         );
 
-        // Manifest + config now hold the canonical current path.
         assert_eq!(manifest_root(&fx.manifest_path), canonical);
         assert_eq!(
             config_root_dir(&fx.config_path),
             canonical.to_string_lossy()
         );
 
-        // Every other manifest field survived the surgical rewrite.
         let healed = crate::storage::read_store_manifest(&fx.manifest_path).unwrap();
         assert_eq!(healed.project_id.as_deref(), Some(PROJECT_ID));
         assert_eq!(
@@ -408,14 +376,12 @@ mod tests {
             PathBuf::from(crate::config::DB_FILENAME)
         );
 
-        // The drift finding is gone now that the manifest matches the registry.
         let post = registry_drift_findings(&fx.global_db, &fx.profile_root).await;
         assert!(
             post.iter().all(|f| f.field != "project_root"),
             "project_root drift should be resolved: {post:?}"
         );
 
-        // Second run: nothing left to heal.
         let (again, warnings) =
             reconcile_drifted_store_roots(&fx.global_db, &fx.profile_root).await;
         assert!(again.is_empty(), "second run must be a no-op: {again:?}");
@@ -425,13 +391,36 @@ mod tests {
         );
     }
 
-    // (b)/safety: when the registry canonical root does NOT exist on disk the
-    //     drift is left untouched — never invent a path.
+    #[tokio::test]
+    async fn manifest_reconcile_is_reported_when_config_rewrite_fails() {
+        let fx = build_fixture().await;
+        let canonical = fx.current_root.canonicalize().unwrap();
+        std::fs::write(&fx.config_path, "{ not json").unwrap();
+
+        let (reconciled, warnings) =
+            reconcile_drifted_store_roots(&fx.global_db, &fx.profile_root).await;
+        assert_eq!(
+            reconciled.len(),
+            1,
+            "manifest rewrite should still be reported"
+        );
+        assert_eq!(reconciled[0].store_id, STORE_ID);
+        assert_eq!(reconciled[0].manifest_path, fx.manifest_path);
+        assert_eq!(
+            reconciled[0].config_path, None,
+            "failed config rewrite must not be reported as reconciled"
+        );
+        assert_eq!(manifest_root(&fx.manifest_path), canonical);
+        assert_eq!(warnings.len(), 1, "config failure should still be surfaced");
+        assert!(
+            warnings[0].contains("could not read config"),
+            "unexpected warning: {warnings:?}"
+        );
+    }
+
     #[tokio::test]
     async fn missing_canonical_root_is_not_healed() {
         let fx = build_fixture().await;
-        // Remove the current root so the registry canonical path no longer
-        // exists; the safety gate must refuse to heal.
         std::fs::remove_dir_all(&fx.current_root).unwrap();
 
         let (reconciled, warnings) =
@@ -441,7 +430,6 @@ mod tests {
             warnings.is_empty(),
             "gate is silent, not a warning: {warnings:?}"
         );
-        // Manifest untouched.
         assert_eq!(manifest_root(&fx.manifest_path), fx.stale_root);
     }
 }

@@ -44,7 +44,8 @@ use tracedecay::storage::{
 };
 use tracedecay::tracedecay::TraceDecay;
 
-static GLOBAL_DB_ENV_LOCK: Mutex<()> = Mutex::const_new(());
+pub(crate) static GLOBAL_DB_ENV_LOCK: Mutex<()> = Mutex::const_new(());
+const MCP_TEST_RESPONSE_CHAR_LIMIT: usize = 15_000;
 
 struct TestDbConnection {
     _db: libsql::Database,
@@ -2368,25 +2369,28 @@ async fn retrieve_tool_reports_missing_and_expired_handles_actionably() {
 #[tokio::test]
 async fn fact_store_large_list_response_uses_retrieve_handle() {
     let (cg, _env, _dir) = setup_empty_project().await;
-    let added = handle_tool_call(
-        &cg,
-        "tracedecay_fact_store",
-        json!({
-            "action": "add",
-            "content": format!(
-                "LONG_FACT_MARKER_00: {}",
-                "large fact-store response should remain retrievable ".repeat(220)
-            ),
-            "category": "project",
-            "trust": 0.9
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
-    let last_fact_id = added["fact"]["fact_id"].as_i64();
+    let mut last_fact_id = None;
+    for index in 0..4 {
+        let added = handle_tool_call(
+            &cg,
+            "tracedecay_fact_store",
+            json!({
+                "action": "add",
+                "content": format!(
+                    "LONG_FACT_MARKER_{index:02}: {}",
+                    "large fact-store response should remain retrievable ".repeat(180)
+                ),
+                "category": "project",
+                "trust": 0.9
+            }),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
+        last_fact_id = added["fact"]["fact_id"].as_i64();
+    }
     let last_fact_id = last_fact_id.expect("tail fact id");
 
     let listed = handle_tool_call(
@@ -2448,7 +2452,7 @@ async fn fact_store_large_list_response_uses_retrieve_handle() {
         .as_str()
         .expect("retrieve response should contain original JSON text");
     let full: Value = serde_json::from_str(full_json).expect("retrieved content should be JSON");
-    assert_eq!(full["count"].as_u64(), Some(1));
+    assert_eq!(full["count"].as_u64(), Some(4));
     assert!(
         full_json.contains("LONG_FACT_MARKER_00"),
         "retrieved response should include the full fact list"
@@ -2458,23 +2462,25 @@ async fn fact_store_large_list_response_uses_retrieve_handle() {
 #[tokio::test]
 async fn fact_store_large_list_response_reports_store_failure_actionably() {
     let (cg, _env, _dir) = setup_empty_project().await;
-    handle_tool_call(
-        &cg,
-        "tracedecay_fact_store",
-        json!({
-            "action": "add",
-            "content": format!(
-                "STORE_FAILURE_MARKER_00: {}",
-                "large fact-store response should surface cache failures ".repeat(220)
-            ),
-            "category": "project",
-            "trust": 0.9
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    for index in 0..4 {
+        handle_tool_call(
+            &cg,
+            "tracedecay_fact_store",
+            json!({
+                "action": "add",
+                "content": format!(
+                    "STORE_FAILURE_MARKER_{index:02}: {}",
+                    "large fact-store response should surface cache failures ".repeat(180)
+                ),
+                "category": "project",
+                "trust": 0.9
+            }),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    }
 
     let handle_dir = response_handle_dir(&cg);
     fs::write(&handle_dir, "not-a-directory").unwrap();
@@ -2517,7 +2523,7 @@ async fn fact_store_large_list_response_reports_store_failure_actionably() {
 
 #[tokio::test]
 async fn search_large_response_uses_retrievable_truncation_handle() {
-    const LARGE_RESPONSE_MARKER_COUNT: usize = 120;
+    const LARGE_RESPONSE_MARKER_COUNT: usize = 260;
     const LAST_LARGE_RESPONSE_MARKER: usize = LARGE_RESPONSE_MARKER_COUNT - 1;
 
     let dir = test_temp_dir();
@@ -2666,7 +2672,7 @@ async fn context_includes_matching_memory_facts() {
 }
 
 #[tokio::test]
-async fn context_memory_controls_filter_disable_and_compact_markdown() {
+async fn context_memory_controls_filter_disable_and_preserve_markdown() {
     let (cg, _dir) = setup_project().await;
     let long_content = format!("Long memory control fact {}", "x".repeat(320));
     handle_tool_call(
@@ -2756,8 +2762,50 @@ async fn context_memory_controls_filter_disable_and_compact_markdown() {
     .unwrap();
     let text = extract_text(&markdown.value);
     assert!(text.contains("Long memory control fact"));
-    assert!(text.contains("..."));
-    assert!(!text.contains(&"x".repeat(300)));
+    assert!(text.contains(&"x".repeat(300)));
+    assert!(!text.contains("..."));
+}
+
+#[tokio::test]
+async fn context_memory_large_markdown_uses_reversible_lane_preview() {
+    let (cg, _dir) = setup_project().await;
+    let tail = "MEMORY_TAIL_MARKER";
+    let long_content = format!("Large reversible memory fact {}{tail}", "x".repeat(4_000));
+    handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": long_content,
+            "category": "decision",
+            "entity": "large reversible memory fact",
+            "tags": ["context-memory-lane-preview"],
+            "trust": 0.95,
+            "source": "mcp-context-test"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let markdown = handle_tool_call(
+        &cg,
+        "tracedecay_context",
+        json!({"task": "large reversible memory fact", "memory_limit": 1}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let text = extract_text(&markdown.value);
+    assert!(text.starts_with("# Truncated Response"), "got: {text}");
+    assert!(text.contains("lane-budgeted preview"), "got: {text}");
+    assert!(text.contains("### Memory Matches"), "got: {text}");
+    assert!(text.contains("lane truncated"), "got: {text}");
+    assert!(text.contains("tracedecay_retrieve"), "got: {text}");
+    assert!(!text.contains(tail), "preview should omit tail: {text}");
 }
 
 #[tokio::test]
@@ -3203,7 +3251,7 @@ async fn test_diff_context() {
 
 #[tokio::test]
 async fn diff_context_large_response_uses_retrievable_truncation_handle() {
-    const LARGE_RESPONSE_MARKER_COUNT: usize = 120;
+    const LARGE_RESPONSE_MARKER_COUNT: usize = 260;
     const LAST_LARGE_RESPONSE_MARKER: usize = LARGE_RESPONSE_MARKER_COUNT - 1;
 
     let dir = test_temp_dir();
@@ -4705,6 +4753,29 @@ async fn outline_preserves_db_payload_and_adds_ast_grep_outline_when_available()
                 .is_some_and(|items| items.iter().any(|item| item["name"] == "helper")))),
         "ast-grep outline should be attached under ast_grep_outline: {payload}"
     );
+}
+
+#[tokio::test]
+async fn outline_markdown_uses_context_style_bullets_not_table() {
+    if !tracedecay::mcp::tools::ast_grep_outline_available() {
+        return;
+    }
+
+    let (cg, _dir) = setup_project().await;
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_outline",
+        json!({"file": "src/utils.rs", "format": "markdown"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let text = extract_text(&result.value);
+    assert!(text.contains("## Outline"));
+    assert!(text.contains("- **helper**"));
+    assert!(!text.contains("| symbol | kind |"));
 }
 
 #[cfg(unix)]
@@ -9672,7 +9743,7 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         .as_str()
         .unwrap()
         .contains("EXPANDED CONTEXT"));
-    assert!(extract_text(&result.value).len() <= 15_000);
+    assert!(extract_text(&result.value).len() <= MCP_TEST_RESPONSE_CHAR_LIMIT);
 
     let preflight = handle_tool_call(
         &cg,
@@ -9938,7 +10009,7 @@ async fn lcm_compress_oversized_needs_summary_uses_retrievable_full_payload() {
     assert_eq!(payload["retrieve_tool"], "tracedecay_retrieve");
     assert!(payload.get("contract_truncated").is_none());
     assert!(payload.get("replay_messages_truncated_for_mcp").is_none());
-    assert!(text.len() <= 15_000);
+    assert!(text.len() <= MCP_TEST_RESPONSE_CHAR_LIMIT);
     let retrieved = handle_tool_call(
         &cg,
         "tracedecay_retrieve",
@@ -10018,7 +10089,7 @@ async fn lcm_preflight_oversized_replay_preserves_bridge_contract() {
     assert_eq!(payload["mcp_response_truncated"], true);
     assert_eq!(payload["contract_truncated"], true);
     assert!(payload.get("truncated").is_none());
-    assert!(text.len() <= 15_000);
+    assert!(text.len() <= MCP_TEST_RESPONSE_CHAR_LIMIT);
     assert!(payload["replay_messages_compacted_for_mcp"]
         .as_bool()
         .unwrap_or(false));
@@ -10063,7 +10134,7 @@ async fn lcm_preflight_structured_replay_content_is_bounded_for_mcp() {
     let payload: Value = serde_json::from_str(text).unwrap();
     assert_eq!(payload["status"], "ok");
     assert!(payload.get("truncated").is_none());
-    assert!(text.len() <= 15_000);
+    assert!(text.len() <= MCP_TEST_RESPONSE_CHAR_LIMIT);
     let compacted_content = payload["replay_messages"][0]["content"]
         .as_str()
         .expect("structured replay content should be serialized to bounded text");
@@ -11134,7 +11205,7 @@ async fn lcm_large_json_response_stays_parseable_after_truncation() {
     let payload: Value = serde_json::from_str(extract_text(&result.value))
         .expect("truncated LCM tool text should remain valid JSON");
     assert_eq!(payload["truncated"], true);
-    assert!(payload["preview"].as_str().unwrap().len() <= 15_000);
+    assert!(payload["preview"].as_str().unwrap().len() <= MCP_TEST_RESPONSE_CHAR_LIMIT);
 }
 
 #[tokio::test]
@@ -11197,7 +11268,7 @@ async fn lcm_expand_query_large_response_preserves_synthesis_contract() {
         payload["context_blocks"].as_array().unwrap().len() <= 3,
         "MCP expand-query context should stay compact"
     );
-    assert!(text.len() <= 15_000);
+    assert!(text.len() <= MCP_TEST_RESPONSE_CHAR_LIMIT);
     close_test_graph(cg).await;
 }
 
@@ -11284,7 +11355,7 @@ async fn lcm_expand_query_oversized_prompt_preserves_synthesis_contract() {
         .as_str()
         .unwrap()
         .contains("QUESTION:"));
-    assert!(text.len() <= 15_000);
+    assert!(text.len() <= MCP_TEST_RESPONSE_CHAR_LIMIT);
 }
 
 #[tokio::test]

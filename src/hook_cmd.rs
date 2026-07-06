@@ -33,7 +33,7 @@ pub(crate) async fn handle_hook_command(command: Commands) -> tracedecay::errors
             exit_if_nonzero(tracedecay::hooks::hook_cursor_subagent_start());
         }
         Commands::HookCursorPostToolUse => {
-            exit_if_nonzero(tracedecay::hooks::hook_cursor_post_tool_use());
+            exit_if_nonzero(tracedecay::hooks::hook_cursor_post_tool_use().await);
         }
         Commands::HookCursorBeforeSubmitPrompt => {
             exit_if_nonzero(tracedecay::hooks::hook_cursor_before_submit_prompt().await);

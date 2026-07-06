@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
 
+use super::apply_policy::record_has_auto_applied_memory_ops;
 use super::artifact_feedback::{
     validation_feedback_entries, validation_gate_decision, validation_report_hash,
 };
@@ -424,28 +425,6 @@ pub(super) fn codex_handoff_payload(
     })
 }
 
-fn record_has_auto_applied_memory_ops(
-    task: AgentTaskKind,
-    record: &AutomationRunLedgerRecord,
-) -> bool {
-    if !matches!(
-        task,
-        AgentTaskKind::MemoryCurator | AgentTaskKind::SessionReflector
-    ) {
-        return false;
-    }
-    record
-        .validation_report
-        .as_ref()
-        .and_then(|report| {
-            report
-                .pointer("/apply_policy/mutates_store")
-                .or_else(|| report.pointer("/session_fact_apply_policy/mutates_store"))
-        })
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -700,6 +679,78 @@ mod tests {
             payload
                 .pointer("/validation_requirements/must_not_auto_apply")
                 .unwrap(),
+            &json!(false)
+        );
+    }
+
+    #[test]
+    fn codex_handoff_preserves_approval_gate_for_partial_memory_apply() {
+        let (request, response, mut record) = payload_fixture();
+        record.accepted_count = 2;
+        record.reviewed_count = 2;
+        record.applied_ops = Some(json!([
+            { "op": "delete", "fact_id": 102 },
+            { "op": "delete", "fact_id": 102 }
+        ]));
+        record.validation_report = Some(json!({
+            "applied": 1,
+            "results": [
+                { "op": "delete", "fact_id": 102, "status": "deleted" },
+                { "op": "delete", "fact_id": 102, "status": "error" }
+            ],
+            "apply_policy": {
+                "accepted_count": 2,
+                "mutates_store": true,
+            }
+        }));
+        let outcomes = AutomationOutcomesSnapshot::default();
+        let ctx = ArtifactPayloadContext {
+            run_id: "run-outcomes",
+            task: AgentTaskKind::MemoryCurator,
+            task_key: "memory_curator",
+            prompt_version: "memory_curator:v1",
+            policy: artifact_policy(AgentTaskKind::MemoryCurator),
+            request: &request,
+            response: &response,
+            record: &record,
+            outcomes: &outcomes,
+        };
+        let refs = ArtifactRefs {
+            trace: json!({"kind": "traces"}),
+            feedback: json!({"kind": "feedback"}),
+            generated_evals: json!({"kind": "generated_evals"}),
+            validation_gate: json!({"kind": "validation_gate"}),
+            optimizer_diagnosis: json!({"kind": "optimizer_diagnosis"}),
+        };
+        let evals = generated_eval_payloads(&ctx);
+        let gate = improvement_gate_payload(&ctx, &evals);
+        let validation_payload = validation_gate_payload(
+            &ctx,
+            (&refs.trace, &refs.feedback, &refs.generated_evals),
+            &evals,
+            &gate,
+        );
+
+        let payload = codex_handoff_payload(&ctx, &refs, &evals, &gate);
+
+        assert_eq!(
+            validation_payload
+                .pointer("/task_validation/approval_required")
+                .unwrap(),
+            &json!(true)
+        );
+        assert_eq!(
+            validation_payload
+                .pointer("/improvement_gate/criteria/auto_apply_allowed")
+                .unwrap(),
+            &json!(false)
+        );
+        assert_eq!(
+            payload.pointer("/readiness/approval_required").unwrap(),
+            &json!(true)
+        );
+        assert_eq!(
+            payload.pointer("/readiness/auto_apply_allowed").unwrap(),
             &json!(false)
         );
     }

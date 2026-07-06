@@ -1,9 +1,59 @@
-use std::time::Duration;
+use std::{ffi::OsString, path::Path, time::Duration};
 use tempfile::tempdir;
 use tracedecay::mcp::McpServer;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 use crate::common::canonical_existing_path;
+
+struct TranscriptHomeEnvGuard {
+    previous_home: Option<OsString>,
+    previous_userprofile: Option<OsString>,
+    previous_data_dir: Option<OsString>,
+    previous_hermes_home: Option<OsString>,
+}
+
+impl TranscriptHomeEnvGuard {
+    fn set(home: &Path) -> Self {
+        let previous_home = std::env::var_os("HOME");
+        let previous_userprofile = std::env::var_os("USERPROFILE");
+        let previous_data_dir = std::env::var_os(tracedecay::config::USER_DATA_DIR_ENV);
+        let previous_hermes_home = std::env::var_os("HERMES_HOME");
+        std::env::set_var("HOME", home);
+        std::env::set_var("USERPROFILE", home);
+        std::env::set_var(
+            tracedecay::config::USER_DATA_DIR_ENV,
+            home.join(tracedecay::config::TRACEDECAY_DIR),
+        );
+        std::env::set_var("HERMES_HOME", home.join(".hermes"));
+        Self {
+            previous_home,
+            previous_userprofile,
+            previous_data_dir,
+            previous_hermes_home,
+        }
+    }
+}
+
+impl Drop for TranscriptHomeEnvGuard {
+    fn drop(&mut self) {
+        match self.previous_home.take() {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match self.previous_userprofile.take() {
+            Some(value) => std::env::set_var("USERPROFILE", value),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+        match self.previous_data_dir.take() {
+            Some(value) => std::env::set_var(tracedecay::config::USER_DATA_DIR_ENV, value),
+            None => std::env::remove_var(tracedecay::config::USER_DATA_DIR_ENV),
+        }
+        match self.previous_hermes_home.take() {
+            Some(value) => std::env::set_var("HERMES_HOME", value),
+            None => std::env::remove_var("HERMES_HOME"),
+        }
+    }
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_mcps_on_same_project_coordinate_via_sync_lock() {
@@ -11,6 +61,7 @@ async fn two_mcps_on_same_project_coordinate_via_sync_lock() {
     let tmp = tempdir().unwrap();
     let project = tmp.path().to_path_buf();
     let profile_root = canonical_existing_path(home.path()).join(".tracedecay");
+    let _transcript_home_env = TranscriptHomeEnvGuard::set(home.path());
     let open_options = TraceDecayOpenOptions {
         profile_root: Some(profile_root.clone()),
         global_db_path: Some(profile_root.join("global.db")),

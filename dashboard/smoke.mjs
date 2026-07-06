@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import readline from "node:readline";
+import { fileURLToPath } from "node:url";
 import { chromium, devices } from "playwright";
 
 const VIEWPORT_PROFILES = {
@@ -32,7 +33,7 @@ const VIEWPORT_PROFILES = {
 const DASHBOARD_URL_RE = /(http:\/\/127\.0\.0\.1:\d+\/)/;
 
 function workspaceRoot() {
-  return new URL("..", import.meta.url).pathname;
+  return fileURLToPath(new URL("..", import.meta.url));
 }
 
 function withTrailingSlash(url) {
@@ -118,13 +119,16 @@ async function startDashboardServer(projectPath) {
 }
 
 async function waitForAny(page, locators, timeoutMs) {
-  const timeout = new Promise((_, reject) => {
-    setTimeout(() => reject(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs);
-  });
-  const checks = locators.map((locator) =>
-    locator.waitFor({ state: "visible", timeout: timeoutMs }).then(() => locator),
-  );
-  return Promise.race([timeout, ...checks]);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    for (const locator of locators) {
+      if (await locator.isVisible().catch(() => false)) {
+        return locator;
+      }
+    }
+    await page.waitForTimeout(Math.min(100, Math.max(0, deadline - Date.now())));
+  }
+  throw new Error(`timed out after ${timeoutMs}ms`);
 }
 
 async function runViewportSmoke(browser, baseUrl, profile, expectLcmMode) {
@@ -133,8 +137,6 @@ async function runViewportSmoke(browser, baseUrl, profile, expectLcmMode) {
   });
   const page = await context.newPage();
 
-  // Fail the smoke on any uncaught JS error, console.error, or 5xx response —
-  // a tab that renders visually but throws in the console is still broken.
   const runtimeErrors = [];
   page.on("pageerror", (err) => {
     runtimeErrors.push(`pageerror: ${err.message}`);
@@ -241,10 +243,6 @@ async function runViewportSmoke(browser, baseUrl, profile, expectLcmMode) {
     await waitForAny(page, [recentSessionsHeader, emptyStateHeader], 8000);
   }
 
-  // The Savings, Code Diagnostics, and Settings shells are full tabs the smoke
-  // previously never opened. Walk them once (content is viewport-independent, so
-  // the desktop pass is enough) and assert each resolves past its loading/empty
-  // state rather than rendering a blank or spinner-stuck panel.
   if (profile.name === "desktop") {
     await runSecondaryTabsSmoke(page);
   }
@@ -263,16 +261,12 @@ async function runViewportSmoke(browser, baseUrl, profile, expectLcmMode) {
   await context.close();
 }
 
-// Opens the Savings & Cost, Code Diagnostics, and Settings tabs and asserts each
-// renders real content. These are the shells the memory/graph/LCM smoke skipped.
 async function runSecondaryTabsSmoke(page) {
   const tab = (name) =>
     page
       .getByRole("tab", { name, exact: true })
       .or(page.getByRole("button", { name, exact: true }));
 
-  // --- Savings & Cost: must resolve past the "Loading savings analytics…"
-  // placeholder into real analytics, and expose its sub-tabs.
   await tab("Savings & Cost").click();
   await page.waitForFunction(
     () => {
@@ -287,29 +281,19 @@ async function runSecondaryTabsSmoke(page) {
     await page.waitForTimeout(200);
   }
 
-  // --- Code Graph (already covered above) — jump straight to Code Diagnostics.
   await tab("Code Diagnostics").click();
   await page.getByText("ENGINES", { exact: false }).first().waitFor({ state: "visible", timeout: 8000 });
   await assertEngineIdsDoNotCharStack(page);
 
-  // --- Settings: the config panel must render its project-config path and the
-  // Save/Discard controls.
   await tab("Settings").click();
   await page.getByText("Project config", { exact: false }).first().waitFor({ state: "visible", timeout: 8000 });
-  // Settings renders a Save per section (Indexing, User & Uploads); assert at
-  // least one is present.
   await page.getByRole("button", { name: "Save", exact: true }).first().waitFor({ state: "visible", timeout: 8000 });
 }
 
-// Regression guard: engine ids (e.g. `rust-analyzer`) live in a squeezable grid
-// column. With `overflow-wrap: anywhere` they collapse to one character per line
-// when the column is tight. The fix pins them to `white-space: nowrap` (truncate
-// with an ellipsis instead), so assert that computed style is applied.
 async function assertEngineIdsDoNotCharStack(page) {
   const whiteSpaces = await page.$$eval(".tdcd-engine-row > code", (nodes) =>
     nodes.map((node) => getComputedStyle(node).whiteSpace),
   );
-  // No engine rows in a hermetic workspace is acceptable; only assert when present.
   for (const whiteSpace of whiteSpaces) {
     if (whiteSpace !== "nowrap") {
       throw new Error(

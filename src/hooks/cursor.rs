@@ -65,11 +65,11 @@ pub fn hook_cursor_subagent_start() -> i32 {
 /// search tool) and irrelevant tools fail open with no output. Each hint
 /// category is emitted at most once per session via
 /// [`super::tool_hints::ToolHintDedupe`] persisted under `.tracedecay/`.
-pub fn hook_cursor_post_tool_use() -> i32 {
+pub async fn hook_cursor_post_tool_use() -> i32 {
     let event = read_hook_event!();
     let root = cursor_project_root_from_event(&event);
     record_hook_invoked(root.as_deref(), HintAgent::Cursor, "postToolUse", &event);
-    if let Some(decision) = cursor_post_tool_use_decision(&event) {
+    if let Some(decision) = cursor_post_tool_use_decision_for_hook(&event).await {
         println!("{decision}");
     }
     0
@@ -260,16 +260,14 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
 pub async fn hook_cursor_session_start() -> i32 {
     let event = read_hook_event!();
     let mut root = cursor_project_root_from_event(&event);
-    // On a sync miss, fall back to the git-identity resolver so a renamed /
-    // global-only repo (registered store, no repo-local marker) still resolves
-    // its root; cursor_session_context_for_root already gates on
-    // has_initialized_store, so the Initialized line is emitted once root binds.
     if root.is_none() {
-        if let Ok(parsed) = serde_json::from_str::<Value>(&event) {
-            if let Some(cwd) = cursor_event_cwd(&parsed) {
-                root = crate::config::discover_project_root_with_identity(&cwd).await;
-            }
-        }
+        root = match serde_json::from_str::<Value>(&event) {
+            Ok(parsed) => match cursor_event_cwd(&parsed) {
+                Some(cwd) => crate::config::discover_project_root_with_identity(&cwd).await,
+                None => None,
+            },
+            Err(_) => None,
+        };
     }
     record_hook_invoked(root.as_deref(), HintAgent::Cursor, "sessionStart", &event);
     ingest_cursor_transcript_for_event(
@@ -377,9 +375,14 @@ pub fn evaluate_cursor_post_tool_use(event_json: &str) -> Option<String> {
     )
 }
 
-/// Impure `postToolUse` path: [`evaluate_cursor_post_tool_use`] plus
-/// per-session hint dedupe persisted under the project's `.tracedecay/` dir.
-pub fn cursor_post_tool_use_decision(event_json: &str) -> Option<String> {
+fn format_cursor_post_tool_use_decision(hint: &ToolHint) -> String {
+    serde_json::json!({
+        "additional_context": format_tool_hint(hint),
+    })
+    .to_string()
+}
+
+fn prepare_cursor_post_tool_use_hint(event_json: &str) -> Option<(String, ToolHint)> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
     let hint = decide_hint(&cursor_tool_hint_input(&parsed))?;
     let root = cursor_project_root_candidate_from_parsed_event(&parsed);
@@ -392,13 +395,21 @@ pub fn cursor_post_tool_use_decision(event_json: &str) -> Option<String> {
         &hint_id,
         &hint,
     );
+    Some((hint_id, hint))
+}
+
+/// Impure `postToolUse` path: [`evaluate_cursor_post_tool_use`] plus
+/// per-session hint dedupe persisted under the project's `.tracedecay/` dir.
+pub fn cursor_post_tool_use_decision(event_json: &str) -> Option<String> {
+    let (hint_id, hint) = prepare_cursor_post_tool_use_hint(event_json)?;
     let hint = deduped_cursor_hint(event_json, &hint_id, hint)?;
-    Some(
-        serde_json::json!({
-            "additional_context": format_tool_hint(&hint),
-        })
-        .to_string(),
-    )
+    Some(format_cursor_post_tool_use_decision(&hint))
+}
+
+async fn cursor_post_tool_use_decision_for_hook(event_json: &str) -> Option<String> {
+    let (hint_id, hint) = prepare_cursor_post_tool_use_hint(event_json)?;
+    let hint = deduped_cursor_hint_for_initialized_store(event_json, &hint_id, hint).await?;
+    Some(format_cursor_post_tool_use_decision(&hint))
 }
 
 /// Suppresses hints that were already emitted for this session.
@@ -410,17 +421,19 @@ pub fn cursor_post_tool_use_decision(event_json: &str) -> Option<String> {
 /// tracedecay tools there would be misleading). When no session id is present
 /// the hint is emitted as-is — dedupe is impossible but the hint is still
 /// useful (fail-open).
-fn deduped_cursor_hint(event_json: &str, hint_id: &str, hint: ToolHint) -> Option<ToolHint> {
+fn cursor_hint_root(
+    event_json: &str,
+    hint_id: &str,
+    hint: &ToolHint,
+) -> Option<(PathBuf, Option<String>)> {
     let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
-        // The candidate was already recorded against `hint_id`; close its outcome
-        // with a terminal event instead of dropping it silently.
         record_hint_analytics(
             None,
             "dropped_no_root",
             HintAgent::Cursor,
             None,
             hint_id,
-            &hint,
+            hint,
         );
         return None;
     };
@@ -432,11 +445,36 @@ fn deduped_cursor_hint(event_json: &str, hint_id: &str, hint: ToolHint) -> Optio
             HintAgent::Cursor,
             session_id.as_deref(),
             hint_id,
-            &hint,
+            hint,
         );
         return None;
     };
+    Some((root, session_id))
+}
+
+fn deduped_cursor_hint(event_json: &str, hint_id: &str, hint: ToolHint) -> Option<ToolHint> {
+    let (root, session_id) = cursor_hint_root(event_json, hint_id, &hint)?;
     if !crate::tracedecay::TraceDecay::is_initialized(&root) {
+        record_hint_analytics(
+            Some(&root),
+            "suppressed_uninitialized",
+            HintAgent::Cursor,
+            session_id.as_deref(),
+            hint_id,
+            &hint,
+        );
+        return None;
+    }
+    deduped_project_hint_with_id(Some(root), HintAgent::Cursor, session_id, hint_id, hint)
+}
+
+async fn deduped_cursor_hint_for_initialized_store(
+    event_json: &str,
+    hint_id: &str,
+    hint: ToolHint,
+) -> Option<ToolHint> {
+    let (root, session_id) = cursor_hint_root(event_json, hint_id, &hint)?;
+    if !crate::tracedecay::TraceDecay::has_initialized_store(&root).await {
         record_hint_analytics(
             Some(&root),
             "suppressed_uninitialized",

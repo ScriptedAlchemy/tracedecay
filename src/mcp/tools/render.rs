@@ -11,9 +11,18 @@ use crate::mcp::response_handles::{
     store_response_handle, ResponseHandleRecord, RESPONSE_HANDLE_TTL_SECS, RESPONSE_RETRIEVE_TOOL,
 };
 use crate::path_tree::format_compact_path_list;
+use crate::text::utf8_prefix_at_or_before;
 use crate::tracedecay::current_timestamp;
 
 use super::MAX_RESPONSE_CHARS;
+
+const MARKDOWN_TRUNCATION_RESERVED_CHARS: usize = 2_048;
+const MARKDOWN_PRIORITY_HEADINGS: &[&str] = &[
+    "### Memory Matches",
+    "### Entry Points",
+    "### Extension Points",
+    "### Test Coverage",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutputFormat {
@@ -169,6 +178,18 @@ pub(super) fn truncate_text_with_handle(project_root: Option<&Path>, text: &str)
     truncated_markdown_with_handle(project_root, text)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn markdown_preview_with_handle(
+    project_root: Option<&Path>,
+    full_text: &str,
+    preview: &str,
+) -> String {
+    if full_text == preview {
+        return truncated_markdown_with_handle(project_root, full_text);
+    }
+    markdown_preview_truncation_with_handle(project_root, full_text, preview)
+}
+
 fn truncated_markdown_with_handle(project_root: Option<&Path>, text: &str) -> String {
     if text.len() <= MAX_RESPONSE_CHARS {
         return text.to_string();
@@ -176,26 +197,188 @@ fn truncated_markdown_with_handle(project_root: Option<&Path>, text: &str) -> St
     let started = std::time::Instant::now();
     let now = current_timestamp();
     let handle = prepare_truncated_response_handle(project_root, text);
-    let mut end = text.len().min(MAX_RESPONSE_CHARS.saturating_sub(2048));
+    let end = text
+        .len()
+        .min(MAX_RESPONSE_CHARS.saturating_sub(MARKDOWN_TRUNCATION_RESERVED_CHARS));
+    render_markdown_with_shrinking_preview(
+        &MarkdownPreviewRender {
+            project_root,
+            full_len: text.len(),
+            handle: &handle,
+            started,
+            now,
+        },
+        end,
+        |end| markdown_truncation_preview(text, end),
+        |preview| {
+            format!(
+                "Showing the first {} of {} characters.",
+                preview.len(),
+                text.len()
+            )
+        },
+    )
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn markdown_preview_truncation_with_handle(
+    project_root: Option<&Path>,
+    full_text: &str,
+    preview: &str,
+) -> String {
+    let started = std::time::Instant::now();
+    let now = current_timestamp();
+    let handle = prepare_truncated_response_handle(project_root, full_text);
+    let end = preview
+        .len()
+        .min(MAX_RESPONSE_CHARS.saturating_sub(MARKDOWN_TRUNCATION_RESERVED_CHARS));
+    render_markdown_with_shrinking_preview(
+        &MarkdownPreviewRender {
+            project_root,
+            full_len: full_text.len(),
+            handle: &handle,
+            started,
+            now,
+        },
+        end,
+        |end| {
+            if preview.len() <= end {
+                preview.to_string()
+            } else {
+                markdown_truncation_preview(preview, end)
+            }
+        },
+        |compact_preview| {
+            format!(
+                "Showing a lane-budgeted preview of {} characters from {} original characters.",
+                compact_preview.len(),
+                full_text.len()
+            )
+        },
+    )
+}
+
+struct MarkdownPreviewRender<'a> {
+    project_root: Option<&'a Path>,
+    full_len: usize,
+    handle: &'a TruncatedResponseHandle,
+    started: std::time::Instant,
+    now: i64,
+}
+
+fn render_markdown_with_shrinking_preview(
+    context: &MarkdownPreviewRender<'_>,
+    mut end: usize,
+    mut preview_for_end: impl FnMut(usize) -> String,
+    preview_note: impl Fn(&str) -> String,
+) -> String {
     loop {
-        while end > 0 && !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        let preview = &text[..end];
-        let rendered = render_markdown_truncation(preview, text.len(), &handle);
+        let preview = preview_for_end(end);
+        let rendered =
+            render_markdown_truncation(&preview, context.handle, &preview_note(&preview));
         if rendered.len() <= MAX_RESPONSE_CHARS || end == 0 {
             observe_response_truncation(
-                text.len(),
+                context.full_len,
                 rendered.len(),
-                handle.record.is_some(),
-                now,
-                truncation_handle_status(project_root, &handle),
-                started.elapsed(),
+                context.handle.record.is_some(),
+                context.now,
+                truncation_handle_status(context.project_root, context.handle),
+                context.started.elapsed(),
             );
             return rendered;
         }
         end = end.saturating_sub(1024);
     }
+}
+
+fn markdown_truncation_preview(text: &str, budget: usize) -> String {
+    if text.len() <= budget {
+        return text.to_string();
+    }
+    let has_late_priority = MARKDOWN_PRIORITY_HEADINGS
+        .iter()
+        .any(|heading| text.find(heading).is_some_and(|idx| idx > budget));
+    if !has_late_priority {
+        return markdown_prefix_preview(text, budget);
+    }
+
+    let prefix_budget = budget.saturating_mul(2) / 3;
+    let prefix = utf8_prefix_at_or_before(text, prefix_budget);
+    let prefix_len = prefix.len();
+    let mut preview = prefix.to_string();
+    close_open_markdown_fence(&mut preview);
+    let mut remaining = budget.saturating_sub(preview.len());
+    let mut preserved = String::new();
+
+    for heading in MARKDOWN_PRIORITY_HEADINGS {
+        let Some(start) = text.find(heading) else {
+            continue;
+        };
+        if start < prefix_len {
+            continue;
+        }
+        let section_header = if preserved.is_empty() {
+            "\n\n## Preserved Priority Sections\n\n"
+        } else {
+            "\n"
+        };
+        if remaining <= section_header.len() + 96 {
+            break;
+        }
+        preserved.push_str(section_header);
+        remaining -= section_header.len();
+
+        let section = markdown_section_at(text, start);
+        let section_preview = utf8_prefix_at_or_before(section, remaining);
+        preserved.push_str(section_preview);
+        let section_truncated = section_preview.len() < section.len();
+        close_open_markdown_fence(&mut preserved);
+        remaining = budget.saturating_sub(preview.len() + preserved.len());
+        if section_truncated && remaining >= 5 {
+            preserved.push_str("\n...");
+            remaining -= 5;
+        }
+    }
+
+    if preserved.is_empty() {
+        return markdown_prefix_preview(text, budget);
+    }
+    preview.push_str(&preserved);
+    preview
+}
+
+fn markdown_prefix_preview(text: &str, budget: usize) -> String {
+    let mut preview = utf8_prefix_at_or_before(text, budget).to_string();
+    close_open_markdown_fence(&mut preview);
+    preview
+}
+
+fn markdown_section_at(text: &str, start: usize) -> &str {
+    let rest = &text[start..];
+    let end = ["\n## ", "\n### "]
+        .into_iter()
+        .filter_map(|marker| rest[1..].find(marker).map(|idx| idx + 1))
+        .min()
+        .unwrap_or(rest.len());
+    &rest[..end]
+}
+
+fn close_open_markdown_fence(markdown: &mut String) {
+    if has_open_markdown_fence(markdown) {
+        if !markdown.ends_with('\n') {
+            markdown.push('\n');
+        }
+        markdown.push_str("```");
+    }
+}
+
+fn has_open_markdown_fence(markdown: &str) -> bool {
+    markdown
+        .lines()
+        .filter(|line| line.trim_start().starts_with("```"))
+        .count()
+        % 2
+        == 1
 }
 
 struct TruncatedResponseHandle {
@@ -254,16 +437,12 @@ fn prepare_truncated_response_handle(
 
 fn render_markdown_truncation(
     preview: &str,
-    original_chars: usize,
     handle: &TruncatedResponseHandle,
+    preview_note: &str,
 ) -> String {
     let mut rendered = String::new();
     rendered.push_str("# Truncated Response\n\n");
-    let _ = writeln!(
-        rendered,
-        "Showing the first {} of {original_chars} characters.",
-        preview.len()
-    );
+    let _ = writeln!(rendered, "{preview_note}");
     if let Some(record) = &handle.record {
         let _ = writeln!(
             rendered,
@@ -284,10 +463,6 @@ fn render_markdown_truncation(
         rendered.push('\n');
     }
     rendered
-}
-
-fn esc_cell(s: &str) -> String {
-    s.replace('|', "\\|").replace(['\n', '\r'], " ")
 }
 
 pub(super) fn field_str<'a>(v: &'a Value, key: &str) -> &'a str {
@@ -339,20 +514,6 @@ impl Md {
         self
     }
 
-    pub(super) fn table(&mut self, headers: &[&str], rows: &[Vec<String>]) -> &mut Self {
-        if headers.is_empty() {
-            return self;
-        }
-        let _ = writeln!(self.buf, "| {} |", headers.join(" | "));
-        let sep: Vec<&str> = headers.iter().map(|_| "---").collect();
-        let _ = writeln!(self.buf, "| {} |", sep.join(" | "));
-        for row in rows {
-            let cells: Vec<String> = row.iter().map(|c| esc_cell(c)).collect();
-            let _ = writeln!(self.buf, "| {} |", cells.join(" | "));
-        }
-        self
-    }
-
     pub(super) fn code(&mut self, lang: &str, body: &str) -> &mut Self {
         let _ = writeln!(self.buf, "```{lang}");
         self.buf.push_str(body);
@@ -379,6 +540,143 @@ pub(super) fn generic_md(value: &Value) -> String {
     } else {
         out
     }
+}
+
+pub(super) fn diagnostics_md(value: &Value) -> String {
+    let mut md = Md::new();
+    md.heading(2, "Diagnostics");
+    for key in [
+        "status",
+        "scope",
+        "diagnostics_parsed",
+        "diagnostics_returned",
+        "diagnostic_count",
+        "error_count",
+        "warning_count",
+        "mapped_to_node",
+        "unmapped",
+        "truncated",
+        "target_dir",
+    ] {
+        if let Some(v) = value.get(key).filter(|v| is_scalar(v)) {
+            md.field(title_label(key), &cell_str(key, v));
+        }
+    }
+    if let Some(message) = value.get("message").and_then(Value::as_str) {
+        md.field("Message", &indent_multiline_value(message));
+    }
+    md.blank();
+
+    let diagnostics = value
+        .get("diagnostics")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    if diagnostics.is_empty() {
+        md.empty_note("No diagnostics.");
+        return md.render();
+    }
+
+    md.heading(3, "Findings");
+    for diagnostic in diagnostics {
+        render_diagnostic_record(&mut md, diagnostic);
+    }
+    md.render()
+}
+
+fn render_diagnostic_record(md: &mut Md, diagnostic: &Value) {
+    let level = diagnostic
+        .get("level")
+        .or_else(|| diagnostic.get("severity"))
+        .and_then(Value::as_str)
+        .unwrap_or("diagnostic");
+    let location = diagnostic_location(diagnostic);
+    let code = diagnostic.get("code").and_then(Value::as_str).unwrap_or("");
+    let title = if code.is_empty() {
+        format!("{} at {location}", level.to_uppercase())
+    } else {
+        format!("{} {code} at {location}", level.to_uppercase())
+    };
+    md.bullet(&format!("**{title}**"));
+    if let Some(message) = diagnostic.get("message").and_then(Value::as_str) {
+        md.line(&format!(
+            "  **Message:** {}",
+            indent_multiline_value(message)
+        ));
+    }
+    if let Some(driver) = diagnostic.get("driver").and_then(Value::as_str) {
+        md.line(&format!("  **Driver:** {driver}"));
+    }
+    if let Some(enclosing) = diagnostic.get("enclosing").and_then(Value::as_str) {
+        if !enclosing.is_empty() {
+            md.line(&format!("  **Enclosing:** {enclosing}"));
+        }
+    }
+    if let Some(node) = diagnostic.get("node").filter(|v| !v.is_null()) {
+        let name = node
+            .get("qualified_name")
+            .or_else(|| node.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if !name.is_empty() {
+            md.line(&format!("  **Node:** {name}"));
+        }
+    }
+    if let Some(callers) = diagnostic.get("callers").and_then(Value::as_array) {
+        let callers = callers
+            .iter()
+            .filter_map(|caller| {
+                let name = caller.get("name").and_then(Value::as_str)?;
+                let file = caller.get("file").and_then(Value::as_str).unwrap_or("");
+                let line = caller.get("line").and_then(Value::as_u64).unwrap_or(0);
+                Some(if file.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{name} ({file}:{line})")
+                })
+            })
+            .collect::<Vec<_>>();
+        if !callers.is_empty() {
+            md.line(&format!("  **Callers:** {}", callers.join(", ")));
+        }
+    }
+}
+
+fn diagnostic_location(diagnostic: &Value) -> String {
+    let file = diagnostic
+        .get("file")
+        .and_then(Value::as_str)
+        .unwrap_or("<unknown>");
+    let line = diagnostic
+        .get("line_start")
+        .or_else(|| diagnostic.get("line"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let column = diagnostic.get("column").and_then(Value::as_u64);
+    match column {
+        Some(column) if column > 0 => format!("{file}:{line}:{column}"),
+        _ => format!("{file}:{line}"),
+    }
+}
+
+fn title_label(key: &str) -> &str {
+    match key {
+        "diagnostics_parsed" => "Diagnostics parsed",
+        "diagnostics_returned" => "Diagnostics returned",
+        "diagnostic_count" => "Diagnostic count",
+        "error_count" => "Error count",
+        "warning_count" => "Warning count",
+        "mapped_to_node" => "Mapped to node",
+        "target_dir" => "Target dir",
+        "status" => "Status",
+        "scope" => "Scope",
+        "unmapped" => "Unmapped",
+        "truncated" => "Truncated",
+        _ => key,
+    }
+}
+
+fn indent_multiline_value(value: &str) -> String {
+    value.replace('\n', "\n    ")
 }
 
 fn is_id_key(k: &str) -> bool {
@@ -437,9 +735,6 @@ fn scalar_str_keyed(key: &str, v: &Value) -> String {
     scalar_str(v)
 }
 
-/// Renders a nested JSON value into a single table cell without dumping raw
-/// JSON. Arrays of objects become `name (file:line)`-style summaries; plain
-/// objects become compact `k=v` strings; arrays of scalars are comma-joined.
 fn nested_cell_str(v: &Value) -> String {
     const MAX_ITEMS: usize = 3;
 
@@ -472,8 +767,6 @@ fn nested_cell_str(v: &Value) -> String {
     }
 }
 
-/// Compact one-line summary of an object for a table cell. Prefers a
-/// `name (file:line)` shape when those keys exist, else `k=v` pairs.
 fn summarize_object(obj: &serde_json::Map<String, Value>) -> String {
     let name = obj
         .get("name")
@@ -533,7 +826,7 @@ fn render_array(md: &mut Md, arr: &[Value], depth: u8) {
         return;
     }
     if arr.iter().all(Value::is_object) {
-        render_object_array_table(md, arr);
+        render_object_array_records(md, arr);
     } else {
         for e in arr {
             if is_scalar(e) {
@@ -557,12 +850,7 @@ fn column_rank(col: &str) -> (usize, &str) {
     }
 }
 
-/// Renders an array of objects as a markdown table with three refinements:
-/// columns are ordered (preferred keys first, rest alphabetical), columns that
-/// are empty in every row are dropped, and columns whose value is constant
-/// across every row are hoisted into a header line (`edge_kind: calls`) rather
-/// than repeated in each cell.
-fn render_object_array_table(md: &mut Md, arr: &[Value]) {
+fn render_object_array_records(md: &mut Md, arr: &[Value]) {
     // Collect the union of keys.
     let mut cols: Vec<String> = Vec::new();
     for e in arr {
@@ -588,10 +876,12 @@ fn render_object_array_table(md: &mut Md, arr: &[Value]) {
 
     // Drop columns empty in every row; hoist columns constant across all rows.
     let mut hoisted: Vec<(String, String)> = Vec::new();
+    let mut dropped_empty: Vec<String> = Vec::new();
     let mut keep: Vec<usize> = Vec::new();
     for (ci, col) in cols.iter().enumerate() {
         let all_empty = rendered.iter().all(|row| row[ci].is_empty());
         if all_empty {
+            dropped_empty.push(col.clone());
             continue;
         }
         let first = &rendered[0][ci];
@@ -612,16 +902,38 @@ fn render_object_array_table(md: &mut Md, arr: &[Value]) {
 
     if keep.is_empty() {
         if hoisted.is_empty() {
-            md.empty_note("No visible fields.");
+            let dropped = if dropped_empty.is_empty() {
+                "none".to_string()
+            } else {
+                dropped_empty.join(", ")
+            };
+            md.empty_note(&format!(
+                "No visible fields across {} rows; dropped empty keys: {dropped}.",
+                arr.len()
+            ));
         }
         return;
     }
-    let headers: Vec<&str> = keep.iter().map(|&ci| cols[ci].as_str()).collect();
-    let rows: Vec<Vec<String>> = rendered
+    let title_ci = keep
         .iter()
-        .map(|row| keep.iter().map(|&ci| row[ci].clone()).collect())
-        .collect();
-    md.table(&headers, &rows);
+        .copied()
+        .find(|ci| matches!(cols[*ci].as_str(), "name" | "symbol" | "file" | "path"))
+        .unwrap_or(keep[0]);
+    for (idx, row) in rendered.iter().enumerate() {
+        let title = if row[title_ci].is_empty() {
+            format!("Item {}", idx + 1)
+        } else {
+            row[title_ci].clone()
+        };
+        md.bullet(&format!("**{title}**"));
+        for &ci in &keep {
+            if ci == title_ci || row[ci].is_empty() {
+                continue;
+            }
+            let value = row[ci].replace('\n', "\n    ");
+            md.line(&format!("  **{}:** {}", cols[ci], value));
+        }
+    }
 }
 
 fn compact_path_array(arr: &[Value]) -> Option<String> {

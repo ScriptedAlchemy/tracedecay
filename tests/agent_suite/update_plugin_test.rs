@@ -927,14 +927,19 @@ fn codex_update_plugin_refreshes_bundle_with_malformed_unrelated_legacy_config()
     let codex_dir = home.path().join(".codex");
     std::fs::create_dir_all(&codex_dir).unwrap();
     let config = codex_dir.join("config.toml");
-    std::fs::write(&config, "[mcp_servers.tracedecay\ncommand = \"/old/bin/tracedecay\"\n")
-        .unwrap();
+    std::fs::write(
+        &config,
+        "[mcp_servers.tracedecay\ncommand = \"/old/bin/tracedecay\"\n",
+    )
+    .unwrap();
     let before = bytes(&config);
 
     let outcome = codex
         .update_plugin(&ctx_with_project(home.path(), NEW_BIN, &project_root))
         .unwrap();
-    assert!(matches!(outcome, UpdatePluginOutcome::Refreshed(paths) if paths == vec![plugin_dir.clone()]));
+    assert!(
+        matches!(outcome, UpdatePluginOutcome::Refreshed(paths) if paths == vec![plugin_dir.clone()])
+    );
     assert_eq!(bytes(&config), before);
     assert_codex_bundle_contains_bin(&plugin_dir, NEW_BIN, CodexScope::Global);
 }

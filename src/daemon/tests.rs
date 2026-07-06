@@ -945,6 +945,90 @@ async fn automation_scheduler_tick_secs_loads_dashboard_project_config() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn daemon_ensure_scheduler_skips_before_project_has_configured_work() {
+    let dir = TempDir::new().expect("temp dir");
+    let project = dir.path().canonicalize().expect("canonical temp dir");
+    let client_identity = test_client_identity_for(project.join("profile"));
+    std::fs::create_dir_all(project.join("src")).expect("src dir");
+    std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
+    let handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let engine = super::DaemonEngine::default();
+    let key = super::ProjectServerKey::from_handshake(project.clone(), &handshake);
+
+    engine
+        .ensure_automation_scheduler(key.clone(), project, handshake)
+        .await;
+
+    let schedulers = engine.automation_schedulers.lock().await;
+    assert!(!schedulers.contains_key(&key));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn daemon_ensure_scheduler_starts_after_project_configures_work() {
+    use crate::automation::config::{
+        save_project_config, AutomationBackend, AutomationConfigPatch, AutomationTaskPatch,
+    };
+
+    let dir = TempDir::new().expect("temp dir");
+    let project = dir.path().canonicalize().expect("canonical temp dir");
+    let client_identity = test_client_identity_for(project.join("profile"));
+    std::fs::create_dir_all(project.join("src")).expect("src dir");
+    std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
+    let cg = crate::tracedecay::TraceDecay::init_with_options(
+        &project,
+        crate::tracedecay::TraceDecayOpenOptions {
+            profile_root: Some(client_identity.profile_root.clone()),
+            global_db_path: Some(client_identity.global_db_path.clone()),
+        },
+    )
+    .await
+    .expect("project init");
+    let handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let engine = super::DaemonEngine::default();
+    let key = super::ProjectServerKey::from_handshake(project.clone(), &handshake);
+
+    engine
+        .ensure_automation_scheduler(key.clone(), project.clone(), handshake.clone())
+        .await;
+    assert!(!engine.automation_schedulers.lock().await.contains_key(&key));
+
+    save_project_config(
+        &cg.store_layout().dashboard_root,
+        &AutomationConfigPatch {
+            enabled: Some(true),
+            backend: Some(AutomationBackend::CodexAppServer),
+            memory_curator: AutomationTaskPatch {
+                enabled: Some(true),
+                schedule: Some(Some("every:5m".to_string())),
+                ..AutomationTaskPatch::default()
+            },
+            ..AutomationConfigPatch::default()
+        },
+    )
+    .await
+    .expect("save automation config");
+
+    engine
+        .ensure_automation_scheduler(key.clone(), project, handshake)
+        .await;
+
+    let schedulers = engine.automation_schedulers.lock().await;
+    assert!(schedulers.contains_key(&key));
+    drop(schedulers);
+    engine.shutdown_all().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn automation_scheduler_tick_respects_pause_control_without_backend_call() {
     use crate::automation::config::{
         save_project_config, AutomationBackend, AutomationConfigPatch, AutomationTaskPatch,

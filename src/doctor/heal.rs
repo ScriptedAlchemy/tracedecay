@@ -44,8 +44,7 @@ pub struct HealthPassReport {
     pub quarantined_branch_meta: Vec<BranchMetaQuarantine>,
     /// `None` when the global DB could not be opened, so the GC never ran.
     pub purged_temp_registry_rows: Option<usize>,
-    /// Stale store manifests (and sibling configs) whose project root was
-    /// reconciled to the registry canonical path after a project rename.
+    /// Stale store manifests reconciled to the registry canonical path.
     pub reconciled_store_roots: Vec<super::registry_drift::ReconciledStoreRoot>,
     pub remaining_findings: Vec<String>,
     pub warnings: Vec<String>,
@@ -96,17 +95,23 @@ async fn compute_health_pass_report(profile_root: &Path) -> HealthPassReport {
     let (purged, purged_ids) = gc_stale_temp_registry_rows(&global_db, &projects).await;
     report.purged_temp_registry_rows = Some(purged);
 
-    // Reconcile stale store manifest / config roots to the registry canonical
-    // path (durable half of the project-rename self-heal). Runs before
-    // collect_remaining_findings so any healed drift drops out of the
-    // report-only remaining-findings count.
+    let registry_drift =
+        super::registry_drift::registry_drift_findings(&global_db, profile_root).await;
     let (reconciled, reconcile_warnings) =
-        super::registry_drift::reconcile_drifted_store_roots(&global_db, profile_root).await;
+        super::registry_drift::reconcile_drifted_store_roots_from_findings(&registry_drift);
+    let remaining_registry_drift_count =
+        count_remaining_registry_drift(&registry_drift, &reconciled);
     report.reconciled_store_roots = reconciled;
     report.warnings.extend(reconcile_warnings);
 
-    let (findings, warnings) =
-        collect_remaining_findings(&global_db, profile_root, &projects, &purged_ids).await;
+    let (findings, warnings) = collect_remaining_findings(
+        &global_db,
+        profile_root,
+        &projects,
+        &purged_ids,
+        remaining_registry_drift_count,
+    )
+    .await;
     report.remaining_findings = findings;
     report.warnings.extend(warnings);
     report
@@ -263,6 +268,7 @@ async fn collect_remaining_findings(
     profile_root: &Path,
     projects: &[CodeProjectRecord],
     purged_ids: &[String],
+    remaining_registry_drift_count: usize,
 ) -> (Vec<String>, Vec<String>) {
     let mut findings = Vec::new();
     let project_paths = global_db.list_project_paths().await;
@@ -285,14 +291,28 @@ async fn collect_remaining_findings(
         ));
     }
 
-    let drift = super::registry_drift::registry_drift_findings(global_db, profile_root).await;
-    if !drift.is_empty() {
+    if remaining_registry_drift_count > 0 {
         findings.push(format!(
-            "{} registry/store manifest identity drift finding(s)",
-            drift.len()
+            "{remaining_registry_drift_count} registry/store manifest identity drift finding(s)"
         ));
     }
     (findings, warnings)
+}
+
+fn count_remaining_registry_drift(
+    drift: &[super::registry_drift::RegistryDriftFinding],
+    reconciled: &[super::registry_drift::ReconciledStoreRoot],
+) -> usize {
+    drift
+        .iter()
+        .filter(|finding| {
+            finding.field != "project_root"
+                || !reconciled.iter().any(|entry| {
+                    entry.store_id == finding.store_id
+                        && entry.manifest_path == finding.manifest_path
+                })
+        })
+        .count()
 }
 
 #[cfg(test)]

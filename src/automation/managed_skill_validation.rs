@@ -9,8 +9,11 @@ use super::managed_skill_model::{
     ManagedSupportFile, SkillInstallTarget, MAX_MANAGED_SKILL_BODY_BYTES,
     MAX_MANAGED_SUPPORT_FILES, MAX_MANAGED_SUPPORT_FILE_BYTES,
 };
+use super::skill_frontmatter::{parse_skill_frontmatter, SkillFrontmatterValue};
 
 const ALLOWED_SUPPORT_ROOTS: &[&str] = &["references", "templates", "scripts", "assets"];
+const MAX_NATIVE_SKILL_NAME_CHARS: usize = 64;
+const MAX_NATIVE_SKILL_DESCRIPTION_CHARS: usize = 1024;
 
 pub(crate) fn validate_skill_id(id: &str) -> Result<()> {
     if id.is_empty()
@@ -21,6 +24,63 @@ pub(crate) fn validate_skill_id(id: &str) -> Result<()> {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
     {
         return Err(config_error(format!("unsafe managed skill id '{id}'")));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_native_skill_markdown(markdown: &str) -> Result<()> {
+    let frontmatter = parse_skill_frontmatter(markdown)?;
+    for key in frontmatter.keys() {
+        if key != "name" && key != "description" {
+            return Err(config_error(format!(
+                "native skill frontmatter cannot include '{key}'"
+            )));
+        }
+    }
+    let name = frontmatter
+        .get("name")
+        .and_then(SkillFrontmatterValue::as_scalar)
+        .ok_or_else(|| config_error("native skill frontmatter requires scalar name".to_string()))?;
+    let description = frontmatter
+        .get("description")
+        .and_then(SkillFrontmatterValue::as_scalar)
+        .ok_or_else(|| {
+            config_error("native skill frontmatter requires scalar description".to_string())
+        })?;
+    validate_native_skill_name(name)?;
+    validate_native_skill_description(description)
+}
+
+fn validate_native_skill_name(name: &str) -> Result<()> {
+    validate_frontmatter_scalar("native name", name)?;
+    if name.chars().count() > MAX_NATIVE_SKILL_NAME_CHARS {
+        return Err(config_error(format!(
+            "native skill name cannot exceed {MAX_NATIVE_SKILL_NAME_CHARS} characters"
+        )));
+    }
+    if name.starts_with('-') || name.ends_with('-') || name.contains("--") {
+        return Err(config_error(
+            "native skill name must use kebab-case lowercase letters, numbers, or '-'".to_string(),
+        ));
+    }
+    if name
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        Ok(())
+    } else {
+        Err(config_error(
+            "native skill name must use kebab-case lowercase letters, numbers, or '-'".to_string(),
+        ))
+    }
+}
+
+fn validate_native_skill_description(description: &str) -> Result<()> {
+    validate_frontmatter_scalar("native description", description)?;
+    if description.chars().count() > MAX_NATIVE_SKILL_DESCRIPTION_CHARS {
+        return Err(config_error(format!(
+            "native skill description cannot exceed {MAX_NATIVE_SKILL_DESCRIPTION_CHARS} characters"
+        )));
     }
     Ok(())
 }

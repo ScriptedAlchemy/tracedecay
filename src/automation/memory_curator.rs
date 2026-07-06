@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use super::apply_policy::{MemoryApplyDecision, MemoryApplyPolicy};
 use super::artifacts::sha256_json;
 use super::backend::{AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse};
 use super::config::AutomationConfig;
@@ -152,8 +153,8 @@ pub async fn run_memory_curator_with_backend(
     };
 
     let accepted_ops = dry_run_report.pointer("/llm_apply/ops").cloned();
-    let apply_policy = memory_curation_apply_policy(config, accepted_ops.as_ref());
-    let should_apply = apply_policy
+    let dry_run_apply_policy = memory_curation_apply_policy(config, accepted_ops.as_ref(), None);
+    let should_apply = dry_run_apply_policy
         .get("mutates_store")
         .and_then(Value::as_bool)
         .unwrap_or(false);
@@ -183,18 +184,27 @@ pub async fn run_memory_curator_with_backend(
                 return Err(err);
             }
         };
+        let applied_ops = applied_report.pointer("/llm_apply/ops").cloned();
+        let applied_count = applied_report
+            .pointer("/llm_apply/applied")
+            .and_then(value_as_usize)
+            .unwrap_or(0);
+        let apply_policy =
+            memory_curation_apply_policy(config, applied_ops.as_ref(), Some(applied_count));
         annotate_memory_curation_report(&mut applied_report, apply_policy.clone());
-        if let Ok(project_db) = cg.open_project_store_db().await {
-            crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
-                project_db.conn(),
-                &cg.store_layout().project_root,
-            )
-            .await;
+        if applied_count > 0 {
+            if let Ok(project_db) = cg.open_project_store_db().await {
+                crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
+                    project_db.conn(),
+                    &cg.store_layout().project_root,
+                )
+                .await;
+            }
         }
         applied_report
     } else {
         let mut report = dry_run_report;
-        annotate_memory_curation_report(&mut report, apply_policy.clone());
+        annotate_memory_curation_report(&mut report, dry_run_apply_policy.clone());
         report
     };
 
@@ -256,41 +266,72 @@ fn build_memory_curator_prompt(llm_review: &Value) -> String {
     )
 }
 
-fn memory_curation_apply_policy(config: &AutomationConfig, accepted_ops: Option<&Value>) -> Value {
+fn memory_curation_apply_policy(
+    config: &AutomationConfig,
+    accepted_ops: Option<&Value>,
+    applied_count: Option<usize>,
+) -> Value {
     let ops = accepted_ops
         .and_then(Value::as_array)
         .map_or_else(|| &[] as &[Value], Vec::as_slice);
     let destructive = memory_destructive_op_counts(ops);
     let accepted_count = ops.len();
-    let mutates_store = accepted_count > 0 && config.auto_apply_memory_ops;
-    let decision = if accepted_count == 0 {
-        "no_valid_ops"
-    } else if mutates_store {
-        "auto_apply_allowed"
-    } else {
-        "memory_auto_apply_disabled"
-    };
-    let apply_instructions = match decision {
-        "auto_apply_allowed" => {
-            "Accepted memory curation ops were applied because memory auto-apply is enabled."
+    let policy = MemoryApplyPolicy::curation_ops(config, accepted_count);
+    let apply_instructions = match policy.decision() {
+        MemoryApplyDecision::AutoApplyAllowed => {
+            "Accepted memory curation ops were applied because auto-apply is enabled and dashboard approval is not required."
         }
-        "memory_auto_apply_disabled" => {
-            "Enable memory auto-apply before mutating the memory store."
+        MemoryApplyDecision::RequiresDashboardApproval => {
+            "Review accepted memory curation ops in the dashboard before applying permanent deletes or merge losers."
         }
-        _ => "No accepted memory curation ops require apply.",
+        MemoryApplyDecision::DryRunOnly | MemoryApplyDecision::ProposalOnly => {
+            "Re-run with an explicit apply policy before mutating the memory store."
+        }
+        MemoryApplyDecision::NoValidOps | MemoryApplyDecision::NoValidFacts => {
+            "No accepted memory curation ops require apply."
+        }
     };
-    json!({
-        "decision": decision,
-        "dry_run_first": true,
-        "mutates_store": mutates_store,
-        "auto_apply_memory_ops": config.auto_apply_memory_ops,
-        "autonomous_memory_apply": mutates_store,
-        "accepted_count": accepted_count,
-        "permanent_delete_count": destructive.permanent_delete_count,
-        "merge_loser_count": destructive.merge_loser_count,
-        "destructive_target_count": destructive.permanent_delete_count + destructive.merge_loser_count,
-        "apply_instructions": apply_instructions,
-    })
+    let mut payload = policy.to_json();
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("dry_run_first".to_string(), json!(true));
+        object.insert("accepted_count".to_string(), json!(accepted_count));
+        if let Some(applied_count) = applied_count {
+            object.insert("applied_count".to_string(), json!(applied_count));
+            object.insert(
+                "fully_applied".to_string(),
+                json!(accepted_count > 0 && applied_count == accepted_count),
+            );
+            object.insert(
+                "approval_required".to_string(),
+                json!(accepted_count > 0 && applied_count < accepted_count),
+            );
+            object.insert("mutates_store".to_string(), json!(applied_count > 0));
+            object.insert(
+                "autonomous_memory_apply".to_string(),
+                json!(applied_count > 0),
+            );
+        }
+        object.insert(
+            "permanent_delete_count".to_string(),
+            json!(destructive.permanent_delete_count),
+        );
+        object.insert(
+            "merge_loser_count".to_string(),
+            json!(destructive.merge_loser_count),
+        );
+        object.insert(
+            "destructive_target_count".to_string(),
+            json!(destructive.permanent_delete_count + destructive.merge_loser_count),
+        );
+        object.insert("apply_instructions".to_string(), json!(apply_instructions));
+    }
+    payload
+}
+
+fn value_as_usize(value: &Value) -> Option<usize> {
+    value
+        .as_u64()
+        .and_then(|number| usize::try_from(number).ok())
 }
 
 #[derive(Debug, Default)]

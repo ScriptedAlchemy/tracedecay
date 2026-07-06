@@ -106,12 +106,11 @@ pub fn parse_skill_frontmatter(contents: &str) -> Result<BTreeMap<String, SkillF
     Ok(fields)
 }
 
-/// Strips one level of YAML quoting, including YAML `''` single-quote escaping.
 fn unquote_scalar(value: &str) -> String {
     if let Some(inner) = value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')) {
         inner.replace("''", "'")
     } else if let Some(inner) = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')) {
-        inner.to_string()
+        serde_json::from_str(value).unwrap_or_else(|_| inner.to_string())
     } else {
         value.to_string()
     }
@@ -150,6 +149,28 @@ mod tests {
         assert_eq!(
             fields["paths"].as_list_items(),
             Some(vec!["**/*.rs".to_string(), "**/Cargo.toml".to_string()])
+        );
+    }
+
+    #[test]
+    fn parses_json_escaped_double_quoted_scalars() {
+        let doc = concat!(
+            "---\n",
+            "name: my-skill\n",
+            "description: \"Use \\\"quoted\\\" paths like C:\\\\tmp\"\n",
+            "paths:\n",
+            "  - \"C:\\\\tmp\"\n",
+            "---\n",
+            "\n# Body\n"
+        );
+        let fields = parse_skill_frontmatter(doc).unwrap();
+        assert_eq!(
+            fields["description"].as_scalar(),
+            Some(r#"Use "quoted" paths like C:\tmp"#)
+        );
+        assert_eq!(
+            fields["paths"].as_list_items(),
+            Some(vec![r"C:\tmp".to_string()])
         );
     }
 

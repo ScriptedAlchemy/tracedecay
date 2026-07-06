@@ -18,7 +18,7 @@ whether generated output was adopted.
 3. For failures or suspicious skips, open the relevant artifact with
    `tracedecay_automation_run_artifact_view` or
    `tracedecay tool automation_run_artifact_view --args ...`.
-4. Inspect pending human review queues:
+4. Inspect pending self-managed review/apply state:
    `tracedecay automation facts list`, dashboard approvals, and
    `tracedecay_skill_list --state pending`.
 5. Check adoption evidence: `tracedecay analytics diagnostics --all --no-sync`,
@@ -49,6 +49,6 @@ whether generated output was adopted.
 
 ## Deliverable
 
-Report task/status counts, the exact run or artifact ids inspected, pending
-approval queues, adoption gaps, and the next concrete command for any mutation
+Report task/status counts, the exact run or artifact ids inspected, staged
+fact/skill state, adoption gaps, and the next concrete command for any mutation
 the user should choose.

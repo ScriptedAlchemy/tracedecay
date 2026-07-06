@@ -279,14 +279,36 @@ pub fn install_fake_codex_launcher(_script: &Path, bin: &Path) {
 
 #[cfg(not(windows))]
 pub fn install_fake_codex_launcher(script: &Path, bin: &Path) {
-    fs::copy(script, bin).unwrap_or_else(|err| {
+    let script_name = script
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_else(|| {
+            panic!(
+                "fake codex script has no valid file name: {}",
+                script.display()
+            )
+        });
+    let launcher = format!(
+        "#!/bin/sh\n\
+         SCRIPT_DIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n\
+         exec python3 \"$SCRIPT_DIR/{script_name}\" \"$@\"\n"
+    );
+    let tmp = bin.with_extension(format!("tmp.{}", std::process::id()));
+    fs::write(&tmp, launcher).unwrap_or_else(|err| {
         panic!(
-            "failed to install fake codex launcher {} from {}: {err}",
-            bin.display(),
+            "failed to write fake codex launcher {} for {}: {err}",
+            tmp.display(),
             script.display()
         )
     });
-    make_executable(bin);
+    make_executable(&tmp);
+    fs::rename(&tmp, bin).unwrap_or_else(|err| {
+        panic!(
+            "failed to install fake codex launcher {} from {}: {err}",
+            bin.display(),
+            tmp.display()
+        )
+    });
 }
 
 #[cfg(unix)]

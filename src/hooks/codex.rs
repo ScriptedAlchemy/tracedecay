@@ -115,9 +115,6 @@ async fn codex_prompt_memory_recall(event_json: &str) -> Option<String> {
 async fn codex_session_context_for_event(event_json: &str) -> (String, HookWorkspaceStatus) {
     let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
     let cwd = event_cwd_from_parsed(&parsed);
-    // On a sync miss, fall back to the git-identity resolver so a renamed /
-    // global-only repo (registered store, no repo-local marker) still resolves
-    // its root and reports Initialized instead of the UnindexedProject nudge.
     let root = match codex_project_root_from_parsed_event(&parsed) {
         Some(r) => Some(r),
         None => match cwd.as_deref() {
@@ -685,11 +682,6 @@ mod tests {
         );
     }
 
-    /// A renamed / global-only repo (registered store, no repo-local marker or
-    /// path-hash store) must resolve via the identity fallback in
-    /// `codex_session_context_for_event` and report Initialized, NOT the
-    /// `UnindexedProject` nudge. A project-like cwd with no store must still nudge
-    /// (the fix must not mask the real `UnindexedProject` status).
     #[tokio::test]
     async fn codex_session_context_resolves_global_only_and_preserves_nudge() {
         let _profile = crate::config::PinnedUserDataDir::new();
@@ -699,8 +691,6 @@ mod tests {
         let project_dir = tempfile::tempdir().unwrap();
         let project_root = project_dir.path().canonicalize().unwrap();
 
-        // Register by canonical path only (no enrollment marker) so resolution
-        // must use the GlobalDb identity branch.
         let project_id = "proj_codex_identity";
         gdb.upsert_code_project(project_id, &project_root, None, None, None)
             .await
@@ -737,7 +727,6 @@ mod tests {
             "a registered, graph-db-backed global-only repo must report Initialized"
         );
 
-        // A project-like cwd with no store on disk must still report Unindexed.
         let unindexed = tempfile::tempdir().unwrap();
         let unindexed_root = unindexed.path().canonicalize().unwrap();
         std::fs::write(unindexed_root.join("Cargo.toml"), b"[package]\n").unwrap();

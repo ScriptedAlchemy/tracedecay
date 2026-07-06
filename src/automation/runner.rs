@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use super::apply_policy::MemoryApplyPolicy;
 use super::artifacts::sha256_json;
 use super::backend::{
     extract_json_object_prefix, AgentTaskBackend, AgentTaskKind, AgentTaskRequest,
@@ -333,7 +334,7 @@ async fn finalize_session_reflector_success(
         &rejected_facts,
     )
     .await?;
-    let auto_apply_facts = config.auto_apply_memory_ops;
+    let auto_apply_facts = MemoryApplyPolicy::should_apply(config, accepted_count);
     let applied_fact_proposals = if auto_apply_facts {
         auto_apply_session_fact_proposals(cg, dashboard_root, std::mem::take(&mut proposal_records))
             .await?
@@ -356,23 +357,22 @@ async fn finalize_session_reflector_success(
         .iter()
         .filter_map(|record| record.applied_fact_id)
         .collect();
-    let session_fact_apply_policy = json!({
-        "decision": if auto_apply_facts && accepted_count > 0 {
-            "auto_apply_allowed"
-        } else if accepted_count > 0 {
-            "memory_auto_apply_disabled"
-        } else {
-            "no_valid_facts"
-        },
-        "auto_apply_memory_ops": config.auto_apply_memory_ops,
-        "autonomous_memory_apply": !applied_proposal_ids.is_empty(),
-        "mutates_store": !applied_proposal_ids.is_empty(),
-        "applied_proposal_ids": applied_proposal_ids,
-        "applied_fact_ids": applied_fact_ids,
-    });
+    let applied_count = applied_proposal_ids.len();
+    let fully_applied = accepted_count > 0 && applied_count == accepted_count;
+    let mut session_fact_apply_policy =
+        MemoryApplyPolicy::session_facts(config, accepted_count, applied_count).to_json();
+    if let Some(object) = session_fact_apply_policy.as_object_mut() {
+        object.insert(
+            "applied_proposal_ids".to_string(),
+            json!(applied_proposal_ids),
+        );
+        object.insert("applied_fact_ids".to_string(), json!(applied_fact_ids));
+        object.insert("applied_count".to_string(), json!(applied_count));
+        object.insert("fully_applied".to_string(), json!(fully_applied));
+    }
     let report = json!({
-        "status": if auto_apply_facts && accepted_count > 0 { "auto_applied" } else { "needs_approval" },
-        "dry_run": !(auto_apply_facts && accepted_count > 0),
+        "status": if fully_applied { "auto_applied" } else { "needs_approval" },
+        "dry_run": !fully_applied,
         "task": "session_reflector",
         "evidence_hash": evidence_hash,
         "accepted_facts": accepted_facts,

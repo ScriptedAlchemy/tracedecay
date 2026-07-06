@@ -130,6 +130,7 @@ pub(crate) async fn create(
     save_jobs(&state.dashboard_root, &jobs)
         .await
         .map_err(|err| internal_error(&err))?;
+    state.reconcile_automation_scheduler();
     Ok(Json(json!({ "job": job })))
 }
 
@@ -187,6 +188,7 @@ pub(crate) async fn update(
     save_jobs(&state.dashboard_root, &jobs)
         .await
         .map_err(|err| internal_error(&err))?;
+    state.reconcile_automation_scheduler();
     Ok(Json(json!({ "job": updated })))
 }
 
@@ -205,6 +207,7 @@ pub(crate) async fn delete(
     save_jobs(&state.dashboard_root, &jobs)
         .await
         .map_err(|err| internal_error(&err))?;
+    state.reconcile_automation_scheduler();
     Ok(Json(json!({ "deleted": job_id })))
 }
 

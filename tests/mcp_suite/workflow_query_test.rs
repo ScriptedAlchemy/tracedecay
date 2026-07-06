@@ -301,6 +301,7 @@ fn search_session_ids(payload: &Value) -> Vec<String> {
 /// modes plus the git-scope list end to end.
 #[tokio::test]
 async fn workflows_query_surface_end_to_end() {
+    let _env_lock = crate::mcp_handler_test::GLOBAL_DB_ENV_LOCK.lock().await;
     let (env, project_root) = common::IsolatedEnv::acquire().await;
     let home = env.home().to_path_buf();
 
@@ -432,6 +433,7 @@ async fn workflows_query_surface_end_to_end() {
 /// `tracedecay_message_search`.
 #[tokio::test]
 async fn message_search_workflow_scope_narrows_to_run_agents() {
+    let _env_lock = crate::mcp_handler_test::GLOBAL_DB_ENV_LOCK.lock().await;
     let (env, project_root) = common::IsolatedEnv::acquire().await;
     let home = env.home().to_path_buf();
 
@@ -585,6 +587,7 @@ async fn message_search_workflow_scope_narrows_to_run_agents() {
 /// schema returns empty rather than erroring on a missing table.
 #[tokio::test]
 async fn message_search_workflow_scope_empty_without_workflow_tables() {
+    let _env_lock = crate::mcp_handler_test::GLOBAL_DB_ENV_LOCK.lock().await;
     let (_env, project_root) = common::IsolatedEnv::acquire().await;
 
     let cg = TraceDecay::init(&project_root)

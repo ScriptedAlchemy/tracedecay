@@ -149,7 +149,6 @@ fn render_status_md(value: &Value) -> String {
     let mut md = Md::new();
     md.heading(2, "Project Status");
     if let Some(obj) = value.as_object() {
-        let mut rows: Vec<Vec<String>> = Vec::new();
         let mut warnings: Vec<String> = Vec::new();
         let mut keys: Vec<&String> = obj.keys().collect();
         keys.sort();
@@ -162,15 +161,24 @@ fn render_status_md(value: &Value) -> String {
                 }
             }
             match v {
-                Value::String(s) => rows.push(vec![k.clone(), s.clone()]),
-                Value::Number(n) => rows.push(vec![k.clone(), n.to_string()]),
-                Value::Bool(b) => rows.push(vec![k.clone(), b.to_string()]),
-                Value::Array(a) => rows.push(vec![k.clone(), format!("{} item(s)", a.len())]),
-                Value::Object(o) => rows.push(vec![k.clone(), format!("{{{} field(s)}}", o.len())]),
+                Value::String(s) => {
+                    md.field(k, s);
+                }
+                Value::Number(n) => {
+                    md.field(k, &n.to_string());
+                }
+                Value::Bool(b) => {
+                    md.field(k, &b.to_string());
+                }
+                Value::Array(a) => {
+                    md.field(k, &format!("{} item(s)", a.len()));
+                }
+                Value::Object(o) => {
+                    md.field(k, &format!("{{{} field(s)}}", o.len()));
+                }
                 Value::Null => {}
             }
         }
-        md.table(&["field", "value"], &rows);
         if !warnings.is_empty() {
             md.blank().heading(3, "Warnings");
             for w in &warnings {
@@ -1404,79 +1412,74 @@ fn render_simplify_scan_markdown(output: &Value) -> String {
 }
 
 fn render_simplify_duplications(md: &mut Md, items: &[Value]) {
-    if items.is_empty() {
-        return;
-    }
-    md.heading(2, "Possible Duplications");
-    let rows = items
-        .iter()
-        .map(|item| {
-            vec![
-                render::field_str(item, "symbol").to_string(),
-                finding_location(item),
-                summarize_similar_symbols(item),
-            ]
-        })
-        .collect::<Vec<_>>();
-    md.table(&["Symbol", "Location", "Similar Symbols"], &rows)
-        .blank();
+    render_simplify_section(md, "Possible Duplications", items, "symbol", |md, item| {
+        md.line(&format!("  **Location:** {}", finding_location(item)));
+        let similar = summarize_similar_symbols(item);
+        if !similar.is_empty() {
+            md.line(&format!("  **Similar symbols:** {similar}"));
+        }
+    });
 }
 
 fn render_simplify_dead_code(md: &mut Md, items: &[Value]) {
-    if items.is_empty() {
-        return;
-    }
-    md.heading(2, "Potential Dead Code");
-    let rows = items
-        .iter()
-        .map(|item| {
-            vec![
-                render::field_str(item, "symbol").to_string(),
-                finding_location(item),
-                render::field_str(item, "reason").to_string(),
-            ]
-        })
-        .collect::<Vec<_>>();
-    md.table(&["Symbol", "Location", "Reason"], &rows).blank();
+    render_simplify_section(md, "Potential Dead Code", items, "symbol", |md, item| {
+        md.line(&format!("  **Location:** {}", finding_location(item)));
+        md.line(&format!(
+            "  **Reason:** {}",
+            render::field_str(item, "reason")
+        ));
+    });
 }
 
 fn render_simplify_complexity(md: &mut Md, items: &[Value]) {
-    if items.is_empty() {
-        return;
-    }
-    md.heading(2, "Complexity Warnings");
-    let rows = items
-        .iter()
-        .map(|item| {
-            vec![
-                render::field_str(item, "symbol").to_string(),
-                finding_location(item),
-                render::field_i64(item, "lines").to_string(),
-                render::field_i64(item, "fan_out").to_string(),
-                render::field_i64(item, "score").to_string(),
-            ]
-        })
-        .collect::<Vec<_>>();
-    md.table(&["Symbol", "Location", "Lines", "Fan-out", "Score"], &rows)
-        .blank();
+    render_simplify_section(md, "Complexity Warnings", items, "symbol", |md, item| {
+        md.line(&format!("  **Location:** {}", finding_location(item)));
+        md.line(&format!(
+            "  **Lines:** {}",
+            render::field_i64(item, "lines")
+        ));
+        md.line(&format!(
+            "  **Fan-out:** {}",
+            render::field_i64(item, "fan_out")
+        ));
+        md.line(&format!(
+            "  **Score:** {}",
+            render::field_i64(item, "score")
+        ));
+    });
 }
 
 fn render_simplify_coupling(md: &mut Md, items: &[Value]) {
+    render_simplify_section(md, "Coupling Warnings", items, "file", |md, item| {
+        md.line(&format!(
+            "  **Fan-in:** {}",
+            render::field_i64(item, "fan_in")
+        ));
+        md.line(&format!(
+            "  **Warning:** {}",
+            render::field_str(item, "warning")
+        ));
+    });
+}
+
+fn render_simplify_section<FDetails>(
+    md: &mut Md,
+    title: &str,
+    items: &[Value],
+    label_field: &str,
+    details: FDetails,
+) where
+    FDetails: Fn(&mut Md, &Value),
+{
     if items.is_empty() {
         return;
     }
-    md.heading(2, "Coupling Warnings");
-    let rows = items
-        .iter()
-        .map(|item| {
-            vec![
-                render::field_str(item, "file").to_string(),
-                render::field_i64(item, "fan_in").to_string(),
-                render::field_str(item, "warning").to_string(),
-            ]
-        })
-        .collect::<Vec<_>>();
-    md.table(&["File", "Fan-in", "Warning"], &rows).blank();
+    md.heading(2, title);
+    for item in items {
+        md.bullet(&format!("**{}**", render::field_str(item, label_field)));
+        details(md, item);
+    }
+    md.blank();
 }
 
 fn finding_location(item: &Value) -> String {
@@ -2297,25 +2300,25 @@ fn render_outline_md(value: &Value) -> String {
     md.blank();
     match value.get("symbols").and_then(Value::as_array) {
         Some(symbols) if !symbols.is_empty() => {
-            let rows: Vec<Vec<String>> = symbols
-                .iter()
-                .map(|s| {
-                    let line = render::field_i64(s, "line");
-                    let end = render::field_i64(s, "end_line");
-                    let span = if end > line {
-                        format!("{line}-{end}")
-                    } else {
-                        line.to_string()
-                    };
-                    vec![
-                        render::field_str(s, "name").to_string(),
-                        render::field_str(s, "kind").to_string(),
-                        span,
-                        render::field_str(s, "visibility").to_string(),
-                    ]
-                })
-                .collect();
-            md.table(&["symbol", "kind", "lines", "visibility"], &rows);
+            for symbol in symbols {
+                let name = render::field_str(symbol, "name");
+                let kind = render::field_str(symbol, "kind");
+                let visibility = render::field_str(symbol, "visibility");
+                let line = render::field_i64(symbol, "line");
+                let end = render::field_i64(symbol, "end_line");
+                let span = if end > line {
+                    format!("{line}-{end}")
+                } else {
+                    line.to_string()
+                };
+                let signature = render::field_str(symbol, "signature");
+                md.bullet(&format!(
+                    "**{name}** ({kind}) - lines {span} - {visibility}"
+                ));
+                if !signature.is_empty() {
+                    md.line(&format!("  `{signature}`"));
+                }
+            }
         }
         _ => {
             md.empty_note("No symbols.");

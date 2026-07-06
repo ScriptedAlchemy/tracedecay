@@ -52,10 +52,14 @@ fn truncate_short_response() {
 
 #[test]
 fn truncate_long_response() {
-    let long = "x".repeat(20_000);
+    let long = "x".repeat(MAX_RESPONSE_CHARS - 1);
     let result = truncate_response(&long);
-    assert!(result.len() < 20_000);
-    assert!(result.contains("[... truncated at 15000 chars]"));
+    assert_eq!(result, long);
+
+    let longer = "x".repeat(MAX_RESPONSE_CHARS + 5_000);
+    let result = truncate_response(&longer);
+    assert!(result.len() < longer.len());
+    assert!(result.contains(&format!("[... truncated at {MAX_RESPONSE_CHARS} chars]")));
 }
 
 #[test]
@@ -135,6 +139,96 @@ fn truncated_markdown_includes_readable_handle_guidance() {
 }
 
 #[test]
+fn truncated_markdown_preserves_late_priority_sections() {
+    let _store_guard = lock_response_handle_store();
+    let dir = tempfile::TempDir::new().unwrap();
+    let long = format!(
+        "## Code Context\n{}\n### Memory Matches\n- fact_id=42 category=project trust=0.90 score=0.500: remembered context\n\n### Entry Points\n- **late_symbol** (function) - src/lib.rs:10\n",
+        "padding\n".repeat(5_000)
+    );
+
+    let result = truncated_markdown_with_handle(Some(dir.path()), &long);
+
+    assert!(result.len() <= MAX_RESPONSE_CHARS);
+    assert!(result.contains("## Preserved Priority Sections"));
+    assert!(result.contains("### Memory Matches"));
+    assert!(result.contains("fact_id=42"));
+    assert!(result.contains("### Entry Points"));
+    assert!(result.contains("late_symbol"));
+}
+
+#[test]
+fn markdown_truncation_preview_closes_open_code_fence() {
+    let markdown = format!("### Code\n```rust\n{}\n", "fn demo() {}\n".repeat(1_000));
+
+    let preview = markdown_truncation_preview(&markdown, 1_024);
+
+    assert!(!has_open_markdown_fence(&preview));
+}
+
+#[test]
+fn markdown_truncation_preview_closes_prefix_fence_before_preserved_sections() {
+    let markdown = format!(
+        "## Code Context\n```rust\n{}\n### Memory Matches\n- fact_id=42 category=project trust=0.90 score=0.500: remembered context\n",
+        "fn demo() {}\n".repeat(5_000)
+    );
+
+    let preview = markdown_truncation_preview(&markdown, 12_000);
+    let preserved_start = preview
+        .find("## Preserved Priority Sections")
+        .unwrap_or(preview.len());
+    assert!(
+        preserved_start < preview.len(),
+        "late priority section should be preserved: {preview}"
+    );
+
+    assert!(!has_open_markdown_fence(&preview[..preserved_start]));
+}
+
+#[test]
+fn markdown_preview_with_handle_stores_full_text_when_preview_differs() {
+    let _store_guard = lock_response_handle_store();
+    let dir = tempfile::TempDir::new().unwrap();
+    let full = "# Full\n\nsmall visible preview\n\n## Details\nfull-only detail";
+    let preview = "# Full\n\nsmall visible preview";
+
+    let result = markdown_preview_with_handle(Some(dir.path()), full, preview);
+
+    assert!(result.starts_with("# Truncated Response"));
+    assert!(result.contains("lane-budgeted preview"));
+    assert!(result.contains(preview));
+    assert!(!result.contains("full-only detail"));
+    let Some(handle) = result
+        .split("handle `")
+        .nth(1)
+        .and_then(|tail| tail.split('`').next())
+    else {
+        panic!("markdown preview envelope should include handle");
+    };
+
+    let prepared = prepare_truncated_response_handle(Some(dir.path()), full);
+    let record = prepared.record.as_ref().unwrap();
+    assert_eq!(record.handle, handle);
+    let stored = retrieve_response_handle_from_root(
+        &record.response_handle_root,
+        handle,
+        current_timestamp(),
+    )
+    .unwrap();
+    match stored {
+        ResponseHandleLookup::Found(record) => assert_eq!(record.content, full),
+        other => panic!("stored markdown preview should be retrievable, got {other:?}"),
+    }
+}
+
+#[test]
+fn markdown_preview_with_handle_keeps_matching_short_text_plain() {
+    let text = "# Full\n\nalready complete";
+
+    assert_eq!(markdown_preview_with_handle(None, text, text), text);
+}
+
+#[test]
 fn truncate_text_with_handle_returns_short_text_unchanged() {
     let short = "hello world";
     assert_eq!(truncate_text_with_handle(None, short), short);
@@ -197,17 +291,17 @@ fn truncated_json_envelope_reports_store_failure() {
 }
 
 #[test]
-fn generic_md_renders_array_of_objects_as_table() {
+fn generic_md_renders_array_of_objects_as_bullets() {
     let v = json!([
         {"id": "function:abc", "name": "foo", "line": 10},
         {"id": "function:def", "name": "bar", "line": 20}
     ]);
     let out = generic_md(&v);
-    // Preferred column order follows PREFERRED_COLUMNS
-    // (name, kind, file, line, id, ...), so `line` sorts ahead of `id`.
-    assert!(out.contains("| name | line | id |"), "got: {out}");
+    assert!(out.contains("- **foo**"), "got: {out}");
+    assert!(out.contains("- **bar**"), "got: {out}");
+    assert!(out.contains("**line:** 10"), "got: {out}");
     assert!(out.contains("`function:abc`"), "id should be backticked");
-    assert!(out.contains("foo"));
+    assert!(!out.contains("| name | line | id |"), "got: {out}");
 }
 
 #[test]
@@ -221,8 +315,40 @@ fn generic_md_renders_object_fields_and_sections() {
     assert!(out.contains("**total:** 3"));
     assert!(out.contains("**name:** demo"));
     assert!(out.contains("## items"));
-    // `file` is a preferred column so it sorts ahead of `count`.
-    assert!(out.contains("| file | count |"), "got: {out}");
+    assert!(out.contains("- **a.rs**"), "got: {out}");
+    assert!(out.contains("**count:** 1"), "got: {out}");
+    assert!(!out.contains("| file | count |"), "got: {out}");
+}
+
+#[test]
+fn diagnostics_md_renders_bullets_not_tables() {
+    let v = json!({
+        "scope": "workspace",
+        "diagnostic_count": 1,
+        "error_count": 1,
+        "warning_count": 0,
+        "diagnostics": [{
+            "level": "error",
+            "code": "E0425",
+            "message": "cannot find value\nsecond line",
+            "file": "src/lib.rs",
+            "line_start": 42,
+            "driver": "cargo",
+            "enclosing": "crate::demo"
+        }]
+    });
+
+    let out = diagnostics_md(&v);
+
+    assert!(out.contains("## Diagnostics"), "got: {out}");
+    assert!(out.contains("**Diagnostic count:** 1"), "got: {out}");
+    assert!(
+        out.contains("- **ERROR E0425 at src/lib.rs:42**"),
+        "got: {out}"
+    );
+    assert!(out.contains("  **Message:** cannot find value\n    second line"));
+    assert!(!out.contains("| file |"), "got: {out}");
+    assert!(!out.contains("| --- |"), "got: {out}");
 }
 
 #[test]
@@ -332,19 +458,20 @@ fn nested_object_becomes_kv_cell() {
 }
 
 #[test]
-fn table_columns_use_preferred_order() {
+fn object_array_fields_use_preferred_order() {
     let v = json!([{ "line": 5, "name": "foo", "file": "a.rs", "extra": "z", "kind": "fn" }]);
     let out = generic_md(&v);
-    let header = out.lines().find(|l| l.starts_with("| name")).unwrap();
-    // name, kind, file, line come first; unknown `extra` sorts after.
-    assert_eq!(
-        header, "| name | kind | file | line | extra |",
-        "got: {out}"
-    );
+    let kind_idx = out.find("**kind:** fn").unwrap();
+    let file_idx = out.find("**file:** a.rs").unwrap();
+    let line_idx = out.find("**line:** 5").unwrap();
+    let extra_idx = out.find("**extra:** z").unwrap();
+    assert!(kind_idx < file_idx, "got: {out}");
+    assert!(file_idx < line_idx, "got: {out}");
+    assert!(line_idx < extra_idx, "got: {out}");
 }
 
 #[test]
-fn table_drops_all_empty_columns() {
+fn object_array_drops_all_empty_fields() {
     let v = json!([
         { "name": "foo", "doc": "", "line": 1 },
         { "name": "bar", "doc": "", "line": 2 }
@@ -354,17 +481,22 @@ fn table_drops_all_empty_columns() {
         !out.contains("doc"),
         "empty column should be dropped: {out}"
     );
-    assert!(out.contains("| name | line |"), "got: {out}");
+    assert!(out.contains("- **foo**"), "got: {out}");
+    assert!(out.contains("**line:** 1"), "got: {out}");
+    assert!(!out.contains("| name | line |"), "got: {out}");
 }
 
 #[test]
 fn table_with_no_visible_columns_is_not_blank() {
     let out = generic_md(&json!([{ "id": null }, { "id": null }]));
-    assert!(out.contains("No visible fields."), "got: {out}");
+    assert!(
+        out.contains("No visible fields across 2 rows; dropped empty keys: id."),
+        "got: {out}"
+    );
 }
 
 #[test]
-fn table_hoists_constant_columns() {
+fn object_array_hoists_constant_fields() {
     let v = json!([
         { "name": "foo", "edge_kind": "calls" },
         { "name": "bar", "edge_kind": "calls" }
@@ -377,9 +509,22 @@ fn table_hoists_constant_columns() {
     // It should not also appear as a table column.
     assert!(
         !out.contains("| edge_kind"),
-        "constant leaked into table: {out}"
+        "constant leaked into table output: {out}"
     );
-    assert!(out.contains("| name |"), "got: {out}");
+    assert!(out.contains("- **foo**"), "got: {out}");
+    assert!(out.contains("- **bar**"), "got: {out}");
+}
+
+#[test]
+fn object_array_indents_multiline_field_values() {
+    let v = json!([{ "name": "foo", "doc": "first\n# heading\n- item" }]);
+    let out = generic_md(&v);
+    assert!(
+        out.contains("  **doc:** first\n    # heading\n    - item"),
+        "got: {out}"
+    );
+    assert!(!out.contains("\n# heading"), "got: {out}");
+    assert!(!out.contains("\n- item"), "got: {out}");
 }
 
 #[test]
@@ -401,16 +546,4 @@ fn object_collapses_empty_collections_to_one_line() {
     assert!(out.contains("meta: none"), "got: {out}");
     // No bare heading for the empty collection.
     assert!(!out.contains("## callers"), "got: {out}");
-}
-
-#[test]
-fn table_escapes_pipes() {
-    let mut md = Md::new();
-    md.table(
-        &["name", "sig"],
-        &[vec!["foo".to_string(), "fn foo(a|b)".to_string()]],
-    );
-    let out = md.render();
-    assert!(out.contains("fn foo(a\\|b)"));
-    assert!(out.contains("| name | sig |"));
 }

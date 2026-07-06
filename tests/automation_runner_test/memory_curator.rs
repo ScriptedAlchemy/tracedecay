@@ -128,7 +128,7 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     );
     assert_eq!(
         run.ledger_record.validation_report.as_ref().unwrap()["apply_policy"]["decision"],
-        json!("memory_auto_apply_disabled")
+        json!("requires_dashboard_approval")
     );
     assert_eq!(
         run.ledger_record.validation_report.as_ref().unwrap()["apply_policy"]
@@ -143,11 +143,13 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
         run.report["automation_apply_policy"]["autonomous_memory_apply"],
         json!(false)
     );
-    assert!(
-        run.report["automation_apply_policy"]
-            .get("approval_required")
-            .is_none(),
-        "memory apply policy should not expose approval terminology"
+    assert_eq!(
+        run.report["automation_apply_policy"]["require_dashboard_approval"],
+        json!(true)
+    );
+    assert_eq!(
+        run.report["automation_apply_policy"]["approval_required"],
+        json!(true)
     );
     assert_eq!(
         run.ledger_record.report_ref.as_ref().unwrap()["run_id"],
@@ -698,7 +700,7 @@ async fn memory_curator_runner_artifacts_mark_handoff_ready_for_accepted_only_ex
 }
 
 #[tokio::test]
-async fn memory_curator_runner_auto_applies_even_when_dashboard_approval_is_required() {
+async fn memory_curator_runner_auto_apply_is_blocked_by_dashboard_approval() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     seed_duplicate_facts(&cg).await;
@@ -745,7 +747,7 @@ async fn memory_curator_runner_auto_applies_even_when_dashboard_approval_is_requ
     assert_eq!(backend.calls(), 1);
     assert_eq!(
         run.report["automation_apply_policy"]["decision"],
-        json!("auto_apply_allowed")
+        json!("requires_dashboard_approval")
     );
     assert_eq!(
         run.report["automation_apply_policy"]["auto_apply_memory_ops"],
@@ -753,26 +755,125 @@ async fn memory_curator_runner_auto_applies_even_when_dashboard_approval_is_requ
     );
     assert_eq!(
         run.report["automation_apply_policy"]["mutates_store"],
-        json!(true)
+        json!(false)
     );
     assert_eq!(
         run.report["automation_apply_policy"]["autonomous_memory_apply"],
+        json!(false)
+    );
+    assert_eq!(
+        run.report["automation_apply_policy"]["require_dashboard_approval"],
         json!(true)
     );
-    assert!(
-        run.report["automation_apply_policy"]
-            .get("require_dashboard_approval")
-            .is_none(),
-        "memory apply policy should not expose stale dashboard approval terminology"
+    assert_eq!(
+        run.report["automation_apply_policy"]["approval_required"],
+        json!(true)
     );
-    assert_eq!(run.report["llm_apply"]["applied"], json!(1));
+    assert_eq!(run.report["llm_apply"]["applied"], Value::Null);
+    assert!(
+        fact_exists(&cg, 102).await,
+        "dashboard approval must block permanent delete auto-apply"
+    );
+}
+
+#[tokio::test]
+async fn memory_curator_runner_preserves_review_gate_when_auto_apply_applies_zero_ops() {
+    let temp = tempdir().unwrap();
+    let cg = init_project(temp.path()).await;
+    seed_duplicate_facts(&cg).await;
+    let backend = JsonBackend::new(json!({
+        "ops": [
+            {
+                "cluster_id": "cluster-0000",
+                "op": "merge",
+                "winner_id": 101,
+                "loser_ids": [102, 102],
+                "confidence": 0.98,
+                "reason": "valid dry-run ids but invalid duplicate loser ids at apply"
+            }
+        ]
+    }));
+    let config = AutomationConfig {
+        enabled: true,
+        backend: AutomationBackend::CodexAppServer,
+        host_mode: AutomationHostMode::Standalone,
+        auto_apply_memory_ops: true,
+        require_dashboard_approval: false,
+        tasks: AutomationTaskSet {
+            memory_curator: AutomationTaskConfig {
+                enabled: true,
+                schedule: Some("manual".to_string()),
+                ..AutomationTaskConfig::default()
+            },
+            ..AutomationTaskSet::default()
+        },
+        ..AutomationConfig::default()
+    };
+
+    let run = run_memory_curator_with_backend(
+        &cg,
+        &config,
+        &backend,
+        MemoryCuratorAutomationOptions {
+            trigger: AutomationTrigger::ManualCli,
+            max_clusters: 4,
+            min_confidence: 0.5,
+            run_id: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(run.report["llm_apply"]["applied"], json!(0));
     assert_eq!(
         run.report["llm_apply"]["results"][0]["status"],
-        json!("deleted")
+        json!("error")
     );
-    assert!(
-        !fact_exists(&cg, 102).await,
-        "memory curation auto-apply should not be blocked by dashboard approval"
+    assert_eq!(
+        run.report["automation_apply_policy"]["accepted_count"],
+        json!(1)
+    );
+    assert_eq!(
+        run.report["automation_apply_policy"]["applied_count"],
+        json!(0)
+    );
+    assert_eq!(
+        run.report["automation_apply_policy"]["fully_applied"],
+        json!(false)
+    );
+    assert_eq!(
+        run.report["automation_apply_policy"]["mutates_store"],
+        json!(false)
+    );
+    assert_eq!(
+        run.report["automation_apply_policy"]["approval_required"],
+        json!(true)
+    );
+
+    let validation_payload =
+        read_artifact(&cg, &run.run_id, &run.ledger_record, "validation_gate").await;
+    assert_eq!(
+        validation_payload["task_validation"]["approval_required"],
+        json!(true)
+    );
+    assert_eq!(
+        validation_payload["improvement_gate"]["criteria"]["auto_apply_allowed"],
+        json!(false)
+    );
+
+    let handoff_payload =
+        read_artifact(&cg, &run.run_id, &run.ledger_record, "codex_handoff").await;
+    assert_eq!(
+        handoff_payload["readiness"]["approval_required"],
+        json!(true)
+    );
+    assert_eq!(
+        handoff_payload["readiness"]["auto_apply_allowed"],
+        json!(false)
+    );
+    assert_eq!(
+        handoff_payload["validation_requirements"]["must_not_auto_apply"],
+        json!(true)
     );
 }
 

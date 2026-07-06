@@ -213,16 +213,18 @@ pub async fn handle_tool_call_with_registry(
             global_db,
             allow_default_registry_fallback,
             implicit_project_path: None,
+            automation_scheduler_reconciler: None,
         },
     )
     .await
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct ToolCallRegistryOptions<'a> {
     pub global_db: Option<&'a GlobalDb>,
     pub allow_default_registry_fallback: bool,
     pub implicit_project_path: Option<&'a Path>,
+    pub automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
 }
 
 pub async fn handle_tool_call_with_registry_and_implicit_project(
@@ -422,7 +424,10 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         "tracedecay_skill_list" => skills::handle_skill_list(cg, args).await,
         "tracedecay_skill_view" => skills::handle_skill_view(cg, args).await,
         "tracedecay_hermes_skill_bridge" => skills::handle_hermes_skill_bridge(cg, &args),
-        "tracedecay_dashboard" => dashboard::handle_dashboard(cg, args).await,
+        "tracedecay_dashboard" => {
+            dashboard::handle_dashboard(cg, args, options.automation_scheduler_reconciler.clone())
+                .await
+        }
         "tracedecay_message_search" => {
             session::handle_message_search(
                 cg,
@@ -913,7 +918,7 @@ mod tests {
 
     #[tokio::test]
     async fn selected_project_retrieve_finds_selected_project_response_handle() {
-        const LARGE_RESPONSE_MARKER_COUNT: usize = 120;
+        const LARGE_RESPONSE_MARKER_COUNT: usize = 260;
         const LAST_LARGE_RESPONSE_MARKER: usize = LARGE_RESPONSE_MARKER_COUNT - 1;
 
         let _env_lock = lock_user_data_dir_test_env();

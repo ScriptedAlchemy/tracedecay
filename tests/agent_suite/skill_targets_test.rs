@@ -42,11 +42,12 @@ fn targeted_draft(id: &str, title: &str, targets: Vec<SkillInstallTarget>) -> Ma
 }
 
 #[test]
-fn managed_skill_defaults_do_not_target_cursor() {
+fn managed_skill_defaults_target_supported_hosts() {
     let targets = default_managed_skill_targets();
     assert_eq!(
         targets,
         vec![
+            SkillInstallTarget::Cursor,
             SkillInstallTarget::Codex,
             SkillInstallTarget::Claude,
             SkillInstallTarget::Agents,
@@ -55,7 +56,6 @@ fn managed_skill_defaults_do_not_target_cursor() {
             SkillInstallTarget::Kiro,
         ]
     );
-    assert!(!targets.contains(&SkillInstallTarget::Cursor));
 }
 
 #[tokio::test]
@@ -226,10 +226,74 @@ async fn codex_plugin_artifact_exports_shareable_bundle_with_managed_skills() {
             .unwrap();
     assert!(codex_skill.contains("name: codex-only"));
     assert!(codex_skill.contains(r#"description: "Use when Codex only summary""#));
+    assert!(!codex_skill.contains("id: codex-only"));
+    assert!(!codex_skill.contains("targets:"));
+    assert!(!codex_skill.contains("checksum:"));
 
     let mcp = std::fs::read_to_string(plugin_root.join(".mcp.json")).unwrap();
     assert!(mcp.contains("\"command\": \"tracedecay-bin\""));
     assert!(mcp.contains("\"TRACEDECAY_ENABLE_GLOBAL_DB\": \"1\""));
+}
+
+#[tokio::test]
+async fn native_overlay_rejects_invalid_skill_names_without_clobbering_export() {
+    for (index, invalid_name) in [
+        "repo_hygiene",
+        "-repo-hygiene",
+        "repo-hygiene-",
+        "repo--hygiene",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let temp = tempfile::tempdir().unwrap();
+        let profile_root = temp.path().join("profile");
+        let plugin_root = temp.path().join("cursor-plugin");
+
+        create_managed_skill_draft(
+            &profile_root,
+            targeted_draft(
+                "repo-hygiene",
+                "Repository hygiene",
+                vec![SkillInstallTarget::Cursor],
+            ),
+        )
+        .await
+        .unwrap();
+        approve_managed_skill(&profile_root, "repo-hygiene")
+            .await
+            .unwrap();
+
+        let previous_skill = plugin_root.join("skills/agent-managed/repo-hygiene/SKILL.md");
+        if index == 0 {
+            export_native_skill_overlay(&profile_root, SkillInstallTarget::Cursor, &plugin_root)
+                .unwrap();
+            assert!(previous_skill.is_file());
+        }
+
+        let mut invalid = load_managed_skill(&profile_root, "repo-hygiene")
+            .await
+            .unwrap();
+        invalid.metadata.id = invalid_name.to_string();
+        let skill_dir = managed_skill_dir(&profile_root, "repo-hygiene").unwrap();
+        std::fs::write(
+            skill_dir.join("skill.json"),
+            serde_json::to_vec_pretty(&invalid).unwrap(),
+        )
+        .unwrap();
+
+        let err =
+            export_native_skill_overlay(&profile_root, SkillInstallTarget::Cursor, &plugin_root)
+                .unwrap_err()
+                .to_string();
+        assert!(
+            err.contains("native skill name must use kebab-case"),
+            "accepted invalid native skill name {invalid_name}: {err}"
+        );
+        if index == 0 {
+            assert!(previous_skill.is_file());
+        }
+    }
 }
 
 #[tokio::test]

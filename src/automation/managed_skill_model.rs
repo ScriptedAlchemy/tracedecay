@@ -7,7 +7,9 @@ use sha2::{Digest, Sha256};
 use crate::errors::Result;
 
 use super::managed_skill_format::{frontmatter_string, source_key, state_key, target_key};
-use super::managed_skill_validation::{validate_managed_skill, validate_support_file};
+use super::managed_skill_validation::{
+    validate_managed_skill, validate_native_skill_markdown, validate_support_file,
+};
 
 pub const MAX_MANAGED_SUPPORT_FILES: usize = 20;
 pub const MAX_MANAGED_SUPPORT_FILE_BYTES: usize = 64 * 1024;
@@ -56,6 +58,7 @@ impl SkillInstallTarget {
 
 pub fn default_managed_skill_targets() -> Vec<SkillInstallTarget> {
     vec![
+        SkillInstallTarget::Cursor,
         SkillInstallTarget::Codex,
         SkillInstallTarget::Claude,
         SkillInstallTarget::Agents,
@@ -297,12 +300,6 @@ impl ManagedSkill {
     pub fn render_skill_markdown(&self) -> String {
         let mut output = String::new();
         output.push_str("---\n");
-        let _ = writeln!(output, "name: {}", self.metadata.id);
-        let _ = writeln!(
-            output,
-            "description: {}",
-            frontmatter_string(&managed_skill_description(&self.metadata.summary))
-        );
         let _ = writeln!(output, "id: {}", self.metadata.id);
         let _ = writeln!(
             output,
@@ -347,6 +344,22 @@ impl ManagedSkill {
         output
     }
 
+    pub fn render_native_skill_markdown(&self) -> Result<String> {
+        let mut output = String::new();
+        output.push_str("---\n");
+        let _ = writeln!(output, "name: {}", self.metadata.id);
+        let _ = writeln!(
+            output,
+            "description: {}",
+            frontmatter_string(&managed_skill_description(&self.metadata.summary))
+        );
+        output.push_str("---\n\n");
+        output.push_str(&self.body_markdown);
+        output.push('\n');
+        validate_native_skill_markdown(&output)?;
+        Ok(output)
+    }
+
     fn content_checksum(&self) -> String {
         let mut hasher = Sha256::new();
         hasher.update(self.metadata.id.as_bytes());
@@ -375,4 +388,39 @@ impl ManagedSkill {
 
 pub(super) fn current_metadata_timestamp() -> i64 {
     crate::tracedecay::current_timestamp()
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::automation::skill_frontmatter::parse_skill_frontmatter;
+
+    #[test]
+    fn native_skill_markdown_round_trips_escaped_description() {
+        let skill = ManagedSkillDraft {
+            id: "native-escape".to_string(),
+            title: "Native escape".to_string(),
+            summary: r#"Use when checking "quoted" paths like C:\tmp"#.to_string(),
+            category: "testing".to_string(),
+            targets: vec![SkillInstallTarget::Codex],
+            body_markdown: "# Native escape\n".to_string(),
+            support_files: Vec::new(),
+            provenance: ManagedSkillProvenance {
+                source: ManagedSkillSource::UserDraft,
+                actor: "tester".to_string(),
+                run_id: None,
+            },
+        }
+        .materialize()
+        .unwrap();
+
+        let markdown = skill.render_native_skill_markdown().unwrap();
+        let frontmatter = parse_skill_frontmatter(&markdown).unwrap();
+
+        assert_eq!(
+            frontmatter["description"].as_scalar(),
+            Some(r#"Use when checking "quoted" paths like C:\tmp"#)
+        );
+    }
 }

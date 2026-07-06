@@ -3339,7 +3339,9 @@ async fn test_codex_install_exports_active_managed_skills() {
     let skill_path =
         codex_plugin_install_dir(home).join("skills/agent-managed/repo-hygiene/SKILL.md");
     let skill = std::fs::read_to_string(skill_path).unwrap();
-    assert!(skill.contains("id: repo-hygiene"));
+    assert!(skill.contains("name: repo-hygiene"));
+    assert!(skill.contains("description:"));
+    assert!(!skill.contains("id: repo-hygiene"));
     assert!(skill.contains("Use Repo Hygiene for repeated workflows."));
 
     let digest_skill_path =
@@ -3386,7 +3388,9 @@ async fn test_codex_shareable_plugin_artifact_exports_bundle_and_managed_skills(
         .output
         .join("skills/agent-managed/repo-hygiene/SKILL.md");
     let skill = std::fs::read_to_string(skill_path).unwrap();
-    assert!(skill.contains("id: repo-hygiene"));
+    assert!(skill.contains("name: repo-hygiene"));
+    assert!(skill.contains("description:"));
+    assert!(!skill.contains("id: repo-hygiene"));
     assert!(skill.contains("Use Repo Hygiene for repeated workflows."));
     assert!(
         !summary
@@ -3963,7 +3967,9 @@ async fn test_cursor_install_exports_active_managed_skills() {
     let skill_path =
         cursor_plugin_install_dir(home).join("skills/agent-managed/repo-hygiene/SKILL.md");
     let skill = std::fs::read_to_string(skill_path).unwrap();
-    assert!(skill.contains("id: repo-hygiene"));
+    assert!(skill.contains("name: repo-hygiene"));
+    assert!(skill.contains("description:"));
+    assert!(!skill.contains("id: repo-hygiene"));
     assert!(skill.contains("Use Repo Hygiene for repeated workflows."));
 }
 

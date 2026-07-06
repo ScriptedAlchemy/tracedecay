@@ -108,8 +108,6 @@ fn validates_minimum_metadata_and_renders_frontmatter() {
     let skill = draft().materialize().unwrap();
     let markdown = skill.render_skill_markdown();
     for key in [
-        "name: repo-hygiene",
-        r#"description: "Use when Keep repository maintenance guidance current.""#,
         "id: repo-hygiene",
         r#"title: "Repository hygiene""#,
         r#"summary: "Keep repository maintenance guidance current.""#,
@@ -125,6 +123,12 @@ fn validates_minimum_metadata_and_renders_frontmatter() {
         r#"provenance_run_id: "run_123""#,
     ] {
         assert!(markdown.contains(key), "missing frontmatter key {key}");
+    }
+    for key in ["name:", "description:"] {
+        assert!(
+            !markdown.contains(key),
+            "managed markdown must not include native frontmatter key {key}"
+        );
     }
 
     let mut punctuated = draft();

@@ -11,13 +11,15 @@ use crate::context::format_context_as_markdown;
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::types::{FactSearchResult, SearchFactsRequest};
 use crate::path_tree::format_compact_path_list;
+use crate::text::utf8_prefix_at_or_before;
 use crate::tracedecay::TraceDecay;
 use crate::types::{BuildContextOptions, EdgeKind, Node, NodeKind, TaskContext, Visibility};
 
 const CONTEXT_MEMORY_MATCH_LIMIT: usize = 3;
 const CONTEXT_MEMORY_MATCH_LIMIT_MAX: usize = 10;
-const CONTEXT_MEMORY_SNIPPET_CHARS: usize = 240;
 const CONTEXT_MEMORY_ANALYTICS_KEY: &str = "context_memory_analytics";
+const CONTEXT_LANE_TRUNCATED_NOTE: &str =
+    "\n... lane truncated; retrieve the full response handle for omitted details.\n";
 
 use super::super::render::{self, Md};
 use super::super::ToolResult;
@@ -49,6 +51,39 @@ where
         value
     };
     let text = render::finalize(Some(cg.project_root()), args, value, md);
+    let result = text_tool_result(&text, touched_files);
+    if let Some(internal_analytics) = internal_analytics {
+        result.with_internal_analytics(internal_analytics)
+    } else {
+        result
+    }
+}
+
+fn rendered_context_tool_result(
+    cg: &TraceDecay,
+    args: &Value,
+    value: &Value,
+    touched_files: Vec<String>,
+    full_markdown: String,
+    preview_markdown: Option<&str>,
+) -> ToolResult {
+    let internal_analytics = value.get(CONTEXT_MEMORY_ANALYTICS_KEY).cloned();
+    let public_value;
+    let value = if internal_analytics.is_some() {
+        public_value = strip_internal_context_memory_analytics(value);
+        &public_value
+    } else {
+        value
+    };
+    let text = if render::wants_json(args) {
+        render::finalize(Some(cg.project_root()), args, value, || full_markdown)
+    } else {
+        render::markdown_preview_with_handle(
+            Some(cg.project_root()),
+            &full_markdown,
+            preview_markdown.unwrap_or(&full_markdown),
+        )
+    };
     let result = text_tool_result(&text, touched_files);
     if let Some(internal_analytics) = internal_analytics {
         result.with_internal_analytics(internal_analytics)
@@ -226,23 +261,11 @@ pub(super) async fn handle_context(
             ),
     );
     let mut output = format_context_as_markdown(&context);
-    if !memory_matches.is_empty() {
-        let _ = writeln!(output, "\n### Memory Matches");
-        for hit in &memory_matches {
-            let fact = &hit.fact;
-            let _ = writeln!(
-                output,
-                "- fact_id={} category={} trust={:.2} score={:.3}: {}",
-                fact.fact_id,
-                fact.category,
-                fact.trust_score,
-                hit.score,
-                compact_memory_content(&fact.content)
-            );
-        }
-    } else if let Some(err) = &memory_matches_error {
-        let _ = writeln!(output, "\n### Memory Matches\nUnavailable: {err}");
-    }
+    insert_context_memory_section(
+        &mut output,
+        &memory_matches,
+        memory_matches_error.as_deref(),
+    );
     if let Some(hint) = cg.index_coverage_hint(context.subgraph.nodes.len()) {
         let _ = writeln!(
             output,
@@ -286,13 +309,139 @@ pub(super) async fn handle_context(
             object.insert("memory_matches_error".to_string(), json!(err));
         }
     }
-    Ok(rendered_tool_result(
+    let preview = (!render::wants_json(&args)).then(|| context_markdown_lane_preview(&output));
+    Ok(rendered_context_tool_result(
         cg,
         &args,
         &value,
         touched_files,
-        || output,
+        output,
+        preview.as_deref(),
     ))
+}
+
+fn context_markdown_lane_preview(markdown: &str) -> String {
+    let mut preview = String::with_capacity(markdown.len().min(24_000));
+    let mut lane = String::new();
+    let mut lane_key = String::new();
+    let mut in_fence = false;
+
+    for line in markdown.split_inclusive('\n') {
+        if !in_fence {
+            if let Some(key) = context_lane_key(line) {
+                push_context_lane_preview(&mut preview, &lane_key, &lane);
+                lane.clear();
+                lane_key = key.to_string();
+            }
+        }
+        lane.push_str(line);
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+        }
+    }
+    push_context_lane_preview(&mut preview, &lane_key, &lane);
+    preview
+}
+
+fn context_lane_key(line: &str) -> Option<&str> {
+    if line.starts_with("### ") || line.starts_with("seen_node_ids:") {
+        Some(line.trim_end())
+    } else {
+        None
+    }
+}
+
+fn push_context_lane_preview(preview: &mut String, lane_key: &str, lane: &str) {
+    if lane.is_empty() {
+        return;
+    }
+    let budget = context_lane_budget(lane_key);
+    if lane.len() <= budget {
+        preview.push_str(lane);
+        return;
+    }
+    let prefix = utf8_prefix_at_or_before(lane, budget);
+    preview.push_str(prefix);
+    if has_open_markdown_fence(prefix) {
+        preview.push_str("\n```\n");
+    }
+    preview.push_str(CONTEXT_LANE_TRUNCATED_NOTE);
+}
+
+fn context_lane_budget(lane_key: &str) -> usize {
+    if lane_key.starts_with("### Code") {
+        8_500
+    } else if lane_key.starts_with("### Related Symbols") {
+        3_500
+    } else if lane_key.starts_with("### Entry Points") || lane_key.starts_with("### Test Coverage")
+    {
+        3_000
+    } else if lane_key.starts_with("### Memory Matches") {
+        2_500
+    } else if lane_key.starts_with("### Extension Points") || lane_key.starts_with("seen_node_ids:")
+    {
+        1_500
+    } else if lane_key.starts_with("### Index Coverage Hint") {
+        1_000
+    } else {
+        2_000
+    }
+}
+
+fn has_open_markdown_fence(markdown: &str) -> bool {
+    markdown
+        .lines()
+        .filter(|line| line.trim_start().starts_with("```"))
+        .count()
+        % 2
+        == 1
+}
+
+fn insert_context_memory_section(
+    output: &mut String,
+    memory_matches: &[FactSearchResult],
+    memory_matches_error: Option<&str>,
+) {
+    let Some(section) = context_memory_section(memory_matches, memory_matches_error) else {
+        return;
+    };
+    if let Some(idx) = output.find("\n### Entry Points") {
+        output.insert_str(idx, &section);
+    } else {
+        output.push_str(&section);
+    }
+}
+
+fn context_memory_section(
+    memory_matches: &[FactSearchResult],
+    memory_matches_error: Option<&str>,
+) -> Option<String> {
+    let mut section = String::new();
+    if !memory_matches.is_empty() {
+        section.push_str("\n### Memory Matches\n");
+        for hit in memory_matches {
+            let fact = &hit.fact;
+            let _ = writeln!(
+                section,
+                "- fact_id={} category={} trust={:.2} score={:.3}: {}",
+                fact.fact_id,
+                fact.category,
+                fact.trust_score,
+                hit.score,
+                compact_memory_content(&fact.content)
+            );
+        }
+        return Some(section);
+    }
+    if let Some(err) = memory_matches_error {
+        let _ = writeln!(section, "\n### Memory Matches\nUnavailable: {err}");
+        return Some(section);
+    }
+    None
+}
+
+fn compact_memory_content(content: &str) -> String {
+    content.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 struct ContextMemoryOptions {
@@ -355,22 +504,6 @@ async fn context_memory_matches(
         include_why: false,
     })
     .await
-}
-
-fn compact_memory_content(content: &str) -> String {
-    let mut snippet = String::new();
-    let mut truncated = false;
-    for (idx, ch) in content.chars().enumerate() {
-        if idx >= CONTEXT_MEMORY_SNIPPET_CHARS {
-            truncated = true;
-            break;
-        }
-        snippet.push(ch);
-    }
-    if truncated {
-        snippet.push_str("...");
-    }
-    snippet
 }
 
 fn build_context_options(args: &Value, scope_prefix: Option<&str>) -> BuildContextOptions {
@@ -1496,4 +1629,146 @@ async fn collect_method_bodies(
         }));
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::types::{FactRecord, FactSearchResult, MemoryCategory};
+
+    #[test]
+    fn context_markdown_lane_preview_keeps_all_lanes_visible() {
+        let full = format!(
+            "## Code Context\n**Query:** q\n\n### Memory Matches\n{}\n### Entry Points\n{}\n### Related Symbols\n{}\n### Code\n{}\n### Index Coverage Hint\n{}\n### Extension Points\n{}\n### Test Coverage\n{}\nseen_node_ids: [{}]\n",
+            "memory fact with unicode caf\u{e9}\n".repeat(300),
+            "- **entry** src/lib.rs:1\n".repeat(300),
+            "- related\n".repeat(500),
+            "```rust\nfn demo() {}\n```\n".repeat(500),
+            "hint\n".repeat(500),
+            "- trait\n".repeat(400),
+            "- tests/context_test.rs\n".repeat(400),
+            "\"node-id\",".repeat(400)
+        );
+
+        let preview = context_markdown_lane_preview(&full);
+
+        for heading in [
+            "## Code Context",
+            "### Memory Matches",
+            "### Entry Points",
+            "### Related Symbols",
+            "### Code",
+            "### Index Coverage Hint",
+            "### Extension Points",
+            "### Test Coverage",
+            "seen_node_ids:",
+        ] {
+            assert!(preview.contains(heading), "missing {heading}: {preview}");
+        }
+        assert!(preview.len() < full.len());
+        assert!(preview.contains("lane truncated"));
+        assert!(preview.is_char_boundary(preview.len()));
+    }
+
+    #[test]
+    fn context_memory_section_keeps_full_content_for_retrieval_handle() {
+        let content = format!("{}tail-marker", "long memory body ".repeat(100));
+        let hit = FactSearchResult {
+            fact: FactRecord {
+                fact_id: 7,
+                content: content.clone(),
+                category: MemoryCategory::Project,
+                trust_score: 0.9,
+                source: Some("test".to_string()),
+                entities: vec![],
+                tags: vec![],
+                metadata: serde_json::Value::Null,
+                created_at: 0,
+                updated_at: 0,
+                access_count: 0,
+                last_retrieved_at: None,
+                retrieval_count: 0,
+                helpful_count: 0,
+                unhelpful_count: 0,
+                last_feedback_at: None,
+                last_recalled_at: None,
+            },
+            score: 0.5,
+            fts_score: 0.25,
+            jaccard_score: 0.25,
+            holographic_score: 0.0,
+            trust_score: 0.9,
+            why: None,
+        };
+
+        let Some(section) = context_memory_section(&[hit], None) else {
+            panic!("memory hit should render");
+        };
+
+        assert!(section.contains(&content));
+        assert!(section.contains("tail-marker"));
+        assert!(!section.contains("..."));
+    }
+
+    #[test]
+    fn context_memory_section_compacts_multiline_content() {
+        let hit = FactSearchResult {
+            fact: FactRecord {
+                fact_id: 7,
+                content: "first line\n# heading\n- item".to_string(),
+                category: MemoryCategory::Project,
+                trust_score: 0.9,
+                source: Some("test".to_string()),
+                entities: vec![],
+                tags: vec![],
+                metadata: serde_json::Value::Null,
+                created_at: 0,
+                updated_at: 0,
+                access_count: 0,
+                last_retrieved_at: None,
+                retrieval_count: 0,
+                helpful_count: 0,
+                unhelpful_count: 0,
+                last_feedback_at: None,
+                last_recalled_at: None,
+            },
+            score: 0.5,
+            fts_score: 0.25,
+            jaccard_score: 0.25,
+            holographic_score: 0.0,
+            trust_score: 0.9,
+            why: None,
+        };
+
+        let Some(section) = context_memory_section(&[hit], None) else {
+            panic!("memory hit should render");
+        };
+
+        assert!(section.contains("first line # heading - item"));
+        assert!(!section.contains("\n# heading"));
+        assert!(!section.contains("\n- item"));
+    }
+
+    #[test]
+    fn context_lane_preview_closes_open_code_fence_before_truncation_note() {
+        let markdown = format!("### Code\n```rust\n{}\n", "fn demo() {}\n".repeat(1_000));
+
+        let preview = context_markdown_lane_preview(&markdown);
+
+        assert!(preview.contains("```\n\n... lane truncated"));
+    }
+
+    #[test]
+    fn context_lane_preview_ignores_heading_markers_inside_code_fences() {
+        let markdown = format!(
+            "### Code\n```markdown\n{}\n```\n### Test Coverage\n- real lane\n",
+            "### not a lane\n".repeat(1_000)
+        );
+
+        let preview = context_markdown_lane_preview(&markdown);
+
+        assert!(preview.contains("### Code"));
+        assert!(preview.contains("### Test Coverage"));
+        assert_eq!(preview.matches("lane truncated").count(), 1);
+    }
 }

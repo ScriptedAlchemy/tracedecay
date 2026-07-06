@@ -77,6 +77,7 @@ use crate::tracedecay::TraceDecay;
 /// Default port for `tracedecay dashboard` (chosen to avoid common dev-server
 /// defaults; override with `--port`).
 pub const DEFAULT_PORT: u16 = 7341;
+pub(crate) type AutomationSchedulerReconciler = Arc<dyn Fn() + Send + Sync + 'static>;
 
 pub(crate) type CuratePreviewFingerprint = (i64, i64, i64, i64);
 
@@ -121,10 +122,7 @@ pub(crate) struct DashboardState {
     pub(crate) storage_mode: String,
     /// Resolved active project store root.
     pub(crate) store_root: PathBuf,
-    /// Identity-resolved `config.json` path for this project's store. Derived
-    /// from the resolved store layout (not the path-hash `get_config_path`), so
-    /// settings read/write hit the store the dashboard actually serves — e.g.
-    /// after the repo directory was renamed on disk.
+    /// Resolved `config.json` path for the active project store.
     pub(crate) config_path: PathBuf,
     /// Resolved dashboard sidecar root inside the active project store.
     pub(crate) dashboard_root: PathBuf,
@@ -141,6 +139,15 @@ pub(crate) struct DashboardState {
     /// Ensures the dashboard-opened idle backfill pass is scheduled once per
     /// dashboard server lifetime.
     pub(crate) code_diagnostics_backfill_started: Arc<AtomicBool>,
+    pub(crate) automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
+}
+
+impl DashboardState {
+    pub(crate) fn reconcile_automation_scheduler(&self) {
+        if let Some(reconcile) = &self.automation_scheduler_reconciler {
+            reconcile();
+        }
+    }
 }
 
 /// The LCM session store the dashboard will serve.
@@ -249,6 +256,7 @@ async fn build_state_inner(
     cg: &TraceDecay,
     repair_memory_on_startup: bool,
     warm_token_counts: bool,
+    automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
 ) -> DashboardState {
     let (mem_conn, mem_db_path) = resolve_project_memory_store(cg).await;
     let lcm = resolve_lcm_store(cg).await;
@@ -289,6 +297,7 @@ async fn build_state_inner(
         token_counts: Arc::new(token_count::TokenCountCache::new()),
         code_diagnostics: Arc::new(RwLock::new(code_diagnostics)),
         code_diagnostics_backfill_started: Arc::new(AtomicBool::new(false)),
+        automation_scheduler_reconciler,
     };
     if repair_memory_on_startup {
         if let Err(err) = memory_api::repair_derived_memory(&state).await {
@@ -305,14 +314,22 @@ async fn build_state_inner(
 
 /// Builds the dashboard state shared by the CLI `run` path and the
 /// `tracedecay_dashboard` MCP tool.
+#[allow(dead_code)]
 pub(crate) async fn build_state(cg: &TraceDecay) -> DashboardState {
-    build_state_inner(cg, true, true).await
+    build_state_inner(cg, true, true, None).await
+}
+
+pub(crate) async fn build_state_with_automation_reconciler(
+    cg: &TraceDecay,
+    automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
+) -> DashboardState {
+    build_state_inner(cg, true, true, automation_scheduler_reconciler).await
 }
 
 /// Builds a lightweight cached state for a non-active project selected from the
 /// dashboard project picker.
 pub(crate) async fn build_selected_project_state(cg: &TraceDecay) -> DashboardState {
-    build_state_inner(cg, false, false).await
+    build_state_inner(cg, false, false, None).await
 }
 
 /// Detached catch-up ingest for transcript sources (Claude, Codex, Vibe,
@@ -421,6 +438,7 @@ where
         cg,
         options.repair_memory_on_startup,
         options.warm_token_counts,
+        None,
     )
     .await;
     if options.start_session_catch_up && state.lcm_scope != "global" {

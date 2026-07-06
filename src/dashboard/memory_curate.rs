@@ -143,6 +143,7 @@ async fn cli_state(cg: &TraceDecay) -> DashboardState {
             crate::diagnostics::lsp::settings::CodeDiagnosticsSettings::default(),
         ))),
         code_diagnostics_backfill_started: Arc::new(AtomicBool::new(false)),
+        automation_scheduler_reconciler: None,
     }
 }
 

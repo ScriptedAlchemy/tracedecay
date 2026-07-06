@@ -715,6 +715,7 @@ pub struct McpServer {
     /// to the daemon process profile for selector resolution.
     registry_db: Option<Arc<GlobalDb>>,
     allow_default_registry_fallback: bool,
+    automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
     initialize_root_routing_enabled: AtomicBool,
     hook_project_routes: SharedHookProjectRouteCache,
     /// Cached latest-version check result.
@@ -842,6 +843,25 @@ impl McpServer {
         registry_db: Option<Arc<GlobalDb>>,
         allow_default_registry_fallback: bool,
     ) -> Arc<Self> {
+        Self::new_with_dbs_and_automation_reconciler(
+            cg,
+            scope_prefix,
+            global_db,
+            registry_db,
+            allow_default_registry_fallback,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn new_with_dbs_and_automation_reconciler(
+        cg: TraceDecay,
+        scope_prefix: Option<String>,
+        global_db: Option<Arc<GlobalDb>>,
+        registry_db: Option<Arc<GlobalDb>>,
+        allow_default_registry_fallback: bool,
+        automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
+    ) -> Arc<Self> {
         let file_token_map = cg.get_file_token_map().await.unwrap_or_default();
         let persisted = cg.get_tokens_saved().await.unwrap_or(0);
         let response_handle_project_root = cg.project_root().to_path_buf();
@@ -882,6 +902,7 @@ impl McpServer {
             global_db,
             registry_db,
             allow_default_registry_fallback,
+            automation_scheduler_reconciler,
             initialize_root_routing_enabled: AtomicBool::new(true),
             hook_project_routes: SharedHookProjectRouteCache::default(),
             version_cache: std::sync::Mutex::new(VersionCheckState {
@@ -2426,6 +2447,7 @@ impl McpServer {
                 global_db: self.registry_db.as_deref(),
                 allow_default_registry_fallback: self.allow_default_registry_fallback,
                 implicit_project_path,
+                automation_scheduler_reconciler: self.automation_scheduler_reconciler.clone(),
             },
         )
         .await;

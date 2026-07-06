@@ -1466,12 +1466,18 @@ impl DaemonEngine {
         .await?;
         let accounting_db = accounting_db_for_handshake(handshake).await;
         let registry_db = registry_db_for_handshake(handshake).await;
-        let server = crate::mcp::McpServer::new_with_dbs(
+        let reconciler = self.automation_scheduler_reconciler(
+            key.clone(),
+            canonical_project_path.clone(),
+            handshake.clone(),
+        );
+        let server = crate::mcp::McpServer::new_with_dbs_and_automation_reconciler(
             cg,
             handshake.scope_prefix.clone(),
             accounting_db,
             registry_db,
             false,
+            Some(reconciler),
         )
         .await;
         servers.insert(key.clone(), Arc::clone(&server));
@@ -1497,7 +1503,7 @@ impl DaemonEngine {
             }
         }
 
-        let scheduler_configured = match Box::pin(automation_scheduler_configured_for_project(
+        let configured = match Box::pin(automation_scheduler_has_work_for_project(
             &project_path,
             &handshake,
         ))
@@ -1516,10 +1522,40 @@ impl DaemonEngine {
                 false
             }
         };
-        if scheduler_configured {
-            self.start_automation_scheduler(key, project_path, handshake)
-                .await;
+        if !configured {
+            log_daemon_event(
+                "scheduler_config",
+                &[
+                    ("project", project_path.display().to_string()),
+                    ("outcome", "skipped".to_string()),
+                    ("reason", "not_configured".to_string()),
+                ],
+            );
+            return;
         }
+
+        self.start_automation_scheduler(key, project_path, handshake)
+            .await;
+    }
+
+    fn automation_scheduler_reconciler(
+        &self,
+        key: ProjectServerKey,
+        project_path: PathBuf,
+        handshake: DaemonHandshake,
+    ) -> crate::dashboard::AutomationSchedulerReconciler {
+        let engine = self.clone();
+        std::sync::Arc::new(move || {
+            let engine = engine.clone();
+            let key = key.clone();
+            let project_path = project_path.clone();
+            let handshake = handshake.clone();
+            tokio::spawn(async move {
+                engine
+                    .ensure_automation_scheduler(key, project_path, handshake)
+                    .await;
+            });
+        })
     }
 
     async fn start_automation_scheduler(
@@ -1561,6 +1597,35 @@ impl DaemonEngine {
 #[cfg(unix)]
 async fn run_automation_scheduler_loop(project_path: PathBuf, handshake: DaemonHandshake) {
     loop {
+        match Box::pin(automation_scheduler_has_work_for_project(
+            &project_path,
+            &handshake,
+        ))
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                log_daemon_event(
+                    "scheduler_exit",
+                    &[
+                        ("project", project_path.display().to_string()),
+                        ("reason", "not_configured".to_string()),
+                    ],
+                );
+                break;
+            }
+            Err(e) => {
+                log_daemon_event(
+                    "scheduler_project_open",
+                    &[
+                        ("project", project_path.display().to_string()),
+                        ("outcome", "error".to_string()),
+                        ("error", e.to_string()),
+                    ],
+                );
+                break;
+            }
+        }
         log_daemon_event(
             "scheduler_tick",
             &[
@@ -1592,6 +1657,16 @@ async fn run_automation_scheduler_loop(project_path: PathBuf, handshake: DaemonH
         );
         tokio::time::sleep(Duration::from_secs(tick_secs)).await;
     }
+}
+
+#[cfg(unix)]
+async fn automation_scheduler_has_work_for_project(
+    project_path: &Path,
+    handshake: &DaemonHandshake,
+) -> Result<bool> {
+    let cg = open_existing_project_with_options(project_path, handshake.open_options()).await?;
+    let config = effective_automation_config_for_project(&cg, &handshake.client_identity).await?;
+    Ok(automation_scheduler_has_work(&cg, &config).await)
 }
 
 #[cfg(unix)]
@@ -1822,16 +1897,6 @@ async fn effective_automation_config_for_project(
     let global = user_config_for_client(client_identity).automation;
     let project = load_project_config(&cg.store_layout().dashboard_root).await?;
     effective_config(&global, project.as_ref())
-}
-
-#[cfg(unix)]
-async fn automation_scheduler_configured_for_project(
-    project_path: &Path,
-    handshake: &DaemonHandshake,
-) -> Result<bool> {
-    let cg = open_existing_project_with_options(project_path, handshake.open_options()).await?;
-    let config = effective_automation_config_for_project(&cg, &handshake.client_identity).await?;
-    Ok(automation_scheduler_has_work(&cg, &config).await)
 }
 
 #[cfg(unix)]

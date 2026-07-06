@@ -304,34 +304,12 @@ pub fn write_store_manifest(layout: &StoreLayout) -> Result<StoreManifest> {
                 layout.storage_mode
             ),
         })?;
-    if let Some(parent) = path.parent() {
-        PrivateStoreIo::create_dir_all(parent).map_err(|e| TraceDecayError::Config {
-            message: format!(
-                "failed to create store manifest directory '{}': {e}",
-                parent.display()
-            ),
-        })?;
-    }
     let manifest = StoreManifest::from_layout(layout);
-    let text = serde_json::to_string_pretty(&manifest).map_err(|e| TraceDecayError::Config {
-        message: format!(
-            "failed to serialize store manifest '{}': {e}",
-            path.display()
-        ),
-    })?;
-    PrivateStoreIo::write_file(path, text.as_bytes()).map_err(|e| TraceDecayError::Config {
-        message: format!("failed to write store manifest '{}': {e}", path.display()),
-    })?;
+    write_store_manifest_to_path(path, &manifest)?;
     Ok(manifest)
 }
 
-/// Writes a [`StoreManifest`] to an explicit path with an atomic temp+rename,
-/// preserving every field as given.
-///
-/// Unlike [`write_store_manifest`], this does not rebuild the manifest from a
-/// [`StoreLayout`]; it serializes the manifest exactly as passed, so callers
-/// (e.g. the doctor heal pass) can surgically rewrite a single field on an
-/// already-parsed manifest without a layout in hand.
+/// Writes `manifest` to `path` without rebuilding it from a [`StoreLayout`].
 pub fn write_store_manifest_to_path(path: &Path, manifest: &StoreManifest) -> Result<()> {
     let text = serde_json::to_string_pretty(manifest).map_err(|e| TraceDecayError::Config {
         message: format!(

@@ -151,9 +151,14 @@ pub async fn ensure_initialized_with_options(
     })
 }
 
-fn initialized_project_paths(mut paths: Vec<String>) -> Vec<String> {
-    paths.retain(|path| TraceDecay::is_initialized(Path::new(path)));
-    paths
+async fn initialized_project_paths(paths: Vec<String>) -> Vec<String> {
+    let mut initialized = Vec::new();
+    for path in paths {
+        if TraceDecay::has_initialized_store(Path::new(&path)).await {
+            initialized.push(path);
+        }
+    }
+    initialized
 }
 
 fn cwd_match_resolution(
@@ -213,7 +218,7 @@ pub async fn resolve_serve_from_global_db(
     let Some(gdb) = GlobalDb::open().await else {
         return ServeGlobalDbResolution::None;
     };
-    let mut paths = initialized_project_paths(gdb.list_project_paths().await);
+    let mut paths = initialized_project_paths(gdb.list_project_paths().await).await;
     paths.sort();
     if paths.len() == 1 {
         return ServeGlobalDbResolution::Found(PathBuf::from(paths.remove(0)));
@@ -285,7 +290,7 @@ async fn resolve_project_from_roots(roots: &[std::path::PathBuf]) -> Option<std:
         return None;
     }
     let registered = match GlobalDb::open().await {
-        Some(gdb) => initialized_project_paths(gdb.list_project_paths().await),
+        Some(gdb) => initialized_project_paths(gdb.list_project_paths().await).await,
         None => Vec::new(),
     };
     for root_path in roots {
