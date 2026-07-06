@@ -1690,7 +1690,14 @@ pub(super) async fn handle_body(
         .and_then(serde_json::Value::as_u64)
         .map_or(3, |v| v.clamp(1, 20) as usize);
 
-    let chosen = body_candidates(cg, symbol, limit, scope_prefix).await?;
+    let chosen = body_candidates(
+        cg,
+        symbol,
+        limit,
+        scope_prefix,
+        super::dependency_hints::lazy_indexing_requested(&args),
+    )
+    .await?;
 
     if chosen.is_empty() {
         return Ok(ToolResult::new(
@@ -1785,6 +1792,7 @@ async fn body_candidates(
     symbol: &str,
     limit: usize,
     scope_prefix: Option<&str>,
+    lazy_index_ignored_dependencies: bool,
 ) -> Result<Vec<crate::types::SearchResult>> {
     // First try an exact-name lookup against the DB — this avoids the BM25
     // ranker's tendency to bury a definition under unrelated noise when the
@@ -1793,7 +1801,7 @@ async fn body_candidates(
     // `get_nodes_by_qualified_name`.
     let exact_nodes = cg.get_nodes_by_qualified_name(symbol).await?;
     let mut exact_nodes = filter_by_scope(exact_nodes, scope_prefix, |n| &n.file_path);
-    if exact_nodes.is_empty() {
+    if exact_nodes.is_empty() && lazy_index_ignored_dependencies {
         let indexed = dependency_hints::lazy_index_ignored_dependency_candidates(
             cg,
             symbol,

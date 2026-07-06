@@ -148,7 +148,7 @@ pub(super) async fn handle_skill_list(cg: &TraceDecay, args: Value) -> Result<To
             .collect::<Vec<_>>(),
     });
     Ok(tool_json_with_md(cg, &args, &payload, || {
-        renderers::skill_list_md(&payload)
+        renderers::skill_list_md(renderers::SkillListView::new(&payload))
     }))
 }
 
@@ -211,7 +211,7 @@ pub(super) async fn handle_skill_view(cg: &TraceDecay, args: Value) -> Result<To
         "support_files_included": include_support_files,
     });
     Ok(tool_json_with_md(cg, &args, &payload, || {
-        renderers::skill_view_md(&payload)
+        renderers::skill_view_md(renderers::SkillView::new(&payload))
     }))
 }
 
@@ -242,7 +242,7 @@ pub(super) async fn handle_automation_run_artifact_view(
         "payload": payload,
     });
     Ok(tool_json_with_md(cg, &args, &payload, || {
-        renderers::automation_artifact_md(&payload)
+        renderers::automation_artifact_md(renderers::AutomationArtifactView::new(&payload))
     }))
 }
 

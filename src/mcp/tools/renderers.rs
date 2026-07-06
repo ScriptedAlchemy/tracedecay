@@ -2,8 +2,51 @@ use serde_json::Value;
 
 use super::render::{self, Md};
 
-pub(super) fn fact_store_md(args: &Value, value: &Value) -> String {
+pub(super) struct FactStoreView<'a> {
+    args: &'a Value,
+    payload: &'a Value,
+}
+
+impl<'a> FactStoreView<'a> {
+    pub(super) fn new(args: &'a Value, payload: &'a Value) -> Self {
+        Self { args, payload }
+    }
+}
+
+pub(super) struct SkillListView<'a> {
+    payload: &'a Value,
+}
+
+impl<'a> SkillListView<'a> {
+    pub(super) fn new(payload: &'a Value) -> Self {
+        Self { payload }
+    }
+}
+
+pub(super) struct SkillView<'a> {
+    payload: &'a Value,
+}
+
+impl<'a> SkillView<'a> {
+    pub(super) fn new(payload: &'a Value) -> Self {
+        Self { payload }
+    }
+}
+
+pub(super) struct AutomationArtifactView<'a> {
+    payload: &'a Value,
+}
+
+impl<'a> AutomationArtifactView<'a> {
+    pub(super) fn new(payload: &'a Value) -> Self {
+        Self { payload }
+    }
+}
+
+pub(super) fn fact_store_md(view: FactStoreView<'_>) -> String {
     let mut md = Md::new();
+    let args = view.args;
+    let value = view.payload;
     md.heading(2, "Fact Store");
     let action = render::field_str(value, "action");
     if !action.is_empty() {
@@ -52,8 +95,9 @@ pub(super) fn fact_store_md(args: &Value, value: &Value) -> String {
     md.render()
 }
 
-pub(super) fn skill_list_md(value: &Value) -> String {
+pub(super) fn skill_list_md(view: SkillListView<'_>) -> String {
     let mut md = Md::new();
+    let value = view.payload;
     md.heading(2, "Managed Skills");
     md.field("status", render::field_str(value, "status"));
     md.field("count", &render::field_i64(value, "count").to_string());
@@ -76,8 +120,9 @@ pub(super) fn skill_list_md(value: &Value) -> String {
     md.render()
 }
 
-pub(super) fn skill_view_md(value: &Value) -> String {
+pub(super) fn skill_view_md(view: SkillView<'_>) -> String {
     let mut md = Md::new();
+    let value = view.payload;
     let skill = value.get("skill").unwrap_or(value);
     let metadata = skill.get("metadata").unwrap_or(skill);
     let id = value_str(metadata, "/id");
@@ -131,8 +176,9 @@ pub(super) fn skill_view_md(value: &Value) -> String {
     md.render()
 }
 
-pub(super) fn automation_artifact_md(value: &Value) -> String {
+pub(super) fn automation_artifact_md(view: AutomationArtifactView<'_>) -> String {
     let mut md = Md::new();
+    let value = view.payload;
     md.heading(2, "Automation Run Artifact");
     md.field("status", render::field_str(value, "status"));
     md.field("run_id", render::field_str(value, "run_id"));

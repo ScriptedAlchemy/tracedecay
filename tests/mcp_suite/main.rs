@@ -25,4 +25,5 @@ mod multi_mcp_coordination_test;
 mod serve_degraded_mode_test;
 mod serve_harness;
 mod serve_template_path_test;
+mod support;
 mod workflow_query_test;

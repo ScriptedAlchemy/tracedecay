@@ -129,7 +129,9 @@ pub(super) async fn handle_search(
     let results = cg.search(query, limit).await?;
     let mut results = filter_by_scope(results, scope_prefix, |r| &r.node.file_path);
     let mut lazy_indexed_files = Vec::new();
-    if dependency_hints::should_check_ignored_dependency_hint(results.len(), limit) {
+    if dependency_hints::lazy_indexing_requested(&args)
+        && dependency_hints::should_check_ignored_dependency_hint(results.len(), limit)
+    {
         lazy_indexed_files = dependency_hints::lazy_index_ignored_dependency_candidates(
             cg,
             query,
@@ -800,7 +802,7 @@ pub(super) async fn handle_find_exact_symbol(
     let mut nodes = cg.get_nodes_by_name(name).await?;
     nodes = filter_by_scope(nodes, scope_prefix, |n| &n.file_path);
     let mut lazy_indexed_files = Vec::new();
-    if nodes.is_empty() {
+    if nodes.is_empty() && dependency_hints::lazy_indexing_requested(&args) {
         lazy_indexed_files = dependency_hints::lazy_index_ignored_dependency_candidates(
             cg,
             name,

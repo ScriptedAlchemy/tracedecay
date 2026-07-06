@@ -95,19 +95,7 @@ pub(crate) async fn handle_tool_call(
     server_stats: Option<serde_json::Value>,
     scope_prefix: Option<&str>,
 ) -> tracedecay::errors::Result<ToolResult> {
-    let owns_format = matches!(
-        tool_name,
-        "tracedecay_context"
-            | "tracedecay_automation_run_artifact_view"
-            | "tracedecay_dsm"
-            | "tracedecay_fact_feedback"
-            | "tracedecay_fact_store"
-            | "tracedecay_files"
-            | "tracedecay_read"
-            | "tracedecay_skill_list"
-            | "tracedecay_skill_view"
-            | "tracedecay_type_hierarchy"
-    );
+    let owns_format = tracedecay::mcp::tools::tool_defaults_to_markdown(tool_name);
     if !owns_format {
         if let Some(obj) = args.as_object_mut() {
             obj.entry("format".to_string())
@@ -2135,7 +2123,12 @@ export const value = 1;
     let result = handle_tool_call(
         &cg,
         "tracedecay_search",
-        json!({"query": "Foo", "limit": 5, "format": "json"}),
+        json!({
+            "query": "Foo",
+            "limit": 5,
+            "format": "json",
+            "lazy_index_ignored_dependencies": true
+        }),
         None,
         None,
     )
@@ -2179,7 +2172,12 @@ export const value = 1;
     let lookup = handle_tool_call(
         &cg,
         "tracedecay_find_exact_symbol",
-        json!({"name": "Foo", "limit": 5, "format": "json"}),
+        json!({
+            "name": "Foo",
+            "limit": 5,
+            "format": "json",
+            "lazy_index_ignored_dependencies": true
+        }),
         None,
         None,
     )
@@ -2265,6 +2263,14 @@ export const value = 1;
             .as_str()
             .is_some_and(|path| path.starts_with("tests/"))
     }));
+    let db = cg.open_project_store_db().await.unwrap();
+    assert!(
+        db.get_file("node_modules/pkg/index.d.ts")
+            .await
+            .unwrap()
+            .is_none(),
+        "default search should not lazy-index ignored dependencies"
+    );
 }
 
 #[tokio::test]

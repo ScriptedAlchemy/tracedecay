@@ -3,13 +3,19 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::dependency_imports::{candidates_from_type_only_import, DependencyImportCandidate};
+use crate::dependency_imports::{DependencyImportCandidate, candidates_from_type_only_import};
 use crate::errors::Result;
 use crate::mcp::tools::render::{self, Md};
 use crate::tracedecay::TraceDecay;
 
 pub(super) fn should_check_ignored_dependency_hint(result_count: usize, limit: usize) -> bool {
     result_count == 0 || result_count < limit.clamp(1, 20)
+}
+
+pub(super) fn lazy_indexing_requested(args: &Value) -> bool {
+    args.get("lazy_index_ignored_dependencies")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 pub(super) async fn ignored_dependency_hint(

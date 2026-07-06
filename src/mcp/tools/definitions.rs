@@ -492,6 +492,22 @@ pub fn format_capable_tool_names() -> &'static [&'static str] {
     FORMAT_CAPABLE_TOOL_NAMES
 }
 
+pub fn tool_defaults_to_markdown(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "tracedecay_context"
+            | "tracedecay_automation_run_artifact_view"
+            | "tracedecay_dsm"
+            | "tracedecay_fact_feedback"
+            | "tracedecay_fact_store"
+            | "tracedecay_files"
+            | "tracedecay_read"
+            | "tracedecay_skill_list"
+            | "tracedecay_skill_view"
+            | "tracedecay_type_hierarchy"
+    )
+}
+
 fn add_format_property(definitions: &mut [ToolDefinition]) {
     for definition in matching_tool_definitions_mut(definitions, FORMAT_CAPABLE_TOOL_NAMES) {
         let properties = definition
@@ -689,6 +705,10 @@ fn def_search() -> ToolDefinition {
                 "limit": {
                     "type": "number",
                     "description": "Maximum number of results to return (default: 10)"
+                },
+                "lazy_index_ignored_dependencies": {
+                    "type": "boolean",
+                    "description": "Opt in to bounded indexing of ignored dependency entry files when an import hint matches (default: false)."
                 }
             })),
             "required": ["query"]
@@ -3158,6 +3178,10 @@ fn def_body() -> ToolDefinition {
                 "limit": {
                     "type": "number",
                     "description": "Maximum number of matching bodies to return when the name is ambiguous (default: 3, max: 20)"
+                },
+                "lazy_index_ignored_dependencies": {
+                    "type": "boolean",
+                    "description": "Opt in to bounded indexing of ignored dependency entry files when an import hint matches (default: false)."
                 }
             },
             "required": ["symbol"]
@@ -3589,6 +3613,10 @@ fn def_find_exact_symbol() -> ToolDefinition {
                 "limit": {
                     "type": "number",
                     "description": "Maximum matches to return (default: 20, max: 200)."
+                },
+                "lazy_index_ignored_dependencies": {
+                    "type": "boolean",
+                    "description": "Opt in to bounded indexing of ignored dependency entry files when an import hint matches (default: false)."
                 }
             },
             "required": ["name"]

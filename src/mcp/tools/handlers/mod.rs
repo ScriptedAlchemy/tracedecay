@@ -1167,6 +1167,11 @@ mod tests {
     fn format_capable_tools_advertise_markdown_json_without_tables() {
         let tools = get_tool_definitions();
         for tool_name in super::super::definitions::format_capable_tool_names() {
+            if *tool_name == "tracedecay_ast_grep_rewrite"
+                && !super::super::definitions::ast_grep_available()
+            {
+                continue;
+            }
             let tool = tools
                 .iter()
                 .find(|tool| tool.name == *tool_name)

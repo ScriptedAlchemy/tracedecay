@@ -11,22 +11,20 @@
 //! enclosing graph node, so callers get structured errors mapped to the
 //! same node IDs the rest of tracedecay's tools speak.
 
+mod cache;
+mod fingerprint;
 pub mod lsp;
 pub mod python;
 pub mod rust;
 pub mod typescript;
 
-use std::collections::HashMap;
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::UNIX_EPOCH;
 
 use serde::Serialize;
-use sha2::{Digest, Sha256};
-use tokio::sync::Notify;
 
-use crate::errors::{Result, TraceDecayError};
+use crate::errors::Result;
+
+pub use cache::DiagnosticsCache;
 
 /// One diagnostic emitted by a language's type-checker.
 #[derive(Debug, Clone, Serialize)]
@@ -60,235 +58,6 @@ pub enum Scope {
     Package { name: String },
     /// A single file. Most useful for editor-style on-save checks.
     File { path: String },
-}
-
-#[derive(Debug, Default)]
-pub struct DiagnosticsCache {
-    entries: tokio::sync::Mutex<HashMap<DiagnosticsCacheKey, Arc<DiagnosticsCacheSlot>>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct DiagnosticsCacheKey {
-    project_root: PathBuf,
-    scope: Scope,
-}
-
-#[derive(Debug, Clone)]
-struct CachedDiagnostics {
-    fingerprint: DiagnosticsFingerprint,
-    diagnostics: Vec<Diagnostic>,
-}
-
-#[derive(Debug, Default)]
-struct DiagnosticsCacheSlot {
-    state: tokio::sync::Mutex<DiagnosticsCacheSlotState>,
-    notify: Notify,
-}
-
-#[derive(Debug, Default)]
-enum DiagnosticsCacheSlotState {
-    #[default]
-    Idle,
-    Ready(CachedDiagnostics),
-    Running {
-        fingerprint: DiagnosticsFingerprint,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DiagnosticsFingerprint {
-    files: Vec<DiagnosticsFileFingerprint>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DiagnosticsFileFingerprint {
-    path: String,
-    bytes: u64,
-    mtime_nanos: u128,
-    sha256: String,
-}
-
-impl DiagnosticsCache {
-    pub async fn run(&self, project_root: &Path, scope: &Scope) -> Result<Vec<Diagnostic>> {
-        self.run_with(project_root, scope, || run_all(project_root, scope))
-            .await
-    }
-
-    async fn run_with<F, Fut>(
-        &self,
-        project_root: &Path,
-        scope: &Scope,
-        run: F,
-    ) -> Result<Vec<Diagnostic>>
-    where
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<Vec<Diagnostic>>>,
-    {
-        let key = DiagnosticsCacheKey {
-            project_root: project_root
-                .canonicalize()
-                .unwrap_or_else(|_| project_root.to_path_buf()),
-            scope: scope.clone(),
-        };
-        let fingerprint = DiagnosticsFingerprint::capture(project_root, scope)?;
-        let slot = {
-            let mut entries = self.entries.lock().await;
-            Arc::clone(
-                entries
-                    .entry(key)
-                    .or_insert_with(|| Arc::new(DiagnosticsCacheSlot::default())),
-            )
-        };
-
-        loop {
-            let mut state = slot.state.lock().await;
-            match &*state {
-                DiagnosticsCacheSlotState::Ready(cached) if cached.fingerprint == fingerprint => {
-                    return Ok(cached.diagnostics.clone());
-                }
-                DiagnosticsCacheSlotState::Running {
-                    fingerprint: running,
-                } if running == &fingerprint => {
-                    let notified = slot.notify.notified();
-                    drop(state);
-                    notified.await;
-                }
-                _ => {
-                    *state = DiagnosticsCacheSlotState::Running {
-                        fingerprint: fingerprint.clone(),
-                    };
-                    break;
-                }
-            }
-        }
-
-        let result = run().await;
-        let mut state = slot.state.lock().await;
-        let still_current = matches!(
-            &*state,
-            DiagnosticsCacheSlotState::Running {
-                fingerprint: running
-            } if running == &fingerprint
-        );
-        if still_current {
-            match &result {
-                Ok(diagnostics) => {
-                    *state = DiagnosticsCacheSlotState::Ready(CachedDiagnostics {
-                        fingerprint,
-                        diagnostics: diagnostics.clone(),
-                    });
-                }
-                Err(_) => {
-                    *state = DiagnosticsCacheSlotState::Idle;
-                }
-            }
-        }
-        drop(state);
-        slot.notify.notify_waiters();
-        result
-    }
-}
-
-impl DiagnosticsFingerprint {
-    fn capture(project_root: &Path, scope: &Scope) -> Result<Self> {
-        let mut fingerprint = Self { files: Vec::new() };
-
-        match scope {
-            Scope::File { path } => {
-                fingerprint.include_path(project_root, &project_root.join(path))?;
-                for path in diagnostics_manifest_inputs(project_root) {
-                    fingerprint.include_path(project_root, &path)?;
-                }
-            }
-            Scope::Workspace | Scope::Package { .. } => {
-                for entry in walkdir::WalkDir::new(project_root)
-                    .into_iter()
-                    .filter_entry(|entry| should_walk_diagnostics_path(entry.path()))
-                {
-                    let entry = entry.map_err(|err| TraceDecayError::Config {
-                        message: format!("failed to fingerprint diagnostics inputs: {err}"),
-                    })?;
-                    let path = entry.path();
-                    if path.is_file() && is_diagnostics_input(path) {
-                        fingerprint.include_path(project_root, path)?;
-                    }
-                }
-            }
-        }
-
-        fingerprint
-            .files
-            .sort_by(|left, right| left.path.cmp(&right.path));
-        Ok(fingerprint)
-    }
-
-    fn include_path(&mut self, project_root: &Path, path: &Path) -> Result<()> {
-        let Ok(metadata) = std::fs::metadata(path) else {
-            return Ok(());
-        };
-        if !metadata.is_file() {
-            return Ok(());
-        }
-        let modified = metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map(|duration| duration.as_nanos())
-            .unwrap_or_default();
-        let bytes = std::fs::read(path).map_err(|err| TraceDecayError::Config {
-            message: format!(
-                "failed to fingerprint diagnostics input {}: {err}",
-                path.display()
-            ),
-        })?;
-        let relative = path.strip_prefix(project_root).unwrap_or(path);
-        self.files.push(DiagnosticsFileFingerprint {
-            path: relative.to_string_lossy().replace('\\', "/"),
-            bytes: metadata.len(),
-            mtime_nanos: modified,
-            sha256: hex::encode(Sha256::digest(&bytes)),
-        });
-        Ok(())
-    }
-}
-
-fn diagnostics_manifest_inputs(project_root: &Path) -> Vec<PathBuf> {
-    [
-        "Cargo.lock",
-        "Cargo.toml",
-        "package.json",
-        "tsconfig.json",
-        "pyproject.toml",
-        "pyrightconfig.json",
-    ]
-    .into_iter()
-    .map(|name| project_root.join(name))
-    .collect()
-}
-
-fn should_walk_diagnostics_path(path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return true;
-    };
-    !matches!(
-        name,
-        ".git" | ".tracedecay" | ".worktrees" | "target" | "node_modules" | "dist"
-    )
-}
-
-fn is_diagnostics_input(path: &Path) -> bool {
-    match path.file_name().and_then(|name| name.to_str()) {
-        Some(
-            "Cargo.lock" | "Cargo.toml" | "package.json" | "tsconfig.json" | "pyproject.toml"
-            | "pyrightconfig.json",
-        ) => return true,
-        _ => {}
-    }
-
-    matches!(
-        path.extension().and_then(|ext| ext.to_str()),
-        Some("rs" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "json" | "py")
-    )
 }
 
 /// Per-language driver contract. Implementations live in submodules
@@ -410,6 +179,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    use super::fingerprint::DiagnosticsFingerprint;
     use super::*;
 
     fn test_diagnostic(message: &str) -> Diagnostic {
@@ -539,16 +309,63 @@ mod tests {
         assert_eq!(max_active.load(Ordering::SeqCst), 2);
     }
 
-    #[test]
-    fn fingerprint_tracks_same_size_content_changes() {
+    #[tokio::test]
+    async fn cache_clears_running_state_when_owner_is_cancelled() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("src")).unwrap();
+        std::fs::write(temp.path().join("src/lib.rs"), "pub fn demo() {}\n").unwrap();
+
+        let cache = Arc::new(DiagnosticsCache::default());
+        let project_root = temp.path().to_path_buf();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (_release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let running = {
+            let cache = Arc::clone(&cache);
+            tokio::spawn(async move {
+                cache
+                    .run_with(&project_root, &Scope::Workspace, || async move {
+                        let _ = started_tx.send(());
+                        let _ = release_rx.await;
+                        Ok(vec![test_diagnostic("cancelled")])
+                    })
+                    .await
+            })
+        };
+
+        started_rx.await.unwrap();
+        running.abort();
+        let _ = running.await;
+
+        let retry = tokio::time::timeout(Duration::from_secs(1), {
+            let project_root = temp.path().to_path_buf();
+            async move {
+                cache
+                    .run_with(&project_root, &Scope::Workspace, || async {
+                        Ok(vec![test_diagnostic("retry")])
+                    })
+                    .await
+            }
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(retry[0].message, "retry");
+    }
+
+    #[tokio::test]
+    async fn fingerprint_tracks_same_size_content_changes() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(temp.path().join("src")).unwrap();
         let source = temp.path().join("src/lib.rs");
         std::fs::write(&source, "pub fn a() {}\n").unwrap();
-        let first = DiagnosticsFingerprint::capture(temp.path(), &Scope::Workspace).unwrap();
+        let first = DiagnosticsFingerprint::capture(temp.path(), &Scope::Workspace)
+            .await
+            .unwrap();
 
         std::fs::write(&source, "pub fn b() {}\n").unwrap();
-        let second = DiagnosticsFingerprint::capture(temp.path(), &Scope::Workspace).unwrap();
+        let second = DiagnosticsFingerprint::capture(temp.path(), &Scope::Workspace)
+            .await
+            .unwrap();
 
         assert_eq!(first.files.len(), 1);
         assert_eq!(second.files.len(), 1);
