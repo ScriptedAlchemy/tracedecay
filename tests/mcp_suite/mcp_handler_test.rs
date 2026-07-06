@@ -2079,7 +2079,7 @@ async fn test_search_returns_index_coverage_hint_for_skipped_generated_dirs() {
 }
 
 #[tokio::test]
-async fn test_search_hints_at_ignored_dependency_candidates() {
+async fn test_search_lazy_indexes_ignored_dependency_candidates() {
     let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
@@ -2111,17 +2111,75 @@ export const value = 1;
     .unwrap();
     let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
     assert_eq!(
-        payload["ignored_dependency_hint"]["candidates"][0]["module"].as_str(),
-        Some("pkg")
+        payload["lazy_indexed_ignored_dependency_files"][0].as_str(),
+        Some("node_modules/pkg/index.d.ts")
     );
+    assert!(payload["results"].as_array().is_some_and(|results| results
+        .iter()
+        .any(|result| result["name"].as_str() == Some("Foo")
+            && result["file"].as_str() == Some("node_modules/pkg/index.d.ts"))));
+}
+
+#[tokio::test]
+async fn test_find_exact_symbol_lazy_indexes_ignored_dependency_candidate() {
+    let dir = test_temp_dir();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::create_dir_all(project.join("node_modules/pkg")).unwrap();
+    fs::write(
+        project.join("src/app.ts"),
+        r#"import type { Foo } from "pkg";
+export const value = 1;
+"#,
+    )
+    .unwrap();
+    fs::write(
+        project.join("node_modules/pkg/index.d.ts"),
+        "export interface Foo { value: string }\n",
+    )
+    .unwrap();
+
+    let (cg, _env) = init_test_project(project).await;
+    cg.index_all().await.unwrap();
+
+    let lookup = handle_tool_call(
+        &cg,
+        "tracedecay_find_exact_symbol",
+        json!({"name": "Foo", "limit": 5, "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&lookup.value)).unwrap();
+    let db = cg.open_project_store_db().await.unwrap();
+    let indexed_file = db
+        .get_file("node_modules/pkg/index.d.ts")
+        .await
+        .unwrap()
+        .is_some();
+    assert!(indexed_file, "{payload}");
+    assert_eq!(payload["count"].as_u64(), Some(1), "{payload}");
     assert_eq!(
-        payload["ignored_dependency_hint"]["candidates"][0]["symbol"].as_str(),
-        Some("Foo")
+        payload["matches"][0]["file"].as_str(),
+        Some("node_modules/pkg/index.d.ts")
     );
-    assert!(payload["ignored_dependency_hint"]["message"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("ignored dependency"));
+
+    let body = handle_tool_call(
+        &cg,
+        "tracedecay_body",
+        json!({"symbol": "Foo", "limit": 5, "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&body.value)).unwrap();
+    assert_eq!(payload["match_count"].as_u64(), Some(1));
+    assert_eq!(
+        payload["matches"][0]["body"].as_str(),
+        Some("export interface Foo { value: string }")
+    );
 }
 
 #[tokio::test]

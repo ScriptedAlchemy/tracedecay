@@ -2,7 +2,7 @@
 //! detection for the active project store.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Component, Path};
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
@@ -37,6 +37,15 @@ fn normalize_rel_path(path: &str) -> String {
 /// the caller's existing `Vec`.
 fn normalize_rel_paths(paths: &[String]) -> Vec<String> {
     paths.iter().map(|p| normalize_rel_path(p)).collect()
+}
+
+fn is_safe_lazy_dependency_path(path: &str) -> bool {
+    if !path.starts_with("node_modules/") || path.contains('\\') {
+        return false;
+    }
+    Path::new(path)
+        .components()
+        .all(|component| matches!(component, Component::Normal(_)))
 }
 
 /// Metadata flag recording that the *complete* extracted reference set has
@@ -587,6 +596,43 @@ impl TraceDecay {
 
         clear_dirty_sentinel_at(&self.store_layout.dirty_path);
         Ok(())
+    }
+
+    /// Lazily index explicitly requested dependency files that normal sync
+    /// skips, keeping the operation bounded and inside `node_modules`.
+    pub async fn lazy_index_ignored_dependency_files(
+        &self,
+        file_paths: &[String],
+    ) -> Result<Vec<String>> {
+        self.ensure_branch_writable("lazy index ignored dependency files")?;
+
+        let mut accepted = Vec::new();
+        let mut seen = HashSet::new();
+        for path in file_paths {
+            let normalized = normalize_rel_path(path.trim());
+            if !is_safe_lazy_dependency_path(&normalized) || !seen.insert(normalized.clone()) {
+                continue;
+            }
+            let abs_path = self.project_root.join(&normalized);
+            let Ok(metadata) = std::fs::metadata(&abs_path) else {
+                continue;
+            };
+            if !metadata.is_file()
+                || metadata.len() > self.config.max_file_size
+                || self.registry.extractor_for_file(&normalized).is_none()
+            {
+                continue;
+            }
+            accepted.push(normalized);
+            if accepted.len() >= 20 {
+                break;
+            }
+        }
+
+        if !accepted.is_empty() {
+            self.sync_single_files(&accepted).await?;
+        }
+        Ok(accepted)
     }
 
     /// Re-resolves only the references whose edge can appear or disappear when

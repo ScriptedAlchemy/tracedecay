@@ -127,16 +127,40 @@ pub(super) async fn handle_search(
         .map_or(10, |v| v.min(500) as usize);
 
     let results = cg.search(query, limit).await?;
-    let results = filter_by_scope(results, scope_prefix, |r| &r.node.file_path);
+    let mut results = filter_by_scope(results, scope_prefix, |r| &r.node.file_path);
+    let mut lazy_indexed_files = Vec::new();
+    if dependency_hints::should_check_ignored_dependency_hint(results.len(), limit) {
+        lazy_indexed_files = dependency_hints::lazy_index_ignored_dependency_candidates(
+            cg,
+            query,
+            limit,
+            scope_prefix,
+        )
+        .await?;
+        if !lazy_indexed_files.is_empty() {
+            results = filter_by_scope(cg.search(query, limit).await?, scope_prefix, |r| {
+                &r.node.file_path
+            });
+        }
+    }
     let coverage_hint = cg.index_coverage_hint(results.len());
-    let ignored_dependency_hint =
-        if dependency_hints::should_check_ignored_dependency_hint(results.len(), limit) {
-            dependency_hints::ignored_dependency_hint(cg, query, limit, scope_prefix).await?
-        } else {
-            None
-        };
+    let lazy_match_visible = results
+        .iter()
+        .any(|result| lazy_indexed_files.contains(&result.node.file_path));
+    let ignored_dependency_hint = if !lazy_match_visible
+        && dependency_hints::should_check_ignored_dependency_hint(results.len(), limit)
+    {
+        dependency_hints::ignored_dependency_hint(cg, query, limit, scope_prefix).await?
+    } else {
+        None
+    };
 
-    let touched_files = unique_file_paths(results.iter().map(|r| r.node.file_path.as_str()));
+    let touched_files = unique_file_paths(
+        results
+            .iter()
+            .map(|r| r.node.file_path.as_str())
+            .chain(lazy_indexed_files.iter().map(String::as_str)),
+    );
 
     let items: Vec<Value> = results
         .iter()
@@ -155,6 +179,9 @@ pub(super) async fn handle_search(
 
     let output_value = if coverage_hint.is_some() || ignored_dependency_hint.is_some() {
         let mut value = json!({ "results": items });
+        if !lazy_indexed_files.is_empty() {
+            value["lazy_indexed_ignored_dependency_files"] = json!(lazy_indexed_files);
+        }
         if let Some(hint) = coverage_hint {
             value["index_coverage_hint"] = json!(hint);
         }
@@ -162,6 +189,11 @@ pub(super) async fn handle_search(
             value["ignored_dependency_hint"] = hint;
         }
         value
+    } else if !lazy_indexed_files.is_empty() {
+        json!({
+            "results": items,
+            "lazy_indexed_ignored_dependency_files": lazy_indexed_files,
+        })
     } else {
         json!(items)
     };
@@ -773,11 +805,31 @@ pub(super) async fn handle_find_exact_symbol(
 
     let mut nodes = cg.get_nodes_by_name(name).await?;
     nodes = filter_by_scope(nodes, scope_prefix, |n| &n.file_path);
+    let mut lazy_indexed_files = Vec::new();
+    if nodes.is_empty() {
+        lazy_indexed_files = dependency_hints::lazy_index_ignored_dependency_candidates(
+            cg,
+            name,
+            limit,
+            scope_prefix,
+        )
+        .await?;
+        if !lazy_indexed_files.is_empty() {
+            nodes = filter_by_scope(cg.get_nodes_by_name(name).await?, scope_prefix, |n| {
+                &n.file_path
+            });
+        }
+    }
     if nodes.len() > limit {
         nodes.truncate(limit);
     }
 
-    let touched_files = unique_file_paths(nodes.iter().map(|n| n.file_path.as_str()));
+    let touched_files = unique_file_paths(
+        nodes
+            .iter()
+            .map(|n| n.file_path.as_str())
+            .chain(lazy_indexed_files.iter().map(String::as_str)),
+    );
 
     let items: Vec<Value> = nodes
         .iter()
@@ -798,6 +850,7 @@ pub(super) async fn handle_find_exact_symbol(
         "name": name,
         "count": items.len(),
         "matches": items,
+        "lazy_indexed_ignored_dependency_files": lazy_indexed_files,
     });
     Ok(rendered_tool_result(
         cg,
