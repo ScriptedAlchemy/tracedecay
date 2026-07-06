@@ -12,8 +12,8 @@ use super::managed_skill_model::{
 use super::skill_frontmatter::{parse_skill_frontmatter, SkillFrontmatterValue};
 
 const ALLOWED_SUPPORT_ROOTS: &[&str] = &["references", "templates", "scripts", "assets"];
-const MAX_NATIVE_SKILL_NAME_CHARS: usize = 64;
-const MAX_NATIVE_SKILL_DESCRIPTION_CHARS: usize = 1024;
+pub(crate) const MAX_NATIVE_SKILL_NAME_CHARS: usize = 64;
+pub(crate) const MAX_NATIVE_SKILL_DESCRIPTION_CHARS: usize = 1024;
 
 pub(crate) fn validate_skill_id(id: &str) -> Result<()> {
     if id.is_empty()

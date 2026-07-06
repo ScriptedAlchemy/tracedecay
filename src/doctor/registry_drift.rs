@@ -8,6 +8,7 @@ pub(super) struct RegistryDriftFinding {
     pub(super) registry_value: String,
     pub(super) manifest_value: String,
     pub(super) manifest_path: PathBuf,
+    manifest: crate::storage::StoreManifest,
     registry_path: Option<PathBuf>,
 }
 
@@ -44,6 +45,7 @@ pub(super) async fn registry_drift_findings(
                     registry_value: store.project_id.clone(),
                     manifest_value: manifest_project_id,
                     manifest_path: manifest_path.clone(),
+                    manifest: manifest.clone(),
                     registry_path: None,
                 });
             }
@@ -58,6 +60,7 @@ pub(super) async fn registry_drift_findings(
                     registry_value: project.canonical_root.clone(),
                     manifest_value: manifest_project_root.display().to_string(),
                     manifest_path,
+                    manifest,
                     registry_path: Some(registry_project_root),
                 });
             }
@@ -119,13 +122,7 @@ fn reconcile_one_store_root(
     finding: &RegistryDriftFinding,
     canonical: &Path,
 ) -> std::result::Result<(Option<ReconciledStoreRoot>, Option<String>), String> {
-    let mut manifest =
-        crate::storage::read_store_manifest(&finding.manifest_path).map_err(|e| {
-            format!(
-                "could not read store manifest '{}': {e}",
-                finding.manifest_path.display()
-            )
-        })?;
+    let mut manifest = finding.manifest.clone();
 
     let mut manifest_rewritten = false;
     if manifest.project_root != canonical {
@@ -236,7 +233,7 @@ fn resolve_registry_manifest_path(
 mod tests {
     use super::*;
     use crate::global_db::{GlobalDb, StoreInstanceUpsert};
-    use crate::storage::{STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest};
+    use crate::storage::{StorageMode, StoreKind, StoreManifest, STORE_MANIFEST_SCHEMA_VERSION};
 
     const STORE_ID: &str = "store_reconcile_test";
     const PROJECT_ID: &str = "proj_reconcile_test";

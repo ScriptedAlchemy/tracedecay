@@ -10,7 +10,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use super::cursor_compact::{
-    CURSOR_PRE_COMPACT_SUMMARY_BUDGET, cursor_pre_compact_for_event_with_config,
+    cursor_pre_compact_for_event_with_config, CURSOR_PRE_COMPACT_SUMMARY_BUDGET,
 };
 use super::cursor_shell::paths_same;
 use super::memory_inject;
@@ -18,7 +18,7 @@ use super::steering::{
     append_context_block, append_context_recovery_hint, build_cursor_session_context,
     cursor_index_signals_for_root, session_start_from_compaction,
 };
-use super::tool_hints::{HintAgent, ToolHint, ToolHintInput, decide_hint};
+use super::tool_hints::{decide_hint, HintAgent, ToolHint, ToolHintInput};
 use super::{
     append_tool_hint, deduped_project_hint_with_id, event_session_id, format_tool_hint,
     hook_route_metadata_from_event, mint_hint_id, nearest_project_like_root, prompt_like_text,
@@ -44,9 +44,9 @@ const CURSOR_STOP_INGEST_BUDGET: Duration = Duration::from_secs(25);
 /// Cursor `subagentStart` hook handler.
 ///
 /// Allows Cursor subagents while preserving legacy hook compatibility.
-pub fn hook_cursor_subagent_start() -> i32 {
+pub async fn hook_cursor_subagent_start() -> i32 {
     let event = read_hook_event!();
-    let root = cursor_project_root_from_event(&event);
+    let root = cursor_project_root_from_event_with_identity(&event).await;
     record_hook_invoked(root.as_deref(), HintAgent::Cursor, "subagentStart", &event);
     if let Some(decision) = evaluate_cursor_subagent_start(&event) {
         println!("{decision}");
@@ -67,7 +67,7 @@ pub fn hook_cursor_subagent_start() -> i32 {
 /// [`super::tool_hints::ToolHintDedupe`] persisted under `.tracedecay/`.
 pub async fn hook_cursor_post_tool_use() -> i32 {
     let event = read_hook_event!();
-    let root = cursor_project_root_from_event(&event);
+    let root = cursor_project_root_from_event_with_identity(&event).await;
     record_hook_invoked(root.as_deref(), HintAgent::Cursor, "postToolUse", &event);
     if let Some(decision) = cursor_post_tool_use_decision_for_hook(&event).await {
         println!("{decision}");
@@ -89,7 +89,7 @@ pub async fn hook_cursor_post_tool_use() -> i32 {
 /// blocks submission, even if the tail ingest or hint injection times out.
 pub async fn hook_cursor_before_submit_prompt() -> i32 {
     let event = read_hook_event!();
-    let root = cursor_project_root_from_event(&event);
+    let root = cursor_project_root_from_event_with_identity(&event).await;
     record_hook_invoked(
         root.as_deref(),
         HintAgent::Cursor,
@@ -166,7 +166,7 @@ fn cursor_prompt_hint(event_json: &str) -> Option<ToolHint> {
 
 async fn cursor_prompt_memory_recall(event_json: &str) -> Option<String> {
     let parsed = serde_json::from_str::<Value>(event_json).ok()?;
-    let root = cursor_project_root_from_parsed_event(&parsed)?;
+    let root = cursor_project_root_from_parsed_event_with_identity(&parsed).await?;
     let prompt = prompt_like_text(&parsed)?;
     let session_id = event_session_id(&parsed);
     memory_inject::prompt_memory_recall(&root, session_id.as_deref(), &prompt).await
@@ -181,7 +181,7 @@ async fn cursor_prompt_memory_recall(event_json: &str) -> Option<String> {
 /// so an empty object is emitted. Fail-open.
 pub async fn hook_cursor_session_end() -> i32 {
     let event = read_hook_event!();
-    let root = cursor_project_root_from_event(&event);
+    let root = cursor_project_root_from_event_with_identity(&event).await;
     record_hook_invoked(root.as_deref(), HintAgent::Cursor, "sessionEnd", &event);
     ingest_cursor_transcript_for_event(
         &event,
@@ -201,7 +201,7 @@ pub async fn hook_cursor_session_end() -> i32 {
 /// we emit an empty object and never ask the agent to continue. Fail-open.
 pub async fn hook_cursor_stop() -> i32 {
     let event = read_hook_event!();
-    let root = cursor_project_root_from_event(&event);
+    let root = cursor_project_root_from_event_with_identity(&event).await;
     record_hook_invoked(root.as_deref(), HintAgent::Cursor, "stop", &event);
     ingest_cursor_transcript_for_event(
         &event,
@@ -222,7 +222,7 @@ pub async fn hook_cursor_stop() -> i32 {
 /// summary node. The hook is fail-open and emits Cursor's empty object shape.
 pub async fn hook_cursor_pre_compact() -> i32 {
     let event = read_hook_event!();
-    let root = cursor_project_root_from_event(&event);
+    let root = cursor_project_root_from_event_with_identity(&event).await;
     record_hook_invoked(root.as_deref(), HintAgent::Cursor, "preCompact", &event);
     if std::env::var(crate::sessions::cursor_agent::CURSOR_SUMMARY_CHILD_ENV).is_err() {
         let mut config = crate::sessions::cursor_agent::CursorAgentSummaryConfig::from_env();
@@ -246,7 +246,7 @@ pub async fn hook_cursor_pre_compact() -> i32 {
 /// and the hook fails open when no daemon is available.
 pub async fn hook_cursor_after_file_edit() -> i32 {
     let event = read_hook_event!();
-    let root = cursor_project_root_from_event(&event);
+    let root = cursor_project_root_from_event_with_identity(&event).await;
     record_hook_invoked(root.as_deref(), HintAgent::Cursor, "afterFileEdit", &event);
     notify_cursor_after_file_edit(&event).await;
     0
@@ -259,16 +259,7 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
 /// for the resolved workspace. Never blocks session creation.
 pub async fn hook_cursor_session_start() -> i32 {
     let event = read_hook_event!();
-    let mut root = cursor_project_root_from_event(&event);
-    if root.is_none() {
-        root = match serde_json::from_str::<Value>(&event) {
-            Ok(parsed) => match cursor_event_cwd(&parsed) {
-                Some(cwd) => crate::config::discover_project_root_with_identity(&cwd).await,
-                None => None,
-            },
-            Err(_) => None,
-        };
-    }
+    let root = cursor_project_root_from_event_with_identity(&event).await;
     record_hook_invoked(root.as_deref(), HintAgent::Cursor, "sessionStart", &event);
     ingest_cursor_transcript_for_event(
         &event,
@@ -317,7 +308,7 @@ async fn cursor_session_context_for_root(root: Option<&Path>) -> String {
 /// the command requires branch tracking or coalesced incremental sync.
 pub async fn hook_cursor_after_shell() -> i32 {
     let event = read_hook_event!();
-    let root = cursor_project_root_from_event(&event);
+    let root = cursor_project_root_from_event_with_identity(&event).await;
     record_hook_invoked(
         root.as_deref(),
         HintAgent::Cursor,
@@ -333,7 +324,7 @@ pub async fn hook_cursor_after_shell() -> i32 {
 /// Notifies the daemon to run one-shot workspace catch-up. Fail-open.
 pub async fn hook_cursor_workspace_open() -> i32 {
     let event = read_hook_event!();
-    let root = cursor_project_root_from_event(&event);
+    let root = cursor_project_root_from_event_with_identity(&event).await;
     record_hook_invoked(root.as_deref(), HintAgent::Cursor, "workspaceOpen", &event);
     notify_cursor_workspace_open(&event).await;
     if let Some(root) = root.as_deref() {
@@ -512,6 +503,30 @@ pub(super) fn cursor_project_root_from_parsed_event(parsed: &Value) -> Option<Pa
     }
 }
 
+async fn cursor_project_root_from_event_with_identity(event_json: &str) -> Option<PathBuf> {
+    let parsed: Value = serde_json::from_str(event_json).ok()?;
+    cursor_project_root_from_parsed_event_with_identity(&parsed).await
+}
+
+async fn cursor_project_root_from_parsed_event_with_identity(parsed: &Value) -> Option<PathBuf> {
+    let mut resolved = None;
+    for candidate in cursor_event_candidates(parsed) {
+        if let Some(root) = crate::config::discover_project_root_with_identity(&candidate).await {
+            resolved = Some(root);
+            break;
+        }
+    }
+    let cwd_root = match cursor_event_cwd(parsed) {
+        Some(cwd) => crate::config::discover_project_root_with_identity(&cwd).await,
+        None => None,
+    };
+    match (cwd_root, resolved) {
+        (Some(cwd_root), Some(resolved)) if !paths_same(&cwd_root, &resolved) => Some(cwd_root),
+        (Some(cwd_root), None) => Some(cwd_root),
+        (_, other) => other,
+    }
+}
+
 fn cursor_event_candidates(event: &Value) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     let mut push_unique = |candidate: PathBuf| {
@@ -634,7 +649,7 @@ pub fn cursor_session_start_json(project_root: Option<&Path>, additional_context
 /// Resolves the edited repo-relative paths locally, then lets the daemon own
 /// scheduling and sync execution. No-ops when no in-project paths were edited.
 async fn notify_cursor_after_file_edit(event_json: &str) {
-    let Some(root) = cursor_project_root_from_event(event_json) else {
+    let Some(root) = cursor_project_root_from_event_with_identity(event_json).await else {
         return;
     };
     if !crate::tracedecay::TraceDecay::has_initialized_store(&root).await {
@@ -661,7 +676,7 @@ async fn notify_cursor_after_shell_event(event_json: &str) {
         .get("command")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let Some(root) = cursor_project_root_from_event(event_json) else {
+    let Some(root) = cursor_project_root_from_event_with_identity(event_json).await else {
         return;
     };
     if !crate::tracedecay::TraceDecay::has_initialized_store(&root).await {
@@ -678,7 +693,7 @@ async fn notify_cursor_after_shell_event(event_json: &str) {
 
 /// Best-effort daemon notification for Cursor `workspaceOpen`.
 async fn notify_cursor_workspace_open(event_json: &str) {
-    let Some(root) = cursor_project_root_from_event(event_json) else {
+    let Some(root) = cursor_project_root_from_event_with_identity(event_json).await else {
         return;
     };
     if !crate::tracedecay::TraceDecay::has_initialized_store(&root).await {
@@ -693,7 +708,7 @@ async fn notify_cursor_workspace_open(event_json: &str) {
 }
 
 async fn reset_counter_for_cursor_event(event_json: &str) {
-    let Some(project_root) = cursor_project_root_from_event(event_json) else {
+    let Some(project_root) = cursor_project_root_from_event_with_identity(event_json).await else {
         return;
     };
     if let Ok(cg) = crate::tracedecay::TraceDecay::open(&project_root).await {
@@ -714,7 +729,8 @@ pub(super) async fn ingest_cursor_transcript_for_event(
         let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
             return false;
         };
-        let Some(project_root) = cursor_project_root_from_parsed_event(&parsed) else {
+        let Some(project_root) = cursor_project_root_from_parsed_event_with_identity(&parsed).await
+        else {
             return false;
         };
         if let Some(cwd_root) = cursor_event_cwd(&parsed)
@@ -863,6 +879,70 @@ mod tests {
         assert!(
             cursor_prompt_hint(&event).is_none(),
             "Cursor prompt hints must reuse the shared per-session hint dedupe"
+        );
+    }
+
+    #[tokio::test]
+    async fn cursor_root_uses_identity_resolver_for_global_only_store() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let profile_root = crate::storage::default_profile_root().unwrap();
+        let gdb = crate::global_db::GlobalDb::open().await.unwrap();
+
+        let project = tempfile::tempdir().unwrap();
+        let project_root = project.path().canonicalize().unwrap();
+        let status = std::process::Command::new("git")
+            .arg("init")
+            .arg(&project_root)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git init failed");
+
+        let project_id = "proj_cursor_identity";
+        let git_common_dir = crate::worktree::git_common_dir(&project_root);
+        gdb.upsert_code_project(
+            project_id,
+            &project_root,
+            git_common_dir.as_deref(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        gdb.upsert_store_instance(crate::global_db::StoreInstanceUpsert {
+            store_id: "store_cursor_identity".to_string(),
+            project_id: project_id.to_string(),
+            store_kind: "code_project".to_string(),
+            storage_mode: "profile_sharded".to_string(),
+            store_relpath: format!("projects/{project_id}"),
+            manifest_relpath: Some(format!("projects/{project_id}/store_manifest.json")),
+            last_verified_at: Some(100),
+            last_write_at: Some(101),
+        })
+        .await
+        .unwrap();
+        let layout = crate::storage::profile_sharded_layout(
+            &project_root,
+            &profile_root,
+            &crate::storage::EnrollmentMarker {
+                project_id: project_id.to_string(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )
+        .unwrap();
+        std::fs::create_dir_all(layout.graph_db_path.parent().unwrap()).unwrap();
+        std::fs::write(&layout.graph_db_path, b"").unwrap();
+
+        let nested = project_root.join("src/deep");
+        std::fs::create_dir_all(&nested).unwrap();
+        let parsed = serde_json::json!({
+            "cwd": nested,
+            "workspace_roots": [project_root.clone()],
+        });
+
+        assert!(cursor_project_root_from_parsed_event(&parsed).is_none());
+        assert_eq!(
+            cursor_project_root_from_parsed_event_with_identity(&parsed).await,
+            Some(project_root)
         );
     }
 }

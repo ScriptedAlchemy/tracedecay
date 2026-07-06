@@ -243,7 +243,7 @@ transcripts"), so Codex sessions also feed reflection.
   from the hook binary** (the hooks are the same `tracedecay` binary; no MCP
   round-trip needed).
 
-### 3.4 Storage loop: session_reflector (exists, gated off by default)
+### 3.4 Storage loop: session_reflector (exists, automation disabled by default)
 
 `src/automation/{runner,session_reflector,fact_proposals}.rs`:
 
@@ -253,14 +253,13 @@ transcripts"), so Codex sessions also feed reflection.
   returned **fact proposals** against evidence citations
   (`validate_fact_proposals` — each proposal must cite raw messages / store
   ids / summary nodes; trust bounded by `proposal_trust_value`).
-- Accepted proposals are recorded to the dashboard proposal store
-  (`fact_proposals.rs::record_session_fact_proposals`) for human approval in
-  the curation UI, or auto-applied when
-  `auto_apply_memory_ops && !require_dashboard_approval`.
-- **Defaults are conservative:** `AutomationConfig::default()` has
-  `enabled: false`, `backend: Disabled`, `require_dashboard_approval: true`,
-  `auto_apply_memory_ops: false` (`src/automation/config.rs:101-113`). So the
-  write path from transcripts → facts exists but is off unless the user
+- Accepted proposals flow through the automation apply policy
+  (`fact_proposals.rs::record_session_fact_proposals`): self-managed memory
+  apply is the normal model-managed path, while the dashboard exposes outcomes,
+  telemetry, and explicit apply/reject controls for configured review modes.
+- **Defaults are conservative:** automation starts disabled
+  (`enabled: false`, `backend: Disabled`; `src/automation/config.rs:101-113`).
+  The write path from transcripts → facts exists but is off unless the user
   enables automation.
 
 ### 3.5 hermes_skill_bridge / skill deployment
@@ -373,13 +372,13 @@ half pointed at TraceDecay.
 ### D. Enable the reflection loop (sidecar-equivalent storage)
 
 session_reflector is the background sidecar analog: transcripts (both agents,
-already ingested by the hooks) → evidence-cited fact proposals → dashboard
-approval → store. The work is activation, not construction:
+already ingested by the hooks) → evidence-cited fact operations → model-managed
+apply policy → store, with dashboard inspection/telemetry. The work is
+activation, not construction:
 
 - Surface a one-command enable (`tracedecay automation enable
-  session-reflector`) that picks a backend and leaves
-  `require_dashboard_approval: true`; document the graduation path to
-  `auto_apply_memory_ops` once proposal quality is trusted.
+  session-reflector`) that picks a backend and uses model-managed memory apply
+  defaults; document the explicit dashboard-review mode for high-risk rollout.
 - Wire a nudge into `doctor`/`memory_status` when transcripts accumulate but
   automation is disabled ("N sessions ingested, 0 reflected").
 
@@ -404,7 +403,7 @@ With `features.memories = true`, Codex builds a parallel memory in
 3. **Harvest:** one-way import of `~/.codex/memories/raw_memories.md` +
    `rollout_summaries/*.md` into fact proposals (they're clean markdown with
    cwd/thread metadata — easy to parse into `AddFactRequest`s routed through
-   the same proposal/approval path as D). Gives the fact store Codex's
+   the same validation/apply path as D). Gives the fact store Codex's
    already-consolidated knowledge on day one.
 
 For Cursor: native Memories can't be intercepted or exported; the only lever

@@ -1489,9 +1489,8 @@ impl McpServer {
     }
 
     /// Returns a compact one-line notice when automation runs have staged
-    /// output awaiting review (skill drafts, fact proposals) that the user
-    /// hasn't been told about yet — `TraceDecay`'s equivalent of Hermes's
-    /// inline "💾 Self-improvement review" moment (parity R5).
+    /// managed-skill output awaiting review that the user hasn't been told
+    /// about yet. Fact proposal counts remain telemetry-only.
     ///
     /// Cheap by construction: a 60 s `compare_exchange` cooldown gates the
     /// check, and the underlying dedupe state
@@ -2572,9 +2571,9 @@ impl McpServer {
                 }
 
                 // Staged-automation nudge (Hermes parity R5): when automation
-                // runs have queued skill drafts / fact proposals for review,
-                // append a one-line notice so the approval queue doesn't grow
-                // silently. Deduped per batch and cooldown-gated inside.
+                // runs have queued skill drafts for review, append a one-line
+                // notice so the approval queue doesn't grow silently. Fact
+                // proposal counts stay telemetry-only in `staged_notice`.
                 if let Some(notice) = self.maybe_automation_staged_notice(&cg).await {
                     if let Some(content) = result
                         .value

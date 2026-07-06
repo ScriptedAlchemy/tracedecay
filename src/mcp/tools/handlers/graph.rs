@@ -7,7 +7,12 @@ use std::fmt::Write as _;
 
 use serde_json::{json, Value};
 
-use crate::context::format_context_as_markdown;
+use crate::context::{
+    format_context_as_markdown, CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING,
+    CONTEXT_EXTENSION_POINTS_HEADING, CONTEXT_INDEX_COVERAGE_HINT_HEADING,
+    CONTEXT_MEMORY_MATCHES_HEADING, CONTEXT_RELATED_SYMBOLS_HEADING, CONTEXT_SEEN_NODE_IDS_LABEL,
+    CONTEXT_TEST_COVERAGE_HEADING,
+};
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::types::{FactSearchResult, SearchFactsRequest};
 use crate::path_tree::format_compact_path_list;
@@ -43,40 +48,25 @@ where
     F: FnOnce() -> String,
 {
     let internal_analytics = value.get(CONTEXT_MEMORY_ANALYTICS_KEY).cloned();
-    let public_value;
-    let value = if internal_analytics.is_some() {
-        public_value = strip_internal_context_memory_analytics(value);
-        &public_value
-    } else {
-        value
-    };
+    let public_value = internal_analytics
+        .as_ref()
+        .and_then(|_| public_value_without_internal_context_memory_analytics(value));
+    let value = public_value.as_ref().unwrap_or(value);
     let text = render::finalize(Some(cg.project_root()), args, value, md);
-    let result = text_tool_result(&text, touched_files);
-    if let Some(internal_analytics) = internal_analytics {
-        result.with_internal_analytics(internal_analytics)
-    } else {
-        result
-    }
+    text_tool_result_with_analytics(&text, touched_files, internal_analytics)
 }
 
 fn rendered_context_tool_result(
     cg: &TraceDecay,
     args: &Value,
-    value: &Value,
+    mut value: Value,
     touched_files: Vec<String>,
     full_markdown: String,
     preview_markdown: Option<&str>,
 ) -> ToolResult {
-    let internal_analytics = value.get(CONTEXT_MEMORY_ANALYTICS_KEY).cloned();
-    let public_value;
-    let value = if internal_analytics.is_some() {
-        public_value = strip_internal_context_memory_analytics(value);
-        &public_value
-    } else {
-        value
-    };
+    let internal_analytics = take_internal_context_memory_analytics(&mut value);
     let text = if render::wants_json(args) {
-        render::finalize(Some(cg.project_root()), args, value, || full_markdown)
+        render::finalize(Some(cg.project_root()), args, &value, || full_markdown)
     } else {
         render::markdown_preview_with_handle(
             Some(cg.project_root()),
@@ -84,20 +74,29 @@ fn rendered_context_tool_result(
             preview_markdown.unwrap_or(&full_markdown),
         )
     };
-    let result = text_tool_result(&text, touched_files);
+    text_tool_result_with_analytics(&text, touched_files, internal_analytics)
+}
+
+fn public_value_without_internal_context_memory_analytics(value: &Value) -> Option<Value> {
+    let mut value = value.clone();
+    take_internal_context_memory_analytics(&mut value).map(|_| value)
+}
+
+fn take_internal_context_memory_analytics(value: &mut Value) -> Option<Value> {
+    value.as_object_mut()?.remove(CONTEXT_MEMORY_ANALYTICS_KEY)
+}
+
+fn text_tool_result_with_analytics(
+    text: &str,
+    touched_files: Vec<String>,
+    internal_analytics: Option<Value>,
+) -> ToolResult {
+    let result = text_tool_result(text, touched_files);
     if let Some(internal_analytics) = internal_analytics {
         result.with_internal_analytics(internal_analytics)
     } else {
         result
     }
-}
-
-fn strip_internal_context_memory_analytics(value: &Value) -> Value {
-    let mut value = value.clone();
-    if let Some(object) = value.as_object_mut() {
-        object.remove(CONTEXT_MEMORY_ANALYTICS_KEY);
-    }
-    value
 }
 
 fn text_tool_result(text: &str, touched_files: Vec<String>) -> ToolResult {
@@ -269,7 +268,8 @@ pub(super) async fn handle_context(
     if let Some(hint) = cg.index_coverage_hint(context.subgraph.nodes.len()) {
         let _ = writeln!(
             output,
-            "\n### Index Coverage Hint\n{}\nSkipped trees seen: {}\nTo opt in, run: `{}`\n",
+            "\n{}\n{}\nSkipped trees seen: {}\nTo opt in, run: `{}`\n",
+            CONTEXT_INDEX_COVERAGE_HINT_HEADING,
             hint.message,
             hint.skipped_dirs.join(", "),
             hint.suggested_command,
@@ -284,7 +284,8 @@ pub(super) async fn handle_context(
     if !context.seen_node_ids.is_empty() {
         let _ = write!(
             output,
-            "\nseen_node_ids: {}\n",
+            "\n{} {}\n",
+            CONTEXT_SEEN_NODE_IDS_LABEL,
             serde_json::to_string(&context.seen_node_ids).unwrap_or_default()
         );
     }
@@ -313,7 +314,7 @@ pub(super) async fn handle_context(
     Ok(rendered_context_tool_result(
         cg,
         &args,
-        &value,
+        value,
         touched_files,
         output,
         preview.as_deref(),
@@ -344,7 +345,7 @@ fn context_markdown_lane_preview(markdown: &str) -> String {
 }
 
 fn context_lane_key(line: &str) -> Option<&str> {
-    if line.starts_with("### ") || line.starts_with("seen_node_ids:") {
+    if line.starts_with("### ") || line.starts_with(CONTEXT_SEEN_NODE_IDS_LABEL) {
         Some(line.trim_end())
     } else {
         None
@@ -369,19 +370,21 @@ fn push_context_lane_preview(preview: &mut String, lane_key: &str, lane: &str) {
 }
 
 fn context_lane_budget(lane_key: &str) -> usize {
-    if lane_key.starts_with("### Code") {
+    if lane_key.starts_with(CONTEXT_SEEN_NODE_IDS_LABEL) {
+        usize::MAX
+    } else if lane_key.starts_with(CONTEXT_CODE_HEADING) {
         8_500
-    } else if lane_key.starts_with("### Related Symbols") {
+    } else if lane_key.starts_with(CONTEXT_RELATED_SYMBOLS_HEADING) {
         3_500
-    } else if lane_key.starts_with("### Entry Points") || lane_key.starts_with("### Test Coverage")
+    } else if lane_key.starts_with(CONTEXT_ENTRY_POINTS_HEADING)
+        || lane_key.starts_with(CONTEXT_TEST_COVERAGE_HEADING)
     {
         3_000
-    } else if lane_key.starts_with("### Memory Matches") {
+    } else if lane_key.starts_with(CONTEXT_MEMORY_MATCHES_HEADING) {
         2_500
-    } else if lane_key.starts_with("### Extension Points") || lane_key.starts_with("seen_node_ids:")
-    {
+    } else if lane_key.starts_with(CONTEXT_EXTENSION_POINTS_HEADING) {
         1_500
-    } else if lane_key.starts_with("### Index Coverage Hint") {
+    } else if lane_key.starts_with(CONTEXT_INDEX_COVERAGE_HINT_HEADING) {
         1_000
     } else {
         2_000
@@ -405,7 +408,7 @@ fn insert_context_memory_section(
     let Some(section) = context_memory_section(memory_matches, memory_matches_error) else {
         return;
     };
-    if let Some(idx) = output.find("\n### Entry Points") {
+    if let Some(idx) = output.find(&format!("\n{CONTEXT_ENTRY_POINTS_HEADING}")) {
         output.insert_str(idx, &section);
     } else {
         output.push_str(&section);
@@ -418,7 +421,9 @@ fn context_memory_section(
 ) -> Option<String> {
     let mut section = String::new();
     if !memory_matches.is_empty() {
-        section.push_str("\n### Memory Matches\n");
+        section.push('\n');
+        section.push_str(CONTEXT_MEMORY_MATCHES_HEADING);
+        section.push('\n');
         for hit in memory_matches {
             let fact = &hit.fact;
             let _ = writeln!(
@@ -434,7 +439,10 @@ fn context_memory_section(
         return Some(section);
     }
     if let Some(err) = memory_matches_error {
-        let _ = writeln!(section, "\n### Memory Matches\nUnavailable: {err}");
+        let _ = writeln!(
+            section,
+            "\n{CONTEXT_MEMORY_MATCHES_HEADING}\nUnavailable: {err}"
+        );
         return Some(section);
     }
     None
@@ -1668,6 +1676,26 @@ mod tests {
         assert!(preview.len() < full.len());
         assert!(preview.contains("lane truncated"));
         assert!(preview.is_char_boundary(preview.len()));
+    }
+
+    #[test]
+    fn context_lane_preview_keeps_seen_node_ids_parseable() {
+        let ids: Vec<String> = (0..100).map(|i| format!("function:{i:032x}")).collect();
+        let markdown = format!(
+            "{} {}\n",
+            CONTEXT_SEEN_NODE_IDS_LABEL,
+            serde_json::to_string(&ids).unwrap()
+        );
+
+        let preview = context_markdown_lane_preview(&markdown);
+        let json = preview
+            .strip_prefix(CONTEXT_SEEN_NODE_IDS_LABEL)
+            .expect("preview should keep seen_node_ids label")
+            .trim();
+        let parsed: Vec<String> = serde_json::from_str(json).unwrap();
+
+        assert_eq!(parsed, ids);
+        assert!(!preview.contains("lane truncated"));
     }
 
     #[test]

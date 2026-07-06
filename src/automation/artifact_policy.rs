@@ -46,15 +46,15 @@ pub(super) fn artifact_policy(task: AgentTaskKind) -> TaskArtifactPolicy {
         AgentTaskKind::SessionReflector => TaskArtifactPolicy {
             optimizer_action: "update fact proposal evidence or dedupe policy",
             accepted_next_actions: &[
-                "review pending fact proposals",
-                "approve or reject fact proposals from the dashboard",
+                "inspect fact automation outcomes",
+                "apply or reject fact records only when explicitly reviewing",
             ],
             rejected_next_actions: &[
                 "review rejected fact proposals",
                 "adjust evidence query before rerunning",
             ],
             handoff_test: "cargo test --test automation_runner_test session_reflector",
-            eval_replay_command: "cargo test --test automation_runner_test session_reflector_runner_validates_fact_proposals_without_applying -- --nocapture",
+            eval_replay_command: "cargo test --test automation_runner_test session_reflector_runner_auto_applies_valid_fact_proposals_by_default -- --nocapture",
         },
         AgentTaskKind::SkillWriter => TaskArtifactPolicy {
             optimizer_action: "update skill writer evidence or draft validation",
@@ -72,8 +72,8 @@ pub(super) fn artifact_policy(task: AgentTaskKind) -> TaskArtifactPolicy {
         AgentTaskKind::CombinedReview => TaskArtifactPolicy {
             optimizer_action: "update combined review evidence or per-task validation",
             accepted_next_actions: &[
-                "review pending fact proposals and managed skill drafts",
-                "approve or reject each proposal from the dashboard",
+                "inspect fact automation outcomes and managed skill drafts",
+                "apply or reject fact records only when explicitly reviewing",
             ],
             rejected_next_actions: &[
                 "review rejected fact and skill proposals",

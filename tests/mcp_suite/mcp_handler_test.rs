@@ -2770,7 +2770,7 @@ async fn context_memory_controls_filter_disable_and_preserve_markdown() {
 async fn context_memory_large_markdown_uses_reversible_lane_preview() {
     let (cg, _dir) = setup_project().await;
     let tail = "MEMORY_TAIL_MARKER";
-    let long_content = format!("Large reversible memory fact {}{tail}", "x".repeat(4_000));
+    let long_content = format!("Large reversible memory fact {}{tail}", "x".repeat(20_000));
     handle_tool_call(
         &cg,
         "tracedecay_fact_store",

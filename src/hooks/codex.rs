@@ -45,7 +45,7 @@ const CODEX_POST_COMPACT_BUDGET: Duration = Duration::from_secs(115);
 /// Codex `SessionStart` hook handler.
 pub async fn hook_codex_session_start() -> i32 {
     let event = read_hook_event!();
-    let root = codex_project_root_from_event(&event);
+    let root = codex_project_root_from_event_with_identity(&event).await;
     record_hook_invoked(root.as_deref(), HintAgent::Codex, "SessionStart", &event);
     let (mut context, _) = codex_session_context_for_event(&event).await;
     if let Some(root) = root.as_deref() {
@@ -74,7 +74,7 @@ pub async fn hook_codex_session_start() -> i32 {
 /// Resets the local counter and injects steering context for the new turn.
 pub async fn hook_codex_user_prompt_submit() -> i32 {
     let event = read_hook_event!();
-    let root = codex_project_root_from_event(&event);
+    let root = codex_project_root_from_event_with_identity(&event).await;
     record_hook_invoked(
         root.as_deref(),
         HintAgent::Codex,
@@ -105,7 +105,7 @@ pub async fn codex_user_prompt_submit_context_for_event(event: &str) -> String {
 
 async fn codex_prompt_memory_recall(event_json: &str) -> Option<String> {
     let parsed = serde_json::from_str::<Value>(event_json).ok()?;
-    let root = codex_project_root_from_parsed_event(&parsed)?;
+    let root = codex_project_root_from_parsed_event_with_identity(&parsed).await?;
     let prompt = prompt_like_text(&parsed)?;
     let session_id = event_session_id(&parsed);
     memory_inject::prompt_memory_recall(&root, session_id.as_deref(), &prompt).await
@@ -115,13 +115,7 @@ async fn codex_prompt_memory_recall(event_json: &str) -> Option<String> {
 async fn codex_session_context_for_event(event_json: &str) -> (String, HookWorkspaceStatus) {
     let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
     let cwd = event_cwd_from_parsed(&parsed);
-    let root = match codex_project_root_from_parsed_event(&parsed) {
-        Some(r) => Some(r),
-        None => match cwd.as_deref() {
-            Some(cwd) => crate::config::discover_project_root_with_identity(cwd).await,
-            None => None,
-        },
-    };
+    let root = codex_project_root_from_parsed_event_with_identity(&parsed).await;
     let session_id = event_session_id(&parsed);
     let status = codex_workspace_status(root.as_deref(), cwd.as_deref());
     record_workspace_status_analytics(root.as_deref(), status, session_id.as_deref());
@@ -141,9 +135,9 @@ async fn codex_session_context_for_event(event_json: &str) -> (String, HookWorks
 /// Codex `SubagentStart` hook handler.
 pub async fn hook_codex_subagent_start() -> i32 {
     let event = read_hook_event!();
-    let root = codex_project_root_from_event(&event);
+    let root = codex_project_root_from_event_with_identity(&event).await;
     record_hook_invoked(root.as_deref(), HintAgent::Codex, "SubagentStart", &event);
-    let count = record_codex_subagent_start(&event);
+    let count = record_codex_subagent_start(&event).await;
     let output = evaluate_codex_subagent_start(&event);
     let digest = match root.as_deref() {
         Some(root) => memory_inject::session_memory_digest(root, None).await,
@@ -185,7 +179,7 @@ fn merge_codex_subagent_output(output: Option<String>, digest: Option<String>) -
 /// Codex `PostToolUse` hook handler used to keep the graph fresh.
 pub async fn hook_codex_post_tool_use() -> i32 {
     let event = read_hook_event!();
-    let root = codex_project_root_from_event(&event);
+    let root = codex_project_root_from_event_with_identity(&event).await;
     record_hook_invoked(root.as_deref(), HintAgent::Codex, "PostToolUse", &event);
     notify_post_tool_use(&CODEX_POST_TOOL_USE_SPEC, &event).await;
     0
@@ -196,7 +190,7 @@ pub async fn hook_codex_post_tool_use() -> i32 {
 /// Replaces temporary compaction summaries from visible LCM source messages.
 pub async fn hook_codex_post_compact() -> i32 {
     let event = read_hook_event!();
-    let root = codex_project_root_from_event(&event);
+    let root = codex_project_root_from_event_with_identity(&event).await;
     record_hook_invoked(root.as_deref(), HintAgent::Codex, "PostCompact", &event);
     if std::env::var_os(crate::sessions::codex_app_server::CODEX_SUMMARY_CHILD_ENV).is_none() {
         codex_post_compact(&event).await;
@@ -274,10 +268,12 @@ pub fn evaluate_codex_subagent_start(event_json: &str) -> Option<String> {
 }
 
 /// Records a Codex `SubagentStart` and returns the session-local count.
-pub fn record_codex_subagent_start(event_json: &str) -> Option<u64> {
+pub async fn record_codex_subagent_start(event_json: &str) -> Option<u64> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
-    let root = codex_project_root_from_parsed_event(&parsed)?;
-    let layout = crate::storage::resolve_layout_for_current_profile(&root).ok()?;
+    let root = codex_project_root_from_parsed_event_with_identity(&parsed).await?;
+    let layout = crate::tracedecay::TraceDecay::resolve_store_layout_for_identity(&root)
+        .await
+        .ok()?;
     let path = layout.data_root.join("codex_subagent_starts.json");
     let analytics_session_id = event_session_id(&parsed);
     let session_id = analytics_session_id
@@ -418,6 +414,16 @@ pub(super) fn codex_project_root_from_parsed_event(parsed: &Value) -> Option<Pat
     crate::config::discover_project_root(&cwd)
 }
 
+async fn codex_project_root_from_event_with_identity(event_json: &str) -> Option<PathBuf> {
+    let parsed: Value = serde_json::from_str(event_json).ok()?;
+    codex_project_root_from_parsed_event_with_identity(&parsed).await
+}
+
+async fn codex_project_root_from_parsed_event_with_identity(parsed: &Value) -> Option<PathBuf> {
+    let cwd = event_cwd_from_parsed(parsed)?;
+    crate::config::discover_project_root_with_identity(&cwd).await
+}
+
 fn codex_workspace_status(root: Option<&Path>, cwd: Option<&Path>) -> HookWorkspaceStatus {
     if root.is_some() {
         return HookWorkspaceStatus::Initialized;
@@ -472,7 +478,8 @@ pub fn codex_apply_patch_rel_paths(command: &str, cwd: &Path, project_root: &Pat
 
 async fn codex_post_compact(event_json: &str) {
     let work = async {
-        let Some(project_root) = codex_project_root_from_event(event_json) else {
+        let Some(project_root) = codex_project_root_from_event_with_identity(event_json).await
+        else {
             return;
         };
         if !crate::tracedecay::TraceDecay::has_initialized_store(&project_root).await {
@@ -523,7 +530,7 @@ async fn codex_post_compact(event_json: &str) {
 }
 
 async fn reset_counter_for_codex_event(event_json: &str) {
-    let Some(project_root) = codex_project_root_from_event(event_json) else {
+    let Some(project_root) = codex_project_root_from_event_with_identity(event_json).await else {
         return;
     };
     if let Ok(cg) = crate::tracedecay::TraceDecay::open(&project_root).await {

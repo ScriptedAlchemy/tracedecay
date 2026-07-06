@@ -220,7 +220,7 @@ Every backend-validated run writes six chained artifacts, each hash-linked to
 its predecessors: **traces → feedback → generated_evals → validation_gate →
 optimizer_diagnosis → codex_handoff**. These are inspectable via
 `/api/automation/runs/{run_id}/artifacts[/{kind}]`. The handoff is the durable
-output for broader improvement work and preserves the approval gates.
+output for broader improvement work and preserves the configured apply policy.
 
 ### 2.5 Managed skills and distribution (`managed_skills.rs`, `skill_targets.rs`)
 
@@ -275,13 +275,13 @@ in `delegated_host` mode TraceDecay does no backend calls of its own.
 
 | # | Strength | TraceDecay | Hermes |
 |---|----------|-----------|--------|
-| S1 | **Approval gating by default** | `require_dashboard_approval=true`, fact proposals and skill drafts staged as `pending_approval`; destructive memory ops manual-approval-only | `write_approval` default **off**; background review writes memory and skills freely (the source of the "wrong assumptions" complaints its own docstring admits) |
+| S1 | **Model-managed memory with safety policy** | Fact automation is self-managed by the model/automation loop, with explicit dashboard review only when configured; destructive memory ops remain policy-gated | `write_approval` default **off**; background review writes memory and skills freely (the source of the "wrong assumptions" complaints its own docstring admits) |
 | S2 | **Deterministic validation gate** | LLM output re-validated against recomputed evidence (allowed fact ids, confidence floor, mandatory source spans, checksum-guarded skill updates) | Trusts the review fork's writes; only optional post-hoc security scan |
 | S3 | **Artifact/evidence chain** | traces → feedback → generated evals → validation gate → optimizer diagnosis → codex handoff, hash-linked, per run, API-inspectable | Cron output archives and a curator report file; no structured chain |
 | S4 | **Run ledger and failure discipline** | Trigger provenance, input/evidence hashes, error classification, non-retryable circuit breaker, cooldowns, skip dedup, stale locks | Best-effort daemon thread; failures log a warning and vanish |
 | S5 | **Structured memory** | HRR/FHRR-encoded fact store with trust scores, categories, entities, contradiction checks, FTS, oplog | Two flat §-delimited markdown files with char budgets (plus optional external providers) |
 | S6 | **Multi-host skill distribution** | One managed store exported to Cursor, Codex, Claude Code, OpenCode, Kimi, Kiro (overlay or prompt-index + MCP body serving), plus shareable Codex plugin artifacts | Single-host `~/.hermes/skills` |
-| S7 | **Dashboard review surface** | Full CRUD + lifecycle UI/API for skills, fact proposals, scheduler pause/resume, run artifacts | CLI slash-commands and a thinner web dashboard for pending writes |
+| S7 | **Dashboard observability surface** | Full CRUD + lifecycle UI/API for skills, fact automation outcomes/proposals, scheduler pause/resume, run artifacts | CLI slash-commands and a thinner web dashboard for pending writes |
 | S8 | **Standalone/delegated host split** | Clean contract for owning vs bridging the loops (incl. read-only Hermes bridge) | N/A — Hermes is always the host |
 
 ### 3.3 Verdict
@@ -291,7 +291,7 @@ missing the **signal layer** that makes Hermes's loops actually learn
 (G1–G4): Hermes reviews the right context at the right moment with a smart
 prompt and an agentic loop; TraceDecay reviews a keyword-filtered sample on a
 timer with a thin prompt. Closing G1–G5 keeps every TraceDecay safety
-property intact — they are orthogonal to approval gating.
+property intact — they are orthogonal to manual approval modes.
 
 ---
 
@@ -303,7 +303,7 @@ property intact — they are orthogonal to approval gating.
 | **P0** | **R2. Port the Hermes editorial policy into the prompts** | Rewrite `build_skill_writer_prompt` / `build_session_reflector_prompt` with: patch-over-create preference ladder, class-level naming rule, frustration-as-first-class-signal, and the do-NOT-capture list (env failures, negative tool claims, transients, one-off narratives). Bump `prompt_version` to `:v2` so ledger/input hashes distinguish eras. | `src/automation/runner.rs:741-753`, `src/automation/backend.rs:220-226`; source text to adapt: `hermes-agent/agent/background_review.py:45-233` |
 | **P1** | **R3. Activity-coupled triggering** | Add `AutomationTrigger::SessionActivity`: have session-ingestion (hooks / LCM ingest) mark "new evidence since last run" per task, and let the scheduler tick run reflector/skill_writer when new sessions landed — instead of (or in addition to) the blind interval. Redefine `min_idle_secs` to measure time since the **last LCM ingestion/session activity** (true idle, matching the contracts doc's wording), not time since the task's own last run. | `src/automation/scheduler.rs:203-208` (`schedule_decision`), `src/automation/run_ledger.rs` (`AutomationTrigger`), `src/daemon.rs:1228` (`run_automation_scheduler_loop`); activity timestamps available from the LCM sessions DB used in `runner.rs::automation_lcm_db_path` |
 | **P1** | **R4. Session-replay evidence, not just keyword grep** | For the reflector and skill writer, add a "recent completed sessions" evidence mode: pull the last N sessions' turn-ordered slices (or LCM summary DAG nodes) rather than only grep hits on fixed queries. Keep the grep as a secondary recall channel. The `session_id` option already exists on `SessionReflectorAutomationOptions` — drive it from recently-completed sessions. | `src/automation/runner.rs:170-260` and `:574-700` (evidence builders), `src/sessions/lcm` replay/summary APIs; keep `evidence_hash` semantics intact |
-| **P1** | **R5. Surface loop results to the user in-session** | Emit a compact result line ("skill draft 'x' staged for approval; 2 fact proposals pending") through channels agents already see: an MCP notification / next-tool-response nudge (the hint infrastructure exists), plus a dashboard badge count. This is Hermes's "💾 Self-improvement review" moment and drives the approval queue getting drained. | `src/daemon.rs:431-530` (scheduler task logging), MCP server hint/nudge path in `src/mcp/server.rs`; dashboard: pending counts already derivable from `fact_proposals.rs` + `managed_skills.rs::list_managed_skills` |
+| **P1** | **R5. Surface loop results to the user in-session** | Emit a compact result line ("skill draft 'x' staged; 2 fact updates applied; 1 validation warning") through channels agents already see: an MCP notification / next-tool-response nudge (the hint infrastructure exists), plus a dashboard badge count. This is Hermes's "💾 Self-improvement review" moment and drives inspection of outcomes and telemetry. | `src/daemon.rs:431-530` (scheduler task logging), MCP server hint/nudge path in `src/mcp/server.rs`; dashboard: fact automation counts already derivable from `fact_proposals.rs` + `managed_skills.rs::list_managed_skills` |
 | **P2** | **R6. Managed-skill consolidation pass (curator parity)** | Add an overlap/consolidation review to skill_writer evidence (pairwise similarity of managed skill bodies/titles) and allow an explicit `merge`/`archive` recommendation kind that stages — never auto-applies — consolidations. Honor pinned exactly as Hermes curator does; keep "archive not delete". | New logic beside `src/automation/skill_usage/recommendations.rs`; proposal handling in `src/automation/skill_writer.rs::validate_and_apply_skill_proposals`; similarity helpers exist in the memory/dedup stack |
 | **P2** | **R7. Combined reflector+skill pass option** | When both tasks are due in the same tick, run one combined backend call with shared evidence (Hermes `_COMBINED_REVIEW_PROMPT` pattern) returning `{facts:[], skills:[]}`. Halves backend cost and gives the model cross-signal (a correction often yields both a fact and a skill patch). | `src/automation/runner.rs` (new entry point), `src/automation/backend.rs` (new `AgentTaskKind::CombinedReview` contract), scheduler dispatch in `src/daemon.rs` |
 | **P2** | **R8. Deliver curated memory into host prompts** | Close the loop's consumption side: export a bounded, trust-ranked "durable facts" snapshot (Hermes MEMORY.md analogue) into the same overlay/prompt-index channel skills already use, so approved facts inform sessions without an MCP recall call. Char-budgeted and injection-scanned like Hermes's frozen snapshot. | New exporter beside `src/automation/skill_targets.rs`; fact selection from `src/memory/store.rs` (trust + category filters); wire into `src/agents/{cursor,codex}.rs` install paths |
@@ -312,7 +312,7 @@ property intact — they are orthogonal to approval gating.
 
 Deliberately **not** recommended: copying Hermes's write-freely default
 (`write_approval=false`) or its flat-file memory. TraceDecay's
-approval-first posture and structured fact store are the differentiators;
+policy-guarded apply posture and structured fact store are the differentiators;
 the fixes above raise signal quality and loop latency without weakening
 either.
 
@@ -337,7 +337,7 @@ TraceDecay (`~/projects/tracedecay`):
 - `src/automation/backend.rs` — codex_app_server backend, contracts, error classes
 - `src/automation/{artifacts,artifact_payloads,artifact_policy}.rs` — artifact chain
 - `src/automation/{managed_skills,managed_skill_model,skill_targets,skill_usage}.rs` — skill store + export
-- `src/automation/fact_proposals.rs` — fact approval staging
+- `src/automation/fact_proposals.rs` — fact apply-policy staging
 - `src/automation/hermes_*.rs` — read-only Hermes bridge
 - `src/daemon.rs:1055-1300` — per-project scheduler loops
 - `src/dashboard/automation_*_api.rs`, `src/dashboard/mod.rs:417-559` — `/api/automation/*`

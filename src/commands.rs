@@ -1125,22 +1125,22 @@ pub(crate) fn handle_upload_counter(enable: bool) {
     }
 }
 
-pub(crate) fn handle_gitignore(
+pub(crate) async fn handle_gitignore(
     path: Option<String>,
     action: Option<String>,
 ) -> tracedecay::errors::Result<()> {
     let project_path = tracedecay::config::resolve_path(path);
-    let mut config = tracedecay::config::load_config(&project_path)?;
+    let mut config = tracedecay::config::load_config_with_identity(&project_path).await?;
     match action.as_deref() {
         Some("on") => {
             config.git_ignore = true;
-            tracedecay::config::save_config(&project_path, &config)?;
+            tracedecay::config::save_config_with_identity(&project_path, &config).await?;
             eprintln!("gitignore enabled — .gitignore rules will be respected during indexing.");
             eprintln!("Run `tracedecay sync` to re-index with the new setting.");
         }
         Some("off") => {
             config.git_ignore = false;
-            tracedecay::config::save_config(&project_path, &config)?;
+            tracedecay::config::save_config_with_identity(&project_path, &config).await?;
             eprintln!("gitignore disabled — .gitignore rules will be ignored during indexing.");
             eprintln!("Run `tracedecay sync` to re-index with the new setting.");
         }

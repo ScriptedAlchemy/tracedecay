@@ -1,4 +1,4 @@
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use super::backend::AgentTaskKind;
 use super::config::AutomationConfig;
@@ -89,14 +89,16 @@ impl MemoryApplyPolicy {
         config: &AutomationConfig,
         accepted_count: usize,
         applied_count: usize,
+        auto_managed: bool,
     ) -> Self {
-        Self::new(
-            MemoryApplySubject::SessionFacts,
-            config,
+        Self {
+            subject: MemoryApplySubject::SessionFacts,
             accepted_count,
-            applied_count > 0,
-            accepted_count > 0 && applied_count >= accepted_count,
-        )
+            auto_apply_memory_ops: should_auto_apply_session_facts(config, accepted_count),
+            require_dashboard_approval: session_facts_require_dashboard_approval(config),
+            mutates_store: auto_managed,
+            fully_applied: accepted_count > 0 && applied_count >= accepted_count,
+        }
     }
 
     fn new(
@@ -117,13 +119,15 @@ impl MemoryApplyPolicy {
     }
 
     pub(crate) fn should_apply(config: &AutomationConfig, accepted_count: usize) -> bool {
-        should_auto_apply_memory_ops(config, accepted_count)
+        should_auto_apply_session_facts(config, accepted_count)
     }
 
     pub(crate) fn decision(self) -> MemoryApplyDecision {
         if self.accepted_count == 0 {
             self.subject.no_valid_decision()
-        } else if self.fully_applied {
+        } else if self.fully_applied
+            || (self.subject == MemoryApplySubject::SessionFacts && self.mutates_store)
+        {
             MemoryApplyDecision::AutoApplyAllowed
         } else if self.require_dashboard_approval {
             MemoryApplyDecision::RequiresDashboardApproval
@@ -137,7 +141,8 @@ impl MemoryApplyPolicy {
             "decision": self.decision().as_str(),
             "auto_apply_memory_ops": self.auto_apply_memory_ops,
             "require_dashboard_approval": self.require_dashboard_approval,
-            "approval_required": self.accepted_count > 0 && !self.fully_applied,
+            "approval_required": self.accepted_count > 0
+                && self.decision() != MemoryApplyDecision::AutoApplyAllowed,
             "autonomous_memory_apply": self.mutates_store,
             "mutates_store": self.mutates_store,
         })
@@ -193,7 +198,22 @@ fn session_fact_record_fully_applied(record: &AutomationRunLedgerRecord) -> bool
     if record.accepted_count == 0 {
         return false;
     }
+    if record
+        .validation_report
+        .as_ref()
+        .is_some_and(session_fact_record_self_managed)
+    {
+        return true;
+    }
     session_fact_applied_count(record) >= record.accepted_count
+}
+
+fn session_fact_record_self_managed(report: &Value) -> bool {
+    report.get("dry_run").and_then(Value::as_bool) == Some(false)
+        && report
+            .pointer("/session_fact_apply_policy/decision")
+            .and_then(Value::as_str)
+            == Some(MemoryApplyDecision::AutoApplyAllowed.as_str())
 }
 
 fn session_fact_applied_count(record: &AutomationRunLedgerRecord) -> usize {
@@ -229,4 +249,12 @@ fn value_as_usize(value: &Value) -> Option<usize> {
 
 fn should_auto_apply_memory_ops(config: &AutomationConfig, accepted_count: usize) -> bool {
     accepted_count > 0 && config.auto_apply_memory_ops && !config.require_dashboard_approval
+}
+
+fn should_auto_apply_session_facts(config: &AutomationConfig, accepted_count: usize) -> bool {
+    accepted_count > 0 && !session_facts_require_dashboard_approval(config)
+}
+
+fn session_facts_require_dashboard_approval(config: &AutomationConfig) -> bool {
+    config.require_dashboard_approval && config.auto_apply_memory_ops
 }

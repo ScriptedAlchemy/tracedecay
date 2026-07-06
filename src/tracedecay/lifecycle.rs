@@ -794,6 +794,23 @@ impl TraceDecay {
             .filter(|layout| layout.graph_db_path.is_file())
     }
 
+    /// Resolves the profile store layout for a local path using enrollment
+    /// markers first, then the global registry aliases for the git identity.
+    pub async fn resolve_store_layout_for_identity(project_root: &Path) -> Result<StoreLayout> {
+        Self::resolve_store_layout_for_identity_with_options(
+            project_root,
+            &TraceDecayOpenOptions::default(),
+        )
+        .await
+    }
+
+    pub async fn resolve_store_layout_for_identity_with_options(
+        project_root: &Path,
+        open_options: &TraceDecayOpenOptions,
+    ) -> Result<StoreLayout> {
+        Self::resolve_store_layout_for_local_identity(project_root, open_options).await
+    }
+
     async fn resolve_store_layout_for_local_identity(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,

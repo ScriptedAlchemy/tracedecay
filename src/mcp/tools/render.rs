@@ -5,6 +5,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use crate::context::CONTEXT_PRIORITY_HEADINGS;
 use crate::display::format_relative_time;
 use crate::mcp::response_handles::{
     note_response_handle_store_skipped_no_project_root, observe_response_truncation,
@@ -17,12 +18,6 @@ use crate::tracedecay::current_timestamp;
 use super::MAX_RESPONSE_CHARS;
 
 const MARKDOWN_TRUNCATION_RESERVED_CHARS: usize = 2_048;
-const MARKDOWN_PRIORITY_HEADINGS: &[&str] = &[
-    "### Memory Matches",
-    "### Entry Points",
-    "### Extension Points",
-    "### Test Coverage",
-];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutputFormat {
@@ -178,12 +173,14 @@ pub(super) fn truncate_text_with_handle(project_root: Option<&Path>, text: &str)
     truncated_markdown_with_handle(project_root, text)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn markdown_preview_with_handle(
     project_root: Option<&Path>,
     full_text: &str,
     preview: &str,
 ) -> String {
+    if full_text.len() <= MAX_RESPONSE_CHARS {
+        return full_text.to_string();
+    }
     if full_text == preview {
         return truncated_markdown_with_handle(project_root, full_text);
     }
@@ -194,21 +191,10 @@ fn truncated_markdown_with_handle(project_root: Option<&Path>, text: &str) -> St
     if text.len() <= MAX_RESPONSE_CHARS {
         return text.to_string();
     }
-    let started = std::time::Instant::now();
-    let now = current_timestamp();
-    let handle = prepare_truncated_response_handle(project_root, text);
-    let end = text
-        .len()
-        .min(MAX_RESPONSE_CHARS.saturating_sub(MARKDOWN_TRUNCATION_RESERVED_CHARS));
-    render_markdown_with_shrinking_preview(
-        &MarkdownPreviewRender {
-            project_root,
-            full_len: text.len(),
-            handle: &handle,
-            started,
-            now,
-        },
-        end,
+    render_markdown_truncation_with_handle(
+        project_root,
+        text,
+        text.len(),
         |end| markdown_truncation_preview(text, end),
         |preview| {
             format!(
@@ -220,27 +206,15 @@ fn truncated_markdown_with_handle(project_root: Option<&Path>, text: &str) -> St
     )
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn markdown_preview_truncation_with_handle(
     project_root: Option<&Path>,
     full_text: &str,
     preview: &str,
 ) -> String {
-    let started = std::time::Instant::now();
-    let now = current_timestamp();
-    let handle = prepare_truncated_response_handle(project_root, full_text);
-    let end = preview
-        .len()
-        .min(MAX_RESPONSE_CHARS.saturating_sub(MARKDOWN_TRUNCATION_RESERVED_CHARS));
-    render_markdown_with_shrinking_preview(
-        &MarkdownPreviewRender {
-            project_root,
-            full_len: full_text.len(),
-            handle: &handle,
-            started,
-            now,
-        },
-        end,
+    render_markdown_truncation_with_handle(
+        project_root,
+        full_text,
+        preview.len(),
         |end| {
             if preview.len() <= end {
                 preview.to_string()
@@ -258,32 +232,28 @@ fn markdown_preview_truncation_with_handle(
     )
 }
 
-struct MarkdownPreviewRender<'a> {
-    project_root: Option<&'a Path>,
-    full_len: usize,
-    handle: &'a TruncatedResponseHandle,
-    started: std::time::Instant,
-    now: i64,
-}
-
-fn render_markdown_with_shrinking_preview(
-    context: &MarkdownPreviewRender<'_>,
+fn render_markdown_truncation_with_handle(
+    project_root: Option<&Path>,
+    full_text: &str,
     mut end: usize,
     mut preview_for_end: impl FnMut(usize) -> String,
     preview_note: impl Fn(&str) -> String,
 ) -> String {
+    let started = std::time::Instant::now();
+    let now = current_timestamp();
+    let handle = prepare_truncated_response_handle(project_root, full_text);
+    end = end.min(MAX_RESPONSE_CHARS.saturating_sub(MARKDOWN_TRUNCATION_RESERVED_CHARS));
     loop {
         let preview = preview_for_end(end);
-        let rendered =
-            render_markdown_truncation(&preview, context.handle, &preview_note(&preview));
+        let rendered = render_markdown_truncation(&preview, &handle, &preview_note(&preview));
         if rendered.len() <= MAX_RESPONSE_CHARS || end == 0 {
             observe_response_truncation(
-                context.full_len,
+                full_text.len(),
                 rendered.len(),
-                context.handle.record.is_some(),
-                context.now,
-                truncation_handle_status(context.project_root, context.handle),
-                context.started.elapsed(),
+                handle.record.is_some(),
+                now,
+                truncation_handle_status(project_root, &handle),
+                started.elapsed(),
             );
             return rendered;
         }
@@ -295,7 +265,7 @@ fn markdown_truncation_preview(text: &str, budget: usize) -> String {
     if text.len() <= budget {
         return text.to_string();
     }
-    let has_late_priority = MARKDOWN_PRIORITY_HEADINGS
+    let has_late_priority = CONTEXT_PRIORITY_HEADINGS
         .iter()
         .any(|heading| text.find(heading).is_some_and(|idx| idx > budget));
     if !has_late_priority {
@@ -310,7 +280,7 @@ fn markdown_truncation_preview(text: &str, budget: usize) -> String {
     let mut remaining = budget.saturating_sub(preview.len());
     let mut preserved = String::new();
 
-    for heading in MARKDOWN_PRIORITY_HEADINGS {
+    for heading in CONTEXT_PRIORITY_HEADINGS {
         let Some(start) = text.find(heading) else {
             continue;
         };
@@ -447,8 +417,7 @@ fn render_markdown_truncation(
         let _ = writeln!(
             rendered,
             "Full response stored locally. Retrieve it with `{RESPONSE_RETRIEVE_TOOL}` using handle `{}` before {}.",
-            record.handle,
-            record.expires_at
+            record.handle, record.expires_at
         );
     } else if let Some(status) = &handle.unavailable {
         let message = status

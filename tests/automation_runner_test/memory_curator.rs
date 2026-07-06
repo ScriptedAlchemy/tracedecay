@@ -99,24 +99,21 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     assert_eq!(run.ledger_record.backend, "codex_app_server");
     assert_eq!(run.ledger_record.host_mode.as_deref(), Some("standalone"));
     assert_eq!(run.ledger_record.model.as_deref(), Some("fixture-model"));
-    assert!(
-        run.ledger_record
-            .evidence_hash
-            .as_deref()
-            .is_some_and(|hash| hash.starts_with("sha256:"))
-    );
-    assert!(
-        run.ledger_record
-            .input_hash
-            .as_deref()
-            .is_some_and(|hash| hash.starts_with("sha256:"))
-    );
-    assert!(
-        run.ledger_record
-            .output_hash
-            .as_deref()
-            .is_some_and(|hash| hash.starts_with("sha256:"))
-    );
+    assert!(run
+        .ledger_record
+        .evidence_hash
+        .as_deref()
+        .is_some_and(|hash| hash.starts_with("sha256:")));
+    assert!(run
+        .ledger_record
+        .input_hash
+        .as_deref()
+        .is_some_and(|hash| hash.starts_with("sha256:")));
+    assert!(run
+        .ledger_record
+        .output_hash
+        .as_deref()
+        .is_some_and(|hash| hash.starts_with("sha256:")));
     assert_eq!(
         run.ledger_record.applied_ops.as_ref().unwrap()[0]["fact_id"],
         json!(102)
@@ -134,7 +131,8 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
         json!("requires_dashboard_approval")
     );
     assert_eq!(
-        run.ledger_record.validation_report.as_ref().unwrap()["apply_policy"]["permanent_delete_count"],
+        run.ledger_record.validation_report.as_ref().unwrap()["apply_policy"]
+            ["permanent_delete_count"],
         json!(1)
     );
     assert_eq!(
@@ -227,16 +225,14 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
         validation_payload["improvement_gate"]["optimizer_status"],
         json!("ready_for_optimizer_review")
     );
-    assert!(
-        validation_payload["improvement_gate"]["artifact_refs"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|reference| reference["kind"] == json!("generated_evals")
-                && reference["sha256"]
-                    .as_str()
-                    .is_some_and(|hash| hash.starts_with("sha256:")))
-    );
+    assert!(validation_payload["improvement_gate"]["artifact_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reference| reference["kind"] == json!("generated_evals")
+            && reference["sha256"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("sha256:"))));
     let feedback_artifact = run
         .ledger_record
         .artifacts
@@ -257,32 +253,26 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     assert_eq!(feedback_payload["summary"]["rejected_count"], json!(1));
     assert_eq!(feedback_payload["summary"]["reviewed_count"], json!(2));
     assert_eq!(feedback_payload["human"], json!([]));
-    assert!(
-        feedback_payload["artifact_refs"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|reference| reference["kind"] == json!("traces")
-                && reference["sha256"]
-                    .as_str()
-                    .is_some_and(|hash| hash.starts_with("sha256:")))
-    );
+    assert!(feedback_payload["artifact_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reference| reference["kind"] == json!("traces")
+            && reference["sha256"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("sha256:"))));
     assert_eq!(feedback_payload["model"].as_array().unwrap().len(), 2);
-    assert!(
-        feedback_payload["model"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| entry["outcome"] == json!("accepted"))
-    );
-    assert!(
-        feedback_payload["model"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| entry["outcome"] == json!("rejected")
-                && entry["reason"] == json!("fact_id 999 was not in reviewed evidence"))
-    );
+    assert!(feedback_payload["model"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["outcome"] == json!("accepted")));
+    assert!(feedback_payload["model"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["outcome"] == json!("rejected")
+            && entry["reason"] == json!("fact_id 999 was not in reviewed evidence")));
 
     let eval_artifact = run
         .ledger_record
@@ -332,11 +322,9 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
         eval_payload["runner"]["inputs"]["expected_eval_count"],
         json!(2)
     );
-    assert!(
-        eval_payload["runner"]["inputs"]["validation_report_hash"]
-            .as_str()
-            .is_some_and(|hash| hash.starts_with("sha256:"))
-    );
+    assert!(eval_payload["runner"]["inputs"]["validation_report_hash"]
+        .as_str()
+        .is_some_and(|hash| hash.starts_with("sha256:")));
     assert_eq!(
         eval_payload["runner"]["checks"].as_array().unwrap().len(),
         3
@@ -355,48 +343,41 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
         eval_payload["promotion"]["requires_human_review"],
         json!(true)
     );
-    assert!(
-        eval_payload["artifact_refs"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|reference| reference["kind"] == json!("feedback")
-                && reference["sha256"]
-                    .as_str()
-                    .is_some_and(|hash| hash.starts_with("sha256:")))
-    );
-    assert!(
-        eval_payload["eval_definitions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| entry["expected_outcome"] == json!("accepted")
-                && entry["eval_id"] == json!("memory_curator:accepted:0")
-                && entry["source_feedback_ref"] == json!("accepted:0")
-                && entry["schema_version"] == json!(1)
-                && entry["kind"] == json!("automation_validation_regression")
-                && entry["harness"]["type"] == json!("cargo_test_filter")
-                && entry["harness"]["commands"][0]
-                    == json!("cargo test --test automation_runner_test memory_curator")
-                && entry["fixture"]["candidate"].is_object()
-                && entry["source_feedback"]["artifact_kind"] == json!("feedback")
-                && entry["source_feedback"]["feedback_id"] == json!("accepted:0")
-                && entry["assertions"][0]["type"] == json!("outcome_equals"))
-    );
-    assert!(
-        eval_payload["eval_definitions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| entry["expected_outcome"] == json!("rejected")
-                && entry["eval_id"] == json!("memory_curator:rejected:0")
-                && entry["source_feedback_ref"] == json!("rejected:0")
-                && entry["source_feedback"]["outcome"] == json!("rejected")
-                && entry["expected"]["reason"]
-                    == json!("fact_id 999 was not in reviewed evidence")
-                && entry["input"]["evidence_hash"] == json!(run.ledger_record.evidence_hash)
-                && entry["input"]["input_hash"] == json!(run.ledger_record.input_hash))
-    );
+    assert!(eval_payload["artifact_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reference| reference["kind"] == json!("feedback")
+            && reference["sha256"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("sha256:"))));
+    assert!(eval_payload["eval_definitions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["expected_outcome"] == json!("accepted")
+            && entry["eval_id"] == json!("memory_curator:accepted:0")
+            && entry["source_feedback_ref"] == json!("accepted:0")
+            && entry["schema_version"] == json!(1)
+            && entry["kind"] == json!("automation_validation_regression")
+            && entry["harness"]["type"] == json!("cargo_test_filter")
+            && entry["harness"]["commands"][0]
+                == json!("cargo test --test automation_runner_test memory_curator")
+            && entry["fixture"]["candidate"].is_object()
+            && entry["source_feedback"]["artifact_kind"] == json!("feedback")
+            && entry["source_feedback"]["feedback_id"] == json!("accepted:0")
+            && entry["assertions"][0]["type"] == json!("outcome_equals")));
+    assert!(eval_payload["eval_definitions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["expected_outcome"] == json!("rejected")
+            && entry["eval_id"] == json!("memory_curator:rejected:0")
+            && entry["source_feedback_ref"] == json!("rejected:0")
+            && entry["source_feedback"]["outcome"] == json!("rejected")
+            && entry["expected"]["reason"] == json!("fact_id 999 was not in reviewed evidence")
+            && entry["input"]["evidence_hash"] == json!(run.ledger_record.evidence_hash)
+            && entry["input"]["input_hash"] == json!(run.ledger_record.input_hash)));
     assert_eq!(
         eval_payload["result_refs"][0]["kind"],
         json!("validation_report")
@@ -427,23 +408,19 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
         optimizer_payload["signals"]["validation_gate_decision"],
         json!("ready_for_optimizer_review")
     );
-    assert!(
-        optimizer_payload["artifact_refs"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|reference| reference["kind"] == json!("traces"))
-    );
-    assert!(
-        optimizer_payload["diagnostic_inputs"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|reference| reference["kind"] == json!("generated_evals")
-                && reference["sha256"]
-                    .as_str()
-                    .is_some_and(|hash| hash.starts_with("sha256:")))
-    );
+    assert!(optimizer_payload["artifact_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reference| reference["kind"] == json!("traces")));
+    assert!(optimizer_payload["diagnostic_inputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reference| reference["kind"] == json!("generated_evals")
+            && reference["sha256"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("sha256:"))));
     assert_eq!(optimizer_payload["blockers"], json!([]));
     assert_eq!(
         optimizer_payload["recommendations"][0]["id"],
@@ -494,13 +471,11 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
         handoff_payload["source_refs"][0]["kind"],
         json!("validation_gate")
     );
-    assert!(
-        handoff_payload["artifact_manifest"]["refs"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|reference| reference["kind"] == json!("optimizer_diagnosis"))
-    );
+    assert!(handoff_payload["artifact_manifest"]["refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reference| reference["kind"] == json!("optimizer_diagnosis")));
     assert_eq!(
         handoff_payload["artifact_manifest"]["api_list"],
         json!(format!("/api/automation/runs/{}/artifacts", run.run_id))
@@ -525,11 +500,9 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
             "cargo test --test automation_runner_test memory_curator_runner_validates_backend_ops_and_records_ledger -- --nocapture"
         )
     );
-    assert!(
-        handoff_payload["request"]["evidence_hash"]
-            .as_str()
-            .is_some_and(|hash| hash.starts_with("sha256:"))
-    );
+    assert!(handoff_payload["request"]["evidence_hash"]
+        .as_str()
+        .is_some_and(|hash| hash.starts_with("sha256:")));
     assert_eq!(run.report["llm_apply"]["ops"][0]["fact_id"], json!(102));
     assert_eq!(
         run.report["llm_apply"]["rejected_ops"][0]["rejected_reason"],
@@ -1080,12 +1053,11 @@ async fn memory_curator_runner_records_noop_fallback_when_backend_run_task_fails
         "memory_curator",
         json!({ "ops": [] }),
     );
-    assert!(
-        run.ledger_record
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("executable"))
-    );
+    assert!(run
+        .ledger_record
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("executable")));
     let records = load_run_records(&cg.store_layout().dashboard_root, 10)
         .await
         .unwrap();

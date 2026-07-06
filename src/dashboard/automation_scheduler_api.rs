@@ -59,9 +59,8 @@ async fn scheduler_status_payload(state: &DashboardState) -> ApiResult {
     let records = load_run_records(&state.dashboard_root, 200)
         .await
         .map_err(|err| internal_error(&err))?;
-    // Pending-review badge counts (additive; Hermes parity R5). Best-effort
-    // zero when the profile root is unavailable, mirroring the count helper's
-    // treatment of missing stores.
+    // Additive pending-output counts. Fact proposals stay telemetry/backcompat;
+    // pending skills are the only human-review badge input.
     let pending = match crate::storage::default_profile_root() {
         Ok(profile_root) => {
             count_pending_automation_output(&state.dashboard_root, &profile_root).await

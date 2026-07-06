@@ -421,7 +421,7 @@ pub(crate) async fn curation_runs(
 }
 
 /// `GET /api/plugins/holographic/fact-proposals` — session-reflector fact
-/// proposals awaiting approval, plus historical applied/rejected decisions.
+/// proposal telemetry, plus historical applied/rejected decisions.
 pub(crate) async fn fact_proposals(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<FactProposalParams>,
@@ -455,7 +455,7 @@ pub(crate) async fn fact_proposals(
 }
 
 /// `POST /api/plugins/holographic/fact-proposals/{proposal_id}/apply` —
-/// approval-gated session-reflector fact write.
+/// applies a stored session-reflector fact proposal.
 pub(crate) async fn fact_proposal_apply(
     State(state): State<DashboardState>,
     Path(proposal_id): Path<String>,

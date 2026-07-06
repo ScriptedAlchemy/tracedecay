@@ -32,7 +32,7 @@ confusing, silent, too hard to discover, or missing a safe command.
 | Agents query stores directly | Add/read skill guardrail and expose CLI summary. |
 | Skill exists but is not invoked | Improve description trigger and analytics events. |
 | Automation skips look like failures | Add grouped run/status summary. |
-| Same fact proposed repeatedly | Deduplicate before approval queue. |
+| Same fact proposed repeatedly | Deduplicate before validation/apply. |
 
 ## Guardrails
 

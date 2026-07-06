@@ -902,8 +902,7 @@ function HolographicView({
     window.history.replaceState(null, "", url);
   }, []);
 
-  // Pending automation output (skill drafts + fact proposals awaiting
-  // review) surfaces as a count badge on the Curation tab (parity R5).
+  // Managed-skill drafts awaiting review surface as a Curation badge.
   const pendingAutomationCount = usePendingAutomationCounts(api);
 
   // Cross-view navigation: a similarity pair jumps to the Semantic Map with
@@ -948,7 +947,7 @@ function HolographicView({
                 <Badge
                   tone="secondary"
                   className={NUM_BADGE}
-                  aria-label={`${pendingAutomationCount} automation items awaiting review`}
+                  aria-label={`${pendingAutomationCount} managed skill drafts awaiting review`}
                 >
                   {pendingAutomationCount}
                 </Badge>

@@ -79,6 +79,7 @@ export function AutomationTaskConfigRow({
         <Button
           size="xs"
           outlined
+          aria-label={`Run ${descriptor.runAriaLabel}`}
           disabled={!canRun || !config.enabled}
           title={runTitle}
           onClick={() => onRun(task)}

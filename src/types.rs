@@ -587,7 +587,7 @@ pub struct TaskContext {
     pub entry_points: Vec<Node>,
     pub code_blocks: Vec<CodeBlock>,
     pub related_files: Vec<String>,
-    /// IDs of all nodes returned as entry points (pass to next call's `exclude_node_ids` for dedup).
+    /// IDs of all returned nodes (pass to next call's `exclude_node_ids` for dedup).
     pub seen_node_ids: Vec<String>,
 }
 

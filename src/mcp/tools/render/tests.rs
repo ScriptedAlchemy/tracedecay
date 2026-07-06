@@ -189,10 +189,13 @@ fn markdown_truncation_preview_closes_prefix_fence_before_preserved_sections() {
 fn markdown_preview_with_handle_stores_full_text_when_preview_differs() {
     let _store_guard = lock_response_handle_store();
     let dir = tempfile::TempDir::new().unwrap();
-    let full = "# Full\n\nsmall visible preview\n\n## Details\nfull-only detail";
+    let full = format!(
+        "# Full\n\nsmall visible preview\n\n{}## Details\nfull-only detail",
+        "full-only body\n".repeat(MAX_RESPONSE_CHARS)
+    );
     let preview = "# Full\n\nsmall visible preview";
 
-    let result = markdown_preview_with_handle(Some(dir.path()), full, preview);
+    let result = markdown_preview_with_handle(Some(dir.path()), &full, preview);
 
     assert!(result.starts_with("# Truncated Response"));
     assert!(result.contains("lane-budgeted preview"));
@@ -206,7 +209,7 @@ fn markdown_preview_with_handle_stores_full_text_when_preview_differs() {
         panic!("markdown preview envelope should include handle");
     };
 
-    let prepared = prepare_truncated_response_handle(Some(dir.path()), full);
+    let prepared = prepare_truncated_response_handle(Some(dir.path()), &full);
     let record = prepared.record.as_ref().unwrap();
     assert_eq!(record.handle, handle);
     let stored = retrieve_response_handle_from_root(
@@ -226,6 +229,14 @@ fn markdown_preview_with_handle_keeps_matching_short_text_plain() {
     let text = "# Full\n\nalready complete";
 
     assert_eq!(markdown_preview_with_handle(None, text, text), text);
+}
+
+#[test]
+fn markdown_preview_with_handle_keeps_different_short_full_text_plain() {
+    let full = "# Full\n\nsmall visible preview\n\n## Details\nfull-only detail";
+    let preview = "# Full\n\nsmall visible preview";
+
+    assert_eq!(markdown_preview_with_handle(None, full, preview), full);
 }
 
 #[test]

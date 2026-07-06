@@ -124,12 +124,15 @@ impl AgentIntegration for CodexIntegration {
         // replacement before the sweep below strips the working global
         // config — even when a cached or repo-local refresh already put
         // something into `refreshed`.
-        let has_personal_bundle =
-            !cached_dirs.is_empty() || codex_plugin_manifest_path(&ctx.home).exists();
+        let personal_bundle_exists = codex_plugin_manifest_path(&ctx.home).exists();
+        let has_personal_bundle = !cached_dirs.is_empty() || personal_bundle_exists;
         if refreshed.is_empty() && !has_personal_bundle && !legacy_config_install {
             return Ok(UpdatePluginOutcome::NotInstalled);
         }
-        if refreshed.is_empty() || (legacy_config_install && !has_personal_bundle) {
+        if (cached_dirs.is_empty() && personal_bundle_exists)
+            || refreshed.is_empty()
+            || (legacy_config_install && !has_personal_bundle)
+        {
             install_codex_personal_bootstrap(&ctx.home, &ctx.tracedecay_bin)?;
             refreshed.push(plugin_dir.clone());
         }
@@ -251,7 +254,16 @@ fn codex_legacy_config_has_tracedecay(home: &Path) -> Result<bool> {
 }
 
 fn codex_legacy_config_has_tracedecay_for_update(home: &Path) -> bool {
-    codex_legacy_config_has_tracedecay(home).unwrap_or(false)
+    match codex_legacy_config_has_tracedecay(home) {
+        Ok(has_tracedecay) => has_tracedecay,
+        Err(err) => {
+            eprintln!(
+                "  Could not inspect legacy Codex MCP config at {}: {err}",
+                codex_config_path(home).display()
+            );
+            false
+        }
+    }
 }
 
 fn codex_config_has_tracedecay_mcp_server(config_path: &Path) -> Result<bool> {

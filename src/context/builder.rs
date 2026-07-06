@@ -62,7 +62,13 @@ impl<'a> ContextBuilder<'a> {
         // Build summary
         let summary = Self::build_summary(query, &entry_points, &subgraph);
 
-        let seen_node_ids: Vec<String> = entry_points.iter().map(|n| n.id.clone()).collect();
+        let mut seen = HashSet::new();
+        let mut seen_node_ids = Vec::new();
+        for id in entry_points.iter().chain(&subgraph.nodes).map(|n| &n.id) {
+            if seen.insert(id.as_str()) {
+                seen_node_ids.push(id.clone());
+            }
+        }
 
         Ok(TaskContext {
             query: query.to_string(),

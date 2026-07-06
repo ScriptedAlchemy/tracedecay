@@ -402,12 +402,26 @@ pub fn get_config_path(project_root: &Path) -> PathBuf {
     get_tracedecay_dir(project_root).join(CONFIG_FILENAME)
 }
 
+pub async fn get_config_path_with_identity(project_root: &Path) -> PathBuf {
+    if let Ok(layout) =
+        crate::tracedecay::TraceDecay::resolve_store_layout_for_identity(project_root).await
+    {
+        return layout.config_path;
+    }
+    get_config_path(project_root)
+}
+
 /// Loads the configuration from disk.
 ///
 /// If the configuration file does not exist, returns a default configuration
 /// with `root_dir` set to the given project root.
 pub fn load_config(project_root: &Path) -> Result<TraceDecayConfig> {
     let config_path = get_config_path(project_root);
+    load_config_from_path(project_root, &config_path)
+}
+
+pub async fn load_config_with_identity(project_root: &Path) -> Result<TraceDecayConfig> {
+    let config_path = get_config_path_with_identity(project_root).await;
     load_config_from_path(project_root, &config_path)
 }
 
@@ -447,6 +461,14 @@ pub fn load_config_from_path(project_root: &Path, config_path: &Path) -> Result<
 /// ensuring that a partial write never corrupts the configuration.
 pub fn save_config(project_root: &Path, config: &TraceDecayConfig) -> Result<()> {
     let config_path = get_config_path(project_root);
+    save_config_to_path(&config_path, config)
+}
+
+pub async fn save_config_with_identity(
+    project_root: &Path,
+    config: &TraceDecayConfig,
+) -> Result<()> {
+    let config_path = get_config_path_with_identity(project_root).await;
     save_config_to_path(&config_path, config)
 }
 

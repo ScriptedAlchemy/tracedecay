@@ -83,7 +83,7 @@ export function FactProposalsSection({
             ) : null}
           </div>
           <div className="mt-0.5 text-[11px] text-text-tertiary">
-            Session-reflection facts staged for dashboard approval.
+            Session-reflection facts retained as automation telemetry.
           </div>
         </div>
         <Button
@@ -146,8 +146,8 @@ export function FactProposalsSection({
         {pendingProposals.length === 0 ? (
           <div className="text-xs text-text-tertiary">
             {proposals.length === 0
-              ? "No fact proposals are waiting in this profile."
-              : "No proposals are waiting for review."}
+              ? "No fact proposals recorded in this profile."
+              : "No pending fact proposals in this profile."}
           </div>
         ) : null}
         {resolvedProposals.length ? (

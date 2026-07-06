@@ -1,7 +1,7 @@
 use super::{
-    TraceDecayConfig, USER_DATA_DIR_ENV, db_filename, get_project_db_path, get_tracedecay_dir,
-    is_excluded, is_excluded_dir, is_ignored_by_explicit_global_excludes, is_ignored_by_git,
-    is_included, lock_user_data_dir_test_env, user_data_dir,
+    db_filename, get_project_db_path, get_tracedecay_dir, is_excluded, is_excluded_dir,
+    is_ignored_by_explicit_global_excludes, is_ignored_by_git, is_included,
+    lock_user_data_dir_test_env, user_data_dir, TraceDecayConfig, USER_DATA_DIR_ENV,
 };
 use std::ffi::OsString;
 use std::fs;
@@ -380,6 +380,75 @@ async fn discover_project_root_with_identity_resolves_global_only_store() {
             .await
             .is_none(),
         "a directory with no store must not resolve"
+    );
+}
+
+#[tokio::test]
+async fn config_path_with_identity_uses_registered_store_without_enrollment() {
+    let _profile = super::PinnedUserDataDir::new();
+    let profile_root = crate::storage::default_profile_root().unwrap();
+    let gdb = crate::global_db::GlobalDb::open().await.unwrap();
+
+    let project_dir = TempDir::new().unwrap();
+    let project_root = project_dir.path().canonicalize().unwrap();
+    let status = Command::new("git")
+        .arg("init")
+        .arg(&project_root)
+        .status()
+        .unwrap();
+    assert!(status.success(), "git init failed");
+
+    let project_id = "proj_config_identity";
+    let git_common_dir = crate::worktree::git_common_dir(&project_root);
+    gdb.upsert_code_project(
+        project_id,
+        &project_root,
+        git_common_dir.as_deref(),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    gdb.upsert_store_instance(crate::global_db::StoreInstanceUpsert {
+        store_id: "store_config_identity".to_string(),
+        project_id: project_id.to_string(),
+        store_kind: "code_project".to_string(),
+        storage_mode: "profile_sharded".to_string(),
+        store_relpath: format!("projects/{project_id}"),
+        manifest_relpath: Some(format!("projects/{project_id}/store_manifest.json")),
+        last_verified_at: Some(100),
+        last_write_at: Some(101),
+    })
+    .await
+    .unwrap();
+    let identity_layout = crate::storage::profile_sharded_layout(
+        &project_root,
+        &profile_root,
+        &crate::storage::EnrollmentMarker {
+            project_id: project_id.to_string(),
+            storage_mode: crate::storage::StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    super::save_config_to_path(
+        &identity_layout.config_path,
+        &TraceDecayConfig {
+            root_dir: "identity-config".to_string(),
+            ..TraceDecayConfig::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        super::get_config_path_with_identity(&project_root).await,
+        identity_layout.config_path
+    );
+    assert_eq!(
+        super::load_config_with_identity(&project_root)
+            .await
+            .unwrap()
+            .root_dir,
+        "identity-config"
     );
 }
 

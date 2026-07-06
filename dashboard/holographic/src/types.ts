@@ -470,7 +470,7 @@ export interface AutomationSchedulerStatusResponse {
   enabled: boolean;
   scheduler_tick_secs: number;
   now: number;
-  /** Fact proposals awaiting review (additive; older servers omit it). */
+  /** Pending fact proposal telemetry (additive; older servers omit it). */
   pending_fact_proposals?: number;
   /** Skill drafts/updates awaiting review (additive; older servers omit it). */
   pending_skills?: number;

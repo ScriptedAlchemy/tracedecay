@@ -23,23 +23,23 @@ fn combined_output_fixture() -> Value {
     json!({
         "facts": [
             {
-                "content": "The project requires durable session reflection facts to stay approval gated",
+                "content": "TraceDecay automation should manage durable session reflection facts directly",
                 "category": "project",
                 "tags": ["automation", "memory"],
                 "entities": ["TraceDecay"],
                 "trust": 0.72,
                 "source_span": {"session_id": "session-reflect-1", "message_id": "session-reflect-1-message-001"},
-                "reason": "Repeated session evidence describes the required approval gate"
+                "reason": "Repeated session evidence supports self-managed durable fact automation"
             }
         ],
         "skills": [
             {
                 "id": "automation-run-review",
                 "title": "Automation run review",
-                "summary": "Review self-improvement automation run ledgers and approval gates.",
+                "summary": "Review self-improvement automation run ledgers and apply policies.",
                 "category": "workflow",
                 "body_markdown": "Use when reviewing TraceDecay self-improvement runs.",
-                "reason": "Session evidence repeats approval-gated automation workflow review."
+                "reason": "Session evidence repeats automation workflow outcome review."
             }
         ]
     })
@@ -98,11 +98,18 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
         assert_eq!(report_ref["combined_task_key"], json!("combined_review"));
     }
 
-    // Approval gating is unchanged: the fact lands as a pending proposal and
-    // the skill as a pending-approval draft.
-    let proposals = list_fact_proposals(
+    // Session facts are self-managed by default; managed skills still stage drafts.
+    let pending = list_fact_proposals(
         &cg.store_layout().dashboard_root,
         Some(FactProposalState::PendingApproval),
+        10,
+    )
+    .await
+    .unwrap();
+    assert!(pending.is_empty());
+    let proposals = list_fact_proposals(
+        &cg.store_layout().dashboard_root,
+        Some(FactProposalState::Applied),
         10,
     )
     .await

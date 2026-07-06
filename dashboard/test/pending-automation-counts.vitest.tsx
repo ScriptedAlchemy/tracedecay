@@ -23,11 +23,11 @@ function makeApi(
 }
 
 describe("usePendingAutomationCounts", () => {
-  it("sums pending fact proposals and skills from scheduler status", async () => {
+  it("counts only pending skills from scheduler status", async () => {
     const api = makeApi({ pending_fact_proposals: 2, pending_skills: 1 });
     const { result } = renderHook(() => usePendingAutomationCounts(api));
 
-    await waitFor(() => expect(result.current).toBe(3));
+    await waitFor(() => expect(result.current).toBe(1));
     expect(api.getAutomationSchedulerStatus).toHaveBeenCalledTimes(1);
   });
 

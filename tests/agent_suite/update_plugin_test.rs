@@ -14,7 +14,7 @@ use serde_json::json;
 use tempfile::TempDir;
 use tracedecay::agents::{get_integration, InstallContext, UpdatePluginOutcome};
 
-use crate::common::{AgentEnvLock, EnvVarGuard};
+use crate::common::{tracedecay_command_with_home, AgentEnvLock, EnvVarGuard};
 use crate::plugin_validation_support::{assert_schema_valid, compile_schema, relative_files_under};
 
 const OLD_BIN: &str = "/old/bin/tracedecay";
@@ -919,7 +919,6 @@ trusted_hash = "sha256:post"
 fn codex_update_plugin_refreshes_bundle_with_malformed_unrelated_legacy_config() {
     let home = TempDir::new().unwrap();
     let _agent_env = AgentEnvLock::pin(&home);
-    let project_root = home.path().join("workspace");
     let codex = get_integration("codex").unwrap();
     codex.install(&ctx(home.path(), OLD_BIN)).unwrap();
 
@@ -934,14 +933,20 @@ fn codex_update_plugin_refreshes_bundle_with_malformed_unrelated_legacy_config()
     .unwrap();
     let before = bytes(&config);
 
-    let outcome = codex
-        .update_plugin(&ctx_with_project(home.path(), NEW_BIN, &project_root))
-        .unwrap();
-    assert!(
-        matches!(outcome, UpdatePluginOutcome::Refreshed(paths) if paths == vec![plugin_dir.clone()])
-    );
+    let output = tracedecay_command_with_home(home.path())
+        .arg("update-plugin")
+        .output()
+        .expect("run tracedecay update-plugin");
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Could not inspect legacy Codex MCP config at"));
+    assert!(stderr.contains("failed to parse"));
     assert_eq!(bytes(&config), before);
-    assert_codex_bundle_contains_bin(&plugin_dir, NEW_BIN, CodexScope::Global);
+    assert_codex_bundle_contains_bin(
+        &plugin_dir,
+        env!("CARGO_BIN_EXE_tracedecay"),
+        CodexScope::Global,
+    );
 }
 
 // ---------------------------------------------------------------------------

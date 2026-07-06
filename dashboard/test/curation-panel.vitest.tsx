@@ -590,9 +590,9 @@ describe("CurationPanel", () => {
     renderAutomationPanel();
 
     expect(await screen.findByText(/was not found/i)).toBeTruthy();
-    const runButtons = await screen.findAllByRole("button", { name: /^run$/i });
-    expect((runButtons[0] as HTMLButtonElement).disabled).toBe(true);
-    expect(runButtons[0].getAttribute("title")).toContain("was not found");
+    const runButton = await screen.findByRole("button", { name: "Run Memory curator" });
+    expect((runButton as HTMLButtonElement).disabled).toBe(true);
+    expect(runButton.getAttribute("title")).toContain("was not found");
   });
 
   it("renders automation config validation errors inline", async () => {
@@ -713,9 +713,8 @@ describe("CurationPanel", () => {
     renderAutomationPanel();
 
     await screen.findByLabelText("Session reflector schedule");
-    const runButtons = screen.getAllByRole("button", { name: /^run$/i });
 
-    fireEvent.click(runButtons[1]);
+    fireEvent.click(screen.getByRole("button", { name: "Run Session reflector" }));
 
     await waitFor(() => {
       expect(apiMock.postAutomationRunSessionReflection).toHaveBeenCalledWith({
@@ -723,7 +722,7 @@ describe("CurationPanel", () => {
       });
     });
 
-    fireEvent.click(runButtons[2]);
+    fireEvent.click(screen.getByRole("button", { name: "Run Skill writer" }));
 
     await waitFor(() => {
       expect(apiMock.postAutomationRunSkillWriting).toHaveBeenCalledWith({
@@ -731,7 +730,7 @@ describe("CurationPanel", () => {
       });
     });
 
-    fireEvent.click(runButtons[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Run Memory curator" }));
 
     await waitFor(() => {
       expect(apiMock.postAutomationRunMemoryCurator).toHaveBeenCalledWith({

@@ -15,7 +15,7 @@ use tracedecay::user_config::UserConfig;
 
 pub(crate) fn refresh_generated_plugins() -> tracedecay::errors::Result<()> {
     let home = tracedecay_home_dir()?;
-    let tracedecay_bin = tracedecay_bin_on_path()?;
+    let tracedecay_bin = tracedecay_bin_for_generated_artifacts()?;
     eprintln!("Refreshing tracedecay-generated plugin artifacts (agent configs are not touched)");
 
     // Detection-driven, not `installed_agents`-driven: each integration
@@ -126,6 +126,25 @@ pub(crate) fn tracedecay_bin_on_path() -> tracedecay::errors::Result<String> {
             message: "tracedecay not found on PATH".to_string(),
         }
     })
+}
+
+fn tracedecay_bin_for_generated_artifacts() -> tracedecay::errors::Result<String> {
+    current_tracedecay_exe().map_or_else(tracedecay_bin_on_path, Ok)
+}
+
+fn current_tracedecay_exe() -> Option<String> {
+    let current = std::env::current_exe().ok()?;
+    current_tracedecay_exe_from(Some(&current))
+}
+
+fn current_tracedecay_exe_from(current: Option<&Path>) -> Option<String> {
+    let current = current?;
+    let stem = current.file_stem()?.to_str()?;
+    (stem == "tracedecay").then(|| normalize_bin_path(current))
+}
+
+fn normalize_bin_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 /// How the `post-update` re-exec reacts to the binary-upgrade outcome.
@@ -392,8 +411,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        partition_reinstall_results, post_update_binary, run_install_then_refresh, RefreshPolicy,
-        ReinstallOutcome,
+        current_tracedecay_exe_from, partition_reinstall_results, post_update_binary,
+        run_install_then_refresh, RefreshPolicy, ReinstallOutcome,
     };
     use tempfile::TempDir;
     use tracedecay::upgrade::UpgradeOutcome;
@@ -411,6 +430,23 @@ mod tests {
 
     fn err(id: &str) -> (String, tracedecay::errors::Result<()>) {
         (id.to_string(), Err(config_err("install failed")))
+    }
+
+    #[test]
+    fn generated_artifact_bin_accepts_cargo_target_tracedecay_exe() {
+        let current = Path::new("/repo/target/debug/tracedecay");
+
+        assert_eq!(
+            current_tracedecay_exe_from(Some(current)).as_deref(),
+            Some("/repo/target/debug/tracedecay")
+        );
+    }
+
+    #[test]
+    fn generated_artifact_bin_ignores_non_tracedecay_test_exe() {
+        let current = Path::new("/repo/target/debug/deps/agent_suite-abc123");
+
+        assert_eq!(current_tracedecay_exe_from(Some(current)), None);
     }
 
     #[test]

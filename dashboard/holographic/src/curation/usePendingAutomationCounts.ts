@@ -8,10 +8,9 @@ const POLL_MS = 60_000;
 export type PendingAutomationCountsApi = Pick<typeof defaultApi, "getAutomationSchedulerStatus">;
 
 /**
- * Total automation output awaiting human review (pending fact proposals +
- * pending skill drafts), sourced from the additive counts on
- * `/api/automation/scheduler/status`. Self-contained so the Curation tab
- * badge stays decoupled from the CurationPanel's own data plumbing.
+ * Managed-skill drafts awaiting human review, sourced from the additive counts
+ * on `/api/automation/scheduler/status`. Fact proposal counts remain telemetry
+ * and do not drive review badges.
  */
 export function usePendingAutomationCounts(api: PendingAutomationCountsApi): number {
   const [total, setTotal] = useState(0);
@@ -24,7 +23,7 @@ export function usePendingAutomationCounts(api: PendingAutomationCountsApi): num
       try {
         const status = await api.getAutomationSchedulerStatus();
         if (!cancelled) {
-          setTotal((status.pending_fact_proposals ?? 0) + (status.pending_skills ?? 0));
+          setTotal(status.pending_skills ?? 0);
         }
       } catch {
         // Advisory badge: keep the last known count on transient errors.

@@ -4,10 +4,7 @@
 
 use serde_json::Value;
 
-use super::codex::{
-    codex_additional_context_json, codex_project_root_from_event,
-    codex_project_root_from_parsed_event,
-};
+use super::codex::{codex_additional_context_json, codex_project_root_from_parsed_event};
 use super::post_tool_use::{
     is_claude_edit_tool, is_claude_hint_tool, notify_post_tool_use, tool_input_command_str,
     tool_input_file_path_str, CLAUDE_POST_TOOL_USE_SHELL_TOOLS, CLAUDE_POST_TOOL_USE_SPEC,
@@ -144,12 +141,8 @@ pub(super) fn is_code_research_prompt(prompt: &str) -> bool {
 pub async fn hook_claude_session_start() -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    // Resolve the project root the same registry-aware way the printed context
-    // does: the walk-up-only `codex_project_root_from_event` returns `None` for
-    // exactly this feature's targets — global-only-store projects (e.g. the
-    // tracedecay repo, which has no repo-local `.tracedecay/`) and fresh
-    // harness-created linked worktrees — so gating the notify on it would skip
-    // the AddBranchAt path in its primary scenario.
+    // Resolve the project root the same identity-aware way the printed context
+    // does, including global-only stores and fresh harness-created worktrees.
     let root = claude_session_project_root(&parsed).await;
     record_hook_invoked(root.as_deref(), HintAgent::Claude, "SessionStart", &event);
     let mut context = claude_session_context_for_event(&event).await;
@@ -196,7 +189,7 @@ symbol->search, concept->context";
 /// nothing to steer toward). Analytics are fire-and-forget like `SessionStart`.
 pub async fn hook_claude_subagent_start() -> i32 {
     let event = read_hook_event!();
-    let root = codex_project_root_from_event(&event);
+    let root = claude_project_root_from_event_with_identity(&event).await;
     record_hook_invoked(root.as_deref(), HintAgent::Claude, "SubagentStart", &event);
     if let Some(context) = claude_subagent_start_context(&event).await {
         println!(
@@ -262,61 +255,18 @@ pub async fn claude_session_context_for_event(event_json: &str) -> String {
 
 /// Resolves the tracedecay project root for a Claude session event.
 ///
-/// The cwd walk-up ([`codex_project_root_from_parsed_event`], which calls
-/// `discover_project_root`) only finds projects with a repo-local store, an
-/// enrollment marker, or a profile-sharded store on disk under the session
-/// tree. Projects whose store is global-only — no repo-local `.tracedecay/`,
-/// e.g. the tracedecay repo itself — are invisible to that walk even though the
-/// MCP server serves them via the global-DB registry (see
-/// `serve::resolve_serve_from_global_db`). Without this fallback the
-/// `SessionStart` hook wrongly prints the "no project index found" init nudge
-/// for a project the server indexes fine. Mirror the server's registry step:
-/// prefer a registered, initialized project that contains (or equals) the
-/// session cwd, deepest match first.
+/// Uses the same identity-aware cwd resolver as Codex and Cursor so global-only
+/// git worktrees do not get a false "no project index found" init nudge.
 async fn claude_session_project_root(parsed: &Value) -> Option<std::path::PathBuf> {
-    if let Some(root) = codex_project_root_from_parsed_event(parsed) {
-        return Some(root);
-    }
     let cwd = event_cwd_from_parsed(parsed)?;
-    claude_session_root_from_global_registry(&cwd).await
+    crate::config::discover_project_root_with_identity(&cwd).await
 }
 
-/// Global-DB registry fallback for [`claude_session_project_root`]: returns the
-/// deepest registered, initialized project whose path is an ancestor of (or
-/// equal to) `cwd`. Returns `None` when the global DB is unavailable or no
-/// registered project contains the session cwd.
-async fn claude_session_root_from_global_registry(
-    cwd: &std::path::Path,
+async fn claude_project_root_from_event_with_identity(
+    event_json: &str,
 ) -> Option<std::path::PathBuf> {
-    let gdb = crate::global_db::GlobalDb::open().await?;
-    claude_session_root_from_global_registry_db(cwd, &gdb).await
-}
-
-async fn claude_session_root_from_global_registry_db(
-    cwd: &std::path::Path,
-    gdb: &crate::global_db::GlobalDb,
-) -> Option<std::path::PathBuf> {
-    let canonical_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-    let mut best: Option<std::path::PathBuf> = None;
-    for path in gdb.list_project_paths().await {
-        let project_path = std::path::PathBuf::from(&path);
-        let canonical_project =
-            std::fs::canonicalize(&project_path).unwrap_or_else(|_| project_path.clone());
-        if !canonical_cwd.starts_with(&canonical_project) {
-            continue;
-        }
-        if !crate::tracedecay::TraceDecay::has_initialized_store(&canonical_project).await {
-            continue;
-        }
-        // Deepest ancestor wins (most specific registered project).
-        let is_deeper = best.as_ref().is_none_or(|current| {
-            canonical_project.components().count() > current.components().count()
-        });
-        if is_deeper {
-            best = Some(canonical_project);
-        }
-    }
-    best
+    let parsed = serde_json::from_str::<Value>(event_json).ok()?;
+    claude_session_project_root(&parsed).await
 }
 
 /// Claude Code `PostToolUse` hook handler used to keep the graph fresh and to
@@ -329,7 +279,7 @@ async fn claude_session_root_from_global_registry_db(
 /// not interfere. Fail-open: no surviving hint leaves prior behavior unchanged.
 pub async fn hook_claude_post_tool_use() -> i32 {
     let event = read_hook_event!();
-    let root = codex_project_root_from_event(&event);
+    let root = claude_project_root_from_event_with_identity(&event).await;
     record_hook_invoked(root.as_deref(), HintAgent::Claude, "PostToolUse", &event);
     if let Some(context) = claude_post_tool_use_hint_context(&event) {
         println!("{}", codex_additional_context_json("PostToolUse", &context));
@@ -624,23 +574,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_root_falls_back_to_global_registry_for_global_only_project() {
+    async fn session_root_uses_shared_identity_resolver_for_global_only_project() {
         let _profile = crate::config::PinnedUserDataDir::new();
-
-        let gdb_dir = tempfile::tempdir().unwrap();
-        let gdb_path = gdb_dir.path().join("global.db");
-        let gdb = crate::global_db::GlobalDb::open_at(&gdb_path)
-            .await
-            .unwrap();
+        let profile_root = crate::storage::default_profile_root().unwrap();
+        let gdb = crate::global_db::GlobalDb::open().await.unwrap();
 
         let project_dir = tempfile::tempdir().unwrap();
         let project_root = project_dir.path().canonicalize().unwrap();
-        gdb.upsert(&project_root, 0).await;
-        let graph_db_path = touch_marker_graph_db(&project_root);
+        let status = std::process::Command::new("git")
+            .arg("init")
+            .arg(&project_root)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git init failed");
+
+        let project_id = "proj_claude_identity";
+        gdb.upsert_code_project(project_id, &project_root, None, None, None)
+            .await
+            .unwrap();
+        gdb.upsert_store_instance(crate::global_db::StoreInstanceUpsert {
+            store_id: "store_claude_identity".to_string(),
+            project_id: project_id.to_string(),
+            store_kind: "code_project".to_string(),
+            storage_mode: "profile_sharded".to_string(),
+            store_relpath: format!("projects/{project_id}"),
+            manifest_relpath: Some(format!("projects/{project_id}/store_manifest.json")),
+            last_verified_at: Some(100),
+            last_write_at: Some(101),
+        })
+        .await
+        .unwrap();
+        let layout = crate::storage::profile_sharded_layout(
+            &project_root,
+            &profile_root,
+            &crate::storage::EnrollmentMarker {
+                project_id: project_id.to_string(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )
+        .unwrap();
+        std::fs::create_dir_all(layout.graph_db_path.parent().unwrap()).unwrap();
+        std::fs::write(&layout.graph_db_path, b"").unwrap();
 
         let nested = project_root.join("crates/inner");
         std::fs::create_dir_all(&nested).unwrap();
-        let resolved = claude_session_root_from_global_registry_db(&nested, &gdb).await;
+        let event = serde_json::json!({ "cwd": nested.to_string_lossy() });
+        let resolved = claude_session_project_root(&event).await;
         assert_eq!(
             resolved
                 .as_deref()
@@ -652,17 +631,17 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         let outside_root = outside.path().canonicalize().unwrap();
         assert!(
-            claude_session_root_from_global_registry_db(&outside_root, &gdb)
-                .await
-                .is_none(),
+            claude_session_project_root(
+                &serde_json::json!({ "cwd": outside_root.to_string_lossy() })
+            )
+            .await
+            .is_none(),
             "a cwd outside every registered project must not resolve"
         );
 
-        std::fs::remove_file(&graph_db_path).unwrap();
+        std::fs::remove_file(&layout.graph_db_path).unwrap();
         assert!(
-            claude_session_root_from_global_registry_db(&nested, &gdb)
-                .await
-                .is_none(),
+            claude_session_project_root(&event).await.is_none(),
             "a registered project without a real graph db must not resolve"
         );
     }

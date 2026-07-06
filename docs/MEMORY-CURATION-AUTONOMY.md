@@ -170,14 +170,14 @@ details carry hashes rather than deleted content.
    transient, stale-but-uncertain, and ambiguous same-topic findings. Do not
    lower trust solely because a fact is old.
 7. **Produce a dry-run curation report.** Include every proposed operation,
-   every skipped candidate, and the approval state for any destructive action.
-8. **Gate mutation by risk tier.** Add/update/merge require review-first
-   approval. Delete requires manual approval immediately before apply, showing
-   fact id, content/source summary, reason, and permanent-delete warning.
+   every skipped candidate, and the apply-policy state for any destructive action.
+8. **Gate mutation by risk tier.** Add/update/merge follow the configured apply
+   policy. Delete requires an explicit user request immediately before apply,
+   showing fact id, content/source summary, reason, and permanent-delete warning.
 9. **Apply narrowly.** Use fact-store add/update only for directly supported
-   facts. Use `--llm-ops <file> --apply` or `/curate/apply` only for reviewed
+   facts. Use `--llm-ops <file> --apply` or `/curate/apply` only for validated
    ops. Avoid `POST /curate {"dry_run": false}` unless the operator explicitly
-   approved the deterministic duplicate-deletion plan.
+   requested the deterministic duplicate-deletion plan.
 10. **Verify read-only.** Re-run targeted get/search/list/contradict checks and
     inspect apply results/oplog. Report changed, skipped, rejected, and still
     ambiguous facts.
@@ -197,7 +197,7 @@ Before any mutation, produce this compact report:
 - `merges`: winner id, loser ids, similarity evidence, retained provenance,
   optional `merged_content`, and why separate facts are redundant.
 - `deletes`: fact ids, content/source summary, permanent-delete reason, risk,
-  surviving fact if any, and explicit approval status.
+  surviving fact if any, and apply-policy status.
 - `skipped`: rejected transient, secret-like, unsupported, stale-but-uncertain,
   same-topic-not-duplicate, out-of-scope, or duplicate candidates.
 - `verification_plan`: exact read-only checks to run after apply.
@@ -208,9 +208,9 @@ Before any mutation, produce this compact report:
 | --- | --- | --- |
 | Read-mostly | MCP context/search, fact get/contradict/search/list/probe/related/reason, dry-run preview | allowed |
 | Draft | propose add, update, merge, delete, retag-like notes, LLM review request | allowed |
-| Low-risk apply | add clearly durable facts with source links | review-first |
-| Medium-risk apply | update or merge facts with retained source evidence | review-first |
-| High-risk apply | hard-delete facts or merge losers | manual approval only |
+| Low-risk apply | add clearly durable facts with source links | auto-apply when `auto_apply_memory_ops=true` |
+| Medium-risk apply | update or merge facts with retained source evidence | policy-gated |
+| High-risk apply | hard-delete facts or merge losers | explicit user request only |
 
 Deletion and merge loser removal remain high risk because they remove rows from
 `memory_facts`; entity links cascade and FTS rows drop. There is no recovery
@@ -232,7 +232,7 @@ When subagents participate, give each one an explicit project selector and a non
 - **Telemetry Analyst**: measures hint uptake, accepted/rejected candidates,
   false positives, and audited net token deltas from real transcript data.
 - **Apply Operator**: the parent/operator role only. It invokes mutating APIs
-  after policy and approval gates pass.
+  after policy checks pass and any required explicit user request is present.
 
 For multi-agent runs, each role owns separate notes or database rows. Writers
 do not share editable artifacts. The apply role consumes finalized plans only.

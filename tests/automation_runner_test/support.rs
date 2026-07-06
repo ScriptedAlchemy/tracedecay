@@ -758,7 +758,7 @@ pub(crate) async fn seed_session_evidence(cg: &TraceDecay) {
             message_id: "session-reflect-1-message-001",
             role: "user",
             timestamp: 1_715_000_001,
-            text: "Remember durable session reflection facts must remain approval gated for automation workflows.",
+            text: "Remember TraceDecay automation should manage durable session reflection facts directly.",
             source: None,
         },
     )

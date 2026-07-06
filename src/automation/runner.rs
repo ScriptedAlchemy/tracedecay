@@ -360,7 +360,8 @@ async fn finalize_session_reflector_success(
     let applied_count = applied_proposal_ids.len();
     let fully_applied = accepted_count > 0 && applied_count == accepted_count;
     let mut session_fact_apply_policy =
-        MemoryApplyPolicy::session_facts(config, accepted_count, applied_count).to_json();
+        MemoryApplyPolicy::session_facts(config, accepted_count, applied_count, auto_apply_facts)
+            .to_json();
     if let Some(object) = session_fact_apply_policy.as_object_mut() {
         object.insert(
             "applied_proposal_ids".to_string(),
@@ -371,8 +372,8 @@ async fn finalize_session_reflector_success(
         object.insert("fully_applied".to_string(), json!(fully_applied));
     }
     let report = json!({
-        "status": if fully_applied { "auto_applied" } else { "needs_approval" },
-        "dry_run": !fully_applied,
+        "status": if auto_apply_facts { "auto_applied" } else { "needs_approval" },
+        "dry_run": !auto_apply_facts,
         "task": "session_reflector",
         "evidence_hash": evidence_hash,
         "accepted_facts": accepted_facts,
@@ -401,17 +402,36 @@ async fn finalize_session_reflector_success(
         .filter(|value| value.as_array().is_some_and(|items| !items.is_empty()))
         .cloned();
     record.rejected_ops = report.get("rejected_facts").cloned();
-    record.validation_report = Some(json!({
+    let proposal_review_key = if auto_apply_facts {
+        "applied_proposals"
+    } else {
+        "pending_proposals"
+    };
+    let proposal_review_ids = if auto_apply_facts {
+        report
+            .pointer("/session_fact_apply_policy/applied_proposal_ids")
+            .cloned()
+    } else {
+        report.get("proposal_ids").cloned()
+    }
+    .unwrap_or_else(|| json!([]));
+    let mut validation_report = json!({
         "status": report.get("status").cloned().unwrap_or_else(|| json!("needs_approval")),
         "dry_run": report.get("dry_run").cloned().unwrap_or(json!(true)),
         "accepted_count": accepted_count,
         "rejected_count": rejected_count,
         "session_fact_apply_policy": report.get("session_fact_apply_policy").cloned().unwrap_or_else(|| json!({})),
-        "pending_proposals": {
-            "proposal_ids": report.get("proposal_ids").cloned().unwrap_or_else(|| json!([])),
+    });
+    if let Some(object) = validation_report.as_object_mut() {
+        object.insert(
+            proposal_review_key.to_string(),
+            json!({
+            "proposal_ids": proposal_review_ids,
             "accepted_facts": report.get("accepted_facts").cloned().unwrap_or_else(|| json!([])),
-        },
-    }));
+            }),
+        );
+    }
+    record.validation_report = Some(validation_report);
     Ok((report, record))
 }
 

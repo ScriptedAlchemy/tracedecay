@@ -1,25 +1,25 @@
 ---
 name: inspecting-automation-cycles
-description: 'TraceDecay Dev: Use when auditing TraceDecay automation loops, skipped runs, memory-curator/session-reflector/skill-writer output, pending approvals, or run artifacts.'
+description: 'TraceDecay Dev: Use when auditing TraceDecay automation loops, skipped runs, memory-curator/session-reflector/skill-writer output, apply policy, or run artifacts.'
 ---
 
 # TraceDecay Dev: Inspecting Automation Cycles
 
 TraceDecay automation is a loop, not a single artifact: config schedules jobs,
-runs produce artifacts, dashboards queue approvals, and usage analytics prove
-whether generated output was adopted.
+runs produce artifacts, dashboards expose outcomes/telemetry, and usage
+analytics prove whether generated output was adopted.
 
 ## Workflow
 
 1. Start with `tracedecay automation config get` to identify enabled tasks,
-   schedules, locks, profile paths, and approval gates.
+   schedules, locks, profile paths, and apply policy.
 2. List recent runs with `tracedecay automation runs list --limit 100`; group
    by task and status before opening individual artifacts.
 3. For failures or suspicious skips, open the relevant artifact with
    `tracedecay_automation_run_artifact_view` or
    `tracedecay tool automation_run_artifact_view --args ...`.
-4. Inspect pending human review queues:
-   `tracedecay automation facts list`, dashboard approvals, and
+4. Inspect model-managed memory outcomes plus configured managed-skill review
+   queues: `tracedecay automation facts list`, dashboard telemetry, and
    `tracedecay_skill_list --state pending`.
 5. Check adoption evidence: `tracedecay analytics diagnostics --all --no-sync`,
    `tracedecay sessions search "mcp__tracedecay" --provider all`, and managed
@@ -32,14 +32,15 @@ whether generated output was adopted.
 | `scheduler_interval_not_elapsed` | Healthy throttling | Count only, do not fix. |
 | `scheduler_lock_active` | Another run owns the loop | Check age before calling stale. |
 | `no_new_session_activity` | Nothing new to process | Verify transcript ingest if surprising. |
-| `validation_gate` artifact | Proposed mutation was staged | Report approval command or dashboard path. |
-| Many pending fact proposals | Queue needs curation | Use `tracedecay:project-memory`. |
+| `validation_gate` artifact | Mutation passed validation | Inspect apply-policy state or dashboard artifact. |
+| Many fact proposal records | Inspect validation/apply telemetry | Use `tracedecay:project-memory`. |
 | Active managed skills with zero use | Adoption telemetry gap | Use `tracedecay:diagnosing-analytics`. |
 
 ## Guardrails
 
-- Prefer read-only inspection. Do not approve, reject, delete, or apply queued
-  facts unless the user explicitly asked for mutation.
+- Prefer read-only inspection. Do not mutate fact records.
+- Do not approve, reject, delete, or apply managed-skill drafts unless the user
+  explicitly asked for mutation.
 - Do not treat skipped runs as failures until grouped by skip reason and age.
 - Avoid parallel `tracedecay_skill_view` calls against one profile while
   automation may write usage ledgers. If a usage read reports a truncated JSON
@@ -49,6 +50,6 @@ whether generated output was adopted.
 
 ## Deliverable
 
-Report task/status counts, the exact run or artifact ids inspected, pending
-approval queues, adoption gaps, and the next concrete command for any mutation
-the user should choose.
+Report task/status counts, the exact run or artifact ids inspected, apply-policy
+state, adoption gaps, and the next concrete command for any mutation the user
+should choose.

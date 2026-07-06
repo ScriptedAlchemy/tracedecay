@@ -771,8 +771,8 @@ fn automation_staged_log_fields(
 }
 
 /// After a scheduler tick where at least one task completed, emit a stable
-/// `event=automation_staged` line with the pending-review counts so operators
-/// can see the approval queue growing from the daemon log alone (parity R5).
+/// `event=automation_staged` line with managed-skill review counts plus fact
+/// proposal telemetry.
 /// Silent when nothing is pending or the profile root is unavailable.
 #[cfg(unix)]
 async fn log_automation_staged_if_pending(project_path: &Path, dashboard_root: &Path) {

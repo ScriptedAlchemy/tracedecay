@@ -9,6 +9,7 @@ use crate::errors::Result;
 use super::managed_skill_format::{frontmatter_string, source_key, state_key, target_key};
 use super::managed_skill_validation::{
     validate_managed_skill, validate_native_skill_markdown, validate_support_file,
+    MAX_NATIVE_SKILL_DESCRIPTION_CHARS, MAX_NATIVE_SKILL_NAME_CHARS,
 };
 
 pub const MAX_MANAGED_SUPPORT_FILES: usize = 20;
@@ -70,7 +71,7 @@ pub fn default_managed_skill_targets() -> Vec<SkillInstallTarget> {
 
 fn managed_skill_description(summary: &str) -> String {
     let trimmed = summary.trim();
-    if trimmed
+    let description = if trimmed
         .get(..8)
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("use when"))
         || trimmed
@@ -80,7 +81,41 @@ fn managed_skill_description(summary: &str) -> String {
         trimmed.to_string()
     } else {
         format!("Use when {trimmed}")
+    };
+    truncate_frontmatter_chars(&description, MAX_NATIVE_SKILL_DESCRIPTION_CHARS)
+}
+
+fn native_skill_name(id: &str) -> String {
+    let mut normalized = String::with_capacity(id.len().min(MAX_NATIVE_SKILL_NAME_CHARS));
+    for byte in id.bytes() {
+        match byte {
+            b'a'..=b'z' | b'0'..=b'9' => normalized.push(byte as char),
+            b'-' | b'_' if !normalized.ends_with('-') => normalized.push('-'),
+            _ => {}
+        }
     }
+
+    let trimmed = normalized.trim_matches('-');
+    let truncated = truncate_frontmatter_chars(trimmed, MAX_NATIVE_SKILL_NAME_CHARS);
+    let name = truncated.trim_end_matches('-');
+    if name.is_empty() {
+        "skill".to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+fn truncate_frontmatter_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+
+    value
+        .chars()
+        .take(max_chars)
+        .collect::<String>()
+        .trim_end()
+        .to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -347,7 +382,7 @@ impl ManagedSkill {
     pub fn render_native_skill_markdown(&self) -> Result<String> {
         let mut output = String::new();
         output.push_str("---\n");
-        let _ = writeln!(output, "name: {}", self.metadata.id);
+        let _ = writeln!(output, "name: {}", native_skill_name(&self.metadata.id));
         let _ = writeln!(
             output,
             "description: {}",

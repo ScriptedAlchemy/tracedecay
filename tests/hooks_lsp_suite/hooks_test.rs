@@ -1408,8 +1408,8 @@ fn test_codex_subagent_start_no_history_does_not_suppress_later_research_context
     assert!(context.contains("tracedecay hint:"));
 }
 
-#[test]
-fn test_codex_subagent_start_counts_and_formats_log_line() {
+#[tokio::test]
+async fn test_codex_subagent_start_counts_and_formats_log_line() {
     let _lock = lock_global_db_env();
     let project = tempfile::tempdir().unwrap();
     let profile = tempfile::tempdir().unwrap();
@@ -1425,8 +1425,8 @@ fn test_codex_subagent_start_counts_and_formats_log_line() {
     })
     .to_string();
 
-    assert_eq!(record_codex_subagent_start(&input), Some(1));
-    assert_eq!(record_codex_subagent_start(&input), Some(2));
+    assert_eq!(record_codex_subagent_start(&input).await, Some(1));
+    assert_eq!(record_codex_subagent_start(&input).await, Some(2));
 
     let line = codex_subagent_start_log_line(&input, Some(2), true);
     assert!(line.contains("Codex SubagentStart #2"));
