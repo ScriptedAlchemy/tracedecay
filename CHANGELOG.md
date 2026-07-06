@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.33](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.32...v0.0.33) - 2026-07-06
+
+### Fixed
+
+- *(codex)* silence plugin-only MCP cleanup ([#294](https://github.com/ScriptedAlchemy/tracedecay/pull/294))
+
+### Other
+
+- Fix automation self-improvement review findings
+
 ## [0.0.32](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.31...v0.0.32) - 2026-07-05
 
 ### Added
