@@ -66,7 +66,6 @@ pub(super) async fn registry_drift_findings(
     findings
 }
 
-/// One reconciled store root rewritten during the heal pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReconciledStoreRoot {
     pub store_id: String,
@@ -237,7 +236,7 @@ fn resolve_registry_manifest_path(
 mod tests {
     use super::*;
     use crate::global_db::{GlobalDb, StoreInstanceUpsert};
-    use crate::storage::{StorageMode, StoreKind, StoreManifest, STORE_MANIFEST_SCHEMA_VERSION};
+    use crate::storage::{STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest};
 
     const STORE_ID: &str = "store_reconcile_test";
     const PROJECT_ID: &str = "proj_reconcile_test";
@@ -405,7 +404,10 @@ mod tests {
             "manifest rewrite should still be reported"
         );
         assert_eq!(reconciled[0].store_id, STORE_ID);
-        assert_eq!(reconciled[0].manifest_path, fx.manifest_path);
+        assert_eq!(
+            reconciled[0].manifest_path,
+            fx.manifest_path.canonicalize().unwrap()
+        );
         assert_eq!(
             reconciled[0].config_path, None,
             "failed config rewrite must not be reported as reconciled"

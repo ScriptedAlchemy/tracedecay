@@ -696,28 +696,19 @@ pub fn discover_project_root(start: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Like [`discover_project_root`], but on a sync miss walks ancestors with
-/// [`crate::tracedecay::TraceDecay::has_initialized_store`] so renamed or
-/// global-only repos still resolve.
+/// Like [`discover_project_root`], but on a sync miss checks the git worktree
+/// root with [`crate::tracedecay::TraceDecay::has_initialized_store`] so renamed
+/// or global-only repos still resolve without probing unrelated ancestors.
 pub async fn discover_project_root_with_identity(start: &Path) -> Option<PathBuf> {
     if let Some(root) = discover_project_root(start) {
         return Some(root);
     }
-    let mut dir = start.to_path_buf();
-    let worktree_root = crate::worktree::git_worktree_root(start);
-    loop {
-        if crate::tracedecay::TraceDecay::has_initialized_store(&dir).await {
-            return Some(dir);
-        }
-        if worktree_root
-            .as_ref()
-            .is_some_and(|root| paths_same(&dir, root))
-        {
-            return None;
-        }
-        if !dir.pop() {
-            return None;
-        }
+    let candidate =
+        crate::worktree::git_worktree_root(start).unwrap_or_else(|| start.to_path_buf());
+    if crate::tracedecay::TraceDecay::has_initialized_store(&candidate).await {
+        Some(candidate)
+    } else {
+        None
     }
 }
 

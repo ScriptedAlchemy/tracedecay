@@ -305,12 +305,16 @@ pub fn write_store_manifest(layout: &StoreLayout) -> Result<StoreManifest> {
             ),
         })?;
     let manifest = StoreManifest::from_layout(layout);
-    write_store_manifest_to_path(path, &manifest)?;
+    write_store_manifest_payload(path, &manifest)?;
     Ok(manifest)
 }
 
 /// Writes `manifest` to `path` without rebuilding it from a [`StoreLayout`].
 pub fn write_store_manifest_to_path(path: &Path, manifest: &StoreManifest) -> Result<()> {
+    write_store_manifest_payload(path, manifest)
+}
+
+fn write_store_manifest_payload(path: &Path, manifest: &StoreManifest) -> Result<()> {
     let text = serde_json::to_string_pretty(manifest).map_err(|e| TraceDecayError::Config {
         message: format!(
             "failed to serialize store manifest '{}': {e}",

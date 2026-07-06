@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::backend::AgentTaskKind;
 use super::config::AutomationConfig;
@@ -61,12 +61,27 @@ pub(crate) struct MemoryApplyPolicy {
 
 impl MemoryApplyPolicy {
     pub(crate) fn curation_ops(config: &AutomationConfig, accepted_count: usize) -> Self {
+        let should_apply = should_auto_apply_memory_ops(config, accepted_count);
         Self::new(
             MemoryApplySubject::CurationOps,
             config,
             accepted_count,
-            should_auto_apply_memory_ops(config, accepted_count),
-            should_auto_apply_memory_ops(config, accepted_count),
+            should_apply,
+            should_apply,
+        )
+    }
+
+    pub(crate) fn applied_curation_ops(
+        config: &AutomationConfig,
+        accepted_count: usize,
+        applied_count: usize,
+    ) -> Self {
+        Self::new(
+            MemoryApplySubject::CurationOps,
+            config,
+            accepted_count,
+            applied_count > 0,
+            accepted_count > 0 && applied_count >= accepted_count,
         )
     }
 

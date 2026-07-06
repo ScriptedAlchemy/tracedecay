@@ -1,7 +1,7 @@
 use super::{
-    db_filename, get_project_db_path, get_tracedecay_dir, is_excluded, is_excluded_dir,
-    is_ignored_by_explicit_global_excludes, is_ignored_by_git, is_included,
-    lock_user_data_dir_test_env, user_data_dir, TraceDecayConfig, USER_DATA_DIR_ENV,
+    TraceDecayConfig, USER_DATA_DIR_ENV, db_filename, get_project_db_path, get_tracedecay_dir,
+    is_excluded, is_excluded_dir, is_ignored_by_explicit_global_excludes, is_ignored_by_git,
+    is_included, lock_user_data_dir_test_env, user_data_dir,
 };
 use std::ffi::OsString;
 use std::fs;
@@ -307,7 +307,6 @@ fn sync_config_env_overrides_bool_and_int() {
     );
 }
 
-/// Resolves a global-only registered store that sync discovery cannot see.
 #[tokio::test]
 async fn discover_project_root_with_identity_resolves_global_only_store() {
     let _profile = super::PinnedUserDataDir::new();
@@ -347,6 +346,13 @@ async fn discover_project_root_with_identity_resolves_global_only_store() {
     fs::create_dir_all(layout.graph_db_path.parent().unwrap()).unwrap();
     fs::write(&layout.graph_db_path, b"").unwrap();
 
+    let status = Command::new("git")
+        .arg("init")
+        .arg(&project_root)
+        .status()
+        .unwrap();
+    assert!(status.success(), "git init failed");
+
     assert!(
         super::discover_project_root(&project_root).is_none(),
         "sync discover_project_root must not see a global-only store"
@@ -377,7 +383,52 @@ async fn discover_project_root_with_identity_resolves_global_only_store() {
     );
 }
 
-/// Sync fast path stays identical when repo-local discovery already works.
+#[tokio::test]
+async fn discover_project_root_with_identity_does_not_bind_non_git_child_to_parent_store() {
+    let _profile = super::PinnedUserDataDir::new();
+    let profile_root = crate::storage::default_profile_root().unwrap();
+    let gdb = crate::global_db::GlobalDb::open().await.unwrap();
+
+    let parent_dir = TempDir::new().unwrap();
+    let parent_root = parent_dir.path().canonicalize().unwrap();
+    let project_id = "proj_parent_identity_only";
+    gdb.upsert_code_project(project_id, &parent_root, None, None, None)
+        .await
+        .unwrap();
+    gdb.upsert_store_instance(crate::global_db::StoreInstanceUpsert {
+        store_id: "store_parent_identity_only".to_string(),
+        project_id: project_id.to_string(),
+        store_kind: "code_project".to_string(),
+        storage_mode: "profile_sharded".to_string(),
+        store_relpath: format!("projects/{project_id}"),
+        manifest_relpath: Some(format!("projects/{project_id}/store_manifest.json")),
+        last_verified_at: Some(100),
+        last_write_at: Some(101),
+    })
+    .await
+    .unwrap();
+    let layout = crate::storage::profile_sharded_layout(
+        &parent_root,
+        &profile_root,
+        &crate::storage::EnrollmentMarker {
+            project_id: project_id.to_string(),
+            storage_mode: crate::storage::StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    fs::create_dir_all(layout.graph_db_path.parent().unwrap()).unwrap();
+    fs::write(&layout.graph_db_path, b"").unwrap();
+
+    let child = parent_root.join("scratch/deep");
+    fs::create_dir_all(&child).unwrap();
+
+    assert_eq!(
+        super::discover_project_root_with_identity(&child).await,
+        None,
+        "non-git scratch directories must not inherit initialized parent stores"
+    );
+}
+
 #[tokio::test]
 async fn discover_project_root_with_identity_preserves_sync_fast_path() {
     let _profile = super::PinnedUserDataDir::new();

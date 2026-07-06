@@ -1,15 +1,15 @@
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::apply_policy::{MemoryApplyDecision, MemoryApplyPolicy};
 use super::artifacts::sha256_json;
 use super::backend::{AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse};
 use super::config::AutomationConfig;
-use super::lifecycle::{failed_backend_fallback_report, AgentTaskRunContext, SchedulerGate};
+use super::lifecycle::{AgentTaskRunContext, SchedulerGate, failed_backend_fallback_report};
 use super::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
 use crate::dashboard::memory_curate::{
-    run_memory_curate, MemoryCurateOptions, CURATION_DEFAULT_MAX_CLUSTERS,
-    CURATION_DEFAULT_MIN_CONFIDENCE,
+    CURATION_DEFAULT_MAX_CLUSTERS, CURATION_DEFAULT_MIN_CONFIDENCE, MemoryCurateOptions,
+    run_memory_curate,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
@@ -276,7 +276,12 @@ fn memory_curation_apply_policy(
         .map_or_else(|| &[] as &[Value], Vec::as_slice);
     let destructive = memory_destructive_op_counts(ops);
     let accepted_count = ops.len();
-    let policy = MemoryApplyPolicy::curation_ops(config, accepted_count);
+    let policy = applied_count.map_or_else(
+        || MemoryApplyPolicy::curation_ops(config, accepted_count),
+        |applied_count| {
+            MemoryApplyPolicy::applied_curation_ops(config, accepted_count, applied_count)
+        },
+    );
     let apply_instructions = match policy.decision() {
         MemoryApplyDecision::AutoApplyAllowed => {
             "Accepted memory curation ops were applied because auto-apply is enabled and dashboard approval is not required."
@@ -299,16 +304,7 @@ fn memory_curation_apply_policy(
             object.insert("applied_count".to_string(), json!(applied_count));
             object.insert(
                 "fully_applied".to_string(),
-                json!(accepted_count > 0 && applied_count == accepted_count),
-            );
-            object.insert(
-                "approval_required".to_string(),
-                json!(accepted_count > 0 && applied_count < accepted_count),
-            );
-            object.insert("mutates_store".to_string(), json!(applied_count > 0));
-            object.insert(
-                "autonomous_memory_apply".to_string(),
-                json!(applied_count > 0),
+                json!(accepted_count > 0 && applied_count >= accepted_count),
             );
         }
         object.insert(

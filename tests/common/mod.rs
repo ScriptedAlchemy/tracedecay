@@ -2,6 +2,10 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
+#[cfg(not(windows))]
+use std::fs::File;
+#[cfg(not(windows))]
+use std::io::Write;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -12,6 +16,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use serde_json::Value;
+#[cfg(not(windows))]
+use tempfile::NamedTempFile;
 use tempfile::TempDir;
 use tokio::sync::OnceCell;
 use tracedecay::config::USER_DATA_DIR_ENV;
@@ -293,38 +299,42 @@ pub fn install_fake_codex_launcher(script: &Path, bin: &Path) {
          SCRIPT_DIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n\
          exec python3 \"$SCRIPT_DIR/{script_name}\" \"$@\"\n"
     );
-    let tmp = bin.with_extension(format!("tmp.{}", std::process::id()));
-    fs::write(&tmp, launcher).unwrap_or_else(|err| {
+    write_executable_atomically(bin, launcher.as_bytes()).unwrap_or_else(|err| {
         panic!(
-            "failed to write fake codex launcher {} for {}: {err}",
-            tmp.display(),
+            "failed to install fake codex launcher {} for {}: {err}",
+            bin.display(),
             script.display()
         )
     });
-    make_executable(&tmp);
-    fs::rename(&tmp, bin).unwrap_or_else(|err| {
-        panic!(
-            "failed to install fake codex launcher {} from {}: {err}",
-            bin.display(),
-            tmp.display()
-        )
-    });
+}
+
+#[cfg(not(windows))]
+fn write_executable_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut tmp = NamedTempFile::new_in(parent)?;
+    tmp.write_all(contents)?;
+    make_executable_file(tmp.as_file())?;
+    tmp.as_file_mut().sync_all()?;
+    tmp.persist(path).map_err(|err| err.error)?;
+    Ok(())
 }
 
 #[cfg(unix)]
-fn make_executable(path: &Path) {
+fn make_executable_file(file: &File) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
-    let mut permissions = fs::metadata(path)
-        .unwrap_or_else(|err| panic!("failed to stat {}: {err}", path.display()))
-        .permissions();
+    let mut permissions = file.metadata()?.permissions();
     permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions)
-        .unwrap_or_else(|err| panic!("failed to chmod {}: {err}", path.display()));
+    file.set_permissions(permissions)
 }
 
 #[cfg(not(unix))]
-fn make_executable(_path: &Path) {}
+fn make_executable_file(_file: &File) -> std::io::Result<()> {
+    Ok(())
+}
 
 pub fn windows_python_launcher(script_name: &str) -> String {
     format!(

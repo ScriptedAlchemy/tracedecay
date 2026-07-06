@@ -10,7 +10,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use super::cursor_compact::{
-    cursor_pre_compact_for_event_with_config, CURSOR_PRE_COMPACT_SUMMARY_BUDGET,
+    CURSOR_PRE_COMPACT_SUMMARY_BUDGET, cursor_pre_compact_for_event_with_config,
 };
 use super::cursor_shell::paths_same;
 use super::memory_inject;
@@ -18,7 +18,7 @@ use super::steering::{
     append_context_block, append_context_recovery_hint, build_cursor_session_context,
     cursor_index_signals_for_root, session_start_from_compaction,
 };
-use super::tool_hints::{decide_hint, HintAgent, ToolHint, ToolHintInput};
+use super::tool_hints::{HintAgent, ToolHint, ToolHintInput, decide_hint};
 use super::{
     append_tool_hint, deduped_project_hint_with_id, event_session_id, format_tool_hint,
     hook_route_metadata_from_event, mint_hint_id, nearest_project_like_root, prompt_like_text,
@@ -367,12 +367,7 @@ pub fn evaluate_cursor_subagent_start(event_json: &str) -> Option<String> {
 pub fn evaluate_cursor_post_tool_use(event_json: &str) -> Option<String> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
     let hint = decide_hint(&cursor_tool_hint_input(&parsed))?;
-    Some(
-        serde_json::json!({
-            "additional_context": format_tool_hint(&hint),
-        })
-        .to_string(),
-    )
+    Some(format_cursor_post_tool_use_decision(&hint))
 }
 
 fn format_cursor_post_tool_use_decision(hint: &ToolHint) -> String {
