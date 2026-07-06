@@ -46,7 +46,8 @@ const CODEX_POST_COMPACT_BUDGET: Duration = Duration::from_secs(115);
 pub async fn hook_codex_session_start() -> i32 {
     let event = read_hook_event!();
     let root = codex_project_root_from_event_with_identity(&event).await;
-    record_hook_invoked(root.as_deref(), HintAgent::Codex, "SessionStart", &event);
+    let _hook_telemetry =
+        record_hook_invoked(root.as_deref(), HintAgent::Codex, "SessionStart", &event);
     let (mut context, _) = codex_session_context_for_event(&event).await;
     if let Some(root) = root.as_deref() {
         let session_id = serde_json::from_str::<Value>(&event)
@@ -75,7 +76,7 @@ pub async fn hook_codex_session_start() -> i32 {
 pub async fn hook_codex_user_prompt_submit() -> i32 {
     let event = read_hook_event!();
     let root = codex_project_root_from_event_with_identity(&event).await;
-    record_hook_invoked(
+    let _hook_telemetry = record_hook_invoked(
         root.as_deref(),
         HintAgent::Codex,
         "UserPromptSubmit",
@@ -136,7 +137,8 @@ async fn codex_session_context_for_event(event_json: &str) -> (String, HookWorks
 pub async fn hook_codex_subagent_start() -> i32 {
     let event = read_hook_event!();
     let root = codex_project_root_from_event_with_identity(&event).await;
-    record_hook_invoked(root.as_deref(), HintAgent::Codex, "SubagentStart", &event);
+    let _hook_telemetry =
+        record_hook_invoked(root.as_deref(), HintAgent::Codex, "SubagentStart", &event);
     let count = record_codex_subagent_start(&event).await;
     let output = evaluate_codex_subagent_start(&event);
     let digest = match root.as_deref() {
@@ -180,7 +182,8 @@ fn merge_codex_subagent_output(output: Option<String>, digest: Option<String>) -
 pub async fn hook_codex_post_tool_use() -> i32 {
     let event = read_hook_event!();
     let root = codex_project_root_from_event_with_identity(&event).await;
-    record_hook_invoked(root.as_deref(), HintAgent::Codex, "PostToolUse", &event);
+    let _hook_telemetry =
+        record_hook_invoked(root.as_deref(), HintAgent::Codex, "PostToolUse", &event);
     notify_post_tool_use(&CODEX_POST_TOOL_USE_SPEC, &event).await;
     0
 }
@@ -191,7 +194,8 @@ pub async fn hook_codex_post_tool_use() -> i32 {
 pub async fn hook_codex_post_compact() -> i32 {
     let event = read_hook_event!();
     let root = codex_project_root_from_event_with_identity(&event).await;
-    record_hook_invoked(root.as_deref(), HintAgent::Codex, "PostCompact", &event);
+    let _hook_telemetry =
+        record_hook_invoked(root.as_deref(), HintAgent::Codex, "PostCompact", &event);
     if std::env::var_os(crate::sessions::codex_app_server::CODEX_SUMMARY_CHILD_ENV).is_none() {
         codex_post_compact(&event).await;
     }

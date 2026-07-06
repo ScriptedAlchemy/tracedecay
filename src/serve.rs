@@ -468,10 +468,12 @@ async fn serve_resolved_project(
     allow_initialize_root_routing: bool,
 ) -> Result<()> {
     let scope_prefix = serve_scope_prefix(original_cwd.as_deref(), cg.project_root());
+    let telemetry_timings =
+        timings || crate::config::load_telemetry_config(cg.project_root()).timings;
     let mut handshake = crate::daemon::DaemonHandshake::for_current_client(
         Some(cg.project_root().to_path_buf()),
         scope_prefix,
-        timings,
+        telemetry_timings,
         false,
     )?;
     handshake.allow_initialize_root_routing = allow_initialize_root_routing;

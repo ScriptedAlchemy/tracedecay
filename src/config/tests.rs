@@ -228,6 +228,38 @@ fn sync_config_defaults_round_trip() {
 }
 
 #[test]
+fn telemetry_timing_defaults_on_and_round_trips() {
+    let config = TraceDecayConfig::default();
+    assert!(config.telemetry.timings);
+    let json = serde_json::to_string(&config).unwrap();
+    let parsed: TraceDecayConfig = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed.telemetry, super::TelemetryConfig::default());
+
+    let legacy = r#"{
+        "version": 1,
+        "root_dir": "/tmp/proj",
+        "exclude": [],
+        "max_file_size": 1048576,
+        "extract_docstrings": true,
+        "track_call_sites": true
+    }"#;
+    let parsed: TraceDecayConfig = serde_json::from_str(legacy).unwrap();
+    assert!(parsed.telemetry.timings);
+
+    let disabled = r#"{
+        "version": 1,
+        "root_dir": "/tmp/proj",
+        "exclude": [],
+        "max_file_size": 1048576,
+        "extract_docstrings": true,
+        "track_call_sites": true,
+        "telemetry": { "timings": false }
+    }"#;
+    let parsed: TraceDecayConfig = serde_json::from_str(disabled).unwrap();
+    assert!(!parsed.telemetry.timings);
+}
+
+#[test]
 fn diagnostics_prewarm_round_trips_and_defaults_off() {
     let config = TraceDecayConfig::default();
     assert!(!config.diagnostics_prewarm, "prewarm must default off");

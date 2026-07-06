@@ -31,7 +31,7 @@ pub fn hook_pre_tool_use() {
             .ok()
             .and_then(|cwd| crate::config::discover_project_root(&cwd))
     });
-    record_hook_invoked(
+    let _hook_telemetry = record_hook_invoked(
         root.as_deref(),
         HintAgent::Claude,
         "preToolUse",
@@ -144,7 +144,8 @@ pub async fn hook_claude_session_start() -> i32 {
     // Resolve the project root the same identity-aware way the printed context
     // does, including global-only stores and fresh harness-created worktrees.
     let root = claude_session_project_root(&parsed).await;
-    record_hook_invoked(root.as_deref(), HintAgent::Claude, "SessionStart", &event);
+    let _hook_telemetry =
+        record_hook_invoked(root.as_deref(), HintAgent::Claude, "SessionStart", &event);
     let mut context = claude_session_context_for_event(&event).await;
     // Fire-and-forget: nudge the daemon to refresh the index (and, when this
     // session runs in a harness-created linked worktree, auto-track its branch
@@ -190,7 +191,8 @@ symbol->search, concept->context";
 pub async fn hook_claude_subagent_start() -> i32 {
     let event = read_hook_event!();
     let root = claude_project_root_from_event_with_identity(&event).await;
-    record_hook_invoked(root.as_deref(), HintAgent::Claude, "SubagentStart", &event);
+    let _hook_telemetry =
+        record_hook_invoked(root.as_deref(), HintAgent::Claude, "SubagentStart", &event);
     if let Some(context) = claude_subagent_start_context(&event).await {
         println!(
             "{}",
@@ -280,7 +282,8 @@ async fn claude_project_root_from_event_with_identity(
 pub async fn hook_claude_post_tool_use() -> i32 {
     let event = read_hook_event!();
     let root = claude_project_root_from_event_with_identity(&event).await;
-    record_hook_invoked(root.as_deref(), HintAgent::Claude, "PostToolUse", &event);
+    let _hook_telemetry =
+        record_hook_invoked(root.as_deref(), HintAgent::Claude, "PostToolUse", &event);
     if let Some(context) = claude_post_tool_use_hint_context(&event) {
         println!("{}", codex_additional_context_json("PostToolUse", &context));
     }

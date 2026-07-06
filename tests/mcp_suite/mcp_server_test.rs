@@ -558,7 +558,7 @@ async fn test_tools_call_plain_text_failure_sets_is_error() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_tools_call_timings_flag_off_by_default() {
+async fn test_tools_call_timings_enabled_by_default() {
     let (server, _dir) = setup_server().await;
     let responses = run_server_with_messages(
         server,
@@ -575,17 +575,19 @@ async fn test_tools_call_timings_flag_off_by_default() {
             .find(|r| parse_response(r)["id"] == 31)
             .expect("response with id 31"),
     );
+    let dur = resp["result"]["_meta"]["duration_us"]
+        .as_u64()
+        .expect("duration_us must be present by default");
     assert!(
-        resp["result"]["_meta"]["duration_us"].is_null(),
-        "duration_us must NOT be present when timings flag is off — got {}",
-        resp["result"]["_meta"]
+        dur < 5_000_000,
+        "duration_us should be well under 5 s, got {dur}"
     );
 }
 
 #[tokio::test]
-async fn test_tools_call_timings_flag_on_emits_duration_us() {
+async fn test_tools_call_timings_can_be_disabled() {
     let (server, _dir) = setup_server().await;
-    server.set_timings_enabled(true);
+    server.set_timings_enabled(false);
     let responses = run_server_with_messages(
         server,
         vec![jsonrpc_request(
@@ -601,14 +603,10 @@ async fn test_tools_call_timings_flag_on_emits_duration_us() {
             .find(|r| parse_response(r)["id"] == 32)
             .expect("response with id 32"),
     );
-    let dur = resp["result"]["_meta"]["duration_us"]
-        .as_u64()
-        .expect("duration_us must be a u64 when timings are enabled");
-    // Lower-bound sanity: any real query takes at least a few microseconds.
-    // Upper bound is generous so the test isn't flaky on slow CI runners.
     assert!(
-        dur < 5_000_000,
-        "duration_us should be well under 5 s, got {dur}"
+        resp["result"]["_meta"]["duration_us"].is_null(),
+        "duration_us must NOT be present when timings are disabled — got {}",
+        resp["result"]["_meta"]
     );
 }
 

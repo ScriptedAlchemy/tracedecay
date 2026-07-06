@@ -6,7 +6,7 @@
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
@@ -154,6 +154,56 @@ fn now_unix_secs() -> i64 {
         .map_or(0, |d| d.as_secs() as i64)
 }
 
+struct HookTimingSpan {
+    root: Option<PathBuf>,
+    agent: &'static str,
+    hook_name: String,
+    parsed: Value,
+    started: Instant,
+    enabled: bool,
+}
+
+impl HookTimingSpan {
+    fn new(root: Option<&Path>, agent: HintAgent, hook_name: &str, parsed: Value) -> Self {
+        let enabled = root
+            .map(crate::config::load_telemetry_config)
+            .map_or(true, |telemetry| telemetry.timings);
+        Self {
+            root: root.map(Path::to_path_buf),
+            agent: agent.as_key(),
+            hook_name: hook_name.to_string(),
+            parsed,
+            started: Instant::now(),
+            enabled,
+        }
+    }
+}
+
+impl Drop for HookTimingSpan {
+    fn drop(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        let elapsed_us = self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+        record_hook_analytics(
+            self.root.as_deref(),
+            "hook_completed",
+            serde_json::json!({
+                "agent": self.agent,
+                "hook_name": self.hook_name,
+                "hook_event_name": text_field(&self.parsed, &["hook_event_name", "hookEventName"]),
+                "session_id": event_session_id(&self.parsed),
+                "tool_name": text_field(&self.parsed, &["tool_name", "toolName", "name"]),
+                "command": text_field(&self.parsed, &["command", "cmd", "shell_command"]),
+                "prompt_category": inferred_prompt_category(&self.parsed),
+                "event_cwd": event_cwd_from_parsed(&self.parsed).map(|cwd| cwd.display().to_string()),
+                "duration_us": elapsed_us,
+                "duration_ms": elapsed_us / 1000,
+            }),
+        );
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
     crate::config::lock_user_data_dir_test_env()
@@ -177,7 +227,12 @@ fn mint_hint_id() -> String {
     )
 }
 
-fn record_hook_invoked(root: Option<&Path>, agent: HintAgent, hook_name: &str, event_json: &str) {
+fn record_hook_invoked(
+    root: Option<&Path>,
+    agent: HintAgent,
+    hook_name: &str,
+    event_json: &str,
+) -> HookTimingSpan {
     let parsed: Value = serde_json::from_str(event_json).unwrap_or(Value::Null);
     record_hook_analytics(
         root,
@@ -193,6 +248,7 @@ fn record_hook_invoked(root: Option<&Path>, agent: HintAgent, hook_name: &str, e
             "event_cwd": event_cwd_from_parsed(&parsed).map(|cwd| cwd.display().to_string()),
         }),
     );
+    HookTimingSpan::new(root, agent, hook_name, parsed)
 }
 
 fn inferred_prompt_category(parsed: &Value) -> Option<&'static str> {
@@ -548,8 +604,8 @@ pub(crate) fn read_stdin_to_string() -> std::io::Result<String> {
 mod hint_analytics_tests {
     use super::tool_hints::{HintCategory, MAX_HINTS_PER_SESSION};
     use super::{
-        deduped_project_hint_with_id, mint_hint_id, record_hint_emitted, HintAgent, Path, PathBuf,
-        ToolHint, Value,
+        deduped_project_hint_with_id, mint_hint_id, record_hint_emitted, record_hook_invoked,
+        HintAgent, Path, PathBuf, ToolHint, Value,
     };
     use crate::config::USER_DATA_DIR_ENV;
     use std::collections::HashSet;
@@ -654,6 +710,36 @@ mod hint_analytics_tests {
     fn mint_hint_id_is_unique_across_calls() {
         let ids: HashSet<String> = (0..256).map(|_| mint_hint_id()).collect();
         assert_eq!(ids.len(), 256, "hint ids must be unique");
+    }
+
+    #[test]
+    fn hook_invocation_rows_include_duration_telemetry() {
+        let _lock = super::lock_test_env();
+        let project = tempfile::tempdir().unwrap();
+        let profile = tempfile::tempdir().unwrap();
+        let project_root = project.path().canonicalize().unwrap();
+        let profile_root = profile.path().canonicalize().unwrap();
+        let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
+        let data_root = enroll_project(&project_root, "proj_hook_duration");
+
+        {
+            let _hook_telemetry = record_hook_invoked(
+                Some(&project_root),
+                HintAgent::Codex,
+                "PostToolUse",
+                r#"{"session_id":"s1","tool_name":"Bash","cwd":"/tmp"}"#,
+            );
+        }
+
+        let rows = recorded_rows(&data_root, &profile_root);
+        let row = rows
+            .iter()
+            .find(|row| event_kind(row) == "hook_completed")
+            .expect("hook_completed row");
+        assert_eq!(row["hook_name"].as_str(), Some("PostToolUse"));
+        assert_eq!(row["tool_name"].as_str(), Some("Bash"));
+        assert!(row["duration_us"].as_u64().is_some());
+        assert!(row["duration_ms"].as_u64().is_some());
     }
 
     #[test]

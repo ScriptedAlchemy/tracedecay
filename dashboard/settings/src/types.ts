@@ -7,6 +7,11 @@ export interface ProjectConfig {
   extract_docstrings: boolean;
   track_call_sites: boolean;
   git_ignore: boolean;
+  telemetry: TelemetryConfig;
+}
+
+export interface TelemetryConfig {
+  timings: boolean;
 }
 
 export interface ProjectSettings {
@@ -81,6 +86,7 @@ export interface ProjectSettingsPatch {
   extract_docstrings?: boolean;
   track_call_sites?: boolean;
   git_ignore?: boolean;
+  telemetry?: Partial<TelemetryConfig>;
 }
 
 export interface UserSettingsPatch {

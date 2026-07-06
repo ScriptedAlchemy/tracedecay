@@ -9,7 +9,9 @@ use serde_json::{json, Value};
 use super::util::{http_detail, JsonError};
 use super::DashboardState;
 use crate::automation::config as automation_config;
-use crate::config::{load_config_from_path, save_config_to_path, TraceDecayConfig};
+use crate::config::{
+    load_config_from_path, save_config_to_path, TelemetryConfig, TraceDecayConfig,
+};
 use crate::user_config::{self, UserConfig};
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
@@ -31,6 +33,15 @@ struct ProjectSettingsPatch {
     track_call_sites: Option<bool>,
     #[serde(default)]
     git_ignore: Option<bool>,
+    #[serde(default)]
+    telemetry: Option<TelemetrySettingsPatch>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct TelemetrySettingsPatch {
+    #[serde(default)]
+    timings: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -74,6 +85,12 @@ pub(crate) async fn patch_project_settings(
 
     let current = load_config_from_path(&state.project_root, &state.config_path)
         .map_err(|err| internal_error(&err))?;
+    let telemetry = patch.telemetry.map_or_else(
+        || current.telemetry.clone(),
+        |telemetry| TelemetryConfig {
+            timings: telemetry.timings.unwrap_or(current.telemetry.timings),
+        },
+    );
     let updated = TraceDecayConfig {
         include: patch.include.unwrap_or_else(|| current.include.clone()),
         exclude: patch.exclude.unwrap_or_else(|| current.exclude.clone()),
@@ -83,6 +100,7 @@ pub(crate) async fn patch_project_settings(
             .unwrap_or(current.extract_docstrings),
         track_call_sites: patch.track_call_sites.unwrap_or(current.track_call_sites),
         git_ignore: patch.git_ignore.unwrap_or(current.git_ignore),
+        telemetry,
         ..current.clone()
     };
     let resync_recommended = updated != current;

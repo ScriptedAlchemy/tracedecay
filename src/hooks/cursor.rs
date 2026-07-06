@@ -47,7 +47,8 @@ const CURSOR_STOP_INGEST_BUDGET: Duration = Duration::from_secs(25);
 pub async fn hook_cursor_subagent_start() -> i32 {
     let event = read_hook_event!();
     let root = cursor_project_root_from_event_with_identity(&event).await;
-    record_hook_invoked(root.as_deref(), HintAgent::Cursor, "subagentStart", &event);
+    let _hook_telemetry =
+        record_hook_invoked(root.as_deref(), HintAgent::Cursor, "subagentStart", &event);
     if let Some(decision) = evaluate_cursor_subagent_start(&event) {
         println!("{decision}");
     }
@@ -68,7 +69,8 @@ pub async fn hook_cursor_subagent_start() -> i32 {
 pub async fn hook_cursor_post_tool_use() -> i32 {
     let event = read_hook_event!();
     let root = cursor_project_root_from_event_with_identity(&event).await;
-    record_hook_invoked(root.as_deref(), HintAgent::Cursor, "postToolUse", &event);
+    let _hook_telemetry =
+        record_hook_invoked(root.as_deref(), HintAgent::Cursor, "postToolUse", &event);
     if let Some(decision) = cursor_post_tool_use_decision_for_hook(&event).await {
         println!("{decision}");
     }
@@ -90,7 +92,7 @@ pub async fn hook_cursor_post_tool_use() -> i32 {
 pub async fn hook_cursor_before_submit_prompt() -> i32 {
     let event = read_hook_event!();
     let root = cursor_project_root_from_event_with_identity(&event).await;
-    record_hook_invoked(
+    let _hook_telemetry = record_hook_invoked(
         root.as_deref(),
         HintAgent::Cursor,
         "beforeSubmitPrompt",
@@ -182,7 +184,8 @@ async fn cursor_prompt_memory_recall(event_json: &str) -> Option<String> {
 pub async fn hook_cursor_session_end() -> i32 {
     let event = read_hook_event!();
     let root = cursor_project_root_from_event_with_identity(&event).await;
-    record_hook_invoked(root.as_deref(), HintAgent::Cursor, "sessionEnd", &event);
+    let _hook_telemetry =
+        record_hook_invoked(root.as_deref(), HintAgent::Cursor, "sessionEnd", &event);
     ingest_cursor_transcript_for_event(
         &event,
         Some(CURSOR_CATCH_UP_INGEST_MAX_BYTES),
@@ -202,7 +205,7 @@ pub async fn hook_cursor_session_end() -> i32 {
 pub async fn hook_cursor_stop() -> i32 {
     let event = read_hook_event!();
     let root = cursor_project_root_from_event_with_identity(&event).await;
-    record_hook_invoked(root.as_deref(), HintAgent::Cursor, "stop", &event);
+    let _hook_telemetry = record_hook_invoked(root.as_deref(), HintAgent::Cursor, "stop", &event);
     ingest_cursor_transcript_for_event(
         &event,
         Some(CURSOR_CATCH_UP_INGEST_MAX_BYTES),
@@ -223,7 +226,8 @@ pub async fn hook_cursor_stop() -> i32 {
 pub async fn hook_cursor_pre_compact() -> i32 {
     let event = read_hook_event!();
     let root = cursor_project_root_from_event_with_identity(&event).await;
-    record_hook_invoked(root.as_deref(), HintAgent::Cursor, "preCompact", &event);
+    let _hook_telemetry =
+        record_hook_invoked(root.as_deref(), HintAgent::Cursor, "preCompact", &event);
     if std::env::var(crate::sessions::cursor_agent::CURSOR_SUMMARY_CHILD_ENV).is_err() {
         let mut config = crate::sessions::cursor_agent::CursorAgentSummaryConfig::from_env();
         config.timeout = config.timeout.min(CURSOR_PRE_COMPACT_SUMMARY_BUDGET);
@@ -247,7 +251,8 @@ pub async fn hook_cursor_pre_compact() -> i32 {
 pub async fn hook_cursor_after_file_edit() -> i32 {
     let event = read_hook_event!();
     let root = cursor_project_root_from_event_with_identity(&event).await;
-    record_hook_invoked(root.as_deref(), HintAgent::Cursor, "afterFileEdit", &event);
+    let _hook_telemetry =
+        record_hook_invoked(root.as_deref(), HintAgent::Cursor, "afterFileEdit", &event);
     notify_cursor_after_file_edit(&event).await;
     0
 }
@@ -260,7 +265,8 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
 pub async fn hook_cursor_session_start() -> i32 {
     let event = read_hook_event!();
     let root = cursor_project_root_from_event_with_identity(&event).await;
-    record_hook_invoked(root.as_deref(), HintAgent::Cursor, "sessionStart", &event);
+    let _hook_telemetry =
+        record_hook_invoked(root.as_deref(), HintAgent::Cursor, "sessionStart", &event);
     ingest_cursor_transcript_for_event(
         &event,
         Some(CURSOR_CATCH_UP_INGEST_MAX_BYTES),
@@ -309,7 +315,7 @@ async fn cursor_session_context_for_root(root: Option<&Path>) -> String {
 pub async fn hook_cursor_after_shell() -> i32 {
     let event = read_hook_event!();
     let root = cursor_project_root_from_event_with_identity(&event).await;
-    record_hook_invoked(
+    let _hook_telemetry = record_hook_invoked(
         root.as_deref(),
         HintAgent::Cursor,
         "afterShellExecution",
@@ -325,7 +331,8 @@ pub async fn hook_cursor_after_shell() -> i32 {
 pub async fn hook_cursor_workspace_open() -> i32 {
     let event = read_hook_event!();
     let root = cursor_project_root_from_event_with_identity(&event).await;
-    record_hook_invoked(root.as_deref(), HintAgent::Cursor, "workspaceOpen", &event);
+    let _hook_telemetry =
+        record_hook_invoked(root.as_deref(), HintAgent::Cursor, "workspaceOpen", &event);
     notify_cursor_workspace_open(&event).await;
     if let Some(root) = root.as_deref() {
         memory_inject::regenerate_cursor_memory_rule(root).await;

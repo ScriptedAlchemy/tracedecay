@@ -11,6 +11,7 @@ pub(super) struct McpToolAnalyticsEvent<'a> {
     pub(super) raw_file_tokens: u64,
     pub(super) response_tokens: u64,
     pub(super) net_saved_tokens: u64,
+    pub(super) duration_us: Option<u64>,
     pub(super) timestamp: i64,
     pub(super) request_id: &'a Value,
     pub(super) arguments: &'a Value,
@@ -26,6 +27,8 @@ pub(super) fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> Anal
         "before_tokens": input.raw_file_tokens,
         "after_tokens": input.response_tokens,
         "tokens_saved": input.net_saved_tokens,
+        "duration_us": input.duration_us,
+        "duration_ms": input.duration_us.map(|us| us / 1000),
     });
     if input.outcome == "error" {
         metadata["failure_reason"] = json!("tool_dispatch_error");

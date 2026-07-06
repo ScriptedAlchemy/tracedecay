@@ -888,6 +888,7 @@ impl McpServer {
         // Resolve the [sync] config once (D1/D4/D7 all read it). Loading it
         // here keeps the per-call read path free of config-file IO.
         let sync_config = crate::config::load_sync_config(cg.project_root());
+        let telemetry_config = crate::config::load_telemetry_config(cg.project_root());
 
         let server = Arc::new(Self {
             cg: tokio::sync::RwLock::new(Arc::new(cg)),
@@ -912,7 +913,7 @@ impl McpServer {
             pending_notifications: std::sync::Mutex::new(Vec::new()),
             scope_prefix,
             shutdown_done: AtomicBool::new(false),
-            timings_enabled: AtomicBool::new(false),
+            timings_enabled: AtomicBool::new(telemetry_config.timings),
             last_staleness_check_at: AtomicI64::new(0),
             last_automation_notice_check_at: AtomicI64::new(0),
             worktree_mismatch,
@@ -2422,7 +2423,9 @@ impl McpServer {
             None
         };
 
-        let handler_start = if timings_enabled {
+        let timings_active =
+            timings_enabled && crate::config::load_telemetry_config(cg.project_root()).timings;
+        let handler_start = if timings_active {
             Some(std::time::Instant::now())
         } else {
             None
@@ -2528,6 +2531,7 @@ impl McpServer {
                         raw_file_tokens,
                         response_tokens,
                         net_saved_tokens,
+                        duration_us: handler_elapsed_us,
                         timestamp: ts,
                         request_id: &request_id,
                         arguments: &analytics_arguments,
@@ -2716,6 +2720,7 @@ impl McpServer {
                     tool_name,
                     &request_id,
                     &analytics_arguments,
+                    handler_elapsed_us,
                 );
                 tool_error_response(id, tool_name, &e)
             }
@@ -2729,6 +2734,7 @@ impl McpServer {
         tool_name: &str,
         request_id: &Value,
         arguments: &Value,
+        duration_us: Option<u64>,
     ) {
         let Some(gdb) = self.global_db.clone() else {
             return;
@@ -2741,6 +2747,7 @@ impl McpServer {
             raw_file_tokens: 0,
             response_tokens: 0,
             net_saved_tokens: 0,
+            duration_us,
             timestamp: crate::tracedecay::current_timestamp(),
             request_id,
             arguments,

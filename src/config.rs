@@ -90,6 +90,10 @@ pub struct TraceDecayConfig {
     /// branch lifecycle). Absent in older `config.json` files, so defaulted.
     #[serde(default)]
     pub sync: SyncConfig,
+    /// Analytics telemetry settings. Absent in older `config.json` files, so
+    /// defaulted.
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
 }
 
 fn default_git_ignore() -> bool {
@@ -137,6 +141,24 @@ fn default_sync_orphan_db_gc_days() -> u64 {
 }
 fn default_sync_auto_init() -> bool {
     false
+}
+
+fn default_telemetry_timings() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TelemetryConfig {
+    #[serde(default = "default_telemetry_timings")]
+    pub timings: bool,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            timings: default_telemetry_timings(),
+        }
+    }
 }
 
 /// Auto-sync / index-freshness knobs, exposed as the `[sync]` table in
@@ -312,8 +334,13 @@ impl Default for TraceDecayConfig {
             git_ignore: default_git_ignore(),
             diagnostics_prewarm: false,
             sync: SyncConfig::default(),
+            telemetry: TelemetryConfig::default(),
         }
     }
+}
+
+pub fn load_telemetry_config(project_root: &Path) -> TelemetryConfig {
+    load_config(project_root).map_or_else(|_| TelemetryConfig::default(), |config| config.telemetry)
 }
 
 /// Returns the project marker directory for the given project root.
