@@ -1684,15 +1684,17 @@ mod tests {
         let markdown = format!(
             "{} {}\n",
             CONTEXT_SEEN_NODE_IDS_LABEL,
-            serde_json::to_string(&ids).unwrap()
+            serde_json::to_string(&ids)
+                .unwrap_or_else(|err| panic!("failed to serialize seen node ids: {err}"))
         );
 
         let preview = context_markdown_lane_preview(&markdown);
-        let json = preview
-            .strip_prefix(CONTEXT_SEEN_NODE_IDS_LABEL)
-            .expect("preview should keep seen_node_ids label")
-            .trim();
-        let parsed: Vec<String> = serde_json::from_str(json).unwrap();
+        let json = match preview.strip_prefix(CONTEXT_SEEN_NODE_IDS_LABEL) {
+            Some(json) => json.trim(),
+            None => panic!("preview should keep seen_node_ids label: {preview}"),
+        };
+        let parsed: Vec<String> = serde_json::from_str(json)
+            .unwrap_or_else(|err| panic!("failed to parse seen node ids: {err}: {json}"));
 
         assert_eq!(parsed, ids);
         assert!(!preview.contains("lane truncated"));
