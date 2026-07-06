@@ -16,6 +16,7 @@ use crate::types::{NodeKind, Visibility};
 
 use super::super::ToolResult;
 use super::super::render::{self, Md};
+use super::dependency_hints;
 use super::support::{effective_path, filter_by_scope, require_node_id, unique_file_paths};
 
 /// Handles `tracedecay_status` tool calls.
@@ -1791,7 +1792,23 @@ async fn body_candidates(
     // struct field). Falls back to suffix / name match inside
     // `get_nodes_by_qualified_name`.
     let exact_nodes = cg.get_nodes_by_qualified_name(symbol).await?;
-    let exact_nodes = filter_by_scope(exact_nodes, scope_prefix, |n| &n.file_path);
+    let mut exact_nodes = filter_by_scope(exact_nodes, scope_prefix, |n| &n.file_path);
+    if exact_nodes.is_empty() {
+        let indexed = dependency_hints::lazy_index_ignored_dependency_candidates(
+            cg,
+            symbol,
+            limit,
+            scope_prefix,
+        )
+        .await?;
+        if !indexed.is_empty() {
+            exact_nodes = filter_by_scope(
+                cg.get_nodes_by_qualified_name(symbol).await?,
+                scope_prefix,
+                |n| &n.file_path,
+            );
+        }
+    }
 
     // Wrap as SearchResult so the existing scoring/rendering path works.
     let mut candidates: Vec<crate::types::SearchResult> = exact_nodes
