@@ -286,7 +286,9 @@ pub fn compose_digest_body(snapshot: &MemoryDigestSnapshot, char_budget: usize) 
 
     let mut body = String::from(
         "Curated durable facts from TraceDecay project memory (trust-ranked, newest first). \
-         For deeper recall call MCP tool `tracedecay_recall`.\n",
+         For deeper recall call MCP tool `tracedecay_recall`.\n\
+         Rate facts you rely on with `tracedecay_fact_feedback` (fact_id, helpful/unhelpful) \
+         — trust is earned from use; recalled facts are almost never rated.\n",
     );
     let mut budget_hit = false;
     for section in sections {

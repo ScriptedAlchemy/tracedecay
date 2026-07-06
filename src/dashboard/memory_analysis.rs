@@ -393,9 +393,9 @@ fn pair_has_supersession_cue(facts: &[Value], a: usize, b: usize) -> bool {
 /// extreme (≥ [`ACCESS_RELUCTANCE_EXTREME_SIMILARITY`]). A fact that recall
 /// searches keep returning is demonstrably in use; when the trust-based loser
 /// choice would delete it, the pair is left out of the automatic plan for
-/// LLM/human review instead. (Access frequency is deliberately NOT part of
-/// retrieval ranking — see `combined_score` in `memory::retrieval` — it is a
-/// curation-only signal.)
+/// LLM/human review instead. (Recall `retrieval_count` now also feeds a small
+/// bounded ranking boost in `combined_score` — see `memory::retrieval`; this
+/// access-reluctance guard is an additional curation-only signal on top of it.)
 pub(crate) fn propose_dedup_actions(facts: &[Value], pairs: &[ScoredPair]) -> Vec<Value> {
     let mut consumed_losers: std::collections::HashSet<i64> = std::collections::HashSet::new();
     let mut actions: Vec<Value> = Vec::new();
