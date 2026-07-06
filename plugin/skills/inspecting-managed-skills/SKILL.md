@@ -23,7 +23,7 @@ The daemon automation loop (skill writer, memory curator, session reflector) dra
 ## Handoff
 
 - Running or configuring the automation jobs themselves → `tracedecay automation run` / `tracedecay automation config` (CLI).
-- Reviewing session-reflection fact proposals → `tracedecay automation facts list|view|apply|reject` (CLI).
+- Inspecting session-reflection fact automation outcomes → `tracedecay automation facts list|view|apply|reject` (CLI; mutate only on explicit request).
 - Memory fact curation → `tracedecay:project-memory`.
 
 ## If tools are deferred or MCP fails

@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import readline from "node:readline";
+import { fileURLToPath } from "node:url";
 import { chromium, devices } from "playwright";
 
 const VIEWPORT_PROFILES = {
@@ -32,7 +33,7 @@ const VIEWPORT_PROFILES = {
 const DASHBOARD_URL_RE = /(http:\/\/127\.0\.0\.1:\d+\/)/;
 
 function workspaceRoot() {
-  return new URL("..", import.meta.url).pathname;
+  return fileURLToPath(new URL("..", import.meta.url));
 }
 
 function withTrailingSlash(url) {
@@ -118,13 +119,16 @@ async function startDashboardServer(projectPath) {
 }
 
 async function waitForAny(page, locators, timeoutMs) {
-  const timeout = new Promise((_, reject) => {
-    setTimeout(() => reject(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs);
-  });
-  const checks = locators.map((locator) =>
-    locator.waitFor({ state: "visible", timeout: timeoutMs }).then(() => locator),
-  );
-  return Promise.race([timeout, ...checks]);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    for (const locator of locators) {
+      if (await locator.isVisible().catch(() => false)) {
+        return locator;
+      }
+    }
+    await page.waitForTimeout(Math.min(100, Math.max(0, deadline - Date.now())));
+  }
+  throw new Error(`timed out after ${timeoutMs}ms`);
 }
 
 async function runViewportSmoke(browser, baseUrl, profile, expectLcmMode) {
@@ -132,6 +136,23 @@ async function runViewportSmoke(browser, baseUrl, profile, expectLcmMode) {
     ...profile.contextOptions,
   });
   const page = await context.newPage();
+
+  const runtimeErrors = [];
+  page.on("pageerror", (err) => {
+    runtimeErrors.push(`pageerror: ${err.message}`);
+  });
+  page.on("console", (msg) => {
+    if (msg.type() === "error") {
+      runtimeErrors.push(`console.error: ${msg.text()}`);
+    }
+  });
+  const serverErrors = [];
+  page.on("response", (response) => {
+    if (response.status() >= 500) {
+      serverErrors.push(`${response.status()} ${response.url()}`);
+    }
+  });
+
   await page.goto(baseUrl, { waitUntil: "networkidle" });
 
   // Shell tabs render with role="tab" (older shells used buttons).
@@ -222,7 +243,64 @@ async function runViewportSmoke(browser, baseUrl, profile, expectLcmMode) {
     await waitForAny(page, [recentSessionsHeader, emptyStateHeader], 8000);
   }
 
+  if (profile.name === "desktop") {
+    await runSecondaryTabsSmoke(page);
+  }
+
+  if (runtimeErrors.length > 0) {
+    throw new Error(
+      `dashboard raised ${runtimeErrors.length} runtime error(s):\n  ${runtimeErrors.join("\n  ")}`,
+    );
+  }
+  if (serverErrors.length > 0) {
+    throw new Error(
+      `dashboard returned ${serverErrors.length} server error response(s):\n  ${serverErrors.join("\n  ")}`,
+    );
+  }
+
   await context.close();
+}
+
+async function runSecondaryTabsSmoke(page) {
+  const tab = (name) =>
+    page
+      .getByRole("tab", { name, exact: true })
+      .or(page.getByRole("button", { name, exact: true }));
+
+  await tab("Savings & Cost").click();
+  await page.waitForFunction(
+    () => {
+      const text = document.body.innerText;
+      return !text.includes("Loading savings analytics") && /saved/i.test(text);
+    },
+    undefined,
+    { timeout: 12000 },
+  );
+  for (const subTab of ["Sessions", "Models & Pricing"]) {
+    await tab(subTab).click();
+    await page.waitForTimeout(200);
+  }
+
+  await tab("Code Diagnostics").click();
+  await page.getByText("ENGINES", { exact: false }).first().waitFor({ state: "visible", timeout: 8000 });
+  await assertEngineIdsDoNotCharStack(page);
+
+  await tab("Settings").click();
+  await page.getByText("Project config", { exact: false }).first().waitFor({ state: "visible", timeout: 8000 });
+  await page.getByRole("button", { name: "Save", exact: true }).first().waitFor({ state: "visible", timeout: 8000 });
+}
+
+async function assertEngineIdsDoNotCharStack(page) {
+  const whiteSpaces = await page.$$eval(".tdcd-engine-row > code", (nodes) =>
+    nodes.map((node) => getComputedStyle(node).whiteSpace),
+  );
+  for (const whiteSpace of whiteSpaces) {
+    if (whiteSpace !== "nowrap") {
+      throw new Error(
+        `engine id <code> must not per-character wrap; expected white-space: nowrap, got "${whiteSpace}"`,
+      );
+    }
+  }
 }
 
 async function assertNoHorizontalOverflow(page) {

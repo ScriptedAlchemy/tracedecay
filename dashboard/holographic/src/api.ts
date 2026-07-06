@@ -260,7 +260,7 @@ export const api = {
   /** Restore an archived/disabled skill to pending approval. */
   restoreManagedSkill: (id: string) => postManagedSkillAction(id, "restore"),
 
-  /** Durable session-reflection fact proposals awaiting approval. */
+  /** Durable session-reflection fact proposal telemetry. */
   getFactProposals: (params: { state?: string; limit?: number } = {}) => {
     const qs = new URLSearchParams();
     if (params.state) qs.set("state", params.state);
@@ -271,13 +271,13 @@ export const api = {
     );
   },
 
-  /** Apply an approved fact proposal to the memory store. */
+  /** Apply a pending fact proposal to the memory store. */
   applyFactProposal: (id: string) =>
     fetchJSON<FactProposalResponse>(factProposalPath(id, "apply"), {
       method: "POST",
     }),
 
-  /** Reject a pending fact proposal without mutating memory. */
+  /** Mark a pending fact proposal rejected without mutating memory. */
   rejectFactProposal: (id: string, reason?: string) =>
     fetchJSON<FactProposalResponse>(factProposalPath(id, "reject"), {
       method: "POST",

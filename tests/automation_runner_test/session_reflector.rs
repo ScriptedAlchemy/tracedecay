@@ -32,7 +32,7 @@ async fn session_reflector_runner_skips_when_task_is_disabled() {
 }
 
 #[tokio::test]
-async fn session_reflector_runner_validates_fact_proposals_without_applying() {
+async fn session_reflector_runner_auto_applies_valid_fact_proposals_by_default() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
@@ -40,13 +40,13 @@ async fn session_reflector_runner_validates_fact_proposals_without_applying() {
     let backend = SessionJsonBackend::new(json!({
         "facts": [
             {
-                "content": "The project requires durable session reflection facts to stay approval gated",
+                "content": "TraceDecay automation should manage durable session reflection facts directly",
                 "category": "project",
                 "tags": ["automation", "memory"],
                 "entities": ["TraceDecay"],
                 "trust": 0.72,
                 "source_span": {"session_id": "session-reflect-1", "message_id": "session-reflect-1-message-001"},
-                "reason": "Repeated session evidence describes the required approval gate"
+                "reason": "Repeated session evidence supports self-managed durable fact automation"
             },
             {
                 "content": "Use the fact-store workflow only when the user explicitly asks to memorize or remember a subject",
@@ -184,7 +184,7 @@ async fn session_reflector_runner_validates_fact_proposals_without_applying() {
     );
     assert_eq!(
         run.report["accepted_facts"][0]["add_fact_request"]["metadata"]["trust_reason"],
-        json!("Repeated session evidence describes the required approval gate")
+        json!("Repeated session evidence supports self-managed durable fact automation")
     );
     assert_eq!(
         run.report["accepted_facts"][1]["add_fact_request"]["category"],
@@ -216,9 +216,17 @@ async fn session_reflector_runner_validates_fact_proposals_without_applying() {
         run.report["accepted_facts"][2]["add_fact_request"]["trust"],
         json!(0.85)
     );
-    let proposals = list_fact_proposals(
+    let pending = list_fact_proposals(
         &cg.store_layout().dashboard_root,
         Some(FactProposalState::PendingApproval),
+        10,
+    )
+    .await
+    .unwrap();
+    assert!(pending.is_empty());
+    let proposals = list_fact_proposals(
+        &cg.store_layout().dashboard_root,
+        Some(FactProposalState::Applied),
         10,
     )
     .await
@@ -227,7 +235,7 @@ async fn session_reflector_runner_validates_fact_proposals_without_applying() {
     assert_eq!(proposals[0].run_id, run.run_id);
     assert_eq!(
         proposals[0].add_fact_request.as_ref().unwrap().content,
-        "The project requires durable session reflection facts to stay approval gated"
+        "TraceDecay automation should manage durable session reflection facts directly"
     );
     assert_eq!(proposals[1].run_id, run.run_id);
     assert_eq!(
@@ -242,16 +250,22 @@ async fn session_reflector_runner_validates_fact_proposals_without_applying() {
         run.report["proposal_ids"][0],
         json!(proposals[0].proposal_id)
     );
-    assert!(run.ledger_record.applied_ops.is_none());
+    assert_eq!(run.report["status"], json!("auto_applied"));
+    assert_eq!(run.report["dry_run"], json!(false));
     assert_eq!(
-        run.ledger_record.validation_report.as_ref().unwrap()["pending_proposals"]["proposal_ids"]
+        run.report["session_fact_apply_policy"]["decision"],
+        json!("auto_apply_allowed")
+    );
+    assert!(run.ledger_record.applied_ops.is_some());
+    assert_eq!(
+        run.ledger_record.validation_report.as_ref().unwrap()["applied_proposals"]["proposal_ids"]
             [0],
         json!(proposals[0].proposal_id)
     );
     assert_eq!(
-        run.ledger_record.validation_report.as_ref().unwrap()["pending_proposals"]
+        run.ledger_record.validation_report.as_ref().unwrap()["applied_proposals"]
             ["accepted_facts"][0]["add_fact_request"]["content"],
-        json!("The project requires durable session reflection facts to stay approval gated")
+        json!("TraceDecay automation should manage durable session reflection facts directly")
     );
     let artifact_kinds: Vec<&str> = run
         .ledger_record
@@ -285,7 +299,7 @@ async fn session_reflector_runner_validates_fact_proposals_without_applying() {
     assert_eq!(
         eval_payload["runner"]["commands"][0],
         json!(
-            "cargo test --test automation_runner_test session_reflector_runner_validates_fact_proposals_without_applying -- --nocapture"
+            "cargo test --test automation_runner_test session_reflector_runner_auto_applies_valid_fact_proposals_by_default -- --nocapture"
         )
     );
     let handoff_payload =
@@ -293,45 +307,17 @@ async fn session_reflector_runner_validates_fact_proposals_without_applying() {
     assert_eq!(handoff_payload["task"], json!("session_reflector"));
     assert_eq!(
         handoff_payload["next_actions"][0],
-        json!("review pending fact proposals")
+        json!("inspect fact automation outcomes")
     );
     assert_eq!(
         handoff_payload["eval_replay"]["commands"][0],
         json!(
-            "cargo test --test automation_runner_test session_reflector_runner_validates_fact_proposals_without_applying -- --nocapture"
+            "cargo test --test automation_runner_test session_reflector_runner_auto_applies_valid_fact_proposals_by_default -- --nocapture"
         )
     );
-    let before_apply = cg
-        .search_facts(tracedecay::memory::types::SearchFactsRequest {
-            query: "durable session reflection facts approval gated".to_string(),
-            category: Some(tracedecay::memory::types::MemoryCategory::Project),
-            limit: Some(10),
-            min_trust: Some(0.1),
-            include_why: false,
-        })
-        .await
-        .unwrap();
-    assert!(
-        before_apply
-            .iter()
-            .all(|hit| hit.fact.source.as_deref() != Some("session_reflector")),
-        "session reflector should not write accepted facts before proposal approval"
-    );
-
-    let project_db = cg.open_project_store_db().await.unwrap();
-    let applied = apply_fact_proposal(
-        &cg.store_layout().dashboard_root,
-        project_db.conn(),
-        &proposals[0].proposal_id,
-        Some("test".to_string()),
-    )
-    .await
-    .unwrap();
-    assert_eq!(applied.state, FactProposalState::Applied);
-    assert!(applied.apply_outcome.is_some());
     let after_apply = cg
         .search_facts(tracedecay::memory::types::SearchFactsRequest {
-            query: "durable session reflection facts approval gated".to_string(),
+            query: "TraceDecay automation durable session reflection facts".to_string(),
             category: Some(tracedecay::memory::types::MemoryCategory::Project),
             limit: Some(10),
             min_trust: Some(0.1),
@@ -343,7 +329,7 @@ async fn session_reflector_runner_validates_fact_proposals_without_applying() {
         after_apply
             .iter()
             .any(|hit| hit.fact.source.as_deref() == Some("session_reflector")),
-        "approving the proposal should apply it to the fact store"
+        "session reflector should auto-apply accepted facts"
     );
 
     let records = load_run_records(&cg.store_layout().dashboard_root, 10)
@@ -353,11 +339,11 @@ async fn session_reflector_runner_validates_fact_proposals_without_applying() {
     assert_eq!(records[0].run_id, run.run_id);
     assert_eq!(records[0].accepted_count, 3);
     assert_eq!(records[0].rejected_count, 8);
-    assert!(records[0].applied_ops.is_none());
+    assert!(records[0].applied_ops.is_some());
 }
 
 #[tokio::test]
-async fn session_reflector_runner_auto_applies_facts_when_memory_auto_apply_is_enabled() {
+async fn session_reflector_runner_auto_apply_is_blocked_by_dashboard_approval() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
@@ -379,7 +365,7 @@ async fn session_reflector_runner_auto_applies_facts_when_memory_auto_apply_is_e
         backend: AutomationBackend::CodexAppServer,
         host_mode: AutomationHostMode::Standalone,
         model: Some("configured-model".to_string()),
-        require_dashboard_approval: false,
+        require_dashboard_approval: true,
         auto_apply_memory_ops: true,
         tasks: AutomationTaskSet {
             session_reflector: AutomationTaskConfig {
@@ -409,29 +395,32 @@ async fn session_reflector_runner_auto_applies_facts_when_memory_auto_apply_is_e
     .unwrap();
 
     assert_eq!(backend.calls(), 1);
-    assert_eq!(run.report["status"], json!("auto_applied"));
-    assert_eq!(run.report["dry_run"], json!(false));
+    assert_eq!(run.report["status"], json!("needs_approval"));
+    assert_eq!(run.report["dry_run"], json!(true));
     assert_eq!(
         run.report["session_fact_apply_policy"]["decision"],
-        json!("auto_apply_allowed")
+        json!("requires_dashboard_approval")
     );
     assert_eq!(
         run.report["session_fact_apply_policy"]["mutates_store"],
+        json!(false)
+    );
+    assert_eq!(
+        run.report["session_fact_apply_policy"]["autonomous_memory_apply"],
+        json!(false)
+    );
+    assert_eq!(
+        run.report["session_fact_apply_policy"]["require_dashboard_approval"],
         json!(true)
     );
     assert_eq!(
-        run.ledger_record
-            .applied_ops
-            .as_ref()
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .len(),
-        1
+        run.report["session_fact_apply_policy"]["approval_required"],
+        json!(true)
     );
+    assert!(run.ledger_record.applied_ops.is_none());
     assert_eq!(
         run.ledger_record.validation_report.as_ref().unwrap()["status"],
-        json!("auto_applied")
+        json!("needs_approval")
     );
 
     let pending = list_fact_proposals(
@@ -441,7 +430,7 @@ async fn session_reflector_runner_auto_applies_facts_when_memory_auto_apply_is_e
     )
     .await
     .unwrap();
-    assert!(pending.is_empty());
+    assert_eq!(pending.len(), 1);
     let applied = list_fact_proposals(
         &cg.store_layout().dashboard_root,
         Some(FactProposalState::Applied),
@@ -449,11 +438,7 @@ async fn session_reflector_runner_auto_applies_facts_when_memory_auto_apply_is_e
     )
     .await
     .unwrap();
-    assert_eq!(applied.len(), 1);
-    assert_eq!(
-        applied[0].reviewer.as_deref(),
-        Some("session_reflector:auto_apply")
-    );
+    assert!(applied.is_empty());
 
     let facts = cg
         .search_facts(tracedecay::memory::types::SearchFactsRequest {
@@ -468,8 +453,100 @@ async fn session_reflector_runner_auto_applies_facts_when_memory_auto_apply_is_e
     assert!(
         facts
             .iter()
-            .any(|hit| hit.fact.source.as_deref() == Some("session_reflector")),
-        "auto-applied accepted session facts should be written to the fact store"
+            .all(|hit| hit.fact.source.as_deref() != Some("session_reflector")),
+        "dashboard approval should block accepted session facts from being auto-applied"
+    );
+}
+
+#[tokio::test]
+async fn session_reflector_runner_self_manages_partial_noops_without_review_gate() {
+    let temp = tempdir().unwrap();
+    let cg = init_project(temp.path()).await;
+    seed_session_evidence(&cg).await;
+    let backend = SessionJsonBackend::new(json!({
+        "facts": [
+            {
+                "content": "TraceDecay automation should keep partial session memory applies review gated",
+                "category": "project",
+                "tags": ["automation", "memory"],
+                "entities": ["TraceDecay"],
+                "trust": 0.76,
+                "source_span": {"session_id": "session-reflect-1", "message_id": "session-reflect-1-message-001"},
+                "reason": "Repeated session evidence supports a partial apply regression"
+            },
+            {
+                "content": "TraceDecay automation should keep partial session memory applies review gated",
+                "category": "project",
+                "tags": ["automation", "memory"],
+                "entities": ["TraceDecay"],
+                "trust": 0.76,
+                "source_span": {"session_id": "session-reflect-1", "message_id": "session-reflect-1-message-001"},
+                "reason": "Repeated session evidence supports a duplicate proposal no-op"
+            }
+        ]
+    }));
+    let config = AutomationConfig {
+        enabled: true,
+        backend: AutomationBackend::CodexAppServer,
+        host_mode: AutomationHostMode::Standalone,
+        model: Some("configured-model".to_string()),
+        auto_apply_memory_ops: true,
+        require_dashboard_approval: false,
+        tasks: AutomationTaskSet {
+            session_reflector: AutomationTaskConfig {
+                enabled: true,
+                schedule: Some("manual".to_string()),
+                ..AutomationTaskConfig::default()
+            },
+            ..AutomationTaskSet::default()
+        },
+        ..AutomationConfig::default()
+    };
+
+    let run = run_session_reflector_with_backend(
+        &cg,
+        &config,
+        &backend,
+        SessionReflectorAutomationOptions {
+            trigger: AutomationTrigger::ManualCli,
+            provider: "cursor".to_string(),
+            query: "durable session reflection".to_string(),
+            evidence_limit: 5,
+            run_id: None,
+            ..SessionReflectorAutomationOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(run.report["status"], json!("auto_applied"));
+    assert_eq!(run.report["dry_run"], json!(false));
+    assert_eq!(
+        run.report["session_fact_apply_policy"]["applied_count"],
+        json!(1)
+    );
+    assert_eq!(
+        run.report["session_fact_apply_policy"]["fully_applied"],
+        json!(false)
+    );
+    assert_eq!(
+        run.report["session_fact_apply_policy"]["approval_required"],
+        json!(false)
+    );
+    assert_eq!(
+        run.ledger_record.validation_report.as_ref().unwrap()["status"],
+        json!("auto_applied")
+    );
+
+    let handoff_payload =
+        read_artifact(&cg, &run.run_id, &run.ledger_record, "codex_handoff").await;
+    assert_eq!(
+        handoff_payload["readiness"]["approval_required"],
+        json!(false)
+    );
+    assert_eq!(
+        handoff_payload["readiness"]["auto_apply_allowed"],
+        json!(true)
     );
 }
 
@@ -479,7 +556,7 @@ async fn session_fact_proposals_dedupe_repeated_pending_facts_across_runs() {
     let dashboard_root = temp.path().join("dashboard");
     let accepted = json!({
         "add_fact_request": {
-            "content": "Repeated session evidence should produce one pending fact proposal",
+            "content": "Repeated session evidence should produce one durable fact action",
             "category": "project",
             "source": "session_reflector",
             "tags": ["session-reflector"],
@@ -494,7 +571,7 @@ async fn session_fact_proposals_dedupe_repeated_pending_facts_across_runs() {
             }
         },
         "proposal": {
-            "content": "Repeated session evidence should produce one pending fact proposal"
+            "content": "Repeated session evidence should produce one durable fact action"
         },
         "validation": {
             "dedupe": {

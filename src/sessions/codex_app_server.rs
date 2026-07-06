@@ -1,7 +1,7 @@
 //! Codex app-server adapter used to generate auxiliary compaction summaries.
 
 use std::fmt::Write as _;
-use std::io::{BufRead, BufReader, Write as IoWrite};
+use std::io::{BufRead, BufReader, ErrorKind, Write as IoWrite};
 #[cfg(windows)]
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -14,6 +14,8 @@ use crate::errors::{Result, TraceDecayError};
 use crate::sessions::lcm::LcmSummaryRequest;
 
 pub const CODEX_SUMMARY_CHILD_ENV: &str = "TRACEDECAY_CODEX_SUMMARY_CHILD";
+const CODEX_APP_SERVER_SPAWN_RETRY_WINDOW: Duration = Duration::from_millis(250);
+const CODEX_APP_SERVER_SPAWN_RETRY_SLEEP: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone)]
 pub struct CodexAppServerSummaryConfig {
@@ -105,15 +107,12 @@ pub fn run_prompt_with_codex_app_server(
 ) -> Result<CodexAppServerSummary> {
     let model = configured_model(config);
     let mut command = codex_app_server_command(&config.codex_bin);
-    let child = command
+    command
         .env(CODEX_SUMMARY_CHILD_ENV, "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|err| TraceDecayError::Config {
-            message: format!("failed to start `{}` app-server: {err}", config.codex_bin),
-        })?;
+        .stderr(Stdio::null());
+    let child = spawn_codex_app_server(&mut command, &config.codex_bin)?;
     let mut child = ChildGuard { child };
 
     let stdout = child
@@ -209,6 +208,25 @@ pub fn run_prompt_with_codex_app_server(
     }
     summary.text = text.to_string();
     Ok(summary)
+}
+
+fn spawn_codex_app_server(command: &mut Command, codex_bin: &str) -> Result<Child> {
+    let deadline = Instant::now() + CODEX_APP_SERVER_SPAWN_RETRY_WINDOW;
+    loop {
+        match command.spawn() {
+            Ok(child) => return Ok(child),
+            Err(err)
+                if err.kind() == ErrorKind::ExecutableFileBusy && Instant::now() < deadline =>
+            {
+                std::thread::sleep(CODEX_APP_SERVER_SPAWN_RETRY_SLEEP);
+            }
+            Err(err) => {
+                return Err(TraceDecayError::Config {
+                    message: format!("failed to start `{codex_bin}` app-server: {err}"),
+                });
+            }
+        }
+    }
 }
 
 fn codex_app_server_command(codex_bin: &str) -> Command {

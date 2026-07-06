@@ -1506,7 +1506,7 @@ pub(super) async fn handle_unsafe_patterns(
         "matches": matches,
     });
     let text = render::finalize(Some(cg.project_root()), &args, &payload, || {
-        render::generic_md(&payload)
+        render::diagnostics_md(&payload)
     });
     Ok(ToolResult::new(
         json!({

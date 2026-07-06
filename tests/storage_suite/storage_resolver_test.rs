@@ -291,6 +291,30 @@ fn store_manifest_roundtrips_from_profile_sharded_layout() {
 
 #[cfg(unix)]
 #[test]
+fn store_manifest_write_rejects_symlinked_atomic_temp_path() {
+    let dir = TempDir::new().unwrap();
+    let temp_root = canonical_temp_path(dir.path());
+    let project = temp_root.join("repo");
+    let profile = temp_root.join("profile");
+    let outside = temp_root.join("outside.tmp");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(&outside, b"outside").unwrap();
+    write_enrollment(&project);
+    let marker = read_enrollment_marker(&project).unwrap().unwrap();
+    let layout = profile_sharded_layout(&project, &profile, &marker).unwrap();
+    let manifest_path = layout.manifest_path.as_ref().unwrap();
+    PrivateStoreIo::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+    symlink(&outside, manifest_path.with_extension("json.tmp")).unwrap();
+
+    let err = write_store_manifest(&layout).unwrap_err();
+
+    assert!(err.to_string().contains("symlink"));
+    assert!(!manifest_path.exists());
+    assert_eq!(fs::read(&outside).unwrap(), b"outside");
+}
+
+#[cfg(unix)]
+#[test]
 fn store_manifest_write_rejects_symlinked_parent_components() {
     let dir = TempDir::new().unwrap();
     let project = dir.path().join("repo");

@@ -1425,8 +1425,18 @@ fn test_codex_subagent_start_counts_and_formats_log_line() {
     })
     .to_string();
 
-    assert_eq!(record_codex_subagent_start(&input), Some(1));
-    assert_eq!(record_codex_subagent_start(&input), Some(2));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|err| panic!("failed to build tokio runtime: {err}"));
+    assert_eq!(
+        runtime.block_on(record_codex_subagent_start(&input)),
+        Some(1)
+    );
+    assert_eq!(
+        runtime.block_on(record_codex_subagent_start(&input)),
+        Some(2)
+    );
 
     let line = codex_subagent_start_log_line(&input, Some(2), true);
     assert!(line.contains("Codex SubagentStart #2"));

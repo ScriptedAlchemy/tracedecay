@@ -14,7 +14,7 @@ use serde_json::json;
 use tempfile::TempDir;
 use tracedecay::agents::{get_integration, InstallContext, UpdatePluginOutcome};
 
-use crate::common::{AgentEnvLock, EnvVarGuard};
+use crate::common::{tracedecay_command_with_home, AgentEnvLock, EnvVarGuard};
 use crate::plugin_validation_support::{assert_schema_valid, compile_schema, relative_files_under};
 
 const OLD_BIN: &str = "/old/bin/tracedecay";
@@ -75,7 +75,8 @@ enum CodexScope {
 }
 
 fn assert_codex_bundle_contains_bin(plugin_dir: &Path, tracedecay_bin: &str, scope: CodexScope) {
-    assert!(text(&plugin_dir.join(".mcp.json")).contains(tracedecay_bin));
+    let tracedecay_bin = tracedecay_bin.replace('\\', "/");
+    assert!(text(&plugin_dir.join(".mcp.json")).contains(&tracedecay_bin));
     let hooks_path = plugin_dir.join("hooks/hooks.json");
     match scope {
         CodexScope::Global => {
@@ -84,7 +85,7 @@ fn assert_codex_bundle_contains_bin(plugin_dir: &Path, tracedecay_bin: &str, sco
                 "global Codex bundle {} must ship hooks/hooks.json",
                 plugin_dir.display()
             );
-            assert!(text(&hooks_path).contains(tracedecay_bin));
+            assert!(text(&hooks_path).contains(&tracedecay_bin));
         }
         CodexScope::RepoLocal => assert!(
             !hooks_path.exists(),
@@ -882,6 +883,71 @@ fn codex_update_plugin_reports_not_installed_without_bundle_or_legacy_config() {
         .unwrap();
     assert!(matches!(outcome, UpdatePluginOutcome::NotInstalled));
     assert!(!home.path().join("plugins").exists());
+}
+
+#[test]
+fn codex_update_plugin_ignores_plugin_only_config_without_legacy_mcp() {
+    let home = TempDir::new().unwrap();
+    let _agent_env = AgentEnvLock::pin(&home);
+    let project_root = home.path().join("workspace");
+    let codex_dir = home.path().join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    let config = codex_dir.join("config.toml");
+    std::fs::write(
+        &config,
+        r#"
+[plugins."tracedecay@personal"]
+enabled = true
+
+[hooks.state."tracedecay@personal:hooks/hooks.json:post_tool_use:0:0"]
+trusted_hash = "sha256:post"
+"#,
+    )
+    .unwrap();
+    let before = bytes(&config);
+    let codex = get_integration("codex").unwrap();
+
+    let outcome = codex
+        .update_plugin(&ctx_with_project(home.path(), NEW_BIN, &project_root))
+        .unwrap();
+
+    assert!(matches!(outcome, UpdatePluginOutcome::NotInstalled));
+    assert_eq!(bytes(&config), before);
+    assert!(!home.path().join("plugins/tracedecay").exists());
+}
+
+#[test]
+fn codex_update_plugin_refreshes_bundle_with_malformed_unrelated_legacy_config() {
+    let home = TempDir::new().unwrap();
+    let _agent_env = AgentEnvLock::pin(&home);
+    let codex = get_integration("codex").unwrap();
+    codex.install(&ctx(home.path(), OLD_BIN)).unwrap();
+
+    let plugin_dir = codex_bootstrap_dir(home.path());
+    let codex_dir = home.path().join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    let config = codex_dir.join("config.toml");
+    std::fs::write(
+        &config,
+        "[mcp_servers.tracedecay\ncommand = \"/old/bin/tracedecay\"\n",
+    )
+    .unwrap();
+    let before = bytes(&config);
+
+    let output = tracedecay_command_with_home(home.path())
+        .arg("update-plugin")
+        .output()
+        .expect("run tracedecay update-plugin");
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Could not inspect legacy Codex MCP config at"));
+    assert!(stderr.contains("failed to parse"));
+    assert_eq!(bytes(&config), before);
+    assert_codex_bundle_contains_bin(
+        &plugin_dir,
+        env!("CARGO_BIN_EXE_tracedecay"),
+        CodexScope::Global,
+    );
 }
 
 // ---------------------------------------------------------------------------

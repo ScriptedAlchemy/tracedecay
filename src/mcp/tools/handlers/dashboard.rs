@@ -13,7 +13,10 @@ use crate::tracedecay::TraceDecay;
 use super::super::render;
 use super::super::ToolResult;
 
-use crate::dashboard::{bind_dashboard, build_state, router, DEFAULT_PORT};
+use crate::dashboard::{
+    bind_dashboard, build_state_with_automation_reconciler, router, AutomationSchedulerReconciler,
+    DEFAULT_PORT,
+};
 
 /// Internal handle for a managed dashboard instance.
 struct RunningDashboard {
@@ -56,7 +59,11 @@ fn dashboard_tool_result(cg: &TraceDecay, args: &Value, payload: &Value) -> Tool
 }
 
 /// Handles `tracedecay_dashboard` tool calls.
-pub(super) async fn handle_dashboard(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_dashboard(
+    cg: &TraceDecay,
+    args: Value,
+    automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
+) -> Result<ToolResult> {
     let action = args
         .get("action")
         .and_then(|v| v.as_str())
@@ -106,7 +113,8 @@ pub(super) async fn handle_dashboard(cg: &TraceDecay, args: Value) -> Result<Too
             // Shared construction with the CLI path: resolved LCM/session store
             // selection included. No catch-up ingest spawn here — the host
             // MCP server already swept hookless transcripts at startup.
-            let state = build_state(cg).await;
+            let state =
+                build_state_with_automation_reconciler(cg, automation_scheduler_reconciler).await;
 
             let app = router(state);
             let (listener, addr) = bind_dashboard(&host, port).await?;

@@ -127,8 +127,8 @@ export function AutomationConfigSection({
               onCheckedChange={(enabled) => updateConfigDraft({ enabled })}
             />
             <ConfigCheckbox
-              label="Require approval"
-              ariaLabel="Require dashboard approval"
+              label="Require manual apply"
+              ariaLabel="Require manual dashboard apply"
               checked={configDraft.require_dashboard_approval}
               error={configFieldErrors.require_dashboard_approval}
               onCheckedChange={(require_dashboard_approval) =>

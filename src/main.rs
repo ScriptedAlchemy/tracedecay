@@ -611,7 +611,7 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
             commands::handle_upload_counter(true);
         }
         Commands::Gitignore { path, action } => {
-            commands::handle_gitignore(path, action)?;
+            commands::handle_gitignore(path, action).await?;
         }
         Commands::Doctor { agent } => {
             tracedecay::doctor::run_doctor(agent.as_deref()).await;

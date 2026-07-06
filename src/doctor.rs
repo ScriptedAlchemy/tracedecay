@@ -12,7 +12,7 @@ use crate::storage::StoreLayout;
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 pub mod heal;
-mod registry_drift;
+pub(crate) mod registry_drift;
 
 /// Runs a comprehensive health check of the tracedecay installation.
 pub async fn run_doctor(agent_filter: Option<&str>) {

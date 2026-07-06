@@ -81,9 +81,7 @@ pub(crate) async fn notify_post_tool_use(spec: &PostToolUseSpec, event_json: &st
     let Some(cwd) = event_cwd_from_parsed(&parsed) else {
         return;
     };
-    let Some(root) = crate::config::discover_project_root(&cwd)
-        .or_else(|| crate::worktree::git_worktree_root(&cwd))
-    else {
+    let Some(root) = crate::config::discover_project_root_with_identity(&cwd).await else {
         return;
     };
     if !crate::tracedecay::TraceDecay::has_initialized_store(&root).await {

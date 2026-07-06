@@ -88,7 +88,7 @@ impl AgentIntegration for CodexIntegration {
     fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
         let cached_dirs = codex_plugin_cached_install_dirs(&ctx.home);
         let plugin_dir = codex_plugin_install_dir(&ctx.home);
-        let legacy_config_install = codex_legacy_config_has_tracedecay(&ctx.home);
+        let legacy_config_install = codex_legacy_config_has_tracedecay_for_update(&ctx.home);
         let mut refreshed = Vec::new();
         if !cached_dirs.is_empty() {
             let target = install_codex_cached_plugin(&ctx.home, &ctx.tracedecay_bin)?;
@@ -124,12 +124,15 @@ impl AgentIntegration for CodexIntegration {
         // replacement before the sweep below strips the working global
         // config — even when a cached or repo-local refresh already put
         // something into `refreshed`.
-        let has_personal_bundle =
-            !cached_dirs.is_empty() || codex_plugin_manifest_path(&ctx.home).exists();
+        let personal_bundle_exists = codex_plugin_manifest_path(&ctx.home).exists();
+        let has_personal_bundle = !cached_dirs.is_empty() || personal_bundle_exists;
         if refreshed.is_empty() && !has_personal_bundle && !legacy_config_install {
             return Ok(UpdatePluginOutcome::NotInstalled);
         }
-        if refreshed.is_empty() || (legacy_config_install && !has_personal_bundle) {
+        if (cached_dirs.is_empty() && personal_bundle_exists)
+            || refreshed.is_empty()
+            || (legacy_config_install && !has_personal_bundle)
+        {
             install_codex_personal_bootstrap(&ctx.home, &ctx.tracedecay_bin)?;
             refreshed.push(plugin_dir.clone());
         }
@@ -246,19 +249,32 @@ impl AgentIntegration for CodexIntegration {
     }
 }
 
-fn codex_legacy_config_has_tracedecay(home: &Path) -> bool {
+fn codex_legacy_config_has_tracedecay(home: &Path) -> Result<bool> {
     codex_config_has_tracedecay_mcp_server(&codex_config_path(home))
 }
 
-fn codex_config_has_tracedecay_mcp_server(config_path: &Path) -> bool {
-    if !config_path.exists() {
-        return false;
+fn codex_legacy_config_has_tracedecay_for_update(home: &Path) -> bool {
+    match codex_legacy_config_has_tracedecay(home) {
+        Ok(has_tracedecay) => has_tracedecay,
+        Err(err) => {
+            eprintln!(
+                "  Could not inspect legacy Codex MCP config at {}: {err}",
+                codex_config_path(home).display()
+            );
+            false
+        }
     }
-    super::load_toml_file(config_path).is_ok_and(|toml| {
-        toml.get("mcp_servers")
-            .and_then(|v| v.get("tracedecay"))
-            .is_some()
-    })
+}
+
+fn codex_config_has_tracedecay_mcp_server(config_path: &Path) -> Result<bool> {
+    if !config_path.exists() {
+        return Ok(false);
+    }
+    let toml = super::load_toml_file(config_path)?;
+    Ok(toml
+        .get("mcp_servers")
+        .and_then(|v| v.get("tracedecay"))
+        .is_some())
 }
 
 // ---------------------------------------------------------------------------
@@ -438,8 +454,16 @@ pub fn remove_legacy_codex_native_automation(home: &Path) -> Result<bool> {
 }
 
 fn uninstall_tracedecay_mcp_if_present(config_path: &Path) {
-    if !codex_config_has_tracedecay_mcp_server(config_path) {
-        return;
+    match codex_config_has_tracedecay_mcp_server(config_path) {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(err) => {
+            eprintln!(
+                "  Could not inspect project-local Codex MCP config at {}: {err}",
+                config_path.display()
+            );
+            return;
+        }
     }
     if let Err(err) = uninstall_mcp_server(config_path) {
         eprintln!(

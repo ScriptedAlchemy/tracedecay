@@ -243,7 +243,7 @@ async fn skill_writer_runner_creates_pending_skill_drafts_for_approval() {
                         "text": "- Check ledger counts\n- Check pending approval state\n"
                     }
                 ],
-                "reason": "Session evidence repeats approval-gated automation workflow review."
+                "reason": "Session evidence repeats automation workflow outcome review."
             },
             {
                 "id": "automation-run-review",
@@ -295,11 +295,11 @@ async fn skill_writer_runner_creates_pending_skill_drafts_for_approval() {
     assert_eq!(run.report["created_skills"][0]["action"], json!("create"));
     assert_eq!(
         run.report["created_skills"][0]["proposal_reason"],
-        json!("Session evidence repeats approval-gated automation workflow review.")
+        json!("Session evidence repeats automation workflow outcome review.")
     );
     assert_eq!(
         run.report["created_skills"][0]["reason"],
-        json!("Session evidence repeats approval-gated automation workflow review.")
+        json!("Session evidence repeats automation workflow outcome review.")
     );
     assert_eq!(
         run.report["created_skills"][0]["approval_status"],
@@ -560,7 +560,7 @@ async fn skill_writer_runner_auto_enables_when_config_explicitly_allows() {
                     "base_checksum": base_checksum,
                     "summary": "Review self-improvement automation runs and activation policy.",
                     "body_markdown": "Check the run ledger, activation policy, and approval state before applying changes.",
-                    "reason": "Session evidence repeats approval-gated automation workflow review."
+                    "reason": "Session evidence repeats automation workflow outcome review."
                 }
             ]
         }),
@@ -687,7 +687,7 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
                         "text": "- Check ledger counts\n- Check rejected proposals\n"
                     }
                 ],
-                "reason": "Session evidence repeats approval-gated automation workflow review."
+                "reason": "Session evidence repeats automation workflow outcome review."
             },
             {
                 "action": "patch",
@@ -734,11 +734,11 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
     assert_eq!(run.report["updated_skills"][0]["action"], json!("update"));
     assert_eq!(
         run.report["updated_skills"][0]["proposal_reason"],
-        json!("Session evidence repeats approval-gated automation workflow review.")
+        json!("Session evidence repeats automation workflow outcome review.")
     );
     assert_eq!(
         run.report["updated_skills"][0]["reason"],
-        json!("Session evidence repeats approval-gated automation workflow review.")
+        json!("Session evidence repeats automation workflow outcome review.")
     );
     assert_eq!(
         run.report["updated_skills"][0]["approval_status"],

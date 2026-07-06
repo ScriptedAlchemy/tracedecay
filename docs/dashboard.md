@@ -239,8 +239,8 @@ The Curation panel is organized into five sub-tabs:
   per-task **Run** buttons for the memory curator / session reflector /
   skill writer loops, and the automation run ledger with hash-verified
   artifact drill-down.
-- **Proposals**: Session-reflection fact proposals awaiting approval
-  (pending first; resolved proposals are collapsed) and managed-skill
+- **Proposals**: Session-reflection fact automation outcomes and proposals
+  for inspection (recent first; resolved proposals are collapsed) and managed-skill
   drafts with approve/disable/archive/restore actions. The tab label shows
   the pending count.
 - **History**: Curator run history, recent snapshots, the memory operation

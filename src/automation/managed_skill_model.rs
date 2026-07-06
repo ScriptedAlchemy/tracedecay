@@ -7,7 +7,10 @@ use sha2::{Digest, Sha256};
 use crate::errors::Result;
 
 use super::managed_skill_format::{frontmatter_string, source_key, state_key, target_key};
-use super::managed_skill_validation::{validate_managed_skill, validate_support_file};
+use super::managed_skill_validation::{
+    validate_managed_skill, validate_native_skill_markdown, validate_support_file,
+    MAX_NATIVE_SKILL_DESCRIPTION_CHARS, MAX_NATIVE_SKILL_NAME_CHARS,
+};
 
 pub const MAX_MANAGED_SUPPORT_FILES: usize = 20;
 pub const MAX_MANAGED_SUPPORT_FILE_BYTES: usize = 64 * 1024;
@@ -64,6 +67,55 @@ pub fn default_managed_skill_targets() -> Vec<SkillInstallTarget> {
         SkillInstallTarget::Kimi,
         SkillInstallTarget::Kiro,
     ]
+}
+
+fn managed_skill_description(summary: &str) -> String {
+    let trimmed = summary.trim();
+    let description = if trimmed
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("use when"))
+        || trimmed
+            .get(..19)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("use this skill when"))
+    {
+        trimmed.to_string()
+    } else {
+        format!("Use when {trimmed}")
+    };
+    truncate_frontmatter_chars(&description, MAX_NATIVE_SKILL_DESCRIPTION_CHARS)
+}
+
+fn native_skill_name(id: &str) -> String {
+    let mut normalized = String::with_capacity(id.len().min(MAX_NATIVE_SKILL_NAME_CHARS));
+    for byte in id.bytes() {
+        match byte {
+            b'a'..=b'z' | b'0'..=b'9' => normalized.push(byte as char),
+            b'-' | b'_' if !normalized.ends_with('-') => normalized.push('-'),
+            _ => {}
+        }
+    }
+
+    let trimmed = normalized.trim_matches('-');
+    let truncated = truncate_frontmatter_chars(trimmed, MAX_NATIVE_SKILL_NAME_CHARS);
+    let name = truncated.trim_end_matches('-');
+    if name.is_empty() {
+        "skill".to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+fn truncate_frontmatter_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+
+    value
+        .chars()
+        .take(max_chars)
+        .collect::<String>()
+        .trim_end()
+        .to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -327,6 +379,22 @@ impl ManagedSkill {
         output
     }
 
+    pub fn render_native_skill_markdown(&self) -> Result<String> {
+        let mut output = String::new();
+        output.push_str("---\n");
+        let _ = writeln!(output, "name: {}", native_skill_name(&self.metadata.id));
+        let _ = writeln!(
+            output,
+            "description: {}",
+            frontmatter_string(&managed_skill_description(&self.metadata.summary))
+        );
+        output.push_str("---\n\n");
+        output.push_str(&self.body_markdown);
+        output.push('\n');
+        validate_native_skill_markdown(&output)?;
+        Ok(output)
+    }
+
     fn content_checksum(&self) -> String {
         let mut hasher = Sha256::new();
         hasher.update(self.metadata.id.as_bytes());
@@ -355,4 +423,39 @@ impl ManagedSkill {
 
 pub(super) fn current_metadata_timestamp() -> i64 {
     crate::tracedecay::current_timestamp()
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::automation::skill_frontmatter::parse_skill_frontmatter;
+
+    #[test]
+    fn native_skill_markdown_round_trips_escaped_description() {
+        let skill = ManagedSkillDraft {
+            id: "native-escape".to_string(),
+            title: "Native escape".to_string(),
+            summary: r#"Use when checking "quoted" paths like C:\tmp"#.to_string(),
+            category: "testing".to_string(),
+            targets: vec![SkillInstallTarget::Codex],
+            body_markdown: "# Native escape\n".to_string(),
+            support_files: Vec::new(),
+            provenance: ManagedSkillProvenance {
+                source: ManagedSkillSource::UserDraft,
+                actor: "tester".to_string(),
+                run_id: None,
+            },
+        }
+        .materialize()
+        .unwrap();
+
+        let markdown = skill.render_native_skill_markdown().unwrap();
+        let frontmatter = parse_skill_frontmatter(&markdown).unwrap();
+
+        assert_eq!(
+            frontmatter["description"].as_scalar(),
+            Some(r#"Use when checking "quoted" paths like C:\tmp"#)
+        );
+    }
 }

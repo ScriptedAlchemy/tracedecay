@@ -206,9 +206,9 @@ export default function CurationPanel({
     : null;
   // Same server-side count the outer Curation tab badge uses, so the two
   // badges can't disagree and no proposal/skill lists need loading up front.
-  const pendingProposalCount = usePendingAutomationCounts(api);
-  const proposalsLabel = pendingProposalCount
-    ? `Proposals ${pendingProposalCount}`
+  const pendingReviewCount = usePendingAutomationCounts(api);
+  const proposalsLabel = pendingReviewCount
+    ? `Proposals ${pendingReviewCount}`
     : "Proposals";
   const tabs: Array<{ id: CurationTab; label: string; Icon: typeof Wand2 }> = [
     { id: "plan", label: planLabel, Icon: ListChecks },

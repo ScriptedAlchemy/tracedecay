@@ -124,6 +124,12 @@ fn validates_minimum_metadata_and_renders_frontmatter() {
     ] {
         assert!(markdown.contains(key), "missing frontmatter key {key}");
     }
+    for key in ["name:", "description:"] {
+        assert!(
+            !markdown.contains(key),
+            "managed markdown must not include native frontmatter key {key}"
+        );
+    }
 
     let mut punctuated = draft();
     punctuated.title = "Review: automation runs".to_string();

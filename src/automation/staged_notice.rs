@@ -1,11 +1,8 @@
 //! Surfacing of staged automation output (R5, Hermes parity).
 //!
-//! Automation runs stage skill drafts and fact proposals for human review, but
-//! historically the approval queue was only visible in the dashboard or the
-//! run ledger. This module derives cheap pending-review counts and decides —
-//! with a persisted dedupe state — when a compact one-line notice should be
-//! surfaced to the user (via the MCP server's response nudge path and the
-//! daemon's `event=automation_staged` log line).
+//! Automation runs may stage skill drafts for review. Fact proposals are
+//! tracked as automation telemetry/backcompat, but memory management is
+//! self-managed and does not surface a human review queue by default.
 
 use std::path::{Path, PathBuf};
 
@@ -18,10 +15,10 @@ use crate::errors::{Result, TraceDecayError};
 
 const NOTICE_STATE_FILENAME: &str = "automation_notice_seen.json";
 
-/// Counts of automation output awaiting human review.
+/// Counts of staged automation output.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AutomationPendingCounts {
-    /// Fact proposals in `pending_approval` state.
+    /// Fact proposals in `pending_approval` state, retained as telemetry.
     pub pending_fact_proposals: usize,
     /// Managed skills awaiting review: drafts in `pending_approval` state
     /// plus active skills carrying a staged `pending_update`.
@@ -30,7 +27,7 @@ pub struct AutomationPendingCounts {
 
 impl AutomationPendingCounts {
     pub fn total(self) -> usize {
-        self.pending_fact_proposals + self.pending_skills
+        self.pending_skills
     }
 }
 
@@ -70,7 +67,7 @@ pub async fn save_notice_state(dashboard_root: &Path, state: &AutomationNoticeSt
         .map_err(|e| config_error(format!("failed to write automation notice state: {e}")))
 }
 
-/// Counts pending fact proposals (project dashboard store) and pending
+/// Counts pending fact proposal telemetry (project dashboard store) and pending
 /// managed skills (user profile store). Best-effort: unreadable or missing
 /// stores count as zero so callers never fail a request over a notice.
 pub async fn count_pending_automation_output(
@@ -104,7 +101,7 @@ pub async fn count_pending_automation_output(
 
 /// Decides whether a notice should fire for the current pending batch.
 /// Fires only when something is pending AND the batch differs from what was
-/// last notified (different latest run id or different pending counts).
+/// last notified (different latest run id or different pending skill counts).
 pub fn should_notify(
     previous: Option<&AutomationNoticeState>,
     latest_run_id: Option<&str>,
@@ -117,7 +114,6 @@ pub fn should_notify(
         None => true,
         Some(state) => {
             state.last_run_id.as_deref() != latest_run_id
-                || state.pending_fact_proposals != counts.pending_fact_proposals
                 || state.pending_skills != counts.pending_skills
         }
     }
@@ -137,18 +133,11 @@ pub fn staged_notice_message(counts: AutomationPendingCounts) -> Option<String> 
         ));
     }
     if counts.pending_fact_proposals > 0 {
-        parts.push(format!(
-            "{} fact proposal{}",
-            counts.pending_fact_proposals,
-            if counts.pending_fact_proposals == 1 {
-                ""
-            } else {
-                "s"
-            }
-        ));
+        // Fact proposals are self-managed automation state. Keep counting them
+        // for APIs, but never surface them here.
     }
     Some(format!(
-        "TraceDecay automation: {} await{} review — dashboard Curation tab or tracedecay_fact_store.",
+        "TraceDecay automation: {} await{} review — dashboard Skills tab.",
         parts.join(" and "),
         if counts.total() == 1 { "s" } else { "" },
     ))
@@ -156,7 +145,7 @@ pub fn staged_notice_message(counts: AutomationPendingCounts) -> Option<String> 
 
 /// One-shot check used by the MCP server: derives pending counts, dedupes
 /// against the persisted notice state, and returns the notice line to surface
-/// (persisting the new state) when a new batch awaits review.
+/// (persisting the new state) when a new managed-skill batch awaits review.
 pub async fn maybe_automation_staged_notice(
     dashboard_root: &Path,
     profile_root: &Path,
@@ -260,15 +249,12 @@ mod tests {
         assert_eq!(staged_notice_message(counts(0, 0)), None);
         assert_eq!(
             staged_notice_message(counts(2, 1)).unwrap(),
-            "TraceDecay automation: 1 skill draft and 2 fact proposals await review — dashboard Curation tab or tracedecay_fact_store."
+            "TraceDecay automation: 1 skill draft awaits review — dashboard Skills tab."
         );
-        assert_eq!(
-            staged_notice_message(counts(1, 0)).unwrap(),
-            "TraceDecay automation: 1 fact proposal awaits review — dashboard Curation tab or tracedecay_fact_store."
-        );
+        assert_eq!(staged_notice_message(counts(1, 0)), None);
         assert_eq!(
             staged_notice_message(counts(0, 3)).unwrap(),
-            "TraceDecay automation: 3 skill drafts await review — dashboard Curation tab or tracedecay_fact_store."
+            "TraceDecay automation: 3 skill drafts await review — dashboard Skills tab."
         );
     }
 
@@ -278,6 +264,7 @@ mod tests {
         assert!(!should_notify(None, Some("run-1"), counts(0, 0)));
         // First sighting of a pending batch: notify.
         assert!(should_notify(None, Some("run-1"), counts(2, 1)));
+        assert!(!should_notify(None, Some("run-1"), counts(2, 0)));
         let seen = AutomationNoticeState {
             last_run_id: Some("run-1".to_string()),
             pending_fact_proposals: 2,
@@ -287,9 +274,11 @@ mod tests {
         assert!(!should_notify(Some(&seen), Some("run-1"), counts(2, 1)));
         // New run appended: notify again.
         assert!(should_notify(Some(&seen), Some("run-2"), counts(2, 1)));
-        // Same run but pending counts moved (e.g. a second batch staged
-        // before any run-ledger append was observed): notify.
-        assert!(should_notify(Some(&seen), Some("run-1"), counts(3, 1)));
+        // Fact proposal count changes alone are telemetry and do not rearm
+        // user-facing notices.
+        assert!(!should_notify(Some(&seen), Some("run-1"), counts(3, 1)));
+        // Skill count changes still rearm.
+        assert!(should_notify(Some(&seen), Some("run-1"), counts(2, 2)));
     }
 
     #[tokio::test]
@@ -348,19 +337,13 @@ mod tests {
         .await
         .unwrap();
 
-        let first = maybe_automation_staged_notice(&dashboard_root, &profile_root).await;
-        assert_eq!(
-            first.unwrap(),
-            "TraceDecay automation: 1 fact proposal awaits review — dashboard Curation tab or tracedecay_fact_store."
-        );
-        // Same batch: deduped.
         assert!(
             maybe_automation_staged_notice(&dashboard_root, &profile_root)
                 .await
                 .is_none()
         );
 
-        // A second proposal lands: new batch, notice fires again.
+        // More fact proposals land: still no user-facing notice.
         save_fact_proposal_store(
             &dashboard_root,
             &FactProposalStore {
@@ -373,7 +356,22 @@ mod tests {
         )
         .await
         .unwrap();
-        let second = maybe_automation_staged_notice(&dashboard_root, &profile_root).await;
-        assert!(second.unwrap().contains("2 fact proposals"));
+        assert!(
+            maybe_automation_staged_notice(&dashboard_root, &profile_root)
+                .await
+                .is_none()
+        );
+
+        save_managed_skill(
+            &profile_root,
+            &skill("draft-skill", ManagedSkillState::PendingApproval),
+        )
+        .await
+        .unwrap();
+        let skill_notice = maybe_automation_staged_notice(&dashboard_root, &profile_root).await;
+        assert_eq!(
+            skill_notice.unwrap(),
+            "TraceDecay automation: 1 skill draft awaits review — dashboard Skills tab."
+        );
     }
 }

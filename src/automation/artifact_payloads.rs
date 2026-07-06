@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
 
+use super::apply_policy::record_has_auto_applied_memory_ops;
 use super::artifact_feedback::{
     validation_feedback_entries, validation_gate_decision, validation_report_hash,
 };
@@ -225,6 +226,7 @@ pub(super) fn validation_gate_payload(
     gate: &ImprovementGatePayload,
 ) -> Value {
     let (trace_ref, feedback_ref, generated_evals_ref) = refs;
+    let auto_applied = record_has_auto_applied_memory_ops(ctx.task, ctx.record);
     json!({
         "schema_version": 1,
         "run_id": ctx.run_id,
@@ -235,7 +237,7 @@ pub(super) fn validation_gate_payload(
             "accepted_count": ctx.record.accepted_count,
             "rejected_count": ctx.record.rejected_count,
             "reviewed_count": ctx.record.reviewed_count,
-            "approval_required": ctx.record.accepted_count > 0,
+            "approval_required": ctx.record.accepted_count > 0 && !auto_applied,
             "report": ctx.record.validation_report,
         },
         "improvement_gate": {
@@ -260,8 +262,8 @@ pub(super) fn validation_gate_payload(
                 "has_feedback": ctx.record.reviewed_count > 0,
                 "has_generated_evals": evals.count > 0,
                 "validation_report_hash": validation_report_hash(ctx.record.validation_report.as_ref()),
-                "approval_required": ctx.record.accepted_count > 0,
-                "auto_apply_allowed": false,
+                "approval_required": ctx.record.accepted_count > 0 && !auto_applied,
+                "auto_apply_allowed": auto_applied,
             },
             "source_refs": [
                 trace_ref.clone(),
@@ -329,6 +331,7 @@ pub(super) fn codex_handoff_payload(
     evals: &GeneratedEvalPayloads,
     gate: &ImprovementGatePayload,
 ) -> Value {
+    let auto_applied = record_has_auto_applied_memory_ops(ctx.task, ctx.record);
     json!({
         "schema_version": 1,
         "run_id": ctx.run_id,
@@ -358,8 +361,8 @@ pub(super) fn codex_handoff_payload(
             "validation_gate_decision": gate.decision,
             "eval_count": evals.count,
             "blockers": gate.blockers.clone(),
-            "approval_required": ctx.record.accepted_count > 0,
-            "auto_apply_allowed": false,
+            "approval_required": ctx.record.accepted_count > 0 && !auto_applied,
+            "auto_apply_allowed": auto_applied,
         },
         "source_refs": [
             refs.validation_gate.clone(),
@@ -390,8 +393,8 @@ pub(super) fn codex_handoff_payload(
         "validation_requirements": {
             "must_review_artifact_refs": true,
             "must_run_tests": ctx.policy.handoff_tests(),
-            "must_preserve_approval_gate": true,
-            "must_not_auto_apply": true,
+            "must_preserve_approval_gate": !auto_applied,
+            "must_not_auto_apply": !auto_applied,
         },
         "artifact_manifest": {
             "api_list": automation_run_artifacts_api(ctx.run_id),
@@ -609,5 +612,200 @@ mod tests {
             &json!("no_outcomes_recorded")
         );
         assert!(generated_eval_payloads(&ctx).outcome_definitions.is_empty());
+    }
+
+    #[test]
+    fn codex_handoff_reports_auto_applied_records_without_approval_gate() {
+        let (request, response, mut record) = payload_fixture();
+        record.accepted_count = 1;
+        record.reviewed_count = 1;
+        record.applied_ops = Some(json!(["proposal-1"]));
+        record.validation_report = Some(json!({
+            "session_fact_apply_policy": {
+                "mutates_store": true,
+            }
+        }));
+        let outcomes = AutomationOutcomesSnapshot::default();
+        let ctx = ArtifactPayloadContext {
+            run_id: "run-outcomes",
+            task: AgentTaskKind::SessionReflector,
+            task_key: "session_reflector",
+            prompt_version: "session_reflector:v1",
+            policy: artifact_policy(AgentTaskKind::SessionReflector),
+            request: &request,
+            response: &response,
+            record: &record,
+            outcomes: &outcomes,
+        };
+        let refs = ArtifactRefs {
+            trace: json!({"kind": "traces"}),
+            feedback: json!({"kind": "feedback"}),
+            generated_evals: json!({"kind": "generated_evals"}),
+            validation_gate: json!({"kind": "validation_gate"}),
+            optimizer_diagnosis: json!({"kind": "optimizer_diagnosis"}),
+        };
+        let evals = generated_eval_payloads(&ctx);
+        let gate = improvement_gate_payload(&ctx, &evals);
+        let validation_payload = validation_gate_payload(
+            &ctx,
+            (&refs.trace, &refs.feedback, &refs.generated_evals),
+            &evals,
+            &gate,
+        );
+
+        let payload = codex_handoff_payload(&ctx, &refs, &evals, &gate);
+
+        assert_eq!(
+            validation_payload
+                .pointer("/task_validation/approval_required")
+                .unwrap(),
+            &json!(false)
+        );
+        assert_eq!(
+            validation_payload
+                .pointer("/improvement_gate/criteria/auto_apply_allowed")
+                .unwrap(),
+            &json!(true)
+        );
+        assert_eq!(
+            payload.pointer("/readiness/approval_required").unwrap(),
+            &json!(false)
+        );
+        assert_eq!(
+            payload.pointer("/readiness/auto_apply_allowed").unwrap(),
+            &json!(true)
+        );
+        assert_eq!(
+            payload
+                .pointer("/validation_requirements/must_not_auto_apply")
+                .unwrap(),
+            &json!(false)
+        );
+    }
+
+    #[test]
+    fn codex_handoff_preserves_approval_gate_for_partial_memory_apply() {
+        let (request, response, mut record) = payload_fixture();
+        record.accepted_count = 2;
+        record.reviewed_count = 2;
+        record.applied_ops = Some(json!([
+            { "op": "delete", "fact_id": 102 },
+            { "op": "delete", "fact_id": 102 }
+        ]));
+        record.validation_report = Some(json!({
+            "applied": 1,
+            "results": [
+                { "op": "delete", "fact_id": 102, "status": "deleted" },
+                { "op": "delete", "fact_id": 102, "status": "error" }
+            ],
+            "apply_policy": {
+                "accepted_count": 2,
+                "mutates_store": true,
+            }
+        }));
+        let outcomes = AutomationOutcomesSnapshot::default();
+        let ctx = ArtifactPayloadContext {
+            run_id: "run-outcomes",
+            task: AgentTaskKind::MemoryCurator,
+            task_key: "memory_curator",
+            prompt_version: "memory_curator:v1",
+            policy: artifact_policy(AgentTaskKind::MemoryCurator),
+            request: &request,
+            response: &response,
+            record: &record,
+            outcomes: &outcomes,
+        };
+        let refs = ArtifactRefs {
+            trace: json!({"kind": "traces"}),
+            feedback: json!({"kind": "feedback"}),
+            generated_evals: json!({"kind": "generated_evals"}),
+            validation_gate: json!({"kind": "validation_gate"}),
+            optimizer_diagnosis: json!({"kind": "optimizer_diagnosis"}),
+        };
+        let evals = generated_eval_payloads(&ctx);
+        let gate = improvement_gate_payload(&ctx, &evals);
+        let validation_payload = validation_gate_payload(
+            &ctx,
+            (&refs.trace, &refs.feedback, &refs.generated_evals),
+            &evals,
+            &gate,
+        );
+
+        let payload = codex_handoff_payload(&ctx, &refs, &evals, &gate);
+
+        assert_eq!(
+            validation_payload
+                .pointer("/task_validation/approval_required")
+                .unwrap(),
+            &json!(true)
+        );
+        assert_eq!(
+            validation_payload
+                .pointer("/improvement_gate/criteria/auto_apply_allowed")
+                .unwrap(),
+            &json!(false)
+        );
+        assert_eq!(
+            payload.pointer("/readiness/approval_required").unwrap(),
+            &json!(true)
+        );
+        assert_eq!(
+            payload.pointer("/readiness/auto_apply_allowed").unwrap(),
+            &json!(false)
+        );
+    }
+
+    #[test]
+    fn codex_handoff_does_not_treat_skill_writer_applied_ops_as_memory_auto_apply() {
+        let (request, response, mut record) = payload_fixture();
+        record.accepted_count = 1;
+        record.reviewed_count = 1;
+        record.applied_ops = Some(json!({
+            "created_skills": [],
+            "updated_skills": [],
+            "staged_consolidations": [],
+        }));
+        record.validation_report = Some(json!({
+            "status": "needs_approval",
+            "dry_run": true,
+        }));
+        let outcomes = AutomationOutcomesSnapshot::default();
+        let ctx = ArtifactPayloadContext {
+            run_id: "run-outcomes",
+            task: AgentTaskKind::SkillWriter,
+            task_key: "skill_writer",
+            prompt_version: "skill_writer:v1",
+            policy: artifact_policy(AgentTaskKind::SkillWriter),
+            request: &request,
+            response: &response,
+            record: &record,
+            outcomes: &outcomes,
+        };
+        let refs = ArtifactRefs {
+            trace: json!({"kind": "traces"}),
+            feedback: json!({"kind": "feedback"}),
+            generated_evals: json!({"kind": "generated_evals"}),
+            validation_gate: json!({"kind": "validation_gate"}),
+            optimizer_diagnosis: json!({"kind": "optimizer_diagnosis"}),
+        };
+        let evals = generated_eval_payloads(&ctx);
+        let gate = improvement_gate_payload(&ctx, &evals);
+
+        let payload = codex_handoff_payload(&ctx, &refs, &evals, &gate);
+
+        assert_eq!(
+            payload.pointer("/readiness/approval_required").unwrap(),
+            &json!(true)
+        );
+        assert_eq!(
+            payload.pointer("/readiness/auto_apply_allowed").unwrap(),
+            &json!(false)
+        );
+        assert_eq!(
+            payload
+                .pointer("/validation_requirements/must_not_auto_apply")
+                .unwrap(),
+            &json!(true)
+        );
     }
 }

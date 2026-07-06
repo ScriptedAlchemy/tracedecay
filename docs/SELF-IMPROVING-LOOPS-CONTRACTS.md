@@ -23,8 +23,8 @@ TraceDecay standalone automation is time-scheduled by the daemon, not by Codex n
 
 | Task | Default cadence | Default mutation behavior |
 | --- | --- | --- |
-| `memory_curator` | Every 15 minutes, with a 5-minute cooldown | Validated accepted curation ops auto-apply when `auto_apply_memory_ops=true` and dashboard approval is disabled. |
-| `session_reflector` | Every 15 minutes, with a 5-minute cooldown | Validated accepted session facts auto-apply under the same memory auto-apply policy; otherwise they stay as dashboard fact proposals. |
+| `memory_curator` | Every 15 minutes, with a 5-minute cooldown | Validated accepted curation ops auto-apply when `auto_apply_memory_ops=true`; destructive ops remain policy-gated. |
+| `session_reflector` | Every 15 minutes, with a 5-minute cooldown | Validated accepted session facts auto-apply under the same memory auto-apply policy; otherwise they remain pending automation fact records. |
 | `skill_writer` | Every 60 minutes, after a 15-minute idle window, with a 5-minute cooldown | Creates or updates managed skill drafts; skills are not auto-enabled while `auto_enable_skills=false`. |
 
 Scheduling is activity-coupled, not purely wall-clock. The scheduler reads the newest LCM session-message timestamp for the project store as its session-activity signal on every tick:
@@ -37,7 +37,7 @@ The daemon loop is the host for these jobs. It should not create Codex top-level
 
 ## Standalone And Delegated Modes
 
-`standalone` means TraceDecay owns backend calls, evidence collection, validation, run ledger writes, approval staging, dashboard review payloads, and optional scheduler execution. Backend output can propose changes, but TraceDecay validates every proposed mutation before it can be applied.
+`standalone` means TraceDecay owns backend calls, evidence collection, validation, run ledger writes, apply-policy staging, dashboard telemetry payloads, and optional scheduler execution. Backend output can propose changes, but TraceDecay validates every proposed mutation before it can be applied.
 
 `delegated_host` means the host owns intelligence and mutation decisions. TraceDecay exposes contracts and storage views, validates proposed operations when asked, and records bridge-visible evidence. It must not call its own backend for memory curation, session reflection, or skill writing in this mode. Legacy `hermes_hosted` config is only an alias for `delegated_host`.
 
@@ -84,4 +84,4 @@ Every automation run that reaches backend validation should be able to produce a
 - optimizer diagnosis
 - Codex handoff
 
-The handoff is the durable output for broader code or behavior changes. It must preserve approval gates and list validation requirements before any generated recommendation is applied.
+The handoff is the durable output for broader code or behavior changes. It must preserve apply-policy gates and list validation requirements before any generated recommendation is applied.

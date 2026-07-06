@@ -57,6 +57,7 @@ fn automation_config_is_dashboard_controllable_and_persistent() {
         );
 
         let patch = serde_json::json!({
+            "backend": "codex_app_server",
             "model": "project-model",
             "timeout_secs": 90,
             "scheduler_tick_secs": 15,
@@ -64,6 +65,8 @@ fn automation_config_is_dashboard_controllable_and_persistent() {
         });
         let (status, saved) = patch_json_body(&agent, &config_url, &patch);
         assert_eq!(status, 200);
+        assert_eq!(saved["project"]["backend"], "codex_app_server");
+        assert_eq!(saved["effective"]["backend"], "codex_app_server");
         assert_eq!(saved["project"]["model"], "project-model");
         assert_eq!(saved["effective"]["model"], "project-model");
         assert_eq!(saved["effective"]["timeout_secs"], 90);
@@ -208,7 +211,7 @@ fn automation_config_is_dashboard_controllable_and_persistent() {
             &agent,
             &config_url,
             &serde_json::json!({
-                "require_dashboard_approval": false,
+                "require_dashboard_approval": true,
                 "auto_apply_memory_ops": true,
                 "export_memory_digest": false
             }),
@@ -219,7 +222,7 @@ fn automation_config_is_dashboard_controllable_and_persistent() {
         );
         assert_eq!(
             saved_auto_apply["effective"]["require_dashboard_approval"],
-            false
+            true
         );
         assert_eq!(saved_auto_apply["effective"]["auto_apply_memory_ops"], true);
         assert_eq!(saved_auto_apply["effective"]["export_memory_digest"], false);
@@ -269,6 +272,8 @@ fn automation_config_is_dashboard_controllable_and_persistent() {
             &format!("{base_url}/api/plugins/holographic/curation/config"),
         );
         assert_eq!(status, 200);
+        assert_eq!(restored["project"]["backend"], "codex_app_server");
+        assert_eq!(restored["effective"]["backend"], "codex_app_server");
         assert_eq!(restored["project"]["model"], "project-model");
         assert_eq!(restored["effective"]["model"], "project-model");
         assert_eq!(

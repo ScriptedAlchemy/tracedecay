@@ -304,25 +304,29 @@ pub fn write_store_manifest(layout: &StoreLayout) -> Result<StoreManifest> {
                 layout.storage_mode
             ),
         })?;
-    if let Some(parent) = path.parent() {
-        PrivateStoreIo::create_dir_all(parent).map_err(|e| TraceDecayError::Config {
-            message: format!(
-                "failed to create store manifest directory '{}': {e}",
-                parent.display()
-            ),
-        })?;
-    }
     let manifest = StoreManifest::from_layout(layout);
-    let text = serde_json::to_string_pretty(&manifest).map_err(|e| TraceDecayError::Config {
+    write_store_manifest_payload(path, &manifest)?;
+    Ok(manifest)
+}
+
+/// Writes `manifest` to `path` without rebuilding it from a [`StoreLayout`].
+pub fn write_store_manifest_to_path(path: &Path, manifest: &StoreManifest) -> Result<()> {
+    write_store_manifest_payload(path, manifest)
+}
+
+fn write_store_manifest_payload(path: &Path, manifest: &StoreManifest) -> Result<()> {
+    let text = serde_json::to_string_pretty(manifest).map_err(|e| TraceDecayError::Config {
         message: format!(
             "failed to serialize store manifest '{}': {e}",
             path.display()
         ),
     })?;
-    PrivateStoreIo::write_file(path, text.as_bytes()).map_err(|e| TraceDecayError::Config {
-        message: format!("failed to write store manifest '{}': {e}", path.display()),
-    })?;
-    Ok(manifest)
+    let temp_path = path.with_extension("json.tmp");
+    PrivateStoreIo::write_file_atomically(path, &temp_path, text.as_bytes()).map_err(|e| {
+        TraceDecayError::Config {
+            message: format!("failed to write store manifest '{}': {e}", path.display()),
+        }
+    })
 }
 
 pub fn read_store_manifest(path: &Path) -> Result<StoreManifest> {

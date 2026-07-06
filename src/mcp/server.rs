@@ -715,6 +715,7 @@ pub struct McpServer {
     /// to the daemon process profile for selector resolution.
     registry_db: Option<Arc<GlobalDb>>,
     allow_default_registry_fallback: bool,
+    automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
     initialize_root_routing_enabled: AtomicBool,
     hook_project_routes: SharedHookProjectRouteCache,
     /// Cached latest-version check result.
@@ -842,6 +843,25 @@ impl McpServer {
         registry_db: Option<Arc<GlobalDb>>,
         allow_default_registry_fallback: bool,
     ) -> Arc<Self> {
+        Self::new_with_dbs_and_automation_reconciler(
+            cg,
+            scope_prefix,
+            global_db,
+            registry_db,
+            allow_default_registry_fallback,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn new_with_dbs_and_automation_reconciler(
+        cg: TraceDecay,
+        scope_prefix: Option<String>,
+        global_db: Option<Arc<GlobalDb>>,
+        registry_db: Option<Arc<GlobalDb>>,
+        allow_default_registry_fallback: bool,
+        automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
+    ) -> Arc<Self> {
         let file_token_map = cg.get_file_token_map().await.unwrap_or_default();
         let persisted = cg.get_tokens_saved().await.unwrap_or(0);
         let response_handle_project_root = cg.project_root().to_path_buf();
@@ -882,6 +902,7 @@ impl McpServer {
             global_db,
             registry_db,
             allow_default_registry_fallback,
+            automation_scheduler_reconciler,
             initialize_root_routing_enabled: AtomicBool::new(true),
             hook_project_routes: SharedHookProjectRouteCache::default(),
             version_cache: std::sync::Mutex::new(VersionCheckState {
@@ -1468,9 +1489,8 @@ impl McpServer {
     }
 
     /// Returns a compact one-line notice when automation runs have staged
-    /// output awaiting review (skill drafts, fact proposals) that the user
-    /// hasn't been told about yet — `TraceDecay`'s equivalent of Hermes's
-    /// inline "💾 Self-improvement review" moment (parity R5).
+    /// managed-skill output awaiting review that the user hasn't been told
+    /// about yet. Fact proposal counts remain telemetry-only.
     ///
     /// Cheap by construction: a 60 s `compare_exchange` cooldown gates the
     /// check, and the underlying dedupe state
@@ -2426,6 +2446,7 @@ impl McpServer {
                 global_db: self.registry_db.as_deref(),
                 allow_default_registry_fallback: self.allow_default_registry_fallback,
                 implicit_project_path,
+                automation_scheduler_reconciler: self.automation_scheduler_reconciler.clone(),
             },
         )
         .await;
@@ -2550,9 +2571,9 @@ impl McpServer {
                 }
 
                 // Staged-automation nudge (Hermes parity R5): when automation
-                // runs have queued skill drafts / fact proposals for review,
-                // append a one-line notice so the approval queue doesn't grow
-                // silently. Deduped per batch and cooldown-gated inside.
+                // runs have queued skill drafts for review, append a one-line
+                // notice so the approval queue doesn't grow silently. Fact
+                // proposal counts stay telemetry-only in `staged_notice`.
                 if let Some(notice) = self.maybe_automation_staged_notice(&cg).await {
                     if let Some(content) = result
                         .value

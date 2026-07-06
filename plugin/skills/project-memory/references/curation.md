@@ -6,7 +6,7 @@ Full curation and memorize-a-subject protocol for `tracedecay:project-memory`.
 - Curation guardrails (deletion, subagents, dashboard)
 - Memorize a subject on explicit request
 
-## Curate (mutation, requires approval)
+## Curate (explicit destructive mutation)
 
 Destructive curation is a parent-agent responsibility. Use subagents only for
 scoped inspection or recommendation work, with explicit project selectors and

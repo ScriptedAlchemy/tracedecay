@@ -202,7 +202,7 @@ pub(super) async fn handle_diagnose(cg: &TraceDecay, args: Value) -> Result<Tool
         "diagnostics": items,
     });
     let text = render::finalize(Some(cg.project_root()), &args, &body, || {
-        render::generic_md(&body)
+        render::diagnostics_md(&body)
     });
     Ok(ToolResult::new(
         json!({
@@ -430,17 +430,21 @@ fn select_test_targets(
 fn cargo_test_command(project_root: &Path, profile: &str, test_names: &[String]) -> Command {
     let mut cmd = Command::new("cargo");
     cmd.current_dir(project_root)
-        .arg("test")
-        .arg("--no-fail-fast");
-    if profile == "release" {
-        cmd.arg("--release");
-    }
-    cmd.arg("--");
-    for name in test_names {
-        cmd.arg(name);
-    }
+        .args(cargo_test_args(profile, test_names));
     cmd.kill_on_drop(true);
     cmd
+}
+
+fn cargo_test_args(profile: &str, test_names: &[String]) -> Vec<String> {
+    let mut args = vec!["test".to_string(), "--no-fail-fast".to_string()];
+    if profile == "release" {
+        args.push("--release".to_string());
+    }
+    args.push("--".to_string());
+    for name in test_names {
+        args.push(name.clone());
+    }
+    args
 }
 
 fn run_affected_tests_body(
@@ -605,6 +609,23 @@ test result: FAILED. 1 passed; 1 failed; 1 ignored
 ";
         let results = parse_libtest_output(stdout);
         assert_eq!(results, vec![("foo".into(), true), ("bar".into(), false)]);
+    }
+
+    #[test]
+    fn cargo_test_args_put_multiple_filters_after_libtest_separator() {
+        let args = cargo_test_args("debug", &["alpha".to_string(), "beta".to_string()]);
+
+        assert_eq!(args, ["test", "--no-fail-fast", "--", "alpha", "beta"]);
+    }
+
+    #[test]
+    fn cargo_test_args_keep_release_before_libtest_separator() {
+        let args = cargo_test_args("release", &["alpha".to_string(), "beta".to_string()]);
+
+        assert_eq!(
+            args,
+            ["test", "--no-fail-fast", "--release", "--", "alpha", "beta"]
+        );
     }
 
     #[test]

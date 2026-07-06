@@ -27,11 +27,13 @@ fn accepted_feedback_items(record: &AutomationRunLedgerRecord) -> Vec<Value> {
     if !applied.is_empty() {
         return applied;
     }
+    let report = record.validation_report.as_ref();
     artifact_items(
-        record
-            .validation_report
-            .as_ref()
-            .and_then(|report| report.pointer("/pending_proposals/accepted_facts")),
+        report
+            .and_then(|report| report.pointer("/applied_proposals/accepted_facts"))
+            .or_else(|| {
+                report.and_then(|report| report.pointer("/pending_proposals/accepted_facts"))
+            }),
     )
 }
 

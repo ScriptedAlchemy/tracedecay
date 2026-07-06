@@ -60,7 +60,7 @@ export function CurationProposalsPanel({
     <CurationTabPanel
       tab="proposals"
       title="Proposals"
-      subtitle="Facts and skills the automation loops staged for your approval."
+      subtitle="Memory fact outcomes and managed skill drafts staged by automation loops."
     >
       <FactProposalsSection
         proposals={factProposals}
