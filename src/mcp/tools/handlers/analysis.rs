@@ -3,6 +3,7 @@
 //! `unused_imports`, `god_class`, `doc_coverage`, `inheritance_depth`, `module_api`.
 
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -1618,7 +1619,12 @@ fn diagnostics_warming_result(project_root: &std::path::Path, args: &Value) -> T
     )
 }
 
-pub(super) async fn handle_diagnostics(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_diagnostics(
+    cg: &TraceDecay,
+    args: Value,
+    diagnostics_cache: Option<&crate::diagnostics::DiagnosticsCache>,
+    diagnostics_lsp: Option<&tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
+) -> Result<ToolResult> {
     use crate::diagnostics::run_all;
 
     let (scope_str, scope) = diagnostics_scope_arg(&args)?;
@@ -1636,7 +1642,14 @@ pub(super) async fn handle_diagnostics(cg: &TraceDecay, args: Value) -> Result<T
         return Ok(diagnostics_warming_result(&project_root, &args));
     }
 
-    let mut diagnostics = run_all(&project_root, &scope).await?;
+    let mut diagnostics =
+        if let Some(lsp_diagnostics) = lsp_file_diagnostics(cg, &scope, diagnostics_lsp).await? {
+            lsp_diagnostics
+        } else if let Some(cache) = diagnostics_cache {
+            cache.run(&project_root, &scope).await?
+        } else {
+            run_all(&project_root, &scope).await?
+        };
 
     if let crate::diagnostics::Scope::File { path } = &scope {
         diagnostics.retain(|d| d.file == *path);
@@ -1685,6 +1698,90 @@ pub(super) async fn handle_diagnostics(cg: &TraceDecay, args: Value) -> Result<T
         }),
         unique_file_paths(diagnostics.iter().map(|d| d.file.as_str())),
     ))
+}
+
+async fn lsp_file_diagnostics(
+    cg: &TraceDecay,
+    scope: &crate::diagnostics::Scope,
+    diagnostics_lsp: Option<&tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
+) -> Result<Option<Vec<crate::diagnostics::Diagnostic>>> {
+    let crate::diagnostics::Scope::File { path } = scope else {
+        return Ok(None);
+    };
+    let Some(diagnostics_lsp) = diagnostics_lsp else {
+        return Ok(None);
+    };
+
+    let adapter = {
+        let broker = diagnostics_lsp.lock().await;
+        broker
+            .snapshot()
+            .engines
+            .into_iter()
+            .filter_map(|engine| broker.adapter_for(&engine.language))
+            .find(|adapter| {
+                crate::diagnostics::lsp::activity::active_languages_for_files(
+                    cg.project_root(),
+                    std::slice::from_ref(adapter),
+                    std::slice::from_ref(path),
+                )
+                .contains(&adapter.language)
+            })
+    };
+    let Some(adapter) = adapter else {
+        return Ok(None);
+    };
+    let language = adapter.language.clone();
+    let documents = crate::diagnostics::lsp::activity::documents_for_adapter(
+        cg.project_root(),
+        &adapter,
+        vec![path.clone()],
+    )
+    .await?;
+    if documents.is_empty() {
+        return Ok(None);
+    }
+
+    let snapshot = {
+        let mut broker = diagnostics_lsp.lock().await;
+        if broker
+            .refresh_documents(&language, documents, Duration::from_secs(2))
+            .await
+            .is_err()
+        {
+            return Ok(None);
+        }
+        broker.snapshot()
+    };
+
+    Ok(Some(
+        snapshot
+            .diagnostics
+            .into_iter()
+            .filter(|diagnostic| diagnostic.file == *path)
+            .map(lsp_diagnostic_to_compiler_diagnostic)
+            .collect(),
+    ))
+}
+
+fn lsp_diagnostic_to_compiler_diagnostic(
+    diagnostic: crate::diagnostics::lsp::broker::CodeDiagnostic,
+) -> crate::diagnostics::Diagnostic {
+    crate::diagnostics::Diagnostic {
+        file: diagnostic.file,
+        line_start: diagnostic.line_start,
+        line_end: diagnostic.line_end,
+        level: match diagnostic.severity {
+            crate::diagnostics::lsp::broker::DiagnosticSeverity::Error => "error",
+            crate::diagnostics::lsp::broker::DiagnosticSeverity::Warning => "warning",
+            crate::diagnostics::lsp::broker::DiagnosticSeverity::Information => "information",
+            crate::diagnostics::lsp::broker::DiagnosticSeverity::Hint => "hint",
+        }
+        .to_string(),
+        code: diagnostic.code.unwrap_or_default(),
+        message: diagnostic.message,
+        driver: "lsp",
+    }
 }
 
 // ---------------------------------------------------------------------------

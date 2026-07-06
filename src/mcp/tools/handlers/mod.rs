@@ -23,19 +23,19 @@ pub mod workflow_query;
 
 use std::path::Path;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
-use crate::mcp::response_handles::{retrieve_response_handle, ResponseHandleLookup};
-use crate::tracedecay::current_timestamp;
+use crate::mcp::response_handles::{ResponseHandleLookup, retrieve_response_handle};
 use crate::tracedecay::TraceDecay;
+use crate::tracedecay::current_timestamp;
 
+use super::ToolResult;
 use super::dispatch_policy::{
     tool_accepts_registered_project_selector, tool_dispatches_registered_project_reader,
 };
 use super::render;
-use super::ToolResult;
 use support::{profile_root_for_global_db, project_registry_context, project_selector_present};
 
 fn rejected_tool_project_selector_present(tool_name: &str, args: &Value) -> bool {
@@ -214,6 +214,8 @@ pub async fn handle_tool_call_with_registry(
             allow_default_registry_fallback,
             implicit_project_path: None,
             automation_scheduler_reconciler: None,
+            diagnostics_cache: None,
+            diagnostics_lsp: None,
         },
     )
     .await
@@ -225,6 +227,9 @@ pub struct ToolCallRegistryOptions<'a> {
     pub allow_default_registry_fallback: bool,
     pub implicit_project_path: Option<&'a Path>,
     pub automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
+    pub diagnostics_cache: Option<&'a crate::diagnostics::DiagnosticsCache>,
+    pub diagnostics_lsp:
+        Option<&'a tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
 }
 
 pub async fn handle_tool_call_with_registry_and_implicit_project(
@@ -382,7 +387,15 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         "tracedecay_unsafe_patterns" => {
             analysis::handle_unsafe_patterns(cg, args, scope_prefix).await
         }
-        "tracedecay_diagnostics" => analysis::handle_diagnostics(cg, args).await,
+        "tracedecay_diagnostics" => {
+            analysis::handle_diagnostics(
+                cg,
+                args,
+                options.diagnostics_cache,
+                options.diagnostics_lsp,
+            )
+            .await
+        }
         "tracedecay_constructors" => analysis::handle_constructors(cg, args, scope_prefix).await,
         "tracedecay_field_sites" => analysis::handle_field_sites(cg, args, scope_prefix).await,
         "tracedecay_callers_for" => graph::handle_callers_for(cg, args).await,
@@ -539,7 +552,7 @@ mod tests {
 
     use super::super::get_tool_definitions;
     use super::*;
-    use crate::config::{lock_user_data_dir_test_env, USER_DATA_DIR_ENV};
+    use crate::config::{USER_DATA_DIR_ENV, lock_user_data_dir_test_env};
 
     struct EnvVarGuard {
         key: &'static str,
@@ -549,17 +562,21 @@ mod tests {
     impl EnvVarGuard {
         fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
             let previous = std::env::var_os(key);
-            std::env::set_var(key, value);
+            unsafe {
+                std::env::set_var(key, value);
+            }
             Self { key, previous }
         }
     }
 
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
-            if let Some(previous) = self.previous.take() {
-                std::env::set_var(self.key, previous);
-            } else {
-                std::env::remove_var(self.key);
+            unsafe {
+                if let Some(previous) = self.previous.take() {
+                    std::env::set_var(self.key, previous);
+                } else {
+                    std::env::remove_var(self.key);
+                }
             }
         }
     }

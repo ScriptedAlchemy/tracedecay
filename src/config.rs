@@ -909,7 +909,9 @@ impl PinnedUserDataDir {
         fs::create_dir_all(&profile)
             .unwrap_or_else(|err| panic!("failed to create isolated profile root: {err}"));
         let previous = std::env::var_os(USER_DATA_DIR_ENV);
-        std::env::set_var(USER_DATA_DIR_ENV, &profile);
+        unsafe {
+            std::env::set_var(USER_DATA_DIR_ENV, &profile);
+        }
         Self {
             _lock: lock,
             _root: root,
@@ -928,9 +930,11 @@ impl Default for PinnedUserDataDir {
 #[cfg(test)]
 impl Drop for PinnedUserDataDir {
     fn drop(&mut self) {
-        match self.previous.take() {
-            Some(previous) => std::env::set_var(USER_DATA_DIR_ENV, previous),
-            None => std::env::remove_var(USER_DATA_DIR_ENV),
+        unsafe {
+            match self.previous.take() {
+                Some(previous) => std::env::set_var(USER_DATA_DIR_ENV, previous),
+                None => std::env::remove_var(USER_DATA_DIR_ENV),
+            }
         }
     }
 }

@@ -2,13 +2,13 @@
 //! `ast_grep_rewrite`.
 
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
-use super::super::render;
 use super::super::ToolResult;
+use super::super::render;
 
 fn missing_required_param(name: &str) -> TraceDecayError {
     TraceDecayError::Config {

@@ -6,10 +6,10 @@
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::super::render;
 use super::super::ToolResult;
+use super::super::render;
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::{CodeProjectRecord, GlobalDb, ProjectRegistryContext};
 
@@ -323,7 +323,7 @@ mod tests {
     use std::path::PathBuf;
     use std::process::Command;
 
-    use libsql::{params, Connection};
+    use libsql::{Connection, params};
     use serde_json::json;
     use tempfile::TempDir;
     use tokio::sync::Mutex;
@@ -482,8 +482,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unique_project_basename_context_scans_past_first_search_page(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn unique_project_basename_context_scans_past_first_search_page()
+    -> Result<(), Box<dyn std::error::Error>> {
         let dir = TempDir::new()?;
         let db = GlobalDb::open_at(&dir.path().join("global.db"))
             .await
@@ -519,8 +519,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bare_project_path_selector_prefers_unique_basename_over_cwd_git_identity(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn bare_project_path_selector_prefers_unique_basename_over_cwd_git_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
         let _guard = CWD_TEST_LOCK.lock().await;
         let _cwd_guard = CurrentDirGuard::capture()?;
         let dir = TempDir::new()?;

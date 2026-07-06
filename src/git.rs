@@ -131,15 +131,23 @@ mod tests {
         // resolve_git_program() reads GIT directly; test it in isolation so the
         // process-wide OnceLock cache in git_program() is untouched.
         let sentinel = "/nonexistent/tracedecay-test-git-override";
-        std::env::set_var("GIT", sentinel);
+        unsafe {
+            std::env::set_var("GIT", sentinel);
+        }
         let resolved = resolve_git_program();
-        std::env::remove_var("GIT");
+        unsafe {
+            std::env::remove_var("GIT");
+        }
         assert_eq!(resolved, OsString::from(sentinel));
 
         // An empty GIT is ignored (falls through to PATH lookup / literal).
-        std::env::set_var("GIT", "");
+        unsafe {
+            std::env::set_var("GIT", "");
+        }
         let resolved_empty = resolve_git_program();
-        std::env::remove_var("GIT");
+        unsafe {
+            std::env::remove_var("GIT");
+        }
         assert_ne!(resolved_empty, OsString::from(""));
     }
 }

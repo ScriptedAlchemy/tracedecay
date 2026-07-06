@@ -1,4 +1,4 @@
-use super::{format_index_age_phrase, staleness_banner, McpServer, StalenessBannerInputs};
+use super::{McpServer, StalenessBannerInputs, format_index_age_phrase, staleness_banner};
 use crate::config::PinnedUserDataDir;
 use crate::tracedecay::TraceDecay;
 use std::sync::atomic::Ordering;

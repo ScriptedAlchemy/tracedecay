@@ -7,30 +7,30 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
 use crate::mcp::project_route::{
-    mcp_analytics_session_id, HookProjectRouteCache, SharedHookProjectRouteCache,
+    HookProjectRouteCache, SharedHookProjectRouteCache, mcp_analytics_session_id,
 };
 use crate::mcp::response_handles::{
-    cleanup_expired_response_handles, response_handle_stats_json, RESPONSE_RETRIEVE_TOOL,
+    RESPONSE_RETRIEVE_TOOL, cleanup_expired_response_handles, response_handle_stats_json,
 };
 use crate::mcp::tool_analytics::{
-    hook_route_analytics_event, mcp_tool_analytics_event, McpToolAnalyticsEvent,
+    McpToolAnalyticsEvent, hook_route_analytics_event, mcp_tool_analytics_event,
 };
 use crate::path_tree::format_compact_annotated_path_list;
 use crate::tracedecay::TraceDecay;
 
 use super::hook_events::{self, HookAgent, HookEventPlan};
 use super::tools::{
-    explore_call_budget, get_tool_definitions_with_budget,
-    handle_tool_call_with_registry_and_implicit_project, ToolCallRegistryOptions,
+    ToolCallRegistryOptions, explore_call_budget, get_tool_definitions_with_budget,
+    handle_tool_call_with_registry_and_implicit_project,
 };
 use super::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
 
@@ -696,6 +696,8 @@ pub struct McpServer {
     method_call_counts: std::sync::Mutex<HashMap<String, u64>>,
     resource_read_counts: std::sync::Mutex<HashMap<String, u64>>,
     tool_call_counts: std::sync::Mutex<HashMap<String, u64>>,
+    diagnostics_cache: crate::diagnostics::DiagnosticsCache,
+    diagnostics_lsp: tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>,
     /// Approximate token count per indexed file (`file_path` -> tokens).
     /// `Arc` so the detached D4 background-refresh task can hold a cheap
     /// clone and swap in the freshly synced map on completion.
@@ -889,6 +891,14 @@ impl McpServer {
         // here keeps the per-call read path free of config-file IO.
         let sync_config = crate::config::load_sync_config(cg.project_root());
         let telemetry_config = crate::config::load_telemetry_config(cg.project_root());
+        let code_diagnostics_settings =
+            crate::diagnostics::lsp::settings::load_settings(&cg.store_layout().dashboard_root)
+                .await
+                .unwrap_or_default();
+        let diagnostics_lsp = crate::dashboard::code_diagnostics_broker(
+            cg.project_root().to_path_buf(),
+            code_diagnostics_settings,
+        );
 
         let server = Arc::new(Self {
             cg: tokio::sync::RwLock::new(Arc::new(cg)),
@@ -896,6 +906,8 @@ impl McpServer {
             method_call_counts: std::sync::Mutex::new(HashMap::new()),
             resource_read_counts: std::sync::Mutex::new(HashMap::new()),
             tool_call_counts: std::sync::Mutex::new(HashMap::new()),
+            diagnostics_cache: crate::diagnostics::DiagnosticsCache::default(),
+            diagnostics_lsp: tokio::sync::Mutex::new(diagnostics_lsp),
             file_token_map: Arc::new(std::sync::Mutex::new(file_token_map)),
             tokens_saved: AtomicU64::new(persisted),
             last_flushed_tokens: AtomicU64::new(persisted),
@@ -2450,6 +2462,8 @@ impl McpServer {
                 allow_default_registry_fallback: self.allow_default_registry_fallback,
                 implicit_project_path,
                 automation_scheduler_reconciler: self.automation_scheduler_reconciler.clone(),
+                diagnostics_cache: Some(&self.diagnostics_cache),
+                diagnostics_lsp: Some(&self.diagnostics_lsp),
             },
         )
         .await;
@@ -2803,8 +2817,8 @@ impl McpServer {
     /// less).
     async fn record_hook_span_observation(&self, event: &hook_events::HookEvent) {
         use crate::sessions::git_correlation::{
-            self as gc, SpanObservation, SpanSource, DEFAULT_SPAN_MERGE_GAP_SECS,
-            DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
+            self as gc, DEFAULT_SPAN_MERGE_GAP_SECS, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
+            SpanObservation, SpanSource,
         };
 
         let Some(route) = event.route.as_ref() else {

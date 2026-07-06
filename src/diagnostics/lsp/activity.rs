@@ -110,8 +110,8 @@ mod tests {
     use crate::diagnostics::lsp::adapters::DiagnosticMode;
 
     #[tokio::test]
-    async fn documents_for_adapter_requires_a_matching_root_marker(
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    async fn documents_for_adapter_requires_a_matching_root_marker()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let project_root = temp.path();
         let source_path = project_root.join("src/lib.fake");
@@ -131,8 +131,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn documents_for_adapter_accepts_files_under_a_matching_root_marker(
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    async fn documents_for_adapter_accepts_files_under_a_matching_root_marker()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let project_root = temp.path();
         let package_root = project_root.join("package");
@@ -156,8 +156,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn documents_for_adapter_accepts_directory_root_markers(
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    async fn documents_for_adapter_accepts_directory_root_markers()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let project_root = temp.path();
         let package_root = project_root.join("package");

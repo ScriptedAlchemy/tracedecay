@@ -16,18 +16,18 @@
 
 use std::collections::HashMap;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::errors::Result;
 use crate::redundancy::{
-    composite_similarity, compute_fingerprint, find_node_at_lines, jaccard_similarity,
-    overlap_kind, parse_file, severity_bucket, Fingerprint,
+    Fingerprint, composite_similarity, compute_fingerprint, find_node_at_lines, jaccard_similarity,
+    overlap_kind, parse_file, severity_bucket,
 };
 use crate::tracedecay::TraceDecay;
 use crate::types::{Node, NodeKind};
 
-use super::super::render;
 use super::super::ToolResult;
+use super::super::render;
 use super::support::effective_path;
 
 /// `tracedecay_redundancy` handler.

@@ -3,9 +3,9 @@ use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
-use super::super::render::{self, truncated_json_envelope_with_handle, Md};
+use super::super::render::{self, Md, truncated_json_envelope_with_handle};
 use super::support::{
     argument_error, profile_root_for_global_db, project_registry_context, safe_profile_relpath,
     string_arg, tool_json_with_md,
@@ -13,23 +13,24 @@ use super::support::{
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::{GlobalDb, ProjectRegistryContext, WorkflowScopeFilter};
 use crate::mcp::response_handles::{
-    observe_response_truncation, store_response_handle, RESPONSE_RETRIEVE_TOOL,
+    RESPONSE_RETRIEVE_TOOL, observe_response_truncation, store_response_handle,
 };
-use crate::mcp::tools::{ToolResult, MAX_RESPONSE_CHARS};
+use crate::mcp::tools::{MAX_RESPONSE_CHARS, ToolResult};
 use crate::sessions::cursor::HermesProfileDbReadOnly;
 use crate::sessions::git_correlation::{GitRefFilter, GitScopeFilter, SessionsForQuery};
 use crate::sessions::lcm::compression_decision::{self, AssemblyCapInput};
 use crate::sessions::lcm::{
-    LcmCleanConfig, LcmCompressionRequest, LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget,
-    LcmExpandQueryRequest, LcmExpandRequest, LcmExpandTarget, LcmGcConfig, LcmGrepRequest,
-    LcmGrepSort, LcmLoadSessionRequest, LcmPreflightRequest, LcmScope, LcmSessionBoundaryRequest,
-    LcmSummarizerMode, LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT,
+    LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT, LcmCleanConfig, LcmCompressionRequest,
+    LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmExpandQueryRequest,
+    LcmExpandRequest, LcmExpandTarget, LcmGcConfig, LcmGrepRequest, LcmGrepSort,
+    LcmLoadSessionRequest, LcmPreflightRequest, LcmScope, LcmSessionBoundaryRequest,
+    LcmSummarizerMode,
 };
 use crate::sessions::{
     ProviderScope, SessionSearchFilters, SessionSearchScope, SessionSearchTimeRange,
 };
 use crate::timeutil::SearchTimeBound;
-use crate::tracedecay::{current_timestamp, TraceDecay};
+use crate::tracedecay::{TraceDecay, current_timestamp};
 
 const DEFAULT_LCM_CONTENT_LIMIT: usize = 4096;
 const DEFAULT_LCM_EXPAND_QUERY_CONTEXT_LIMIT: usize = 32_000;

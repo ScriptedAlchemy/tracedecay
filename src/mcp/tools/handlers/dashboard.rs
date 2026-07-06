@@ -5,17 +5,17 @@
 //! existing URL if already running for this process. Supports optional `stop`
 //! action to shut down a previously-started instance.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
-use super::super::render;
 use super::super::ToolResult;
+use super::super::render;
 
 use crate::dashboard::{
-    bind_dashboard, build_state_with_automation_reconciler, router, AutomationSchedulerReconciler,
-    DEFAULT_PORT,
+    AutomationSchedulerReconciler, DEFAULT_PORT, bind_dashboard,
+    build_state_with_automation_reconciler, router,
 };
 
 /// Internal handle for a managed dashboard instance.

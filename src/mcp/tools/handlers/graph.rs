@@ -5,13 +5,13 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::context::{
-    format_context_as_markdown, CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING,
-    CONTEXT_EXTENSION_POINTS_HEADING, CONTEXT_INDEX_COVERAGE_HINT_HEADING,
-    CONTEXT_MEMORY_FEEDBACK_HINT, CONTEXT_MEMORY_MATCHES_HEADING, CONTEXT_RELATED_SYMBOLS_HEADING,
-    CONTEXT_SEEN_NODE_IDS_LABEL, CONTEXT_TEST_COVERAGE_HEADING,
+    CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING, CONTEXT_EXTENSION_POINTS_HEADING,
+    CONTEXT_INDEX_COVERAGE_HINT_HEADING, CONTEXT_MEMORY_FEEDBACK_HINT,
+    CONTEXT_MEMORY_MATCHES_HEADING, CONTEXT_RELATED_SYMBOLS_HEADING, CONTEXT_SEEN_NODE_IDS_LABEL,
+    CONTEXT_TEST_COVERAGE_HEADING, format_context_as_markdown,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::types::{FactSearchResult, SearchFactsRequest};
@@ -26,8 +26,8 @@ const CONTEXT_MEMORY_ANALYTICS_KEY: &str = "context_memory_analytics";
 const CONTEXT_LANE_TRUNCATED_NOTE: &str =
     "\n... lane truncated; retrieve the full response handle for omitted details.\n";
 
-use super::super::render::{self, Md};
 use super::super::ToolResult;
+use super::super::render::{self, Md};
 use super::dependency_hints;
 use super::support::{
     effective_path, filter_by_scope, require_node_id, string_array_values, unique_file_paths,

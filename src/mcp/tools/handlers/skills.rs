@@ -4,17 +4,17 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::automation::hermes_bridge::{load_hermes_skill_bridge, HermesSkillBridgeOptions};
+use crate::automation::hermes_bridge::{HermesSkillBridgeOptions, load_hermes_skill_bridge};
 use crate::automation::managed_skills::{
-    list_managed_skills, load_managed_skill, ManagedSkill, ManagedSkillState,
+    ManagedSkill, ManagedSkillState, list_managed_skills, load_managed_skill,
 };
 use crate::automation::run_ledger::{find_run_record, read_run_artifact_payload};
 use crate::automation::skill_usage::{
-    analytics_import_key_for_request, ingest_project_analytics_events, record_skill_usage,
-    skill_improvement_recommendations, stale_skill_recommendations, summarize_skill_usage,
-    summarize_skill_usage_for, SkillUsageAction,
+    SkillUsageAction, analytics_import_key_for_request, ingest_project_analytics_events,
+    record_skill_usage, skill_improvement_recommendations, stale_skill_recommendations,
+    summarize_skill_usage, summarize_skill_usage_for,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::mcp::tools::ToolResult;
@@ -39,9 +39,7 @@ fn tool_json_with_md<F>(cg: &TraceDecay, args: &Value, value: &Value, md: F) -> 
 where
     F: FnOnce() -> String,
 {
-    let text = render::finalize(Some(cg.project_root()), args, value, || {
-        md()
-    });
+    let text = render::finalize(Some(cg.project_root()), args, value, || md());
     ToolResult::new(
         json!({ "content": [{ "type": "text", "text": text }] }),
         vec![],
@@ -86,7 +84,10 @@ fn append_skill_item(md: &mut Md, skill: &Value) {
 
     let summary = value_str(metadata, "/summary");
     if !summary.is_empty() {
-        md.line(&format!("  summary: {}", summary.split_whitespace().collect::<Vec<_>>().join(" ")));
+        md.line(&format!(
+            "  summary: {}",
+            summary.split_whitespace().collect::<Vec<_>>().join(" ")
+        ));
     }
     let category = value_str(metadata, "/category");
     let targets = string_array(metadata.get("targets"));
@@ -94,7 +95,8 @@ fn append_skill_item(md: &mut Md, skill: &Value) {
         .get("support_file_count")
         .and_then(Value::as_i64)
         .or_else(|| {
-            skill.get("support_files")
+            skill
+                .get("support_files")
                 .and_then(Value::as_array)
                 .map(|files| files.len() as i64)
         });
@@ -160,7 +162,10 @@ fn render_skill_view_md(value: &Value) -> String {
         md.field("targets", &targets);
     }
     if let Some(included) = value.get("support_files_included").and_then(Value::as_bool) {
-        md.field("support_files_included", if included { "true" } else { "false" });
+        md.field(
+            "support_files_included",
+            if included { "true" } else { "false" },
+        );
     }
     let summary = value_str(metadata, "/summary");
     if !summary.is_empty() {

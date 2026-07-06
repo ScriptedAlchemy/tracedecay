@@ -264,16 +264,20 @@ mod tests {
     impl EnvRestore {
         fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
             let previous = std::env::var_os(key);
-            std::env::set_var(key, value);
+            unsafe {
+                std::env::set_var(key, value);
+            }
             Self { key, previous }
         }
     }
 
     impl Drop for EnvRestore {
         fn drop(&mut self) {
-            match self.previous.take() {
-                Some(previous) => std::env::set_var(self.key, previous),
-                None => std::env::remove_var(self.key),
+            unsafe {
+                match self.previous.take() {
+                    Some(previous) => std::env::set_var(self.key, previous),
+                    None => std::env::remove_var(self.key),
+                }
             }
         }
     }

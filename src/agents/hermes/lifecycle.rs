@@ -155,12 +155,16 @@ mod tests {
         static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let previous = std::env::var_os("HERMES_HOME");
-        std::env::set_var("HERMES_HOME", hermes_home);
+        unsafe {
+            std::env::set_var("HERMES_HOME", hermes_home);
+        }
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        if let Some(previous) = previous {
-            std::env::set_var("HERMES_HOME", previous);
-        } else {
-            std::env::remove_var("HERMES_HOME");
+        unsafe {
+            if let Some(previous) = previous {
+                std::env::set_var("HERMES_HOME", previous);
+            } else {
+                std::env::remove_var("HERMES_HOME");
+            }
         }
         match result {
             Ok(value) => value,

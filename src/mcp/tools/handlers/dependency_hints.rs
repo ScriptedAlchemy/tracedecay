@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::dependency_imports::candidates_from_type_only_import;
 use crate::errors::Result;

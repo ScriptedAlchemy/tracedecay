@@ -9,16 +9,16 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use ignore::overrides::{Override, OverrideBuilder};
 use ignore::WalkBuilder;
+use ignore::overrides::{Override, OverrideBuilder};
 use regex::{Regex, RegexBuilder};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
-use super::super::render::{self, Md};
 use super::super::ToolResult;
+use super::super::render::{self, Md};
 use super::support::{filter_by_scope, unique_file_paths};
 
 /// Hard cap on `max_results` regardless of what the caller requests.
