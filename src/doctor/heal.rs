@@ -44,6 +44,9 @@ pub struct HealthPassReport {
     pub quarantined_branch_meta: Vec<BranchMetaQuarantine>,
     /// `None` when the global DB could not be opened, so the GC never ran.
     pub purged_temp_registry_rows: Option<usize>,
+    /// Stale store manifests (and sibling configs) whose project root was
+    /// reconciled to the registry canonical path after a project rename.
+    pub reconciled_store_roots: Vec<super::registry_drift::ReconciledStoreRoot>,
     pub remaining_findings: Vec<String>,
     pub warnings: Vec<String>,
 }
@@ -93,6 +96,15 @@ async fn compute_health_pass_report(profile_root: &Path) -> HealthPassReport {
     let (purged, purged_ids) = gc_stale_temp_registry_rows(&global_db, &projects).await;
     report.purged_temp_registry_rows = Some(purged);
 
+    // Reconcile stale store manifest / config roots to the registry canonical
+    // path (durable half of the project-rename self-heal). Runs before
+    // collect_remaining_findings so any healed drift drops out of the
+    // report-only remaining-findings count.
+    let (reconciled, reconcile_warnings) =
+        super::registry_drift::reconcile_drifted_store_roots(&global_db, profile_root).await;
+    report.reconciled_store_roots = reconciled;
+    report.warnings.extend(reconcile_warnings);
+
     let (findings, warnings) =
         collect_remaining_findings(&global_db, profile_root, &projects, &purged_ids).await;
     report.remaining_findings = findings;
@@ -120,6 +132,21 @@ fn render_health_pass_report(report: &HealthPassReport) {
             eprintln!("  \x1b[32m✔\x1b[0m Purged {purged} stale temp-root registry row(s)");
         }
         None => {}
+    }
+
+    if report.reconciled_store_roots.is_empty() {
+        eprintln!("  \x1b[32m✔\x1b[0m No stale store manifest roots to reconcile");
+    } else {
+        eprintln!(
+            "  \x1b[32m✔\x1b[0m Reconciled {} stale store manifest root(s):",
+            report.reconciled_store_roots.len()
+        );
+        for reconciled in &report.reconciled_store_roots {
+            eprintln!("      • {}", reconciled.manifest_path.display());
+            if let Some(config_path) = &reconciled.config_path {
+                eprintln!("        (config: {})", config_path.display());
+            }
+        }
     }
 
     if report.remaining_findings.is_empty() {

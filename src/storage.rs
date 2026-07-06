@@ -325,6 +325,28 @@ pub fn write_store_manifest(layout: &StoreLayout) -> Result<StoreManifest> {
     Ok(manifest)
 }
 
+/// Writes a [`StoreManifest`] to an explicit path with an atomic temp+rename,
+/// preserving every field as given.
+///
+/// Unlike [`write_store_manifest`], this does not rebuild the manifest from a
+/// [`StoreLayout`]; it serializes the manifest exactly as passed, so callers
+/// (e.g. the doctor heal pass) can surgically rewrite a single field on an
+/// already-parsed manifest without a layout in hand.
+pub fn write_store_manifest_to_path(path: &Path, manifest: &StoreManifest) -> Result<()> {
+    let text = serde_json::to_string_pretty(manifest).map_err(|e| TraceDecayError::Config {
+        message: format!(
+            "failed to serialize store manifest '{}': {e}",
+            path.display()
+        ),
+    })?;
+    let temp_path = path.with_extension("json.tmp");
+    PrivateStoreIo::write_file_atomically(path, &temp_path, text.as_bytes()).map_err(|e| {
+        TraceDecayError::Config {
+            message: format!("failed to write store manifest '{}': {e}", path.display()),
+        }
+    })
+}
+
 pub fn read_store_manifest(path: &Path) -> Result<StoreManifest> {
     let text = fs::read_to_string(path).map_err(|e| TraceDecayError::Config {
         message: format!("failed to read store manifest '{}': {e}", path.display()),
