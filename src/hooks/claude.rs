@@ -689,7 +689,7 @@ mod tests {
         );
     }
 
-    /// The observable SessionStart symptom: for a registered, graph-db-backed
+    /// The observable `SessionStart` symptom: for a registered, graph-db-backed
     /// project the context must report the initialized status and NOT print the
     /// false "no project index found" nudge; for a project-like cwd with no
     /// store the real nudge must still appear (the fix must not mask it).

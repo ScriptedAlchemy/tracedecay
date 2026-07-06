@@ -688,8 +688,8 @@ mod tests {
     /// A renamed / global-only repo (registered store, no repo-local marker or
     /// path-hash store) must resolve via the identity fallback in
     /// `codex_session_context_for_event` and report Initialized, NOT the
-    /// UnindexedProject nudge. A project-like cwd with no store must still nudge
-    /// (the fix must not mask the real UnindexedProject status).
+    /// `UnindexedProject` nudge. A project-like cwd with no store must still nudge
+    /// (the fix must not mask the real `UnindexedProject` status).
     #[tokio::test]
     async fn codex_session_context_resolves_global_only_and_preserves_nudge() {
         let _profile = crate::config::PinnedUserDataDir::new();
