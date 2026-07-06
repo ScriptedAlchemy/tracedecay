@@ -22,10 +22,6 @@ For each bucket we report:
     triggered      count of those scenarios that passed (behavior observed)
     adoption%      triggered / opportunities * 100
 
-The feedback bucket is the headline of the headline: the live store showed
-roughly one rating (fact_feedback) per ~1209 recalls, so the feedback-loop
-adoption number is the whole point of this scorecard.
-
 Definitions:
 
 * A row "counts as an opportunity" for a bucket if its ``category`` is
@@ -77,35 +73,37 @@ def bucket_of(category: str) -> str | None:
     return suffix if suffix in BUCKETS else "other"
 
 
-def row_passed(row: dict) -> bool:
-    """Read the pass flag score.py emits (``pass``), tolerating ``passed``."""
+def row_triggered(row: dict) -> bool:
+    """Did the scenario trigger the memory behavior, path-agnostically?
+
+    tracedecay is reachable via BOTH the MCP tools (``tracedecay_fact_*``) and
+    the ``tracedecay tool fact_*`` CLI, so neither counts as a miss. Ground
+    truth is the ``verify_cmd`` store-state check when the scenario has one
+    (fact added / helpful_count / unhelpful_count / fact_count unchanged);
+    otherwise credit any MCP fact tool OR any CLI fact-command attempt.
+    """
     if not isinstance(row, dict):
         return False
+    verify = row.get("verify_pass")
+    if verify is not None:
+        return bool(verify)
+    mcp = row.get("tracedecay_tools") or []
+    used_mcp = any("fact" in str(t).lower() for t in mcp)
+    cli_attempts = row.get("tool_cmd_attempts") or 0
+    if used_mcp or (isinstance(cli_attempts, int) and cli_attempts > 0):
+        return True
     for key in ("pass", "passed"):
         if key in row:
             return bool(row.get(key))
     return False
 
 
+# Backwards-compatible alias.
+row_passed = row_triggered
+
+
 def aggregate(results: list[dict], corpus: list[dict] | None = None) -> dict:
-    """Aggregate scored rows (and optionally a corpus) into adoption buckets.
-
-    Denominator (opportunities):
-      * with ``corpus``: number of ``factstore-<bucket>`` scenarios in the
-        corpus — so scenarios that never produced a results row still count as
-        a missed opportunity;
-      * without ``corpus``: number of ``factstore-<bucket>`` rows present in
-        ``results``.
-
-    Numerator (triggered): number of ``factstore-<bucket>`` result rows whose
-    ``pass`` is truthy. A pass with no matching opportunity (corpus mode, id not
-    in corpus) is still counted as triggered but never exceeds opportunities in
-    the reported percentage because adoption is clamped for display only via the
-    percentage helper; the raw counts are reported verbatim.
-
-    Returns a dict with per-bucket stats plus ``overall`` and a convenience
-    ``feedback_adoption_pct`` headline.
-    """
+    """Aggregate scored rows (and optionally a corpus) into adoption buckets."""
     order = list(BUCKETS)
 
     def blank() -> dict:
@@ -113,7 +111,6 @@ def aggregate(results: list[dict], corpus: list[dict] | None = None) -> dict:
 
     buckets: dict[str, dict] = {name: blank() for name in order}
 
-    # Opportunities.
     if corpus is not None:
         for scenario in corpus:
             b = bucket_of(scenario.get("category", "") if isinstance(scenario, dict) else "")
@@ -133,7 +130,6 @@ def aggregate(results: list[dict], corpus: list[dict] | None = None) -> dict:
                 order.append(b)
             buckets[b]["opportunities"] += 1
 
-    # Triggered (always from actual results — only a real run can trigger).
     for row in results:
         b = bucket_of(row.get("category", "") if isinstance(row, dict) else "")
         if b is None:
@@ -222,10 +218,7 @@ def render_table(summary: dict) -> str:
     )
     lines.append("")
     lines.append(f"Fact-store adoption %: {summary['factstore_adoption_pct']:.2f}%")
-    lines.append(
-        f"Feedback-loop adoption %: {summary['feedback_adoption_pct']:.2f}%  "
-        "(factstore-feedback bucket -- the whole point)"
-    )
+    lines.append(f"Feedback-loop adoption %: {summary['feedback_adoption_pct']:.2f}%")
     return "\n".join(lines)
 
 
