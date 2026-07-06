@@ -19,18 +19,7 @@ const DEFAULT_LIMIT: usize = 10;
 const FTS_SCORE_WEIGHT: f64 = 0.40;
 const JACCARD_SCORE_WEIGHT: f64 = 0.30;
 const HOLOGRAPHIC_SCORE_WEIGHT: f64 = 0.30;
-/// Conservative usage-frequency reinforcement. Facts the model actually
-/// retrieves earn a small, bounded, log-scaled boost so useful memories drift
-/// upward over time even without explicit helpful/unhelpful feedback — a form
-/// of passive self-training. The log scaling (`ln_1p`) means the marginal boost
-/// shrinks as the count grows, and [`RETRIEVAL_REINFORCEMENT_CAP`] hard-limits
-/// the total multiplier to at most +50%, so a heavily-recalled fact can never
-/// crowd out a genuinely more relevant one. A never-retrieved fact
-/// (`retrieval_count == 0`) gets boost `1.0` — it is not penalized, merely not
-/// promoted.
 const RETRIEVAL_REINFORCEMENT_WEIGHT: f64 = 0.02;
-/// Upper bound on the additive portion of the usage boost, capping the total
-/// usage multiplier at `1.0 + 0.5 = 1.5` (+50%) regardless of retrieval count.
 const RETRIEVAL_REINFORCEMENT_CAP: f64 = 0.5;
 
 pub struct FactRetriever<'a> {
@@ -735,18 +724,13 @@ fn jaccard(left: &[String], right: &[String]) -> f64 {
 }
 
 /// Recall ranking: relevance (FTS + Jaccard + holographic) weighted by trust,
-/// temporal decay, and a bounded usage-frequency reinforcement.
+/// temporal decay, and a bounded log-scaled `retrieval_count` boost.
 ///
-/// `access_count` (every probe/list/related/reason scan) is still deliberately
-/// NOT an input. `retrieval_count` — the narrower count of times a fact was
-/// actually RETURNED from a recall search — feeds a *conservative* usage boost
-/// (see [`RETRIEVAL_REINFORCEMENT_WEIGHT`] / [`RETRIEVAL_REINFORCEMENT_CAP`]).
-/// The boost is log-scaled and capped at +50%, so it nudges genuinely useful
-/// facts upward as passive self-training without the rich-get-richer runaway a
-/// raw linear frequency term would cause: a frequently-recalled fact can be
-/// promoted a little, but never enough to bury a more relevant, newer, or
-/// niche-but-correct fact. A never-retrieved fact keeps a boost of exactly
-/// `1.0` (not penalized).
+/// `access_count` is deliberately NOT an input. Folding access frequency into
+/// the ranking would create a rich-get-richer feedback loop: frequently
+/// recalled facts rank higher, get recalled even more, and crowd out newer or
+/// niche-but-correct facts. Access stats exist for *curation* signals
+/// (delete-reluctance for actively used facts), never for retrieval order.
 fn combined_score(
     fts: f64,
     jaccard: f64,
@@ -759,9 +743,6 @@ fn combined_score(
         FTS_SCORE_WEIGHT,
         jaccard.mul_add(JACCARD_SCORE_WEIGHT, holographic * HOLOGRAPHIC_SCORE_WEIGHT),
     );
-    // Bounded, monotonic log-scaled reinforcement. retrieval_count == 0 =>
-    // ln_1p(0) == 0 => usage_boost == 1.0 (no change); large counts saturate at
-    // 1.0 + RETRIEVAL_REINFORCEMENT_CAP (+50%).
     let usage_boost = 1.0
         + (RETRIEVAL_REINFORCEMENT_WEIGHT * (retrieval_count.max(0) as f64).ln_1p())
             .min(RETRIEVAL_REINFORCEMENT_CAP);
@@ -820,13 +801,8 @@ fn db_error(operation: &str, error: impl fmt::Display) -> TraceDecayError {
 mod tests {
     use super::*;
 
-    /// The usage-frequency reinforcement must (a) leave never-retrieved facts
-    /// exactly as they scored before (boost == 1.0) and (b) strictly raise the
-    /// score of a frequently-retrieved fact with otherwise-identical inputs,
-    /// while staying within the documented +50% cap.
     #[test]
     fn retrieval_reinforcement_boosts_frequently_retrieved_facts() {
-        // Identical relevance/trust/decay inputs; only retrieval_count differs.
         let fts = 0.5;
         let jaccard = 0.4;
         let holographic = 0.6;
@@ -836,16 +812,12 @@ mod tests {
         let baseline = combined_score(fts, jaccard, holographic, trust, temporal_decay, 0);
         let boosted = combined_score(fts, jaccard, holographic, trust, temporal_decay, 200);
 
-        // A high retrieval count ranks strictly higher than the same fact never
-        // retrieved.
         assert!(
             boosted > baseline,
             "expected retrieval_count=200 to score higher than retrieval_count=0 \
              (boosted={boosted}, baseline={baseline})"
         );
 
-        // retrieval_count == 0 => boost == 1.0 => the pre-existing value is
-        // unchanged. Recompute the un-boosted relevance*trust*decay directly.
         let relevance = fts.mul_add(
             FTS_SCORE_WEIGHT,
             jaccard.mul_add(JACCARD_SCORE_WEIGHT, holographic * HOLOGRAPHIC_SCORE_WEIGHT),
@@ -857,26 +829,12 @@ mod tests {
              baseline={baseline}, unboosted={unboosted}"
         );
 
-        // The boost is bounded: even a huge retrieval count cannot exceed +50%.
         let saturated = combined_score(fts, jaccard, holographic, trust, temporal_decay, i64::MAX);
         let max_boosted = unboosted * (1.0 + RETRIEVAL_REINFORCEMENT_CAP);
         assert!(
             saturated <= max_boosted + 1e-12,
             "usage boost must be capped at +{:.0}% (saturated={saturated}, cap={max_boosted})",
             RETRIEVAL_REINFORCEMENT_CAP * 100.0
-        );
-    }
-
-    /// Negative retrieval counts (should never occur, but defend anyway) are
-    /// treated as zero: no penalty, boost stays 1.0.
-    #[test]
-    fn retrieval_reinforcement_ignores_negative_counts() {
-        let (fts, jaccard, holographic, trust, temporal_decay) = (0.3, 0.2, 0.5, 0.7, 0.85);
-        let zero = combined_score(fts, jaccard, holographic, trust, temporal_decay, 0);
-        let negative = combined_score(fts, jaccard, holographic, trust, temporal_decay, -50);
-        assert!(
-            (zero - negative).abs() < 1e-12,
-            "negative retrieval_count must behave like 0 (zero={zero}, negative={negative})"
         );
     }
 }

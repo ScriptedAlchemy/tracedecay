@@ -3,12 +3,12 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::graph::health::{
-    acyclicity_score, compute_composite_health, dependency_depth, depth_score, gini_coefficient,
-    gini_label, modularity_score, HealthDimensions,
+    HealthDimensions, acyclicity_score, compute_composite_health, dependency_depth, depth_score,
+    gini_coefficient, gini_label, modularity_score,
 };
 
 /// Coarse human label for a modularity score in [0,1].
@@ -25,8 +25,8 @@ use crate::graph::queries::GraphQueryManager;
 use crate::tracedecay::TraceDecay;
 use crate::types::{EdgeKind, NodeKind};
 
-use super::super::render;
 use super::super::ToolResult;
+use super::super::render::{self, Md};
 use super::support::{effective_path, unique_file_paths};
 
 // ---------------------------------------------------------------------------
@@ -495,9 +495,14 @@ pub(super) async fn handle_dsm(
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
     let path_prefix = effective_path(&args, scope_prefix);
-    let format = args
-        .get("format")
+    let shape = args
+        .get("shape")
         .and_then(|v| v.as_str())
+        .or_else(|| {
+            args.get("format")
+                .and_then(|v| v.as_str())
+                .filter(|value| matches!(*value, "stats" | "clusters" | "matrix"))
+        })
         .unwrap_or("stats");
     let max_files = args
         .get("max_files")
@@ -525,107 +530,43 @@ pub(super) async fn handle_dsm(
         dir_to_files.entry(dir).or_default().push(file.clone());
     }
 
-    let output = match format {
-        "clusters" => {
-            // For each dir, compute internal/outgoing/incoming edges
-            let mut clusters: Vec<Value> = dir_to_files
-                .iter()
-                .map(|(dir, files)| {
-                    let file_set: HashSet<&str> = files.iter().map(String::as_str).collect();
-                    let mut internal = 0usize;
-                    let mut outgoing = 0usize;
-                    let mut incoming = 0usize;
-                    for file in files {
-                        if let Some(targets) = adj.get(file) {
-                            for tgt in targets {
-                                if file_set.contains(tgt.as_str()) {
-                                    internal += 1;
-                                } else {
-                                    outgoing += 1;
-                                }
-                            }
-                        }
-                        // Incoming: edges pointing to this file from outside the cluster
-                        for (src, targets) in &adj {
-                            if !file_set.contains(src.as_str()) && targets.contains(file) {
-                                incoming += 1;
-                            }
-                        }
-                    }
-                    json!({
-                        "directory": dir,
-                        "file_count": files.len(),
-                        "internal_edges": internal,
-                        "outgoing_edges": outgoing,
-                        "incoming_edges": incoming,
-                    })
-                })
-                .collect();
-            clusters.sort_by_key(|c| std::cmp::Reverse(c["file_count"].as_u64().unwrap_or(0)));
-            json!({ "clusters": clusters })
-        }
-        "matrix" => {
-            // Select top max_files by total edge count
-            let mut file_edge_counts: Vec<(String, usize)> = adj
-                .iter()
-                .map(|(f, targets)| {
-                    let out = targets.len();
-                    let inc = adj.values().filter(|t| t.contains(f)).count();
-                    (f.clone(), out + inc)
-                })
-                .collect();
-            file_edge_counts.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
-            file_edge_counts.truncate(max_files);
-
-            let selected: Vec<String> = file_edge_counts.into_iter().map(|(f, _)| f).collect();
-            let _selected_set: HashSet<&str> = selected.iter().map(String::as_str).collect();
-
-            // Build short filenames (last component)
-            let short_names: Vec<String> = selected
-                .iter()
-                .map(|f| {
-                    f.rfind('/')
-                        .map_or_else(|| f.clone(), |i| f[i + 1..].to_string())
-                })
-                .collect();
-
-            // Build NxN matrix
-            let n = selected.len();
-            let mut matrix: Vec<Vec<u8>> = vec![vec![0u8; n]; n];
-            for (i, src) in selected.iter().enumerate() {
-                if let Some(targets) = adj.get(src) {
-                    for (j, tgt) in selected.iter().enumerate() {
-                        if i != j && targets.contains(tgt) {
-                            matrix[i][j] = 1;
-                        }
-                    }
-                }
-            }
-
-            json!({
-                "files": short_names,
-                "matrix": matrix,
-                "note": format!("Top {} files by edge count shown", n),
-            })
-        }
+    let mut clusters = dsm_clusters(&adj, &dir_to_files);
+    let largest_cluster = clusters
+        .iter()
+        .filter_map(|cluster| cluster["file_count"].as_u64())
+        .max()
+        .unwrap_or(0);
+    let stats = json!({
+        "files": file_count,
+        "edges": edge_count,
+        "density": (density * 10000.0).round() / 10000.0,
+        "clusters": dir_to_files.len(),
+        "largest_cluster": largest_cluster,
+    });
+    let output = match shape {
+        "clusters" => json!({
+            "shape": "clusters",
+            "stats": stats,
+            "clusters": clusters,
+        }),
+        "matrix" => json!({
+            "shape": "matrix",
+            "stats": stats,
+            "clusters": clusters.into_iter().take(10).collect::<Vec<_>>(),
+            "matrix": dsm_matrix(&adj, max_files),
+        }),
         _ => {
-            // stats (default)
-            let largest_cluster = dir_to_files.values().map(Vec::len).max().unwrap_or(0);
+            clusters.truncate(10);
             json!({
-                "files": file_count,
-                "edges": edge_count,
-                "density": (density * 10000.0).round() / 10000.0,
-                "clusters": dir_to_files.len(),
-                "largest_cluster": largest_cluster,
+                "shape": "stats",
+                "stats": stats,
+                "clusters": clusters,
             })
         }
     };
 
-    // `dsm` overloads `format`: stats/clusters/matrix pick the data shape and
-    // render as markdown; "json" falls through to the default (stats) shape
-    // and `render::finalize` emits it as compact JSON.
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-        render::generic_md(&output)
+        render_dsm_md(&output)
     });
     Ok(ToolResult::new(
         json!({
@@ -633,6 +574,143 @@ pub(super) async fn handle_dsm(
         }),
         vec![],
     ))
+}
+
+fn dsm_clusters(
+    adj: &HashMap<String, HashSet<String>>,
+    dir_to_files: &HashMap<String, Vec<String>>,
+) -> Vec<Value> {
+    let mut clusters: Vec<Value> = dir_to_files
+        .iter()
+        .map(|(dir, files)| {
+            let file_set: HashSet<&str> = files.iter().map(String::as_str).collect();
+            let mut internal = 0usize;
+            let mut outgoing = 0usize;
+            let mut incoming = 0usize;
+            for file in files {
+                if let Some(targets) = adj.get(file) {
+                    for tgt in targets {
+                        if file_set.contains(tgt.as_str()) {
+                            internal += 1;
+                        } else {
+                            outgoing += 1;
+                        }
+                    }
+                }
+                for (src, targets) in adj {
+                    if !file_set.contains(src.as_str()) && targets.contains(file) {
+                        incoming += 1;
+                    }
+                }
+            }
+            json!({
+                "directory": dir,
+                "file_count": files.len(),
+                "internal_edges": internal,
+                "outgoing_edges": outgoing,
+                "incoming_edges": incoming,
+                "boundary_edges": outgoing + incoming,
+            })
+        })
+        .collect();
+    clusters.sort_by_key(|c| {
+        std::cmp::Reverse((
+            c["boundary_edges"].as_u64().unwrap_or(0),
+            c["file_count"].as_u64().unwrap_or(0),
+        ))
+    });
+    clusters
+}
+
+fn dsm_matrix(adj: &HashMap<String, HashSet<String>>, max_files: usize) -> Value {
+    let mut file_edge_counts: Vec<(String, usize)> = adj
+        .iter()
+        .map(|(f, targets)| {
+            let out = targets.len();
+            let inc = adj.values().filter(|t| t.contains(f)).count();
+            (f.clone(), out + inc)
+        })
+        .collect();
+    file_edge_counts.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
+    file_edge_counts.truncate(max_files);
+
+    let selected: Vec<String> = file_edge_counts.into_iter().map(|(f, _)| f).collect();
+    let short_names: Vec<String> = selected
+        .iter()
+        .map(|f| {
+            f.rfind('/')
+                .map_or_else(|| f.clone(), |i| f[i + 1..].to_string())
+        })
+        .collect();
+
+    let n = selected.len();
+    let mut matrix: Vec<Vec<u8>> = vec![vec![0u8; n]; n];
+    for (i, src) in selected.iter().enumerate() {
+        if let Some(targets) = adj.get(src) {
+            for (j, tgt) in selected.iter().enumerate() {
+                if i != j && targets.contains(tgt) {
+                    matrix[i][j] = 1;
+                }
+            }
+        }
+    }
+
+    json!({
+        "files": short_names,
+        "matrix": matrix,
+        "note": format!("Top {} files by edge count shown", n),
+    })
+}
+
+fn render_dsm_md(value: &Value) -> String {
+    let mut md = Md::new();
+    md.heading(2, "Design Structure Matrix");
+    md.field("shape", &render::field_str(value, "shape"));
+    if let Some(stats) = value.get("stats") {
+        md.field("files", &render::field_i64(stats, "files").to_string());
+        md.field("edges", &render::field_i64(stats, "edges").to_string());
+        md.field("density", &render::field_str(stats, "density"));
+        md.field(
+            "clusters",
+            &render::field_i64(stats, "clusters").to_string(),
+        );
+        md.field(
+            "largest_cluster",
+            &render::field_i64(stats, "largest_cluster").to_string(),
+        );
+    }
+
+    if let Some(clusters) = value.get("clusters").and_then(Value::as_array) {
+        md.blank().heading(3, "Top Clusters");
+        if clusters.is_empty() {
+            md.empty_note("No dependency clusters found.");
+        } else {
+            for cluster in clusters.iter().take(10) {
+                let dir = render::field_str(cluster, "directory");
+                let files = render::field_i64(cluster, "file_count");
+                let internal = render::field_i64(cluster, "internal_edges");
+                let outgoing = render::field_i64(cluster, "outgoing_edges");
+                let incoming = render::field_i64(cluster, "incoming_edges");
+                let boundary = render::field_i64(cluster, "boundary_edges");
+                md.bullet(&format!(
+                    "{dir}: {files} files; {internal} internal; {boundary} boundary ({outgoing} out, {incoming} in)"
+                ));
+            }
+        }
+    }
+
+    if let Some(matrix) = value.get("matrix") {
+        md.blank().heading(3, "Matrix");
+        if let Some(note) = matrix.get("note").and_then(Value::as_str) {
+            md.field("note", note);
+        }
+        md.code(
+            "json",
+            &serde_json::to_string(matrix).unwrap_or_else(|_| "{}".to_string()),
+        );
+    }
+
+    md.render()
 }
 
 struct RiskEntry {

@@ -8,8 +8,9 @@ use serde_json::Value;
 use crate::context::CONTEXT_PRIORITY_HEADINGS;
 use crate::display::format_relative_time;
 use crate::mcp::response_handles::{
+    RESPONSE_HANDLE_TTL_SECS, RESPONSE_RETRIEVE_TOOL, ResponseHandleRecord,
     note_response_handle_store_skipped_no_project_root, observe_response_truncation,
-    store_response_handle, ResponseHandleRecord, RESPONSE_HANDLE_TTL_SECS, RESPONSE_RETRIEVE_TOOL,
+    store_response_handle,
 };
 use crate::path_tree::format_compact_path_list;
 use crate::text::utf8_prefix_at_or_before;
@@ -169,6 +170,7 @@ pub(super) fn truncated_json_envelope_with_handle(
 /// when it fits within [`MAX_RESPONSE_CHARS`]; otherwise stores the full text
 /// via the response-handle machinery and returns the readable markdown
 /// truncation envelope (preview plus `rh_` retrieval handle).
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn truncate_text_with_handle(project_root: Option<&Path>, text: &str) -> String {
     truncated_markdown_with_handle(project_root, text)
 }

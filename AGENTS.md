@@ -31,5 +31,5 @@ cargo test-all
 ## Learned Workspace Facts
 
 - Parallel branch work uses git worktrees under `.worktrees/` in the repo root (for example `.worktrees/codex-cli-args-stdin`).
-- Integration/default branch is `master`, not `main` (GitHub: ScriptedAlchemy/tracedecay).
-- Multi-PR merge verification: build a detached scratch worktree on `origin/master`, merge all target branches, then run tests with isolated `CARGO_TARGET_DIR` and `TRACEDECAY_DATA_DIR` paths.
+- Integration/default branch is `main` (GitHub: ScriptedAlchemy/tracedecay).
+- Multi-PR merge verification: build a detached scratch worktree on `origin/main`, merge all target branches, then run tests with isolated `CARGO_TARGET_DIR` and `TRACEDECAY_DATA_DIR` paths.

@@ -87,7 +87,6 @@ class AggregateTest(unittest.TestCase):
 
     def test_feedback_headline(self):
         s = scorecard.aggregate(SYNTHETIC_RESULTS)
-        # The headline that is the whole point: feedback-loop adoption is 0%.
         self.assertAlmostEqual(s["feedback_adoption_pct"], 0.0, places=2)
 
     def test_non_factstore_ignored(self):

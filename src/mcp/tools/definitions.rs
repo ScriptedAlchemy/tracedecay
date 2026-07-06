@@ -4,10 +4,10 @@
 //! description, JSON Schema for its input parameters, MCP annotations
 //! (readOnlyHint, title), and optional `_meta` (anthropic/alwaysLoad).
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::dispatch_policy::REGISTERED_PROJECT_READER_TOOL_NAMES;
 use super::ToolDefinition;
+use super::dispatch_policy::REGISTERED_PROJECT_READER_TOOL_NAMES;
 
 mod git_scope;
 mod session;
@@ -504,7 +504,7 @@ fn add_format_property(definitions: &mut [ToolDefinition]) {
             json!({
                 "type": "string",
                 "enum": ["markdown", "json"],
-                "description": "Output format. Default 'markdown' (compact, LLM-optimized prose/tables). Pass 'json' for compact machine-readable JSON when a program will parse the result."
+                "description": "Output format. Default 'markdown' (compact, LLM-optimized sections and bullets; no tables). Pass 'json' for compact machine-readable JSON when a program will parse the result."
             }),
         );
     }
@@ -1125,10 +1125,10 @@ fn def_files() -> ToolDefinition {
                     "type": "string",
                     "description": "Filter files matching this glob pattern (e.g. '**/*.rs')"
                 },
-                "format": {
+                "layout": {
                     "type": "string",
                     "enum": ["flat", "grouped"],
-                    "description": "Output format: flat (one per line) or grouped by directory (default: grouped)"
+                    "description": "File listing layout: flat (one per line) or grouped by directory (default: grouped). Legacy format=flat/grouped is still accepted."
                 }
             }
         }),
@@ -1919,10 +1919,10 @@ fn def_dsm() -> ToolDefinition {
                     "type": "string",
                     "description": "Filter to files under this directory path"
                 },
-                "format": {
+                "shape": {
                     "type": "string",
-                    "enum": ["stats", "clusters", "matrix", "json"],
-                    "description": "Data shape rendered as markdown: stats, clusters, or matrix (default: stats). Pass 'json' for compact machine-readable JSON of the default stats shape."
+                    "enum": ["stats", "clusters", "matrix"],
+                    "description": "DSM data shape: stats, clusters, or matrix (default: stats). Legacy format=stats/clusters/matrix is still accepted."
                 },
                 "max_files": {
                     "type": "number",

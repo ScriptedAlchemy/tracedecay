@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub(super) fn branch_schema(description: &str) -> Value {
     json!({

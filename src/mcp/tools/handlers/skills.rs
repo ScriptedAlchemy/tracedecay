@@ -20,7 +20,7 @@ use crate::errors::{Result, TraceDecayError};
 use crate::mcp::tools::ToolResult;
 use crate::tracedecay::TraceDecay;
 
-use super::super::render;
+use super::super::render::{self, Md};
 
 const SKILL_ANALYTICS_IMPORT_LIMIT: usize = 10_000;
 const STALE_SKILL_AFTER_SECS: i64 = 60 * 60 * 24 * 90;
@@ -32,13 +32,183 @@ fn config_error(message: impl Into<String>) -> TraceDecayError {
 }
 
 fn tool_json(cg: &TraceDecay, args: &Value, value: &Value) -> ToolResult {
+    tool_json_with_md(cg, args, value, || render::generic_md(value))
+}
+
+fn tool_json_with_md<F>(cg: &TraceDecay, args: &Value, value: &Value, md: F) -> ToolResult
+where
+    F: FnOnce() -> String,
+{
     let text = render::finalize(Some(cg.project_root()), args, value, || {
-        render::generic_md(value)
+        md()
     });
     ToolResult::new(
         json!({ "content": [{ "type": "text", "text": text }] }),
         vec![],
     )
+}
+
+fn value_str<'a>(value: &'a Value, pointer: &str) -> &'a str {
+    value.pointer(pointer).and_then(Value::as_str).unwrap_or("")
+}
+
+fn value_i64(value: &Value, pointer: &str) -> Option<i64> {
+    value.pointer(pointer).and_then(Value::as_i64)
+}
+
+fn string_array(value: Option<&Value>) -> String {
+    value
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default()
+}
+
+fn append_skill_item(md: &mut Md, skill: &Value) {
+    let metadata = skill.get("metadata").unwrap_or(skill);
+    let id = value_str(metadata, "/id");
+    let title = value_str(metadata, "/title");
+    let state = value_str(metadata, "/state");
+    let mut line = if title.is_empty() || title == id {
+        format!("**{id}**")
+    } else {
+        format!("**{id}** - {title}")
+    };
+    if !state.is_empty() {
+        line.push_str(&format!(" ({state})"));
+    }
+    md.bullet(&line);
+
+    let summary = value_str(metadata, "/summary");
+    if !summary.is_empty() {
+        md.line(&format!("  summary: {}", summary.split_whitespace().collect::<Vec<_>>().join(" ")));
+    }
+    let category = value_str(metadata, "/category");
+    let targets = string_array(metadata.get("targets"));
+    let support_count = skill
+        .get("support_file_count")
+        .and_then(Value::as_i64)
+        .or_else(|| {
+            skill.get("support_files")
+                .and_then(Value::as_array)
+                .map(|files| files.len() as i64)
+        });
+    let mut details = Vec::new();
+    if !category.is_empty() {
+        details.push(format!("category: {category}"));
+    }
+    if !targets.is_empty() {
+        details.push(format!("targets: {targets}"));
+    }
+    if let Some(count) = support_count {
+        details.push(format!("support_files: {count}"));
+    }
+    if !details.is_empty() {
+        md.line(&format!("  {}", details.join("; ")));
+    }
+}
+
+fn render_skill_list_md(value: &Value) -> String {
+    let mut md = Md::new();
+    md.heading(2, "Managed Skills");
+    md.field("status", render::field_str(value, "status"));
+    md.field("count", &render::field_i64(value, "count").to_string());
+    let profile_root = render::field_str(value, "profile_root");
+    if !profile_root.is_empty() {
+        md.field("profile_root", profile_root);
+    }
+    md.blank().heading(3, "Skills");
+    let Some(skills) = value.get("skills").and_then(Value::as_array) else {
+        md.empty_note("No skills field returned.");
+        return md.render();
+    };
+    if skills.is_empty() {
+        md.empty_note("No managed skills.");
+    } else {
+        for skill in skills {
+            append_skill_item(&mut md, skill);
+        }
+    }
+    md.render()
+}
+
+fn render_skill_view_md(value: &Value) -> String {
+    let mut md = Md::new();
+    let skill = value.get("skill").unwrap_or(value);
+    let metadata = skill.get("metadata").unwrap_or(skill);
+    let id = value_str(metadata, "/id");
+    md.heading(2, &format!("Managed Skill: {id}"));
+    md.field("status", render::field_str(value, "status"));
+    for (label, pointer) in [
+        ("title", "/title"),
+        ("state", "/state"),
+        ("category", "/category"),
+        ("checksum", "/checksum"),
+    ] {
+        let text = value_str(metadata, pointer);
+        if !text.is_empty() {
+            md.field(label, text);
+        }
+    }
+    let targets = string_array(metadata.get("targets"));
+    if !targets.is_empty() {
+        md.field("targets", &targets);
+    }
+    if let Some(included) = value.get("support_files_included").and_then(Value::as_bool) {
+        md.field("support_files_included", if included { "true" } else { "false" });
+    }
+    let summary = value_str(metadata, "/summary");
+    if !summary.is_empty() {
+        md.blank().heading(3, "Summary").line(summary);
+    }
+    let body = value_str(skill, "/body_markdown");
+    if !body.is_empty() {
+        md.blank().heading(3, "Body").line(body);
+    }
+    if let Some(files) = skill.get("support_files").and_then(Value::as_array) {
+        md.blank().heading(3, "Support Files");
+        if files.is_empty() {
+            md.empty_note("No support files.");
+        } else {
+            for file in files {
+                let path = value_str(file, "/path");
+                let bytes = file
+                    .get("bytes")
+                    .and_then(Value::as_array)
+                    .map(|bytes| bytes.len())
+                    .unwrap_or_default();
+                md.bullet(&format!("**{path}** - {bytes} bytes"));
+            }
+        }
+    }
+    md.render()
+}
+
+fn render_automation_artifact_md(value: &Value) -> String {
+    let mut md = Md::new();
+    md.heading(2, "Automation Run Artifact");
+    md.field("status", render::field_str(value, "status"));
+    md.field("run_id", render::field_str(value, "run_id"));
+    let artifact = value.get("artifact").unwrap_or(&Value::Null);
+    for key in ["kind", "path", "sha256"] {
+        let text = render::field_str(artifact, key);
+        if !text.is_empty() {
+            md.field(key, text);
+        }
+    }
+    if let Some(size) = value_i64(artifact, "/size_bytes") {
+        md.field("size_bytes", &size.to_string());
+    }
+    if let Some(payload) = value.get("payload") {
+        md.blank().heading(3, "Payload");
+        md.line(render::generic_md(payload).trim());
+    }
+    md.render()
 }
 
 fn optional_bool(args: &Value, key: &str, default: bool) -> bool {
@@ -142,7 +312,9 @@ pub(super) async fn handle_skill_list(cg: &TraceDecay, args: Value) -> Result<To
             })
             .collect::<Vec<_>>(),
     });
-    Ok(tool_json(cg, &args, &payload))
+    Ok(tool_json_with_md(cg, &args, &payload, || {
+        render_skill_list_md(&payload)
+    }))
 }
 
 pub(super) async fn handle_skill_view(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
@@ -203,7 +375,9 @@ pub(super) async fn handle_skill_view(cg: &TraceDecay, args: Value) -> Result<To
         "improvement_recommendation": improvement_recommendation,
         "support_files_included": include_support_files,
     });
-    Ok(tool_json(cg, &args, &payload))
+    Ok(tool_json_with_md(cg, &args, &payload, || {
+        render_skill_view_md(&payload)
+    }))
 }
 
 pub(super) async fn handle_automation_run_artifact_view(
@@ -232,7 +406,9 @@ pub(super) async fn handle_automation_run_artifact_view(
         "artifact": artifact,
         "payload": payload,
     });
-    Ok(tool_json(cg, &args, &payload))
+    Ok(tool_json_with_md(cg, &args, &payload, || {
+        render_automation_artifact_md(&payload)
+    }))
 }
 
 async fn sync_project_skill_analytics(cg: &TraceDecay, profile_root: &Path) -> Result<()> {

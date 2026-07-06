@@ -4,14 +4,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 use crate::types::{NodeKind, Visibility};
 
-use super::super::render;
 use super::super::ToolResult;
+use super::super::render;
 use super::support::{effective_path, filter_by_scope, unique_file_paths};
 
 /// True if `line` contains `identifier` as a whole token (boundaries are
@@ -1597,7 +1597,7 @@ fn prewarm_enabled_from(env_value: Option<bool>, config_flag: bool) -> bool {
 
 /// Build the early-return `warming` payload for a cold prewarm. Factored out so
 /// the warming path is unit-testable without spawning cargo.
-fn diagnostics_warming_result(project_root: &std::path::Path) -> ToolResult {
+fn diagnostics_warming_result(project_root: &std::path::Path, args: &Value) -> ToolResult {
     let target_dir = crate::diagnostics::rust_diagnostics_target_dir(project_root);
     let payload = json!({
         "status": "warming",
@@ -1609,7 +1609,9 @@ fn diagnostics_warming_result(project_root: &std::path::Path) -> ToolResult {
         "target_dir": target_dir.display().to_string(),
         "diagnostic_count": 0,
     });
-    let text = render::generic_md(&payload);
+    let text = render::finalize(Some(project_root), args, &payload, || {
+        render::generic_md(&payload)
+    });
     ToolResult::new(
         json!({ "content": [{ "type": "text", "text": text }] }),
         vec![],
@@ -1631,7 +1633,7 @@ pub(super) async fn handle_diagnostics(cg: &TraceDecay, args: Value) -> Result<T
         && crate::diagnostics::is_rust_diagnostics_cold(&project_root)
     {
         crate::diagnostics::spawn_rust_diagnostics_prewarm(&project_root)?;
-        return Ok(diagnostics_warming_result(&project_root));
+        return Ok(diagnostics_warming_result(&project_root, &args));
     }
 
     let mut diagnostics = run_all(&project_root, &scope).await?;
@@ -1720,10 +1722,18 @@ pub(super) async fn handle_constructors(
         .collect();
 
     if struct_nodes.is_empty() {
+        let payload = json!({
+            "found": false,
+            "struct": struct_name,
+            "message": format!("No struct, class, or case-class named '{struct_name}' found."),
+            "match_count": 0,
+            "sites": [],
+        });
+        let text = render::finalize(Some(cg.project_root()), &args, &payload, || {
+            render::generic_md(&payload)
+        });
         return Ok(ToolResult::new(
-            json!({
-                "content": [{ "type": "text", "text": format!("No struct, class, or case-class named '{struct_name}' found.") }]
-            }),
+            json!({ "content": [{ "type": "text", "text": text }] }),
             vec![],
         ));
     }
@@ -2342,6 +2352,7 @@ mod circular_render_tests {
 #[allow(clippy::unwrap_used)]
 mod diagnostics_warming_tests {
     use super::{diagnostics_warming_result, prewarm_enabled_from};
+    use serde_json::{Value, json};
     use std::path::Path;
 
     #[test]
@@ -2362,7 +2373,7 @@ mod diagnostics_warming_tests {
     #[test]
     fn warming_result_reports_status_and_target_dir() {
         let root = Path::new("/tmp/tracedecay-warming-proj");
-        let result = diagnostics_warming_result(root);
+        let result = diagnostics_warming_result(root, &json!({}));
         let text = result.value["content"][0]["text"].as_str().unwrap();
         assert!(
             text.contains("warming"),
@@ -2378,5 +2389,16 @@ mod diagnostics_warming_tests {
             text.contains("tracedecay-target"),
             "should point at the private diagnostics target dir: {text}"
         );
+        assert!(
+            !text.trim_start().starts_with('{'),
+            "default output should be Markdown: {text}"
+        );
+
+        let json_result = diagnostics_warming_result(root, &json!({ "format": "json" }));
+        let json_text = json_result.value["content"][0]["text"].as_str().unwrap();
+        let json_payload: Value =
+            serde_json::from_str(json_text).expect("format=json should stay parseable JSON");
+        assert_eq!(json_payload["status"], "warming");
+        assert_eq!(json_payload["diagnostic_count"], 0);
     }
 }

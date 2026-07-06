@@ -1147,6 +1147,38 @@ mod tests {
     }
 
     #[test]
+    fn format_capable_tools_advertise_markdown_json_without_tables() {
+        let tools = get_tool_definitions();
+        for tool_name in super::super::definitions::format_capable_tool_names() {
+            let tool = tools
+                .iter()
+                .find(|tool| tool.name == *tool_name)
+                .unwrap_or_else(|| panic!("{tool_name} missing tool definition"));
+            let format = &tool.input_schema["properties"]["format"];
+            assert_eq!(
+                format["enum"],
+                json!(["markdown", "json"]),
+                "{tool_name} should expose markdown/json format choices"
+            );
+            let description = format["description"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{tool_name} format must have a description"));
+            assert!(
+                description.contains("Default 'markdown'"),
+                "{tool_name} should document Markdown as default: {description}"
+            );
+            assert!(
+                description.contains("no tables"),
+                "{tool_name} should advertise no-table Markdown: {description}"
+            );
+            assert!(
+                !description.contains("prose/tables"),
+                "{tool_name} should not advertise table-heavy Markdown: {description}"
+            );
+        }
+    }
+
+    #[test]
     fn test_tool_definitions_have_annotations() {
         let tools = get_tool_definitions();
         let write_tools = [

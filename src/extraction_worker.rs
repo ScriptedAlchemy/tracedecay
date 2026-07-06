@@ -94,7 +94,9 @@ fn worker_main() -> io::Result<()> {
         io::Error::other("worker token not set; cannot run extract-worker directly")
     })?;
     // Scrub immediately so a child of a child cannot inherit it.
-    std::env::remove_var(TOKEN_ENV_VAR);
+    unsafe {
+        std::env::remove_var(TOKEN_ENV_VAR);
+    }
     let expected =
         hex::decode(token_hex.trim()).map_err(|_| io::Error::other("worker token malformed"))?;
     if expected.len() != TOKEN_LEN {
