@@ -120,7 +120,11 @@ pub fn global_db_ambiguity_message(paths: &[String]) -> String {
 
 /// Opens an existing project, or tells the user to run `tracedecay init` first.
 pub async fn ensure_initialized(project_path: &Path) -> Result<TraceDecay> {
-    ensure_initialized_with_options(project_path, TraceDecayOpenOptions::default()).await
+    Box::pin(ensure_initialized_with_options(
+        project_path,
+        TraceDecayOpenOptions::default(),
+    ))
+    .await
 }
 
 pub async fn ensure_initialized_with_options(
@@ -552,7 +556,7 @@ pub async fn resolve_serve_startup(path_arg: Option<String>) -> ServeStartup {
     };
 
     let mut peeked_line: Option<String> = None;
-    let first_error = match ensure_initialized(&resolver.project_path).await {
+    let first_error = match Box::pin(ensure_initialized(&resolver.project_path)).await {
         Ok(cg) => {
             resolver
                 .log_choice_if_template(cg.project_root(), "discovered from the working directory");
@@ -650,7 +654,7 @@ impl ServeProjectResolver {
     }
 
     async fn resolve_once_with_origin(&self) -> Result<(TraceDecay, ServeProjectResolutionOrigin)> {
-        let first_error = match ensure_initialized(&self.project_path).await {
+        let first_error = match Box::pin(ensure_initialized(&self.project_path)).await {
             Ok(cg) => {
                 self.log_choice_if_template(
                     cg.project_root(),
@@ -666,7 +670,7 @@ impl ServeProjectResolver {
 
         let discovered = crate::config::resolve_path_with_discovery(None);
         if discovered != self.project_path {
-            if let Ok(cg) = ensure_initialized(&discovered).await {
+            if let Ok(cg) = Box::pin(ensure_initialized(&discovered)).await {
                 self.log_choice_if_template(
                     cg.project_root(),
                     "discovered from the working directory",
@@ -677,7 +681,7 @@ impl ServeProjectResolver {
 
         if let Some(p) = resolve_project_from_roots(&self.initialize_roots).await {
             self.log_choice_if_template(&p, "matched an MCP initialize root");
-            return ensure_initialized(&p)
+            return Box::pin(ensure_initialized(&p))
                 .await
                 .map(|cg| (cg, ServeProjectResolutionOrigin::InitializeRoots));
         }
@@ -685,7 +689,7 @@ impl ServeProjectResolver {
         match resolve_serve_from_global_db(self.global_db_match).await {
             ServeGlobalDbResolution::Found(p) => {
                 self.log_choice_if_template(&p, "resolved from the global project registry");
-                ensure_initialized(&p)
+                Box::pin(ensure_initialized(&p))
                     .await
                     .map(|cg| (cg, ServeProjectResolutionOrigin::GlobalDb))
             }

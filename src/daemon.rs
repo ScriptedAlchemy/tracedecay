@@ -1664,7 +1664,11 @@ async fn automation_scheduler_has_work_for_project(
     project_path: &Path,
     handshake: &DaemonHandshake,
 ) -> Result<bool> {
-    let cg = open_existing_project_with_options(project_path, handshake.open_options()).await?;
+    let cg = Box::pin(open_existing_project_with_options(
+        project_path,
+        handshake.open_options(),
+    ))
+    .await?;
     let config = effective_automation_config_for_project(&cg, &handshake.client_identity).await?;
     Ok(automation_scheduler_has_work(&cg, &config).await)
 }
@@ -1674,7 +1678,12 @@ async fn automation_scheduler_tick_secs_for_project(
     project_path: &Path,
     handshake: &DaemonHandshake,
 ) -> u64 {
-    match open_existing_project_with_options(project_path, handshake.open_options()).await {
+    match Box::pin(open_existing_project_with_options(
+        project_path,
+        handshake.open_options(),
+    ))
+    .await
+    {
         Ok(cg) => {
             match effective_automation_config_for_project(&cg, &handshake.client_identity).await {
                 Ok(config) => config.scheduler_tick_secs,
@@ -1719,7 +1728,11 @@ async fn run_automation_scheduler_tick(
         SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
     };
 
-    let cg = open_existing_project_with_options(project_path, handshake.open_options()).await?;
+    let cg = Box::pin(open_existing_project_with_options(
+        project_path,
+        handshake.open_options(),
+    ))
+    .await?;
     let control =
         crate::automation::scheduler::load_scheduler_control(&cg.store_layout().dashboard_root)
             .await?;
@@ -2050,7 +2063,12 @@ async fn open_project_for_handshake(
     handshake: &DaemonHandshake,
 ) -> Result<crate::tracedecay::TraceDecay> {
     let open_options = handshake.open_options();
-    match open_existing_project_with_options(project_path, open_options.clone()).await {
+    match Box::pin(open_existing_project_with_options(
+        project_path,
+        open_options.clone(),
+    ))
+    .await
+    {
         Ok(cg) => Ok(cg),
         Err(open_err) if handshake.allow_init && is_missing_index_error(&open_err) => {
             match crate::tracedecay::TraceDecay::init_with_options(project_path, open_options).await

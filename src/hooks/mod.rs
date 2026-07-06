@@ -167,7 +167,7 @@ impl HookTimingSpan {
     fn new(root: Option<&Path>, agent: HintAgent, hook_name: &str, parsed: Value) -> Self {
         let enabled = root
             .map(crate::config::load_telemetry_config)
-            .map_or(true, |telemetry| telemetry.timings);
+            .is_none_or(|telemetry| telemetry.timings);
         Self {
             root: root.map(Path::to_path_buf),
             agent: agent.as_key(),
