@@ -39,6 +39,7 @@ impl AgentIntegration for CodexIntegration {
     fn install(&self, ctx: &InstallContext) -> Result<()> {
         install_codex_plugin(&ctx.home, &ctx.tracedecay_bin)?;
         sweep_legacy_global_codex_config(&ctx.home);
+        install_codex_global_prompt_rules(&ctx.home)?;
 
         eprintln!();
         eprintln!("Setup complete. Next steps:");
@@ -1238,6 +1239,32 @@ fn uninstall_mcp_server(config_path: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Write tracedecay prompt rules to the **global** `~/.codex/AGENTS.md` so they
+/// apply to every Codex session in the profile, not per-repo. Includes a
+/// proactive memory-usage paragraph (store durable facts, search before
+/// answering, rate what you used) — the always-on nudge Codex otherwise lacks,
+/// since its bundle ships only model-invoked skills.
+fn install_codex_global_prompt_rules(home: &Path) -> Result<()> {
+    const CODEX_MEMORY_RULE: &str = "You have durable project memory. Use it proactively, \
+         without waiting to be asked: when the user states a lasting preference, decision, or \
+         correction, store it with `tracedecay_fact_store` (add/update). Before answering a \
+         question about the project or the user, search or probe memory first rather than \
+         guessing. Once a recalled fact helped or misled you, rate it with \
+         `tracedecay_fact_feedback` (helpful/unhelpful) so trust is earned from use.";
+    let agents_md = home.join(".codex").join("AGENTS.md");
+    let block = super::prompt_rules::standard_prompt_rules(
+        super::prompt_rules::PROMPT_RULE_MARKER,
+        &super::prompt_rules::PromptRulesOptions {
+            extra_paragraphs: &[CODEX_MEMORY_RULE],
+        },
+    );
+    super::prompt_rules::reconcile_prompt_rules(
+        &agents_md,
+        super::prompt_rules::PROMPT_RULE_MARKER,
+        &block,
+    )
 }
 
 /// Remove tracedecay rules from AGENTS.md.
