@@ -90,7 +90,9 @@ enum DiagnosticsCacheSlotState {
     #[default]
     Idle,
     Ready(CachedDiagnostics),
-    Running { fingerprint: DiagnosticsFingerprint },
+    Running {
+        fingerprint: DiagnosticsFingerprint,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,9 +143,7 @@ impl DiagnosticsCache {
         loop {
             let mut state = slot.state.lock().await;
             match &*state {
-                DiagnosticsCacheSlotState::Ready(cached)
-                    if cached.fingerprint == fingerprint =>
-                {
+                DiagnosticsCacheSlotState::Ready(cached) if cached.fingerprint == fingerprint => {
                     return Ok(cached.diagnostics.clone());
                 }
                 DiagnosticsCacheSlotState::Running {
@@ -216,7 +216,9 @@ impl DiagnosticsFingerprint {
             }
         }
 
-        fingerprint.files.sort_by(|left, right| left.path.cmp(&right.path));
+        fingerprint
+            .files
+            .sort_by(|left, right| left.path.cmp(&right.path));
         Ok(fingerprint)
     }
 
