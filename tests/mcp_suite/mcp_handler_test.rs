@@ -88,7 +88,7 @@ async fn open_test_db_connection(db_path: &Path) -> TestDbConnection {
     TestDbConnection { _db: db, conn }
 }
 
-async fn handle_tool_call(
+pub(crate) async fn handle_tool_call(
     cg: &TraceDecay,
     tool_name: &str,
     mut args: serde_json::Value,
@@ -117,7 +117,7 @@ async fn handle_tool_call(
     tracedecay::mcp::handle_tool_call(cg, tool_name, args, server_stats, scope_prefix).await
 }
 
-async fn index_all_retrying_sync_lock(cg: &TraceDecay) {
+pub(crate) async fn index_all_retrying_sync_lock(cg: &TraceDecay) {
     for attempt in 0..20 {
         match cg.index_all().await {
             Ok(_) => return,
@@ -231,7 +231,7 @@ fn canonicalize_test_db_path(path: &Path) -> PathBuf {
 // Shared setup
 // ---------------------------------------------------------------------------
 
-struct TestTempDir {
+pub(crate) struct TestTempDir {
     dir: Option<TempDir>,
 }
 
@@ -269,7 +269,7 @@ fn test_temp_dir() -> TestTempDir {
     TestTempDir::new()
 }
 
-struct TestProject {
+pub(crate) struct TestProject {
     dir: Option<TestTempDir>,
     _home_guard: HomeEnvGuard,
     _global_db_guard: GlobalDbEnvGuard,
@@ -294,7 +294,7 @@ impl Drop for TestProject {
     }
 }
 
-struct TestEnv {
+pub(crate) struct TestEnv {
     _home_guard: HomeEnvGuard,
     _global_db_guard: GlobalDbEnvGuard,
     // Drop order = declaration order: the env lock must outlive the guards
@@ -310,7 +310,7 @@ struct CrossProjectMemoryEnv {
     _env_lock: MutexGuard<'static, ()>,
 }
 
-struct TestTraceDecay {
+pub(crate) struct TestTraceDecay {
     inner: Option<TraceDecay>,
 }
 
@@ -370,7 +370,7 @@ impl Drop for TestTraceDecay {
 
 /// Creates a temporary Rust project with cross-file calls, structs, impls,
 /// test files, and doc comments, then initialises and indexes a `TraceDecay`.
-async fn setup_project() -> (TestTraceDecay, TestProject) {
+pub(crate) async fn setup_project() -> (TestTraceDecay, TestProject) {
     let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
     let dir = test_temp_dir();
     let project = dir.path();
@@ -420,7 +420,7 @@ async fn init_test_project(project: &Path) -> (TestTraceDecay, TestEnv) {
     )
 }
 
-async fn setup_empty_project() -> (TestTraceDecay, TestEnv, TestTempDir) {
+pub(crate) async fn setup_empty_project() -> (TestTraceDecay, TestEnv, TestTempDir) {
     let dir = test_temp_dir();
     let (cg, env) = init_test_project(dir.path()).await;
     (cg, env, dir)
@@ -740,13 +740,13 @@ describe('math', () => {
 
 /// Extracts the text content from a `ToolResult` value (the standard
 /// `content[0].text` envelope).
-fn extract_text(value: &Value) -> &str {
+pub(crate) fn extract_text(value: &Value) -> &str {
     value["content"][0]["text"]
         .as_str()
         .unwrap_or("<missing text>")
 }
 
-fn extract_json(value: &Value) -> Value {
+pub(crate) fn extract_json(value: &Value) -> Value {
     serde_json::from_str(extract_text(value)).unwrap()
 }
 
@@ -1078,37 +1078,6 @@ async fn selected_project_read_skips_cache_write_for_read_only_store() {
             "attempt {attempt}: selected read should return file content without writing to the read-only cache: {read_payload}"
         );
     }
-}
-
-#[tokio::test]
-async fn read_cache_default_response_stays_markdown() {
-    let (cg, _dir) = setup_project().await;
-    let args = json!({"file": "src/main.rs", "mode": "full"});
-
-    tracedecay::mcp::handle_tool_call(&cg, "tracedecay_read", args.clone(), None, None)
-        .await
-        .unwrap();
-    let cached = tracedecay::mcp::handle_tool_call(&cg, "tracedecay_read", args, None, None)
-        .await
-        .unwrap();
-    let cached_text = extract_text(&cached.value);
-    assert!(cached_text.starts_with("## src/main.rs (full)"));
-    assert!(cached_text.contains("**unchanged:** true"));
-    assert!(!cached_text.trim_start().starts_with('{'));
-    assert!(!cached_text.contains('|'));
-
-    let cached_json = handle_tool_call(
-        &cg,
-        "tracedecay_read",
-        json!({"file": "src/main.rs", "mode": "full", "format": "json"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let cached_json = extract_json(&cached_json.value);
-    assert_eq!(cached_json["unchanged"], true);
-    assert_eq!(cached_json["file"], "src/main.rs");
 }
 
 fn tool_schema<'a>(tools: &'a [tracedecay::mcp::ToolDefinition], name: &str) -> &'a Value {
@@ -1678,7 +1647,7 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
 
 /// Searches for `name` via the search handler and returns the first matching
 /// node id whose name field equals `name`.
-async fn find_node_id(cg: &TraceDecay, name: &str) -> String {
+pub(crate) async fn find_node_id(cg: &TraceDecay, name: &str) -> String {
     let result = handle_tool_call(cg, "tracedecay_search", json!({"query": name}), None, None)
         .await
         .unwrap();
@@ -14902,83 +14871,6 @@ async fn simplify_scan_surfaces_store_failure_instead_of_no_findings() {
         result.is_err(),
         "a failing store query must produce a tool error, not an empty findings list"
     );
-}
-
-#[tokio::test]
-async fn simplify_scan_markdown_visible_output_is_not_escaped_blob() {
-    let (cg, _env, dir) = setup_empty_project().await;
-    fs::create_dir_all(dir.path().join("src")).unwrap();
-    fs::write(
-        dir.path().join("src/dead.rs"),
-        r#"
-fn abandoned_helper() -> usize {
-    7
-}
-"#,
-    )
-    .unwrap();
-    index_all_retrying_sync_lock(&cg).await;
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_simplify_scan",
-        json!({"files": ["src/dead.rs"], "format": "markdown"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-
-    let text = extract_text(&result.value);
-    assert!(text.contains("# Simplify Scan"), "got: {text}");
-    assert!(text.contains("## Potential Dead Code"), "got: {text}");
-    assert!(text.contains("abandoned_helper"), "got: {text}");
-    assert!(
-        serde_json::from_str::<Value>(text).is_err(),
-        "visible markdown should not be a JSON envelope: {text}"
-    );
-    assert!(
-        !text.contains("\\n") && !text.contains("\\\""),
-        "visible markdown should not contain escaped markdown/json: {text}"
-    );
-    assert!(
-        !text.contains("\"content\""),
-        "visible markdown should not contain a nested MCP envelope: {text}"
-    );
-}
-
-#[tokio::test]
-async fn type_hierarchy_defaults_to_markdown_and_supports_json() {
-    let (cg, _dir) = setup_project().await;
-    let node_id = find_node_id(&cg, "helper").await;
-
-    let markdown = handle_tool_call(
-        &cg,
-        "tracedecay_type_hierarchy",
-        json!({"node_id": node_id}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let markdown = extract_text(&markdown.value);
-    assert!(markdown.starts_with("## Type Hierarchy"));
-    assert!(markdown.contains("```text"));
-    assert!(!markdown.contains("|"));
-    assert!(serde_json::from_str::<Value>(markdown).is_err());
-
-    let json_result = handle_tool_call(
-        &cg,
-        "tracedecay_type_hierarchy",
-        json!({"node_id": node_id, "format": "json"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let parsed: Value = serde_json::from_str(extract_text(&json_result.value)).unwrap();
-    assert_eq!(parsed["root"]["name"], "helper");
-    assert!(parsed["tree"].as_str().unwrap().contains("helper"));
 }
 
 #[tokio::test]

@@ -201,11 +201,13 @@ async fn open_or_init_codex_daemon_automation_project(
             "No TraceDecay store found for {}; initializing one (equivalent to `tracedecay init`).",
             project_path.display()
         );
-        tracedecay::tracedecay::TraceDecay::init_and_index_with_options(
+        let cg = tracedecay::tracedecay::TraceDecay::init_with_options(
             project_path,
             tracedecay::tracedecay::TraceDecayOpenOptions::default(),
         )
-        .await
+        .await?;
+        cg.index_all().await?;
+        Ok(cg)
     }
 }
 

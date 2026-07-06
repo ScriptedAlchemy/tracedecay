@@ -18,7 +18,7 @@ use crate::memory::types::{
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
-use super::super::render::{self, Md};
+use super::super::{render, renderers};
 use super::support::{
     profile_root_for_global_db, project_registry_context, project_selector_present,
     safe_profile_relpath, string_array_values,
@@ -45,7 +45,9 @@ fn rendered_tool_json(project_root: Option<&Path>, args: &Value, value: &Value) 
 }
 
 fn rendered_fact_store(project_root: Option<&Path>, args: &Value, value: &Value) -> ToolResult {
-    let text = render::finalize(project_root, args, value, || fact_store_md(args, value));
+    let text = render::finalize(project_root, args, value, || {
+        renderers::fact_store_md(args, value)
+    });
     text_tool_result(&text)
 }
 
@@ -195,203 +197,6 @@ fn results_envelope(action: &str, results: &Value, count: usize) -> Value {
         "facts": results,
         "count": count,
     })
-}
-
-fn fact_store_md(args: &Value, value: &Value) -> String {
-    let mut md = Md::new();
-    md.heading(2, "Fact Store");
-    let action = render::field_str(value, "action");
-    if !action.is_empty() {
-        md.field("action", action);
-    }
-    append_fact_store_request(&mut md, args);
-    if let Some(count) = value.get("count").and_then(Value::as_i64) {
-        md.field("count", &count.to_string());
-    }
-
-    if let Some(removed) = value.get("removed").and_then(Value::as_bool) {
-        md.field("removed", if removed { "true" } else { "false" });
-    }
-    append_fact_store_diff(&mut md, value);
-
-    if let Some(fact) = value.get("fact").filter(|fact| fact.is_object()) {
-        md.blank().heading(3, "Fact");
-        append_fact_md(&mut md, fact, value);
-    }
-
-    if let Some(results) = value.get("results").and_then(Value::as_array) {
-        md.blank().heading(3, "Facts");
-        if results.is_empty() {
-            md.empty_note("No matching facts.");
-        } else {
-            for result in results {
-                append_fact_md(&mut md, fact_payload(result), result);
-            }
-        }
-    }
-
-    if let Some(history) = value.get("trust_history").and_then(Value::as_array) {
-        md.blank().heading(3, "Trust History");
-        if history.is_empty() {
-            md.empty_note("No trust feedback recorded.");
-        } else {
-            for item in history.iter().take(10) {
-                md.bullet(&compact_json_summary(item));
-            }
-            if history.len() > 10 {
-                md.bullet(&format!("... {} more", history.len() - 10));
-            }
-        }
-    }
-
-    md.render()
-}
-
-fn append_fact_store_request(md: &mut Md, args: &Value) {
-    for key in [
-        "query",
-        "entity",
-        "category",
-        "min_trust",
-        "threshold",
-        "limit",
-    ] {
-        let text = compact_scalar(args.get(key));
-        if !text.is_empty() {
-            md.field(key, &text);
-        }
-    }
-    let entities = string_list(args.get("entities"));
-    if !entities.is_empty() {
-        md.field("entities", &entities.join(", "));
-    }
-}
-
-fn append_fact_store_diff(md: &mut Md, value: &Value) {
-    for key in ["diff", "closest_fact_id", "similarity", "reason", "error"] {
-        let text = compact_scalar(value.get(key));
-        if !text.is_empty() {
-            md.field(key, &text);
-        }
-    }
-}
-
-fn fact_payload(value: &Value) -> &Value {
-    value
-        .get("fact")
-        .filter(|fact| fact.is_object())
-        .unwrap_or(value)
-}
-
-fn append_fact_md(md: &mut Md, fact: &Value, envelope: &Value) {
-    let id = fact
-        .get("fact_id")
-        .and_then(Value::as_i64)
-        .map(|id| format!("#{id}"))
-        .unwrap_or_else(|| "#?".to_string());
-    let category = compact_scalar(fact.get("category"));
-    let trust = fact
-        .get("trust_score")
-        .and_then(Value::as_f64)
-        .map(|score| format!("{score:.3}"))
-        .unwrap_or_default();
-    let content = compact_text(&render::field_str(fact, "content"));
-    let mut head = id;
-    if !category.is_empty() {
-        head.push(' ');
-        head.push_str(&category);
-    }
-    if !trust.is_empty() {
-        head.push_str(" trust ");
-        head.push_str(&trust);
-    }
-    if let Some(score) = envelope
-        .get("score")
-        .and_then(Value::as_f64)
-        .map(|score| format!("{score:.3}"))
-    {
-        head.push_str(" score ");
-        head.push_str(&score);
-    }
-    if !content.is_empty() {
-        head.push_str(": ");
-        head.push_str(&content);
-    }
-    md.bullet(&head);
-
-    let detail = fact_detail_line(fact);
-    if !detail.is_empty() {
-        md.line(&format!("  {detail}"));
-    }
-    let why = compact_text(&render::field_str(envelope, "why"));
-    if !why.is_empty() {
-        md.line(&format!("  why: {why}"));
-    }
-}
-
-fn fact_detail_line(fact: &Value) -> String {
-    let mut parts = Vec::new();
-    let entities = string_list(fact.get("entities"));
-    if !entities.is_empty() {
-        parts.push(format!("entities: {}", entities.join(", ")));
-    }
-    let tags = string_list(fact.get("tags"));
-    if !tags.is_empty() {
-        parts.push(format!("tags: {}", tags.join(", ")));
-    }
-    let source = compact_scalar(fact.get("source"));
-    if !source.is_empty() {
-        parts.push(format!("source: {source}"));
-    }
-    parts.join("; ")
-}
-
-fn string_list(value: Option<&Value>) -> Vec<String> {
-    value
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(compact_text)
-                .filter(|text| !text.is_empty())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn compact_scalar(value: Option<&Value>) -> String {
-    match value {
-        Some(Value::String(text)) => compact_text(text),
-        Some(Value::Number(number)) => number.to_string(),
-        Some(Value::Bool(true)) => "true".to_string(),
-        Some(Value::Bool(false)) => "false".to_string(),
-        _ => String::new(),
-    }
-}
-
-fn compact_text(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn compact_json_summary(value: &Value) -> String {
-    match value {
-        Value::Object(map) => {
-            let mut parts = Vec::new();
-            for key in ["created_at", "trust_score", "feedback", "source", "note"] {
-                let text = compact_scalar(map.get(key));
-                if !text.is_empty() {
-                    parts.push(format!("{key}: {text}"));
-                }
-            }
-            if parts.is_empty() {
-                serde_json::to_string(value).unwrap_or_default()
-            } else {
-                parts.join("; ")
-            }
-        }
-        _ => compact_scalar(Some(value)),
-    }
 }
 
 fn fact_result_ids(results: &[FactSearchResult]) -> Vec<i64> {

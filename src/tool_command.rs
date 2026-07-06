@@ -240,8 +240,10 @@ async fn call_in_process_tool(
         )
         .await
     {
-        tracedecay::tracedecay::TraceDecay::init_and_index_with_options(project_path, open_options)
-            .await?
+        let cg = tracedecay::tracedecay::TraceDecay::init_with_options(project_path, open_options)
+            .await?;
+        cg.index_all().await?;
+        cg
     } else {
         tracedecay::tracedecay::TraceDecay::open_with_options(project_path, open_options).await?
     };
