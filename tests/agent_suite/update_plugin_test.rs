@@ -75,7 +75,8 @@ enum CodexScope {
 }
 
 fn assert_codex_bundle_contains_bin(plugin_dir: &Path, tracedecay_bin: &str, scope: CodexScope) {
-    assert!(text(&plugin_dir.join(".mcp.json")).contains(tracedecay_bin));
+    let tracedecay_bin = tracedecay_bin.replace('\\', "/");
+    assert!(text(&plugin_dir.join(".mcp.json")).contains(&tracedecay_bin));
     let hooks_path = plugin_dir.join("hooks/hooks.json");
     match scope {
         CodexScope::Global => {
@@ -84,7 +85,7 @@ fn assert_codex_bundle_contains_bin(plugin_dir: &Path, tracedecay_bin: &str, sco
                 "global Codex bundle {} must ship hooks/hooks.json",
                 plugin_dir.display()
             );
-            assert!(text(&hooks_path).contains(tracedecay_bin));
+            assert!(text(&hooks_path).contains(&tracedecay_bin));
         }
         CodexScope::RepoLocal => assert!(
             !hooks_path.exists(),

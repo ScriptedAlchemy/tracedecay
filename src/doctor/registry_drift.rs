@@ -326,6 +326,13 @@ mod tests {
             .root_dir
     }
 
+    fn comparable_path(path: &Path) -> String {
+        let text = path.to_string_lossy();
+        text.strip_prefix(r"\\?\")
+            .unwrap_or(&text)
+            .replace('\\', "/")
+    }
+
     #[tokio::test]
     async fn detection_does_not_mutate() {
         let fx = build_fixture().await;
@@ -402,8 +409,8 @@ mod tests {
         );
         assert_eq!(reconciled[0].store_id, STORE_ID);
         assert_eq!(
-            reconciled[0].manifest_path,
-            fx.manifest_path.canonicalize().unwrap()
+            comparable_path(&reconciled[0].manifest_path),
+            comparable_path(&fx.manifest_path.canonicalize().unwrap())
         );
         assert_eq!(
             reconciled[0].config_path, None,
