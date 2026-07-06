@@ -8,6 +8,7 @@ mod definitions;
 mod dispatch_policy;
 mod handlers;
 pub(crate) mod render;
+pub(crate) mod renderers;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
