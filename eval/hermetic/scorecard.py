@@ -70,7 +70,7 @@ def bucket_of(category: str) -> str | None:
     if not category.startswith(FACTSTORE_PREFIX):
         return None
     suffix = category[len(FACTSTORE_PREFIX):]
-    return suffix if suffix in BUCKETS else "other"
+    return suffix if suffix in BUCKETS or suffix == "precision" else "other"
 
 
 def row_triggered(row: dict) -> bool:
@@ -144,8 +144,11 @@ def aggregate(results: list[dict], corpus: list[dict] | None = None) -> dict:
         stats = buckets[name]
         stats["adoption_pct"] = adoption_pct(stats["triggered"], stats["opportunities"])
 
-    total_opp = sum(buckets[n]["opportunities"] for n in order)
-    total_trig = sum(buckets[n]["triggered"] for n in order)
+    # OVERALL adoption sums only the adoption buckets. `precision` measures
+    # restraint (don't-store-ephemeral) and `other` is uncategorized — counting
+    # correct abstention as adoption would bias the headline upward.
+    total_opp = sum(buckets[n]["opportunities"] for n in order if n in BUCKETS)
+    total_trig = sum(buckets[n]["triggered"] for n in order if n in BUCKETS)
 
     overall = {
         "opportunities": total_opp,
