@@ -137,16 +137,20 @@ impl GlobalDbEnvGuard {
     fn set(db_path: &Path) -> Self {
         let previous = std::env::var_os("TRACEDECAY_GLOBAL_DB");
         let db_path = canonicalize_test_db_path(db_path);
-        std::env::set_var("TRACEDECAY_GLOBAL_DB", db_path);
+        unsafe {
+            std::env::set_var("TRACEDECAY_GLOBAL_DB", db_path);
+        }
         Self { previous }
     }
 }
 
 impl Drop for GlobalDbEnvGuard {
     fn drop(&mut self) {
-        match self.previous.take() {
-            Some(value) => std::env::set_var("TRACEDECAY_GLOBAL_DB", value),
-            None => std::env::remove_var("TRACEDECAY_GLOBAL_DB"),
+        unsafe {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("TRACEDECAY_GLOBAL_DB", value),
+                None => std::env::remove_var("TRACEDECAY_GLOBAL_DB"),
+            }
         }
     }
 }
@@ -163,12 +167,14 @@ impl HomeEnvGuard {
         let previous_userprofile = std::env::var_os("USERPROFILE");
         let previous_data_dir = std::env::var_os(tracedecay::config::USER_DATA_DIR_ENV);
         let home = canonicalize_test_dir(home);
-        std::env::set_var("HOME", &home);
-        std::env::set_var("USERPROFILE", &home);
-        std::env::set_var(
-            tracedecay::config::USER_DATA_DIR_ENV,
-            home.join(tracedecay::config::TRACEDECAY_DIR),
-        );
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("USERPROFILE", &home);
+            std::env::set_var(
+                tracedecay::config::USER_DATA_DIR_ENV,
+                home.join(tracedecay::config::TRACEDECAY_DIR),
+            );
+        }
         Self {
             previous_home,
             previous_userprofile,
@@ -179,17 +185,19 @@ impl HomeEnvGuard {
 
 impl Drop for HomeEnvGuard {
     fn drop(&mut self) {
-        match self.previous_home.take() {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-        match self.previous_userprofile.take() {
-            Some(value) => std::env::set_var("USERPROFILE", value),
-            None => std::env::remove_var("USERPROFILE"),
-        }
-        match self.previous_data_dir.take() {
-            Some(value) => std::env::set_var(tracedecay::config::USER_DATA_DIR_ENV, value),
-            None => std::env::remove_var(tracedecay::config::USER_DATA_DIR_ENV),
+        unsafe {
+            match self.previous_home.take() {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match self.previous_userprofile.take() {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+            match self.previous_data_dir.take() {
+                Some(value) => std::env::set_var(tracedecay::config::USER_DATA_DIR_ENV, value),
+                None => std::env::remove_var(tracedecay::config::USER_DATA_DIR_ENV),
+            }
         }
     }
 }

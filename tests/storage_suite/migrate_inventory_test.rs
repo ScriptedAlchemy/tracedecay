@@ -27,18 +27,22 @@ fn with_env_vars<T>(vars: &[(&str, Option<&Path>)], f: impl FnOnce() -> T) -> T 
         .iter()
         .map(|(name, _)| (*name, std::env::var_os(name)))
         .collect::<Vec<_>>();
-    for (name, value) in vars {
-        match value {
-            Some(value) => std::env::set_var(name, value),
-            None => std::env::remove_var(name),
+    unsafe {
+        for (name, value) in vars {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
         }
     }
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-    for (name, value) in previous {
-        if let Some(value) = value {
-            std::env::set_var(name, value);
-        } else {
-            std::env::remove_var(name);
+    unsafe {
+        for (name, value) in previous {
+            if let Some(value) = value {
+                std::env::set_var(name, value);
+            } else {
+                std::env::remove_var(name);
+            }
         }
     }
     match result {

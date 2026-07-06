@@ -28,9 +28,11 @@ impl HomeEnvGuard {
         let previous_userprofile = std::env::var_os("USERPROFILE");
         let previous_data_dir = std::env::var_os(USER_DATA_DIR_ENV);
         let home = canonical_temp_path(home);
-        std::env::set_var("HOME", &home);
-        std::env::set_var("USERPROFILE", &home);
-        std::env::set_var(USER_DATA_DIR_ENV, home.join(".tracedecay"));
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("USERPROFILE", &home);
+            std::env::set_var(USER_DATA_DIR_ENV, home.join(".tracedecay"));
+        }
         Self {
             previous_home,
             previous_userprofile,
@@ -41,17 +43,19 @@ impl HomeEnvGuard {
 
 impl Drop for HomeEnvGuard {
     fn drop(&mut self) {
-        match self.previous_home.take() {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-        match self.previous_userprofile.take() {
-            Some(value) => std::env::set_var("USERPROFILE", value),
-            None => std::env::remove_var("USERPROFILE"),
-        }
-        match self.previous_data_dir.take() {
-            Some(value) => std::env::set_var(USER_DATA_DIR_ENV, value),
-            None => std::env::remove_var(USER_DATA_DIR_ENV),
+        unsafe {
+            match self.previous_home.take() {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match self.previous_userprofile.take() {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+            match self.previous_data_dir.take() {
+                Some(value) => std::env::set_var(USER_DATA_DIR_ENV, value),
+                None => std::env::remove_var(USER_DATA_DIR_ENV),
+            }
         }
     }
 }
