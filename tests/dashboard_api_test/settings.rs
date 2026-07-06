@@ -31,7 +31,7 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             .unwrap_or_default()
             .ends_with("config.json"));
 
-        assert_eq!(settings["user"]["upload_enabled"], true);
+        assert_eq!(settings["user"]["upload_enabled"], false);
         assert_eq!(settings["user"]["watcher_debounce"], "2s");
         assert_eq!(settings["user"]["extraction_timeout_secs"], 60);
 

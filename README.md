@@ -678,7 +678,7 @@ tracedecay status                   # shows project + global lifetime totals + c
 
 ### Worldwide counter
 
-All tracedecay users contribute to an anonymous aggregate counter. `tracedecay status` shows both your project total and the worldwide total. The upload sends only a single number (e.g. `4823`) with no identifying information. Opt out with `tracedecay disable-upload-counter`.
+TraceDecay can optionally contribute to an anonymous aggregate counter. `tracedecay status` shows only local totals unless you opt in with `tracedecay enable-upload-counter`. When enabled, the upload sends only a single number (e.g. `4823`) with no identifying information. Disable it again with `tracedecay disable-upload-counter`.
 
 ---
 
@@ -771,8 +771,8 @@ tracedecay doctor [--agent NAME]    # Check installation health
 tracedecay branch add|list|remove|removeall|gc   # Multi-branch management
 tracedecay current-counter          # Show per-project token counter
 tracedecay reset-counter            # Reset per-project token counter
-tracedecay disable-upload-counter   # Opt out of worldwide counter uploads
-tracedecay enable-upload-counter    # Re-enable worldwide counter uploads
+tracedecay enable-upload-counter    # Opt in to worldwide counter uploads
+tracedecay disable-upload-counter   # Disable worldwide counter uploads
 ```
 
 ---
@@ -813,12 +813,11 @@ tracedecay's core functionality (indexing, search, graph queries, MCP server) is
 
 | Call | Data sent | When | Opt-out |
 |------|-----------|------|---------|
-| Worldwide counter upload | Token count (a number) + country (from IP) | sync, status, MCP sessions | `tracedecay disable-upload-counter` |
-| Worldwide counter read | Nothing (GET request) | status | N/A (read-only, 1s timeout) |
+| Worldwide counter upload/read | Token count (a number) + country (from IP) | sync, status, MCP sessions when enabled | `tracedecay disable-upload-counter` |
 | Version check | Nothing (GET request) | status (cached 5m), sync (parallel) | N/A (1s timeout, no-op on failure) |
 | Model pricing refresh | Nothing (GET request) | `tracedecay cost` (cached 24h) | N/A (5s timeout, falls back to embedded pricing) |
 
-The worldwide counter upload sends a single HTTP POST with a JSON body like `{"amount": 4823}`. No cookies, no tracking, no user ID. The Cloudflare Worker logs the country of your IP address (derived from request headers) for aggregate geographic statistics -- your actual IP address is not stored.
+When enabled, the worldwide counter upload sends a single HTTP POST with a JSON body like `{"amount": 4823}`. No cookies, no tracking, no user ID. The Cloudflare Worker logs the country of your IP address (derived from request headers) for aggregate geographic statistics -- your actual IP address is not stored.
 
 The model pricing refresh fetches a public JSON file from GitHub (`raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json`) to keep Claude model pricing up to date for `tracedecay cost`. No data is sent -- it is a plain HTTPS GET. The response is cached at `~/.tracedecay/pricing.json` for 24 hours. If the fetch fails, tracedecay uses its compiled-in pricing table.
 

@@ -13,8 +13,8 @@ use crate::automation::config::AutomationConfig;
 /// User-level tracedecay configuration.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserConfig {
-    /// Whether to upload pending tokens to the worldwide counter.
-    #[serde(default = "default_true")]
+    /// Whether to upload pending tokens to the optional worldwide counter.
+    #[serde(default)]
     pub upload_enabled: bool,
 
     /// Tokens accumulated locally, not yet uploaded.
@@ -121,7 +121,7 @@ fn default_extraction_timeout_secs() -> u64 {
 impl Default for UserConfig {
     fn default() -> Self {
         Self {
-            upload_enabled: true,
+            upload_enabled: false,
             pending_upload: 0,
             last_upload_at: 0,
             last_worldwide_total: 0,

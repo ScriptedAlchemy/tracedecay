@@ -142,7 +142,9 @@ pub(crate) async fn handle_status_command(
     };
     let mut config = tracedecay::user_config::UserConfig::load();
     let now = current_unix_timestamp();
-    let worldwide = if now - config.last_worldwide_fetch_at < 60 {
+    let worldwide = if !config.upload_enabled {
+        None
+    } else if now - config.last_worldwide_fetch_at < 60 {
         (config.last_worldwide_total > 0).then_some(config.last_worldwide_total)
     } else if let Some(total) = tracedecay::cloud::fetch_worldwide_total() {
         config.last_worldwide_total = total;
@@ -152,7 +154,9 @@ pub(crate) async fn handle_status_command(
     } else {
         (config.last_worldwide_total > 0).then_some(config.last_worldwide_total)
     };
-    let country_flags = if now - config.last_flags_fetch_at < 1800 {
+    let country_flags = if !config.upload_enabled {
+        Vec::new()
+    } else if now - config.last_flags_fetch_at < 1800 {
         config.cached_country_flags.clone()
     } else {
         let fresh = tracedecay::cloud::fetch_country_flags();
