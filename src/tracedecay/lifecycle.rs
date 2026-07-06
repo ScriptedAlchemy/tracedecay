@@ -29,8 +29,7 @@ impl TraceDecay {
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
     ) -> Result<Self> {
-        let store_layout =
-            Self::resolve_store_layout_for_project(project_root, &open_options).await?;
+        let store_layout = Self::resolve_store_layout_for_local_path(project_root, &open_options)?;
         let config = TraceDecayConfig {
             root_dir: project_root.to_string_lossy().to_string(),
             ..TraceDecayConfig::default()
@@ -44,8 +43,9 @@ impl TraceDecay {
 
         // Bootstrap branch metadata if we can detect a default branch
         let active_branch = branch::current_branch(project_root);
-        let default_branch =
-            branch::detect_default_branch(project_root).or_else(|| active_branch.clone());
+        let default_branch = active_branch.as_ref().and_then(|_| {
+            branch::detect_default_branch(project_root).or_else(|| active_branch.clone())
+        });
         if let Some(ref default) = default_branch {
             let meta = BranchMeta::new_for_dir(&store_layout.data_root, default);
             let _ = branch_meta::save_branch_meta(&store_layout.data_root, &meta);
@@ -835,6 +835,18 @@ impl TraceDecay {
                     },
                 );
             }
+        }
+
+        storage::default_profile_sharded_layout(project_root, &profile_root)
+    }
+
+    fn resolve_store_layout_for_local_path(
+        project_root: &Path,
+        open_options: &TraceDecayOpenOptions,
+    ) -> Result<StoreLayout> {
+        let profile_root = open_options.resolved_profile_root()?;
+        if storage::read_enrollment_marker(project_root)?.is_some() {
+            return storage::resolve_layout(project_root, &profile_root);
         }
 
         storage::default_profile_sharded_layout(project_root, &profile_root)
