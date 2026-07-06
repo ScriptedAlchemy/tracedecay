@@ -2207,7 +2207,9 @@ fn def_fact_store() -> ToolDefinition {
          (prefer updating it), possible_conflict = a negation/state-change cue suggests supersession (confirm which fact is current), \
          rejected_secret_like = credential-like content was NOT stored. The get action returns the full fact plus trust_history so operators can answer \
          why a trust score changed. Calibrate trust on add instead of defaulting high \
-         (>=0.85 verified/durable, ~0.7 ordinary, ~0.5 unsure — aim for a spread), and search memory before external lookups.",
+         (>=0.85 verified/durable, ~0.7 ordinary, ~0.5 unsure — aim for a spread), and search memory before external lookups. \
+         Use it proactively, without waiting to be asked: when the user states a durable preference, decision, or correction, add or update a fact for it; \
+         and before answering a question about this project or the user, search or probe memory first rather than guessing.",
         json!({
             "type": "object",
             "properties": memory_fact_properties(),
