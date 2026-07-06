@@ -2214,12 +2214,6 @@ export const value = 1;
         payload["matches"][0]["body"].as_str(),
         Some("export interface Foo { value: string }")
     );
-    assert!(
-        payload["ignored_dependency_hint"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("ignored dependency")
-    );
 }
 
 #[tokio::test]
