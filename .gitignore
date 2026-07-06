@@ -4,7 +4,8 @@
 .tracedecay
 .mcp.json
 !plugin/.mcp.json
-.claude/
+.claude/*
+!.claude/skills/
 .cursor/
 docs/superpowers
 /local-only
