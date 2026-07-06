@@ -10,8 +10,8 @@ use serde_json::{json, Value};
 use crate::context::{
     format_context_as_markdown, CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING,
     CONTEXT_EXTENSION_POINTS_HEADING, CONTEXT_INDEX_COVERAGE_HINT_HEADING,
-    CONTEXT_MEMORY_MATCHES_HEADING, CONTEXT_RELATED_SYMBOLS_HEADING, CONTEXT_SEEN_NODE_IDS_LABEL,
-    CONTEXT_TEST_COVERAGE_HEADING,
+    CONTEXT_MEMORY_FEEDBACK_HINT, CONTEXT_MEMORY_MATCHES_HEADING, CONTEXT_RELATED_SYMBOLS_HEADING,
+    CONTEXT_SEEN_NODE_IDS_LABEL, CONTEXT_TEST_COVERAGE_HEADING,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::types::{FactSearchResult, SearchFactsRequest};
@@ -427,6 +427,9 @@ fn context_memory_section(
                 compact_memory_content(&fact.content)
             );
         }
+        section.push('\n');
+        section.push_str(CONTEXT_MEMORY_FEEDBACK_HINT);
+        section.push('\n');
         return Some(section);
     }
     if let Some(err) = memory_matches_error {
@@ -1729,6 +1732,7 @@ mod tests {
         assert!(section.contains(&content));
         assert!(section.contains("tail-marker"));
         assert!(!section.contains("..."));
+        assert!(section.contains("tracedecay_fact_feedback"));
     }
 
     #[test]

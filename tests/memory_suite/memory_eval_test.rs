@@ -969,6 +969,11 @@ fn eval_memory_ranking_morphology() {
     run_scenario("memory-ranking-morphology");
 }
 
+#[test]
+fn eval_memory_feedback_trust() {
+    run_scenario("memory-feedback-trust");
+}
+
 /// Every scenario file must have a matching `#[test]` above; this guards
 /// against silently-unwired scenarios.
 #[test]
@@ -983,6 +988,7 @@ fn every_scenario_file_is_wired() {
         "memory-ranking-trust-bias",
         "memory-ranking-supersession",
         "memory-ranking-morphology",
+        "memory-feedback-trust",
     ]
     .into_iter()
     .collect();

@@ -20,12 +20,19 @@ Announce: "Using tracedecay:project-memory to <recall/store/curate>."
 | Prior conversations, not facts | `tracedecay_message_search` (`query`, `limit`) — this skill owns FTS→fact; raw replay/scoped grep → `tracedecay:managing-session-context` |
 | A durable decision/correction/pitfall just surfaced | `tracedecay_fact_store` `action:"add"` (`content`, `category`, `tags`, `trust`) — proactively, do NOT wait to be asked, and do NOT write MEMORY.md instead |
 | User rates a recalled fact | `tracedecay_fact_feedback` (`helpful`/`unhelpful`) |
+| A recalled fact you were shown helped or misled you | `tracedecay_fact_feedback` on its `fact_id` (`helpful`/`unhelpful`) — don't wait to be asked |
 | User asks to clean/merge/delete memory | Curation flow below |
 
 Trust calibration for adds: `0.85+` independently verified decisions, `~0.7`
 ordinary well-sourced facts, `~0.5` plausible-but-uncertain. The add path
 already rejects secrets and reports near-duplicates/conflicts — act on those
 flags; never rephrase a rejected secret to bypass filtering.
+
+Rate what you recall: any `fact_id` shown in tracedecay_context's Memory
+Matches (or returned by `fact_store` search) that materially helped or misled
+you should get `tracedecay_fact_feedback` (`helpful`/`unhelpful`) the moment you
+act on it — proactively, without waiting for the user, since recalled facts are
+almost never rated and feedback is how trust is earned.
 
 Do NOT capture: secrets/credentials/PII, transient errors,
 environment-specific failures, one-off narratives, task progress, or

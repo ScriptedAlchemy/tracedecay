@@ -2221,7 +2221,7 @@ fn def_fact_feedback() -> ToolDefinition {
     def_rw(
         "tracedecay_fact_feedback",
         "Fact Feedback",
-        "Record helpful/unhelpful feedback for an active-project memory fact and adjust its trust score.",
+        "Record helpful/unhelpful feedback for an active-project memory fact and adjust its trust score. Call this on the fact_id values surfaced in tracedecay_context's Memory Matches (or from fact_store search) whenever a recalled fact materially helped or misled you -- feedback is how trust is earned, and recalled facts are almost never rated.",
         json!({
             "type": "object",
             "properties": {
