@@ -129,6 +129,7 @@ impl AgentIntegration for CodexIntegration {
         if refreshed.is_empty() && !has_personal_bundle && !legacy_config_install {
             return Ok(UpdatePluginOutcome::NotInstalled);
         }
+        install_codex_managed_agents(&ctx.home)?;
         if (cached_dirs.is_empty() && personal_bundle_exists)
             || refreshed.is_empty()
             || (legacy_config_install && !has_personal_bundle)

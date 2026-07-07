@@ -496,6 +496,8 @@ fn codex_update_plugin_refreshes_bundle_without_touching_config() {
     codex.install(&ctx(home.path(), OLD_BIN)).unwrap();
 
     let plugin_dir = codex_bootstrap_dir(home.path());
+    let agents_dir = home.path().join(".codex/agents");
+    std::fs::remove_dir_all(&agents_dir).unwrap();
     let codex_config = home.path().join(".codex/config.toml");
     std::fs::create_dir_all(codex_config.parent().unwrap()).unwrap();
     std::fs::write(&codex_config, "model = \"gpt-5\"\n").unwrap();
@@ -540,6 +542,10 @@ fn codex_update_plugin_refreshes_bundle_without_touching_config() {
     assert_codex_bundle_contains_bin(&plugin_dir, NEW_BIN, CodexScope::Global);
     assert!(
         text(&plugin_dir.join(".codex-plugin/plugin.json")).contains(env!("CARGO_PKG_VERSION"))
+    );
+    assert!(
+        agents_dir.join("tracedecay-code-explorer.toml").is_file(),
+        "update-plugin must create missing Codex managed agents for existing installs"
     );
 }
 

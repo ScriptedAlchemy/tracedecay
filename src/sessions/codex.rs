@@ -299,9 +299,9 @@ fn session_meta_from_record(record: &Value, path: &Path) -> Option<CodexMeta> {
         || parent_session_id.is_some()
         || payload.pointer("/source/subagent").is_some();
     let agent_id = is_subagent.then(|| {
-        agent_role
+        agent_nickname
             .clone()
-            .or_else(|| agent_nickname.clone())
+            .or_else(|| agent_role.clone())
             .unwrap_or_else(|| session_id.clone())
     });
     Some(CodexMeta {

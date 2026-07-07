@@ -73,10 +73,11 @@ async fn agent_usage_summary(conn: Option<&libsql::Connection>) -> Value {
 
     let rows = query_rows(
         conn,
-        "SELECT COALESCE(agent_id, '') AS agent_id, COUNT(*) AS sessions
+        "SELECT COALESCE(agent_id, '') AS agent_id,
+                COALESCE(metadata_json, '') AS metadata_json
          FROM sessions
-         WHERE is_subagent = 1 AND COALESCE(agent_id, '') <> ''
-         GROUP BY agent_id
+         WHERE is_subagent = 1
+           AND (COALESCE(agent_id, '') <> '' OR COALESCE(metadata_json, '') <> '')
          ORDER BY agent_id",
         (),
     )
@@ -86,10 +87,12 @@ async fn agent_usage_summary(conn: Option<&libsql::Connection>) -> Value {
     let mut by_agent: BTreeMap<String, i64> = BTreeMap::new();
     for row in rows {
         let agent_id = str_field(&row, "agent_id");
-        let Some(label) = crate::automation::agent_targets::managed_agent_label(agent_id) else {
+        let Some(label) =
+            managed_agent_label_for_session(agent_id, str_field(&row, "metadata_json"))
+        else {
             continue;
         };
-        *by_agent.entry(label.to_string()).or_default() += i64_field(&row, "sessions");
+        *by_agent.entry(label.to_string()).or_default() += 1;
     }
 
     json!({
@@ -101,6 +104,16 @@ async fn agent_usage_summary(conn: Option<&libsql::Connection>) -> Value {
                 "sessions": sessions,
             })
         }).collect::<Vec<_>>(),
+    })
+}
+
+fn managed_agent_label_for_session(agent_id: &str, metadata_json: &str) -> Option<&'static str> {
+    crate::automation::agent_targets::managed_agent_label(agent_id).or_else(|| {
+        let metadata: Value = serde_json::from_str(metadata_json).ok()?;
+        ["agent_nickname", "agent_role"]
+            .into_iter()
+            .filter_map(|key| metadata.get(key).and_then(Value::as_str))
+            .find_map(crate::automation::agent_targets::managed_agent_label)
     })
 }
 

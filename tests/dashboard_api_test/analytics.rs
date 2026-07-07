@@ -69,6 +69,18 @@ fn subagent_session(project: &Path, id: &str, agent_id: &str) -> SessionRecord {
     }
 }
 
+fn subagent_session_with_metadata(
+    project: &Path,
+    id: &str,
+    agent_id: &str,
+    metadata_json: Value,
+) -> SessionRecord {
+    SessionRecord {
+        metadata_json: Some(metadata_json.to_string()),
+        ..subagent_session(project, id, agent_id)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn message(
     id: &str,
@@ -118,6 +130,18 @@ async fn seed_session_store(db_path: &Path, project: &Path) {
     assert!(
         gdb.upsert_session(&subagent_session(project, "subagent-worker", "worker"))
             .await
+    );
+    assert!(
+        gdb.upsert_session(&subagent_session_with_metadata(
+            project,
+            "subagent-code-health-auditor",
+            "auditor",
+            serde_json::json!({
+                "agent_nickname": "tracedecay-code-health-auditor",
+                "agent_role": "auditor"
+            })
+        ))
+        .await
     );
 
     let rows = [
@@ -402,6 +426,10 @@ fn analytics_api_advertises_and_aggregates_session_usage() {
         assert_eq!(find_row(agents, "agent", "code-explorer")["sessions"], 1);
         assert_eq!(
             find_row(agents, "agent", "session-historian")["sessions"],
+            1
+        );
+        assert_eq!(
+            find_row(agents, "agent", "code-health-auditor")["sessions"],
             1
         );
         assert!(!has_row(agents, "agent", "worker"));
