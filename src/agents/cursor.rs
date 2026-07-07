@@ -819,7 +819,7 @@ fn doctor_check_session_ingest(dc: &mut DoctorCounters, project_path: &Path) {
                     dc.info(&format!("  - {path}"));
                 }
             }
-            Some(db.session_ingest_health().await)
+            Some(db.session_ingest_health_for_provider(Some("cursor")).await)
         })
     });
     let Some(health) = health else {
@@ -834,11 +834,13 @@ fn doctor_check_session_ingest(dc: &mut DoctorCounters, project_path: &Path) {
             "Cursor transcript ingest looks stalled: a transcript has {} un-ingested \
              byte(s) ({} byte(s) total across {} transcript(s)), exceeding the {} byte \
              per-transcript hook catch-up cap — it will not drain automatically and \
-             session recall is missing those turns",
+             session recall is missing those turns. Run `tracedecay sessions ingest \
+             --project-path {}` to drain the backlog manually",
             health.max_transcript_pending_bytes,
             health.pending_bytes,
             health.pending_transcripts,
             crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES,
+            project_path.display(),
         ));
     } else {
         dc.pass(&format!(

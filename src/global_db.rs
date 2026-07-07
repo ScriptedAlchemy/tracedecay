@@ -1089,22 +1089,40 @@ impl GlobalDb {
     /// For every session with a known transcript path, compares the on-disk
     /// transcript size against the persisted parse offset. `pending_bytes` is
     /// the total un-ingested tail across transcripts; `last_ingest_unix` is
-    /// the newest transcript mtime recorded at ingest time. Surfaced by
-    /// `tracedecay_status` and `tracedecay doctor --agent cursor` so a stalled
-    /// ingest (e.g. a backlog larger than the hook ingest caps) is visible
-    /// instead of silently eroding trust in session recall.
+    /// the newest transcript mtime recorded at ingest time. Surfaced by status
+    /// and doctor checks so a stalled ingest is visible instead of silently
+    /// eroding trust in session recall.
     pub async fn session_ingest_health(&self) -> SessionIngestHealth {
+        self.session_ingest_health_for_provider(None).await
+    }
+
+    pub async fn session_ingest_health_for_provider(
+        &self,
+        provider: Option<&str>,
+    ) -> SessionIngestHealth {
         let mut health = SessionIngestHealth::default();
-        let Ok(mut rows) = self
-            .conn
-            .query(
-                "SELECT DISTINCT transcript_path FROM sessions
+        let rows = if let Some(provider) = provider {
+            self.conn
+                .query(
+                    "SELECT DISTINCT transcript_path FROM sessions
+                     WHERE provider = ?1
+                       AND transcript_path IS NOT NULL
+                       AND transcript_path != ''
+                     LIMIT 1000",
+                    params![provider],
+                )
+                .await
+        } else {
+            self.conn
+                .query(
+                    "SELECT DISTINCT transcript_path FROM sessions
                  WHERE transcript_path IS NOT NULL AND transcript_path != ''
                  LIMIT 1000",
-                (),
-            )
-            .await
-        else {
+                    (),
+                )
+                .await
+        };
+        let Ok(mut rows) = rows else {
             return health;
         };
         let mut paths = Vec::new();

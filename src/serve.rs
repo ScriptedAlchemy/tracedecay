@@ -835,11 +835,12 @@ pub fn degraded_serve_notice(project_path: &Path, startup_error: &TraceDecayErro
          project via `tracedecay serve --path <project>`).\n\
          2. Retry the tool call — this server rechecks the project on every call and recovers \
          automatically once resolution succeeds.\n\
-         3. If the MCP client shows connection errors instead of this message, toggle the \
-         tracedecay MCP server in Cursor Settings → MCP or reload the window; Cursor does not \
-         retry a failed MCP server on its own.\n\
+         3. If the MCP client shows connection errors instead of this message, restart or toggle \
+         the tracedecay MCP server in your MCP host; some hosts do not retry a failed server \
+         process on their own.\n\
          \n\
-         Diagnose with `tracedecay doctor --agent cursor`. Every tool is also available from \
+         Diagnose agent-specific install/config issues with `tracedecay doctor --agent <agent>`. \
+         Every tool is also available from \
          the shell: {args} (run `tracedecay tool` to list tools) from inside an initialized \
          project.",
         args = crate::agents::CLI_FALLBACK_ARGS_INVOCATION,
