@@ -64,7 +64,7 @@ jobs:
         with:
           command: release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
 
       - name: Retry release-plz release after transient GitHub API failure
         id: release_retry
@@ -74,7 +74,7 @@ jobs:
         with:
           command: release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
 
       - name: Fail when release-plz release still fails
         if: steps.release.outcome == 'failure' && steps.release_retry.outcome == 'failure'
