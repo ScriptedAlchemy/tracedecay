@@ -3206,6 +3206,44 @@ async fn test_status() {
 }
 
 #[tokio::test]
+async fn status_stalled_session_ingest_warning_points_to_manual_ingest() {
+    let (cg, _env, dir) = setup_empty_project().await;
+    let db = open_active_project_session_db(&cg).await;
+    let transcript = dir.path().join("claude-backlog.jsonl");
+    let file = fs::File::create(&transcript).unwrap();
+    file.set_len(tracedecay::sessions::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES + 1)
+        .unwrap();
+    assert!(
+        db.upsert_session(&SessionRecord {
+            provider: "claude".to_string(),
+            session_id: "claude-backlog".to_string(),
+            project_key: cg.project_root().to_string_lossy().to_string(),
+            project_path: cg.project_root().to_string_lossy().to_string(),
+            title: Some("Claude backlog".to_string()),
+            started_at: Some(1),
+            ended_at: None,
+            transcript_path: Some(transcript.to_string_lossy().to_string()),
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        })
+        .await
+    );
+
+    let result = handle_tool_call(&cg, "tracedecay_status", json!({}), None, None)
+        .await
+        .unwrap();
+    let text = extract_text(&result.value);
+    assert!(text.contains("session transcript ingest looks stalled"));
+    assert!(text.contains("automatic catch-up warning threshold"));
+    assert!(text.contains("tracedecay sessions ingest --project-path"));
+    assert!(!text.contains("hook catch-up cap"));
+    assert!(!text.contains("tracedecay doctor --agent cursor"));
+}
+
+#[tokio::test]
 async fn test_branch_list_reports_live_vs_serving_drift_state() {
     fn git(project: &Path, args: &[&str]) {
         let status = Command::new("git")

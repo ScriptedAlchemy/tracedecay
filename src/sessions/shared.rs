@@ -10,6 +10,10 @@ use serde_json::Value;
 
 use crate::sessions::SessionMessageRecord;
 
+/// Generic per-transcript backlog threshold for warning that automatic
+/// session transcript catch-up may not drain recall transcripts quickly enough.
+pub const SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES: u64 = 2 * 1024 * 1024;
+
 /// Counters returned by an ingestion pass.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct TranscriptIngestStats {

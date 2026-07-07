@@ -79,13 +79,17 @@ async fn explicit_uninitialized_path_serves_degraded_error_instead_of_global_fal
         explicit_display.as_str(),
         "tracedecay init",
         "tracedecay tool",
-        "Cursor Settings → MCP",
+        "restart or toggle the tracedecay MCP server in your MCP host",
     ] {
         assert!(
             text.contains(needle),
             "degraded tool error should mention '{needle}':\n{text}"
         );
     }
+    assert!(
+        !text.contains("Cursor Settings → MCP") && !text.contains("doctor --agent cursor"),
+        "generic degraded serve guidance should not assume Cursor:\n{text}"
+    );
     assert!(
         !text.contains(&active.path().display().to_string()),
         "degraded serve must not leak or serve the global-fallback project:\n{text}"

@@ -1136,6 +1136,49 @@ async fn session_ingest_health_reports_pending_transcript_backlog() {
 }
 
 #[tokio::test]
+async fn session_ingest_health_can_filter_by_provider() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_isolated_db(&tmp).await;
+
+    let cursor_transcript = tmp.path().join("cursor.jsonl");
+    std::fs::write(&cursor_transcript, "x".repeat(100)).unwrap();
+    let claude_transcript = tmp.path().join("claude.jsonl");
+    std::fs::write(&claude_transcript, "y".repeat(500)).unwrap();
+
+    for (provider, session_id, path) in [
+        ("cursor", "cursor-session", &cursor_transcript),
+        ("claude", "claude-session", &claude_transcript),
+    ] {
+        let mut session = sample_session(provider, session_id, "proj");
+        session.transcript_path = Some(path.to_string_lossy().to_string());
+        db.upsert_session(&session).await;
+    }
+
+    let cursor = |byte_offset, mtime| tracedecay::global_db::ParseOffset {
+        byte_offset,
+        mtime,
+        file_id: 0,
+    };
+    db.set_parse_offset(&cursor_transcript.to_string_lossy(), cursor(100, 1_000))
+        .await;
+    db.set_parse_offset(&claude_transcript.to_string_lossy(), cursor(200, 2_000))
+        .await;
+
+    let all_health = db.session_ingest_health().await;
+    assert_eq!(all_health.pending_transcripts, 1);
+    assert_eq!(all_health.pending_bytes, 300);
+
+    let cursor_health = db.session_ingest_health_for_provider(Some("cursor")).await;
+    assert_eq!(cursor_health.tracked_transcripts, 1);
+    assert_eq!(cursor_health.pending_transcripts, 0);
+
+    let claude_health = db.session_ingest_health_for_provider(Some("claude")).await;
+    assert_eq!(claude_health.tracked_transcripts, 1);
+    assert_eq!(claude_health.pending_transcripts, 1);
+    assert_eq!(claude_health.pending_bytes, 300);
+}
+
+#[tokio::test]
 async fn hook_analytics_import_is_incremental_and_idempotent() {
     use tracedecay::analytics_bridge::{HookImportSource, import_hook_analytics};
 
