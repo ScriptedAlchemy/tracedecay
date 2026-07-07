@@ -21,9 +21,9 @@ Codex.
   encrypted Codex compaction placeholders with auxiliary app-server summaries
   backed by the visible source messages in TraceDecay's LCM DAG.
 
-The source `hooks/hooks-codex.json` is an empty, self-documenting seed for
-repo-local bundles. Global Codex installs populate `hooks/hooks.json` from the
-managed hook table at install time.
+The source `hooks/hooks-codex.json` is an empty seed for repo-local bundles.
+Global Codex installs populate `hooks/hooks.json` from the managed hook table
+at install time.
 
 Codex skips newly installed or changed command hooks until they are trusted —
 run `/hooks` in Codex to review and trust the tracedecay hooks.
