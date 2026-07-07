@@ -1,6 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "tracedecay",
+  "description": "TraceDecay tools for Claude Code: semantic code search, code graph navigation, diagnostics, and durable project memory.",
   "owner": {
     "name": "ScriptedAlchemy"
   },

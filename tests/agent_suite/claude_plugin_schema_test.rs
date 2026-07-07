@@ -52,6 +52,22 @@ fn claude_marketplace_matches_the_claude_marketplace_schema() {
     );
 }
 
+#[test]
+fn claude_marketplace_includes_strict_validator_metadata() {
+    let path = repo_path("plugin/.claude-plugin/marketplace.json");
+    let marketplace = read_json_file(&path);
+    let description = marketplace
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    assert!(
+        !description.is_empty(),
+        "{} must include a top-level description so `claude plugin validate --strict` stays clean",
+        path.display()
+    );
+}
+
 /// Guards against the vendored schemas degenerating into accept-everything:
 /// each must reject representative malformed configs.
 #[test]

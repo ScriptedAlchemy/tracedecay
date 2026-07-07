@@ -14,6 +14,8 @@
       "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$",
       "description": "Marketplace identifier: lowercase kebab-case."
     },
+    "description": { "type": "string", "minLength": 1 },
+    "version": { "type": "string" },
     "owner": {
       "type": "object",
       "required": ["name"],
