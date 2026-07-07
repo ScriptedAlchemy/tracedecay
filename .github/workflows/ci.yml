@@ -54,6 +54,23 @@ jobs:
           fi
           scripts/check-conventional-commits.sh "$RANGE"
 
+  release-version-drift:
+    name: Release Version Drift
+    if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-plz-')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Test release version drift guard
+        run: bash tests/release_drift_check_test.sh
+
+      - name: Check release version drift
+        run: scripts/check-release-drift.sh
+
   test:
     name: Test ${{ matrix.name }}
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
