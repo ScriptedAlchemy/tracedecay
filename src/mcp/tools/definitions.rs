@@ -3491,11 +3491,12 @@ fn def_read() -> ToolDefinition {
         "tracedecay_read",
         "Read File (mode-aware)",
         "Read a file or its symbol map. Modes: 'full' (entire file), 'lines' \
-         (1-based inclusive byte-range slice via the 'lines' arg, e.g. '120-180'), \
+         (1-based inclusive line slice via the 'lines' arg, e.g. '120-180'), \
          'map' (flat list of every top-level symbol from the graph — no source \
          bytes touched), 'signatures' (functions and types with their cached \
-         signature). Cross-session cached: a re-call on an unchanged file returns \
-         a tiny stub with 'unchanged: true'.",
+         signature). Line reads include overlapping symbol signatures by default; \
+         full reads can opt in with include_symbols. Cross-session cached: a re-call \
+         on an unchanged file returns a tiny stub with 'unchanged: true'.",
         json!({
             "type": "object",
             "properties": {
@@ -3511,6 +3512,10 @@ fn def_read() -> ToolDefinition {
                 "lines": {
                     "type": "string",
                     "description": "Required when mode='lines'. Format 'A-B' or single 'A' (1-based, inclusive). E.g. '120-180' or '42'."
+                },
+                "include_symbols": {
+                    "type": "boolean",
+                    "description": "Include graph symbol context for source reads. Defaults to true for mode='lines' and false for mode='full'."
                 }
             },
             "required": ["file"]

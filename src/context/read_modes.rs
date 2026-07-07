@@ -4,7 +4,7 @@
 //! Four modes are implemented in 5.0:
 //!
 //! - `full` — verbatim file content (parity with the raw `Read` tool)
-//! - `lines` — explicit byte-range slice (`A-B`, 1-based, inclusive)
+//! - `lines` — explicit line slice (`A-B`, 1-based, inclusive)
 //! - `map` — flat list of every top-level symbol in the file, sourced from
 //!   the code graph (cheap; no source bytes touched)
 //! - `signatures` — `map` filtered to function/type kinds, with the cached
@@ -18,6 +18,8 @@ use serde_json::{Value, json};
 use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
 use crate::types::{Node, NodeKind};
+
+const MAX_CONTEXT_SYMBOLS: usize = 12;
 
 /// Mode selector for `tracedecay_read`. Parsed from the JSON `mode` argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,7 +51,7 @@ impl ReadMode {
     }
 }
 
-/// Inclusive 1-based byte-line range parsed from `"A-B"` (or just `"A"` for a
+/// Inclusive 1-based line range parsed from `"A-B"` (or just `"A"` for a
 /// single line). Out-of-range values are clamped at render time.
 #[derive(Debug, Clone, Copy)]
 pub struct LineRange {
@@ -142,6 +144,41 @@ pub async fn render_signatures(db: &Database, file_path: &str) -> Result<Value> 
     }))
 }
 
+/// Renders graph context for source reads. For full-file reads, this is a
+/// compact signature overview; for line reads, it is the overlapping symbols.
+pub async fn render_symbol_context(
+    db: &Database,
+    file_path: &str,
+    range: Option<LineRange>,
+) -> Result<Value> {
+    let nodes = fetch_nodes(db, file_path).await?;
+    let mut entries = Vec::new();
+    let mut symbol_count = 0usize;
+
+    for node in nodes
+        .iter()
+        .filter(|node| is_signature_kind(&node.kind))
+        .filter(|node| range.is_none_or(|range| symbol_overlaps_range(node, range)))
+        .filter_map(context_symbol_entry)
+    {
+        symbol_count += 1;
+        if entries.len() < MAX_CONTEXT_SYMBOLS {
+            entries.push(node);
+        }
+    }
+
+    Ok(json!({
+        "file": file_path,
+        "range": range.map(|range| json!({
+            "start": range.start,
+            "end": range.end,
+        })),
+        "symbol_count": symbol_count,
+        "truncated": symbol_count > entries.len(),
+        "symbols": entries,
+    }))
+}
+
 async fn fetch_nodes(db: &Database, file_path: &str) -> Result<Vec<Node>> {
     db.get_nodes_by_file(file_path)
         .await
@@ -181,6 +218,33 @@ fn signature_symbol_entry(node: &Node) -> Option<Value> {
         "signature": signature,
         "is_async": node.is_async,
     }))
+}
+
+fn context_symbol_entry(node: &Node) -> Option<Value> {
+    let signature = node.signature.as_deref()?;
+    let (line, end_line) = node_user_line_span(node);
+    Some(json!({
+        "kind": node.kind.as_str(),
+        "name": node.name,
+        "qualified_name": node.qualified_name,
+        "line": line,
+        "end_line": end_line,
+        "visibility": node.visibility.as_str(),
+        "signature": signature,
+        "is_async": node.is_async,
+    }))
+}
+
+fn symbol_overlaps_range(node: &Node, range: LineRange) -> bool {
+    let (start, end) = node_user_line_span(node);
+    start <= range.end && end >= range.start
+}
+
+fn node_user_line_span(node: &Node) -> (u32, u32) {
+    (
+        node.start_line.saturating_add(1),
+        node.end_line.saturating_add(1),
+    )
 }
 
 /// Kinds whose `signature` column carries useful information for the
@@ -347,5 +411,70 @@ mod tests {
         let node = node_fixture(NodeKind::Function, None);
 
         assert_eq!(signature_symbol_entry(&node), None);
+    }
+
+    #[test]
+    fn context_symbol_entry_uses_user_facing_line_numbers() {
+        let node = node_fixture(NodeKind::Function, Some("pub async fn sample()"));
+
+        assert_eq!(
+            context_symbol_entry(&node),
+            Some(json!({
+                "kind": "function",
+                "name": "sample",
+                "qualified_name": "crate::sample",
+                "line": 13,
+                "end_line": 19,
+                "visibility": "public",
+                "signature": "pub async fn sample()",
+                "is_async": true,
+            }))
+        );
+    }
+
+    #[test]
+    fn symbol_overlap_detects_enclosing_ranges() {
+        let node = node_fixture(NodeKind::Function, Some("pub async fn sample()"));
+
+        assert!(symbol_overlaps_range(
+            &node,
+            LineRange { start: 14, end: 16 }
+        ));
+        assert!(symbol_overlaps_range(
+            &node,
+            LineRange { start: 1, end: 13 }
+        ));
+        assert!(symbol_overlaps_range(
+            &node,
+            LineRange { start: 19, end: 30 }
+        ));
+        assert!(!symbol_overlaps_range(
+            &node,
+            LineRange { start: 1, end: 12 }
+        ));
+        assert!(!symbol_overlaps_range(
+            &node,
+            LineRange { start: 20, end: 30 }
+        ));
+    }
+
+    #[test]
+    fn symbol_overlap_handles_single_line_boundaries() {
+        let mut node = node_fixture(NodeKind::Function, Some("pub fn sample()"));
+        node.start_line = 12;
+        node.end_line = 12;
+
+        assert!(symbol_overlaps_range(
+            &node,
+            LineRange { start: 13, end: 13 }
+        ));
+        assert!(!symbol_overlaps_range(
+            &node,
+            LineRange { start: 12, end: 12 }
+        ));
+        assert!(!symbol_overlaps_range(
+            &node,
+            LineRange { start: 14, end: 14 }
+        ));
     }
 }

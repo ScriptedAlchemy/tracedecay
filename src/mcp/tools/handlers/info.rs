@@ -7,6 +7,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde_json::{Value, json};
 
+use crate::context::read_modes::{LineRange, ReadMode, render_symbol_context};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::{GlobalDb, global_db_path};
 use crate::path_tree::format_compact_annotated_path_list;
@@ -2134,6 +2135,10 @@ pub(super) async fn handle_read(cg: &TraceDecay, args: Value) -> Result<ToolResu
     let mode = ReadMode::parse(mode_str).ok_or_else(|| TraceDecayError::Config {
         message: format!("unknown mode '{mode_str}'; expected one of full, lines, map, signatures"),
     })?;
+    let include_symbols = args
+        .get("include_symbols")
+        .and_then(Value::as_bool)
+        .unwrap_or(mode == ReadMode::Lines);
 
     let line_range = if mode == ReadMode::Lines {
         let raw =
@@ -2185,7 +2190,7 @@ pub(super) async fn handle_read(cg: &TraceDecay, args: Value) -> Result<ToolResu
     )
     .await?
     {
-        let stub = json!({
+        let mut stub = json!({
             "unchanged": true,
             "file": display_file,
             "mode": mode.as_str(),
@@ -2193,6 +2198,11 @@ pub(super) async fn handle_read(cg: &TraceDecay, args: Value) -> Result<ToolResu
             "digest": cached.digest,
             "token_count": cached.token_count,
         });
+        if let Some(context) =
+            read_symbol_context(cg.db(), &display_file, mode, line_range, include_symbols).await?
+        {
+            stub["context"] = context;
+        }
         let text = render::finalize(Some(cg.project_root()), &args, &stub, || {
             render_read_md(&stub)
         });
@@ -2232,6 +2242,8 @@ pub(super) async fn handle_read(cg: &TraceDecay, args: Value) -> Result<ToolResu
         }
     };
 
+    let context =
+        read_symbol_context(cg.db(), &display_file, mode, line_range, include_symbols).await?;
     let token_count = read_modes::estimate_tokens(&body_text);
     let digest = read_cache::digest_bytes(body_text.as_bytes());
 
@@ -2251,7 +2263,7 @@ pub(super) async fn handle_read(cg: &TraceDecay, args: Value) -> Result<ToolResu
         .await?;
     }
 
-    let payload = json!({
+    let mut payload = json!({
         "file": display_file,
         "mode": mode.as_str(),
         "mtime_ns": mtime_ns,
@@ -2259,6 +2271,9 @@ pub(super) async fn handle_read(cg: &TraceDecay, args: Value) -> Result<ToolResu
         "token_count": token_count,
         "body": body_text,
     });
+    if let Some(context) = context {
+        payload["context"] = context;
+    }
     let text = render::finalize(Some(cg.project_root()), &args, &payload, || {
         render_read_md(&payload)
     });
@@ -2290,6 +2305,7 @@ fn render_read_md(value: &Value) -> String {
         "tokens",
         &render::field_i64(value, "token_count").to_string(),
     );
+    render_read_context_md(&mut md, value.get("context"));
     if value.get("body").is_none() {
         return md.render();
     }
@@ -2297,6 +2313,65 @@ fn render_read_md(value: &Value) -> String {
     let lang = file.rsplit_once('.').map_or("", |(_, ext)| ext);
     md.code(lang, render::field_str(value, "body"));
     md.render()
+}
+
+async fn read_symbol_context(
+    db: &crate::db::Database,
+    display_file: &str,
+    mode: ReadMode,
+    line_range: Option<LineRange>,
+    include_symbols: bool,
+) -> Result<Option<Value>> {
+    if !include_symbols || !matches!(mode, ReadMode::Full | ReadMode::Lines) {
+        return Ok(None);
+    }
+    Ok(Some(
+        render_symbol_context(db, display_file, line_range).await?,
+    ))
+}
+
+fn render_read_context_md(md: &mut Md, context: Option<&Value>) {
+    let Some(context) = context else {
+        return;
+    };
+    let Some(symbols) = context.get("symbols").and_then(Value::as_array) else {
+        return;
+    };
+    if symbols.is_empty() {
+        return;
+    }
+
+    md.blank();
+    md.heading(3, "Context");
+    let symbol_count = context
+        .get("symbol_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(symbols.len() as u64);
+    md.field("symbols", &symbol_count.to_string());
+    for symbol in symbols {
+        let kind = render::field_str(symbol, "kind");
+        let name = render::field_str(symbol, "name");
+        let line = render::field_i64(symbol, "line");
+        let end_line = render::field_i64(symbol, "end_line");
+        let signature = render::field_str(symbol, "signature");
+        let span = if end_line > line {
+            format!("{line}-{end_line}")
+        } else {
+            line.to_string()
+        };
+        if signature.is_empty() {
+            md.bullet(&format!("{kind} {name} {span}"));
+        } else {
+            md.bullet(&format!("{kind} {name} {span}: `{signature}`"));
+        }
+    }
+    if context
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        md.empty_note("symbol list truncated");
+    }
 }
 
 /// Handles `tracedecay_outline` — flat symbol map for a file with optional

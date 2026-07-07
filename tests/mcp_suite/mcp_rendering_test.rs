@@ -41,6 +41,63 @@ async fn read_cache_default_response_stays_markdown() {
 }
 
 #[tokio::test]
+async fn read_lines_includes_overlapping_symbol_context() {
+    let (cg, _dir) = setup_project().await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_read",
+        json!({"file": "src/main.rs", "mode": "lines", "lines": "5-7"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+
+    assert!(text.contains("### Context"), "got: {text}");
+    assert!(text.contains("fn main()"), "got: {text}");
+    assert!(text.contains("main 5-8"), "got: {text}");
+    assert!(text.contains("let result = helper();"), "got: {text}");
+
+    let json_result = handle_tool_call(
+        &cg,
+        "tracedecay_read",
+        json!({
+            "file": "src/main.rs",
+            "mode": "lines",
+            "lines": "5-7",
+            "format": "json"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let parsed = extract_json(&json_result.value);
+    assert_eq!(parsed["context"]["symbol_count"], 1);
+    assert_eq!(parsed["context"]["symbols"][0]["name"], "main");
+    assert_eq!(parsed["context"]["symbols"][0]["signature"], "fn main()");
+
+    let cached = handle_tool_call(
+        &cg,
+        "tracedecay_read",
+        json!({"file": "src/main.rs", "mode": "lines", "lines": "5-7"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let cached_text = extract_text(&cached.value);
+    assert!(
+        cached_text.contains("**unchanged:** true"),
+        "got: {cached_text}"
+    );
+    assert!(cached_text.contains("### Context"), "got: {cached_text}");
+    assert!(cached_text.contains("fn main()"), "got: {cached_text}");
+}
+
+#[tokio::test]
 async fn simplify_scan_markdown_visible_output_is_not_escaped_blob() {
     let (cg, _env, dir) = setup_empty_project().await;
     fs::create_dir_all(dir.path().join("src")).unwrap();
