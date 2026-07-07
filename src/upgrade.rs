@@ -351,10 +351,19 @@ fn latest_upgrade_version(source: UpgradeSource, is_beta: bool) -> Result<String
     match source {
         UpgradeSource::CratesIo => crates_io::fetch_latest_version(is_beta),
         UpgradeSource::GitHubRelease => {
-            cloud::fetch_latest_version().ok_or_else(|| TraceDecayError::Config {
-                message: "failed to check for updates — could not reach GitHub".to_string(),
-            })
+            cloud::fetch_latest_version().ok_or_else(|| github_latest_unavailable_error(is_beta))
         }
+    }
+}
+
+fn github_latest_unavailable_error(is_beta: bool) -> TraceDecayError {
+    let channel = if is_beta { "beta" } else { "stable" };
+    TraceDecayError::Config {
+        message: format!(
+            "failed to check for updates — no installable GitHub release asset is available for \
+             the current platform on the {channel} channel.\n  \
+             GitHub may be reachable, but release CI may still be uploading binaries."
+        ),
     }
 }
 
@@ -1100,6 +1109,18 @@ mod tests {
             classify_upgrade("4.0.2", "4.0.3"),
             UpgradeStatus::UpgradeAvailable("4.0.3")
         );
+    }
+
+    #[test]
+    fn github_latest_unavailable_error_mentions_assets_not_connectivity() {
+        let err = github_latest_unavailable_error(false);
+        let TraceDecayError::Config { message } = err else {
+            panic!("expected config error");
+        };
+
+        assert!(message.contains("no installable GitHub release asset"));
+        assert!(message.contains("current platform"));
+        assert!(!message.contains("could not reach GitHub"));
     }
 
     #[test]
