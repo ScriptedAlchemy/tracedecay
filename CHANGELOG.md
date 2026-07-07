@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.34](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.33...v0.0.34) - 2026-07-07
+
+### Added
+
+- install codex managed agents
+- *(codex)* install proactive memory prompt rules
+- *(memory)* document proactive fact-store guidance
+- *(mcp)* improve tool output rendering
+- *(memory)* reinforce recalled fact ranking
+- add memory feedback trust scenario
+- capture default timing telemetry
+- make the worldwide token-savings counter opt-in
+
+### Fixed
+
+- refresh Codex managed agent overlays
+- address automation cleanup review findings
+- satisfy renderer clippy lint
+- restore skill renderer module
+- stabilize automation cleanup CI
+- *(diagnostics)* improve freshness handling
+- satisfy clippy large-future lints
+- route init to worktree-local index
+
+### Other
+
+- simplify diagnostics and renderer fixes
+- split MCP render and diagnostics boundaries
+- Merge remote-tracking branch 'origin/codex/lazy-ignored-dependency-indexing' into simplify/automation-mcp-cleanup
+- split mcp renderer tests
+- *(evals)* document the fact-store triggering/adoption scorecard
+- behavior-preserving cleanups from the merged #295 changes
+
 ## [0.0.33](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.32...v0.0.33) - 2026-07-06
 
 ### Fixed
