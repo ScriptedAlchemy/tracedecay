@@ -1,11 +1,10 @@
 use super::*;
 
-/// The repo-local `hooks-codex.json` ships an empty `hooks` object plus a
-/// self-documenting `description`. Rendering the global bundle must fill the
-/// object from `CODEX_MANAGED_HOOKS` while leaving the description intact,
-/// and must never invent hooks the managed table does not declare.
+/// The repo-local `hooks-codex.json` ships only an empty `hooks` object.
+/// Rendering the global bundle must fill the object from `CODEX_MANAGED_HOOKS`
+/// while keeping Codex's strict top-level schema clean.
 #[test]
-fn codex_plugin_hooks_fills_empty_seed_and_preserves_description() {
+fn codex_plugin_hooks_fills_empty_seed_and_preserves_strict_schema() {
     let raw = codex_embedded_plugin_files()
         .into_iter()
         .find_map(|(relative, contents)| (relative == "hooks/hooks.json").then_some(contents))
@@ -15,18 +14,20 @@ fn codex_plugin_hooks_fills_empty_seed_and_preserves_description() {
     // base the renderer mutates in place).
     let seed: serde_json::Value = serde_json::from_str(raw).unwrap();
     assert_eq!(seed["hooks"], json!({}));
-    assert!(
-        seed["description"]
-            .as_str()
-            .unwrap()
-            .contains("no lifecycle hooks"),
-        "empty seed must carry a self-documenting description"
+    assert_eq!(
+        seed.as_object().unwrap().keys().collect::<Vec<_>>(),
+        vec!["hooks"],
+        "Codex rejects unknown top-level hook fields"
     );
 
     let rendered = codex_plugin_hooks(raw, "/usr/local/bin/tracedecay").unwrap();
     let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
-    // The description survives rendering (Codex's loader ignores it).
-    assert_eq!(value["description"], seed["description"]);
+    let top_level_keys = value.as_object().unwrap().keys().collect::<Vec<_>>();
+    assert_eq!(
+        top_level_keys,
+        vec!["hooks"],
+        "rendered hooks bundle must stay within Codex's strict schema"
+    );
     let hooks = value["hooks"].as_object().unwrap();
     for managed in CODEX_MANAGED_HOOKS {
         assert!(
