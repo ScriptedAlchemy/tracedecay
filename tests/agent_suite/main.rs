@@ -10,6 +10,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+mod agent_targets_test;
 mod agent_test;
 mod claude_agent_test;
 mod claude_plugin_bundle_test;

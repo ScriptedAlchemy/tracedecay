@@ -298,7 +298,12 @@ fn session_meta_from_record(record: &Value, path: &Path) -> Option<CodexMeta> {
     let is_subagent = thread_source.as_deref() == Some("subagent")
         || parent_session_id.is_some()
         || payload.pointer("/source/subagent").is_some();
-    let agent_id = is_subagent.then(|| session_id.clone());
+    let agent_id = is_subagent.then(|| {
+        agent_nickname
+            .clone()
+            .or_else(|| agent_role.clone())
+            .unwrap_or_else(|| session_id.clone())
+    });
     Some(CodexMeta {
         cwd,
         session_id,

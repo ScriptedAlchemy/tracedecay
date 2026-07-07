@@ -1575,7 +1575,7 @@ async fn codex_subagent_rollout_uses_parent_link_from_session_meta() {
         .expect("subagent session should be stored");
     assert_eq!(child.parent_session_id.as_deref(), Some("codex-parent"));
     assert!(child.is_subagent);
-    assert_eq!(child.agent_id.as_deref(), Some("codex-child"));
+    assert_eq!(child.agent_id.as_deref(), Some("Euler"));
 
     let results = db
         .search_session_messages("codex", None, "layout evidence", 10)

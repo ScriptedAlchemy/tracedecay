@@ -129,6 +129,7 @@ impl AgentIntegration for CodexIntegration {
         if refreshed.is_empty() && !has_personal_bundle && !legacy_config_install {
             return Ok(UpdatePluginOutcome::NotInstalled);
         }
+        install_codex_managed_agents(&ctx.home)?;
         if (cached_dirs.is_empty() && personal_bundle_exists)
             || refreshed.is_empty()
             || (legacy_config_install && !has_personal_bundle)
@@ -354,6 +355,7 @@ fn codex_update_project_path(ctx: &InstallContext) -> Option<PathBuf> {
 }
 
 fn install_codex_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
+    install_codex_managed_agents(home)?;
     let cached_dirs = codex_plugin_cached_install_dirs(home);
     if !cached_dirs.is_empty() {
         let install_dir = install_codex_cached_plugin(home, tracedecay_bin)?;
@@ -545,6 +547,12 @@ fn install_codex_plugin_bundle(
         )?;
     }
     Ok(())
+}
+
+fn install_codex_managed_agents(
+    home: &Path,
+) -> Result<crate::automation::agent_targets::ManagedAgentInstallSummary> {
+    crate::automation::agent_targets::install_codex_managed_agents(home)
 }
 
 /// Export a complete shareable Codex plugin bundle with active managed skills.
@@ -824,6 +832,7 @@ fn install_codex_marketplace_entry(
 }
 
 fn uninstall_codex_plugin(home: &Path) -> Result<()> {
+    crate::automation::agent_targets::remove_managed_agents(&home.join(".codex/agents"))?;
     let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(home);
     for install_dir in codex_plugin_cached_install_dirs(home) {
         crate::automation::memory_digest::remove_memory_digest_export(
