@@ -152,12 +152,9 @@ async fn install_codex_daemon_automation(
         enabled: Some(true),
         backend: Some(AutomationBackend::CodexAppServer),
         host_mode: Some(AutomationHostMode::Standalone),
-        model: Some(Some("gpt-5.5".to_string())),
         // Unattended memory-op apply is opt-in: without --auto-apply these
-        // stay unset so AutomationConfig::default() keeps dashboard approval
-        // required, and re-running the installer never weakens stricter
+        // stays unset, and re-running the installer never weakens stricter
         // settings a user already chose.
-        require_dashboard_approval: auto_apply.then_some(false),
         auto_apply_memory_ops: auto_apply.then_some(true),
         memory_curator: codex_daemon_interval_task(15 * 60),
         session_reflector: codex_daemon_interval_task(15 * 60),

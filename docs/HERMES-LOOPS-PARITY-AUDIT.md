@@ -193,8 +193,8 @@ curator's conservative invariants.
   `facts` array; each fact is validated (category whitelist, numeric trust,
   **mandatory `source_span` citing a specific evidence hit**) and recorded as
   a `FactProposalRecord` (`fact_proposals.rs`) in
-  `pending_approval/applied/rejected` states for dashboard review, or
-  auto-applied under the same policy pair as above.
+  `pending_approval/applied/rejected` states for telemetry, and accepted facts
+  are auto-applied under the same policy pair as above.
 - **skill_writer** (`runner.rs:430-707`, `skill_writer.rs`): evidence =
   LCM grep (query `"workflow correction repeated skill tool pattern"`) +
   **existing managed skills** (metadata, body up to 4000 chars, support-file
@@ -275,7 +275,7 @@ in `delegated_host` mode TraceDecay does no backend calls of its own.
 
 | # | Strength | TraceDecay | Hermes |
 |---|----------|-----------|--------|
-| S1 | **Model-managed memory with safety policy** | Fact automation is self-managed by the model/automation loop, with explicit dashboard review only when configured; destructive memory ops remain policy-gated | `write_approval` default **off**; background review writes memory and skills freely (the source of the "wrong assumptions" complaints its own docstring admits) |
+| S1 | **Model-managed memory with safety policy** | Fact automation is self-managed by the model/automation loop; destructive memory ops remain policy-gated and telemetry-visible without a dashboard preview gate | `write_approval` default **off**; background review writes memory and skills freely (the source of the "wrong assumptions" complaints its own docstring admits) |
 | S2 | **Deterministic validation gate** | LLM output re-validated against recomputed evidence (allowed fact ids, confidence floor, mandatory source spans, checksum-guarded skill updates) | Trusts the review fork's writes; only optional post-hoc security scan |
 | S3 | **Artifact/evidence chain** | traces → feedback → generated evals → validation gate → optimizer diagnosis → codex handoff, hash-linked, per run, API-inspectable | Cron output archives and a curator report file; no structured chain |
 | S4 | **Run ledger and failure discipline** | Trigger provenance, input/evidence hashes, error classification, non-retryable circuit breaker, cooldowns, skip dedup, stale locks | Best-effort daemon thread; failures log a warning and vanish |

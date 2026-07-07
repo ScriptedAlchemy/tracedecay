@@ -2,38 +2,23 @@ import {
   Bot,
   History,
   Inbox,
-  ListChecks,
   ScrollText,
   Wand2,
 } from "lucide-react";
 import { Button, Card, CardContent, CardHeader, CardTitle } from "./sdk";
 import { Spinner } from "./Spinner";
-import { countLabel, formatHistoryTime } from "./curation/format";
-import { groupActions } from "./curation/risk";
 import { ActivityScroller } from "./curation/ActivityScroller";
-import { ActionReviewGroup } from "./curation/ActionReviewGroup";
 import { useCurationData, type CurationTab } from "./curation/useCurationData";
 import { usePendingAutomationCounts } from "./curation/usePendingAutomationCounts";
 import { api } from "./api";
 import { CurationAutomationPanel } from "./curation/CurationAutomationPanel";
 import { CurationProposalsPanel } from "./curation/CurationProposalsPanel";
 import { CurationHistoryPanel } from "./curation/CurationHistoryPanel";
-import { InlineConfirm } from "./curation/InlineConfirm";
 import {
   isActiveAutomationStatus,
   type AutomationRunTask,
 } from "./curation/automationTasks";
 import type { SecondsField, TaskField } from "./curation/configTypes";
-
-const DIAGNOSTIC_COUNT_KEYS = new Set([
-  "contradictions_detected",
-  "entity_scan_remaining",
-  "entity_total",
-  "entities_scanned",
-  "orphan_entities",
-  "orphan_entities_pruned",
-  "related_clusters",
-]);
 
 export default function CurationPanel({
   onApplied,
@@ -41,14 +26,6 @@ export default function CurationPanel({
   onApplied?: () => void;
 }) {
   const {
-    report,
-    loading,
-    applying,
-    previewSavedAt,
-    previewStale,
-    previewStaleReason,
-    confirmOpen,
-    error,
     activeTab,
     status,
     statusLoading,
@@ -94,10 +71,7 @@ export default function CurationPanel({
     configDirty,
     activityRef,
     panelRef,
-    setConfirmOpen,
     setActiveTab,
-    preview,
-    apply,
     loadActivity,
     loadStatus,
     loadOplog,
@@ -118,22 +92,6 @@ export default function CurationPanel({
     saveConfigDraft,
   } = useCurationData({ onApplied });
 
-  const actions = report?.actions ?? [];
-  const counts: Record<string, number> = report?.counts ?? {};
-  const isPlan = report?.dry_run ?? true;
-  const shownCounts: Record<string, number> = isPlan
-    ? counts
-    : (report?.applied_counts ?? counts);
-  const actionCounts = Object.entries(shownCounts).filter(
-    ([key]) => !DIAGNOSTIC_COUNT_KEYS.has(key),
-  );
-  const diagnosticCounts = Object.entries(counts).filter(([key]) =>
-    DIAGNOSTIC_COUNT_KEYS.has(key),
-  );
-  const actionGroups = groupActions(actions);
-  const nonEmptyActionGroups = actionGroups.filter(
-    (group) => group.actions.length > 0,
-  );
   const backendAvailability = configResponse?.backend_availability;
   const backendUnavailable =
     !configDirty &&
@@ -191,10 +149,6 @@ export default function CurationPanel({
   };
   const taskFieldError = (task: AutomationRunTask, field: TaskField) =>
     configFieldErrors[`${task}.${field}`];
-  const planLabel = actions.length ? `Plan ${actions.length}` : "Plan";
-  const confirmGroupCounts = nonEmptyActionGroups.map(
-    (group) => [group.label, group.actions.length] as const,
-  );
   const selectedUsage = selectedManagedSkill
     ? managedSkillUsage[selectedManagedSkill.metadata.id]
     : null;
@@ -211,7 +165,6 @@ export default function CurationPanel({
     ? `Proposals ${pendingReviewCount}`
     : "Proposals";
   const tabs: Array<{ id: CurationTab; label: string; Icon: typeof Wand2 }> = [
-    { id: "plan", label: planLabel, Icon: ListChecks },
     { id: "automation", label: "Automation", Icon: Bot },
     { id: "proposals", label: proposalsLabel, Icon: Inbox },
     { id: "history", label: "History", Icon: History },
@@ -225,46 +178,18 @@ export default function CurationPanel({
           <Wand2 className="h-4 w-4" />
           Curation
         </CardTitle>
-        <div className="flex items-center gap-2 shrink-0">
-          <Button
-            size="sm"
-            ghost
-            disabled={loading}
-            onClick={preview}
-            className="gap-2"
-          >
-            {loading ? <Spinner /> : null}
-            Preview
-          </Button>
-          <Button
-            size="sm"
-            disabled={!report || !isPlan || actions.length === 0 || applying}
-            onClick={() => setConfirmOpen(true)}
-            title={
-              applying
-                ? "Apply in progress…"
-                : !report || !isPlan
-                  ? "Run a Preview first to build a plan"
-                  : actions.length === 0
-                    ? "Nothing to apply — the last preview proposed no changes"
-                    : "Apply the previewed plan (deletes flagged duplicates)"
-            }
-          >
-            Apply
-          </Button>
-        </div>
       </CardHeader>
       <CardContent className="flex flex-col gap-3 flex-1 min-h-0 overflow-hidden">
         <p className="text-xs text-text-tertiary shrink-0">
-          Review a curation plan and check the latest run signals. Applying a
-          plan permanently deletes the flagged duplicate facts.
+          Autonomous curation runs through automation. Use this panel for
+          schedule, run history, proposals, and live activity.
         </p>
 
         <div
           ref={panelRef}
           role="tablist"
           aria-label="Curation views"
-          className="grid grid-cols-5 gap-1 rounded-sm border border-border bg-secondary/30 p-1 shrink-0"
+          className="grid grid-cols-4 gap-1 rounded-sm border border-border bg-secondary/30 p-1 shrink-0"
         >
           {tabs.map(({ id, label, Icon }) => {
             const active = activeTab === id;
@@ -291,111 +216,6 @@ export default function CurationPanel({
           })}
         </div>
 
-        {activeTab === "plan" ? (
-          <div
-            role="tabpanel"
-            id="curation-panel-plan"
-            aria-labelledby="curation-tab-plan"
-            className="flex flex-col gap-3 flex-1 min-h-0 overflow-hidden"
-          >
-            {error && (
-              <div className="border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive shrink-0">
-                {error}
-              </div>
-            )}
-            {previewStale ? (
-              <div className="border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning shrink-0">
-                {previewStaleReason ||
-                  "This saved preview is stale because the memory store changed."}
-              </div>
-            ) : null}
-
-            {report && (
-              <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-text-secondary shrink-0">
-                <span>{isPlan ? "proposed actions" : "applied actions"}:</span>
-                {actionCounts.length === 0 ? (
-                  <span className="text-text-tertiary">no changes</span>
-                ) : (
-                  actionCounts.map(([k, v]) => (
-                    <span key={k} className="font-mono-ui whitespace-nowrap">
-                      {countLabel(k)}={v}
-                    </span>
-                  ))
-                )}
-                {diagnosticCounts.length > 0 ? (
-                  <>
-                    <span className="text-text-tertiary">· signals</span>
-                    {diagnosticCounts.map(([k, v]) => (
-                      <span
-                        key={k}
-                        className="font-mono-ui whitespace-nowrap text-text-tertiary"
-                      >
-                        {countLabel(k)}={v}
-                      </span>
-                    ))}
-                  </>
-                ) : null}
-                <span className="text-text-tertiary whitespace-nowrap">
-                  · llm_calls={report.llm_calls}
-                </span>
-                {report.coverage ? (
-                  <span className="text-text-tertiary whitespace-nowrap">
-                    · scanned={report.coverage.scanned}/
-                    {report.coverage.active_total}
-                    {report.coverage.due_remaining
-                      ? ` · due=${report.coverage.due_remaining}`
-                      : ""}
-                  </span>
-                ) : null}
-                {report.coverage?.entity_total != null ? (
-                  <span className="text-text-tertiary whitespace-nowrap">
-                    · entities={report.coverage.entities_scanned ?? 0}/
-                    {report.coverage.entity_total}
-                    {report.coverage.entity_scan_remaining
-                      ? ` · entity_due=${report.coverage.entity_scan_remaining}`
-                      : ""}
-                  </span>
-                ) : null}
-                {isPlan && previewSavedAt ? (
-                  <span className="text-text-tertiary whitespace-nowrap">
-                    · saved={formatHistoryTime(previewSavedAt)}
-                  </span>
-                ) : null}
-                {!isPlan && report.skipped_actions ? (
-                  <span className="text-warning whitespace-nowrap">
-                    · skipped={report.skipped_actions}
-                  </span>
-                ) : null}
-              </div>
-            )}
-
-            {report?.apply_errors?.length ? (
-              <div className="border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning shrink-0">
-                {report.apply_errors.length} action(s) failed to apply.
-              </div>
-            ) : null}
-
-            {!report && !loading && (
-              <p className="text-xs text-text-tertiary shrink-0">
-                Click <span className="text-text-secondary">Preview</span> to
-                see proposed maintenance actions.
-              </p>
-            )}
-
-            {actions.length > 0 ? (
-              <div className="flex flex-1 min-h-0 flex-col gap-2 overflow-y-auto overflow-x-hidden pr-1">
-                {nonEmptyActionGroups.map((group, i) => (
-                  <ActionReviewGroup
-                    key={group.key}
-                    group={group}
-                    defaultOpen={i === 0}
-                  />
-                ))}
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-
         {activeTab === "activity" ? (
           <div
             role="tabpanel"
@@ -409,7 +229,7 @@ export default function CurationPanel({
                   Curator Activity
                 </div>
                 <div className="text-[11px] text-text-tertiary">
-                  Live phases from preview and apply runs.
+                  Live phases from autonomous curator runs.
                 </div>
               </div>
               <Button
@@ -423,14 +243,9 @@ export default function CurationPanel({
                 Refresh
               </Button>
             </div>
-            {error ? (
-              <div className="border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive shrink-0">
-                {error}
-              </div>
-            ) : null}
             <ActivityScroller
               events={activity}
-              loading={loading || applying || activityLoading}
+              loading={activityLoading}
               error={activityError}
               scrollRef={activityRef}
             />
@@ -511,14 +326,6 @@ export default function CurationPanel({
 
         {activeTab === "history" ? (
           <CurationHistoryPanel
-            report={report}
-            previewSavedAt={previewSavedAt}
-            previewStale={previewStale}
-            previewStaleReason={previewStaleReason}
-            actionsLength={actions.length}
-            actionCounts={actionCounts}
-            diagnosticCounts={diagnosticCounts}
-            isPlan={isPlan}
             status={status}
             statusLoading={statusLoading}
             statusError={statusError}
@@ -529,40 +336,6 @@ export default function CurationPanel({
           />
         ) : null}
       </CardContent>
-
-      <InlineConfirm
-        open={confirmOpen}
-        title="Apply memory curation?"
-        description="Apply runs a fresh curation pass first, then applies the recomputed plan. Flagged duplicate facts are permanently deleted — this cannot be undone."
-        confirmLabel="Apply"
-        loading={applying}
-        onCancel={() => setConfirmOpen(false)}
-        onConfirm={apply}
-      >
-        <div className="flex flex-col gap-2 text-xs">
-          <div className="font-medium text-foreground">Preview summary</div>
-          {confirmGroupCounts.length === 0 ? (
-            <div className="text-text-tertiary">No previewed actions.</div>
-          ) : (
-            <div className="grid grid-cols-2 gap-x-3 gap-y-1">
-              {confirmGroupCounts.map(([label, count]) => (
-                <div
-                  key={label}
-                  className="flex items-center justify-between gap-2"
-                >
-                  <span className="text-text-tertiary">{label}</span>
-                  <span className="font-mono-ui text-text-secondary">
-                    {count}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-          <div className="text-warning">
-            Deleted facts are removed permanently and cannot be restored.
-          </div>
-        </div>
-      </InlineConfirm>
     </Card>
   );
 }

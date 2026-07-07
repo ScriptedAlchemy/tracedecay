@@ -18,7 +18,7 @@ fn automation_defaults_are_conservative() {
     assert_eq!(config.host_mode, AutomationHostMode::Standalone);
     assert_eq!(config.timeout_secs, 60);
     assert_eq!(config.scheduler_tick_secs, 60);
-    assert!(config.require_dashboard_approval);
+    assert!(!config.require_dashboard_approval);
     assert!(!config.auto_apply_memory_ops);
     assert!(!config.auto_enable_skills);
     assert!(!config.tasks.memory_curator.enabled);
@@ -49,14 +49,12 @@ fn effective_config_applies_project_sidecar_over_global_defaults() {
     let global = AutomationConfig {
         timeout_secs: 45,
         scheduler_tick_secs: 30,
-        model: Some("global-model".to_string()),
         ..AutomationConfig::default()
     };
     let patch = AutomationConfigPatch {
         enabled: Some(true),
         backend: Some(AutomationBackend::CodexAppServer),
         host_mode: Some(AutomationHostMode::DelegatedHost),
-        model: Some(Some("project-model".to_string())),
         memory_curator: AutomationTaskPatch {
             enabled: Some(true),
             schedule: Some(Some("manual".to_string())),
@@ -72,19 +70,19 @@ fn effective_config_applies_project_sidecar_over_global_defaults() {
     assert_eq!(config.host_mode, AutomationHostMode::DelegatedHost);
     assert_eq!(config.timeout_secs, 45);
     assert_eq!(config.scheduler_tick_secs, 30);
-    assert_eq!(config.model.as_deref(), Some("project-model"));
+    assert_eq!(config.model, None);
     assert!(config.tasks.memory_curator.enabled);
     assert_eq!(
         config.tasks.memory_curator.schedule.as_deref(),
         Some("manual")
     );
-    assert!(config.require_dashboard_approval);
+    assert!(!config.require_dashboard_approval);
     assert!(!config.auto_apply_memory_ops);
     assert!(!config.auto_enable_skills);
 }
 
 #[test]
-fn effective_config_clears_inherited_optional_fields_with_project_nulls() {
+fn effective_config_ignores_legacy_backend_runtime_fields() {
     let global = AutomationConfig {
         model: Some("global-model".to_string()),
         max_tokens: Some(4096),
@@ -146,7 +144,6 @@ fn automation_config_accepts_legacy_hermes_hosted_alias() {
 fn project_config_patch_merges_without_clearing_omitted_fields() {
     let current = AutomationConfigPatch {
         enabled: Some(true),
-        model: Some(Some("project-model".to_string())),
         memory_curator: AutomationTaskPatch {
             enabled: Some(true),
             schedule: Some(Some("manual".to_string())),
@@ -167,7 +164,7 @@ fn project_config_patch_merges_without_clearing_omitted_fields() {
     let merged = merge_project_config(Some(current), patch);
 
     assert_eq!(merged.enabled, Some(true));
-    assert_eq!(merged.model, Some(Some("project-model".to_string())));
+    assert_eq!(merged.model, None);
     assert_eq!(merged.timeout_secs, Some(120));
     assert_eq!(merged.scheduler_tick_secs, Some(20));
     assert_eq!(merged.memory_curator.enabled, Some(true));
@@ -251,19 +248,17 @@ fn validation_allows_explicit_memory_auto_apply_without_dashboard_approval() {
 }
 
 #[test]
-fn validation_rejects_skill_auto_enable_without_dashboard_approval() {
+fn validation_allows_skill_auto_enable_without_dashboard_approval() {
     let patch = AutomationConfigPatch {
         auto_enable_skills: Some(true),
         require_dashboard_approval: Some(false),
         ..AutomationConfigPatch::default()
     };
 
-    let err = effective_config(&AutomationConfig::default(), Some(&patch)).unwrap_err();
+    let config = effective_config(&AutomationConfig::default(), Some(&patch)).unwrap();
 
-    assert!(
-        err.to_string().contains("auto_enable_skills"),
-        "unexpected error: {err}"
-    );
+    assert!(config.auto_enable_skills);
+    assert!(!config.require_dashboard_approval);
 }
 
 #[test]

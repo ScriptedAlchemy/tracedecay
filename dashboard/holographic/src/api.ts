@@ -13,7 +13,6 @@ import type {
   AutomationSchedulerStatusResponse,
   FactProposalListResponse,
   FactProposalResponse,
-  MemoryAgentPlanResponse,
   MemoryAutomationConfigPatch,
   MemoryAutomationConfigResponse,
   MemoryAutomationRunArtifactPayloadResponse,
@@ -24,7 +23,6 @@ import type {
   MemoryCurateOp,
   MemoryCurateResponse,
   MemoryCuratorActivityResponse,
-  MemoryCuratorPreviewResponse,
   MemoryCuratorStatusResponse,
   MemoryDashboardResponse,
   MemoryFactDetailResponse,
@@ -63,7 +61,7 @@ function postAutomationRun<TReport = Record<string, unknown>>(
   return fetchJSON<MemoryAutomationRunResponse<TReport>>(`${AUTOMATION_BASE}/run/${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ dry_run: true, ...body }),
+    body: JSON.stringify(body),
   });
 }
 
@@ -129,24 +127,6 @@ export const api = {
     );
   },
 
-  /** Preview / apply memory curation maintenance (POST /curate). */
-  postMemoryCurate: (body: { dry_run: boolean }) =>
-    fetchJSON<MemoryCurateResponse>(`${BASE}/curate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }),
-
-  /** Standalone backend memory-curator review (POST /curation/agent-plan). */
-  postMemoryAgentPlan: (
-    body: { dry_run?: true; max_clusters?: number; min_confidence?: number } = {},
-  ) =>
-    fetchJSON<MemoryAgentPlanResponse>(`${BASE}/curation/agent-plan`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ dry_run: true, ...body }),
-    }),
-
   /** Standalone memory-curator run (POST /api/automation/run/memory-curator). */
   postAutomationRunMemoryCurator: (body: AutomationRunRequest = {}) =>
     postAutomationRun<MemoryCurateResponse>("memory-curator", body),
@@ -166,10 +146,6 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
-
-  /** Last saved dry-run preview for this project/profile (GET /curation/preview). */
-  getMemoryCuratorPreview: () =>
-    fetchJSON<MemoryCuratorPreviewResponse>(`${BASE}/curation/preview`),
 
   /** Read-only memory curator state/history metadata (GET /curation/status). */
   getMemoryCuratorStatus: () =>

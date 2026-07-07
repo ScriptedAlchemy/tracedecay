@@ -211,7 +211,7 @@ function SystemStrip({
         title={
           agentToolsets > 0
             ? "Agent toolsets the curator can delegate cleanup work to."
-            : "No agent-driven curation is configured. Curation previews and applies still work — they use the built-in deduplication planner."
+            : "No agent-driven curation is configured. Autonomous curation still uses the built-in deduplication planner."
         }
       />
       <Stat className="hm-stat" label="database" value={db.exists ? "ready" : "missing"} />

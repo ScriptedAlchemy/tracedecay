@@ -131,13 +131,10 @@ fn validation_field(message: &str) -> String {
         "auto_apply_memory_ops",
         "auto_enable_skills",
         "export_memory_digest",
-        "require_dashboard_approval",
         "backend",
         "host_mode",
         "timeout_secs",
         "scheduler_tick_secs",
-        "max_tokens",
-        "temperature",
     ] {
         if message.contains(field) {
             return field.to_string();

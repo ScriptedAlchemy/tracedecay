@@ -131,7 +131,7 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     );
     assert_eq!(
         run.ledger_record.validation_report.as_ref().unwrap()["apply_policy"]["decision"],
-        json!("requires_dashboard_approval")
+        json!("dry_run_only")
     );
     assert_eq!(
         run.ledger_record.validation_report.as_ref().unwrap()["apply_policy"]["permanent_delete_count"],
@@ -147,11 +147,11 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     );
     assert_eq!(
         run.report["automation_apply_policy"]["require_dashboard_approval"],
-        json!(true)
+        json!(false)
     );
     assert_eq!(
         run.report["automation_apply_policy"]["approval_required"],
-        json!(true)
+        json!(false)
     );
     assert_eq!(
         run.ledger_record.report_ref.as_ref().unwrap()["run_id"],
@@ -774,7 +774,7 @@ async fn memory_curator_runner_auto_apply_is_blocked_by_dashboard_approval() {
     assert_eq!(backend.calls(), 1);
     assert_eq!(
         run.report["automation_apply_policy"]["decision"],
-        json!("requires_dashboard_approval")
+        json!("auto_apply_allowed")
     );
     assert_eq!(
         run.report["automation_apply_policy"]["auto_apply_memory_ops"],
@@ -782,24 +782,24 @@ async fn memory_curator_runner_auto_apply_is_blocked_by_dashboard_approval() {
     );
     assert_eq!(
         run.report["automation_apply_policy"]["mutates_store"],
-        json!(false)
+        json!(true)
     );
     assert_eq!(
         run.report["automation_apply_policy"]["autonomous_memory_apply"],
-        json!(false)
+        json!(true)
     );
     assert_eq!(
         run.report["automation_apply_policy"]["require_dashboard_approval"],
-        json!(true)
+        json!(false)
     );
     assert_eq!(
         run.report["automation_apply_policy"]["approval_required"],
-        json!(true)
+        json!(false)
     );
-    assert_eq!(run.report["llm_apply"]["applied"], Value::Null);
+    assert_eq!(run.report["llm_apply"]["applied"], json!(1));
     assert!(
-        fact_exists(&cg, 102).await,
-        "dashboard approval must block permanent delete auto-apply"
+        !fact_exists(&cg, 102).await,
+        "auto-apply must delete accepted permanent-delete ops"
     );
 }
 
@@ -882,14 +882,14 @@ async fn memory_curator_runner_preserves_review_gate_when_auto_apply_applies_zer
     );
     assert_eq!(
         run.report["automation_apply_policy"]["approval_required"],
-        json!(true)
+        json!(false)
     );
 
     let validation_payload =
         read_artifact(&cg, &run.run_id, &run.ledger_record, "validation_gate").await;
     assert_eq!(
         validation_payload["task_validation"]["approval_required"],
-        json!(true)
+        json!(false)
     );
     assert_eq!(
         validation_payload["improvement_gate"]["criteria"]["auto_apply_allowed"],
@@ -900,7 +900,7 @@ async fn memory_curator_runner_preserves_review_gate_when_auto_apply_applies_zer
         read_artifact(&cg, &run.run_id, &run.ledger_record, "codex_handoff").await;
     assert_eq!(
         handoff_payload["readiness"]["approval_required"],
-        json!(true)
+        json!(false)
     );
     assert_eq!(
         handoff_payload["readiness"]["auto_apply_allowed"],

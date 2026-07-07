@@ -260,7 +260,7 @@ Every audited surface maps to exactly one policy category below.
 | User `~/.tracedecay/` data dir, `global.db`, monitor files, cache defaults | A | Use in place when `~/.tracedecay/` is absent; new users default to `~/.tracedecay/`. |
 | Project root discovery for `.tracedecay/tracedecay.db` | A | Continue detecting for list/status/wipe-style maintenance. |
 | Branch metadata DB filenames in legacy dirs | A | Keep `tracedecay.db` for legacy active data dirs. |
-| Dashboard curation preview under legacy active dir | A | Store under the active data dir, including `.tracedecay/` when that is active. |
+| Dashboard curation artifacts under legacy active dir | A | Store under the active data dir, including `.tracedecay/` when that is active. |
 | MCP schema text describing legacy project fallback | B | Keep docs/resources aligned with actual fallback behavior. |
 | Diagnostics target dir under active data dir | A | Use active data dir; legacy projects use `.tracedecay/target`. |
 | Generic `TRACEDECAY_*` / `TRACEDECAY_*` env fallback | C | Accept old as fallback, warn, and let new spelling win. |

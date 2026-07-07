@@ -355,37 +355,6 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
         assert_eq!(curation_activity["count"], 0);
         assert_eq!(curation_activity["events"], Value::Array(Vec::new()));
 
-        let (status, curation_preview) = get_json(
-            &agent,
-            &format!(
-                "{}/api/plugins/holographic/curation/preview",
-                fixture.base_url
-            ),
-        );
-        assert_eq!(status, 200);
-        assert!(curation_preview["report"].is_null());
-        assert_eq!(curation_preview["stale"], false);
-
-        // Curation dry-run should return a valid plan (the fixture has a likely-duplicate pair).
-        let (status, curate) = post_json_body(
-            &agent,
-            &format!("{}/api/plugins/holographic/curate", fixture.base_url),
-            &serde_json::json!({ "dry_run": true }),
-        );
-        assert_eq!(status, 200);
-        assert_eq!(curate["ran"], true);
-        assert_eq!(curate["dry_run"], true);
-        assert!(
-            curate["actions"].as_array().is_some(),
-            "curate dry-run should return an actions array"
-        );
-        // The deterministic hygiene candidate section is always present.
-        for key in ["secret_like", "transient", "supersession"] {
-            assert!(
-                curate["hygiene_candidates"][key].as_array().is_some(),
-                "curate dry-run should include hygiene_candidates.{key} proposals"
-            );
-        }
     });
 }
 

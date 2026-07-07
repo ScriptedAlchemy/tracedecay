@@ -46,7 +46,7 @@ Reusable fixtures should cover:
 - Profile-sharded code-project stores with a repo enrollment marker and private profile shard.
 - Hermes profile-home project identities resolved through the user-level store.
 - Stale or unregistered registry rows, moved repos, worktrees, symlinked roots, dirty sentinels, sync locks, and `.branch-add.lock`.
-- Seeded `lcm-payloads/`, response handles, curation previews, WAL/SHM sidecars, and `TRACEDECAY_GLOBAL_DB` overrides.
+- Seeded `lcm-payloads/`, response handles, curation artifacts, WAL/SHM sidecars, and `TRACEDECAY_GLOBAL_DB` overrides.
 
 Suggested helper shape:
 

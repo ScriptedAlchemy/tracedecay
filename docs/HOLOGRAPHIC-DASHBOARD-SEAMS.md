@@ -148,34 +148,30 @@ ref mirrors, async orchestration).
   branch (`975–1062`), activity (already delegated to `ActivityScroller`), and
   the **history branch (`1100–1306`, ~200 lines of `MetadataRow` calls)** →
   `<CuratorHistoryTab/>` + `<CuratorConfigTable/>`.
-- **Data lifecycle / orchestration** (`694–891`, the real risk): 18 `useState`,
-  3 refs, **7 `useEffect`**, plus imperative `preview()`/`apply()`. **Candidate:**
+- **Data lifecycle / orchestration** (`694–891`, the real risk): multiple
+  async loaders, run-state refs, and polling effects. **Candidate:**
   `useCurationData()` hook. **Risk M–H.**
 
 ### Risky prop/state flows
-- **`preview()` / `apply()`** (`784–828`) are imperative orchestration:
-  `setActiveTab("activity")` → fire `loadActivity` → `postMemoryCurate` → in
-  `.then` set `report` + `savedAt` + clear stale flags → `loadSavedPreview` +
-  `loadActivity` + `loadStatus` → `setActiveTab("plan")`. The double tab switch
-  (activity-while-running, then plan-on-done) and the multi-setter sequencing
-  are subtle; only `loading`/`applying` are reset in `finally`. **Risk M–H.**
-- **Polling effect** (`875–884`): interval is `900 ms` while `loading||applying`
-  else `2500 ms`, and is **suspended when `panelRef.offsetParent === null`**
-  (panel hidden by `display:none` in the keep-mounted shell). Correctness depends
-  on the visibility check; a regression would silently poll a hidden tab.
-- **Cross-effect coupling**: `loadActivity` re-runs `loadSavedPreview` when the
-  latest `finish` event was a `dry_run` (`766–772`); the 4 tab-lazy-load effects
-  (`851–873`) each guard on different state. Easy to introduce a duplicate fetch
-  or miss a cleanup.
-- `loadSavedPreview` closes over `loading`/`applying` (in its dep array) so it is
-  recreated per run — fine, but it means `previewSavedAtRef` is the real
-  source of truth for dedup, not React state.
+- **Automation run orchestration**: `runAutomationTask()` queues work, upserts
+  the queued run, refreshes activity/history, and clears per-task loading/error
+  state in `finally`. **Risk M–H.**
+- **Polling effect**: active automation runs use the faster interval; idle state
+  uses the slower interval, and polling is **suspended when
+  `panelRef.offsetParent === null`** (panel hidden by `display:none` in the
+  keep-mounted shell). Correctness depends on the visibility check; a
+  regression would silently poll a hidden tab.
+- **Cross-effect coupling**: curation activity, run history, status, proposals,
+  and memory-state refreshes are split across tab-lazy-load effects. Easy to
+  introduce a duplicate fetch or miss a cleanup.
+- Automation run refresh closes over active run state, so `useAutomationRuns`
+  remains the source of truth for run lifecycle and activity refresh.
 
 ### Recommended seams
 1. `curation/format.ts` + `curation/risk.ts` (pure) — **L**, do first.
 2. Extract leaf components to `curation/` files — **L**.
 3. `<CuratorHistoryTab/>` (+ `<CuratorConfigTable/>`) — **L**.
-4. `useCurationData()` hook (effects + preview/apply + polling) — **M–H**, last.
+4. `useCurationData()` hook (effects + automation-run polling) — **M–H**, last.
 
 ---
 
@@ -190,7 +186,7 @@ ref mirrors, async orchestration).
 | 5 | SemanticMap: move `query`-change reset out of render into the fetch effect | SemanticMap | **M** | Removes the render-phase setState before touching gestures |
 | 6 | `useSemanticTransform()` / `useSemanticGestures()` | SemanticMap | **M–H** | Preserves imperative-perf + ref-mirror invariants |
 | 7 | `useGraphInteraction()` hook | AssociationGraph | **M** | Must preserve callback-stability invariant |
-| 8 | `useCurationData()` hook (effects + preview/apply + polling) | CurationPanel | **M–H** | Most subtle; do last with tests in place |
+| 8 | `useCurationData()` hook (effects + automation-run polling) | CurationPanel | **M–H** | Most subtle; do last with tests in place |
 
 AssociationGraph needs the **least** work — its items (1–2 of its seams) are
 optional polish. SemanticMap and CurationPanel are where the real debt is.
@@ -245,20 +241,17 @@ optional polish. SemanticMap and CurationPanel are where the real debt is.
 - **AssociationGraph view lifecycle**: during settling the view tracks the
   layout bounds; once the user interacts it stops tracking; changing
   min-degree/kind after settle animates a reframe.
-- **CurationPanel preview/apply orchestration**: `preview()` flips to activity
-  tab, then back to plan on success, sets `report`+`savedAt`, clears stale flag,
-  and resets `loading` in `finally`; failure sets `error` and still resets
-  `loading`. `apply()` requires a non-empty dry-run plan (Apply disabled
-  otherwise), opens confirm, and on confirm clears `previewSavedAt` + calls
-  `onApplied`.
-- **CurationPanel polling**: the interval uses 900 ms while loading/applying and
+- **CurationPanel automation orchestration**: `runAutomationTask()` flips to
+  activity/history on queued runs, refreshes run history and activity in
+  `finally`, and preserves per-task loading/error state.
+- **CurationPanel polling**: the interval uses 900 ms while active automation runs exist and
   2500 ms otherwise, and **does not poll while `panelRef.offsetParent === null`**
   (hidden panel).
 - **CurationPanel activity coupling**: when the latest `finish` event is a
-  `dry_run`, `loadActivity` triggers a `loadSavedPreview` refresh.
+  completed memory-curator run, `loadActivity` refreshes curation status and
+  run history.
 - **CurationPanel tab lazy-load**: switching to history loads status + oplog
-  once; switching to activity loads activity once; plan tab refreshes the saved
-  preview.
+  once; switching to activity loads activity once.
 
 ---
 

@@ -91,7 +91,7 @@ export function ActivityScroller({
       ) : null}
       {stale ? (
         <div className="border-b border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
-          The last curator run stopped reporting activity. Refresh or start a new preview to resume from a fresh run.
+          The last curator run stopped reporting activity. Refresh or start a new automation run.
         </div>
       ) : null}
       <div
@@ -100,7 +100,7 @@ export function ActivityScroller({
       >
         {events.length === 0 ? (
           <div className="text-text-tertiary">
-            Start a preview or apply run to watch curator activity here.
+            Start an automation run to watch curator activity here.
           </div>
         ) : (
           <div className="flex flex-col gap-1.5">

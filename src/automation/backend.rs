@@ -359,35 +359,19 @@ pub struct CodexAppServerBackend {
 
 impl CodexAppServerBackend {
     pub fn new(model: Option<String>, timeout_secs: u64) -> Self {
-        Self::new_with_runtime_options(model, timeout_secs, None, None)
+        Self::new_with_runtime_options(model, timeout_secs)
     }
 
     pub fn from_automation_config(config: &AutomationConfig) -> Self {
-        Self::new_with_runtime_options(
-            config.model.clone(),
-            config.timeout_secs,
-            config.max_tokens,
-            config.temperature,
-        )
+        Self::new_with_runtime_options(None, config.timeout_secs)
     }
 
-    pub fn new_with_runtime_options(
-        model: Option<String>,
-        timeout_secs: u64,
-        max_tokens: Option<u32>,
-        temperature: Option<f32>,
-    ) -> Self {
+    pub fn new_with_runtime_options(model: Option<String>, timeout_secs: u64) -> Self {
         let mut config = CodexAppServerSummaryConfig::from_env();
         if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
             config.model = Some(model);
         }
         config.timeout = Duration::from_secs(timeout_secs.clamp(5, 300));
-        if let Some(max_tokens) = max_tokens {
-            config.max_tokens = Some(max_tokens);
-        }
-        if let Some(temperature) = temperature {
-            config.temperature = Some(temperature);
-        }
         Self { config }
     }
 

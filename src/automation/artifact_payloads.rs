@@ -227,7 +227,8 @@ pub(super) fn validation_gate_payload(
 ) -> Value {
     let (trace_ref, feedback_ref, generated_evals_ref) = refs;
     let auto_applied = record_has_auto_applied_memory_ops(ctx.task, ctx.record);
-    let approval_required = ctx.record.accepted_count > 0 && !auto_applied;
+    let approval_required =
+        automation_record_requires_dashboard_approval(ctx.task, ctx.record, auto_applied);
     json!({
         "schema_version": 1,
         "run_id": ctx.run_id,
@@ -333,6 +334,8 @@ pub(super) fn codex_handoff_payload(
     gate: &ImprovementGatePayload,
 ) -> Value {
     let auto_applied = record_has_auto_applied_memory_ops(ctx.task, ctx.record);
+    let approval_required =
+        automation_record_requires_dashboard_approval(ctx.task, ctx.record, auto_applied);
     json!({
         "schema_version": 1,
         "run_id": ctx.run_id,
@@ -362,7 +365,7 @@ pub(super) fn codex_handoff_payload(
             "validation_gate_decision": gate.decision,
             "eval_count": evals.count,
             "blockers": gate.blockers.clone(),
-            "approval_required": ctx.record.accepted_count > 0 && !auto_applied,
+            "approval_required": approval_required,
             "auto_apply_allowed": auto_applied,
         },
         "source_refs": [
@@ -424,6 +427,17 @@ pub(super) fn codex_handoff_payload(
         "next_actions": ctx.policy.next_actions(ctx.record),
         "tests_to_run": ctx.policy.handoff_tests(),
     })
+}
+
+fn automation_record_requires_dashboard_approval(
+    task: AgentTaskKind,
+    record: &AutomationRunLedgerRecord,
+    auto_applied: bool,
+) -> bool {
+    match task {
+        AgentTaskKind::MemoryCurator | AgentTaskKind::SessionReflector => false,
+        _ => record.accepted_count > 0 && !auto_applied,
+    }
 }
 
 #[cfg(test)]
@@ -685,7 +699,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_handoff_preserves_approval_gate_for_partial_memory_apply() {
+    fn codex_handoff_reports_partial_memory_apply_without_approval_gate() {
         let (request, response, mut record) = payload_fixture();
         record.accepted_count = 2;
         record.reviewed_count = 2;
@@ -738,7 +752,7 @@ mod tests {
             validation_payload
                 .pointer("/task_validation/approval_required")
                 .unwrap(),
-            &json!(true)
+            &json!(false)
         );
         assert_eq!(
             validation_payload
@@ -748,7 +762,7 @@ mod tests {
         );
         assert_eq!(
             payload.pointer("/readiness/approval_required").unwrap(),
-            &json!(true)
+            &json!(false)
         );
         assert_eq!(
             payload.pointer("/readiness/auto_apply_allowed").unwrap(),

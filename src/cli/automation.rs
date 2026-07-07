@@ -94,24 +94,12 @@ pub enum AutomationConfigAction {
         /// Host mode: standalone, delegated-host.
         #[arg(long)]
         host_mode: Option<String>,
-        /// Model id. Empty string clears the project override.
-        #[arg(long)]
-        model: Option<String>,
         /// Timeout in seconds.
         #[arg(long)]
         timeout_secs: Option<u64>,
         /// Scheduler polling cadence in seconds.
         #[arg(long)]
         scheduler_tick_secs: Option<u64>,
-        /// Maximum backend output tokens. Empty string clears the override.
-        #[arg(long)]
-        max_tokens: Option<String>,
-        /// Backend sampling temperature. Empty string clears the override.
-        #[arg(long)]
-        temperature: Option<String>,
-        /// Require dashboard approval before applying generated changes.
-        #[arg(long)]
-        require_dashboard_approval: Option<bool>,
         /// Allow accepted memory operations to apply automatically when policy permits.
         #[arg(long)]
         auto_apply_memory_ops: Option<bool>,

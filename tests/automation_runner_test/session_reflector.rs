@@ -347,7 +347,7 @@ async fn session_reflector_runner_auto_applies_valid_fact_proposals_by_default()
 }
 
 #[tokio::test]
-async fn session_reflector_runner_auto_apply_is_blocked_by_dashboard_approval() {
+async fn session_reflector_runner_auto_apply_ignores_dashboard_approval_gate() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
@@ -399,32 +399,32 @@ async fn session_reflector_runner_auto_apply_is_blocked_by_dashboard_approval() 
     .unwrap();
 
     assert_eq!(backend.calls(), 1);
-    assert_eq!(run.report["status"], json!("needs_approval"));
-    assert_eq!(run.report["dry_run"], json!(true));
+    assert_eq!(run.report["status"], json!("auto_applied"));
+    assert_eq!(run.report["dry_run"], json!(false));
     assert_eq!(
         run.report["session_fact_apply_policy"]["decision"],
-        json!("requires_dashboard_approval")
+        json!("auto_apply_allowed")
     );
     assert_eq!(
         run.report["session_fact_apply_policy"]["mutates_store"],
-        json!(false)
+        json!(true)
     );
     assert_eq!(
         run.report["session_fact_apply_policy"]["autonomous_memory_apply"],
-        json!(false)
+        json!(true)
     );
     assert_eq!(
         run.report["session_fact_apply_policy"]["require_dashboard_approval"],
-        json!(true)
+        json!(false)
     );
     assert_eq!(
         run.report["session_fact_apply_policy"]["approval_required"],
-        json!(true)
+        json!(false)
     );
-    assert!(run.ledger_record.applied_ops.is_none());
+    assert!(run.ledger_record.applied_ops.is_some());
     assert_eq!(
         run.ledger_record.validation_report.as_ref().unwrap()["status"],
-        json!("needs_approval")
+        json!("auto_applied")
     );
 
     let pending = list_fact_proposals(
@@ -434,7 +434,7 @@ async fn session_reflector_runner_auto_apply_is_blocked_by_dashboard_approval() 
     )
     .await
     .unwrap();
-    assert_eq!(pending.len(), 1);
+    assert!(pending.is_empty());
     let applied = list_fact_proposals(
         &cg.store_layout().dashboard_root,
         Some(FactProposalState::Applied),
@@ -442,7 +442,7 @@ async fn session_reflector_runner_auto_apply_is_blocked_by_dashboard_approval() 
     )
     .await
     .unwrap();
-    assert!(applied.is_empty());
+    assert_eq!(applied.len(), 1);
 
     let facts = cg
         .search_facts(tracedecay::memory::types::SearchFactsRequest {
@@ -457,8 +457,8 @@ async fn session_reflector_runner_auto_apply_is_blocked_by_dashboard_approval() 
     assert!(
         facts
             .iter()
-            .all(|hit| hit.fact.source.as_deref() != Some("session_reflector")),
-        "dashboard approval should block accepted session facts from being auto-applied"
+            .any(|hit| hit.fact.source.as_deref() == Some("session_reflector")),
+        "dashboard approval must not block accepted session facts from being auto-applied"
     );
 }
 

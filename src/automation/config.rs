@@ -78,17 +78,17 @@ pub struct AutomationConfig {
     pub backend: AutomationBackend,
     #[serde(default)]
     pub host_mode: AutomationHostMode,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub model: Option<String>,
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
     #[serde(default = "default_scheduler_tick_secs")]
     pub scheduler_tick_secs: u64,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub max_tokens: Option<u32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub temperature: Option<f32>,
-    #[serde(default = "default_true")]
+    #[serde(default, skip_serializing)]
     pub require_dashboard_approval: bool,
     #[serde(default)]
     pub auto_apply_memory_ops: bool,
@@ -123,7 +123,7 @@ impl Default for AutomationConfig {
             scheduler_tick_secs: default_scheduler_tick_secs(),
             max_tokens: None,
             temperature: None,
-            require_dashboard_approval: true,
+            require_dashboard_approval: false,
             auto_apply_memory_ops: false,
             auto_enable_skills: false,
             export_memory_digest: true,
@@ -189,7 +189,7 @@ pub struct AutomationConfigPatch {
     #[serde(
         default,
         deserialize_with = "deserialize_clearable_field",
-        skip_serializing_if = "Option::is_none"
+        skip_serializing
     )]
     pub model: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -199,16 +199,16 @@ pub struct AutomationConfigPatch {
     #[serde(
         default,
         deserialize_with = "deserialize_clearable_field",
-        skip_serializing_if = "Option::is_none"
+        skip_serializing
     )]
     pub max_tokens: Option<Option<u32>>,
     #[serde(
         default,
         deserialize_with = "deserialize_clearable_field",
-        skip_serializing_if = "Option::is_none"
+        skip_serializing
     )]
     pub temperature: Option<Option<f32>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing)]
     pub require_dashboard_approval: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_apply_memory_ops: Option<bool>,
@@ -263,8 +263,16 @@ pub fn effective_config(
     if let Some(patch) = project {
         apply_patch(&mut config, patch);
     }
+    normalize_legacy_config(&mut config);
     validate_config(&config)?;
     Ok(config)
+}
+
+fn normalize_legacy_config(config: &mut AutomationConfig) {
+    config.model = None;
+    config.max_tokens = None;
+    config.temperature = None;
+    config.require_dashboard_approval = false;
 }
 
 pub fn merge_project_config(
@@ -297,19 +305,6 @@ pub fn validate_config(config: &AutomationConfig) -> Result<()> {
     }
     if config.scheduler_tick_secs == 0 {
         return config_error("automation scheduler_tick_secs must be greater than zero");
-    }
-    if matches!(config.max_tokens, Some(0)) {
-        return config_error("automation max_tokens must be greater than zero");
-    }
-    if let Some(temperature) = config.temperature {
-        if !temperature.is_finite() || temperature < 0.0 {
-            return config_error("automation temperature must be finite and non-negative");
-        }
-    }
-    if config.auto_enable_skills && !config.require_dashboard_approval {
-        return config_error(
-            "auto_enable_skills requires require_dashboard_approval until automation is trusted",
-        );
     }
     validate_task_config("memory_curator", &config.tasks.memory_curator)?;
     validate_task_config("session_reflector", &config.tasks.session_reflector)?;
@@ -389,23 +384,11 @@ fn apply_patch(config: &mut AutomationConfig, patch: &AutomationConfigPatch) {
     if let Some(host_mode) = patch.host_mode {
         config.host_mode = host_mode;
     }
-    if let Some(model) = &patch.model {
-        config.model.clone_from(model);
-    }
     if let Some(timeout_secs) = patch.timeout_secs {
         config.timeout_secs = timeout_secs;
     }
     if let Some(scheduler_tick_secs) = patch.scheduler_tick_secs {
         config.scheduler_tick_secs = scheduler_tick_secs;
-    }
-    if let Some(max_tokens) = patch.max_tokens {
-        config.max_tokens = max_tokens;
-    }
-    if let Some(temperature) = patch.temperature {
-        config.temperature = temperature;
-    }
-    if let Some(require_dashboard_approval) = patch.require_dashboard_approval {
-        config.require_dashboard_approval = require_dashboard_approval;
     }
     if let Some(auto_apply_memory_ops) = patch.auto_apply_memory_ops {
         config.auto_apply_memory_ops = auto_apply_memory_ops;
@@ -455,15 +438,8 @@ fn merge_patch(config: &mut AutomationConfigPatch, patch: AutomationConfigPatch)
     merge_optional_field(&mut config.enabled, patch.enabled);
     merge_optional_field(&mut config.backend, patch.backend);
     merge_optional_field(&mut config.host_mode, patch.host_mode);
-    merge_optional_field(&mut config.model, patch.model);
     merge_optional_field(&mut config.timeout_secs, patch.timeout_secs);
     merge_optional_field(&mut config.scheduler_tick_secs, patch.scheduler_tick_secs);
-    merge_optional_field(&mut config.max_tokens, patch.max_tokens);
-    merge_optional_field(&mut config.temperature, patch.temperature);
-    merge_optional_field(
-        &mut config.require_dashboard_approval,
-        patch.require_dashboard_approval,
-    );
     merge_optional_field(
         &mut config.auto_apply_memory_ops,
         patch.auto_apply_memory_ops,

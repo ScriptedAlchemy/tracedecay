@@ -84,7 +84,6 @@ src/dashboard/
 ├── mod.rs                  # unchanged route table; +mod declarations only
 ├── util.rs                 # unchanged — the shared data-access contract
 ├── assets.rs               # unchanged
-├── curate_preview_store.rs # unchanged
 │
 ├── memory_api.rs           # ROUTE  (11 handlers) — bodies become thin calls
 ├── memory_service.rs       # NEW — domain logic + curation seam + projection cache
@@ -136,7 +135,7 @@ Each table shows where current code lands. Line numbers are from the audited
 
 | Current (in `memory_api.rs`) | Destination | Notes |
 |---|---|---|
-| 11 route fns: `overview`, `fact_detail`, `projection`, `similarity`, `curation_status`, `curation_activity`, `curation_preview`, `curate`, `curate_apply`, `oplog` (+ the `/` overview alias) | **`memory_api.rs`** (stay) | Bodies shrink to: extract params → `memory_service::…` → wrap `Json`. |
+| Route fns: `overview`, `fact_detail`, `projection`, `similarity`, `curation_status`, `curation_activity`, `curate_apply`, `oplog` (+ the `/` overview alias) | **`memory_api.rs`** (stay) | Bodies shrink to: extract params → `memory_service::…` → wrap `Json`. |
 | `overview_payload`, `fetch_facts`, `fetch_entities`, `graph_payload`, `providers_stub` | **`memory_service.rs`** | Domain assembly; call `memory_queries`. |
 | `vector_facts` (`:595`), `ProjectionComputation` (`:694`), `PROJECTION_CACHE` | **`memory_service.rs`** | Cache + its `OnceLock` move together (C6). |
 | **5 curation fns:** `similarity_computation` (`:906`), `build_delete_plan` (`:1144`), `delete_fact` (`:1184`), `apply_delete_op` (`:1316`), `apply_merge_op` (`:1352`) | **`memory_service.rs`** | Stay `pub(crate)` — the curation seam (C5, §5). |
@@ -299,7 +298,6 @@ not change:
 | `SIMILARITY_CACHE` / `SimilarityComputation` | (already in `memory_analysis.rs`) | Same fingerprint rule. |
 | `DEGREE_CACHE` / `DegreeSummary` | `graph_service.rs` | `(COUNT(*),MAX(id))` of edges; known node-only-edit blind spot (P16). |
 | `VALIDATED_METADATA_STORES` | `lcm_service.rs` | One-shot; **failures not cached** (P13). |
-| `curate_preview` (`DashboardState`) | unchanged (in `mod.rs`) | Cleared on apply; persisted via `curate_preview_store`. |
 
 All caches stay keyed by `mem_db_path`/`lcm_db_path` because one process can
 serve multiple projects via the MCP tool (P17).
@@ -316,10 +314,8 @@ off-loopback without adding auth.** No new auth is introduced by this layering.
 **Hermes wrapper** (`dashboard/hermes-wrapper/plugin_api.py`): a thin reverse
 proxy that forwards fixed path prefixes (`/holographic/* → /api/plugins/holographic/*`,
 `/lcm/*`, `/graph/*`, `/savings/*`) and adds the session-token middleware.
-Because the layering changes **neither route paths nor JSON keys nor the
-`/api/capabilities` feature flags** (C2), the wrapper requires **zero changes**.
-`POST /curation/llm-plan` stays wrapper-only; the standalone `memory_curate`
-mirror (§5) is unaffected.
+The wrapper does not own curation planning; autonomous curation runs through
+TraceDecay automation and explicit apply operations.
 
 **Verification gate for compatibility:** after the migration, the reverse-proxy
 prefix map in `plugin_api.py` must still resolve every advertised route, and
@@ -416,7 +412,7 @@ Delete the shim in the same commit once `memory_curate` points at
   here. The query modules are concrete fns over `&Connection`, not a trait, to
   avoid a speculative abstraction layer.
 - **No moving `util.rs`, `mod.rs` lifecycle, `savings_*`, `token_count`,
-  `assets`, or `curate_preview_store`.**
+  or `assets`.**
 - **No submodule-directory reorg** (`dashboard/{memory,lcm,graph}/`) — that is a
   later mechanical follow-up, not this migration.
 - **No behavior change to the `format!`-injected column-list assembly** beyond

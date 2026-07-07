@@ -22,8 +22,6 @@ pub struct CodexAppServerSummaryConfig {
     pub codex_bin: String,
     pub model: Option<String>,
     pub timeout: Duration,
-    pub max_tokens: Option<u32>,
-    pub temperature: Option<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,8 +36,6 @@ impl Default for CodexAppServerSummaryConfig {
             codex_bin: "codex".to_string(),
             model: None,
             timeout: Duration::from_secs(90),
-            max_tokens: None,
-            temperature: None,
         }
     }
 }
@@ -57,26 +53,6 @@ impl CodexAppServerSummaryConfig {
             .and_then(|secs| secs.parse::<u64>().ok())
         {
             config.timeout = Duration::from_secs(secs.clamp(5, 300));
-        }
-        if let Some(max_tokens) =
-            non_empty_env("TRACEDECAY_CODEX_SUMMARY_MAX_TOKENS").and_then(|value| {
-                value
-                    .parse::<u32>()
-                    .ok()
-                    .filter(|max_tokens| *max_tokens > 0)
-            })
-        {
-            config.max_tokens = Some(max_tokens);
-        }
-        if let Some(temperature) =
-            non_empty_env("TRACEDECAY_CODEX_SUMMARY_TEMPERATURE").and_then(|value| {
-                value
-                    .parse::<f32>()
-                    .ok()
-                    .filter(|temperature| temperature.is_finite() && *temperature >= 0.0)
-            })
-        {
-            config.temperature = Some(temperature);
         }
         config
     }
@@ -183,12 +159,6 @@ pub fn run_prompt_with_codex_app_server(
     });
     if let Some(model) = model {
         turn_params["model"] = json!(model);
-    }
-    if let Some(max_tokens) = config.max_tokens {
-        turn_params["maxOutputTokens"] = json!(max_tokens);
-    }
-    if let Some(temperature) = config.temperature {
-        turn_params["temperature"] = json!(temperature);
     }
     send_json(
         &mut stdin,

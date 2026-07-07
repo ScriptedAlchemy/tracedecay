@@ -203,7 +203,6 @@ These are intentional non-goals unless the policy itself changes.
   - `src/config.rs`
   - `src/global.rs`
   - `src/branch_meta.rs`
-  - `src/dashboard/curate_preview_store.rs`
   - `src/diagnostics/rust.rs`
 
 ### N-02: Do not remove legacy maintenance discovery

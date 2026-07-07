@@ -332,11 +332,7 @@ export interface MemoryCurateHygieneCandidates {
   supersession: MemoryCurateHygieneCandidate[];
 }
 
-/**
- * Wire contract for `POST /api/plugins/holographic/curate`: the curation
- * plan/report. With `dry_run` the actions are proposals; otherwise
- * `applied_counts`/`apply_errors` describe what was actually executed.
- */
+/** Memory-curator automation report payload. */
 export interface MemoryCurateResponse {
   provider?: string;
   ran: boolean;
@@ -366,19 +362,6 @@ export interface MemoryCurateResponse {
   error?: string;
   mode?: string;
   dry_run_required?: boolean;
-}
-
-/**
- * Wire contract for `GET /api/plugins/holographic/curation/preview`: the last
- * saved dry-run report (if any) plus staleness info when the memory store has
- * changed since the preview was generated.
- */
-export interface MemoryCuratorPreviewResponse {
-  report: MemoryCurateResponse | null;
-  saved_at?: string | null;
-  stale?: boolean;
-  stale_reason?: string;
-  error?: string;
 }
 
 export type AutomationBackend = "disabled" | "codex_app_server" | "external_command";
@@ -412,12 +395,8 @@ export interface MemoryAutomationConfig {
   enabled: boolean;
   backend: AutomationBackend;
   host_mode: AutomationHostMode;
-  model?: string | null;
   timeout_secs: number;
   scheduler_tick_secs: number;
-  max_tokens?: number | null;
-  temperature?: number | null;
-  require_dashboard_approval: boolean;
   auto_apply_memory_ops: boolean;
   auto_enable_skills: boolean;
   tasks: AutomationTaskSet;
@@ -436,12 +415,8 @@ export interface MemoryAutomationConfigPatch {
   enabled?: boolean;
   backend?: SelectableAutomationBackend;
   host_mode?: AutomationHostMode;
-  model?: string | null;
   timeout_secs?: number;
   scheduler_tick_secs?: number;
-  max_tokens?: number | null;
-  temperature?: number | null;
-  require_dashboard_approval?: boolean;
   auto_apply_memory_ops?: boolean;
   auto_enable_skills?: boolean;
   memory_curator?: AutomationTaskPatch;
@@ -479,9 +454,8 @@ export interface AutomationSchedulerStatusResponse {
   tasks: AutomationSchedulerTaskStatus[];
 }
 
-export interface MemoryAgentPlanResponse<TReport = Record<string, unknown>> {
+export interface MemoryAutomationRunResponse<TReport = Record<string, unknown>> {
   run_id: string;
-  dry_run: true;
   status: string;
   report?: TReport;
   ledger_record: MemoryAutomationRunRecord;
@@ -490,7 +464,6 @@ export interface MemoryAgentPlanResponse<TReport = Record<string, unknown>> {
 }
 
 export interface AutomationRunRequest {
-  dry_run?: true;
   provider?: string;
   query?: string;
   evidence_limit?: number;
@@ -505,9 +478,6 @@ export interface AutomationRunRequest {
   start_time?: number;
   end_time?: number;
 }
-
-export type MemoryAutomationRunResponse<TReport = Record<string, unknown>> =
-  MemoryAgentPlanResponse<TReport>;
 
 export interface MemoryAutomationRunRecord {
   schema_version: number;
@@ -771,9 +741,6 @@ export interface MemoryCuratorStatusResponse {
     run_count: number;
     last_run_summary?: string | null;
     last_run_id?: string | null;
-    last_preview_at?: string | null;
-    last_preview_summary?: string | null;
-    last_preview_run_id?: string | null;
   };
   config: {
     enabled: boolean;

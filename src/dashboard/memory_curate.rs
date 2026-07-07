@@ -1,15 +1,13 @@
 //! `tracedecay memory curate` — dashboard-free curation core.
 //!
-//! Footprint-Ladder rung 2 for Hermes: the similarity-dedup curate (and the
-//! LLM-review tier's plan/apply halves) run directly against the project
-//! memory store, so a cron job can call the CLI without the dashboard server
-//! or its Hermes wrapper.
+//! The similarity-dedup curate and the LLM-review tier's plan/apply halves run
+//! directly against the project memory store, so automation can call the CLI
+//! without the dashboard server or a host wrapper.
 //!
 //! The LLM tier mirrors the LCM summarizer's two-phase `needs_summary` →
 //! `provided` contract: this binary never calls an LLM itself. `--llm` emits
-//! a `llm_review` request (clusters + chat messages, ported from the Hermes
-//! wrapper's `/curation/llm-plan`); the caller runs the one-shot review with
-//! whatever LLM it owns and feeds the strict-JSON ops back through
+//! a `llm_review` request (clusters + chat messages); the caller runs the
+//! one-shot review with whatever LLM it owns and feeds the strict-JSON ops back through
 //! `--llm-ops`, which validates them against freshly recomputed clusters
 //! (the evidence guard) and applies them through the canonical store paths.
 
@@ -33,9 +31,7 @@ pub const CURATION_DEFAULT_MAX_CLUSTERS: usize = 12;
 pub const CURATION_DEFAULT_MIN_CONFIDENCE: f64 = 0.5;
 const CURATION_CLUSTER_CLASSIFICATIONS: [&str; 2] = ["likely_duplicate", "merge_candidate"];
 
-/// Verbatim port of the Hermes wrapper's `_CURATION_SYSTEM_PROMPT`
-/// (dashboard/hermes-wrapper/plugin_api.py), itself adapted from the
-/// `holographic_plus` curator's one-shot LLM review tier.
+/// Adapted from the `holographic_plus` curator's one-shot LLM review tier.
 const CURATION_SYSTEM_PROMPT: &str = "You are a memory hygiene engine for an AI agent's long-term fact store. \
 You are given candidate fact clusters and must return STRICT JSON \
 describing one op per reviewed cluster. NEVER invent facts. Be \
@@ -134,7 +130,6 @@ async fn cli_state(cg: &TraceDecay) -> DashboardState {
         store_root: store_layout.data_root.clone(),
         config_path: store_layout.config_path.clone(),
         dashboard_root: store_layout.dashboard_root.clone(),
-        curate_preview: Arc::new(RwLock::new(None)),
         curation_activity: Arc::new(RwLock::new(Vec::new())),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
         code_diagnostics: Arc::new(RwLock::new(code_diagnostics_broker(

@@ -1,23 +1,10 @@
 import { CurationTabPanel } from "./CurationTabPanel";
-import { CurrentPreviewSection } from "./CurrentPreviewSection";
 import { MemoryOperationsSection } from "./MemoryOperationsSection";
 import { RunHistorySection } from "./RunHistorySection";
 import { SnapshotsSection } from "./SnapshotsSection";
-import type {
-  MemoryCurateResponse,
-  MemoryCuratorStatusResponse,
-  MemoryOplogEvent,
-} from "../types";
+import type { MemoryCuratorStatusResponse, MemoryOplogEvent } from "../types";
 
 interface CurationHistoryPanelProps {
-  report: MemoryCurateResponse | null;
-  previewSavedAt: string | null;
-  previewStale: boolean;
-  previewStaleReason: string;
-  actionsLength: number;
-  actionCounts: Array<[string, number]>;
-  diagnosticCounts: Array<[string, number]>;
-  isPlan: boolean;
   status: MemoryCuratorStatusResponse | null;
   statusLoading: boolean;
   statusError: string;
@@ -28,14 +15,6 @@ interface CurationHistoryPanelProps {
 }
 
 export function CurationHistoryPanel({
-  report,
-  previewSavedAt,
-  previewStale,
-  previewStaleReason,
-  actionsLength,
-  actionCounts,
-  diagnosticCounts,
-  isPlan,
   status,
   statusLoading,
   statusError,
@@ -63,16 +42,6 @@ export function CurationHistoryPanel({
         </>
       ) : null}
       <MemoryOperationsSection events={oplog} error={oplogError} />
-      <CurrentPreviewSection
-        report={report}
-        previewSavedAt={previewSavedAt}
-        previewStale={previewStale}
-        previewStaleReason={previewStaleReason}
-        actionsLength={actionsLength}
-        actionCounts={actionCounts}
-        diagnosticCounts={diagnosticCounts}
-        isPlan={isPlan}
-      />
     </CurationTabPanel>
   );
 }

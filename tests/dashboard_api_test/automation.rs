@@ -1,7 +1,7 @@
 use crate::dashboard_api_support::*;
 
 #[test]
-fn curation_agent_plan_skips_when_automation_is_disabled_and_records_history() {
+fn dashboard_automation_runs_skip_when_disabled_and_record_history() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -23,7 +23,7 @@ fn curation_agent_plan_skips_when_automation_is_disabled_and_records_history() {
         let agent = http_agent();
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
-        let mut server = spawn_dashboard_server(cg, port);
+        let mut server = spawn_dashboard_server_lightweight(cg, port);
         wait_for_dashboard(&agent, &base_url).await;
 
         let config_url = format!("{base_url}/api/plugins/holographic/curation/config");
@@ -32,31 +32,18 @@ fn curation_agent_plan_skips_when_automation_is_disabled_and_records_history() {
             &config_url,
             &serde_json::json!({
                 "enabled": false,
-                "backend": "codex_app_server",
-                "host_mode": "delegated_host",
-                "model": "queued-model"
+                "backend": "codex_app_server"
             }),
         );
         assert_eq!(status, 200, "config patch should succeed: {saved_config}");
         assert_eq!(saved_config["effective"]["backend"], "codex_app_server");
-        assert_eq!(saved_config["effective"]["host_mode"], "delegated_host");
-        assert_eq!(saved_config["effective"]["model"], "queued-model");
-
-        let (status, payload) = post_json_body(
-            &agent,
-            &format!("{base_url}/api/plugins/holographic/curation/agent-plan"),
-            &serde_json::json!({ "dry_run": true }),
-        );
-        assert_eq!(status, 200);
-        assert_eq!(payload["status"], "skipped");
-        assert_eq!(payload["ledger_record"]["trigger"], "dashboard");
-        assert_eq!(payload["ledger_record"]["error"], "automation_disabled");
-        assert_eq!(payload["report"]["reason"], "automation_disabled");
+        assert_eq!(saved_config["effective"]["host_mode"], "standalone");
+        assert!(saved_config["effective"]["model"].is_null());
 
         let (status, memory_payload) = post_json_body(
             &agent,
             &format!("{base_url}/api/automation/run/memory-curator"),
-            &serde_json::json!({ "dry_run": true }),
+            &serde_json::json!({}),
         );
         assert_eq!(status, 202);
         assert_eq!(memory_payload["status"], "queued");
@@ -68,14 +55,14 @@ fn curation_agent_plan_skips_when_automation_is_disabled_and_records_history() {
         );
         assert_eq!(
             memory_payload["ledger_record"]["host_mode"],
-            "delegated_host"
+            "standalone"
         );
-        assert_eq!(memory_payload["ledger_record"]["model"], "queued-model");
+        assert!(memory_payload["ledger_record"]["model"].is_null());
 
         let (status, session_payload) = post_json_body(
             &agent,
             &format!("{base_url}/api/automation/run/session-reflection"),
-            &serde_json::json!({ "dry_run": true }),
+            &serde_json::json!({}),
         );
         assert_eq!(status, 202);
         assert_eq!(session_payload["status"], "queued");
@@ -90,15 +77,14 @@ fn curation_agent_plan_skips_when_automation_is_disabled_and_records_history() {
         );
         assert_eq!(
             session_payload["ledger_record"]["host_mode"],
-            "delegated_host"
+            "standalone"
         );
-        assert_eq!(session_payload["ledger_record"]["model"], "queued-model");
+        assert!(session_payload["ledger_record"]["model"].is_null());
 
         let (status, skill_payload) = post_json_body(
             &agent,
             &format!("{base_url}/api/automation/run/skill-writing"),
             &serde_json::json!({
-                "dry_run": true,
                 "provider": "cursor",
                 "query": "workflow corrections",
                 "evidence_limit": 7,
@@ -115,14 +101,13 @@ fn curation_agent_plan_skips_when_automation_is_disabled_and_records_history() {
         );
         assert_eq!(
             skill_payload["ledger_record"]["host_mode"],
-            "delegated_host"
+            "standalone"
         );
-        assert_eq!(skill_payload["ledger_record"]["model"], "queued-model");
+        assert!(skill_payload["ledger_record"]["model"].is_null());
 
         let mut rejected_skill_shape = agent
             .post(&format!("{base_url}/api/automation/run/skill-writing"))
             .send_json(serde_json::json!({
-                "dry_run": true,
                 "unsupported_field": true
             }))
             .expect("skill-writing request with unsupported field should receive response");
@@ -135,19 +120,6 @@ fn curation_agent_plan_skips_when_automation_is_disabled_and_records_history() {
         assert!(
             rejected_skill_body.contains("unsupported_field"),
             "rejection should name the unsupported field: {rejected_skill_body}"
-        );
-
-        let (status, rejected) = post_json_body(
-            &agent,
-            &format!("{base_url}/api/automation/run/session-reflection"),
-            &serde_json::json!({ "dry_run": false }),
-        );
-        assert_eq!(status, 400);
-        assert!(
-            rejected["detail"]
-                .as_str()
-                .is_some_and(|detail| detail.contains("dry_run=true")),
-            "dry-run guard should explain the approval-only contract: {rejected}"
         );
 
         let run_ids = [
@@ -179,14 +151,13 @@ fn curation_agent_plan_skips_when_automation_is_disabled_and_records_history() {
             run_ids.len(),
             "dashboard automation jobs did not reach terminal skipped records: {records:#?}"
         );
-        assert_eq!(records.len(), 4);
+        assert_eq!(records.len(), 3);
         let tasks: Vec<_> = records.iter().map(|record| record.task).collect();
         assert_eq!(
             tasks,
             [
                 tracedecay::automation::backend::AgentTaskKind::SkillWriter,
                 tracedecay::automation::backend::AgentTaskKind::SessionReflector,
-                tracedecay::automation::backend::AgentTaskKind::MemoryCurator,
                 tracedecay::automation::backend::AgentTaskKind::MemoryCurator,
             ]
         );
@@ -201,8 +172,8 @@ fn curation_agent_plan_skips_when_automation_is_disabled_and_records_history() {
             );
             assert_eq!(record.error.as_deref(), Some("automation_disabled"));
             assert_eq!(record.backend, "codex_app_server");
-            assert_eq!(record.host_mode.as_deref(), Some("delegated_host"));
-            assert_eq!(record.model.as_deref(), Some("queued-model"));
+            assert_eq!(record.host_mode.as_deref(), Some("standalone"));
+            assert_eq!(record.model.as_deref(), None);
         }
 
         let (status, runs) = get_json(
@@ -210,7 +181,7 @@ fn curation_agent_plan_skips_when_automation_is_disabled_and_records_history() {
             &format!("{base_url}/api/plugins/holographic/curation/runs?limit=5"),
         );
         assert_eq!(status, 200);
-        assert_eq!(runs["count"], 4);
+        assert_eq!(runs["count"], 3);
         assert_eq!(runs["limit"], 5);
         assert_eq!(runs["records"][0]["trigger"], "dashboard");
         assert_eq!(runs["records"][0]["status"], "skipped");
@@ -239,7 +210,7 @@ fn curation_agent_plan_skips_when_automation_is_disabled_and_records_history() {
         ] {
             assert!(
                 phases.contains(&phase),
-                "agent-plan should emit {phase} activity; phases={phases:?}, activity={activity}"
+                "dashboard automation runs should emit {phase} activity; phases={phases:?}, activity={activity}"
             );
         }
         let memory_skip_phases: Vec<_> = events
@@ -303,17 +274,7 @@ fn curation_agent_plan_skips_when_automation_is_disabled_and_records_history() {
         );
         assert!(
             events.iter().any(|event| event["phase"] == "report"),
-            "agent-plan should write a visible curation activity event: {activity}"
-        );
-        assert!(
-            events.iter().any(|event| {
-                event["phase"] == "finish"
-                    && event["dry_run"] == true
-                    && event["message"].as_str().is_some_and(|message| {
-                        message.contains("Finished standalone memory-curator agent plan")
-                    })
-            }),
-            "agent-plan should emit a terminal finish activity event: {activity}"
+            "automation run should write a visible curation activity event: {activity}"
         );
 
         let (status, runs) = get_json(
@@ -321,7 +282,7 @@ fn curation_agent_plan_skips_when_automation_is_disabled_and_records_history() {
             &format!("{base_url}/api/plugins/holographic/curation/runs"),
         );
         assert_eq!(status, 200);
-        assert_eq!(runs["count"], 4);
+        assert_eq!(runs["count"], 3);
         assert!(
             runs["records"].as_array().is_some_and(|records| records
                 .iter()
@@ -329,6 +290,7 @@ fn curation_agent_plan_skips_when_automation_is_disabled_and_records_history() {
                     && record["status"] == "skipped")),
             "memory-curator run should remain visible in newest-first history: {runs}"
         );
+        drop(agent);
         server.stop();
     });
 }
@@ -356,7 +318,7 @@ fn dashboard_session_and_skill_runs_emit_activity_when_evidence_is_unavailable()
         let agent = http_agent();
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
-        let mut server = spawn_dashboard_server(cg, port);
+        let mut server = spawn_dashboard_server_lightweight(cg, port);
         wait_for_dashboard(&agent, &base_url).await;
 
         let (status, config) = patch_json_body(
@@ -375,7 +337,7 @@ fn dashboard_session_and_skill_runs_emit_activity_when_evidence_is_unavailable()
         let (status, session_payload) = post_json_body(
             &agent,
             &format!("{base_url}/api/automation/run/session-reflection"),
-            &serde_json::json!({ "dry_run": true }),
+            &serde_json::json!({}),
         );
         assert_eq!(status, 202, "session run should queue: {session_payload}");
         let session_run_id = session_payload["run_id"].as_str().unwrap().to_string();
@@ -384,7 +346,7 @@ fn dashboard_session_and_skill_runs_emit_activity_when_evidence_is_unavailable()
         let (status, skill_payload) = post_json_body(
             &agent,
             &format!("{base_url}/api/automation/run/skill-writing"),
-            &serde_json::json!({ "dry_run": true }),
+            &serde_json::json!({}),
         );
         assert_eq!(status, 202, "skill run should queue: {skill_payload}");
         let skill_run_id = skill_payload["run_id"].as_str().unwrap().to_string();
@@ -468,7 +430,7 @@ fn dashboard_session_and_skill_runs_emit_activity_when_evidence_is_unavailable()
 }
 
 #[test]
-fn final_self_improvement_smoke_covers_manual_curation_skill_approval_and_dashboard_review() {
+fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_approval() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -493,7 +455,7 @@ fn final_self_improvement_smoke_covers_manual_curation_skill_approval_and_dashbo
         let agent = http_agent();
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
-        let mut server = spawn_dashboard_server(cg, port);
+        let mut server = spawn_dashboard_server_lightweight(cg, port);
         wait_for_dashboard(&agent, &base_url).await;
 
         let (status, config) = patch_json_body(
@@ -503,7 +465,6 @@ fn final_self_improvement_smoke_covers_manual_curation_skill_approval_and_dashbo
                 "enabled": true,
                 "backend": "codex_app_server",
                 "host_mode": "standalone",
-                "model": "dashboard-configured-model",
                 "memory_curator": { "enabled": true, "schedule": "manual" }
             }),
         );
@@ -515,7 +476,6 @@ fn final_self_improvement_smoke_covers_manual_curation_skill_approval_and_dashbo
             &agent,
             &format!("{base_url}/api/automation/run/memory-curator"),
             &serde_json::json!({
-                "dry_run": true,
                 "max_clusters": 4,
                 "min_confidence": 0.5
             }),
@@ -621,9 +581,9 @@ fn final_self_improvement_smoke_covers_manual_curation_skill_approval_and_dashbo
             &serde_json::json!({
                 "id": "final-smoke-review",
                 "title": "Final smoke review",
-                "summary": "Review self-improvement run artifacts and approval state.",
+                "summary": "Inspect self-improvement run artifacts and skill approval state.",
                 "category": "workflow",
-                "body_markdown": "Check the run ledger, generated evals, validation gate, and pending skill approval before applying changes.",
+                "body_markdown": "Check the run ledger, generated evals, validation gate, and pending skill approval.",
                 "targets": ["codex"],
                 "provenance": {
                     "source": "automation_run",
@@ -788,7 +748,7 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
         let agent = http_agent();
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
-        let mut server = spawn_dashboard_server(cg, port);
+        let mut server = spawn_dashboard_server_lightweight(cg, port);
         wait_for_dashboard(&agent, &base_url).await;
 
         let artifact_url = format!("{base_url}/api/automation/runs/{run_id}/artifacts");
@@ -902,7 +862,7 @@ fn automation_outcomes_endpoint_reports_applied_fact_trajectories() {
         let agent = http_agent();
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
-        let mut server = spawn_dashboard_server(cg, port);
+        let mut server = spawn_dashboard_server_lightweight(cg, port);
         wait_for_dashboard(&agent, &base_url).await;
 
         let (status, outcomes) = get_json(&agent, &format!("{base_url}/api/automation/outcomes"));

@@ -3,13 +3,13 @@ use std::sync::{Arc, OnceLock};
 
 use serde_json::{Map, Value, json};
 
+use super::DashboardState;
 use super::memory_analysis::{
     SIMILARITY_DEFAULT_THRESHOLD, SIMILARITY_FACT_CAP, SIMILARITY_PAIR_FLOOR, SIMILARITY_SCORE_MAX,
     SIMILARITY_SCORE_MIN, SimilarityComputation, build_similarity_computation, pca_scores,
     propose_dedup_actions, propose_hygiene_candidates, score_distribution, score_similar_pairs,
 };
 use super::memory_queries::{self, VectorStateFingerprint};
-use super::{CuratePreviewEntry, DashboardState};
 use crate::memory::store::MemoryStore;
 
 const PROJECTION_POINT_CAP: i64 = 2000;
@@ -574,22 +574,6 @@ fn curation_apply_snapshot(index: usize, event: &Value) -> Value {
 }
 
 pub(crate) async fn curation_status_payload(state: &DashboardState) -> Value {
-    let preview = state.curate_preview.read().await;
-    let (last_preview_at, last_preview_summary) = match preview.as_ref() {
-        Some(entry) => (
-            Value::String(entry.saved_at.clone()),
-            Value::String(format!(
-                "{} duplicate fact(s) flagged for deletion",
-                entry
-                    .report
-                    .get("counts")
-                    .and_then(|c| c.get("delete"))
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0)
-            )),
-        ),
-        None => (Value::Null, Value::Null),
-    };
     let activity = state.curation_activity.read().await;
     let apply_finishes: Vec<&Value> = activity
         .iter()
@@ -629,16 +613,13 @@ pub(crate) async fn curation_status_payload(state: &DashboardState) -> Value {
             "run_count": run_count,
             "last_run_summary": last_run_summary,
             "last_run_id": last_run_id,
-            "last_preview_at": last_preview_at,
-            "last_preview_summary": last_preview_summary,
-            "last_preview_run_id": null,
         },
         "config": {
             "enabled": true,
             "interval_hours": null,
             "min_idle_hours": null,
             "mode": "similarity_dedup",
-            "dry_run_first": true,
+            "dry_run_first": false,
         },
         "snapshots": snapshots,
     })
@@ -683,41 +664,6 @@ pub(crate) async fn curation_activity_payload(state: &DashboardState, limit: i64
     json!({ "events": visible, "count": count, "limit": limit, "error": "" })
 }
 
-pub(crate) async fn curation_preview_payload(state: &DashboardState) -> Value {
-    let preview = state.curate_preview.read().await;
-    match preview.as_ref() {
-        None => json!({
-            "report": null,
-            "saved_at": null,
-            "stale": false,
-            "stale_reason": "",
-            "error": "",
-        }),
-        Some(entry) => {
-            let report = entry.report.clone();
-            let saved_at = entry.saved_at.clone();
-            let memory_fingerprint_at_save = entry.memory_fingerprint_at_save;
-            drop(preview);
-            let current_fingerprint = memory_queries::curation_preview_fingerprint(state)
-                .await
-                .unwrap_or((-1, -1, -1, -1));
-            let stale = current_fingerprint != memory_fingerprint_at_save;
-            let stale_reason = if stale {
-                "Memory store changed since this preview was generated."
-            } else {
-                ""
-            };
-            json!({
-                "report": report,
-                "saved_at": saved_at,
-                "stale": stale,
-                "stale_reason": stale_reason,
-                "error": "",
-            })
-        }
-    }
-}
-
 pub(crate) async fn build_delete_plan(
     state: &DashboardState,
 ) -> Result<(Vec<Value>, Value, Map<String, Value>, i64), String> {
@@ -758,207 +704,6 @@ pub(crate) async fn build_delete_plan(
 pub(crate) async fn delete_fact(state: &DashboardState, fact_id: i64) -> Result<bool, String> {
     let store = MemoryStore::new(&state.mem_conn);
     store.remove_fact(fact_id).await.map_err(|e| e.to_string())
-}
-
-pub(crate) async fn curate_payload(state: &DashboardState, dry_run: bool) -> Result<Value, String> {
-    push_curation_activity(
-        state,
-        "queued",
-        if dry_run {
-            "Queued similarity-dedup curation preview"
-        } else {
-            "Queued similarity-dedup curation apply"
-        },
-        dry_run,
-    )
-    .await;
-    push_curation_activity(
-        state,
-        "start",
-        if dry_run {
-            "Starting similarity-dedup curation preview"
-        } else {
-            "Starting similarity-dedup curation apply"
-        },
-        dry_run,
-    )
-    .await;
-    push_curation_activity(
-        state,
-        "evidence",
-        "Collecting similarity and hygiene evidence",
-        dry_run,
-    )
-    .await;
-    push_curation_activity(
-        state,
-        "backend",
-        "Running deterministic similarity-dedup planner",
-        dry_run,
-    )
-    .await;
-    let (actions, hygiene_candidates, counts, total) = match build_delete_plan(state).await {
-        Ok(plan) => plan,
-        Err(err) => {
-            push_curation_activity_with_level(
-                state,
-                "failure",
-                format!("Curation evidence collection failed: {err}"),
-                dry_run,
-                "error",
-            )
-            .await;
-            return Err(err);
-        }
-    };
-    push_curation_activity(
-        state,
-        "validation",
-        format!(
-            "Validated deterministic curation plan: {} delete action(s), {} hygiene candidate(s)",
-            actions.len(),
-            hygiene_candidates.as_array().map_or(0, Vec::len)
-        ),
-        dry_run,
-    )
-    .await;
-
-    let report = json!({
-        "ran": true,
-        "dry_run": dry_run,
-        "actions": actions,
-        "hygiene_candidates": hygiene_candidates,
-        "counts": counts,
-        "applied_counts": if dry_run { Value::Null } else { json!(counts.clone()) },
-        "llm_calls": 0,
-        "coverage": {
-            "scanned": total,
-            "active_total": total,
-            "due_remaining": 0,
-        },
-        "provider": "tracedecay",
-        "mode": "similarity_dedup",
-    });
-
-    if dry_run {
-        let saved_at = crate::timeutil::now_iso_utc();
-        let memory_fingerprint_at_save = memory_queries::curation_preview_fingerprint(state)
-            .await
-            .unwrap_or((total, 0, 0, 0));
-        let entry = CuratePreviewEntry {
-            report: report.clone(),
-            saved_at,
-            active_facts_at_save: total,
-            memory_fingerprint_at_save,
-        };
-        super::curate_preview_store::save(&state.dashboard_root, &entry).await;
-        *state.curate_preview.write().await = Some(entry);
-        push_curation_activity(
-            state,
-            "report",
-            format!(
-                "Preview report ready: {} delete action(s), {} active fact(s) scanned",
-                actions.len(),
-                total
-            ),
-            true,
-        )
-        .await;
-        push_curation_activity(
-            state,
-            "finish",
-            format!(
-                "Preview completed: {} delete action(s), {} active fact(s) scanned",
-                actions.len(),
-                total
-            ),
-            true,
-        )
-        .await;
-        return Ok(report);
-    }
-
-    let mut applied = 0i64;
-    let mut skipped = 0i64;
-    push_curation_activity(
-        state,
-        "report",
-        format!(
-            "Apply report ready: {} delete action(s), {} active fact(s) scanned",
-            actions.len(),
-            total
-        ),
-        false,
-    )
-    .await;
-    push_curation_activity(
-        state,
-        "apply",
-        format!(
-            "Applying {} deterministic curation action(s)",
-            actions.len()
-        ),
-        false,
-    )
-    .await;
-    if let Some(action_list) = report.get("actions").and_then(Value::as_array) {
-        for action in action_list {
-            let Some(fact_id) = action.get("fact_id").and_then(Value::as_i64) else {
-                skipped += 1;
-                continue;
-            };
-            match delete_fact(state, fact_id).await {
-                Ok(true) => applied += 1,
-                Ok(false) | Err(_) => skipped += 1,
-            }
-        }
-    }
-
-    *state.curate_preview.write().await = None;
-    super::curate_preview_store::clear(&state.dashboard_root).await;
-
-    let _ = MemoryStore::new(&state.mem_conn)
-        .record_oplog(
-            "curate_apply",
-            None,
-            &json!({ "mode": "similarity_dedup", "deleted": applied, "skipped": skipped }),
-        )
-        .await;
-
-    let mut applied_counts = Map::new();
-    if applied > 0 {
-        applied_counts.insert("delete".to_string(), json!(applied));
-    }
-    if skipped > 0 {
-        push_curation_activity_with_level(
-            state,
-            "rejection",
-            format!("{skipped} deterministic curation action(s) were skipped during apply"),
-            false,
-            "warning",
-        )
-        .await;
-    }
-    push_curation_activity(
-        state,
-        "finish",
-        format!("Apply completed: {applied} fact(s) deleted, {skipped} action(s) skipped"),
-        false,
-    )
-    .await;
-    Ok(json!({
-        "ran": true,
-        "dry_run": false,
-        "actions": report["actions"],
-        "hygiene_candidates": report["hygiene_candidates"],
-        "counts": report["counts"],
-        "applied_counts": applied_counts,
-        "skipped_actions": skipped,
-        "llm_calls": 0,
-        "coverage": report["coverage"],
-        "provider": "tracedecay",
-        "mode": "similarity_dedup",
-    }))
 }
 
 pub(crate) async fn apply_delete_op(state: &DashboardState, op: &Value) -> (Value, bool) {
@@ -1132,8 +877,6 @@ pub(crate) async fn curate_apply_payload(state: &DashboardState, ops: &[Value]) 
         .await;
     }
     if deleted > 0 || merged > 0 {
-        *state.curate_preview.write().await = None;
-        super::curate_preview_store::clear(&state.dashboard_root).await;
         let _ = MemoryStore::new(&state.mem_conn)
             .record_oplog(
                 "curate_apply",

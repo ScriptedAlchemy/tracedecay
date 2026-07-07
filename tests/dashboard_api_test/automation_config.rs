@@ -43,9 +43,9 @@ fn automation_config_is_dashboard_controllable_and_persistent() {
         assert_eq!(status, 200);
         assert_eq!(config["global"]["enabled"], true);
         assert_eq!(config["global"]["backend"], "codex_app_server");
-        assert_eq!(config["global"]["model"], "global-model");
+        assert!(config["global"].get("model").is_none());
         assert!(config["project"].is_null());
-        assert_eq!(config["effective"]["model"], "global-model");
+        assert!(config["effective"].get("model").is_none());
         assert_eq!(config["backend_availability"]["available"], false);
         assert_eq!(
             config["backend_availability"]["executable"],
@@ -58,7 +58,6 @@ fn automation_config_is_dashboard_controllable_and_persistent() {
 
         let patch = serde_json::json!({
             "backend": "codex_app_server",
-            "model": "project-model",
             "timeout_secs": 90,
             "scheduler_tick_secs": 15,
             "memory_curator": { "enabled": true, "schedule": "manual" }
@@ -67,8 +66,8 @@ fn automation_config_is_dashboard_controllable_and_persistent() {
         assert_eq!(status, 200);
         assert_eq!(saved["project"]["backend"], "codex_app_server");
         assert_eq!(saved["effective"]["backend"], "codex_app_server");
-        assert_eq!(saved["project"]["model"], "project-model");
-        assert_eq!(saved["effective"]["model"], "project-model");
+        assert!(saved["project"].get("model").is_none());
+        assert!(saved["effective"].get("model").is_none());
         assert_eq!(saved["effective"]["timeout_secs"], 90);
         assert_eq!(saved["effective"]["scheduler_tick_secs"], 15);
         assert_eq!(
@@ -211,7 +210,6 @@ fn automation_config_is_dashboard_controllable_and_persistent() {
             &agent,
             &config_url,
             &serde_json::json!({
-                "require_dashboard_approval": true,
                 "auto_apply_memory_ops": true,
                 "export_memory_digest": false
             }),
@@ -220,10 +218,7 @@ fn automation_config_is_dashboard_controllable_and_persistent() {
             status, 200,
             "explicit memory auto-apply should save: {saved_auto_apply}"
         );
-        assert_eq!(
-            saved_auto_apply["effective"]["require_dashboard_approval"],
-            true
-        );
+        assert!(saved_auto_apply["effective"].get("require_dashboard_approval").is_none());
         assert_eq!(saved_auto_apply["effective"]["auto_apply_memory_ops"], true);
         assert_eq!(saved_auto_apply["effective"]["export_memory_digest"], false);
 
@@ -274,8 +269,8 @@ fn automation_config_is_dashboard_controllable_and_persistent() {
         assert_eq!(status, 200);
         assert_eq!(restored["project"]["backend"], "codex_app_server");
         assert_eq!(restored["effective"]["backend"], "codex_app_server");
-        assert_eq!(restored["project"]["model"], "project-model");
-        assert_eq!(restored["effective"]["model"], "project-model");
+        assert!(restored["project"].get("model").is_none());
+        assert!(restored["effective"].get("model").is_none());
         assert_eq!(
             restored["effective"]["tasks"]["memory_curator"]["enabled"],
             true
@@ -286,7 +281,7 @@ fn automation_config_is_dashboard_controllable_and_persistent() {
         );
         assert_eq!(status, 200);
         assert!(reset["project"].is_null());
-        assert_eq!(reset["effective"]["model"], "global-model");
+        assert!(reset["effective"].get("model").is_none());
         assert_eq!(
             reset["effective"]["tasks"]["memory_curator"]["enabled"],
             false

@@ -6,7 +6,7 @@ export type AutomationRunApiMethod =
   | "postAutomationRunSkillWriting";
 
 export type AutomationRunRefreshTarget =
-  | "memory_preview"
+  | "memory_state"
   | "fact_proposals"
   | "managed_skills";
 
@@ -23,7 +23,7 @@ export const AUTOMATION_TASKS = [
   {
     id: "memory_curator",
     runMethod: "postAutomationRunMemoryCurator",
-    refreshTarget: "memory_preview",
+    refreshTarget: "memory_state",
     enabledLabel: "Run memory curator",
     scheduleLabel: "Memory curator schedule",
     runAriaLabel: "Memory curator",

@@ -137,10 +137,9 @@ Hermes `~/.hermes/memory_store.db` (`facts`/`entities`/`memory_banks`).
 | `GET /projection` | numpy PCA over `hrr_vector` blobs (float64) | Rust dual-PCA (Gram matrix power iteration) over bincode-encoded `Vec<f64>` phase vectors | working |
 | `GET /similarity` | pure-python `mean(cos(p_i−p_j))` + lexical overlap + classification | same math in Rust (`SIMILARITY_FACT_CAP` 500, identical thresholds) | working |
 | `GET /archive` / `POST /archive/{id}/restore` | `facts.state='archived'` / provider restore | **removed by design** — tracedecay curation hard-DELETEs losing facts; there is no archive state and no restore. The UI's Archive tab was removed accordingly. | n/a |
-| `GET /curation/status` | hermes curator state files | Returns `enabled:true`, `mode: similarity_dedup`, last preview timestamp | **working** |
-| `GET /curation/activity` | curator activity events | Structured TraceDecay curation activity events from preview/apply, agent-plan, and automation paths (`queued`, `evidence`, `backend`, `validation`, `apply`, `report`, `finish`, `failure`, or `rejection` as applicable) | working |
-| `GET /curation/preview` | saved dry-run file | Last `dry_run=true` result, persisted to a `.tracedecay/dashboard/curation_preview.json` sidecar (survives restarts); stale when fact count changes | **working** |
-| `POST /curate` | `agent.memory_curator.run_memory_curation` | Similarity-based dedup: proposes/applies `delete` actions for `likely_duplicate` pairs; `dry_run=true` returns plan, `dry_run=false` hard-deletes losers via `MemoryStore::remove_fact` | **working** |
+| `GET /curation/status` | hermes curator state files | Returns autonomous curation status and last applied run metadata | **working** |
+| `GET /curation/activity` | curator activity events | Structured TraceDecay curation activity events from automation/apply paths (`queued`, `evidence`, `backend`, `validation`, `apply`, `report`, `finish`, `failure`, or `rejection` as applicable) | working |
+| `POST /api/automation/run/memory-curator` | automation runner | Queues autonomous memory curation; accepted operations apply through policy and emit ledger/activity/artifact telemetry | **working** |
 | `POST /curate/apply` | (new, no Hermes equivalent) | Generic curation-ops apply API: `{"ops": [{"op":"delete",...} \| {"op":"merge",...}]}` with per-op results; the contract for external (LLM) planners | **working** |
 | `providers` block in `GET /` | hermes provider discovery | static tracedecay stub | stubbed |
 
@@ -283,11 +282,10 @@ The tracedecay backend does not have an LLM integration, so built-in curation is
 2. For each pair classified `likely_duplicate` (similarity ≥ 0.95 + lexical
    overlap threshold), proposes to DELETE the **lower-trust** fact (`delete`
    action with `duplicate_of` pointing to the surviving winner).
-3. `dry_run=true` returns the plan without mutating; the plan is saved in-memory
-   as the "last preview" for `GET /curation/preview`.
-4. `dry_run=false` executes the plan: each proposed loser is hard-deleted via
-   `MemoryStore::remove_fact`. Clears the saved preview afterwards.
-5. The response shape is a valid `MemoryCurateResponse` (`ran`, `dry_run`,
+3. Autonomous dashboard runs queue through `POST /api/automation/run/memory-curator`.
+   Accepted operations are validated and applied by automation policy, with
+   ledger, artifact, telemetry, and activity events.
+4. The CLI dry-run response shape remains a valid `MemoryCurateResponse` (`ran`, `dry_run`,
    `actions`, `counts: {delete: n}`, `applied_counts`, `llm_calls: 0`,
    `coverage`, `provider: tracedecay`, `mode: similarity_dedup`).
 
@@ -448,26 +446,10 @@ synced verbatim to the deployed copy
 (`hermes-agent/plugins/hermes_intelligence/dashboard/plugin_api.py`), along
 with freshly rebuilt dist bundles + manifest (includes the new graph.js).
 
-**LLM curation (Hermes-only layer).** Ported from the holographic_plus
-curator's one-shot LLM review tier (`_call_llm_oneshot` +
-`_LLM_SYSTEM_PROMPT` + strict-JSON verdict parsing), adapted to the
-`POST /curate/apply` contract (no archive; hard delete + merge only):
-
-- `POST /api/plugins/hermes-intelligence/curation/llm-plan`
-  (`{dry_run=true, limit, threshold, max_clusters, min_confidence}`):
-  fetches `/similarity` pairs (likely_duplicate + merge_candidate) from the
-  tracedecay server, union-find clusters them, sends ONE
-  `agent.auxiliary_client.call_llm(task="memory_curator", temperature=0)`
-  call (same task key as the original curator, so provider/model resolution
-  matches), validates proposed ops (op vocabulary {merge, delete, keep},
-  evidence guard: only reviewed fact ids, confidence floor), and either
-  returns the plan (dry-run) or POSTs contract-shaped ops to
-  `/api/plugins/holographic/curate/apply` and surfaces the per-op results.
-  Original verdicts → contract mapping: merge→merge, supersede→delete,
-  reflect→merge+merged_content; recategorize/retag have no contract op.
-- `/capabilities` override now also sets `llm_curation: true` (top-level and
-  `features.`) when the Hermes auxiliary client is importable — standalone
-  tracedecay reports `false`, so UIs can feature-detect.
+**LLM curation.** The Hermes wrapper no longer hosts a separate LLM plan/apply
+route. LLM-backed curation is owned by TraceDecay automation or by the CLI
+`tracedecay memory curate --llm` / `--llm-ops` path, with mutations submitted
+through `POST /api/plugins/holographic/curate/apply`.
 - Contract verified live against the rebuilt tracedecay binary (no
   mismatches): dry-run plan over real similarity clusters, then real apply
   against a **copy** of the project DB — `counts: {merged: 1}`, 63 losers
@@ -518,18 +500,14 @@ conservatism backstop, and callers can pass a higher `threshold` /
 ## What's stubbed / known gaps
 
 1. **Curation activity stream**: RESOLVED — `GET /curation/activity` returns the
-   in-memory structured activity log for preview/apply, standalone agent-plan,
-   and queued automation paths. Events use phases such as `queued`, `evidence`,
+   in-memory structured activity log for automation and explicit apply paths.
+   Events use phases such as `queued`, `evidence`,
    `backend`, `validation`, `apply`, `report`, `finish`, `failure`, and
    `rejection` as applicable.
 2. **Rich curation ops**: the built-in planner only proposes `delete`. The apply
    API additionally executes `merge` (content rewrite + loser deletion), but
    `supersede`, `retag`, and `entity_*` ops from holographic_plus are not
-   implemented; an LLM planner (Hermes wrapper, `llm_curation` flag) is expected
-   to supply richer plans via `/curate/apply` later.
-3. **Preview persistence**: RESOLVED — the dry-run preview is mirrored to a
-   sidecar (`.tracedecay/dashboard/curation_preview.json`) and re-hydrated on
-   server start; applying curation clears both copies. API shape unchanged.
+   implemented; automation planners can supply richer plans via `/curate/apply`.
 4. **Similarity floor**: RESOLVED — the cached pair set keeps every finite
    phase-cosine pair (`SIMILARITY_PAIR_FLOOR = -1.0`), and the API accepts a
    `min_similarity` parameter clamped to [-1, 1], so callers can brush below

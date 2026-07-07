@@ -5,8 +5,6 @@ import type {
   MemoryAutomationRunArtifactPayloadResponse,
   MemoryAutomationRunArtifactsResponse,
   MemoryAutomationRunRecord,
-  MemoryAutomationRunResponse,
-  MemoryCurateResponse,
 } from "../types";
 import {
   AUTOMATION_TASK_BY_ID,
@@ -35,8 +33,6 @@ export function useAutomationRuns({
   api,
   pollFastMs,
   setActiveTab,
-  setMemoryPreviewFromRun,
-  loadMemoryPreview,
   loadActivity,
   loadStatus,
   loadFactProposals,
@@ -45,8 +41,6 @@ export function useAutomationRuns({
   api: AutomationRunsApi;
   pollFastMs: number;
   setActiveTab: (tab: "automation") => void;
-  setMemoryPreviewFromRun: (report: MemoryCurateResponse) => void;
-  loadMemoryPreview: (force?: boolean) => Promise<unknown>;
   loadActivity: (showSpinner?: boolean) => void;
   loadStatus: () => void;
   loadFactProposals: (showSpinner?: boolean) => Promise<unknown>;
@@ -75,30 +69,26 @@ export function useAutomationRuns({
   const refreshCompletedRuns = useCallback(async (
     completedRuns: MemoryAutomationRunRecord[],
   ) => {
-    let refreshMemoryPreview = false;
+    let refreshMemoryStateFlag = false;
     let refreshFactProposals = false;
     let refreshManagedSkills = false;
 
     for (const run of completedRuns) {
       const descriptor = AUTOMATION_TASK_BY_ID[run.task as AutomationRunTask];
       if (!descriptor) continue;
-      if (descriptor.refreshTarget === "memory_preview") refreshMemoryPreview = true;
+      if (descriptor.refreshTarget === "memory_state") refreshMemoryStateFlag = true;
       if (descriptor.refreshTarget === "fact_proposals") refreshFactProposals = true;
       if (descriptor.refreshTarget === "managed_skills") refreshManagedSkills = true;
     }
 
     const refreshes: Promise<unknown>[] = [];
-    if (refreshMemoryPreview) {
-      refreshes.push(loadMemoryPreview(true));
-      refreshMemoryState();
-    }
+    if (refreshMemoryStateFlag) refreshMemoryState();
     if (refreshFactProposals) refreshes.push(loadFactProposals(false));
     if (refreshManagedSkills) refreshes.push(loadManagedSkills(false));
     await Promise.all(refreshes);
   }, [
     loadFactProposals,
     loadManagedSkills,
-    loadMemoryPreview,
     refreshMemoryState,
   ]);
 
@@ -157,7 +147,7 @@ export function useAutomationRuns({
     setActiveTab("automation");
     try {
       const descriptor = AUTOMATION_TASK_BY_ID[task];
-      const response = await api[descriptor.runMethod]({ dry_run: true });
+      const response = await api[descriptor.runMethod]({});
       const ledgerRecord = response.ledger_record;
       if (ledgerRecord) {
         setAutomationRuns((records) => {
@@ -168,12 +158,9 @@ export function useAutomationRuns({
       }
       await loadAutomationRuns();
       if (
-        descriptor.refreshTarget === "memory_preview" &&
-        response.report &&
+        descriptor.refreshTarget === "memory_state" &&
         !isActiveAutomationStatus(response.status)
       ) {
-        const report = (response as MemoryAutomationRunResponse<MemoryCurateResponse>).report;
-        if (report) setMemoryPreviewFromRun(report);
         refreshMemoryState();
       } else if (descriptor.refreshTarget === "fact_proposals") {
         await loadFactProposals(false);
@@ -195,7 +182,6 @@ export function useAutomationRuns({
     loadManagedSkills,
     refreshMemoryState,
     setActiveTab,
-    setMemoryPreviewFromRun,
   ]);
 
   useEffect(() => {
