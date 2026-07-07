@@ -1,6 +1,5 @@
 [build]
-# Keep this portable. On this machine, `target` is an ignored symlink to
-# `/scratch/cargo-target/tracedecay`; in CI and packages it remains local.
+# Keep this portable. On this machine and in CI, `target` is repo-local.
 target-dir = "target"
 
 [env]

@@ -2,12 +2,12 @@
 
 ## Cargo
 
-- Do not commit an absolute `[build].target-dir`; hosted CI and published packages cannot assume `/scratch`.
-- On this machine, keep build artifacts on scratch through global Cargo config or an ignored local symlink: `target -> /scratch/cargo-target/tracedecay`.
-- Cargo-launched TraceDecay test data uses `target/test-profile/.tracedecay`; with the local symlink, that also lands on scratch.
+- Do not commit an absolute `[build].target-dir`; hosted CI and published packages must use repo-local or runner-local paths.
+- On this machine, use the normal repo-local `target` directory; `/scratch` is no longer configured for Cargo targets.
+- Cargo-launched TraceDecay test data uses `target/test-profile/.tracedecay`.
 - Run normal repo commands from the repo root: `cargo check`, `cargo test`, `cargo test-all`, `cargo nextest run --workspace --no-fail-fast`.
-- Do not set `CARGO_TARGET_DIR=/scratch/cargo-target` for this repo; use a repo-specific directory to avoid cross-repo contention.
-- If `/scratch` is unavailable and local config points there, override both paths for that command:
+- Do not set a shared `CARGO_TARGET_DIR`; use the repo-local default or a repo-specific temporary directory.
+- If local environment overrides point elsewhere, override both paths for that command:
 
 ```sh
 CARGO_TARGET_DIR=target TRACEDECAY_DATA_DIR=target/test-profile/.tracedecay cargo check
@@ -32,4 +32,4 @@ cargo test-all
 
 - Parallel branch work uses git worktrees under `.worktrees/` in the repo root (for example `.worktrees/codex-cli-args-stdin`).
 - Integration/default branch is `master` (GitHub: ScriptedAlchemy/tracedecay).
-- Multi-PR merge verification: build a detached scratch worktree on `origin/master`, merge all target branches, then run tests with isolated `CARGO_TARGET_DIR` and `TRACEDECAY_DATA_DIR` paths.
+- Multi-PR merge verification: build a detached temporary worktree on `origin/master`, merge all target branches, then run tests with isolated `CARGO_TARGET_DIR` and `TRACEDECAY_DATA_DIR` paths.
