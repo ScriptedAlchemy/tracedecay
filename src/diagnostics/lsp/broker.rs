@@ -129,10 +129,20 @@ impl PreparedRefresh {
         self,
         diagnostics_quiet_timeout: Duration,
     ) -> CompletedRefresh {
+        self.collect_diagnostics_with_timeouts(LspRefreshTimeouts::from_diagnostics_quiet_window(
+            diagnostics_quiet_timeout,
+        ))
+        .await
+    }
+
+    pub async fn collect_diagnostics_with_timeouts(
+        self,
+        timeouts: LspRefreshTimeouts,
+    ) -> CompletedRefresh {
         let language = self.language.clone();
         let command = self.command.clone();
         let epoch = self.epoch;
-        let result = self.collect(diagnostics_quiet_timeout).await;
+        let result = self.collect(timeouts).await;
         CompletedRefresh {
             language,
             command,
@@ -143,10 +153,9 @@ impl PreparedRefresh {
 
     async fn collect(
         self,
-        diagnostics_quiet_timeout: Duration,
+        timeouts: LspRefreshTimeouts,
     ) -> std::result::Result<Vec<CodeDiagnostic>, RefreshFailure> {
         let mut diagnostics = Vec::new();
-        let timeouts = LspRefreshTimeouts::from_diagnostics_quiet_window(diagnostics_quiet_timeout);
         for batch in self.batches {
             let mut client_slot = batch.client.lock().await;
             let mut client = match client_slot.take() {
@@ -387,12 +396,24 @@ impl DiagnosticBroker {
         documents: Vec<LspDocument>,
         diagnostics_quiet_timeout: Duration,
     ) -> Result<()> {
+        self.refresh_documents_with_timeouts(
+            language,
+            documents,
+            LspRefreshTimeouts::from_diagnostics_quiet_window(diagnostics_quiet_timeout),
+        )
+        .await
+    }
+
+    pub async fn refresh_documents_with_timeouts(
+        &mut self,
+        language: &str,
+        documents: Vec<LspDocument>,
+        timeouts: LspRefreshTimeouts,
+    ) -> Result<()> {
         let Some(prepared) = self.prepare_refresh(language, documents)? else {
             return Ok(());
         };
-        let result = prepared
-            .collect_diagnostics(diagnostics_quiet_timeout)
-            .await;
+        let result = prepared.collect_diagnostics_with_timeouts(timeouts).await;
         self.finish_refresh(result)
     }
 
