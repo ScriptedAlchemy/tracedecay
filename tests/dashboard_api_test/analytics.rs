@@ -51,6 +51,24 @@ fn session(project: &Path) -> SessionRecord {
     }
 }
 
+fn subagent_session(project: &Path, id: &str, agent_id: &str) -> SessionRecord {
+    SessionRecord {
+        provider: "codex".to_string(),
+        session_id: id.to_string(),
+        project_key: "analytics-fixture".to_string(),
+        project_path: project.display().to_string(),
+        title: Some(format!("Subagent {agent_id}")),
+        started_at: Some(1_760_000_010),
+        ended_at: None,
+        transcript_path: None,
+        metadata_json: None,
+        parent_session_id: Some("analytics-session".to_string()),
+        is_subagent: true,
+        agent_id: Some(agent_id.to_string()),
+        parent_tool_use_id: None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn message(
     id: &str,
@@ -81,6 +99,26 @@ fn message(
 async fn seed_session_store(db_path: &Path, project: &Path) {
     let gdb = GlobalDb::open_at(db_path).await.expect("open session db");
     assert!(gdb.upsert_session(&session(project)).await);
+    assert!(
+        gdb.upsert_session(&subagent_session(
+            project,
+            "subagent-code-explorer",
+            "tracedecay-code-explorer"
+        ))
+        .await
+    );
+    assert!(
+        gdb.upsert_session(&subagent_session(
+            project,
+            "subagent-session-historian",
+            "session-historian"
+        ))
+        .await
+    );
+    assert!(
+        gdb.upsert_session(&subagent_session(project, "subagent-worker", "worker"))
+            .await
+    );
 
     let rows = [
         message(
@@ -359,6 +397,14 @@ fn analytics_api_advertises_and_aggregates_session_usage() {
             2
         );
         assert_usage_row(usage, "tracedecay_workflow_skill", 1, "skill");
+
+        let agents = &overview["agents"]["by_agent"];
+        assert_eq!(find_row(agents, "agent", "code-explorer")["sessions"], 1);
+        assert_eq!(
+            find_row(agents, "agent", "session-historian")["sessions"],
+            1
+        );
+        assert!(!has_row(agents, "agent", "worker"));
 
         let code_context = find_row(
             &overview["underused_tool_families"],

@@ -46,6 +46,7 @@ pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value>
     let durable_events = durable_analytics_rows_for_state(&state).await;
     let hints = hint_summary(state.lcm_conn.as_ref(), durable_events.as_deref()).await;
     let usage = usage_summary(state.lcm_conn.as_ref(), durable_events.as_deref()).await;
+    let agents = agent_usage_summary(state.lcm_conn.as_ref()).await;
     let diagnostics = diagnostics_summary(&state, durable_events.as_deref()).await;
     let underused = underused_tool_families(state.lcm_conn.as_ref()).await;
 
@@ -55,9 +56,52 @@ pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value>
         "scope": state.lcm_scope,
         "hints": hints,
         "usage": usage,
+        "agents": agents,
         "diagnostics": diagnostics,
         "underused_tool_families": underused,
     }))
+}
+
+async fn agent_usage_summary(conn: Option<&libsql::Connection>) -> Value {
+    let Some(conn) = conn else {
+        return json!({
+            "available": false,
+            "source": "session_store_unavailable",
+            "by_agent": [],
+        });
+    };
+
+    let rows = query_rows(
+        conn,
+        "SELECT COALESCE(agent_id, '') AS agent_id, COUNT(*) AS sessions
+         FROM sessions
+         WHERE is_subagent = 1 AND COALESCE(agent_id, '') <> ''
+         GROUP BY agent_id
+         ORDER BY agent_id",
+        (),
+    )
+    .await
+    .unwrap_or_default();
+
+    let mut by_agent: BTreeMap<String, i64> = BTreeMap::new();
+    for row in rows {
+        let agent_id = str_field(&row, "agent_id");
+        let Some(label) = crate::automation::agent_targets::managed_agent_label(agent_id) else {
+            continue;
+        };
+        *by_agent.entry(label.to_string()).or_default() += i64_field(&row, "sessions");
+    }
+
+    json!({
+        "available": true,
+        "source": "sessions",
+        "by_agent": by_agent.into_iter().map(|(agent, sessions)| {
+            json!({
+                "agent": agent,
+                "sessions": sessions,
+            })
+        }).collect::<Vec<_>>(),
+    })
 }
 
 /// `GET /api/plugins/analytics/hints`

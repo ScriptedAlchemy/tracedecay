@@ -3348,6 +3348,11 @@ async fn test_codex_install_exports_active_managed_skills() {
     assert!(skill.contains("description:"));
     assert!(!skill.contains("id: repo-hygiene"));
     assert!(skill.contains("Use Repo Hygiene for repeated workflows."));
+    assert!(
+        home.join(".codex/agents/tracedecay-code-explorer.toml")
+            .is_file(),
+        "Codex install should write TraceDecay custom agents to ~/.codex/agents"
+    );
 
     let digest_skill_path =
         codex_plugin_install_dir(home).join("skills/agent-managed-memory/SKILL.md");
