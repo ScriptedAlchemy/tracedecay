@@ -120,8 +120,9 @@ fn stale_degraded_ambiguity(contents: &str) -> bool {
             break;
         }
         let trimmed = line.trim();
-        if trimmed.starts_with('/') {
-            paths.push(Path::new(trimmed));
+        let path = Path::new(trimmed);
+        if path.is_absolute() {
+            paths.push(path);
         }
     }
     !paths.is_empty() && paths.iter().any(|path| !path.exists())
