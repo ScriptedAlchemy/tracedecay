@@ -2,6 +2,7 @@ use serde_json::Value;
 
 use super::render::{self, Md};
 
+#[derive(Clone, Copy)]
 pub(super) struct FactStoreView<'a> {
     args: &'a Value,
     payload: &'a Value,
@@ -13,6 +14,7 @@ impl<'a> FactStoreView<'a> {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(super) struct SkillListView<'a> {
     payload: &'a Value,
 }
@@ -23,6 +25,7 @@ impl<'a> SkillListView<'a> {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(super) struct SkillView<'a> {
     payload: &'a Value,
 }
@@ -33,6 +36,7 @@ impl<'a> SkillView<'a> {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(super) struct AutomationArtifactView<'a> {
     payload: &'a Value,
 }
