@@ -49,17 +49,6 @@ struct HealthSnapshot {
     skip_coverage_count: usize,
 }
 
-fn file_matches_scope(file_path: &str, path_prefix: Option<&str>) -> bool {
-    path_prefix.is_none_or(|pfx| {
-        let with_slash = if pfx.ends_with('/') {
-            pfx.to_string()
-        } else {
-            format!("{pfx}/")
-        };
-        file_path.starts_with(&with_slash) || file_path == pfx
-    })
-}
-
 /// Computes all 5 health dimensions and the composite signal for a given scope.
 async fn compute_health_snapshot(
     cg: &TraceDecay,
@@ -77,7 +66,7 @@ async fn compute_health_snapshot(
     let all_nodes = cg.get_all_nodes().await?;
     let nodes: Vec<_> = all_nodes
         .iter()
-        .filter(|n| file_matches_scope(&n.file_path, path_prefix))
+        .filter(|n| crate::path_scope::path_matches_scope(&n.file_path, path_prefix))
         .collect();
 
     let mut per_file_complexity: HashMap<String, f64> = HashMap::new();
@@ -99,7 +88,7 @@ async fn compute_health_snapshot(
         .await?;
     let dead_in_scope = dead
         .iter()
-        .filter(|n| file_matches_scope(&n.file_path, path_prefix));
+        .filter(|n| crate::path_scope::path_matches_scope(&n.file_path, path_prefix));
     let dead_count = dead_in_scope.count();
     let total_fns = nodes
         .iter()
@@ -184,7 +173,7 @@ pub(super) async fn handle_gini(
     // Apply path filter
     let nodes: Vec<_> = all_nodes
         .into_iter()
-        .filter(|n| file_matches_scope(&n.file_path, path_prefix))
+        .filter(|n| crate::path_scope::path_matches_scope(&n.file_path, path_prefix))
         .collect();
 
     // Build named_values per metric+scope

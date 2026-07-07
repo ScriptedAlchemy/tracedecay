@@ -46,7 +46,7 @@ fn rendered_tool_json(project_root: Option<&Path>, args: &Value, value: &Value) 
 
 fn rendered_fact_store(project_root: Option<&Path>, args: &Value, value: &Value) -> ToolResult {
     let text = render::finalize(project_root, args, value, || {
-        renderers::fact_store_md(renderers::FactStoreView::new(args, value))
+        renderers::fact_store_md(args, value)
     });
     text_tool_result(&text)
 }

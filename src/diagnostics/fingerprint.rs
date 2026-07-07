@@ -73,40 +73,31 @@ impl DiagnosticsFingerprint {
 
 fn diagnostics_input_paths(project_root: &Path, scope: &Scope) -> Result<Vec<PathBuf>> {
     match scope {
-        Scope::File { path } => Ok(std::iter::once(project_root.join(path))
-            .chain(diagnostics_manifest_inputs(project_root))
-            .collect()),
-        Scope::Workspace | Scope::Package { .. } => {
-            let mut paths = Vec::new();
-            for entry in walkdir::WalkDir::new(project_root)
-                .into_iter()
-                .filter_entry(|entry| should_walk_diagnostics_path(entry.path()))
-            {
-                let entry = entry.map_err(|err| TraceDecayError::Config {
-                    message: format!("failed to fingerprint diagnostics inputs: {err}"),
-                })?;
-                let path = entry.path();
-                if path.is_file() && is_diagnostics_input(path) {
-                    paths.push(path.to_path_buf());
-                }
-            }
-            Ok(paths)
+        // Cargo, tsc, and pyright all run project-level checks for file scope
+        // when LSP diagnostics are unavailable; fingerprint the same inputs
+        // the fallback drivers can read so post-filtered file diagnostics
+        // cannot go stale after another source file changes.
+        Scope::File { .. } | Scope::Workspace | Scope::Package { .. } => {
+            workspace_diagnostics_input_paths(project_root)
         }
     }
 }
 
-fn diagnostics_manifest_inputs(project_root: &Path) -> Vec<PathBuf> {
-    [
-        "Cargo.lock",
-        "Cargo.toml",
-        "package.json",
-        "tsconfig.json",
-        "pyproject.toml",
-        "pyrightconfig.json",
-    ]
-    .into_iter()
-    .map(|name| project_root.join(name))
-    .collect()
+fn workspace_diagnostics_input_paths(project_root: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for entry in walkdir::WalkDir::new(project_root)
+        .into_iter()
+        .filter_entry(|entry| should_walk_diagnostics_path(entry.path()))
+    {
+        let entry = entry.map_err(|err| TraceDecayError::Config {
+            message: format!("failed to fingerprint diagnostics inputs: {err}"),
+        })?;
+        let path = entry.path();
+        if path.is_file() && is_diagnostics_input(path) {
+            paths.push(path.to_path_buf());
+        }
+    }
+    Ok(paths)
 }
 
 fn should_walk_diagnostics_path(path: &Path) -> bool {

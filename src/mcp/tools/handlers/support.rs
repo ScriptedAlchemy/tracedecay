@@ -90,23 +90,10 @@ pub(super) fn filter_by_scope<T, F>(
 where
     F: Fn(&T) -> &str,
 {
-    match scope_prefix {
-        Some(prefix) => {
-            let with_slash = if prefix.ends_with('/') {
-                prefix.to_string()
-            } else {
-                format!("{prefix}/")
-            };
-            items
-                .into_iter()
-                .filter(|item| {
-                    let p = get_path(item);
-                    p.starts_with(&with_slash) || p == prefix
-                })
-                .collect()
-        }
-        None => items,
-    }
+    items
+        .into_iter()
+        .filter(|item| crate::path_scope::path_matches_scope(get_path(item), scope_prefix))
+        .collect()
 }
 
 /// Deduplicates an iterator of file path strings into a `Vec<String>`.

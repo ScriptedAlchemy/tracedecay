@@ -1972,12 +1972,7 @@ pub(super) async fn handle_todos(
 
     'outer: for file in &files {
         if let Some(prefix) = path {
-            let with_slash = if prefix.ends_with('/') {
-                prefix.to_string()
-            } else {
-                format!("{prefix}/")
-            };
-            if !file.path.starts_with(&with_slash) && file.path != prefix {
+            if !crate::path_scope::path_matches_scope(&file.path, Some(prefix)) {
                 continue;
             }
         }
@@ -2665,12 +2660,7 @@ pub(super) async fn handle_signature_search(
     let mut touched: Vec<String> = Vec::new();
     for node in function_nodes.iter().chain(method_nodes.iter()) {
         if let Some(prefix) = path_filter {
-            let with_slash = if prefix.ends_with('/') {
-                prefix.to_string()
-            } else {
-                format!("{prefix}/")
-            };
-            if !node.file_path.starts_with(&with_slash) && node.file_path != prefix {
+            if !crate::path_scope::path_matches_scope(&node.file_path, Some(prefix)) {
                 continue;
             }
         }

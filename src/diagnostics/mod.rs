@@ -261,6 +261,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn file_scope_cache_invalidates_when_project_inputs_change() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("src")).unwrap();
+        let source = temp.path().join("src/lib.rs");
+        let sibling = temp.path().join("src/other.rs");
+        std::fs::write(&source, "pub fn demo() {}\n").unwrap();
+        std::fs::write(&sibling, "pub fn other() {}\n").unwrap();
+
+        let cache = DiagnosticsCache::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let scope = Scope::File {
+            path: "src/lib.rs".to_string(),
+        };
+
+        for message in ["first", "second"] {
+            let calls = Arc::clone(&calls);
+            let diagnostics = cache
+                .run_with(temp.path(), &scope, || async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(vec![test_diagnostic(message)])
+                })
+                .await
+                .unwrap();
+            assert_eq!(diagnostics[0].message, message);
+            std::fs::write(&sibling, format!("pub fn other() {{}}\n// {message}\n")).unwrap();
+        }
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
     async fn cache_runs_different_keys_concurrently() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(temp.path().join("src")).unwrap();

@@ -151,19 +151,8 @@ fn identifier_from_segment(seg: &str) -> String {
         .to_string()
 }
 
-fn path_matches_prefix(path: &str, prefix: &str) -> bool {
-    if path == prefix {
-        true
-    } else if prefix.ends_with('/') {
-        path.starts_with(prefix)
-    } else {
-        path.strip_prefix(prefix)
-            .is_some_and(|suffix| suffix.starts_with('/'))
-    }
-}
-
 fn path_matches_optional_scope(path: &str, scope_prefix: Option<&str>) -> bool {
-    scope_prefix.is_none_or(|prefix| path_matches_prefix(path, prefix))
+    crate::path_scope::path_matches_scope(path, scope_prefix)
 }
 
 /// Handles `tracedecay_dead_code` tool calls.
@@ -385,9 +374,9 @@ pub(super) async fn handle_hotspots(
         items.retain(|item| {
             item["file"]
                 .as_str()
-                .is_some_and(|f| path_matches_prefix(f, prefix))
+                .is_some_and(|f| crate::path_scope::path_matches_scope(f, Some(prefix)))
         });
-        touched.retain(|f| path_matches_prefix(f, prefix));
+        touched.retain(|f| crate::path_scope::path_matches_scope(f, Some(prefix)));
     }
 
     let touched_files = unique_file_paths(touched.iter().map(std::string::String::as_str));

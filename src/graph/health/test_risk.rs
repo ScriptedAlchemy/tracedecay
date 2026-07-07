@@ -156,7 +156,7 @@ pub async fn analyze_test_risk(
                 && !skip_coverage.contains(&n.id)
                 && !n.qualified_name.contains("::tests::")
         })
-        .filter(|n| file_matches_scope(&n.file_path, path_prefix))
+        .filter(|n| crate::path_scope::path_matches_scope(&n.file_path, path_prefix))
         .collect();
 
     let excluded_count = eligible_fns
@@ -375,15 +375,4 @@ fn classify_test_attribution(depth: Option<usize>) -> TestAttributionMethod {
         Some(depth) if depth >= 2 => TestAttributionMethod::Closure,
         None | Some(_) => TestAttributionMethod::None,
     }
-}
-
-fn file_matches_scope(file_path: &str, path_prefix: Option<&str>) -> bool {
-    path_prefix.is_none_or(|pfx| {
-        let with_slash = if pfx.ends_with('/') {
-            pfx.to_string()
-        } else {
-            format!("{pfx}/")
-        };
-        file_path.starts_with(&with_slash) || file_path == pfx
-    })
 }
