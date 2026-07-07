@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use crate::context::read_modes::{LineRange, ReadMode, render_symbol_context};
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{GlobalDb, global_db_path};
+use crate::global_db::{GlobalDb, SessionIngestHealth, global_db_path};
 use crate::path_tree::format_compact_annotated_path_list;
 use crate::storage::{ProjectPath, StorageMode, StoreKind};
 use crate::tracedecay::{BranchDiagnostics, TraceDecay};
@@ -96,17 +96,10 @@ pub(super) async fn handle_status(
                 let ingest = db.session_ingest_health().await;
                 output["session_ingest"] = serde_json::to_value(&ingest).unwrap_or(json!({}));
                 if ingest.max_transcript_pending_bytes
-                    > crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES
+                    > crate::sessions::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES
                 {
-                    output["session_ingest_warning"] = json!(format!(
-                        "session transcript ingest looks stalled: a transcript has {} \
-                         un-ingested bytes ({} total across {} transcript(s)), exceeding \
-                         the per-transcript hook catch-up cap — session recall is missing \
-                         those turns. See `tracedecay doctor --agent cursor`.",
-                        ingest.max_transcript_pending_bytes,
-                        ingest.pending_bytes,
-                        ingest.pending_transcripts
-                    ));
+                    output["session_ingest_warning"] =
+                        json!(session_ingest_warning(&ingest, cg.project_root()));
                 }
             }
         }
@@ -146,6 +139,20 @@ pub(super) async fn handle_status(
         }),
         vec![],
     ))
+}
+
+fn session_ingest_warning(ingest: &SessionIngestHealth, project_root: &Path) -> String {
+    format!(
+        "session transcript ingest looks stalled: a transcript has {} \
+         un-ingested bytes ({} total across {} transcript(s)), exceeding \
+         the automatic catch-up warning threshold — session recall is missing \
+         those turns. Run `tracedecay sessions ingest --project-path {}` \
+         to drain the backlog manually.",
+        ingest.max_transcript_pending_bytes,
+        ingest.pending_bytes,
+        ingest.pending_transcripts,
+        project_root.display()
+    )
 }
 
 fn render_status_md(value: &Value) -> String {

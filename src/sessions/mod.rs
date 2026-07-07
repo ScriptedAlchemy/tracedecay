@@ -26,6 +26,7 @@ pub mod workflow_ingest;
 pub mod workflow_state;
 
 pub use providers::{ProviderScope, SessionProvider};
+pub use shared::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES;
 
 const FILE_TRANSCRIPT_PROVIDERS: &[SessionProvider] = &[
     SessionProvider::Claude,
