@@ -2,1099 +2,202 @@
   <img src="src/resources/logo.png" alt="TraceDecay" width="300">
 </p>
 
-<h3 align="center">Semantic Code Intelligence for AI Coding Agents</h3>
+<h3 align="center">Semantic code intelligence for AI coding agents</h3>
 
-<p align="center"><strong>Fewer tokens &bull; Fewer tool calls &bull; 100% local</strong></p>
+<p align="center"><strong>Fewer tokens &bull; fewer tool calls &bull; local by default</strong></p>
 
 <p align="center">
   <a href="https://crates.io/crates/tracedecay"><img src="https://img.shields.io/crates/v/tracedecay.svg" alt="crates.io"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-1.70+-orange.svg" alt="Rust"></a>
-</p>
-
-<p align="center">
   <img src="https://img.shields.io/badge/macOS-supported-blue.svg" alt="macOS">
   <img src="https://img.shields.io/badge/Linux-supported-blue.svg" alt="Linux">
   <img src="https://img.shields.io/badge/Windows-supported-blue.svg" alt="Windows">
-  <a href="https://hypercommit.com/tracedecay"><img src="https://img.shields.io/badge/Hypercommit-DB2475" alt="Hypercommit"></a>
 </p>
 
----
+TraceDecay builds a local semantic graph of your repository so AI coding agents can ask for the right symbols, call relationships, impact radius, docs, and source snippets without scanning the tree.
 
-## Why tracedecay?
+Instead of repeated `grep`, `glob`, and file reads, agents use MCP tools such as `tracedecay_context`, `tracedecay_search`, `tracedecay_callers`, and `tracedecay_impact`.
 
-AI coding agents waste tokens exploring codebases. Every grep, glob, and file read costs money. On complex tasks, agents spawn multiple Explore sub-agents that scan hundreds of files just to build context.
+## Highlights
 
-**tracedecay gives agents a pre-indexed semantic knowledge graph.** Instead of scanning files, the agent queries the graph and gets instant, structured answers -- the right symbols, their relationships, and source code, in one call.
+- 70+ MCP tools for discovery, call graphs, impact analysis, code health, test mapping, PR context, and anchored edits.
+- 50+ languages through Rust tree-sitter extractors, with lite/medium/full Cargo feature tiers.
+- Native integrations for Claude Code, Codex, Cursor, Gemini, Hermes, Kiro, OpenCode, Copilot, Cline, Roo Code, Zed, Antigravity, Kilo, Kimi, and Vibe.
+- Local libSQL storage. Your code and project memory stay on your machine.
+- On-demand freshness checks, optional per-branch databases, and linked git worktree support.
+- Local dashboard for code graph, memory, LCM sessions, savings, and cost analytics.
 
-### How It Works
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│  AI Coding Agent (Claude Code, Codex, Gemini, Cursor, ...)   │
-│                                                              │
-│  "Implement user authentication"                             │
-│        │                                                     │
-│        ▼                                                     │
-│  ┌─────────────────┐       ┌─────────────────┐               │
-│  │  Sub-agent      │ ───── │  Sub-agent      │               │
-│  └────────┬────────┘       └─────────┬───────┘               │
-└───────────┼──────────────────────────┼───────────────────────┘
-            │                          │
-            ▼                          ▼
-┌──────────────────────────────────────────────────────────────┐
-│  tracedecay MCP Server                                       │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐           │
-│  │   Search    │  │   Callers   │  │   Context   │           │
-│  │   "auth"    │  │  "login()"  │  │   for task  │           │
-│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘           │
-│         └────────────────┼────────────────┘                  │
-│                          ▼                                   │
-│              ┌───────────────────────┐                       │
-│              │   libSQL Graph DB     │                       │
-│              │   • Instant lookups   │                       │
-│              │   • FTS5 search       │                       │
-│              └───────────────────────┘                       │
-└──────────────────────────────────────────────────────────────┘
-```
-
-**Without tracedecay:** Agents use `grep`, `glob`, and `Read` to scan files -- many API calls, high token usage.
-
-**With tracedecay:** Agents query the graph via MCP tools -- instant results, local processing, fewer tokens.
-
----
-
-## Key Features
-
-| | | |
-|---|---|---|
-| **Smart Context Building** | **Semantic Search** | **Impact Analysis** |
-| One tool call returns everything the agent needs -- entry points, related symbols, and code snippets. | Find code by meaning, not just text. Search for "authentication" and find `login`, `validateToken`, `AuthService`. | Know exactly what breaks before you change it. Trace callers, callees, and the full impact radius of any symbol. |
-| **70+ MCP Tools** | **50+ Languages** | **12+ Agent Integrations** |
-| From call graph traversal to dead code detection, atomic edit primitives, code-health metrics, test mapping, and complexity analysis. | Rust, Go, Java, Python, TypeScript, C, C++, Swift, Svelte, Astro, and 42 more including WGSL/HLSL/Metal shaders and Markdown. Three tiers (lite/medium/full) control binary size. | Claude Code, Codex CLI, Gemini CLI, Hermes, Kiro, Cursor, OpenCode, Copilot, Cline, Roo Code, Zed, Antigravity, Kilo CLI, Kimi CLI, Mistral Vibe. |
-| **Multi-Branch Indexing (opt-in)** | **100% Local** | **Always Fresh** |
-| Optional per-branch databases. Cross-branch diff and search without switching your checkout. | Source code and memory content stay on your machine. No API keys or hosted database are required; the index runs on local libSQL. | On-demand staleness check on every MCP call (30 s cooldown) plus catch-up sync when the server connects. Multi-agent work is expected to use git worktrees — each agent gets its own checkout and changes are merged by git, not by a file watcher. |
-| **Local Dashboard** | **Subprocess-Isolated Extraction** | **Code-Health Analytics** |
-| Explore holographic memory (facts, entities, similarity detection) and LCM session data via a local web UI. Built-in PCA projection, duplicate detection, and curation tools. | A native crash in any tree-sitter grammar (abort, segfault, anything) kills only the worker; the pool respawns it and sync continues. Sync never dies on a malformed file. | Composite health score (0-10000), Gini inequality, file-DAG depth, design-structure matrix, risk-weighted test gaps, and session deltas. |
-| **Atomic Edit Primitives** | | |
-| Edit files without regex or shell-quoting hazards: unique-anchor `str_replace`, atomic multi-replace, AST-rewrite, anchored insert. Auto re-indexes after writes. | | |
-
----
-
-## Quick Start
-
-### 1. Install
-
-**Homebrew (macOS):**
+## Install
 
 ```bash
+# macOS
 brew install ScriptedAlchemy/tap/tracedecay
-```
 
-**Scoop (Windows):**
-
-```powershell
+# Windows
 scoop bucket add tracedecay https://github.com/ScriptedAlchemy/scoop-bucket
 scoop install tracedecay
+
+# Any platform with Rust
+cargo install tracedecay
+
+# Smaller language tiers
+cargo install tracedecay --features medium
+cargo install tracedecay --no-default-features
 ```
 
-> **Note:** The Homebrew tap and Scoop bucket are external repositories updated separately from this one — until they pick up the rename, the package may still be published under the legacy package name.
+Prebuilt Linux, macOS, and Windows archives are available on the [latest release](https://github.com/ScriptedAlchemy/tracedecay/releases/latest).
 
-**Cargo (any platform):**
-
-```bash
-cargo install tracedecay                          # full (50+ languages, default)
-cargo install tracedecay --features medium        # medium tier
-cargo install tracedecay --no-default-features    # lite (smallest binary)
-```
-
-**Prebuilt binaries (Linux, Windows, macOS):**
-
-Download from the [latest release](https://github.com/ScriptedAlchemy/tracedecay/releases/latest) and place the binary in your `PATH`.
-
-| Platform | Archive |
-|---|---|
-| macOS (Apple Silicon) | `tracedecay-vX.Y.Z-aarch64-macos.tar.gz` |
-| Linux (x86_64) | `tracedecay-vX.Y.Z-x86_64-linux.tar.gz` |
-| Linux (ARM64) | `tracedecay-vX.Y.Z-aarch64-linux.tar.gz` |
-| Windows (x86_64) | `tracedecay-vX.Y.Z-x86_64-windows.zip` |
-
-### 2. Configure your agent
-
-```bash
-tracedecay install                         # auto-detects installed agents
-tracedecay install --agent antigravity     # Google Antigravity (formerly Windsurf)
-tracedecay install --agent claude          # Claude Code
-tracedecay install --agent cline           # Cline
-tracedecay install --agent codex           # OpenAI Codex CLI
-tracedecay install --agent codex --automation
-tracedecay install --agent copilot         # GitHub Copilot
-tracedecay install --agent cursor          # Cursor
-tracedecay install --agent gemini          # Gemini CLI
-tracedecay install --agent hermes          # Hermes Agent
-tracedecay install --agent hermes --profile work
-tracedecay install --agent kilo            # Kilo CLI
-tracedecay install --agent kiro            # AWS Kiro
-tracedecay install --agent kimi            # Moonshot Kimi CLI
-tracedecay install --agent opencode        # OpenCode
-tracedecay install --agent roo-code        # Roo Code
-tracedecay install --agent vibe            # Mistral Vibe
-tracedecay install --agent zed             # Zed
-```
-
-Each agent gets the integration that matches its host:
-
-- Claude Code: MCP config, PreToolUse/UserPromptSubmit/Stop hooks, `CLAUDE.md` prompt rules, and auto-allowed tool permissions.
-- Kiro: global MCP config, `tracedecay.md` steering loaded as a resource, and a tracedecay-managed default agent with delegation guardrails and post-write sync. User-managed Kiro agents are preserved.
-- Codex: a Codex plugin bundle for MCP, hooks, and skills through Codex's source, marketplace, and installed-cache flow. The installer does not write `~/.codex/AGENTS.md` or `~/.codex/hooks.json`.
-- Hermes: a native profile plugin, `tracedecay` memory provider, and `tracedecay` LCM context engine with native `lcm_*` session tools backed by `tracedecay_lcm_*` MCP tools.
-- Cursor: a local plugin in `~/.cursor/plugins/local/tracedecay` that bundles MCP, hooks, and the tracedecay rule with commands rewritten to the resolved absolute `tracedecay` executable path.
-
-All changes are idempotent -- safe to run again after upgrading. After agent setup, you'll be offered a global git post-commit hook.
-
-Managed skills generated by the self-improvement loop are exported through the
-host surface that each provider can load safely:
-
-| Host | Managed-skill surface |
-|---|---|
-| Cursor | Native skill overlay under the Cursor plugin's managed skill directory. |
-| Codex | Native skill overlay inside the Codex plugin bundle/cache; Codex sessions load approved skills after the plugin is installed or refreshed. |
-| Claude Code, Kimi, OpenCode, Copilot/Vibe, generic Agents targets | Prompt-index block that points the host at `tracedecay_skill_list` and `tracedecay_skill_view` instead of copying full skill bodies into global prompts. |
-| Kiro | Dedicated steering index at `~/.kiro/steering/tracedecay-managed-skills.md`, referenced by the tracedecay-managed Kiro agent. |
-| Hermes | Read-only bridge only. Hermes owns its native skill store; TraceDecay does not export or mutate Hermes skills. |
-
-The curation backend is provider-agnostic. Hermes remains a compatibility bridge
-and reference source; TraceDecay automation can delegate intelligence to hosts
-such as the Codex app server without requiring Hermes to run.
-
-For project-scoped setup, run from the repository root:
-
-```bash
-tracedecay install --local --agent cursor
-```
-
-Local install writes only workspace files such as `.mcp.json`, `.vscode/mcp.json`, `.hermes/plugins/tracedecay/`, or the equivalent project config or plugin files for Claude, Codex, Gemini, Hermes, Kiro, OpenCode, Copilot/VS Code, Zed, Roo Code, Kimi, Kilo, and Vibe. Generated MCP configs and plugin wrappers use the resolved absolute `tracedecay` executable path.
-
-Hermes installs into `~/.hermes/plugins/tracedecay/` by default, or into `~/.hermes/profiles/<name>/plugins/tracedecay/` with `--profile <name>`. Profile names are normalized to lowercase and must match `[a-z0-9][a-z0-9_-]{0,63}`. The generated context engine resolves its project from explicit host kwargs first, then a `project_root` key on the Hermes config object, then the install-time pin, and finally the session cwd.
-
-Pin a profile to one project with `tracedecay install --agent hermes [--profile <name>] --project-root /abs/path`. The pin is written into the generated plugin, applies to every plugin tool call regardless of the Hermes working directory, and survives later unpinned reinstalls. Use `tracedecay uninstall --agent hermes --profile <name>` to remove a named profile install; `reinstall` and `doctor --agent hermes` currently operate on the default profile.
-
-To refresh generated plugin code after an upgrade without any config writes, run `tracedecay update-plugin` (alias `update-plugins`). It rewrites only tracedecay-generated artifacts: the Hermes plugin files and dashboard page for every detected profile, the Cursor plugin bundle, the Codex plugin bundle, and the Kiro managed agent. It re-reads Hermes pins from `config.yaml`, never writes them, and leaves `config.yaml`, `config.toml`, `mcp.json`, settings, hooks, and prompt rules byte-for-byte intact. Config-managed integrations (Claude, Gemini, ...) have no generated artifacts and are reported as untouched; `tracedecay reinstall` remains the command that reconciles their config entries.
-
-Hermes wrappers run from Hermes' current working directory, use a 600-second timeout, and include truncated stdout/stderr in error JSON. Hermes local install without `--profile` writes only project plugin files and `.hermes/config.yaml`; `tracedecay install --local --agent hermes --profile <name>` is a deliberate mixed-scope mode that targets the named profile instead. Project-local Hermes plugins are loaded by launching Hermes with `HERMES_HOME=<project>/.hermes`.
-
-For Codex install details, see [Codex plugin installs](#codex-plugin-installs). For Cursor, both global and `--local` install put the plugin in `~/.cursor/plugins/local/tracedecay` and require a Cursor reload. The plugin MCP config runs `tracedecay serve --path ${workspaceFolder}`, so it resolves the active workspace instead of the plugin directory and uses that workspace's active project store rather than the legacy global Cursor MCP registration. Cursor install no longer writes `.cursor/mcp.json`, `.cursor/hooks.json`, `.cursor/rules/tracedecay.mdc` (legacy artifact name), or `.cursor/permissions.json`; approvals are left to Cursor approval/run-mode behavior. The plugin hooks are:
-
-- `sessionStart` — fire-and-forget; injects context steering the Agent toward tracedecay MCP tools and reports index freshness (suggests `tracedecay init` when no initialized project store is found).
-- `postToolUse` (unmatched — Cursor's docs enumerate no matcher value for semantic search) — fail-open; injects a soft `additional_context` hint after broad search/read tools (Grep, Glob, Read, semantic search, shell `rg`) so Cursor switches to `tracedecay_grep`, `tracedecay_context`, `tracedecay_search`, `tracedecay_outline`, or `tracedecay_files`. Each hint category is emitted at most once per session (persisted in `.tracedecay/tool_hints_seen.json`).
-- `beforeSubmitPrompt` — resets the local token counter for the new turn and ingests the current Cursor transcript into the active project session store when `transcript_path` is present.
-- `afterFileEdit` (unmatched, so every Agent edit tool counts) — runs a **targeted single-file** sync of just the edited path(s) via `sync_if_stale_silent`, never a full-tree scan (which would scale with repo size, not edit size).
-- `afterShellExecution` — on Agent-run `git checkout`/`switch`/`worktree add`, bootstraps/maintains tracedecay branch tracking (`branch add`); on other state-changing git commands (pull/merge/rebase/reset/cherry-pick/stash apply|pop), runs a coalesced incremental sync.
-- `workspaceOpen` — ensures the current branch's DB exists (branch add if missing) and runs a catch-up incremental sync.
-
-All Cursor hooks are fail-open and only act when they find an initialized project store. **Blind spot:** Cursor hooks only observe the Cursor Agent's own actions and IDE lifecycle. Manual/external-terminal `git checkout` and in-place branch switches are NOT seen by these hooks (`workspaceOpen` does not fire for an in-place checkout). For those, the git post-commit hook and the on-demand MCP staleness check remain the freshness mechanism. We intentionally keep the Cursor `postToolUse` hint nonblocking: it nudges broad search toward tracedecay but does not deny reads/search.
-
-Manual Cursor plugin install for local development:
-
-```bash
-mkdir -p ~/.cursor/plugins/local
-rm -rf ~/.cursor/plugins/local/tracedecay
-cp -R /path/to/tracedecay/cursor-plugin ~/.cursor/plugins/local/tracedecay
-```
-
-Reload Cursor after installing or replacing the plugin. Manual copies use the commands in the source bundle (`tracedecay ...`), so make sure GUI-launched Cursor can resolve `tracedecay` from `PATH`; the normal `tracedecay install --agent cursor` path rewrites commands to the absolute binary path. The plugin relies on Cursor expanding `${workspaceFolder}` in MCP config for workspace scoping; when a host passes the literal unexpanded string instead, `serve` warns and falls back to project discovery where possible (details in `cursor-plugin/README.md`). If tools do not connect, upgrade Cursor and run `tracedecay doctor --agent cursor` to inspect the generated plugin files.
-
-### Codex plugin installs
-
-Codex installs are plugin-based. TraceDecay writes the plugin source bundle and marketplace entry; Codex CLI installs the cache from that source.
-
-First-time global install writes `~/plugins/tracedecay`, updates the personal marketplace at `~/.agents/plugins/marketplace.json`, and prints `codex plugin add tracedecay@personal`. Run that command in Codex to copy the source into Codex's installed cache under `~/.codex/plugins/cache/personal/tracedecay/<version>`.
-
-TraceDecay does not write `~/.codex/AGENTS.md` or `~/.codex/hooks.json`. Re-running `tracedecay install --agent codex` refreshes the source bundle and any detected installed Codex cache, including legacy `caveman-home` cache installs, into the canonical `tracedecay@personal` namespace.
-
-Project-local Codex install writes the repository plugin bundle to `plugins/tracedecay` and the repository marketplace to `.agents/plugins/marketplace.json`. It does not write project `.codex/config.toml`, project `.codex/hooks.json`, or `AGENTS.md`.
-
-Codex skill visibility follows Codex's plugin model. `codex plugin list` and `codex plugin add` read the marketplace source bundle. Active Codex sessions load skills, MCP config, and bundled hooks from the installed cache, not directly from the source directory; start a new Codex session after adding the plugin or recopying it.
-
-Codex still applies its command-hook trust gate, so run `/hooks` inside Codex to trust new or changed tracedecay plugin hooks. TraceDecay cannot force Codex to add, reload, or trust the plugin for you, and it intentionally avoids legacy config surfaces such as `AGENTS.md`, `.codex/config.toml`, and `.codex/hooks.json`.
-
-Local install does not update `~/.tracedecay/config.toml`, installed-agent tracking, the last installed version, or the global git post-commit hook. Antigravity and Cline are global-only and return clear unsupported errors for `--local`.
-
-### 3. Index your project
+## Quick Start
 
 ```bash
 cd /path/to/your/project
 tracedecay init
+tracedecay install
+tracedecay status
 ```
 
-**Non-interactive environments** (CI, containers, headless shells): `init`, `status`, and bare invocation skip prompts and use safe defaults. `init` creates the index without modifying `.gitignore` (prints a notice); `status` exits cleanly without creating an index if none exists.
-
-This creates the active project's TraceDecay store. Graph/session artifacts live in a user-level profile shard scoped to this project; `.tracedecay/` in the repo is only a lightweight marker/config directory. `init` is the explicit opt-in; `sync` only updates already-initialized projects, so the global post-commit hook does not create stores in repos you never intended to index. After `init`, use `tracedecay sync` for incremental updates.
-
-Linked git worktrees do not need their own `tracedecay init`. Once the repository has been initialized from any checkout, TraceDecay resolves sibling or nested worktrees through the repository's shared git common directory and keeps the current worktree as the active file root. Do not copy `.tracedecay/` into worktrees; branch database tracking isolates the checked-out branch inside the shared project store.
-
-<details>
-<summary><strong>What install writes for Claude Code</strong></summary>
-
-#### MCP server
-
-```json
-{
-  "mcpServers": {
-    "tracedecay": {
-      "command": "/path/to/tracedecay",
-      "args": ["serve"]
-    }
-  }
-}
-```
-
-#### PreToolUse hook
-
-The hook runs `tracedecay hook-pre-tool-use` -- a native Rust command (no bash or jq required). It intercepts Agent tool calls and blocks Explore agents, redirecting Claude to use tracedecay MCP tools instead.
-
-#### CLAUDE.md rules
-
-Appends instructions to `~/.claude/CLAUDE.md` that tell Claude to use tracedecay tools before reaching for Explore agents or raw file reads.
-
-</details>
-
----
-
-## Local Dashboard
-
-tracedecay includes a local web dashboard for exploring your project's holographic memory and LCM (Lossless Context Management) session data. Everything runs locally — no external services or API keys required.
-
-### Quick Start
+`tracedecay install` auto-detects supported agents. To target one host:
 
 ```bash
-# Start the dashboard (serves on http://127.0.0.1:7341 by default)
-tracedecay dashboard
-
-# Use a custom port or bind to a different address
-tracedecay dashboard --port 8080
-tracedecay dashboard --host 0.0.0.0 --port 7341
-
-# Let the OS pick a free port (prints the URL)
-tracedecay dashboard --port 0
-
-# Open the dashboard in your default browser automatically
-tracedecay dashboard --open
+tracedecay install --agent claude
+tracedecay install --agent codex
+tracedecay install --agent cursor
+tracedecay install --agent gemini
+tracedecay install --agent hermes
 ```
 
-MCP-connected agents can also start/stop the dashboard via the `tracedecay_dashboard` tool, which runs the server as a background task inside the MCP server and returns the listening URL (idempotent; pass `action: "stop"` to shut it down gracefully).
-
-### What You'll See
-
-The dashboard has four main tabs:
-
-**Holographic Memory** — Explore your project's persistent memory:
-- **Inspector**: Browse facts, entities, and memory banks with trust scores and HRR coverage
-- **Semantic Map**: 2D PCA visualization of holographic vectors showing fact relationships
-- **Association Graph**: Interactive graph of facts, entities, categories, and banks
-- **Similarity**: Detect likely duplicates and merge candidates using phase-vector cosine similarity
-- **Curation**: *(feature-flagged)* Preview and run similarity-based deduplication; applying a plan **permanently deletes** (hard-delete) the lower-trust fact in each duplicate pair. There is no archive, no restore, and no soft-delete state—deleted facts immediately disappear from all recall paths.
-
-**LCM** — Analyze Lossless Context Management session data:
-- **Overview**: Message counts, summary nodes, compression ratios, and role/source breakdowns
-- **Search**: Full-text search across raw messages and summary nodes with role/source/session filters
-- **Timeline**: Time-bucketed activity visualization (hourly or daily)
-- **Compression**: Per-session and per-node compression statistics showing token savings
-
-**Code Graph** — Interactively explore the indexed code graph:
-- **Overview**: Symbols by kind family, files by language, most-connected symbols, largest files
-- **Canvas**: Force-directed explorer with search-to-focus, progressive neighbor expansion, callers/callees, filters, and shortest-path finding between two symbols
-
-See [docs/graph-explorer.md](docs/graph-explorer.md) for the Code Graph tab's API and interaction details.
-
-**Savings & Cost** — Token usage analytics and cost tracking (under active development).
-
-### Dashboard with Hermes
-
-When using the Hermes agent, the dashboard can be accessed via the **TraceDecay** tab. Two integration modes are supported:
-
-1. **Spawn mode** (default): Hermes automatically launches the dashboard server
-2. **External URL mode**: Point Hermes at an already-running dashboard
-
-See [docs/dashboard.md](docs/dashboard.md) for full documentation on environment variables, API endpoints, and troubleshooting.
-
----
-
-## Crash-Resilient Sync
-
-Tree-sitter grammars are compiled C/C++ code. They occasionally hit an internal assertion or otherwise terminate the process in ways Rust's panic handling cannot intercept. As of v4.3.0, every file is parsed inside a short-lived worker subprocess: if a grammar segfaults, calls `abort()`, or hits a stack overflow, only the worker dies. The pool respawns it, the offending file is logged and skipped, and `sync` keeps going.
-
-The worker is a hidden `extract-worker` subcommand authenticated against the parent via a 256-bit per-spawn token, required as both a `TRACEDECAY_WORKER_TOKEN` env var and as the first 32 bytes received on stdin. Direct invocation by users fails. Defaults to `available_parallelism()` workers; opt out with `TRACEDECAY_DISABLE_SUBPROCESS=1`.
-
-Edit primitives (`tracedecay_str_replace`, `tracedecay_insert_at`, etc.) still run in-process: they target one file at a time where subprocess overhead would dominate, and an extractor crash there is immediately visible to the agent.
-
----
-
-## Multi-Branch Indexing (Optional)
-
-tracedecay can optionally maintain a separate code graph per git branch. When enabled, switching branches never gives you stale results and never re-indexes files you already parsed on another branch. Multi-branch tracking is opt-in -- without it, tracedecay uses a single database for all branches.
-
-### How it works
-
-When you track a branch, tracedecay copies the nearest ancestor DB and syncs only the files that differ. This means tracking a feature branch off `main` is nearly instant -- it only parses the files you've changed.
-
-Branch databases are stored with **collision-safe names** (special characters encoded) to support any valid git branch name, including those with slashes, spaces, or Unicode characters.
-
-### CLI commands
+Project-local setup:
 
 ```bash
-tracedecay branch add              # track the current branch
-tracedecay branch list             # see tracked branches and DB sizes
-tracedecay branch remove <name>    # stop tracking a branch
-tracedecay branch removeall        # remove all tracked branches except default
-tracedecay branch gc               # clean up branches deleted from git
+tracedecay install --local --agent cursor
+tracedecay install --local --agent codex
 ```
 
-### Cross-branch MCP tools
+After setup, restart the agent so it loads the MCP server, plugin, hooks, or rules written for that host.
 
-Three MCP tools enable cross-branch queries without switching your checkout:
-
-- **`tracedecay_branch_search`** -- search symbols in another branch's graph
-- **`tracedecay_branch_diff`** -- compare code graphs between two branches: symbols added, removed, and changed (signature differs). Supports file and kind filters.
-- **`tracedecay_branch_list`** -- list tracked branches with DB sizes, parent branch, and sync times
-
-### Branch fallback
-
-When the MCP server can't find a database for the current branch, it serves from the nearest ancestor branch's DB and includes a warning in every tool response suggesting you run `tracedecay branch add`.
-
-See [docs/BRANCHING-USER-GUIDE.md](docs/BRANCHING-USER-GUIDE.md) for the full guide.
-If branch state ever drifts or a branch DB goes missing, see
-[docs/MULTI-BRANCH-RECOVERY.md](docs/MULTI-BRANCH-RECOVERY.md) for the
-diagnosis-and-recovery runbook.
-
----
-
-## Cross-Session Memory
-
-tracedecay memory is stored in the active project store as durable, entity-linked facts. Repo-local projects use `.tracedecay/tracedecay.db`; profile-backed projects use their profile shard instead:
-
-| Tool | Purpose |
-|------|---------|
-| `tracedecay_fact_store` | Store a fact with entities, source, reason, related facts, contradictions, tags, and an initial confidence signal |
-| `tracedecay_fact_feedback` | Record user or agent feedback that raises, lowers, supersedes, or contradicts a fact's trust score |
-| `tracedecay_memory_status` | Repair dirty memory banks, then inspect fact-store readiness, entity counts, trust-score distribution, and vector/backfill health |
-
-Trust scoring is fact-level, not just text-level. The store combines source metadata, feedback history, retrieval counters, contradiction scans, and recency into the returned score components. Entity recall returns facts linked to the requested symbol, file, subsystem, or named concept with `why` metadata so agents can explain why a memory was surfaced.
-
-See [docs/USER-GUIDE.md](docs/USER-GUIDE.md#memory-and-fact-recall) for common memory payloads. For the exact current input schema, inspect the live MCP descriptors for `tracedecay_fact_store`, `tracedecay_fact_feedback`, and `tracedecay_memory_status`.
-
-Memory hygiene is covered by a behavioral eval suite (no-pollution, secret rejection, supersede-without-dup, multi-turn continuity, curation conservatism): a deterministic layer runs in the normal test suite, and a cost-gated real-agent layer drives Hermes or `cursor-agent` against throwaway fixtures. See [docs/memory-evals.md](docs/memory-evals.md).
-
----
-
-## Savings Ledger
-
-Every MCP call writes an append-only row to `~/.tracedecay/global.db` (`savings_ledger` table). Each row records `before` (the indexed size of every file the response references, bytes/4, as if each had been read in full) and `after` (the response size, chars/4); reported savings are `max(0, before - after)` per call. This is an estimated upper bound: chars/4 approximates real tokenization, repeated calls re-count the same files, and an agent would not always have read every referenced file raw. The in-process lifetime counters credit the same net amount per call (full-file reads credit zero). Inspect with `tracedecay gain`:
+Codex first-time installs print one extra step:
 
 ```bash
-tracedecay gain                    # current project, last 30 days
-tracedecay gain --all              # all projects
-tracedecay gain --history --range 7d
-tracedecay gain --json
+codex plugin add tracedecay@personal
 ```
 
-Dollar estimates use the existing pricing module (Sonnet input pricing, refreshed daily via LiteLLM).
+Run it once before starting a new Codex session so Codex copies the generated plugin into its installed cache.
 
----
-
-## Reproducible Benchmark
-
-`tracedecay bench` runs a fixed query set through `tracedecay_context` and reports retrieval savings vs a full-file baseline (mirrors the CCE methodology):
+## Common Commands
 
 ```bash
-tracedecay bench                                    # ships with 10 default queries
-tracedecay bench --queries my-queries.toml --json
-tracedecay bench --max-nodes 5
+tracedecay init [path]              # initialize a project store
+tracedecay sync [path]              # incremental index update
+tracedecay sync --force [path]      # full re-index
+tracedecay status [path]            # graph stats, freshness, savings, cost
+tracedecay query <search> [path]    # CLI symbol search
+tracedecay files                    # indexed files
+tracedecay affected <files...>      # impacted tests/files
+tracedecay serve                    # MCP server
+tracedecay doctor [--agent NAME]    # installation health check
+tracedecay dashboard [--open]       # local dashboard
+tracedecay monitor                  # live MCP savings/cost TUI
+tracedecay update                   # refresh binary, plugins, daemon
+tracedecay upgrade                  # self-upgrade current channel
 ```
 
-**Measured against this repo (`tracedecay` itself) using the shipped generic query set:**
+## Agent Tools
 
-| # | Query | Baseline | Context | Savings |
-|---|---|---:|---:|---:|
-| 1 | How is configuration loaded at startup? | 15,475 | 460 | 97% |
-| 2 | Where are command-line arguments parsed and dispatched? | 8,047 | 242 | 97% |
-| 3 | How is the main entry point organized? | 11,883 | 242 | 98% |
-| 4 | How are errors defined, wrapped, and propagated? | 11,883 | 270 | 98% |
-| 5 | Where is logging or diagnostic output emitted? | 14,714 | 310 | 98% |
-| 6 | How are tests organized and what test harness is used? | 348 | 195 | 44% |
-| 7 | How is data persisted to disk or to a database? | 53,894 | 414 | 99% |
-| 8 | How are async tasks or background work spawned? | 13,439 | 221 | 98% |
-| 9 | How does the build wire up dependencies and initialize state? | 20,368 | 400 | 98% |
-| 10 | How are public API surfaces exposed (HTTP endpoints, library exports, or CLI commands)? | 30,345 | 630 | 98% |
+The MCP server exposes tools grouped around normal coding workflows:
 
-**Aggregate:** 93% mean retrieval savings (180,396 → 3,384 tokens across 10 queries).
+- Discovery: `tracedecay_context`, `tracedecay_search`, `tracedecay_outline`, `tracedecay_files`
+- Graph traversal: `tracedecay_callers`, `tracedecay_callees`, `tracedecay_impact`, `tracedecay_affected`
+- Code health: `tracedecay_complexity`, `tracedecay_dead_code`, `tracedecay_coupling`, `tracedecay_test_risk`
+- Git workflow: `tracedecay_diff_context`, `tracedecay_pr_context`, `tracedecay_changelog`, `tracedecay_test_map`
+- Editing: `tracedecay_str_replace`, `tracedecay_multi_str_replace`, `tracedecay_insert_at`, `tracedecay_ast_grep_rewrite`
+- Memory: `tracedecay_fact_store`, `tracedecay_fact_feedback`, `tracedecay_memory_status`
 
-The default query set targets patterns present in most application codebases (CLIs, daemons, services). Run it on your own project with `tracedecay bench` to see your numbers, or write a tailored query file (`--queries my.toml`) for tighter recall.
-
-### Criterion bench against large real-world repos
-
-`benches/large_repos.rs` is a [criterion](https://bheisler.github.io/criterion.rs/book/) micro-benchmark that exercises the MCP tools end-to-end against four large open-source codebases pinned at constant refs. Each tool is driven by **at least 5 queries** with arguments (node ids, qualified names, file globs, …) sampled from the indexed graph once per repo, so timings are reproducible across runs.
-
-**Repos and pinned refs** (defined in `benches/repos.rs`):
-
-| Repo | URL | Ref |
-|---|---|---|
-| polkadot-sdk | https://github.com/paritytech/polkadot-sdk | `polkadot-stable2412` |
-| emacs | https://github.com/emacs-mirror/emacs | `emacs-30.1` |
-| scipy | https://github.com/scipy/scipy | `v1.14.1` |
-| node | https://github.com/nodejs/node | `v22.11.0` |
-
-Each repo is shallow-cloned (`git init` + `git fetch --progress --depth 1 origin <ref>` + `checkout FETCH_HEAD`) on first use and cached locally; subsequent runs reuse the checkout. Git output is streamed to the terminal so the multi-GB fetch shows real-time progress.
-
-**Tools covered (5 queries each).** Read tools — `grep`, `search`, `context`, `callers`, `callees`, `node`, `by_qualified_name`, `signature`, `impact`, `body`, `files`, `complexity`, `doc_coverage`, `largest`, `hotspots`, `god_class`, `module_api`, `derives`, `dead_code`, `rank`, `coupling`, `circular`, and `outline` when `ast-grep` >= 0.44 is on `PATH`. Write tools — `str_replace`, `multi_str_replace`, `insert_at`, and (when the user-installed `ast-grep` CLI is available) `ast_grep_rewrite`.
-
-**Force-sync on every run.** Before any benchmark fires, the harness runs the equivalent of `tracedecay sync --force` on each repo (`index_all()` regardless of `.tracedecay/` freshness) so timings always reflect the pinned source.
-
-**Write benches and cleanup.** Write tools mutate files. To keep the "match must be unique" precondition holding, the harness uses criterion's `iter_batched` — a small scratch file under `<repo>/.tracedecay-bench-scratch/` is rewritten with known content **before every timed iteration**, then the edit tool runs against it. After all benchmarks finish, the harness runs `git stash --include-untracked && git stash drop` inside every prepared repo so the working tree returns to the pinned ref.
-
-**Criterion configuration.** The bench overrides criterion's defaults to `sample_size = 10` and `measurement_time = 30s` (vs the stock 100 / 5s), which gives each per-query timing ~30 seconds of measurement — enough that slow tools like `tracedecay_context` on polkadot-sdk produce stable numbers.
-
-**Run it:**
-
-```bash
-# Required: a writable cache directory for the cloned repos + their indexes.
-# Expect several GB of disk and a long first run (shallow clone + full index of each repo).
-export TRACEDECAY_BENCH_REPOS_DIR=~/tracedecay-bench-cache
-
-cargo bench --bench large_repos
-```
-
-If `TRACEDECAY_BENCH_REPOS_DIR` is unset the bench prints a notice and registers zero benchmarks (so `cargo bench --all` stays cheap on contributors' machines).
-
-**Configuration (all optional, via environment):**
-
-| Variable | Effect |
-|---|---|
-| `TRACEDECAY_BENCH_REPOS_DIR` | **Required.** Root directory where each repo is cloned to `$DIR/<repo-name>/`. |
-| `TRACEDECAY_BENCH_REPOS` | Comma-separated subset of repo names to bench, e.g. `TRACEDECAY_BENCH_REPOS=emacs,scipy`. Defaults to all four. |
-| `TRACEDECAY_BENCH_SKIP_CLONE` | If set, the bench fails fast for any repo not already at its pinned ref instead of fetching. Useful in CI / offline runs. |
-
-**Filtering benchmarks** uses the standard criterion CLI — for example, only the `search` tool on `scipy`:
-
-```bash
-cargo bench --bench large_repos -- 'scipy/tracedecay_search'
-```
-
-Reports (HTML + raw samples) land under `target/criterion/`.
-
-To change the pinned refs (e.g. to a newer release or a specific SHA), edit `REPOS` in `benches/repos.rs` and delete the corresponding `$TRACEDECAY_BENCH_REPOS_DIR/<repo>/.bench-ref` marker so the next run re-fetches. If you skip the post-run cleanup (e.g. you `Ctrl-C` mid-bench), running `git stash --include-untracked && git stash drop` inside each repo dir restores it manually.
-
-### MCP test-matrix probe (scripts/mcp_probe)
-
-`scripts/mcp_probe/` is a Python harness that drives `tracedecay serve` over stdio against a configurable set of real repos and exercises **every read-only MCP tool with 5 query variants per language**, producing a per-tool / per-repo status table. Same harness serves two purposes:
-
-- **Regression sweep.** New language support, new tool, or a refactor — re-run the matrix and any cell that newly errors, times out, or returns empty results stands out as a 🚩.
-- **Perf probe.** Per-call timings are logged in TSV; the same fixed corpus of repos doubles as a coarse cross-version comparison. The current `tracedecay_inheritance_depth` cycle bug was found by this harness when a single tool on polkadot-sdk timed out at >60 s.
-
-**Layout** — `probe.py` is the driver (id-matched JSON-RPC so a slow tool can't poison subsequent calls), `isolated.py` re-runs a single tool with a fresh server per call (escapes server queueing), `build_matrix.py` reads the TSV and emits markdown, `tools/<lang>.py` modules contribute per-language query sets (Rust shipped; add Python/Go/… by dropping a new module), `repos.toml` lists target repos (override via `$TRACEDECAY_PROBE_REPOS`).
-
-**Quick run:**
-
-```bash
-cargo build --release --bin tracedecay
-python3 scripts/mcp_probe/probe.py
-python3 scripts/mcp_probe/build_matrix.py > matrix.md
-```
-
-Output cells are `✓ 5/5` (clean), `🐛 e/N` (errors), `⏱ N/N` (timeouts), `∅ E/N` (empty), `🐢 ok/slow` (>10 s calls). Any cell carrying an error or timeout earns a 🚩 in the rightmost column. Per-call detail with the first 100 chars of each error lands in the TSV log for follow-up.
-
-Different from the criterion bench above: criterion measures per-iteration latency for a focused tool set on pinned refs and produces statistical reports under `target/criterion/`; `mcp_probe` exercises every tool with a broader query set on whatever repos you point it at, optimising for breadth of coverage rather than measurement precision.
-
----
-
-## 70+ MCP Tools
-
-The server exposes more than 70 tools; the tables below group the most commonly used ones by category. `ast-grep` is an optional external CLI capability used by structural refactor tools and `tracedecay_outline`; outline requires `ast-grep` >= 0.44 on `PATH` for the CLI's `outline` command. These tools have no backend-selection argument. Most tools are read-only, safe to call in parallel, and annotated with `readOnlyHint`. The edit primitives are scoped to single files and re-index in place; session baseline and memory tools also mutate the active local TraceDecay store and are annotated as non-read-only. The three core tools (`tracedecay_context`, `tracedecay_search`, `tracedecay_status`) are marked `anthropic/alwaysLoad` so they bypass the client's tool-search round-trip.
-
-### Recovering Truncated Responses
-
-Large JSON MCP responses may return a valid envelope with `truncated: true`, a
-`preview`, and a local response `handle`. Prefer narrowing the original query
-first when that answers the task. If the omitted details are needed, call
-`tracedecay_retrieve` with the required `handle` argument from the envelope; this
-returns the exact cached original response without re-running the source tool.
-Handles are stored locally under the active project store, expire
-automatically after their TTL, and cache the response text in plaintext. For
-profile-backed projects, handle ownership follows the project shard that
-produced the truncated response.
-
-### Discovery
-
-| Tool | Purpose |
-|------|---------|
-| `tracedecay_context` | Get relevant code context for a task -- entry points, related symbols, code snippets |
-| `tracedecay_search` | Find symbols by name (functions, classes, types) |
-| `tracedecay_node` | Get details + source code for a specific symbol |
-| `tracedecay_outline` | Lightweight `ast-grep` CLI outline of top-level file symbols, with DB-backed TraceDecay symbols preserved for follow-up graph calls; requires `ast-grep` >= 0.44 |
-| `tracedecay_files` | List indexed project files with filtering |
-| `tracedecay_module_api` | Public API surface of a file or directory |
-| `tracedecay_similar` | Find symbols with similar names |
-| `tracedecay_status` | Index status, statistics, tokens saved |
-
-### Call Graph & Impact
-
-| Tool | Purpose |
-|------|---------|
-| `tracedecay_callers` | Find what calls a function |
-| `tracedecay_callees` | Find what a function calls |
-| `tracedecay_impact` | See what's affected by changing a symbol |
-| `tracedecay_affected` | Find test files affected by source changes |
-| `tracedecay_rename_preview` | All references to a symbol (preview rename impact) |
-| `tracedecay_hotspots` | Most connected symbols (highest call count) |
-
-### Code Quality
-
-| Tool | Purpose |
-|------|---------|
-| `tracedecay_complexity` | Rank functions by cyclomatic complexity, nesting depth, safety metrics |
-| `tracedecay_dead_code` | Find unreachable symbols (no incoming edges) |
-| `tracedecay_god_class` | Find classes with too many members |
-| `tracedecay_coupling` | Rank files by fan-in/fan-out |
-| `tracedecay_inheritance_depth` | Find the deepest inheritance hierarchies |
-| `tracedecay_circular` | Detect circular file dependencies |
-| `tracedecay_recursion` | Detect recursive/mutually-recursive call cycles |
-| `tracedecay_unused_imports` | Import statements never referenced |
-| `tracedecay_doc_coverage` | Public symbols missing documentation |
-| `tracedecay_simplify_scan` | Quality analysis of changed files (duplications, dead code, complexity) |
-
-### Code-Health Analytics
-
-Five tools surface structural quality signals from the existing graph. The composite score uses a geometric mean over independent dimensions so no single one can be gamed.
-
-| Tool | Purpose |
-|------|---------|
-| `tracedecay_health` | Composite quality signal (0-10000) from acyclicity, depth, equality, redundancy, and modularity |
-| `tracedecay_gini` | Gini inequality coefficient for any metric (complexity, lines, fan-in/out, members) -- finds god files and uneven distribution |
-| `tracedecay_dependency_depth` | Longest file-level dependency chains (Lakos levelization) with full chain reconstruction after Tarjan SCC cycle-breaking |
-| `tracedecay_dsm` | Design Structure Matrix in `stats`, `clusters`, or `matrix` form -- reveals layering violations and hidden coupling |
-| `tracedecay_test_risk` | Risk-weighted test-gap analysis combining complexity, fan-in, static test attribution (direct vs. depth-3 closure), and 90-day git churn into a single score. `coverage_pct` is a static attribution lower bound, not executed coverage |
-
-### Sessions
-
-Snapshot health metrics at the start of an AI coding session, then diff at the end to see what improved or regressed.
-
-| Tool | Purpose |
-|------|---------|
-| `tracedecay_session_start` | Save current health metrics as a JSON baseline for later comparison |
-| `tracedecay_session_end` | Recompute and diff against the baseline -- per-dimension deltas, pass/fail, automatic cleanup |
-
-### Edit Primitives
-
-Four writer tools that let agents modify files without regex or shell-quoting hazards. Each is single-file, anchored, and triggers an in-place re-index after writing so the graph never goes stale.
-
-| Tool | Purpose |
-|------|---------|
-| `tracedecay_str_replace` | Replace a unique `old_str` with `new_str`; fails if 0 or >1 matches (protects against multi-edit bugs) |
-| `tracedecay_multi_str_replace` | Apply N `(old, new)` replacements atomically -- all-or-nothing transaction |
-| `tracedecay_insert_at` | Insert content before or after a unique anchor string or line number |
-| `tracedecay_ast_grep_rewrite` | Structural code rewrite via the `ast-grep` CLI in `--rewrite` mode |
-
-### Git & Workflow
-
-| Tool | Purpose |
-|------|---------|
-| `tracedecay_diff_context` | Semantic context for changed files -- modified symbols, dependencies, affected tests |
-| `tracedecay_commit_context` | Semantic summary of uncommitted changes for commit message drafting |
-| `tracedecay_pr_context` | Semantic diff between git refs for pull request descriptions |
-| `tracedecay_changelog` | Semantic diff between two git refs |
-| `tracedecay_test_map` | Source-to-test mapping at the symbol level, with uncovered symbol detection |
-
-### Type System
-
-| Tool | Purpose |
-|------|---------|
-| `tracedecay_type_hierarchy` | Recursive type hierarchy tree for traits, interfaces, and classes |
-| `tracedecay_rank` | Rank nodes by relationship count (most implemented interface, most extended class) |
-| `tracedecay_distribution` | Node kind breakdown per file or directory |
-| `tracedecay_largest` | Rank nodes by size -- largest classes, longest methods |
-
-### Porting
-
-| Tool | Purpose |
-|------|---------|
-| `tracedecay_port_status` | Compare symbols between source/target directories to track porting progress |
-| `tracedecay_port_order` | Topological sort of symbols for porting -- port leaves first, then dependents |
-
-### Multi-Branch
-
-| Tool | Purpose |
-|------|---------|
-| `tracedecay_branch_search` | Search symbols in another branch's graph |
-| `tracedecay_branch_diff` | Compare symbols between branches (added/removed/changed) |
-| `tracedecay_branch_list` | List tracked branches with DB sizes and sync times |
-
-### MCP Resources
-
-Four resources are exposed via `resources/list` and `resources/read`:
-
-- `tracedecay://status` -- graph statistics as JSON
-- `tracedecay://files` -- indexed file tree grouped by directory
-- `tracedecay://overview` -- project summary with language distribution and symbol kinds
-- `tracedecay://branches` -- tracked branches with DB sizes and parent info
-
----
-
-## Token Tracking
-
-tracedecay measures the tokens it saves on every MCP tool call. Each tool response includes a `tracedecay_metrics: before=N after=M` line showing how many raw-file tokens were avoided by that specific call.
-
-### Cost observability
-
-```bash
-tracedecay cost                     # 7-day cost summary (default)
-tracedecay cost today               # today only
-tracedecay cost --by-model          # breakdown by Claude model
-tracedecay cost --by-task           # breakdown by task category (coding, debugging, exploration, ...)
-tracedecay cost --export json       # JSON export to stdout
-tracedecay cost --export csv        # CSV export to stdout
-```
-
-Parses Claude Code session transcripts (`~/.claude/projects/**/*.jsonl`), classifies each API turn into one of 13 task categories, computes dollar cost using model pricing, and stores results in `~/.tracedecay/global.db` for fast aggregate queries. Pricing is refreshed from [LiteLLM](https://github.com/BerriAI/litellm) every 24 hours and falls back to an embedded table when offline.
-
-The `tracedecay status` header includes a cost row showing today's spend, 7-day total, and efficiency ratio (tokens saved / total tokens). The `tracedecay monitor` TUI shows a live cost panel alongside the savings feed. At the end of each Claude Code session, the `hook_stop` handler prints a one-line receipt to the terminal.
-
-Task classification categories: Coding, Debugging, Feature Dev, Refactoring, Testing, Exploration, Planning, Delegation, Git Ops, Build/Deploy, Brainstorming, Conversation, General. Classification is deterministic (pattern matching on tool names and Bash commands), requires no LLM calls, and is adapted from [AgentSeal/codeburn](https://github.com/AgentSeal/codeburn).
-
-### Live monitor
-
-```bash
-tracedecay monitor
-```
-
-A global TUI that shows MCP tool calls from all projects in real time, via a shared memory-mapped ring buffer at `~/.tracedecay/monitor.mmap`. Each entry shows the project name, tool name, and token delta. A cost panel at the top shows today's spend, savings, efficiency, and top model (refreshed every 30 seconds).
-
-### Session and lifetime counters
-
-```bash
-tracedecay current-counter          # show per-project session counter
-tracedecay reset-counter            # reset the session counter
-tracedecay status                   # shows project + global lifetime totals + cost
-```
-
-### Worldwide counter
-
-TraceDecay can optionally contribute to an anonymous aggregate counter. `tracedecay status` shows only local totals unless you opt in with `tracedecay enable-upload-counter`. When enabled, the upload sends only a single number (e.g. `4823`) with no identifying information. Disable it again with `tracedecay disable-upload-counter`.
-
----
+Most read tools are safe to call in parallel. Edit tools are single-file, anchored, and re-index after writing.
 
 ## Index Freshness
 
-tracedecay keeps the graph up to date without an OS-level file watcher. The optional MCP daemon reuses server state across clients; it does not watch files in the background.
+TraceDecay does not run a filesystem watcher. MCP calls check for stale indexed files and sync them on demand with a cooldown. When an MCP server starts, it runs a catch-up sync for changes made while no agent was attached.
 
-**On-demand staleness check.** Every MCP tool call checks whether any indexed files have been modified since the last sync. If stale files are found, they are re-extracted before the tool response is returned. A 30-second cooldown prevents back-to-back calls from re-walking the tree on every keystroke.
+Linked git worktrees share the same project enrollment through the repository common directory. Initialize once from any checkout; do not copy `.tracedecay/` into worktrees.
 
-**Catch-up sync on connect.** When the MCP server starts, it immediately runs a non-blocking catch-up sync that picks up any changes made while no agent was attached — a `git pull`, an IDE edit, a build step — so the very first tool call of a session sees a fresh index.
-
-**Multi-agent work and git worktrees.** When multiple agents work on a project concurrently, each is expected to operate in its own git worktree — an independent filesystem checkout of the same repository, so agents never overwrite each other's in-flight edits. After one checkout has been initialized, tracedecay automatically resolves linked worktrees by `git rev-parse --git-common-dir`, uses the shared project store, and keeps the invoking worktree as the active file root for scans and syncs. This works for sibling worktrees, nested `repo/.worktrees/*` layouts, and agent-managed worktrees such as Codex or Conductor. Changes accumulate independently and are reconciled via git merge or rebase, avoiding the complexity and failure modes of cross-agent locking over a shared mutable directory.
-
-**CLI-only workflows.** If you run `tracedecay` commands without an attached agent (no MCP server), the staleness check is not running between commands. Install a git post-commit hook to keep the index fresh automatically after every commit:
+Optional branch databases:
 
 ```bash
-cp scripts/post-commit .git/hooks/post-commit
-chmod +x .git/hooks/post-commit
+tracedecay branch add
+tracedecay branch list
+tracedecay branch remove <name>
+tracedecay branch gc
 ```
 
-### Daemon Debugging
+See [docs/BRANCHING-USER-GUIDE.md](docs/BRANCHING-USER-GUIDE.md) for full branch behavior and recovery.
 
-The daemon is a long-running MCP server for clients that share one local socket. It is opt-in: `tracedecay daemon install-service` installs a per-user service on Linux systemd or a per-user LaunchAgent on macOS.
+## Dashboard
 
 ```bash
-tracedecay daemon install-service     # install/start per-user daemon service
-tracedecay daemon status              # service path, socket state, log command
-systemctl --user status tracedecay.service --no-pager
-journalctl --user -u tracedecay.service -f
-launchctl print "gui/$(id -u)/com.tracedecay.daemon"
-tail -f ~/.tracedecay/daemon.err.log
-tracedecay status --runtime --json    # process + DB/WAL/SHM telemetry snapshot
+tracedecay dashboard
+tracedecay dashboard --port 8080
+tracedecay dashboard --port 0 --open
 ```
 
-Scheduler logs use stable `event=... key=value` fields such as `event=scheduler_tick`, `event=scheduler_task`, `task=memory_curator`, `outcome=skipped`, and `reason=not_configured`, so they can be filtered directly from journald on Linux or the daemon log file on macOS.
+The dashboard includes graph exploration, project memory, LCM session search, token savings, and cost views. See [docs/dashboard.md](docs/dashboard.md) and [docs/graph-explorer.md](docs/graph-explorer.md).
 
-### Upgrading from 5.x
+## Privacy
 
-The old cross-platform watcher/autostart daemon from 5.x-era installs was removed in 6.0.0. The embedded OS-level file watcher that replaced it was itself removed in 6.1.0 (it caused runaway CPU and memory on large monorepos with deep `node_modules` or `target` trees). The current daemon is MCP transport/process reuse, not file watching; the on-demand staleness model above is still the freshness design.
+Core indexing, graph queries, MCP tools, memory, and dashboard data are local.
 
----
+Optional or external network calls:
 
-## Self-Upgrade
+- Worldwide counter: uploads one aggregate token-savings number only when enabled; the Worker also derives country from request metadata for aggregate geography.
+- Version check: fetches release metadata.
+- Pricing refresh: fetches public LiteLLM model pricing for `tracedecay cost`.
+
+Disable the worldwide counter with:
 
 ```bash
-tracedecay upgrade                  # upgrade to latest in current channel
-tracedecay channel                  # show current channel (stable/beta)
-tracedecay channel beta             # switch to beta channel
-tracedecay channel stable           # switch back to stable
+tracedecay disable-upload-counter
 ```
-
-`tracedecay upgrade` downloads the correct platform binary from GitHub releases and replaces the running binary in place. Supports stable and beta channels independently.
-
----
-
-## CLI Reference
-
-```bash
-tracedecay init [path]              # Initialize a new project (full index)
-tracedecay sync [path]              # Incremental sync (must be initialized first)
-tracedecay sync --force [path]      # Force a full re-index
-tracedecay sync --doctor [path]     # Sync and list added/modified/removed files
-tracedecay status [path]            # Show statistics + cost summary
-tracedecay status [path] --json     # Show statistics (JSON output)
-tracedecay status --details         # Include node-kind breakdown
-tracedecay status --runtime         # Capture process + DB/WAL/SHM telemetry
-tracedecay dashboard                # Start local web dashboard (default port 7341)
-tracedecay dashboard --port 8080    # Start dashboard on custom port
-tracedecay dashboard --port 0       # Auto-select a free port
-tracedecay dashboard --open         # Open the URL in the default browser
-tracedecay cost [range]             # Token cost summary (default: 7d)
-tracedecay cost --by-model          # Cost grouped by model
-tracedecay cost --by-task           # Cost grouped by task category
-tracedecay cost --export json|csv   # Export cost data
-tracedecay query <search> [path]    # Search symbols
-tracedecay files [--filter dir] [--pattern glob] [--json]   # List indexed files
-tracedecay affected <files...> [--stdin] [--depth N]        # Find affected test files
-tracedecay install [--agent NAME]   # Configure agent integration
-tracedecay reinstall                # Refresh settings for all installed agents
-tracedecay update-plugin            # Refresh generated plugin code/assets only; never writes agent configs
-tracedecay uninstall [--agent NAME] [--profile NAME] # Remove agent integration
-tracedecay serve                    # Start MCP server
-tracedecay daemon status            # Show daemon service/socket/log hints
-tracedecay daemon install-service   # Install/start per-user daemon service
-tracedecay monitor                  # Live TUI showing MCP calls across all projects
-tracedecay update                   # Refresh binary, generated plugins, and daemon
-tracedecay upgrade                  # Self-update to latest version
-tracedecay channel [stable|beta]    # Show or switch update channel
-tracedecay doctor [--agent NAME]    # Check installation health
-tracedecay branch add|list|remove|removeall|gc   # Multi-branch management
-tracedecay current-counter          # Show per-project token counter
-tracedecay reset-counter            # Reset per-project token counter
-tracedecay enable-upload-counter    # Opt in to worldwide counter uploads
-tracedecay disable-upload-counter   # Disable worldwide counter uploads
-```
-
----
-
-## `tracedecay doctor`
-
-Run a comprehensive health check of your tracedecay installation:
-
-```bash
-tracedecay doctor
-```
-
-Checks: binary location, project index, global DB, user config, optional external capabilities such as `ast-grep` for `tracedecay_outline` and structural refactor tools, agent integration (MCP server or plugin, hooks, permissions, prompt rules where applicable), and network connectivity. If `ast-grep` is missing or older than 0.44, install or update it, make sure it is on `PATH`, then rerun `tracedecay install` or `tracedecay update-plugin` as appropriate to refresh generated agent integrations. If any tool permissions are missing after an upgrade, doctor tells you to run `tracedecay install`. Use `--agent` to check a specific agent only.
-
-Doctor also validates that each installed hook uses the correct tracedecay subcommand and auto-repairs broken hooks.
-
----
-
-## How It Works with Claude Code
-
-Once configured, Claude Code automatically uses tracedecay instead of reading raw files when it needs to understand your codebase. Three layers reinforce each other:
-
-| Layer | What it does | Why it matters |
-|-------|-------------|----------------|
-| **MCP server** | Exposes 70+ `tracedecay_*` tools to Claude | Claude can query the graph directly |
-| **CLAUDE.md rules** | Tells Claude to prefer tracedecay over agents/file reads | Prevents the model from falling back to expensive patterns |
-| **PreToolUse hook** | Native Rust hook blocks Explore agents | Catches cases where the model ignores the CLAUDE.md rules |
-| **UserPromptSubmit hook** | Runs at prompt submission | Lifecycle tracking for token accounting |
-| **Stop hook** | Runs when the session ends | Flushes token counters |
-
-The result: Claude gets the same code understanding with far fewer tokens. A typical Explore agent reads 20-50 files; tracedecay returns the relevant symbols, relationships, and code snippets from its pre-built index.
-
----
-
-## Network Calls & Privacy
-
-tracedecay's core functionality (indexing, search, graph queries, MCP server) is **100% local** -- your code never leaves your machine.
-
-| Call | Data sent | When | Opt-out |
-|------|-----------|------|---------|
-| Worldwide counter upload/read | Token count (a number) + country (from IP) | sync, status, MCP sessions when enabled | `tracedecay disable-upload-counter` |
-| Version check | Nothing (GET request) | status (cached 5m), sync (parallel) | N/A (1s timeout, no-op on failure) |
-| Model pricing refresh | Nothing (GET request) | `tracedecay cost` (cached 24h) | N/A (5s timeout, falls back to embedded pricing) |
-
-When enabled, the worldwide counter upload sends a single HTTP POST with a JSON body like `{"amount": 4823}`. No cookies, no tracking, no user ID. The Cloudflare Worker logs the country of your IP address (derived from request headers) for aggregate geographic statistics -- your actual IP address is not stored.
-
-The model pricing refresh fetches a public JSON file from GitHub (`raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json`) to keep Claude model pricing up to date for `tracedecay cost`. No data is sent -- it is a plain HTTPS GET. The response is cached at `~/.tracedecay/pricing.json` for 24 hours. If the fetch fails, tracedecay uses its compiled-in pricing table.
-
----
-
-## 50+ Languages
-
-tracedecay supports more than 50 programming languages organized into three tiers controlled by Cargo feature flags. Each tier includes all languages from the tier below it. Markdown headers are extracted as `Module` nodes with hierarchical `Contains` edges so document structure participates in graph queries alongside source code.
-
-### Lite -- `--no-default-features`
-
-Always compiled. The smallest binary for the most popular languages, plus Svelte and Astro (script-block extraction via the TypeScript extractor, no extra grammar dependency).
-
-| Language | Extensions |
-|----------|-----------|
-| Rust | `.rs` |
-| Go | `.go` |
-| Java | `.java` |
-| Scala | `.scala`, `.sc` |
-| TypeScript | `.ts`, `.tsx` |
-| JavaScript | `.js`, `.jsx` |
-| Python | `.py` |
-| C | `.c`, `.h` |
-| C++ | `.cpp`, `.hpp`, `.cc`, `.cxx`, `.hh` |
-| Kotlin | `.kt`, `.kts` |
-| C# | `.cs` |
-| Swift | `.swift` |
-| Svelte | `.svelte` |
-| Astro | `.astro` |
-
-### Medium (Lite + 9 more) -- `--features medium`
-
-| Language | Extensions | Feature flag |
-|----------|-----------|-------------|
-| Dart | `.dart` | `lang-dart` |
-| Pascal | `.pas`, `.pp`, `.dpr` | `lang-pascal` |
-| PHP | `.php` | `lang-php` |
-| Ruby | `.rb` | `lang-ruby` |
-| Bash | `.sh`, `.bash` | `lang-bash` |
-| Protobuf | `.proto` | `lang-protobuf` |
-| PowerShell | `.ps1`, `.psm1` | `lang-powershell` |
-| Nix | `.nix` | `lang-nix` |
-| VB.NET | `.vb` | `lang-vbnet` |
-
-### Full (Medium + everything else) -- default
-
-| Language | Extensions | Feature flag |
-|----------|-----------|-------------|
-| Lua | `.lua` | `lang-lua` |
-| Zig | `.zig` | `lang-zig` |
-| Objective-C | `.m`, `.mm` | `lang-objc` |
-| Perl | `.pl`, `.pm` | `lang-perl` |
-| Batch/CMD | `.bat`, `.cmd` | `lang-batch` |
-| Fortran | `.f90`, `.f95`, `.f03`, `.f08`, `.f18`, `.f`, `.for` | `lang-fortran` |
-| COBOL | `.cob`, `.cbl`, `.cpy` | `lang-cobol` |
-| MS BASIC 2.0 | `.bas` | `lang-msbasic2` |
-| GW-BASIC | `.gw` | `lang-gwbasic` |
-| QBasic | `.qb` | `lang-qbasic` |
-| QuickBASIC 4.5 | `.bi`, `.bm` | `lang-qbasic` |
-| Dockerfile | `Dockerfile`, `.dockerfile` | `lang-dockerfile` |
-| GLSL | `.glsl`, `.vert`, `.frag`, `.comp` | `lang-glsl` |
-| WGSL | `.wgsl` | `lang-wgsl` |
-| HLSL | `.hlsl`, `.fx` | `lang-hlsl` |
-| Metal | `.metal` | `lang-metal` |
-| Markdown | `.md`, `.markdown` | `lang-markdown` |
-| R | `.r`, `.R` | `lang-r` |
-| SQL | `.sql` | `lang-sql` |
-| Julia | `.jl` | `lang-julia` |
-| Haskell | `.hs`, `.lhs` | `lang-haskell` |
-| OCaml | `.ml`, `.mli` | `lang-ocaml` |
-| Clojure | `.clj`, `.cljs`, `.cljc` | `lang-clojure` |
-| Erlang | `.erl`, `.hrl` | `lang-erlang` |
-| Elixir | `.ex`, `.exs` | `lang-elixir` |
-| F# | `.fs`, `.fsi`, `.fsx` | `lang-fsharp` |
-| Quint | `.qnt` | `lang-quint` |
-| TOML | `.toml` | `lang-toml` |
-| Lean | `.lean` | `lang-lean` |
-
-Individual languages can also be cherry-picked without a full tier:
-
-```bash
-cargo install tracedecay --no-default-features --features lang-nix,lang-bash
-```
-
-All extractors share the same depth: functions, classes, methods, fields, imports, call graphs, inheritance chains, docstrings, complexity metrics, decorator/annotation extraction, and cross-file dependency tracking.
-
----
-
-## tracedecay vs CodeGraph
-
-tracedecay is a ground-up Rust rewrite of [CodeGraph](https://www.npmjs.com/package/@colbymchenry/codegraph) (Node.js/TypeScript). Both build semantic code graphs for AI coding agents, but they diverge significantly in scope and capabilities.
-
-| | **tracedecay** | **CodeGraph** |
-|---|---|---|
-| **Runtime** | Native binary (Rust) | Node.js 18+ |
-| **Install** | `brew install`, `cargo install`, `scoop install` | `npx @colbymchenry/codegraph` |
-| **Languages** | 50+ (3 tiers: lite/medium/full) | 19+ |
-| **MCP tools** | 70+ | 9 |
-| **Agent integrations** | 12+ (Claude, Codex, Gemini, OpenCode, Cursor, Cline, Copilot, Roo Code, Zed, Antigravity, Kilo, Kiro, Kimi, Vibe) | 1 (Claude Code) |
-| **Index freshness** | On-demand staleness check on every MCP call; catch-up sync on connect; multi-agent work expected to use git worktrees | Native OS-level file watcher (FSEvents/inotify/ReadDirectoryChangesW, 2 s debounce); catch-up sync on connect |
-| **Multi-branch indexing** | Yes, opt-in (per-branch DBs, cross-branch diff/search) | No |
-| **Complexity metrics** | AST-extracted (branches, loops, nesting depth, cyclomatic) | No |
-| **Porting tools** | Yes (`port_status`, `port_order`) | No |
-| **Graph visualizer** | Removed (v4.0.1) | Yes |
-| **Semantic search** | Agent-driven keyword expansion (zero-cost) | Local embeddings (nomic-embed-text-v1.5 via ONNX) |
-| **MCP resources** | 4 (status, files, overview, branches) | No |
-| **MCP annotations** | Yes (readOnlyHint, alwaysLoad) | No |
-| **Dead code detection** | Yes | No |
-| **Circular dependency detection** | Yes | No |
-| **Type hierarchy** | Yes | No |
-| **God class / coupling analysis** | Yes | No |
-| **Commit / PR context** | Yes | No |
-| **Test mapping** | Yes | No |
-| **Rename preview** | Yes | No |
-| **Token tracking** | Per-call metrics, live TUI monitor, session + lifetime counters | No |
-| **Code-health analytics** | Composite score, Gini, dependency depth, DSM, risk-weighted test gaps, session deltas | No |
-| **Edit primitives** | 4 atomic writers (`str_replace`, `multi_str_replace`, `insert_at`, `ast_grep_rewrite`) with auto re-indexing | No |
-| **Crash resilience** | Subprocess-isolated extraction; native grammar aborts skip the file, sync continues | No |
-| **Self-upgrade** | `tracedecay upgrade` with stable/beta channels | `npm update` |
-| **DB engine** | libsql (SQLite fork, WAL, async) | better-sqlite3 / wa-sqlite (WASM) |
-| **Indexing speed** | ~1.2s for 1,782 files | ~4s for 1,782 files |
-| **Binary size** | ~25 MB (all grammars bundled) | ~80 MB (node_modules + WASM) |
-
-CodeGraph pioneered the approach and remains a solid choice if you prefer npm tooling and only need Claude Code integration. tracedecay extends the concept with deeper analysis, more agents, multi-branch support, and a native binary with no runtime dependencies.
-
-For detailed comparisons against CodeGraph, Dual-Graph (GrapeRoot), code-review-graph, and OpenWolf, see [docs/COMPARABLE-TOOLS.md](docs/COMPARABLE-TOOLS.md).
-
----
-
-## Why tracedecay Over the Alternatives
-
-Several tools reduce token usage for AI coding agents. Here's why tracedecay stands apart.
-
-### Single native binary, zero dependencies
-
-Every alternative requires a runtime: Python, Node.js, or both. tracedecay ships as a single ~25 MB Rust binary with all 50+ tree-sitter grammars bundled. Nothing else to install.
-
-### Deepest code intelligence
-
-tracedecay works at the symbol level: functions, structs, fields, call edges, type hierarchies, complexity metrics. Alternatives like Dual-Graph (GrapeRoot) work at the file level -- they know which files exist but can't answer "who calls this function?" or "what breaks if I change this struct?" tracedecay's 70+ specialized MCP tools cover call graph traversal, impact analysis, dead code detection, test mapping, rename preview, type hierarchies, circular dependency detection, complexity ranking, code-health analytics (Gini, DSM, dependency depth, risk-weighted test gaps), atomic edit primitives, and more. The closest competitor (code-review-graph) has 22 tools; others have 5-9.
-
-### Broadest agent support
-
-More than a dozen AI coding agent integrations with per-agent native configuration formats. No other tool covers as many agents with as deep an integration. Claude Code gets hooks, prompt rules, and auto-allowed tool permissions. Kiro gets global MCP config, `tracedecay.md` steering loaded as a resource, a managed agent with permissive built-in/tracedecay tool approval, and hooks for delegation guardrails plus post-write sync. Other agents get MCP server registration in their native config format.
-
-### Multi-branch indexing
-
-The only tool in this space with optional per-branch graph databases and cross-branch diff and search. When enabled, switching branches is instant -- no re-indexing required.
-
-### Per-call token tracking
-
-The only tool that reports exactly how many tokens each individual MCP tool call saved, plus a live TUI monitor across all projects and lifetime counters.
-
-### Fully open source
-
-MIT-licensed Rust, auditable end to end. Dual-Graph's core engine (`graperoot` on PyPI) is proprietary -- you can't see what it does with your code graph. OpenWolf is AGPL-3.0, which requires derivative works to be open-sourced.
-
-### Performance
-
-Full-index benchmark on a 1,782-file mixed Rust/Java/Scala codebase (57K nodes, 103K edges):
-
-| Tool | Time | Speedup |
-|---|---|---|
-| CodeGraph (TypeScript) | 31.2s | 1x |
-| **tracedecay (Rust)** | **1.2s** | **26x** |
-
----
 
 ## Troubleshooting
 
-### "tracedecay not initialized"
-
-TraceDecay could not find an initialized project store. Run `tracedecay init` from the project root to create the user-level profile store and project enrollment marker.
-
 ```bash
-tracedecay init
+tracedecay doctor
+tracedecay status --runtime
+tracedecay sync --doctor
 ```
 
-If you are inside a linked git worktree, initialize the repository once from any checkout instead of running `init` in every worktree. A separate clone with the same remote URL is not considered initialized; only the original checkout and its linked worktrees share the store.
+Common fixes:
 
-### MCP server not connecting
+- Not initialized: run `tracedecay init` from the project root.
+- Agent does not see tools: run `tracedecay doctor --agent <name>`, then restart the agent.
+- Missing symbols: run `tracedecay sync` and confirm the file is not ignored.
+- Slow first index: use normal incremental `tracedecay sync` after the first run.
 
-The AI agent doesn't see tracedecay tools.
-
-1. Ensure the agent config includes the tracedecay MCP server (run `tracedecay doctor`)
-2. Restart the agent completely
-3. Check that `tracedecay` is in your PATH: `which tracedecay`
-
-### Missing symbols in search
-
-- Run `tracedecay sync` to update the index
-- Check that the language is supported (see table above)
-- Verify the file isn't excluded by `.gitignore`
-
-### Indexing is slow
-
-Large projects take longer on the first full index.
-
-- Subsequent runs use incremental sync and are much faster
-- Use `tracedecay sync` (not `--force`) for day-to-day updates
-- Staleness is checked automatically on every MCP tool call while an agent is connected
-
-### Environment Variables
-
-| Variable | Effect |
-|----------|--------|
-| `TRACEDECAY_GLOBAL_DB` | Override the path to the global database or session store for dashboard LCM selection. When unset, the dashboard serves the active project's resolved session store, profile-sharded by default. |
-| `TRACEDECAY_BIN` | Path to the tracedecay binary (used by Hermes wrapper for spawn mode). |
-| `TRACEDECAY_DASHBOARD_PROJECT` | Project root path for Hermes dashboard spawn mode (defaults to Hermes' cwd). |
-| `TRACEDECAY_DASHBOARD_URL` | Full URL to an already-running dashboard (Hermes external URL mode). |
-| `TRACEDECAY_DAEMON_SOCKET` | Override the Unix socket used by MCP daemon clients. |
-| `HERMES_HOME` | Path to Hermes profile directory for profile-scoped plugin installation. |
-| `TRACEDECAY_OFFLINE` | Set to `1` to skip network requests for pricing data (Savings & Cost tab uses bundled fallback). |
-| `DISABLE_TRACEDECAY` | Set to `true` to disable the MCP server entirely (exits cleanly without initializing). |
-
-Use `TRACEDECAY_*` environment variables for TraceDecay configuration. Pre-rename environment variable names are not runtime fallbacks.
-
-### Disabling tracedecay for specific projects
-
-If a project is too large and tracedecay uses too much RAM, you can disable it per-project by setting `DISABLE_TRACEDECAY=true` in the MCP server environment. The server exits cleanly without initializing.
-
-**Claude Code** — add to your project's `.claude/settings.json`:
-
-```json
-{
-  "mcpServers": {
-    "tracedecay": {
-      "command": "tracedecay",
-      "args": ["serve"],
-      "env": {
-        "DISABLE_TRACEDECAY": "true"
-      }
-    }
-  }
-}
-```
-
-**Other agents** — set the environment variable in whatever config your agent uses to launch MCP servers.
-
-You can also set it globally via the shell (`DISABLE_TRACEDECAY=true claude`), but this disables tracedecay for every project in the session.
-
----
-
-## Origin
-
-This project is a Rust port of the original [CodeGraph](https://github.com/colbymchenry/codegraph) TypeScript implementation by [@colbymchenry](https://github.com/colbymchenry). The port maintains the same architecture and MCP tool interface while leveraging Rust for performance and native tree-sitter bindings.
-
----
-
-## Building
+## Build
 
 ```bash
-cargo build --release                          # full (50+ languages, default)
-cargo build --release --features medium        # medium tier
-cargo build --release --no-default-features    # lite (smallest binary)
+cargo build --release
+cargo build --release --features medium
+cargo build --release --no-default-features
 
-cargo nextest run --workspace --no-fail-fast  # run all tests (requires full)
-cargo check --no-default-features              # verify lite compiles
+cargo nextest run --workspace --no-fail-fast
+cargo check --no-default-features
 cargo clippy --workspace --all-targets
 ```
 
-## Star History
+## Docs
 
-<a href="https://www.star-history.com/#ScriptedAlchemy/tracedecay&Date">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=ScriptedAlchemy/tracedecay&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=ScriptedAlchemy/tracedecay&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=ScriptedAlchemy/tracedecay&type=Date" />
- </picture>
-</a>
+- [User guide](docs/USER-GUIDE.md)
+- [Comparable tools](docs/COMPARABLE-TOOLS.md)
+- [Dashboard](docs/dashboard.md)
+- [Branching](docs/BRANCHING-USER-GUIDE.md)
+- [MCP extensions](docs/MCP-extensions.md)
+- [Architecture/design notes](docs/DESIGN-DOC.md)
 
-## Acknowledgments
+## Origin
 
-Windows builds are code-signed with a free Authenticode certificate generously provided by [SignPath.io](https://signpath.io), with a certificate issued by the [SignPath Foundation](https://signpath.org).
+TraceDecay is a Rust port of the original [CodeGraph](https://github.com/colbymchenry/codegraph) TypeScript implementation by [@colbymchenry](https://github.com/colbymchenry).
 
 ## License
 
-MIT License -- see [LICENSE](LICENSE) for details.
-
-**[TraceDecay on GitHub](https://github.com/ScriptedAlchemy/tracedecay)**
+MIT License -- see [LICENSE](LICENSE).
