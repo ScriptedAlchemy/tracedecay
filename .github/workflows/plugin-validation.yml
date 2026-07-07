@@ -67,6 +67,21 @@ jobs:
               echo "ok: $f"
             done
 
+  claude-native-validation:
+    name: Claude native plugin validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Claude Code
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Validate Claude plugin bundle
+        run: claude plugin validate plugin --strict
+
   # Uses MCP Inspector's TypeScript SDK client to cover stdio handshake and
   # schema compatibility beyond the in-repo Rust MCP tests.
   mcp-conformance-smoke:
