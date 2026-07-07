@@ -1,6 +1,6 @@
 ---
 name: using-tracedecay
-description: 'Use when starting any code task in a TraceDecay-indexed project, before the first Grep, Glob, cat, Read, "gh pr diff", test run, or memory-file write, including in subagents. Maps moments to tools; rebuts native-search fallback. Do NOT use for a scoped subagent handed exact files.'
+description: 'Use when starting any code or repo-context task in a TraceDecay-indexed project, before Grep/Glob/cat/Read/gh pr diff/tests/memory writes, including cross-project or sibling workspace context via project registry. Skip only for scoped subagents handed exact files.'
 ---
 
 # Using TraceDecay
@@ -33,8 +33,10 @@ of this rule is violating its spirit.
 tracedecay tools may be **deferred** — listed by name only, uncallable until
 their schemas load. First need → ONE batched ToolSearch call:
 `select:tracedecay_context,tracedecay_search,tracedecay_grep,tracedecay_outline,tracedecay_body`
-(add others per the skill you enter). If any MCP call errors or times out, the
-same tool runs as `tracedecay tool <name> --args '<json>'` — see
+(add project/session tools such as `tracedecay_project_list`,
+`tracedecay_project_search`, `tracedecay_project_context`, or
+`tracedecay_message_search` when the moment needs them). If any MCP call
+errors or times out, the same tool runs as `tracedecay tool <name> --args '<json>'` — see
 `tracedecay:using-the-cli`. Transport failure never justifies grep.
 
 ## Moment to mandatory action
@@ -43,6 +45,7 @@ same tool runs as `tracedecay tool <name> --args '<json>'` — see
 |---|---|
 | About to grep/rg a literal string, regex, or config key | `tracedecay_grep` — skill: `tracedecay:exploring-code` |
 | About to search for a symbol or concept, or open/Read a source file | `tracedecay_search` / `tracedecay_context`; read via outline→body→read slices — `tracedecay:exploring-code` |
+| User names another repo/project/workspace, sibling checkout, or cross-repo/cross-project context | `tracedecay_project_list` / `tracedecay_project_search` → `tracedecay_project_context`; pass `project_id`, `project_path`, or `project_selector` to `tracedecay_context`, `tracedecay_search`, and `tracedecay_message_search` |
 | "Who calls X" / "what does X call" / "trace this" | `tracedecay:tracing-functions` |
 | Wondering what breaks or which tests to run | `tracedecay:assessing-impact` |
 | About to run `gh pr diff` / read a raw diff to review | `tracedecay_pr_context` / `tracedecay_diff_context` (offline, no gh needed) — `tracedecay:reviewing-changes` |

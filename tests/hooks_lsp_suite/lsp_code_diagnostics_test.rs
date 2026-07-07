@@ -11,13 +11,31 @@ const FAKE_PATH: &str = "src/lib.fake";
 // already-initialized fake server.
 const FAKE_LSP_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(150);
 // Recovery collections (re-run a healthy server after forcing a crash) must
-// complete a real python spawn + didOpen -> publishDiagnostics round trip. The
-// client early-returns as soon as every requested URI has published, so this
-// generous bound costs no extra wall time on success — it only prevents a
-// false timeout when a loaded runner is slow to spawn/schedule the child. It
-// stays well under `OUTER_ASYNC_TIMEOUT`, so a genuine hang is still caught.
+// complete a real python spawn + didOpen -> publishDiagnostics round trip. This
+// generous spawn/write bound prevents false timeouts on loaded runners; the
+// recovery helper keeps the diagnostics quiet window small so success stays
+// cheap.
 const FAKE_LSP_RECOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const OUTER_ASYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
+const HANGING_WRITE_LINE_COUNT: usize = 64_000;
+
+fn bounded_fake_lsp_timeouts() -> lsp::client::LspRefreshTimeouts {
+    lsp::client::LspRefreshTimeouts::new(
+        std::time::Duration::from_millis(350),
+        std::time::Duration::from_millis(350),
+        std::time::Duration::from_millis(350),
+        std::time::Duration::from_millis(50),
+    )
+}
+
+fn recovery_fake_lsp_timeouts() -> lsp::client::LspRefreshTimeouts {
+    lsp::client::LspRefreshTimeouts::new(
+        FAKE_LSP_RECOVERY_TIMEOUT + FAKE_LSP_TIMEOUT,
+        FAKE_LSP_RECOVERY_TIMEOUT,
+        FAKE_LSP_RECOVERY_TIMEOUT,
+        FAKE_LSP_TIMEOUT,
+    )
+}
 
 #[test]
 fn builtin_registry_advertises_phase_one_setup_contract() {
@@ -343,10 +361,10 @@ async fn broker_bounds_lsp_initialize_hangs() {
 
     let result = tokio::time::timeout(
         OUTER_ASYNC_TIMEOUT,
-        broker.refresh_documents(
+        broker.refresh_documents_with_timeouts(
             FAKE_LANGUAGE,
             vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
-            std::time::Duration::from_millis(50),
+            bounded_fake_lsp_timeouts(),
         ),
     )
     .await;
@@ -383,14 +401,14 @@ async fn broker_bounds_lsp_document_write_hangs() {
 
     let result = tokio::time::timeout(
         OUTER_ASYNC_TIMEOUT,
-        broker.refresh_documents(
+        broker.refresh_documents_with_timeouts(
             FAKE_LANGUAGE,
             vec![fake_document(
                 FAKE_LANGUAGE,
                 FAKE_PATH,
-                &"let nope\n".repeat(600_000),
+                &"let nope\n".repeat(HANGING_WRITE_LINE_COUNT),
             )],
-            std::time::Duration::from_millis(50),
+            bounded_fake_lsp_timeouts(),
         ),
     )
     .await;
@@ -404,10 +422,10 @@ async fn broker_bounds_lsp_document_write_hangs() {
 
     std::fs::write(&script_path, fake_lsp_script()).unwrap();
     broker
-        .refresh_documents(
+        .refresh_documents_with_timeouts(
             FAKE_LANGUAGE,
             vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
-            FAKE_LSP_RECOVERY_TIMEOUT,
+            recovery_fake_lsp_timeouts(),
         )
         .await
         .unwrap();
@@ -429,16 +447,16 @@ async fn stdio_client_bounds_lsp_document_write_hangs() {
 
     let result = tokio::time::timeout(
         OUTER_ASYNC_TIMEOUT,
-        lsp::client::collect_document_diagnostics(
+        lsp::client::collect_document_diagnostics_with_timeouts(
             python_command(),
             &[script_path.display().to_string()],
             temp.path(),
             vec![fake_document(
                 FAKE_LANGUAGE,
                 FAKE_PATH,
-                &"let nope\n".repeat(600_000),
+                &"let nope\n".repeat(HANGING_WRITE_LINE_COUNT),
             )],
-            std::time::Duration::from_millis(50),
+            bounded_fake_lsp_timeouts(),
         ),
     )
     .await;
@@ -492,10 +510,10 @@ async fn broker_drops_lsp_client_after_partial_diagnostics_frame_timeout() {
     );
 
     let err = broker
-        .refresh_documents(
+        .refresh_documents_with_timeouts(
             FAKE_LANGUAGE,
             vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
-            std::time::Duration::from_millis(50),
+            bounded_fake_lsp_timeouts(),
         )
         .await
         .expect_err("partial diagnostics frame should crash the cached client");
@@ -505,10 +523,10 @@ async fn broker_drops_lsp_client_after_partial_diagnostics_frame_timeout() {
 
     std::fs::write(&script_path, fake_lsp_script()).unwrap();
     broker
-        .refresh_documents(
+        .refresh_documents_with_timeouts(
             FAKE_LANGUAGE,
             vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
-            FAKE_LSP_RECOVERY_TIMEOUT,
+            recovery_fake_lsp_timeouts(),
         )
         .await
         .unwrap();

@@ -26,6 +26,20 @@ pub struct LspRefreshTimeouts {
 }
 
 impl LspRefreshTimeouts {
+    pub fn new(
+        refresh: Duration,
+        initialize_response: Duration,
+        message_io: Duration,
+        diagnostics_quiet: Duration,
+    ) -> Self {
+        Self {
+            refresh,
+            initialize_response,
+            message_io,
+            diagnostics_quiet,
+        }
+    }
+
     pub fn from_diagnostics_quiet_window(diagnostics_quiet: Duration) -> Self {
         let message_io = diagnostics_quiet.max(MIN_MESSAGE_IO_TIMEOUT);
         let initialize_response = message_io.max(MIN_INITIALIZE_RESPONSE_TIMEOUT);
@@ -55,6 +69,17 @@ pub async fn collect_document_diagnostics(
     diagnostics_quiet_timeout: Duration,
 ) -> Result<Vec<CodeDiagnostic>> {
     let timeouts = LspRefreshTimeouts::from_diagnostics_quiet_window(diagnostics_quiet_timeout);
+    collect_document_diagnostics_with_timeouts(command, args, project_root, documents, timeouts)
+        .await
+}
+
+pub async fn collect_document_diagnostics_with_timeouts(
+    command: &str,
+    args: &[String],
+    project_root: &Path,
+    documents: Vec<LspDocument>,
+    timeouts: LspRefreshTimeouts,
+) -> Result<Vec<CodeDiagnostic>> {
     let mut client =
         StdioLspClient::start_with_timeouts(command, args, project_root, timeouts).await?;
     client

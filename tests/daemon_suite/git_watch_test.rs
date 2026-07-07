@@ -276,7 +276,7 @@ async fn fifty_commit_rebase_needs_one_sync() {
     // One coalesced diff covers all 50 commits (under the escalation limit).
     let files = cg
         .stale_files_since_commit(&base, 500)
-        .expect("50 files is within the escalation limit → one bounded diff");
+        .expect("50 files is within the escalation limit -> one bounded diff");
     assert_eq!(files.len(), 50, "one diff should surface all 50 new files");
     cg.sync_if_stale_silent(&files).await.unwrap();
     drop(cg);

@@ -1,6 +1,6 @@
 ---
 name: code-health
-description: 'Use when producing a code-health scorecard or tech-debt ranking, mapping repo/module architecture and dependency layers, bracketing a refactor with a before/after health delta, or checking project identity, index freshness, config values, TODO markers, or server runtime.'
+description: 'Use when producing code-health scorecards, architecture maps, project identity/index status, registered project lookup, cross-project or cross-repo context gathering, TODO/config/runtime checks, or before/after refactor health deltas.'
 ---
 
 # Code health, architecture & status
@@ -60,9 +60,13 @@ and the specific scans the user asked for — don't run every tool by reflex.
 2. **Storage status → `tracedecay_storage_status`** (no args): resolved
    active project store health, graph DB path, writability, branch-fallback
    warnings — instead of probing `.tracedecay` or direct SQLite checks.
-3. **Project registry → `tracedecay_project_list` /
+3. **Project registry / cross-project context → `tracedecay_project_list` /
    `tracedecay_project_search` / `tracedecay_project_context`** when the user
-   asks about another project or workspace.
+   asks about another project, sibling workspace, cross-repo context, or
+   cross-project context gathering. Confirm the target store first, then pass
+   `project_id`, `project_path`, or `project_selector` to
+   `tracedecay_context`, `tracedecay_search`, or `tracedecay_message_search`
+   instead of scanning parent directories.
 4. **Index status → `tracedecay_status`**: node/edge/file counts, DB size,
    active branch + fallback warning, tokens saved.
 5. **Config lookups → `tracedecay_config`** (`key` required, plus `path` or
@@ -92,7 +96,7 @@ and the specific scans the user asked for — don't run every tool by reflex.
 ## If tools are deferred or MCP fails
 
 - Deferred (names listed without schemas): load once with ToolSearch —
-  `select:tracedecay_health,tracedecay_gini,tracedecay_dsm,tracedecay_status,tracedecay_active_project`
+  `select:tracedecay_health,tracedecay_gini,tracedecay_dsm,tracedecay_status,tracedecay_active_project,tracedecay_project_list,tracedecay_project_search,tracedecay_project_context`
   (one batched call, add others needed) — then call normally.
 - MCP error/timeout/disconnect: same tool, same args, via shell:
   `tracedecay tool <name>` (see `tracedecay:using-the-cli`). Never

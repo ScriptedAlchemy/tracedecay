@@ -1,6 +1,6 @@
 ---
 name: managing-session-context
-description: 'Use the moment you need anything from a PAST agent session — transcript recall, scoped/time grep, lossless replay, summary-DAG drill-down, or compaction recovery — and when driving the host LCM lifecycle (preflight, compression, boundary, or repair). Reach here before trusting a compacted summary.'
+description: 'Use when you need LCM, session search, transcript search, raw past-session replay, scoped/time grep, summary-DAG drill-down, branch/worktree/commit history, workflow recovery, or compaction recovery; and when driving host LCM lifecycle preflight/compress/boundary/repair.'
 ---
 
 # Managing session context
@@ -18,12 +18,17 @@ For durable *decisions and facts* (rather than raw conversation), start with
 
 ## Retrieval ladder (read-only, start here)
 
-Climb cheapest-first; stop as soon as the question is answered.
+Climb cheapest-first; stop as soon as the question is answered. For
+cross-project or sibling-repo session search, first resolve the target project
+with `tracedecay_project_search`/`tracedecay_project_context`, then pass
+`project_id`, `project_path`, or `project_selector` to
+`tracedecay_message_search` instead of searching the active project by accident.
 
 1. **Fast full-text recall → `tracedecay_message_search`** (`query`, optional
-   `provider`, `scope`: `all`|`parents_only`|`subagents_only`, `limit`): FTS
-   over ingested transcripts; returns messages with their session ids — the
-   entry point into the ladder below.
+   `provider`, `scope`: `all`|`parents_only`|`subagents_only`, `limit`;
+   optional `project_id`/`project_path`/`project_selector` for registered
+   projects): FTS over ingested transcripts; returns messages with their
+   session ids — the entry point into the ladder below.
 2. **Scoped/filtered grep → `tracedecay_lcm_grep`** (`query`, `scope`:
    `current`|`session`|`all` — `current`/`session` require `session_id`; `role`,
    `source`, `start_time`/`end_time`, `sort`: `recency`|`relevance`|`hybrid`):
@@ -119,7 +124,7 @@ on explicit user intent.
 ## If tools are deferred or MCP fails
 
 - Deferred (names listed without schemas): load once with ToolSearch —
-  `select:tracedecay_message_search,tracedecay_lcm_grep,tracedecay_lcm_load_session,tracedecay_lcm_status,tracedecay_lcm_compress,tracedecay_sessions_for`
+  `select:tracedecay_message_search,tracedecay_lcm_grep,tracedecay_lcm_load_session,tracedecay_lcm_status,tracedecay_lcm_compress,tracedecay_sessions_for,tracedecay_workflows,tracedecay_project_search,tracedecay_project_context`
   (one batched call, add others needed) — then call normally.
 - MCP error/timeout/disconnect: same tool, same args, via shell:
   `tracedecay tool <name>` (see `tracedecay:using-the-cli`). Never
