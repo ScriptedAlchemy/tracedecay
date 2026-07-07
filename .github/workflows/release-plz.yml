@@ -58,11 +58,31 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Run release-plz release
+        id: release
         uses: release-plz/action@v0.5
+        continue-on-error: true
         with:
           command: release
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Retry release-plz release after transient GitHub API failure
+        id: release_retry
+        if: steps.release.outcome == 'failure'
+        uses: release-plz/action@v0.5
+        continue-on-error: true
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fail when release-plz release still fails
+        if: steps.release.outcome == 'failure' && steps.release_retry.outcome == 'failure'
+        run: exit 1
+
+      - name: Check release version drift
+        if: always()
+        run: scripts/check-release-drift.sh
 
   release-plz-pr:
     name: Open or update release PR
