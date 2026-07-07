@@ -1148,7 +1148,7 @@ fn def_files() -> ToolDefinition {
                 "layout": {
                     "type": "string",
                     "enum": ["flat", "grouped"],
-                    "description": "File listing layout: flat (one per line) or grouped by directory (default: grouped). Legacy format=flat/grouped is still accepted."
+                    "description": "File listing layout: flat (one per line) or grouped by directory (default: grouped)."
                 }
             }
         }),
@@ -1942,7 +1942,7 @@ fn def_dsm() -> ToolDefinition {
                 "shape": {
                     "type": "string",
                     "enum": ["stats", "clusters", "matrix"],
-                    "description": "DSM data shape: stats, clusters, or matrix (default: stats). Legacy format=stats/clusters/matrix is still accepted."
+                    "description": "DSM data shape: stats, clusters, or matrix (default: stats)."
                 },
                 "max_files": {
                     "type": "number",

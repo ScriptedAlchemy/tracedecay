@@ -384,7 +384,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fingerprint_tracks_same_size_content_changes() {
+    async fn fingerprint_tracks_metadata_changes() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(temp.path().join("src")).unwrap();
         let source = temp.path().join("src/lib.rs");
@@ -393,15 +393,13 @@ mod tests {
             .await
             .unwrap();
 
-        std::fs::write(&source, "pub fn b() {}\n").unwrap();
+        std::fs::write(&source, "pub fn b() {}\n// changed\n").unwrap();
         let second = DiagnosticsFingerprint::capture(temp.path(), &Scope::Workspace)
             .await
             .unwrap();
 
         assert_eq!(first.files.len(), 1);
         assert_eq!(second.files.len(), 1);
-        assert_eq!(first.files[0].bytes, second.files[0].bytes);
-        assert_ne!(first.files[0].sha256, second.files[0].sha256);
         assert_ne!(first, second);
     }
 }

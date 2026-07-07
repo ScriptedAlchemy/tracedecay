@@ -483,11 +483,6 @@ pub(super) async fn handle_dsm(
     let shape = args
         .get("shape")
         .and_then(|v| v.as_str())
-        .or_else(|| {
-            args.get("format")
-                .and_then(|v| v.as_str())
-                .filter(|value| matches!(*value, "stats" | "clusters" | "matrix"))
-        })
         .unwrap_or("stats");
     let max_files = args
         .get("max_files")

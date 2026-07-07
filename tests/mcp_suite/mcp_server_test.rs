@@ -228,7 +228,7 @@ async fn initialize_roots_route_registered_reader_tools_without_explicit_selecto
                 "tools/call",
                 json!({
                     "name": "tracedecay_files",
-                    "arguments": {"format": "flat"}
+                    "arguments": {"layout": "flat"}
                 }),
             ),
         ],

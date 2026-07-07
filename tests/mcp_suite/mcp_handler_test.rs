@@ -3349,21 +3349,8 @@ async fn test_files_flat_format() {
 }
 
 #[tokio::test]
-async fn test_files_legacy_flat_format_and_json_format() {
+async fn test_files_json_format_with_grouped_layout() {
     let (cg, _dir) = setup_project().await;
-    let legacy = handle_tool_call(
-        &cg,
-        "tracedecay_files",
-        json!({"format": "flat"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let legacy_text = extract_text(&legacy.value);
-    assert!(legacy_text.contains("**layout:** flat"));
-    assert!(legacy_text.contains("bytes"));
-
     let json_result = handle_tool_call(
         &cg,
         "tracedecay_files",
@@ -4494,7 +4481,7 @@ async fn test_files_grouped_format() {
     let result = handle_tool_call(
         &cg,
         "tracedecay_files",
-        json!({"format": "grouped"}),
+        json!({"layout": "grouped"}),
         None,
         None,
     )
@@ -6158,30 +6145,6 @@ async fn test_dsm_clusters() {
         text.contains("### Top Clusters"),
         "clusters section should exist, got: {}",
         text
-    );
-}
-
-#[tokio::test]
-async fn test_dsm_legacy_format_clusters_still_selects_shape() {
-    let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_dsm",
-        json!({ "format": "clusters" }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    assert!(
-        text.contains("### Top Clusters"),
-        "legacy format=clusters should still select clusters shape, got: {}",
-        text
-    );
-    assert!(
-        serde_json::from_str::<Value>(text).is_err(),
-        "legacy shape selector should render markdown by default"
     );
 }
 

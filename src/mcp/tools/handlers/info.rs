@@ -604,11 +604,6 @@ pub(super) async fn handle_files(
     let layout = args
         .get("layout")
         .and_then(|v| v.as_str())
-        .or_else(|| {
-            args.get("format")
-                .and_then(|v| v.as_str())
-                .filter(|value| matches!(*value, "flat" | "grouped"))
-        })
         .unwrap_or("grouped");
 
     let file_values: Vec<Value> = files

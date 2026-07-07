@@ -1,8 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use sha2::{Digest, Sha256};
-
 use super::Scope;
 use crate::errors::{Result, TraceDecayError};
 
@@ -16,7 +14,6 @@ pub(super) struct DiagnosticsFileFingerprint {
     pub(super) path: String,
     pub(super) bytes: u64,
     pub(super) mtime_nanos: u128,
-    pub(super) sha256: String,
 }
 
 impl DiagnosticsFingerprint {
@@ -54,18 +51,11 @@ impl DiagnosticsFingerprint {
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
             .map(|duration| duration.as_nanos())
             .unwrap_or_default();
-        let bytes = std::fs::read(path).map_err(|err| TraceDecayError::Config {
-            message: format!(
-                "failed to fingerprint diagnostics input {}: {err}",
-                path.display()
-            ),
-        })?;
         let relative = path.strip_prefix(project_root).unwrap_or(path);
         self.files.push(DiagnosticsFileFingerprint {
             path: relative.to_string_lossy().replace('\\', "/"),
             bytes: metadata.len(),
             mtime_nanos: modified,
-            sha256: hex::encode(Sha256::digest(&bytes)),
         });
         Ok(())
     }

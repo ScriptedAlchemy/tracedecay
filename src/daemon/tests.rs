@@ -481,7 +481,7 @@ async fn proxy_transport_carries_initialize_root_and_resets_on_reinitialize() {
                 "method": "tools/call",
                 "params": {
                     "name": "tracedecay_files",
-                    "arguments": {"format": "flat"}
+                    "arguments": {"layout": "flat"}
                 }
             }))
             .expect("tools/call json"),
@@ -508,7 +508,7 @@ async fn proxy_transport_carries_initialize_root_and_resets_on_reinitialize() {
                 "method": "tools/call",
                 "params": {
                     "name": "tracedecay_files",
-                    "arguments": {"format": "flat"}
+                    "arguments": {"layout": "flat"}
                 }
             }))
             .expect("post-reinitialize tools/call json"),
