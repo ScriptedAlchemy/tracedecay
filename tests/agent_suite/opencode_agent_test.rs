@@ -2,8 +2,8 @@ use std::path::Path;
 
 use tempfile::TempDir;
 use tracedecay::agents::{
-    expected_tool_perms, AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext,
-    OpenCodeIntegration,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, OpenCodeIntegration,
+    expected_tool_perms,
 };
 
 // ---------------------------------------------------------------------------

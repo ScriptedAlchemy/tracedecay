@@ -10,10 +10,10 @@ use crate::common;
 use crate::common::{
     canonical_existing_path, spawn_tracedecay_daemon, tracedecay_command_with_home,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay::storage::{
-    default_profile_project_id, write_enrollment_marker, EnrollmentMarker, StorageMode,
+    EnrollmentMarker, StorageMode, default_profile_project_id, write_enrollment_marker,
 };
 
 /// Bound for waits that depend on spawning and running the real `tracedecay`

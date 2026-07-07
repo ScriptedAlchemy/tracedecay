@@ -38,13 +38,13 @@ use std::collections::HashMap;
 use axum::extract::State;
 use axum::response::Json;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::token_count::{
-    counting_available, encoder_for_model, MessageTokens, MESSAGE_TOKENS_CTE,
+    MESSAGE_TOKENS_CTE, MessageTokens, counting_available, encoder_for_model,
 };
-use super::util::{coerce_limit, i64_field, query_i64, query_rows, str_field, JsonQuery};
-use super::{savings_pricing, token_count, DashboardState};
+use super::util::{JsonQuery, coerce_limit, i64_field, query_i64, query_rows, str_field};
+use super::{DashboardState, savings_pricing, token_count};
 use crate::accounting::metrics::parse_range;
 use crate::global_db::GlobalDb;
 

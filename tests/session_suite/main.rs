@@ -1,3 +1,4 @@
+#![allow(clippy::collapsible_if)]
 //! Consolidated session/LCM sqlite test suite.
 //!
 //! Windows CI links every integration-test binary separately, and link time

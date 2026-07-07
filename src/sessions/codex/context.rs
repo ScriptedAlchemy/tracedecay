@@ -3,11 +3,11 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use super::{session_meta_from_record, turn_context_from_record, CodexMeta};
-use crate::sessions::shared::{
-    append_location_metadata, TranscriptLocation, TranscriptLocationMetadataKeys,
-};
+use super::{CodexMeta, session_meta_from_record, turn_context_from_record};
 use crate::sessions::SessionMessageRecord;
+use crate::sessions::shared::{
+    TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,
+};
 
 const CODEX_SESSION_LOCATION_KEYS: TranscriptLocationMetadataKeys =
     TranscriptLocationMetadataKeys::new(

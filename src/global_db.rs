@@ -8,15 +8,15 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use libsql::{params, Builder, Connection, Database as LibsqlDatabase, OpenFlags, Value};
+use libsql::{Builder, Connection, Database as LibsqlDatabase, OpenFlags, Value, params};
 use serde_json::Value as JsonValue;
 
 use crate::sessions::{
+    SessionMessageRecord, SessionMessageSearchResult, SessionRecord, SessionSearchFilters,
     lcm::{
         LcmSourceRef, LcmSummaryNode, LcmSummaryNodeDraft, LcmSummaryRequest,
         LcmSummarySourceMessage, LcmSummarySourceRange,
     },
-    SessionMessageRecord, SessionMessageSearchResult, SessionRecord, SessionSearchFilters,
 };
 
 const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;
@@ -1481,11 +1481,7 @@ impl GlobalDb {
                     match_project = Some(project);
                 }
             }
-            if ambiguous {
-                None
-            } else {
-                match_project
-            }
+            if ambiguous { None } else { match_project }
         }?;
         self.resolve_project_store_for_project(&match_project).await
     }

@@ -6,7 +6,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
 use crate::types::{
-    generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility,
+    Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility, generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from Dockerfile source files using tree-sitter.

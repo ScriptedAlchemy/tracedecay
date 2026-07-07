@@ -5,13 +5,13 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::context::{
-    format_context_as_markdown, CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING,
-    CONTEXT_EXTENSION_POINTS_HEADING, CONTEXT_INDEX_COVERAGE_HINT_HEADING,
+    CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING, CONTEXT_EXTENSION_POINTS_HEADING,
+    CONTEXT_INDEX_COVERAGE_HINT_HEADING, CONTEXT_MEMORY_FEEDBACK_HINT,
     CONTEXT_MEMORY_MATCHES_HEADING, CONTEXT_RELATED_SYMBOLS_HEADING, CONTEXT_SEEN_NODE_IDS_LABEL,
-    CONTEXT_TEST_COVERAGE_HEADING,
+    CONTEXT_TEST_COVERAGE_HEADING, format_context_as_markdown,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::types::{FactSearchResult, SearchFactsRequest};
@@ -26,8 +26,8 @@ const CONTEXT_MEMORY_ANALYTICS_KEY: &str = "context_memory_analytics";
 const CONTEXT_LANE_TRUNCATED_NOTE: &str =
     "\n... lane truncated; retrieve the full response handle for omitted details.\n";
 
-use super::super::render::{self, Md};
 use super::super::ToolResult;
+use super::super::render::{self, Md};
 use super::dependency_hints;
 use super::support::{
     effective_path, filter_by_scope, require_node_id, string_array_values, unique_file_paths,
@@ -127,16 +127,42 @@ pub(super) async fn handle_search(
         .map_or(10, |v| v.min(500) as usize);
 
     let results = cg.search(query, limit).await?;
-    let results = filter_by_scope(results, scope_prefix, |r| &r.node.file_path);
+    let mut results = filter_by_scope(results, scope_prefix, |r| &r.node.file_path);
+    let mut lazy_indexed_files = Vec::new();
+    if dependency_hints::lazy_indexing_requested(&args)
+        && dependency_hints::should_check_ignored_dependency_hint(results.len(), limit)
+    {
+        lazy_indexed_files = dependency_hints::lazy_index_ignored_dependency_candidates(
+            cg,
+            query,
+            limit,
+            scope_prefix,
+        )
+        .await?;
+        if !lazy_indexed_files.is_empty() {
+            results = filter_by_scope(cg.search(query, limit).await?, scope_prefix, |r| {
+                &r.node.file_path
+            });
+        }
+    }
     let coverage_hint = cg.index_coverage_hint(results.len());
-    let ignored_dependency_hint =
-        if dependency_hints::should_check_ignored_dependency_hint(results.len(), limit) {
-            dependency_hints::ignored_dependency_hint(cg, query, limit, scope_prefix).await?
-        } else {
-            None
-        };
+    let lazy_match_visible = results
+        .iter()
+        .any(|result| lazy_indexed_files.contains(&result.node.file_path));
+    let ignored_dependency_hint = if !lazy_match_visible
+        && dependency_hints::should_check_ignored_dependency_hint(results.len(), limit)
+    {
+        dependency_hints::ignored_dependency_hint(cg, query, limit, scope_prefix).await?
+    } else {
+        None
+    };
 
-    let touched_files = unique_file_paths(results.iter().map(|r| r.node.file_path.as_str()));
+    let touched_files = unique_file_paths(
+        results
+            .iter()
+            .map(|r| r.node.file_path.as_str())
+            .chain(lazy_indexed_files.iter().map(String::as_str)),
+    );
 
     let items: Vec<Value> = results
         .iter()
@@ -155,6 +181,9 @@ pub(super) async fn handle_search(
 
     let output_value = if coverage_hint.is_some() || ignored_dependency_hint.is_some() {
         let mut value = json!({ "results": items });
+        if !lazy_indexed_files.is_empty() {
+            value["lazy_indexed_ignored_dependency_files"] = json!(lazy_indexed_files);
+        }
         if let Some(hint) = coverage_hint {
             value["index_coverage_hint"] = json!(hint);
         }
@@ -162,6 +191,11 @@ pub(super) async fn handle_search(
             value["ignored_dependency_hint"] = hint;
         }
         value
+    } else if !lazy_indexed_files.is_empty() {
+        json!({
+            "results": items,
+            "lazy_indexed_ignored_dependency_files": lazy_indexed_files,
+        })
     } else {
         json!(items)
     };
@@ -363,7 +397,7 @@ fn push_context_lane_preview(preview: &mut String, lane_key: &str, lane: &str) {
     }
     let prefix = utf8_prefix_at_or_before(lane, budget);
     preview.push_str(prefix);
-    if has_open_markdown_fence(prefix) {
+    if render::has_open_markdown_fence(prefix) {
         preview.push_str("\n```\n");
     }
     preview.push_str(CONTEXT_LANE_TRUNCATED_NOTE);
@@ -389,15 +423,6 @@ fn context_lane_budget(lane_key: &str) -> usize {
     } else {
         2_000
     }
-}
-
-fn has_open_markdown_fence(markdown: &str) -> bool {
-    markdown
-        .lines()
-        .filter(|line| line.trim_start().starts_with("```"))
-        .count()
-        % 2
-        == 1
 }
 
 fn insert_context_memory_section(
@@ -436,6 +461,9 @@ fn context_memory_section(
                 compact_memory_content(&fact.content)
             );
         }
+        section.push('\n');
+        section.push_str(CONTEXT_MEMORY_FEEDBACK_HINT);
+        section.push('\n');
         return Some(section);
     }
     if let Some(err) = memory_matches_error {
@@ -773,11 +801,31 @@ pub(super) async fn handle_find_exact_symbol(
 
     let mut nodes = cg.get_nodes_by_name(name).await?;
     nodes = filter_by_scope(nodes, scope_prefix, |n| &n.file_path);
+    let mut lazy_indexed_files = Vec::new();
+    if nodes.is_empty() && dependency_hints::lazy_indexing_requested(&args) {
+        lazy_indexed_files = dependency_hints::lazy_index_ignored_dependency_candidates(
+            cg,
+            name,
+            limit,
+            scope_prefix,
+        )
+        .await?;
+        if !lazy_indexed_files.is_empty() {
+            nodes = filter_by_scope(cg.get_nodes_by_name(name).await?, scope_prefix, |n| {
+                &n.file_path
+            });
+        }
+    }
     if nodes.len() > limit {
         nodes.truncate(limit);
     }
 
-    let touched_files = unique_file_paths(nodes.iter().map(|n| n.file_path.as_str()));
+    let touched_files = unique_file_paths(
+        nodes
+            .iter()
+            .map(|n| n.file_path.as_str())
+            .chain(lazy_indexed_files.iter().map(String::as_str)),
+    );
 
     let items: Vec<Value> = nodes
         .iter()
@@ -798,6 +846,7 @@ pub(super) async fn handle_find_exact_symbol(
         "name": name,
         "count": items.len(),
         "matches": items,
+        "lazy_indexed_ignored_dependency_files": lazy_indexed_files,
     });
     Ok(rendered_tool_result(
         cg,
@@ -1738,6 +1787,7 @@ mod tests {
         assert!(section.contains(&content));
         assert!(section.contains("tail-marker"));
         assert!(!section.contains("..."));
+        assert!(section.contains("tracedecay_fact_feedback"));
     }
 
     #[test]

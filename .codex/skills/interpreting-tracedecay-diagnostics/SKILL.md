@@ -37,6 +37,17 @@ pyright output.
 - A mapped test target is a recommendation. Run it, then broaden only if the
   changed symbol is shared or public.
 
+## Helper script
+
+[scripts/diagnose-summary.sh](scripts/diagnose-summary.sh) runs the mapped-owner
+workflow in one step. Pipe compiler stderr into it
+(`cargo check 2>&1 | scripts/diagnose-summary.sh`) to map each diagnostic to its
+enclosing symbol with callers attached; run it with no stdin to invoke
+`tracedecay tool diagnostics` directly (the first cold call can take minutes).
+It reports how many diagnostics were recognized, the mapped owners to fix, and
+how many went UNMAPPED — treat a high unmapped count as a parse/mapping-coverage
+gap, not an unimportant error.
+
 ## Deliverable
 
 Report symptom, mapped owner, root cause, patch, and verification command. If

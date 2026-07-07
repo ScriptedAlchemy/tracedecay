@@ -1,11 +1,11 @@
 use tracedecay::automation::managed_skills::{
-    create_managed_skill_draft, default_managed_skill_targets, ManagedSkillDraft,
-    ManagedSkillProvenance, ManagedSkillSource,
+    ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, create_managed_skill_draft,
+    default_managed_skill_targets,
 };
 use tracedecay::automation::skill_usage::{
-    ingest_analytics_events, record_skill_usage, record_skill_usage_event,
-    skill_improvement_recommendations, stale_skill_recommendations, summarize_skill_usage,
-    SkillUsageAction, SkillUsageEvent,
+    SkillUsageAction, SkillUsageEvent, ingest_analytics_events, record_skill_usage,
+    record_skill_usage_event, skill_improvement_recommendations, stale_skill_recommendations,
+    summarize_skill_usage,
 };
 use tracedecay::global_db::AnalyticsEventRecord;
 
@@ -406,10 +406,12 @@ async fn stale_scoring_explains_archive_candidates_and_exclusions() {
     assert!(stale.stale);
     assert_eq!(stale.recommendation, "archive_review");
     assert!(stale.reason.contains("no recorded uses or patches"));
-    assert!(stale
-        .evidence
-        .iter()
-        .any(|entry| entry == "provenance_source=automation_run"));
+    assert!(
+        stale
+            .evidence
+            .iter()
+            .any(|entry| entry == "provenance_source=automation_run")
+    );
 
     let pinned = recommendations
         .iter()
@@ -469,8 +471,10 @@ async fn repeated_skill_patches_recommend_improvement_review() {
     assert_eq!(recommendation.recommendation, "patch_review");
     assert_eq!(recommendation.priority, "medium");
     assert!(recommendation.reason.contains("repeated patches"));
-    assert!(recommendation
-        .evidence
-        .iter()
-        .any(|entry| entry == "patches=2"));
+    assert!(
+        recommendation
+            .evidence
+            .iter()
+            .any(|entry| entry == "patches=2")
+    );
 }

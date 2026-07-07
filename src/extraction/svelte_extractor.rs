@@ -13,8 +13,8 @@
 //! * `<script module>` — module-level script (Svelte 5)
 //! * `<script context="module">` — module-level script (Svelte 4)
 
-use crate::extraction::typescript_extractor::TypeScriptExtractor;
 use crate::extraction::LanguageExtractor;
+use crate::extraction::typescript_extractor::TypeScriptExtractor;
 use crate::types::ExtractionResult;
 
 /// Extracts code graph nodes and edges from Svelte single-file components.

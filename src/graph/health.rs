@@ -4,6 +4,8 @@
 //! Tarjan's SCC-based acyclicity scoring, dependency depth analysis,
 //! modularity estimation, and composite health scoring.
 
+pub mod test_risk;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::BuildHasher;
 
@@ -407,7 +409,7 @@ pub fn modularity_score<S1: BuildHasher, S2: BuildHasher>(
     // Identify hub nodes
     let hubs: HashSet<&str> = connectivity
         .iter()
-        .filter(|(_, &v)| v as f64 > threshold)
+        .filter(|&(_, &v)| v as f64 > threshold)
         .map(|(&k, _)| k)
         .collect();
 

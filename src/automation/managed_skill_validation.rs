@@ -5,11 +5,11 @@ use crate::errors::{Result, TraceDecayError};
 
 use super::managed_skill_format::target_key;
 use super::managed_skill_model::{
+    MAX_MANAGED_SKILL_BODY_BYTES, MAX_MANAGED_SUPPORT_FILE_BYTES, MAX_MANAGED_SUPPORT_FILES,
     ManagedSkill, ManagedSkillPendingUpdate, ManagedSkillState, ManagedSkillUpdate,
-    ManagedSupportFile, SkillInstallTarget, MAX_MANAGED_SKILL_BODY_BYTES,
-    MAX_MANAGED_SUPPORT_FILES, MAX_MANAGED_SUPPORT_FILE_BYTES,
+    ManagedSupportFile, SkillInstallTarget,
 };
-use super::skill_frontmatter::{parse_skill_frontmatter, SkillFrontmatterValue};
+use super::skill_frontmatter::{SkillFrontmatterValue, parse_skill_frontmatter};
 
 const ALLOWED_SUPPORT_ROOTS: &[&str] = &["references", "templates", "scripts", "assets"];
 pub(crate) const MAX_NATIVE_SKILL_NAME_CHARS: usize = 64;
@@ -102,7 +102,7 @@ fn validate_relative_path(path: &Path) -> Result<()> {
                 return Err(config_error(format!(
                     "unsafe support path '{}'",
                     path.display()
-                )))
+                )));
             }
         }
     }

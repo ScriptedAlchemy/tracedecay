@@ -743,20 +743,20 @@ There are two optional network calls.
 
 ### Worldwide token counter
 
-TraceDecay tracks how many tokens it has saved you. During `sync` and `status`, it uploads that count (a single number like `4823`) to an anonymous worldwide counter. No code, file names, project names, or identifying information is sent. The Cloudflare Worker also logs the country derived from your IP for aggregate geographic statistics — your actual IP is not stored.
+TraceDecay tracks how many tokens it has saved you locally. If you opt in, `sync` and `status` upload that count (a single number like `4823`) to an anonymous worldwide counter. No code, file names, project names, or identifying information is sent. The Cloudflare Worker also logs the country derived from your IP for aggregate geographic statistics — your actual IP is not stored.
 
-This powers the "Worldwide" counter shown in `tracedecay status`.
+This powers the "Worldwide" counter shown in `tracedecay status` only when the counter is enabled.
 
-**To opt out:**
-
-```bash
-tracedecay disable-upload-counter
-```
-
-When disabled, tracedecay never uploads your count but still fetches and displays the worldwide total. Re-enable at any time:
+**To opt in:**
 
 ```bash
 tracedecay enable-upload-counter
+```
+
+Disable it again at any time:
+
+```bash
+tracedecay disable-upload-counter
 ```
 
 ### Version check
@@ -836,7 +836,7 @@ Created in your home directory. Contains:
 The `config.toml` is plain TOML and fully transparent:
 
 ```toml
-upload_enabled = true       # set to false to stop uploading
+upload_enabled = false      # set to true to opt in to counter upload/read
 pending_upload = 4823       # tokens waiting to be uploaded
 last_upload_at = 1711375200 # last successful upload timestamp
 last_worldwide_total = 1000000

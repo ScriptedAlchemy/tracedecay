@@ -1,8 +1,8 @@
-use libsql::{params, Connection};
+use libsql::{Connection, params};
 
 use super::{
-    normalize_worktree, CommitSessionRecord, GitCorrelationError, SpanObservation, SpanOverlapKind,
-    SpanSource, DEFAULT_SPAN_MERGE_GAP_SECS,
+    CommitSessionRecord, DEFAULT_SPAN_MERGE_GAP_SECS, GitCorrelationError, SpanObservation,
+    SpanOverlapKind, SpanSource, normalize_worktree,
 };
 
 // Historical backfill for sessions that predate live span recording.

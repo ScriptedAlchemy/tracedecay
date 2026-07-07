@@ -1,28 +1,28 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::apply_policy::MemoryApplyPolicy;
 use super::artifacts::sha256_json;
 use super::backend::{
-    extract_json_object_prefix, AgentTaskBackend, AgentTaskKind, AgentTaskRequest,
-    AgentTaskResponse,
+    AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
+    extract_json_object_prefix,
 };
 use super::config::AutomationConfig;
 use super::fact_proposals::{
-    apply_fact_proposal, record_session_fact_proposals, FactProposalRecord, FactProposalState,
+    FactProposalRecord, FactProposalState, apply_fact_proposal, record_session_fact_proposals,
 };
 use super::lifecycle::{
-    failed_backend_fallback_report, generated_run_id, task_run_gate, AgentRunFinalizer,
-    AgentTaskRunContext, BackendTaskRun, SchedulerGate,
+    AgentRunFinalizer, AgentTaskRunContext, BackendTaskRun, SchedulerGate,
+    failed_backend_fallback_report, generated_run_id, task_run_gate,
 };
 use super::managed_skills::list_managed_skills;
 use super::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
 use super::session_reflector::validate_fact_proposals;
 use super::skill_usage::{
-    ingest_project_analytics_events, skill_overlap_candidates, stale_skill_recommendations,
-    summarize_skill_usage, DEFAULT_SKILL_OVERLAP_LIMIT,
+    DEFAULT_SKILL_OVERLAP_LIMIT, ingest_project_analytics_events, skill_overlap_candidates,
+    stale_skill_recommendations, summarize_skill_usage,
 };
 use super::skill_writer::{
     activation_policy as skill_writer_activation_policy, skill_improvement_recommendations,
@@ -30,19 +30,19 @@ use super::skill_writer::{
     validate_and_apply_skill_proposals,
 };
 use super::text::truncate_chars_for_prompt;
-use crate::analytics::{underused_tool_family_signals, ToolUsageObservation};
+use crate::analytics::{ToolUsageObservation, underused_tool_family_signals};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
 use crate::sessions::cursor::{
-    resolve_hermes_profile_session_db_readonly, HermesProfileDbReadOnly,
+    HermesProfileDbReadOnly, resolve_hermes_profile_session_db_readonly,
 };
 use crate::sessions::lcm::{
     LcmGrepRequest, LcmGrepSort, LcmScope, LcmSessionReplayRequest, LcmSessionReplaySlice,
 };
-use crate::tracedecay::{current_timestamp, TraceDecay};
+use crate::tracedecay::{TraceDecay, current_timestamp};
 
 pub use super::memory_curator::{
-    run_memory_curator_with_backend, MemoryCuratorAutomationOptions, MemoryCuratorAutomationRun,
+    MemoryCuratorAutomationOptions, MemoryCuratorAutomationRun, run_memory_curator_with_backend,
 };
 
 const SKILL_ANALYTICS_IMPORT_LIMIT: usize = 2_000;

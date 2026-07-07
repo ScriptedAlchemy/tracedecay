@@ -3,9 +3,9 @@ use std::fs;
 use tempfile::tempdir;
 
 use tracedecay::automation::config::{
-    effective_config, load_project_config, merge_project_config, save_project_config,
     AutomationBackend, AutomationConfig, AutomationConfigPatch, AutomationHostMode,
-    AutomationTaskConfig, AutomationTaskPatch, AutomationTaskSet,
+    AutomationTaskConfig, AutomationTaskPatch, AutomationTaskSet, effective_config,
+    load_project_config, merge_project_config, save_project_config,
 };
 use tracedecay::user_config::UserConfig;
 

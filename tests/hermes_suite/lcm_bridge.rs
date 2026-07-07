@@ -6,7 +6,7 @@ use tempfile::TempDir;
 use tracedecay::agents::{AgentIntegration, HermesIntegration, InstallContext};
 use tracedecay::sessions::lcm::{LcmCompressionRequest, LcmSummarizerMode};
 
-use crate::common::{write_pyyaml_shim, PYYAML_FALLBACK_PRELUDE};
+use crate::common::{PYYAML_FALLBACK_PRELUDE, write_pyyaml_shim};
 
 // Compiles the generated plugin sources with py_compile (argv[1] is the
 // plugin dir). Only `generated_python_sources_compile` runs this: loading the

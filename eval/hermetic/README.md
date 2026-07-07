@@ -182,3 +182,41 @@ facts recorded in tracedecay memory:
 
 Because every run is hermetic, differences between two runs are attributable to
 the code change (plus model noise), not to drift in the user's real environment.
+
+## Fact-store adoption scorecard
+
+The `eval/hermetic/corpora/fact-store-adoption.jsonl` corpus measures whether a
+real agent actually **uses project memory** the way the tools intend: whether it
+**stores** durable facts (`tracedecay_fact_store`), **recalls** them when they
+would help, and — the headline metric — gives **feedback** on the facts it used
+(`tracedecay_fact_feedback`). The write/recall/feedback loop is the point:
+storing a fact nobody ever reinforces or corrects decays in value, so the
+feedback bucket is the truest signal of adoption.
+
+`scorecard.py` rolls a run's `results.jsonl` into an **adoption %** per bucket
+(write / recall / feedback) plus an overall figure, so a single number tells you
+how close the agent is to the intended loop.
+
+Run recipe (adapted from the reusable-env examples above):
+
+```bash
+ENV=$(eval/hermetic/run.sh setup --agent claude --debug)
+eval/hermetic/run.sh index --env-dir "$ENV" --project /path/to/repo
+eval/hermetic/run.sh run --agent claude --env-dir "$ENV" \
+  --corpus eval/hermetic/corpora/fact-store-adoption.jsonl --model sonnet
+python3 eval/hermetic/scorecard.py "$ENV"/results/results.jsonl \
+  --corpus eval/hermetic/corpora/fact-store-adoption.jsonl
+eval/hermetic/run.sh teardown --env-dir "$ENV"
+```
+
+This is **not CI**. It runs deliberately, hits the real Anthropic API, and
+**consumes model credits** — reuse an env dir with `--keep` rather than
+re-setting up per run. A **low feedback-adoption %** is the *expected* baseline
+today; that gap is the measurement, not a bug. It quantifies exactly what the
+recent context-lane, tool-description, and memory-digest changes aim to close,
+so the same corpus doubles as a **before/after** measure of those changes.
+
+Store the baseline the same way the post-merge re-eval protocol above prescribes:
+record the per-bucket and overall adoption % as a durable fact via
+`tracedecay_fact_store`, so a later rerun makes any regression — or the intended
+improvement — visible against a fixed number.

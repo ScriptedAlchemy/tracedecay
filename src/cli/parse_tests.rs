@@ -5,7 +5,7 @@ use super::{
     AutomationRunsAction, AutomationSkillsAction, AutomationSkillsInstallTarget, BranchAction, Cli,
     Commands, DaemonAction, LspAction, MemoryAction, MigrateAction, SessionsAction,
 };
-use clap::{error::ErrorKind, Command, CommandFactory, Parser};
+use clap::{Command, CommandFactory, Parser, error::ErrorKind};
 
 fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| value.to_string()).collect()

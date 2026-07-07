@@ -93,10 +93,12 @@ class C {
     let extractor = TypeScriptExtractor;
     let result = extractor.extract("anonymous-generator-method.ts", source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Method && n.name == "<anonymous>"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Method && n.name == "<anonymous>")
+    );
 }
 
 #[test]
@@ -108,10 +110,12 @@ class C {}
     let extractor = TypeScriptExtractor;
     let result = extractor.extract("empty-decorator.ts", source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Class && n.name == "C"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Class && n.name == "C")
+    );
 }
 
 #[test]

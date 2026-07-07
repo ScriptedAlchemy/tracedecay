@@ -384,10 +384,12 @@ fn migration_removes_config_managed_but_keeps_foreign_entries() {
             .unwrap();
     let stop = settings["hooks"]["Stop"].as_array().unwrap();
     assert_eq!(stop.len(), 1, "only the foreign hook should survive");
-    assert!(stop[0]["hooks"][0]["command"]
-        .as_str()
-        .unwrap()
-        .contains("other-tool"));
+    assert!(
+        stop[0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("other-tool")
+    );
 
     assert!(
         !claude_dir.join("agents/code-explorer.md").exists(),
@@ -495,10 +497,12 @@ fn uninstall_removes_plugin_and_marketplace() {
         &std::fs::read_to_string(home.path().join(".claude/settings.json")).unwrap(),
     )
     .unwrap();
-    assert!(settings
-        .get("enabledPlugins")
-        .and_then(|p| p.get(PLUGIN_IDENTIFIER))
-        .is_none());
+    assert!(
+        settings
+            .get("enabledPlugins")
+            .and_then(|p| p.get(PLUGIN_IDENTIFIER))
+            .is_none()
+    );
 }
 
 #[test]

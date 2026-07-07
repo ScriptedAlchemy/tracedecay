@@ -35,7 +35,7 @@ fn vibe_prompt_path(home: &Path) -> std::path::PathBuf {
     vibe_home(home).join("prompts/cli.md")
 }
 
-use super::prompt_rules::{PromptRulesOptions, PROMPT_RULE_MARKER};
+use super::prompt_rules::{PROMPT_RULE_MARKER, PromptRulesOptions};
 
 /// The TOML marker that identifies a tracedecay MCP server entry.
 const TOML_MARKER: &str = "name = \"tracedecay\"";

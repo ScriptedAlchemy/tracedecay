@@ -1,3 +1,4 @@
+#![allow(clippy::collapsible_if)]
 //! Consolidated in-process test suite for graph, types, display, context,
 //! resolution, bench, cloud, annotation-helper, and complexity tests.
 //!

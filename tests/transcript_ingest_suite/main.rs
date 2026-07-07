@@ -1,3 +1,4 @@
+#![allow(clippy::collapsible_if)]
 //! Consolidated transcript-ingest integration suite.
 //!
 //! One test binary for every per-agent transcript ingestion source (Claude,

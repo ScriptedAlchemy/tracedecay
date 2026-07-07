@@ -3,16 +3,16 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
 use crate::sessions::git_correlation::GitScopeFilter;
-use crate::sessions::workflow_index::{WorkflowIndexError, MAX_WORKFLOW_LIMIT};
+use crate::sessions::workflow_index::{MAX_WORKFLOW_LIMIT, WorkflowIndexError};
 use crate::tracedecay::TraceDecay;
 
-use super::super::render::{self, Md};
 use super::super::ToolResult;
+use super::super::render::{self, Md};
 use super::support::{argument_error, string_arg, tool_json_with_md};
 
 const DEFAULT_WORKFLOWS_LIMIT: usize = 20;

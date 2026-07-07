@@ -37,7 +37,9 @@ pub struct EnvVarGuard {
 impl EnvVarGuard {
     pub fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
         let previous = std::env::var_os(key);
-        std::env::set_var(key, value);
+        unsafe {
+            std::env::set_var(key, value);
+        }
         Self { key, previous }
     }
 
@@ -45,17 +47,21 @@ impl EnvVarGuard {
     /// no-override path.
     pub fn unset(key: &'static str) -> Self {
         let previous = std::env::var_os(key);
-        std::env::remove_var(key);
+        unsafe {
+            std::env::remove_var(key);
+        }
         Self { key, previous }
     }
 }
 
 impl Drop for EnvVarGuard {
     fn drop(&mut self) {
-        if let Some(previous) = self.previous.take() {
-            std::env::set_var(self.key, previous);
-        } else {
-            std::env::remove_var(self.key);
+        unsafe {
+            if let Some(previous) = self.previous.take() {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
         }
     }
 }

@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::backend::AgentTaskKind;
 use super::config::AutomationConfig;
@@ -137,12 +137,13 @@ impl MemoryApplyPolicy {
     }
 
     pub(crate) fn to_json(self) -> Value {
+        let decision = self.decision();
         json!({
-            "decision": self.decision().as_str(),
+            "decision": decision.as_str(),
             "auto_apply_memory_ops": self.auto_apply_memory_ops,
             "require_dashboard_approval": self.require_dashboard_approval,
             "approval_required": self.accepted_count > 0
-                && self.decision() != MemoryApplyDecision::AutoApplyAllowed,
+                && decision != MemoryApplyDecision::AutoApplyAllowed,
             "autonomous_memory_apply": self.mutates_store,
             "mutates_store": self.mutates_store,
         })
@@ -241,7 +242,7 @@ fn array_len(value: &Value) -> Option<usize> {
     value.as_array().map(Vec::len)
 }
 
-fn value_as_usize(value: &Value) -> Option<usize> {
+pub(super) fn value_as_usize(value: &Value) -> Option<usize> {
     value
         .as_u64()
         .and_then(|number| usize::try_from(number).ok())

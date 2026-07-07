@@ -1,15 +1,15 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::super::managed_skills::{
-    discard_pending_managed_skill_update, stage_managed_skill_archive, stage_managed_skill_update,
     ManagedSkill, ManagedSkillSource, ManagedSkillState, ManagedSkillUpdate,
+    discard_pending_managed_skill_update, stage_managed_skill_archive, stage_managed_skill_update,
 };
 use super::{
-    optional_proposal_string, optional_proposal_targets, required_proposal_string,
-    support_files_from_proposal, SkillProposalAction,
+    SkillProposalAction, optional_proposal_string, optional_proposal_targets,
+    required_proposal_string, support_files_from_proposal,
 };
 use crate::errors::Result;
 
@@ -249,8 +249,8 @@ pub(super) fn staged_consolidation_record(
 #[cfg(test)]
 mod tests {
     use super::super::super::managed_skills::{
-        default_managed_skill_targets, ManagedSkillDraft, ManagedSkillPendingUpdate,
-        ManagedSkillProvenance,
+        ManagedSkillDraft, ManagedSkillPendingUpdate, ManagedSkillProvenance,
+        default_managed_skill_targets,
     };
     use super::super::skill_proposal_action;
     use super::*;

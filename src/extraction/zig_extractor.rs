@@ -5,10 +5,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
-use crate::extraction::complexity::{count_complexity, ZIG_COMPLEXITY};
+use crate::extraction::complexity::{ZIG_COMPLEXITY, count_complexity};
 use crate::extraction::traversal::find_direct_child_by_kind;
 use crate::types::{
-    generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
+    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from Zig source files using tree-sitter.
@@ -312,11 +312,7 @@ impl ZigExtractor {
         let string_node = find_direct_child_by_kind(args, "string")?;
         let content = find_direct_child_by_kind(string_node, "string_content")?;
         let text = state.node_text(content);
-        if text.is_empty() {
-            None
-        } else {
-            Some(text)
-        }
+        if text.is_empty() { None } else { Some(text) }
     }
 
     // ----------------------------------
@@ -820,11 +816,7 @@ impl ZigExtractor {
         let first_line = text.lines().next()?.trim().to_string();
         // Strip the opening brace if it's on the same line.
         let sig = first_line.trim_end_matches('{').trim().to_string();
-        if sig.is_empty() {
-            None
-        } else {
-            Some(sig)
-        }
+        if sig.is_empty() { None } else { Some(sig) }
     }
 
     /// Extract the first line as signature for type declarations.

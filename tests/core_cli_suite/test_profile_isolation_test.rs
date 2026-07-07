@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tracedecay::config::{user_data_dir, USER_DATA_DIR_ENV};
+use tracedecay::config::{USER_DATA_DIR_ENV, user_data_dir};
 
 fn canonical(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())

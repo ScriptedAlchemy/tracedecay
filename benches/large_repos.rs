@@ -1,3 +1,4 @@
+#![allow(clippy::collapsible_if)]
 //! Criterion benchmark: tracedecay MCP tools against large, real-world repos.
 //!
 //! What it does:
@@ -32,15 +33,15 @@ mod repos;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use serde_json::Value;
 use tokio::runtime::Runtime;
 
 use tracedecay::mcp::handle_tool_call;
 use tracedecay::tracedecay::TraceDecay;
 
-use queries::{build_context, build_queries, Query, QueryKind, ToolGroup, SCRATCH_DIR};
-use repos::{ensure_cloned, repos_root, restore_repo, selected_repos, Repo};
+use queries::{Query, QueryKind, SCRATCH_DIR, ToolGroup, build_context, build_queries};
+use repos::{Repo, ensure_cloned, repos_root, restore_repo, selected_repos};
 
 /// Per-repo state we hand to criterion: indexed graph + frozen query catalog.
 struct RepoBench {

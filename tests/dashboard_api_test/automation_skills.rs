@@ -467,12 +467,16 @@ fn managed_skill_dashboard_api_persists_and_updates_lifecycle() {
         let (status, created) = post_json_body(&agent, &skills_url, &draft);
         assert_eq!(status, 200);
         assert_eq!(created["skill"]["metadata"]["state"], "pending_approval");
-        assert!(created["skill"]["metadata"]["created_at"]
-            .as_i64()
-            .is_some_and(|value| value > 0));
-        assert!(created["skill"]["metadata"]["updated_at"]
-            .as_i64()
-            .is_some_and(|value| value > 0));
+        assert!(
+            created["skill"]["metadata"]["created_at"]
+                .as_i64()
+                .is_some_and(|value| value > 0)
+        );
+        assert!(
+            created["skill"]["metadata"]["updated_at"]
+                .as_i64()
+                .is_some_and(|value| value > 0)
+        );
         assert!(
             profile_root
                 .join("agent_managed/skills/repo-hygiene/SKILL.md")

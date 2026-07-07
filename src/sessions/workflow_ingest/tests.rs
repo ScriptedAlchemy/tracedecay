@@ -212,11 +212,12 @@ fn dir_only_run_from_disk_yields_running_and_roster() {
     }
     let a1 = agents.iter().find(|a| a.agent_id == "a1").unwrap();
     assert_eq!(a1.tokens, 10);
-    assert!(a1
-        .transcript_path
-        .as_deref()
-        .unwrap()
-        .ends_with("agent-a1.jsonl"));
+    assert!(
+        a1.transcript_path
+            .as_deref()
+            .unwrap()
+            .ends_with("agent-a1.jsonl")
+    );
     assert_eq!(a1.agent_session_id.as_deref(), Some("s"));
     // a3 has no file: no transcript path, zero tokens.
     let a3 = agents.iter().find(|a| a.agent_id == "a3").unwrap();
@@ -332,11 +333,13 @@ async fn sweep_ingests_runs_scoped_to_project_and_is_incremental() {
         .find(|a| a.agent_id == "a17141dbe5a308242")
         .unwrap();
     assert_eq!(enriched.tokens, 140);
-    assert!(enriched
-        .transcript_path
-        .as_deref()
-        .unwrap()
-        .ends_with("agent-a17141dbe5a308242.jsonl"));
+    assert!(
+        enriched
+            .transcript_path
+            .as_deref()
+            .unwrap()
+            .ends_with("agent-a17141dbe5a308242.jsonl")
+    );
 
     let orphan = db.workflow_run_for_id("wf_orphan").await.unwrap().unwrap();
     assert_eq!(orphan.status, WorkflowStatus::Running);
@@ -363,11 +366,12 @@ async fn sweep_skips_runs_owned_by_a_different_project() {
 
     let stats = ingest_workflow_runs_from(&db, &target_root, &projects).await;
     assert_eq!(stats, WorkflowIngestStats::default());
-    assert!(db
-        .workflow_runs_for_session("sess-x", 10)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        db.workflow_runs_for_session("sess-x", 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// Force `path`'s mtime to a fixed unix-second value, so a fixture's
@@ -428,11 +432,12 @@ async fn other_project_run_does_not_advance_watermark() {
     // the out-of-scope (other) runs are not.
     let stats = ingest_workflow_runs_from(&db, &target_root, &projects).await;
     assert_eq!(stats.runs_ingested, 2); // target's wf_meta + wf_orphan
-    assert!(db
-        .workflow_runs_for_session("sess-other", 10)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        db.workflow_runs_for_session("sess-other", 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
     // The persisted watermark must reflect only in-scope runs, so it stays
     // well below the out-of-project run's far-future mtime. On the buggy

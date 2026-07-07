@@ -72,12 +72,16 @@ async fn vibe_messages_populate_searchable_session_messages() {
         )
         .await;
     assert_eq!(results.len(), 2);
-    assert!(results
-        .iter()
-        .any(|hit| hit.message.tool_names.as_deref() == Some("read_file")));
-    assert!(results
-        .iter()
-        .all(|hit| hit.message.model.as_deref() == Some("mistral-medium-3.5")));
+    assert!(
+        results
+            .iter()
+            .any(|hit| hit.message.tool_names.as_deref() == Some("read_file"))
+    );
+    assert!(
+        results
+            .iter()
+            .all(|hit| hit.message.model.as_deref() == Some("mistral-medium-3.5"))
+    );
 
     let assistant = results
         .iter()

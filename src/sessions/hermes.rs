@@ -33,9 +33,9 @@ use serde_json::{Map, Value};
 use crate::agents::hermes::read_config_pinned_project_root;
 use crate::global_db::{GlobalDb, ParseOffset, TranscriptBatch};
 use crate::sessions::shared::{
+    StoredCursor, TranscriptIngestStats, TranscriptLocation, TranscriptLocationMetadataKeys,
     append_location_metadata, content_storage_text_and_tools, path_belongs_to_project, paths_equal,
-    preview_title, read_new_rows, title_from_messages, StoredCursor, TranscriptIngestStats,
-    TranscriptLocation, TranscriptLocationMetadataKeys,
+    preview_title, read_new_rows, title_from_messages,
 };
 use crate::sessions::{SessionMessageRecord, SessionRecord};
 

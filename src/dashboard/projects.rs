@@ -2,15 +2,15 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use axum::Router;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
-use axum::Router;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::RwLock;
 
-use super::{build_selected_project_state, config_error, DashboardState};
+use super::{DashboardState, build_selected_project_state, config_error};
 use crate::errors::Result;
 use crate::global_db::{GlobalDb, ProjectRegistryContext};
 use crate::tracedecay::TraceDecay;

@@ -3,7 +3,7 @@ use tracedecay::user_config::UserConfig;
 #[test]
 fn defaults_when_no_file() {
     let config = UserConfig::default();
-    assert!(config.upload_enabled);
+    assert!(!config.upload_enabled);
     assert_eq!(config.pending_upload, 0);
     assert_eq!(config.last_upload_at, 0);
     assert_eq!(config.last_worldwide_total, 0);

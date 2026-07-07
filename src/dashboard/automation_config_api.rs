@@ -1,16 +1,16 @@
 //! Dashboard endpoints for project/profile self-improvement automation config.
 
+use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::util::{http_detail, JsonError};
 use super::DashboardState;
+use super::util::{JsonError, http_detail};
 use crate::automation::backend;
 use crate::automation::config::{
-    clear_project_config, effective_config, load_project_config, merge_project_config,
-    save_project_config, AutomationBackend, AutomationConfig, AutomationConfigPatch,
+    AutomationBackend, AutomationConfig, AutomationConfigPatch, clear_project_config,
+    effective_config, load_project_config, merge_project_config, save_project_config,
 };
 use crate::user_config::UserConfig;
 

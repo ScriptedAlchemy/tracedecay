@@ -28,7 +28,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::global_db::{CodeProjectRecord, GlobalDb};
-use crate::migrate::registry::{code_project_root_exists, stale_code_projects, StaleRootScope};
+use crate::migrate::registry::{StaleRootScope, code_project_root_exists, stale_code_projects};
 use crate::storage::{BRANCH_META_FILENAME, BRANCH_META_QUARANTINE_PREFIX};
 
 /// A corrupt `branch-meta.json` that was renamed out of the way.

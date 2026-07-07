@@ -3,17 +3,17 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 
-use libsql::{params, Connection};
+use libsql::{Connection, params};
 
 use super::diff::{
-    classify_add_diff, combined_similarity, normalized_equivalent, vector_similarity,
-    NEAR_DUPLICATE_THRESHOLD,
+    NEAR_DUPLICATE_THRESHOLD, classify_add_diff, combined_similarity, normalized_equivalent,
+    vector_similarity,
 };
 use super::encoding::HolographicEncoder;
 use super::entities::{extract_entities, normalize_entity};
 use super::hygiene::detect_secret_like;
 use super::similarity::content_tokens;
-use super::trust::{apply_feedback, clamp_trust, DEFAULT_MIN_TRUST};
+use super::trust::{DEFAULT_MIN_TRUST, apply_feedback, clamp_trust};
 use super::types::{
     AddFactDiff, AddFactDiffKind, AddFactOutcome, AddFactRequest, FactRecord, FeedbackAction,
     FeedbackRequest, FeedbackResult, MemoryCategory, TrustHistoryEntry, UpdateFactRequest,

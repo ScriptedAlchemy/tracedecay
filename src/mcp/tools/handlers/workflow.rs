@@ -9,17 +9,17 @@ use std::path::Path;
 use std::process::Output;
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::diagnose::{parse_cargo_output, Severity};
+use crate::diagnose::{Severity, parse_cargo_output};
 use crate::errors::{Result, TraceDecayError};
-use crate::tracedecay::{is_test_file, TraceDecay};
+use crate::tracedecay::{TraceDecay, is_test_file};
 use crate::types::Node;
 
-use super::super::render;
 use super::super::ToolResult;
+use super::super::render;
 use super::support::unique_file_paths;
 
 /// Maximum tests we'll allow `cargo test` to receive in one call. A loose

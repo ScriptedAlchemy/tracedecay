@@ -6,12 +6,12 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::errors::{Result, TraceDecayError};
@@ -624,11 +624,7 @@ fn response_handle_cache_snapshot(project_root: &Path) -> ResponseHandleCacheSna
 }
 
 fn timestamp_json(value: i64) -> Value {
-    if value > 0 {
-        json!(value)
-    } else {
-        Value::Null
-    }
+    if value > 0 { json!(value) } else { Value::Null }
 }
 
 fn duration_micros_u64(duration: Duration) -> u64 {

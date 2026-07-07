@@ -1,4 +1,4 @@
-use libsql::{params::IntoParams, Connection, Value};
+use libsql::{Connection, Value, params::IntoParams};
 use sha2::{Digest, Sha256};
 
 use super::LcmError;

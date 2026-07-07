@@ -40,7 +40,7 @@ pub(crate) fn load_pending_skill_writes(
             return Err(config_error(format!(
                 "failed to read Hermes pending skills '{}': {e}",
                 pending_dir.display()
-            )))
+            )));
         }
     };
     let mut pending = Vec::new();

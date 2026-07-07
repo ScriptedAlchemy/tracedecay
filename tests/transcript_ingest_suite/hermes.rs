@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use tempfile::TempDir;
+use tracedecay::sessions::SessionRecord;
 use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::sessions::hermes::ingest_homes;
 use tracedecay::sessions::lcm::LcmPreflightRequest;
-use tracedecay::sessions::SessionRecord;
 
 use crate::support::{assert_metadata_path_eq, create_git_repo_with_linked_worktree};
 
@@ -211,13 +211,17 @@ async fn hermes_state_db_populates_projection_for_pinned_project() {
         .await;
     assert!(results.iter().any(|hit| hit.message.role == "user"));
     assert!(results.iter().any(|hit| hit.message.role == "assistant"));
-    assert!(results
-        .iter()
-        .all(|hit| hit.message.model.as_deref() == Some("gpt-5.5")));
+    assert!(
+        results
+            .iter()
+            .all(|hit| hit.message.model.as_deref() == Some("gpt-5.5"))
+    );
     // REAL epoch-second timestamps land truncated to whole seconds.
-    assert!(results
-        .iter()
-        .any(|hit| hit.message.timestamp == Some(1_780_629_300)));
+    assert!(
+        results
+            .iter()
+            .any(|hit| hit.message.timestamp == Some(1_780_629_300))
+    );
 
     let session = db
         .get_session("hermes", SESSION_ID)
@@ -243,9 +247,11 @@ async fn hermes_state_db_populates_projection_for_pinned_project() {
     assert_eq!(metadata["usage"]["output_tokens"], 3804);
     assert_eq!(metadata["usage"]["cache_read_input_tokens"], 1_064_960);
     assert_eq!(metadata["usage"]["reasoning_tokens"], 2061);
-    assert!(metadata["usage"]
-        .get("cache_creation_input_tokens")
-        .is_none());
+    assert!(
+        metadata["usage"]
+            .get("cache_creation_input_tokens")
+            .is_none()
+    );
 
     // The assistant tool-call turn has no content; its text falls back to the
     // tool_calls JSON and the tool name is extracted.
@@ -268,10 +274,11 @@ async fn hermes_state_db_populates_projection_for_pinned_project() {
     // Projection-only: Hermes raw messages are owned by the runtime LCM
     // ingest, so the transcript sweep must never write lcm_raw_messages.
     for ordinal in 2..=5 {
-        assert!(db
-            .lcm_load_raw_message("hermes", &format!("{SESSION_ID}:{ordinal}"))
-            .await
-            .is_none());
+        assert!(
+            db.lcm_load_raw_message("hermes", &format!("{SESSION_ID}:{ordinal}"))
+                .await
+                .is_none()
+        );
     }
 }
 
@@ -470,17 +477,20 @@ async fn sweep_skips_rewound_rows_and_surfaces_reasoning_only_turns() {
     let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &project).await;
     // 4 fixture turns + the reasoning-only turn; the rewound row is skipped.
     assert_eq!(stats.messages_upserted, 5);
-    assert!(db
-        .get_session_message("hermes", &format!("{SESSION_ID}:6"))
-        .await
-        .is_none());
+    assert!(
+        db.get_session_message("hermes", &format!("{SESSION_ID}:6"))
+            .await
+            .is_none()
+    );
     let reasoning_turn = db
         .get_session_message("hermes", &format!("{SESSION_ID}:7"))
         .await
         .expect("reasoning-only turn should be searchable");
-    assert!(reasoning_turn
-        .text
-        .contains("thinking about the billing fix"));
+    assert!(
+        reasoning_turn
+            .text
+            .contains("thinking about the billing fix")
+    );
     let hits = db
         .search_session_messages("hermes", None, "rewound secret prompt", 10)
         .await;

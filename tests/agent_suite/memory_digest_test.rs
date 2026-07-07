@@ -4,18 +4,18 @@
 
 use serde_json::json;
 
-use tracedecay::automation::config::{save_project_config, AutomationConfigPatch};
+use tracedecay::automation::config::{AutomationConfigPatch, save_project_config};
 use tracedecay::automation::fact_proposals::{
-    apply_fact_proposal, record_session_fact_proposals, FactProposalState,
+    FactProposalState, apply_fact_proposal, record_session_fact_proposals,
 };
 use tracedecay::automation::memory_digest::{
-    build_project_section, compose_digest_body, detect_injection_like, export_memory_digest,
-    export_memory_digest_to_recorded_targets, load_memory_digest_snapshot,
+    MEMORY_DIGEST_END, MEMORY_DIGEST_START, MemoryDigestOptions, MemoryDigestSnapshot,
+    ProjectDigestSection, build_project_section, compose_digest_body, detect_injection_like,
+    export_memory_digest, export_memory_digest_to_recorded_targets, load_memory_digest_snapshot,
     memory_digest_export_enabled, memory_digest_export_enabled_for_project,
     refresh_memory_digest_after_memory_change_for_profile, refresh_project_memory_digest,
     remove_memory_digest_export, select_digest_facts, sync_memory_digest_export,
-    update_project_digest_section, MemoryDigestOptions, MemoryDigestSnapshot, ProjectDigestSection,
-    MEMORY_DIGEST_END, MEMORY_DIGEST_START,
+    update_project_digest_section,
 };
 use tracedecay::automation::skill_targets::SkillInstallTarget;
 use tracedecay::global_db::GlobalDb;
@@ -132,11 +132,13 @@ fn compose_digest_body_orders_projects_newest_first_and_enforces_budget() {
     let alpha_at = body.find("## alpha").unwrap();
     assert!(beta_at < alpha_at, "newest project section must come first");
 
-    let tight = compose_digest_body(&snapshot, 220).unwrap();
+    // Budget sized so the (larger, feedback-nudge) header plus the newest
+    // section fits while the older section is truncated.
+    let tight = compose_digest_body(&snapshot, 340).unwrap();
     assert!(tight.contains("beta fact"));
     assert!(!tight.contains("alpha fact"));
     assert!(tight.contains("digest truncated at char budget"));
-    assert!(tight.len() <= 220 + 64, "budget overshoot: {}", tight.len());
+    assert!(tight.len() <= 340 + 64, "budget overshoot: {}", tight.len());
 
     let empty = MemoryDigestSnapshot::default();
     assert!(compose_digest_body(&empty, 2000).is_none());
@@ -327,9 +329,11 @@ async fn project_config_gate_disables_refresh_and_removes_existing_section() {
     assert!(
         sync_memory_digest_export(&profile_root, SkillInstallTarget::Claude, &prompt_path).unwrap()
     );
-    assert!(std::fs::read_to_string(&prompt_path)
-        .unwrap()
-        .contains("Existing project fact"));
+    assert!(
+        std::fs::read_to_string(&prompt_path)
+            .unwrap()
+            .contains("Existing project fact")
+    );
 
     let db_path = temp.path().join("graph.db");
     let db = crate::common::open_graph_db_from_template(&db_path).await;
@@ -360,9 +364,11 @@ async fn fact_proposal_apply_then_refresh_regenerates_recorded_overlays() {
 
     // Install-time export records the prompt index as a refresh target.
     sync_memory_digest_export(&profile_root, SkillInstallTarget::Claude, &prompt_path).unwrap();
-    assert!(std::fs::read_to_string(&prompt_path)
-        .unwrap()
-        .contains("No durable facts exported yet"));
+    assert!(
+        std::fs::read_to_string(&prompt_path)
+            .unwrap()
+            .contains("No durable facts exported yet")
+    );
 
     let db_path = temp.path().join("graph.db");
     let db = crate::common::open_graph_db_from_template(&db_path).await;

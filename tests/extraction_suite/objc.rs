@@ -218,10 +218,12 @@ fn test_objc_extract_class_with_protocol_conformance() {
     assert_eq!(classes[0].name, "Connection");
 
     // Extends Base
-    assert!(result
-        .unresolved_refs
-        .iter()
-        .any(|r| { r.reference_kind == EdgeKind::Extends && r.reference_name == "Base" }));
+    assert!(
+        result
+            .unresolved_refs
+            .iter()
+            .any(|r| { r.reference_kind == EdgeKind::Extends && r.reference_name == "Base" })
+    );
 
     // Implements Serializable
     assert!(result.unresolved_refs.iter().any(|r| {
@@ -403,12 +405,16 @@ fn test_objc_message_expression_calls() {
         calls.len()
     );
     // Message sends create receiver.method format
-    assert!(calls
-        .iter()
-        .any(|r| r.reference_name.contains("doSomething")));
-    assert!(calls
-        .iter()
-        .any(|r| r.reference_name.contains("stringWithFormat")));
+    assert!(
+        calls
+            .iter()
+            .any(|r| r.reference_name.contains("doSomething"))
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|r| r.reference_name.contains("stringWithFormat"))
+    );
     // NSLog is a C function call
     assert!(calls.iter().any(|r| r.reference_name == "NSLog"));
 }
@@ -546,32 +552,42 @@ fn test_objc_full_sample_file() {
     assert!(props.len() >= 3, "expected >= 3 properties");
 
     // C Function
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Function && n.name == "logMessage"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Function && n.name == "logMessage")
+    );
 
     // Extends refs
-    assert!(result
-        .unresolved_refs
-        .iter()
-        .any(|r| { r.reference_kind == EdgeKind::Extends && r.reference_name == "NSObject" }));
-    assert!(result
-        .unresolved_refs
-        .iter()
-        .any(|r| { r.reference_kind == EdgeKind::Extends && r.reference_name == "Base" }));
+    assert!(
+        result
+            .unresolved_refs
+            .iter()
+            .any(|r| { r.reference_kind == EdgeKind::Extends && r.reference_name == "NSObject" })
+    );
+    assert!(
+        result
+            .unresolved_refs
+            .iter()
+            .any(|r| { r.reference_kind == EdgeKind::Extends && r.reference_name == "Base" })
+    );
 
     // Implements refs
-    assert!(result
-        .unresolved_refs
-        .iter()
-        .any(|r| { r.reference_kind == EdgeKind::Implements }));
+    assert!(
+        result
+            .unresolved_refs
+            .iter()
+            .any(|r| { r.reference_kind == EdgeKind::Implements })
+    );
 
     // Call sites
-    assert!(result
-        .unresolved_refs
-        .iter()
-        .any(|r| r.reference_kind == EdgeKind::Calls));
+    assert!(
+        result
+            .unresolved_refs
+            .iter()
+            .any(|r| r.reference_kind == EdgeKind::Calls)
+    );
 
     // Contains edges
     let contains: Vec<_> = result

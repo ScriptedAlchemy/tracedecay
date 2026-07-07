@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::automation::memory_digest::refresh_memory_digest_after_memory_change;
 use crate::db::Database;
@@ -17,8 +17,8 @@ use crate::memory::types::{
 };
 use crate::tracedecay::TraceDecay;
 
-use super::super::render::{self, truncated_json_envelope_with_handle};
 use super::super::ToolResult;
+use super::super::{render, renderers};
 use super::support::{
     profile_root_for_global_db, project_registry_context, project_selector_present,
     safe_profile_relpath, string_array_values,
@@ -39,14 +39,15 @@ fn text_tool_result(text: &str) -> ToolResult {
     )
 }
 
-fn tool_json(project_root: Option<&Path>, value: &Value) -> ToolResult {
-    let formatted = serde_json::to_string(value).unwrap_or_default();
-    let text = truncated_json_envelope_with_handle(project_root, &formatted);
+fn rendered_tool_json(project_root: Option<&Path>, args: &Value, value: &Value) -> ToolResult {
+    let text = render::finalize(project_root, args, value, || render::generic_md(value));
     text_tool_result(&text)
 }
 
-fn rendered_tool_json(project_root: Option<&Path>, args: &Value, value: &Value) -> ToolResult {
-    let text = render::finalize(project_root, args, value, || render::generic_md(value));
+fn rendered_fact_store(project_root: Option<&Path>, args: &Value, value: &Value) -> ToolResult {
+    let text = render::finalize(project_root, args, value, || {
+        renderers::fact_store_md(args, value)
+    });
     text_tool_result(&text)
 }
 
@@ -493,7 +494,11 @@ pub(super) async fn handle_fact_store(
     if refresh_digest {
         refresh_memory_digest_after_memory_change(conn, &target_memory.project_root).await;
     }
-    Ok(tool_json(Some(&target_memory.project_root), &out))
+    Ok(rendered_fact_store(
+        Some(&target_memory.project_root),
+        &args,
+        &out,
+    ))
 }
 
 pub(super) async fn handle_fact_feedback(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
@@ -515,10 +520,8 @@ pub(super) async fn handle_fact_feedback(cg: &TraceDecay, args: Value) -> Result
         })
         .await?;
     refresh_memory_digest_after_memory_change(db.conn(), cg.project_root()).await;
-    Ok(tool_json(
-        Some(cg.project_root()),
-        &json!({ "status": "recorded", "feedback": result }),
-    ))
+    let value = json!({ "status": "recorded", "feedback": result });
+    Ok(rendered_tool_json(Some(cg.project_root()), &args, &value))
 }
 
 pub(super) async fn handle_memory_status(

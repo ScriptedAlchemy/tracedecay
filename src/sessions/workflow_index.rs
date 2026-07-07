@@ -17,7 +17,7 @@
 //! that discovers run directories and parses transcripts, and the
 //! `tracedecay_workflows` query surface, build on the APIs defined here.
 
-use libsql::{params, Connection, Value};
+use libsql::{Connection, Value, params};
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 

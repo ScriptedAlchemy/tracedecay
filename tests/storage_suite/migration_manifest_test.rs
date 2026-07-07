@@ -12,15 +12,15 @@ use tracedecay::migrate::inventory::{
     StoreStatus,
 };
 use tracedecay::migrate::manifest::{
-    apply_migration_manifest, assess_migration_rollback_state, build_plan_manifest,
-    cleanup_migration_sources, finalize_migration_apply, load_manifest,
-    rollback_migration_manifest, save_manifest, verify_migration_manifest, ArtifactState,
-    MigrationArtifact, MigrationManifest, MigrationPlanOptions, MigrationProtocol,
-    MigrationRollbackState, MIGRATION_MANIFEST_SCHEMA_VERSION,
+    ArtifactState, MIGRATION_MANIFEST_SCHEMA_VERSION, MigrationArtifact, MigrationManifest,
+    MigrationPlanOptions, MigrationProtocol, MigrationRollbackState, apply_migration_manifest,
+    assess_migration_rollback_state, build_plan_manifest, cleanup_migration_sources,
+    finalize_migration_apply, load_manifest, rollback_migration_manifest, save_manifest,
+    verify_migration_manifest,
 };
 use tracedecay::storage::{
-    read_enrollment_marker, read_store_manifest, write_enrollment_marker, EnrollmentMarker,
-    StorageMode, StoreKind, StoreManifest, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION,
+    EnrollmentMarker, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
+    StoreKind, StoreManifest, read_enrollment_marker, read_store_manifest, write_enrollment_marker,
 };
 
 fn empty_inventory() -> MigrationInventory {
@@ -277,10 +277,12 @@ fn plan_manifest_maps_inventory_artifacts_into_profile_shard_targets() {
         manifest.artifacts[1].target_path.as_deref(),
         Some(profile_root.join("projects/proj_123/sessions.db").as_path())
     );
-    assert!(manifest
-        .artifacts
-        .iter()
-        .all(|artifact| artifact.state == ArtifactState::Planned));
+    assert!(
+        manifest
+            .artifacts
+            .iter()
+            .all(|artifact| artifact.state == ArtifactState::Planned)
+    );
 }
 
 #[test]
@@ -622,10 +624,12 @@ fn apply_migration_manifest_stops_at_verified_before_cutover() {
 
     apply_migration_manifest(&mut manifest).unwrap();
 
-    assert!(manifest
-        .artifacts
-        .iter()
-        .all(|artifact| artifact.state == ArtifactState::Verified));
+    assert!(
+        manifest
+            .artifacts
+            .iter()
+            .all(|artifact| artifact.state == ArtifactState::Verified)
+    );
     assert!(read_enrollment_marker(&project).unwrap().is_none());
     let verify = verify_migration_manifest(&manifest);
     assert!(verify.cutover_ready, "{:?}", verify.issues);
@@ -691,10 +695,12 @@ fn finalize_migration_apply_marks_cutover_complete() {
 
     finalize_migration_apply(&mut manifest).unwrap();
 
-    assert!(manifest
-        .artifacts
-        .iter()
-        .all(|artifact| artifact.state == ArtifactState::Applied));
+    assert!(
+        manifest
+            .artifacts
+            .iter()
+            .all(|artifact| artifact.state == ArtifactState::Applied)
+    );
     assert!(verify_migration_manifest(&manifest).apply_supported);
 }
 
@@ -1017,22 +1023,28 @@ fn migrate_apply_copies_single_store_and_cuts_over_profile_shard() {
     assert_eq!(marker.storage_mode, StorageMode::ProfileSharded);
 
     let applied = load_manifest(&manifest_path).unwrap();
-    assert!(applied
-        .artifacts
-        .iter()
-        .all(|artifact| artifact.state == ArtifactState::Applied));
+    assert!(
+        applied
+            .artifacts
+            .iter()
+            .all(|artifact| artifact.state == ArtifactState::Applied)
+    );
     let backup_graph = profile_root.join("migration-backups/mig_123/tracedecay.db");
     assert_eq!(fs::read(&backup_graph).unwrap(), b"graph");
-    assert!(applied
-        .backup_artifacts
-        .iter()
-        .any(|artifact| artifact.kind == "graph_db"
-            && artifact.target_path.as_deref() == Some(backup_graph.as_path())
-            && artifact.state == ArtifactState::Verified));
-    assert!(applied
-        .artifacts
-        .iter()
-        .any(|artifact| artifact.kind == "store_manifest"));
+    assert!(
+        applied
+            .backup_artifacts
+            .iter()
+            .any(|artifact| artifact.kind == "graph_db"
+                && artifact.target_path.as_deref() == Some(backup_graph.as_path())
+                && artifact.state == ArtifactState::Verified)
+    );
+    assert!(
+        applied
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.kind == "store_manifest")
+    );
 
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let resolution = runtime.block_on(async {
@@ -1045,10 +1057,12 @@ fn migrate_apply_copies_single_store_and_cuts_over_profile_shard() {
     });
     assert_eq!(resolution.project.project_id, "proj_123");
     assert_eq!(resolution.store.storage_mode, "profile_sharded");
-    assert!(resolution
-        .artifacts
-        .iter()
-        .any(|artifact| artifact.artifact_kind == "store_manifest"));
+    assert!(
+        resolution
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.artifact_kind == "store_manifest")
+    );
 
     let verify = verify_migration_manifest(&applied);
     assert!(verify.apply_supported, "{:?}", verify.issues);

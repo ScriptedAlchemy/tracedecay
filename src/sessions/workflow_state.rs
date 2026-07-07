@@ -9,7 +9,7 @@
 //! evidence that a run did not finish cleanly, including for providers/sessions
 //! that never produced a `wf_*` run directory.
 
-use libsql::{params, Connection};
+use libsql::{Connection, params};
 use serde::Serialize;
 
 use crate::global_db::GlobalDb;

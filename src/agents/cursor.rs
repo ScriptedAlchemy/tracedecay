@@ -12,8 +12,8 @@ use serde_json::json;
 use crate::errors::{Result, TraceDecayError};
 
 use super::{
-    backup_and_write_json, load_json_file, load_jsonc_file_strict, safe_write_text_file,
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, UpdatePluginOutcome,
+    backup_and_write_json, load_json_file, load_jsonc_file_strict, safe_write_text_file,
 };
 
 /// Cursor agent.

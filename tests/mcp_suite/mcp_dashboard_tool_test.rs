@@ -6,7 +6,7 @@ use std::fs;
 use std::time::Duration;
 
 use crate::common::http_agent;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay::mcp::handle_tool_call;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};

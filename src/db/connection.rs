@@ -42,11 +42,7 @@ pub(crate) fn adaptive_cache_sizes(db_file_size: u64) -> (u64, u64) {
 /// and removes the crash at its source. Other platforms keep the adaptive
 /// mmap size for its read-throughput benefit.
 pub(crate) fn platform_safe_mmap_size(mmap: u64) -> u64 {
-    if cfg!(windows) {
-        0
-    } else {
-        mmap
-    }
+    if cfg!(windows) { 0 } else { mmap }
 }
 
 /// Env var that, when set to `1`, switches every `TraceDecay` `SQLite`
@@ -453,23 +449,29 @@ mod tests {
     impl EnvVarGuard {
         fn set(key: &'static str, value: &str) -> Self {
             let previous = std::env::var_os(key);
-            std::env::set_var(key, value);
+            unsafe {
+                std::env::set_var(key, value);
+            }
             Self { key, previous }
         }
 
         fn unset(key: &'static str) -> Self {
             let previous = std::env::var_os(key);
-            std::env::remove_var(key);
+            unsafe {
+                std::env::remove_var(key);
+            }
             Self { key, previous }
         }
     }
 
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
-            if let Some(previous) = self.previous.take() {
-                std::env::set_var(self.key, previous);
-            } else {
-                std::env::remove_var(self.key);
+            unsafe {
+                if let Some(previous) = self.previous.take() {
+                    std::env::set_var(self.key, previous);
+                } else {
+                    std::env::remove_var(self.key);
+                }
             }
         }
     }

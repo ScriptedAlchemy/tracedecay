@@ -5,8 +5,9 @@ use std::future::Future;
 use std::path::PathBuf;
 
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
+use super::DashboardState;
 use super::automation_run_service::{
     self, MemoryCuratorRunRequest, SessionReflectionRunRequest, SkillWritingRunRequest,
 };
@@ -15,15 +16,14 @@ use super::memory_api::{
 };
 use super::memory_service::{push_curation_activity, push_curation_activity_with_level};
 use super::util::http_detail;
-use super::DashboardState;
 use crate::automation::backend::{
-    agent_task_contract, classify_agent_task_error_message, prompt_version, task_key, AgentTaskKind,
+    AgentTaskKind, agent_task_contract, classify_agent_task_error_message, prompt_version, task_key,
 };
-use crate::automation::config::{effective_config, load_project_config, AutomationConfig};
+use crate::automation::config::{AutomationConfig, effective_config, load_project_config};
 use crate::automation::run_ledger::{
-    append_run_record, find_run_record, load_run_records, read_run_artifact_payload,
     AutomationRunArtifact, AutomationRunArtifactKind, AutomationRunLedgerRecord,
-    AutomationRunStatus, AutomationTrigger,
+    AutomationRunStatus, AutomationTrigger, append_run_record, find_run_record, load_run_records,
+    read_run_artifact_payload,
 };
 use crate::sessions::lcm::{LcmGrepSort, LcmScope};
 use crate::tracedecay::current_timestamp;

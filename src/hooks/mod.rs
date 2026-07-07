@@ -5,11 +5,10 @@
 
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
+mod analytics;
 mod claude;
 mod codex;
 mod cursor;
@@ -34,34 +33,40 @@ pub use codex::{
     hook_codex_user_prompt_submit, record_codex_subagent_start,
 };
 pub use cursor::{
-    cursor_after_file_edit_rel_paths, cursor_before_submit_prompt_json,
-    cursor_post_tool_use_decision, cursor_project_root_from_event, cursor_session_start_json,
-    cursor_should_run_sync, evaluate_cursor_post_tool_use, evaluate_cursor_subagent_start,
-    hook_cursor_after_file_edit, hook_cursor_after_shell, hook_cursor_before_submit_prompt,
-    hook_cursor_post_tool_use, hook_cursor_pre_compact, hook_cursor_session_end,
-    hook_cursor_session_start, hook_cursor_stop, hook_cursor_subagent_start,
-    hook_cursor_workspace_open, CURSOR_CATCH_UP_INGEST_MAX_BYTES,
+    CURSOR_CATCH_UP_INGEST_MAX_BYTES, cursor_after_file_edit_rel_paths,
+    cursor_before_submit_prompt_json, cursor_post_tool_use_decision,
+    cursor_project_root_from_event, cursor_session_start_json, cursor_should_run_sync,
+    evaluate_cursor_post_tool_use, evaluate_cursor_subagent_start, hook_cursor_after_file_edit,
+    hook_cursor_after_shell, hook_cursor_before_submit_prompt, hook_cursor_post_tool_use,
+    hook_cursor_pre_compact, hook_cursor_session_end, hook_cursor_session_start, hook_cursor_stop,
+    hook_cursor_subagent_start, hook_cursor_workspace_open,
 };
-pub use cursor_compact::{cursor_pre_compact_for_event_with_config, CursorPreCompactOutcome};
+pub use cursor_compact::{CursorPreCompactOutcome, cursor_pre_compact_for_event_with_config};
 pub use cursor_shell::{
-    cursor_branch_switch_target, cursor_shell_command_targets_project, cursor_shell_sync_plan,
-    cursor_shell_sync_plan_with_current_branch, is_git_state_changing_command,
-    resolve_worktree_add_root, CursorShellSyncPlan,
+    CursorShellSyncPlan, cursor_branch_switch_target, cursor_shell_command_targets_project,
+    cursor_shell_sync_plan, cursor_shell_sync_plan_with_current_branch,
+    is_git_state_changing_command, resolve_worktree_add_root,
 };
 pub use kiro::{
     evaluate_kiro_pre_tool_use, hook_kiro_post_tool_use, hook_kiro_pre_tool_use,
     hook_kiro_prompt_submit, kiro_post_tool_use_rel_paths,
 };
 pub use post_tool_use::{
-    claude_post_tool_use_matcher, CLAUDE_POST_TOOL_USE_EDIT_TOOLS, CLAUDE_POST_TOOL_USE_SHELL_TOOLS,
+    CLAUDE_POST_TOOL_USE_EDIT_TOOLS, CLAUDE_POST_TOOL_USE_SHELL_TOOLS, claude_post_tool_use_matcher,
 };
 pub use steering::{
-    build_codex_session_context, build_codex_session_context_for_workspace,
-    build_cursor_session_context, cursor_staleness_hint, HookWorkspaceStatus, CURSOR_PLUGIN_SKILLS,
+    CURSOR_PLUGIN_SKILLS, HookWorkspaceStatus, build_codex_session_context,
+    build_codex_session_context_for_workspace, build_cursor_session_context, cursor_staleness_hint,
 };
 
 pub(crate) use cursor_shell::shell_words;
 
+#[cfg(test)]
+use analytics::HOOK_ANALYTICS_FILENAME;
+use analytics::{
+    mint_hint_id, record_hint_analytics, record_hint_emitted, record_hook_analytics,
+    record_hook_invoked, record_workspace_status_analytics,
+};
 use tool_hints::{HintAgent, ToolHint};
 
 macro_rules! read_hook_event {
@@ -86,8 +91,6 @@ is faster and more precise for symbol relationships, call paths, and code struct
 Only use agents for code exploration if you have already tried tracedecay and it \
 cannot answer the question.";
 
-const HOOK_ANALYTICS_FILENAME: &str = "hook_analytics.jsonl";
-
 fn research_block_reason(hint: Option<ToolHint>) -> String {
     let base = crate::config::brand_env("RESEARCH_BLOCK_REASON")
         .unwrap_or_else(|| TRACEDECAY_RESEARCH_BLOCK_REASON.to_string());
@@ -95,57 +98,6 @@ fn research_block_reason(hint: Option<ToolHint>) -> String {
         || base.clone(),
         |hint| format!("{}\n\n{}", base, format_tool_hint(&hint)),
     )
-}
-
-fn record_hook_analytics(root: Option<&Path>, event: &str, mut fields: serde_json::Value) {
-    let Some(path) = hook_analytics_path(root) else {
-        return;
-    };
-    let Some(fields) = fields.as_object_mut() else {
-        return;
-    };
-    // Attribute the row to its project even when it lands in the user-level
-    // fallback file, so readers can re-join the split streams per project.
-    if let Some(root) = root {
-        fields.insert(
-            "project_root".to_string(),
-            serde_json::Value::String(root.display().to_string()),
-        );
-    }
-    fields.insert(
-        "event".to_string(),
-        serde_json::Value::String(event.to_string()),
-    );
-    fields.insert(
-        "ts_unix_ms".to_string(),
-        serde_json::Value::Number(serde_json::Number::from(now_unix_millis())),
-    );
-    let Ok(line) = serde_json::to_string(&fields) else {
-        return;
-    };
-    append_private_jsonl(&path, &line);
-}
-
-fn hook_analytics_path(root: Option<&Path>) -> Option<PathBuf> {
-    match root {
-        Some(root) => crate::storage::resolve_layout_for_current_profile(root)
-            .ok()
-            .map(|layout| layout.data_root.join(HOOK_ANALYTICS_FILENAME)),
-        None => crate::storage::default_profile_root()
-            .ok()
-            .map(|root| root.join(HOOK_ANALYTICS_FILENAME)),
-    }
-}
-
-fn append_private_jsonl(path: &Path, line: &str) {
-    let _ = crate::storage::PrivateStoreIo::append_line(path, line);
-}
-
-fn now_unix_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
-        .unwrap_or_default()
 }
 
 fn now_unix_secs() -> i64 {
@@ -157,117 +109,6 @@ fn now_unix_secs() -> i64 {
 #[cfg(test)]
 pub(crate) fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
     crate::config::lock_user_data_dir_test_env()
-}
-
-/// Mints a unique id for one hint candidate so its `hint_candidate` row and its
-/// single terminal row (`hint_emitted` / `hint_escalated` / `suppressed_duplicate`
-/// / `suppressed_budget` / `missing_session` / `dropped_no_root`) can be correlated
-/// in `analytics_events`. The crate has no
-/// uuid dependency, so we combine a millisecond timestamp with a process-local
-/// monotonic counter — unique within a process, and effectively unique across the
-/// short-lived hook processes that each mint at most a handful of ids.
-fn mint_hint_id() -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!(
-        "h-{:x}-{:x}-{:x}",
-        now_unix_millis(),
-        std::process::id(),
-        seq
-    )
-}
-
-fn record_hook_invoked(root: Option<&Path>, agent: HintAgent, hook_name: &str, event_json: &str) {
-    let parsed: Value = serde_json::from_str(event_json).unwrap_or(Value::Null);
-    record_hook_analytics(
-        root,
-        "hook_invoked",
-        serde_json::json!({
-            "agent": agent.as_key(),
-            "hook_name": hook_name,
-            "hook_event_name": text_field(&parsed, &["hook_event_name", "hookEventName"]),
-            "session_id": event_session_id(&parsed),
-            "tool_name": text_field(&parsed, &["tool_name", "toolName", "name"]),
-            "command": text_field(&parsed, &["command", "cmd", "shell_command"]),
-            "prompt_category": inferred_prompt_category(&parsed),
-            "event_cwd": event_cwd_from_parsed(&parsed).map(|cwd| cwd.display().to_string()),
-        }),
-    );
-}
-
-fn inferred_prompt_category(parsed: &Value) -> Option<&'static str> {
-    let text = prompt_like_text(parsed)
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if text.is_empty() {
-        return None;
-    }
-    if claude::is_code_research_prompt(&text) {
-        Some("code_research")
-    } else if text.contains("test") || text.contains("failing") || text.contains("ci") {
-        Some("test_or_ci")
-    } else if text.contains("dashboard") || text.contains("ui") || text.contains("frontend") {
-        Some("dashboard_or_ui")
-    } else if text.contains("bug") || text.contains("fix") || text.contains("error") {
-        Some("debug_or_fix")
-    } else {
-        Some("general")
-    }
-}
-
-fn record_hint_analytics(
-    root: Option<&Path>,
-    event: &str,
-    agent: HintAgent,
-    session_id: Option<&str>,
-    hint_id: &str,
-    hint: &ToolHint,
-) {
-    record_hook_analytics(
-        root,
-        event,
-        serde_json::json!({
-            "agent": agent.as_key(),
-            "session_id": session_id,
-            "category": hint.category.as_key(),
-            "hint_id": hint_id,
-        }),
-    );
-}
-
-fn record_workspace_status_analytics(
-    root: Option<&Path>,
-    status: HookWorkspaceStatus,
-    session_id: Option<&str>,
-) {
-    record_hook_analytics(
-        root,
-        "workspace_status",
-        serde_json::json!({
-            "agent": HintAgent::Codex.as_key(),
-            "session_id": session_id,
-            "workspace_status": status.as_key(),
-        }),
-    );
-}
-
-fn record_hint_emitted(
-    root: Option<&Path>,
-    agent: HintAgent,
-    session_id: Option<&str>,
-    hint_id: &str,
-    hint: &ToolHint,
-) {
-    // Exactly one terminal event per candidate. A missing session id is its own
-    // terminal outcome (the hint still surfaces to the agent, but it can never be
-    // deduped), so we record `missing_session` instead of also emitting
-    // `hint_emitted` — double terminals corrupt the per-candidate outcome count.
-    let event = if session_id.is_none() {
-        "missing_session"
-    } else {
-        "hint_emitted"
-    };
-    record_hint_analytics(root, event, agent, session_id, hint_id, hint);
 }
 
 fn hook_route_metadata_from_event(
@@ -548,8 +389,8 @@ pub(crate) fn read_stdin_to_string() -> std::io::Result<String> {
 mod hint_analytics_tests {
     use super::tool_hints::{HintCategory, MAX_HINTS_PER_SESSION};
     use super::{
-        deduped_project_hint_with_id, mint_hint_id, record_hint_emitted, HintAgent, Path, PathBuf,
-        ToolHint, Value,
+        HintAgent, Path, PathBuf, ToolHint, Value, deduped_project_hint_with_id, mint_hint_id,
+        record_hint_emitted, record_hook_invoked,
     };
     use crate::config::USER_DATA_DIR_ENV;
     use std::collections::HashSet;
@@ -657,6 +498,36 @@ mod hint_analytics_tests {
     }
 
     #[test]
+    fn hook_invocation_rows_include_duration_telemetry() {
+        let _lock = super::lock_test_env();
+        let project = tempfile::tempdir().unwrap();
+        let profile = tempfile::tempdir().unwrap();
+        let project_root = project.path().canonicalize().unwrap();
+        let profile_root = profile.path().canonicalize().unwrap();
+        let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
+        let data_root = enroll_project(&project_root, "proj_hook_duration");
+
+        {
+            let _hook_telemetry = record_hook_invoked(
+                Some(&project_root),
+                HintAgent::Codex,
+                "PostToolUse",
+                r#"{"session_id":"s1","tool_name":"Bash","cwd":"/tmp"}"#,
+            );
+        }
+
+        let rows = recorded_rows(&data_root, &profile_root);
+        let row = rows
+            .iter()
+            .find(|row| event_kind(row) == "hook_completed")
+            .expect("hook_completed row");
+        assert_eq!(row["hook_name"].as_str(), Some("PostToolUse"));
+        assert_eq!(row["tool_name"].as_str(), Some("Bash"));
+        assert!(row["duration_us"].as_u64().is_some());
+        assert!(row["duration_ms"].as_u64().is_some());
+    }
+
+    #[test]
     fn record_hint_emitted_missing_session_is_single_terminal() {
         let _lock = super::lock_test_env();
         let project = tempfile::tempdir().unwrap();
@@ -698,47 +569,55 @@ mod hint_analytics_tests {
 
         // Branch: root known, session known → on-disk dedupe emits once.
         let emit_id = mint_hint_id();
-        assert!(deduped_project_hint_with_id(
-            Some(project_root.clone()),
-            HintAgent::Cursor,
-            Some("session-emit".to_string()),
-            &emit_id,
-            test_hint(),
-        )
-        .is_some());
+        assert!(
+            deduped_project_hint_with_id(
+                Some(project_root.clone()),
+                HintAgent::Cursor,
+                Some("session-emit".to_string()),
+                &emit_id,
+                test_hint(),
+            )
+            .is_some()
+        );
 
         // Branch: same (session, category) again → suppressed as duplicate.
         let dup_id = mint_hint_id();
-        assert!(deduped_project_hint_with_id(
-            Some(project_root.clone()),
-            HintAgent::Cursor,
-            Some("session-emit".to_string()),
-            &dup_id,
-            test_hint(),
-        )
-        .is_none());
+        assert!(
+            deduped_project_hint_with_id(
+                Some(project_root.clone()),
+                HintAgent::Cursor,
+                Some("session-emit".to_string()),
+                &dup_id,
+                test_hint(),
+            )
+            .is_none()
+        );
 
         // Branch: root known, session missing → single `missing_session` terminal.
         let no_session_id = mint_hint_id();
-        assert!(deduped_project_hint_with_id(
-            Some(project_root.clone()),
-            HintAgent::Cursor,
-            None,
-            &no_session_id,
-            test_hint(),
-        )
-        .is_some());
+        assert!(
+            deduped_project_hint_with_id(
+                Some(project_root.clone()),
+                HintAgent::Cursor,
+                None,
+                &no_session_id,
+                test_hint(),
+            )
+            .is_some()
+        );
 
         // Branch: no root at all → emits with no attribution.
         let no_root_id = mint_hint_id();
-        assert!(deduped_project_hint_with_id(
-            None,
-            HintAgent::Cursor,
-            Some("session-noroot".to_string()),
-            &no_root_id,
-            test_hint(),
-        )
-        .is_some());
+        assert!(
+            deduped_project_hint_with_id(
+                None,
+                HintAgent::Cursor,
+                Some("session-noroot".to_string()),
+                &no_root_id,
+                test_hint(),
+            )
+            .is_some()
+        );
 
         let rows = recorded_rows(&data_root, &profile_root);
 
@@ -804,14 +683,16 @@ mod hint_analytics_tests {
                 context: "c".to_string(),
                 nonblocking: true,
             };
-            assert!(deduped_project_hint_with_id(
-                Some(project_root.clone()),
-                HintAgent::Cursor,
-                Some(session.clone()),
-                &mint_hint_id(),
-                hint,
-            )
-            .is_some());
+            assert!(
+                deduped_project_hint_with_id(
+                    Some(project_root.clone()),
+                    HintAgent::Cursor,
+                    Some(session.clone()),
+                    &mint_hint_id(),
+                    hint,
+                )
+                .is_some()
+            );
         }
 
         // A fourth, not-yet-seen category is over budget (test_hint's Impact is

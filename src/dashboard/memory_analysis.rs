@@ -3,7 +3,7 @@
 //! Extracted from `memory_api.rs` so similarity classification, lexical overlap,
 //! PCA projection, and dedup planning can be unit-tested without an HTTP harness.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 // Similarity primitives live in `crate::memory::similarity` (shared with the
 // write-time diff check in `MemoryStore::add_fact`); re-exported so dashboard
@@ -393,9 +393,9 @@ fn pair_has_supersession_cue(facts: &[Value], a: usize, b: usize) -> bool {
 /// extreme (≥ [`ACCESS_RELUCTANCE_EXTREME_SIMILARITY`]). A fact that recall
 /// searches keep returning is demonstrably in use; when the trust-based loser
 /// choice would delete it, the pair is left out of the automatic plan for
-/// LLM/human review instead. (Access frequency is deliberately NOT part of
-/// retrieval ranking — see `combined_score` in `memory::retrieval` — it is a
-/// curation-only signal.)
+/// LLM/human review instead. (Recall `retrieval_count` now also feeds a small
+/// bounded ranking boost in `combined_score` — see `memory::retrieval`; this
+/// access-reluctance guard is an additional curation-only signal on top of it.)
 pub(crate) fn propose_dedup_actions(facts: &[Value], pairs: &[ScoredPair]) -> Vec<Value> {
     let mut consumed_losers: std::collections::HashSet<i64> = std::collections::HashSet::new();
     let mut actions: Vec<Value> = Vec::new();
@@ -870,12 +870,16 @@ mod tests {
         // Below the supersession similarity floor the cue pair is ignored.
         let weak_pair = vec![ScoredPair::analyze(&facts, 0.5, 1, 2)];
         let hygiene_candidates = propose_hygiene_candidates(&facts, &facts, &weak_pair, &consumed);
-        assert!(hygiene_candidates["transient"]
-            .as_array()
-            .is_some_and(std::vec::Vec::is_empty));
-        assert!(hygiene_candidates["supersession"]
-            .as_array()
-            .is_some_and(std::vec::Vec::is_empty));
+        assert!(
+            hygiene_candidates["transient"]
+                .as_array()
+                .is_some_and(std::vec::Vec::is_empty)
+        );
+        assert!(
+            hygiene_candidates["supersession"]
+                .as_array()
+                .is_some_and(std::vec::Vec::is_empty)
+        );
     }
 
     #[test]

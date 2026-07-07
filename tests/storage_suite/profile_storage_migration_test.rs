@@ -13,8 +13,8 @@ use tracedecay::migrate::inventory::{
     StoreStatus,
 };
 use tracedecay::migrate::manifest::{
-    apply_migration_manifest, build_plan_manifest, finalize_migration_apply,
-    verify_migration_manifest, MigrationPlanOptions,
+    MigrationPlanOptions, apply_migration_manifest, build_plan_manifest, finalize_migration_apply,
+    verify_migration_manifest,
 };
 use tracedecay::migrate::registry::{
     apply_registry_reconstruction_report, reconstruct_registry_from_store_manifest,
@@ -23,8 +23,8 @@ use tracedecay::migrate::registry::{
 use tracedecay::serve;
 use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::storage::{
-    read_enrollment_marker, write_enrollment_marker, EnrollmentMarker, StorageMode, StoreKind,
-    StoreManifest, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION,
+    EnrollmentMarker, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
+    StoreKind, StoreManifest, read_enrollment_marker, write_enrollment_marker,
 };
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
@@ -41,9 +41,11 @@ impl HomeEnvGuard {
         let previous_home = std::env::var_os("HOME");
         let previous_userprofile = std::env::var_os("USERPROFILE");
         let previous_data_dir = std::env::var_os(USER_DATA_DIR_ENV);
-        std::env::set_var("HOME", home);
-        std::env::set_var("USERPROFILE", home);
-        std::env::set_var(USER_DATA_DIR_ENV, home.join(".tracedecay"));
+        unsafe {
+            std::env::set_var("HOME", home);
+            std::env::set_var("USERPROFILE", home);
+            std::env::set_var(USER_DATA_DIR_ENV, home.join(".tracedecay"));
+        }
         Self {
             previous_home,
             previous_userprofile,
@@ -54,17 +56,19 @@ impl HomeEnvGuard {
 
 impl Drop for HomeEnvGuard {
     fn drop(&mut self) {
-        match self.previous_home.take() {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-        match self.previous_userprofile.take() {
-            Some(value) => std::env::set_var("USERPROFILE", value),
-            None => std::env::remove_var("USERPROFILE"),
-        }
-        match self.previous_data_dir.take() {
-            Some(value) => std::env::set_var(USER_DATA_DIR_ENV, value),
-            None => std::env::remove_var(USER_DATA_DIR_ENV),
+        unsafe {
+            match self.previous_home.take() {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match self.previous_userprofile.take() {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+            match self.previous_data_dir.take() {
+                Some(value) => std::env::set_var(USER_DATA_DIR_ENV, value),
+                None => std::env::remove_var(USER_DATA_DIR_ENV),
+            }
         }
     }
 }
@@ -188,16 +192,18 @@ fn reconstructs_registry_records_from_profile_store_manifest() {
         Some("projects/proj_123/store_manifest.json".to_string())
     );
     assert_eq!(plan.store.last_verified_at, Some(1_800_000_001));
-    assert!(plan
-        .artifacts
-        .iter()
-        .any(|artifact| artifact.artifact_kind == "graph_db"
-            && portable_relpath(&artifact.relpath) == "projects/proj_123/tracedecay.db"));
-    assert!(plan
-        .artifacts
-        .iter()
-        .any(|artifact| artifact.artifact_kind == "store_manifest"
-            && portable_relpath(&artifact.relpath) == "projects/proj_123/store_manifest.json"));
+    assert!(
+        plan.artifacts
+            .iter()
+            .any(|artifact| artifact.artifact_kind == "graph_db"
+                && portable_relpath(&artifact.relpath) == "projects/proj_123/tracedecay.db")
+    );
+    assert!(
+        plan.artifacts
+            .iter()
+            .any(|artifact| artifact.artifact_kind == "store_manifest"
+                && portable_relpath(&artifact.relpath) == "projects/proj_123/store_manifest.json")
+    );
     assert_eq!(plan.graph_scopes.len(), 1);
     assert_eq!(plan.graph_scopes[0].branch_name, "main");
     assert_eq!(
@@ -234,10 +240,12 @@ fn scan_profile_store_manifests_rejects_unsafe_manifest_relpaths() {
     let report = scan_profile_store_manifests(&profile_root, 1_800_000_001);
 
     assert!(report.plans.is_empty());
-    assert!(report
-        .issues
-        .iter()
-        .any(|issue| issue.contains("unsafe graph_db_relpath")));
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|issue| issue.contains("unsafe graph_db_relpath"))
+    );
 }
 
 #[tokio::test]

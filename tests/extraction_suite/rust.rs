@@ -43,11 +43,13 @@ fn helper() {}
     );
     let add_fn = fns.iter().find(|f| f.name == "add").expect("add not found");
     assert_eq!(add_fn.visibility, Visibility::Pub);
-    assert!(add_fn
-        .docstring
-        .as_deref()
-        .unwrap_or("")
-        .contains("Adds two numbers"));
+    assert!(
+        add_fn
+            .docstring
+            .as_deref()
+            .unwrap_or("")
+            .contains("Adds two numbers")
+    );
     assert!(add_fn.signature.as_deref().unwrap_or("").contains("fn add"));
     let helper = fns
         .iter()
@@ -107,12 +109,16 @@ pub struct Point {
         "expected 3 fields, got: {:?}",
         fields.iter().map(|n| &n.name).collect::<Vec<_>>()
     );
-    assert!(fields
-        .iter()
-        .any(|f| f.name == "x" && f.visibility == Visibility::Pub));
-    assert!(fields
-        .iter()
-        .any(|f| f.name == "label" && f.visibility == Visibility::Private));
+    assert!(
+        fields
+            .iter()
+            .any(|f| f.name == "x" && f.visibility == Visibility::Pub)
+    );
+    assert!(
+        fields
+            .iter()
+            .any(|f| f.name == "label" && f.visibility == Visibility::Private)
+    );
 }
 
 #[test]

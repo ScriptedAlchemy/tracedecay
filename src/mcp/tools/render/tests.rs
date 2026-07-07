@@ -1,6 +1,6 @@
 use super::*;
 use crate::mcp::response_handles::{
-    lock_response_handle_store, retrieve_response_handle_from_root, ResponseHandleLookup,
+    ResponseHandleLookup, lock_response_handle_store, retrieve_response_handle_from_root,
 };
 use crate::tracedecay::current_timestamp;
 use serde_json::json;
@@ -295,10 +295,12 @@ fn truncated_json_envelope_reports_store_failure() {
         parsed["handle_status"]["reason_code"],
         "handle_store_failed"
     );
-    assert!(parsed["handle_status"]["message"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("could not be cached locally"));
+    assert!(
+        parsed["handle_status"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("could not be cached locally")
+    );
 }
 
 #[test]

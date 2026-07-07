@@ -200,6 +200,56 @@ async fn fallback_writes_are_refused_by_all_sync_entry_points() {
 }
 
 #[tokio::test]
+async fn detached_linked_worktree_uses_worktree_local_index() {
+    let _env_lock = HOME_ENV_LOCK.lock().await;
+    let (_env, project) = IsolatedEnv::acquire().await;
+    let project = project.as_path();
+    let linked = project.parent().unwrap().join("linked-detached-worktree");
+
+    git(project, &["init", "-b", "main"]);
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn indexed_on_main() {}\n").unwrap();
+    commit_all(project, "initial commit");
+
+    let main = TraceDecay::init(project).await.unwrap();
+    main.index_all().await.unwrap();
+    drop(main);
+
+    git(
+        project,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            linked.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    fs::write(
+        linked.join("src/worktree_only.rs"),
+        "pub fn worktree_only() {}\n",
+    )
+    .unwrap();
+
+    let worktree = TraceDecay::init(&linked).await.unwrap();
+    worktree.index_all().await.unwrap();
+    drop(worktree);
+
+    let reopened = TraceDecay::open(&linked).await.unwrap();
+    assert_eq!(reopened.active_branch(), None);
+    assert_eq!(reopened.serving_branch(), None);
+    assert!(!reopened.is_fallback());
+    assert!(
+        !reopened
+            .search("worktree_only", 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "detached linked worktree should read its own index"
+    );
+}
+
+#[tokio::test]
 async fn add_branch_tracking_copies_from_nearest_tracked_ancestor() {
     let _env_lock = HOME_ENV_LOCK.lock().await;
     let (_env, project) = IsolatedEnv::acquire().await;

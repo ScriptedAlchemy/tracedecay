@@ -6,11 +6,11 @@
 use std::path::Path;
 
 use crate::plugin_validation_support::{
-    is_kebab_case_skill_name, load_skill_docs, load_skill_docs_from, relative_files_under,
-    repo_path, SkillDoc,
+    SkillDoc, is_kebab_case_skill_name, load_skill_docs, load_skill_docs_from,
+    relative_files_under, repo_path,
 };
 use tempfile::TempDir;
-use tracedecay::agents::{expected_tool_perms, get_integration, InstallContext};
+use tracedecay::agents::{InstallContext, expected_tool_perms, get_integration};
 
 const CODEX_SKILL_ROOT: &str = "plugin/skills";
 const REPO_LOCAL_SKILL_ROOT: &str = ".codex/skills";

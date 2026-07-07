@@ -3,15 +3,16 @@
 //! `unused_imports`, `god_class`, `doc_coverage`, `inheritance_depth`, `module_api`.
 
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 use crate::types::{NodeKind, Visibility};
 
-use super::super::render;
 use super::super::ToolResult;
+use super::super::render;
 use super::support::{effective_path, filter_by_scope, unique_file_paths};
 
 /// True if `line` contains `identifier` as a whole token (boundaries are
@@ -150,19 +151,8 @@ fn identifier_from_segment(seg: &str) -> String {
         .to_string()
 }
 
-fn path_matches_prefix(path: &str, prefix: &str) -> bool {
-    if path == prefix {
-        true
-    } else if prefix.ends_with('/') {
-        path.starts_with(prefix)
-    } else {
-        path.strip_prefix(prefix)
-            .is_some_and(|suffix| suffix.starts_with('/'))
-    }
-}
-
 fn path_matches_optional_scope(path: &str, scope_prefix: Option<&str>) -> bool {
-    scope_prefix.is_none_or(|prefix| path_matches_prefix(path, prefix))
+    crate::path_scope::path_matches_scope(path, scope_prefix)
 }
 
 /// Handles `tracedecay_dead_code` tool calls.
@@ -384,9 +374,9 @@ pub(super) async fn handle_hotspots(
         items.retain(|item| {
             item["file"]
                 .as_str()
-                .is_some_and(|f| path_matches_prefix(f, prefix))
+                .is_some_and(|f| crate::path_scope::path_matches_scope(f, Some(prefix)))
         });
-        touched.retain(|f| path_matches_prefix(f, prefix));
+        touched.retain(|f| crate::path_scope::path_matches_scope(f, Some(prefix)));
     }
 
     let touched_files = unique_file_paths(touched.iter().map(std::string::String::as_str));
@@ -1597,7 +1587,7 @@ fn prewarm_enabled_from(env_value: Option<bool>, config_flag: bool) -> bool {
 
 /// Build the early-return `warming` payload for a cold prewarm. Factored out so
 /// the warming path is unit-testable without spawning cargo.
-fn diagnostics_warming_result(project_root: &std::path::Path) -> ToolResult {
+fn diagnostics_warming_result(project_root: &std::path::Path, args: &Value) -> ToolResult {
     let target_dir = crate::diagnostics::rust_diagnostics_target_dir(project_root);
     let payload = json!({
         "status": "warming",
@@ -1609,14 +1599,21 @@ fn diagnostics_warming_result(project_root: &std::path::Path) -> ToolResult {
         "target_dir": target_dir.display().to_string(),
         "diagnostic_count": 0,
     });
-    let text = render::generic_md(&payload);
+    let text = render::finalize(Some(project_root), args, &payload, || {
+        render::generic_md(&payload)
+    });
     ToolResult::new(
         json!({ "content": [{ "type": "text", "text": text }] }),
         vec![],
     )
 }
 
-pub(super) async fn handle_diagnostics(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_diagnostics(
+    cg: &TraceDecay,
+    args: Value,
+    diagnostics_cache: Option<&crate::diagnostics::DiagnosticsCache>,
+    diagnostics_lsp: Option<&tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
+) -> Result<ToolResult> {
     use crate::diagnostics::run_all;
 
     let (scope_str, scope) = diagnostics_scope_arg(&args)?;
@@ -1631,10 +1628,17 @@ pub(super) async fn handle_diagnostics(cg: &TraceDecay, args: Value) -> Result<T
         && crate::diagnostics::is_rust_diagnostics_cold(&project_root)
     {
         crate::diagnostics::spawn_rust_diagnostics_prewarm(&project_root)?;
-        return Ok(diagnostics_warming_result(&project_root));
+        return Ok(diagnostics_warming_result(&project_root, &args));
     }
 
-    let mut diagnostics = run_all(&project_root, &scope).await?;
+    let mut diagnostics =
+        if let Some(lsp_diagnostics) = lsp_file_diagnostics(cg, &scope, diagnostics_lsp).await? {
+            lsp_diagnostics
+        } else if let Some(cache) = diagnostics_cache {
+            cache.run(&project_root, &scope).await?
+        } else {
+            run_all(&project_root, &scope).await?
+        };
 
     if let crate::diagnostics::Scope::File { path } = &scope {
         diagnostics.retain(|d| d.file == *path);
@@ -1685,6 +1689,90 @@ pub(super) async fn handle_diagnostics(cg: &TraceDecay, args: Value) -> Result<T
     ))
 }
 
+async fn lsp_file_diagnostics(
+    cg: &TraceDecay,
+    scope: &crate::diagnostics::Scope,
+    diagnostics_lsp: Option<&tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
+) -> Result<Option<Vec<crate::diagnostics::Diagnostic>>> {
+    let crate::diagnostics::Scope::File { path } = scope else {
+        return Ok(None);
+    };
+    let Some(diagnostics_lsp) = diagnostics_lsp else {
+        return Ok(None);
+    };
+
+    let adapter = {
+        let broker = diagnostics_lsp.lock().await;
+        broker
+            .snapshot()
+            .engines
+            .into_iter()
+            .filter_map(|engine| broker.adapter_for(&engine.language))
+            .find(|adapter| {
+                crate::diagnostics::lsp::activity::active_languages_for_files(
+                    cg.project_root(),
+                    std::slice::from_ref(adapter),
+                    std::slice::from_ref(path),
+                )
+                .contains(&adapter.language)
+            })
+    };
+    let Some(adapter) = adapter else {
+        return Ok(None);
+    };
+    let language = adapter.language.clone();
+    let documents = crate::diagnostics::lsp::activity::documents_for_adapter(
+        cg.project_root(),
+        &adapter,
+        vec![path.clone()],
+    )
+    .await?;
+    if documents.is_empty() {
+        return Ok(None);
+    }
+
+    let snapshot = {
+        let mut broker = diagnostics_lsp.lock().await;
+        if broker
+            .refresh_documents(&language, documents, Duration::from_secs(2))
+            .await
+            .is_err()
+        {
+            return Ok(None);
+        }
+        broker.snapshot()
+    };
+
+    Ok(Some(
+        snapshot
+            .diagnostics
+            .into_iter()
+            .filter(|diagnostic| diagnostic.file == *path)
+            .map(lsp_diagnostic_to_compiler_diagnostic)
+            .collect(),
+    ))
+}
+
+fn lsp_diagnostic_to_compiler_diagnostic(
+    diagnostic: crate::diagnostics::lsp::broker::CodeDiagnostic,
+) -> crate::diagnostics::Diagnostic {
+    crate::diagnostics::Diagnostic {
+        file: diagnostic.file,
+        line_start: diagnostic.line_start,
+        line_end: diagnostic.line_end,
+        level: match diagnostic.severity {
+            crate::diagnostics::lsp::broker::DiagnosticSeverity::Error => "error",
+            crate::diagnostics::lsp::broker::DiagnosticSeverity::Warning => "warning",
+            crate::diagnostics::lsp::broker::DiagnosticSeverity::Information => "information",
+            crate::diagnostics::lsp::broker::DiagnosticSeverity::Hint => "hint",
+        }
+        .to_string(),
+        code: diagnostic.code.unwrap_or_default(),
+        message: diagnostic.message,
+        driver: "lsp",
+    }
+}
+
 // ---------------------------------------------------------------------------
 // tracedecay_constructors
 // ---------------------------------------------------------------------------
@@ -1720,10 +1808,18 @@ pub(super) async fn handle_constructors(
         .collect();
 
     if struct_nodes.is_empty() {
+        let payload = json!({
+            "found": false,
+            "struct": struct_name,
+            "message": format!("No struct, class, or case-class named '{struct_name}' found."),
+            "match_count": 0,
+            "sites": [],
+        });
+        let text = render::finalize(Some(cg.project_root()), &args, &payload, || {
+            render::generic_md(&payload)
+        });
         return Ok(ToolResult::new(
-            json!({
-                "content": [{ "type": "text", "text": format!("No struct, class, or case-class named '{struct_name}' found.") }]
-            }),
+            json!({ "content": [{ "type": "text", "text": text }] }),
             vec![],
         ));
     }
@@ -2342,6 +2438,7 @@ mod circular_render_tests {
 #[allow(clippy::unwrap_used)]
 mod diagnostics_warming_tests {
     use super::{diagnostics_warming_result, prewarm_enabled_from};
+    use serde_json::{Value, json};
     use std::path::Path;
 
     #[test]
@@ -2362,7 +2459,7 @@ mod diagnostics_warming_tests {
     #[test]
     fn warming_result_reports_status_and_target_dir() {
         let root = Path::new("/tmp/tracedecay-warming-proj");
-        let result = diagnostics_warming_result(root);
+        let result = diagnostics_warming_result(root, &json!({}));
         let text = result.value["content"][0]["text"].as_str().unwrap();
         assert!(
             text.contains("warming"),
@@ -2378,5 +2475,18 @@ mod diagnostics_warming_tests {
             text.contains("tracedecay-target"),
             "should point at the private diagnostics target dir: {text}"
         );
+        assert!(
+            !text.trim_start().starts_with('{'),
+            "default output should be Markdown: {text}"
+        );
+
+        let json_result = diagnostics_warming_result(root, &json!({ "format": "json" }));
+        let Some(json_text) = json_result.value["content"][0]["text"].as_str() else {
+            panic!("format=json should include text content");
+        };
+        let json_payload: Value = serde_json::from_str(json_text)
+            .unwrap_or_else(|err| panic!("format=json should stay parseable JSON: {err}"));
+        assert_eq!(json_payload["status"], "warming");
+        assert_eq!(json_payload["diagnostic_count"], 0);
     }
 }

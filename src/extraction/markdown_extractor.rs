@@ -17,7 +17,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tree_sitter::{Node as TsNode, Parser, Range, Tree};
 
 use crate::types::{
-    generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility,
+    Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility, generate_node_id,
 };
 
 pub struct MarkdownExtractor;

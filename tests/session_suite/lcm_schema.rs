@@ -391,9 +391,11 @@ async fn lcm_schema_v3_migration_restructures_raw_fts_and_preserves_search() {
         fts_message_ids_matching(&db_path, "legacy").await,
         vec!["legacy-message".to_string()]
     );
-    assert!(fts_message_ids_matching(&db_path, "assistant")
-        .await
-        .is_empty());
+    assert!(
+        fts_message_ids_matching(&db_path, "assistant")
+            .await
+            .is_empty()
+    );
 }
 
 // Mirrors hermes-lcm `run_versioned_migrations` (db_bootstrap.py:580-601):

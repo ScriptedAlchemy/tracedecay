@@ -8,11 +8,11 @@ use tree_sitter::{Node as TsNode, Parser, Tree};
 
 use crate::extraction::{
     common::{clean_c_comment, docstring_from_preceding_comments, extract_call_expression_sites},
-    complexity::{count_complexity, C_COMPLEXITY},
+    complexity::{C_COMPLEXITY, count_complexity},
     traversal::{find_descendant_by_kind, find_direct_child_by_kind, has_direct_child_kind},
 };
 use crate::types::{
-    generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
+    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from C source files using tree-sitter.

@@ -134,23 +134,33 @@ fn nested_modules_parent_correctly() {
         .collect();
 
     // Outer contains Inner, a, c (but not b)
-    assert!(contains
-        .iter()
-        .any(|e| e.source == outer.id && e.target == inner.id));
-    assert!(contains
-        .iter()
-        .any(|e| e.source == outer.id && e.target == a.id));
-    assert!(contains
-        .iter()
-        .any(|e| e.source == outer.id && e.target == c.id));
-    assert!(!contains
-        .iter()
-        .any(|e| e.source == outer.id && e.target == b.id));
+    assert!(
+        contains
+            .iter()
+            .any(|e| e.source == outer.id && e.target == inner.id)
+    );
+    assert!(
+        contains
+            .iter()
+            .any(|e| e.source == outer.id && e.target == a.id)
+    );
+    assert!(
+        contains
+            .iter()
+            .any(|e| e.source == outer.id && e.target == c.id)
+    );
+    assert!(
+        !contains
+            .iter()
+            .any(|e| e.source == outer.id && e.target == b.id)
+    );
 
     // Inner contains b (only)
-    assert!(contains
-        .iter()
-        .any(|e| e.source == inner.id && e.target == b.id));
+    assert!(
+        contains
+            .iter()
+            .any(|e| e.source == inner.id && e.target == b.id)
+    );
 }
 
 #[test]
@@ -165,10 +175,12 @@ fn inner_braces_do_not_pop_module_scope() {
     let result = extract(source);
     let m = result.nodes.iter().find(|n| n.name == "M").unwrap();
     let after = result.nodes.iter().find(|n| n.name == "after").unwrap();
-    assert!(result
-        .edges
-        .iter()
-        .any(|e| e.source == m.id && e.target == after.id && e.kind == EdgeKind::Contains));
+    assert!(
+        result
+            .edges
+            .iter()
+            .any(|e| e.source == m.id && e.target == after.id && e.kind == EdgeKind::Contains)
+    );
 }
 
 #[test]

@@ -1,5 +1,5 @@
 use tempfile::TempDir;
-use tracedecay::bench::{run_bench, BenchOptions, OutputFormat};
+use tracedecay::bench::{BenchOptions, OutputFormat, run_bench};
 use tracedecay::tracedecay::TraceDecay;
 
 #[tokio::test]

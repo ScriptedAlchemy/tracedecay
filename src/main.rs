@@ -1,3 +1,4 @@
+#![allow(clippy::collapsible_if)]
 // Rust guideline compliant 2025-10-17
 // Updated 2026-03-23: compact bordered table for status output
 use clap::{CommandFactory, Parser};
@@ -245,8 +246,8 @@ async fn run_startup_preamble(command: &Commands) {
 
     if is_first_run && !skip_startup_maintenance {
         eprintln!(
-            "note: tracedecay uploads anonymous token savings counts to a worldwide counter.\n\
-             \x20     Run `tracedecay disable-upload-counter` to opt out."
+            "note: tracedecay can optionally upload anonymous token savings counts to a worldwide counter.\n\
+             \x20     Run `tracedecay enable-upload-counter` to opt in."
         );
     }
 

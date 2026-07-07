@@ -36,17 +36,17 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
+use tracedecay::daemon::DaemonHandshake;
 #[cfg(unix)]
 use tracedecay::daemon::call_default_tool;
-use tracedecay::daemon::DaemonHandshake;
 use tracedecay::errors::{Result, TraceDecayError};
 use tracedecay::mcp::tools::{
-    get_tool_definitions, handle_profile_scoped_lcm_tool_call, render_tool_cli_help,
-    short_tool_name, ToolDefinition, RESERVED_FLAGS_FOOTER,
+    RESERVED_FLAGS_FOOTER, ToolDefinition, get_tool_definitions,
+    handle_profile_scoped_lcm_tool_call, render_tool_cli_help, short_tool_name,
 };
 
 mod args;
-use args::{canonical_tool_name, nearest_tool_name, parse_invocation, ParsedInvocation};
+use args::{ParsedInvocation, canonical_tool_name, nearest_tool_name, parse_invocation};
 #[cfg(test)]
 use args::{edit_distance, finalize_arrays, parse_invocation_with_stdin};
 #[cfg(test)]
@@ -240,7 +240,10 @@ async fn call_in_process_tool(
         )
         .await
     {
-        tracedecay::tracedecay::TraceDecay::init_with_options(project_path, open_options).await?
+        let cg = tracedecay::tracedecay::TraceDecay::init_with_options(project_path, open_options)
+            .await?;
+        cg.index_all().await?;
+        cg
     } else {
         tracedecay::tracedecay::TraceDecay::open_with_options(project_path, open_options).await?
     };

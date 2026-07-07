@@ -5,16 +5,18 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{global_db_path, GlobalDb};
+use crate::global_db::{GlobalDb, global_db_path};
+use crate::path_tree::format_compact_annotated_path_list;
 use crate::storage::{ProjectPath, StorageMode, StoreKind};
 use crate::tracedecay::{BranchDiagnostics, TraceDecay};
 use crate::types::{NodeKind, Visibility};
 
-use super::super::render::{self, Md};
 use super::super::ToolResult;
+use super::super::render::{self, Md};
+use super::dependency_hints;
 use super::support::{effective_path, filter_by_scope, require_node_id, unique_file_paths};
 
 /// Handles `tracedecay_status` tool calls.
@@ -599,51 +601,84 @@ pub(super) async fn handle_files(
     // Listing files is metadata-only — no source code is served, so no tokens saved.
     let touched_files = vec![];
 
-    let format = args
-        .get("format")
+    let layout = args
+        .get("layout")
         .and_then(|v| v.as_str())
         .unwrap_or("grouped");
 
-    let output = if format == "flat" {
-        files
-            .iter()
-            .map(|f| format!("{} ({} symbols, {} bytes)", f.path, f.node_count, f.size))
-            .collect::<Vec<_>>()
-            .join("\n")
-    } else {
-        // Grouped by directory
-        let mut groups: std::collections::BTreeMap<String, Vec<String>> =
-            std::collections::BTreeMap::new();
-        for f in &files {
-            let dir = f.path.rfind('/').map_or(".", |i| &f.path[..i]).to_string();
-            #[allow(clippy::map_unwrap_or)]
-            let name = f
-                .path
-                .rfind('/')
-                .map(|i| &f.path[i + 1..])
-                .unwrap_or(&f.path);
-            groups
-                .entry(dir)
-                .or_default()
-                .push(format!("{} ({} symbols)", name, f.node_count));
-        }
-        let mut lines = Vec::new();
-        lines.push(format!("{} indexed files", files.len()));
-        for (dir, entries) in &groups {
-            lines.push(format!("\n{}/ ({} files)", dir, entries.len()));
-            for entry in entries {
-                lines.push(format!("  {entry}"));
-            }
-        }
-        lines.join("\n")
-    };
+    let file_values: Vec<Value> = files
+        .iter()
+        .map(|f| json!({ "path": f.path, "symbols": f.node_count, "bytes": f.size }))
+        .collect();
+    let payload = json!({
+        "count": files.len(),
+        "layout": layout,
+        "files": file_values,
+    });
+    let text = render::finalize(Some(cg.project_root()), &args, &payload, || {
+        render_files_md(&payload)
+    });
 
     Ok(ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": render::truncate_text_with_handle(Some(cg.project_root()), &output) }]
-        }),
+        json!({ "content": [{ "type": "text", "text": text }] }),
         touched_files,
     ))
+}
+
+fn render_files_md(value: &Value) -> String {
+    let mut md = Md::new();
+    md.heading(2, "Files");
+    md.field(
+        "indexed files",
+        &render::field_i64(value, "count").to_string(),
+    );
+    let layout = render::field_str(value, "layout");
+    md.field("layout", &layout);
+
+    let files = value
+        .get("files")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if files.is_empty() {
+        md.blank().empty_note("No indexed files matched.");
+        return md.render();
+    }
+
+    if layout == "flat" {
+        let lines = files
+            .iter()
+            .filter_map(|file| {
+                let path = file.get("path").and_then(Value::as_str)?;
+                let symbols = render::field_i64(file, "symbols");
+                let bytes = render::field_i64(file, "bytes");
+                Some(format!("- {path} ({symbols} symbols, {bytes} bytes)"))
+            })
+            .collect::<Vec<_>>();
+        let listing = lines.join("\n");
+        md.blank().code("text", &listing);
+        return md.render();
+    }
+
+    let paths = files
+        .iter()
+        .filter_map(|file| {
+            file.get("path")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .collect::<Vec<_>>();
+    let suffixes = files
+        .iter()
+        .map(|file| format!(" ({} symbols)", render::field_i64(file, "symbols")))
+        .collect::<Vec<_>>();
+    let annotated = paths
+        .iter()
+        .zip(suffixes.iter())
+        .map(|(path, suffix)| (path.as_str(), suffix.as_str()));
+    let listing = format_compact_annotated_path_list(annotated, "- ", "");
+    md.blank().code("text", &listing);
+    md.render()
 }
 
 /// Default node kinds for port comparisons.
@@ -1524,7 +1559,7 @@ pub(super) async fn handle_type_hierarchy(cg: &TraceDecay, args: Value) -> Resul
             message: format!("node not found: {node_id}"),
         })?;
 
-    let mut output = format!(
+    let mut tree = format!(
         "{} ({}) -- {}:{}\n",
         root.name,
         root.kind.as_str(),
@@ -1534,13 +1569,45 @@ pub(super) async fn handle_type_hierarchy(cg: &TraceDecay, args: Value) -> Resul
     let mut all_files: Vec<String> = vec![root.file_path.clone()];
 
     // Recursively build the hierarchy
-    build_type_tree(cg, &root.id, max_depth, 0, &mut output, &mut all_files).await?;
+    build_type_tree(cg, &root.id, max_depth, 0, &mut tree, &mut all_files).await?;
 
     let touched_files = unique_file_paths(all_files.iter().map(std::string::String::as_str));
+    let payload = json!({
+        "root": {
+            "id": root.id,
+            "name": root.name,
+            "kind": root.kind.as_str(),
+            "file": root.file_path,
+            "line": root.start_line,
+        },
+        "max_depth": max_depth,
+        "tree": tree,
+    });
+    let text = render::finalize(Some(cg.project_root()), &args, &payload, || {
+        render_type_hierarchy_md(&payload)
+    });
     Ok(ToolResult::new(
-        json!({"content": [{"type": "text", "text": render::truncate_text_with_handle(Some(cg.project_root()), &output)}]}),
+        json!({"content": [{"type": "text", "text": text}]}),
         touched_files,
     ))
+}
+
+fn render_type_hierarchy_md(value: &Value) -> String {
+    let mut md = Md::new();
+    md.heading(2, "Type Hierarchy");
+    if let Some(root) = value.get("root") {
+        let name = render::field_str(root, "name");
+        let kind = render::field_str(root, "kind");
+        let file = render::field_str(root, "file");
+        let line = render::field_i64(root, "line");
+        md.field("root", &format!("{name} ({kind}) - {file}:{line}"));
+    }
+    md.field(
+        "max_depth",
+        &render::field_i64(value, "max_depth").to_string(),
+    );
+    md.blank().code("text", &render::field_str(value, "tree"));
+    md.render()
 }
 
 /// Recursively appends type hierarchy lines to the output string.
@@ -1618,7 +1685,14 @@ pub(super) async fn handle_body(
         .and_then(serde_json::Value::as_u64)
         .map_or(3, |v| v.clamp(1, 20) as usize);
 
-    let chosen = body_candidates(cg, symbol, limit, scope_prefix).await?;
+    let chosen = body_candidates(
+        cg,
+        symbol,
+        limit,
+        scope_prefix,
+        super::dependency_hints::lazy_indexing_requested(&args),
+    )
+    .await?;
 
     if chosen.is_empty() {
         return Ok(ToolResult::new(
@@ -1713,6 +1787,7 @@ async fn body_candidates(
     symbol: &str,
     limit: usize,
     scope_prefix: Option<&str>,
+    lazy_index_ignored_dependencies: bool,
 ) -> Result<Vec<crate::types::SearchResult>> {
     // First try an exact-name lookup against the DB — this avoids the BM25
     // ranker's tendency to bury a definition under unrelated noise when the
@@ -1720,7 +1795,23 @@ async fn body_candidates(
     // struct field). Falls back to suffix / name match inside
     // `get_nodes_by_qualified_name`.
     let exact_nodes = cg.get_nodes_by_qualified_name(symbol).await?;
-    let exact_nodes = filter_by_scope(exact_nodes, scope_prefix, |n| &n.file_path);
+    let mut exact_nodes = filter_by_scope(exact_nodes, scope_prefix, |n| &n.file_path);
+    if exact_nodes.is_empty() && lazy_index_ignored_dependencies {
+        let indexed = dependency_hints::lazy_index_ignored_dependency_candidates(
+            cg,
+            symbol,
+            limit,
+            scope_prefix,
+        )
+        .await?;
+        if !indexed.is_empty() {
+            exact_nodes = filter_by_scope(
+                cg.get_nodes_by_qualified_name(symbol).await?,
+                scope_prefix,
+                |n| &n.file_path,
+            );
+        }
+    }
 
     // Wrap as SearchResult so the existing scoring/rendering path works.
     let mut candidates: Vec<crate::types::SearchResult> = exact_nodes
@@ -1876,12 +1967,7 @@ pub(super) async fn handle_todos(
 
     'outer: for file in &files {
         if let Some(prefix) = path {
-            let with_slash = if prefix.ends_with('/') {
-                prefix.to_string()
-            } else {
-                format!("{prefix}/")
-            };
-            if !file.path.starts_with(&with_slash) && file.path != prefix {
+            if !crate::path_scope::path_matches_scope(&file.path, Some(prefix)) {
                 continue;
             }
         }
@@ -2034,7 +2120,7 @@ async fn resolve_indexed_source_file(cg: &TraceDecay, file: &str) -> Result<(Pat
 pub(super) async fn handle_read(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     use crate::context::read_cache::{self, GLOBAL_SESSION};
     use crate::context::read_modes::{
-        self, render_full, render_lines, render_map, render_signatures, LineRange, ReadMode,
+        self, LineRange, ReadMode, render_full, render_lines, render_map, render_signatures,
     };
 
     let file =
@@ -2107,9 +2193,12 @@ pub(super) async fn handle_read(cg: &TraceDecay, args: Value) -> Result<ToolResu
             "digest": cached.digest,
             "token_count": cached.token_count,
         });
+        let text = render::finalize(Some(cg.project_root()), &args, &stub, || {
+            render_read_md(&stub)
+        });
         return Ok(ToolResult::new(
             json!({
-                "content": [{ "type": "text", "text": serde_json::to_string(&stub).unwrap_or_default() }]
+                "content": [{ "type": "text", "text": text }]
             }),
             vec![display_file],
         ));
@@ -2186,10 +2275,24 @@ fn render_read_md(value: &Value) -> String {
     let file = render::field_str(value, "file");
     let mode = render::field_str(value, "mode");
     md.heading(2, &format!("{file} ({mode})"));
+    if value
+        .get("unchanged")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        md.field("unchanged", "true");
+        let digest = render::field_str(value, "digest");
+        if !digest.is_empty() {
+            md.field("digest", digest);
+        }
+    }
     md.field(
         "tokens",
         &render::field_i64(value, "token_count").to_string(),
     );
+    if value.get("body").is_none() {
+        return md.render();
+    }
     md.blank();
     let lang = file.rsplit_once('.').map_or("", |(_, ext)| ext);
     md.code(lang, render::field_str(value, "body"));
@@ -2552,12 +2655,7 @@ pub(super) async fn handle_signature_search(
     let mut touched: Vec<String> = Vec::new();
     for node in function_nodes.iter().chain(method_nodes.iter()) {
         if let Some(prefix) = path_filter {
-            let with_slash = if prefix.ends_with('/') {
-                prefix.to_string()
-            } else {
-                format!("{prefix}/")
-            };
-            if !node.file_path.starts_with(&with_slash) && node.file_path != prefix {
+            if !crate::path_scope::path_matches_scope(&node.file_path, Some(prefix)) {
                 continue;
             }
         }

@@ -90,6 +90,10 @@ pub struct TraceDecayConfig {
     /// branch lifecycle). Absent in older `config.json` files, so defaulted.
     #[serde(default)]
     pub sync: SyncConfig,
+    /// Analytics telemetry settings. Absent in older `config.json` files, so
+    /// defaulted.
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
 }
 
 fn default_git_ignore() -> bool {
@@ -136,7 +140,25 @@ fn default_sync_orphan_db_gc_days() -> u64 {
     7
 }
 fn default_sync_auto_init() -> bool {
-    false
+    true
+}
+
+fn default_telemetry_timings() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TelemetryConfig {
+    #[serde(default = "default_telemetry_timings")]
+    pub timings: bool,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            timings: default_telemetry_timings(),
+        }
+    }
 }
 
 /// Auto-sync / index-freshness knobs, exposed as the `[sync]` table in
@@ -312,8 +334,13 @@ impl Default for TraceDecayConfig {
             git_ignore: default_git_ignore(),
             diagnostics_prewarm: false,
             sync: SyncConfig::default(),
+            telemetry: TelemetryConfig::default(),
         }
     }
+}
+
+pub fn load_telemetry_config(project_root: &Path) -> TelemetryConfig {
+    load_config(project_root).map_or_else(|_| TelemetryConfig::default(), |config| config.telemetry)
 }
 
 /// Returns the project marker directory for the given project root.
@@ -882,7 +909,9 @@ impl PinnedUserDataDir {
         fs::create_dir_all(&profile)
             .unwrap_or_else(|err| panic!("failed to create isolated profile root: {err}"));
         let previous = std::env::var_os(USER_DATA_DIR_ENV);
-        std::env::set_var(USER_DATA_DIR_ENV, &profile);
+        unsafe {
+            std::env::set_var(USER_DATA_DIR_ENV, &profile);
+        }
         Self {
             _lock: lock,
             _root: root,
@@ -901,9 +930,11 @@ impl Default for PinnedUserDataDir {
 #[cfg(test)]
 impl Drop for PinnedUserDataDir {
     fn drop(&mut self) {
-        match self.previous.take() {
-            Some(previous) => std::env::set_var(USER_DATA_DIR_ENV, previous),
-            None => std::env::remove_var(USER_DATA_DIR_ENV),
+        unsafe {
+            match self.previous.take() {
+                Some(previous) => std::env::set_var(USER_DATA_DIR_ENV, previous),
+                None => std::env::remove_var(USER_DATA_DIR_ENV),
+            }
         }
     }
 }

@@ -2,15 +2,15 @@ use serde_json::json;
 
 use tracedecay::agents::codex::export_codex_plugin_artifact;
 use tracedecay::agents::{export_managed_skills_to_agent_hosts, export_managed_skills_to_agents};
-use tracedecay::automation::hermes_bridge::{load_hermes_skill_bridge, HermesSkillBridgeOptions};
+use tracedecay::automation::hermes_bridge::{HermesSkillBridgeOptions, load_hermes_skill_bridge};
 use tracedecay::automation::managed_skills::{
+    ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
     approve_managed_skill, create_managed_skill_draft, default_managed_skill_targets,
-    disable_managed_skill, load_managed_skill, managed_skill_dir, ManagedSkillDraft,
-    ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
+    disable_managed_skill, load_managed_skill, managed_skill_dir,
 };
 use tracedecay::automation::skill_targets::{
-    export_native_skill_overlay, export_prompt_skill_index, install_managed_skills,
-    remove_prompt_skill_index_for_target, SkillInstallTarget,
+    SkillInstallTarget, export_native_skill_overlay, export_prompt_skill_index,
+    install_managed_skills, remove_prompt_skill_index_for_target,
 };
 
 fn draft(id: &str, title: &str) -> ManagedSkillDraft {
@@ -21,11 +21,10 @@ fn draft(id: &str, title: &str) -> ManagedSkillDraft {
         category: "workflow".to_string(),
         targets: default_managed_skill_targets(),
         body_markdown: format!("Use {title} when the workflow repeats."),
-        support_files: vec![ManagedSupportFile::new(
-            "references/checklist.md",
-            format!("- {id}\n").into_bytes(),
-        )
-        .unwrap()],
+        support_files: vec![
+            ManagedSupportFile::new("references/checklist.md", format!("- {id}\n").into_bytes())
+                .unwrap(),
+        ],
         provenance: ManagedSkillProvenance {
             source: ManagedSkillSource::UserDraft,
             actor: "test".to_string(),
@@ -106,22 +105,32 @@ async fn native_overlay_exports_only_active_skills_and_prunes_generated_namespac
             .unwrap();
 
     assert_eq!(summary.exported_count, 1);
-    assert!(plugin_root
-        .join("skills/agent-managed/repo-hygiene/SKILL.md")
-        .is_file());
-    assert!(plugin_root
-        .join("skills/agent-managed/repo-hygiene/references/checklist.md")
-        .is_file());
-    assert!(!plugin_root
-        .join("skills/agent-managed/pending-flow/SKILL.md")
-        .exists());
-    assert!(!plugin_root
-        .join("skills/agent-managed/stale-skill/SKILL.md")
-        .exists());
+    assert!(
+        plugin_root
+            .join("skills/agent-managed/repo-hygiene/SKILL.md")
+            .is_file()
+    );
+    assert!(
+        plugin_root
+            .join("skills/agent-managed/repo-hygiene/references/checklist.md")
+            .is_file()
+    );
+    assert!(
+        !plugin_root
+            .join("skills/agent-managed/pending-flow/SKILL.md")
+            .exists()
+    );
+    assert!(
+        !plugin_root
+            .join("skills/agent-managed/stale-skill/SKILL.md")
+            .exists()
+    );
     assert!(plugin_root.join("skills/static-skill/SKILL.md").is_file());
-    assert!(plugin_root
-        .join("skills/agent-managed/.tracedecay-managed-skills.json")
-        .is_file());
+    assert!(
+        plugin_root
+            .join("skills/agent-managed/.tracedecay-managed-skills.json")
+            .is_file()
+    );
     let manifest = std::fs::read_to_string(
         plugin_root.join("skills/agent-managed/.tracedecay-managed-skills.json"),
     )
@@ -142,9 +151,11 @@ async fn native_overlay_exports_only_active_skills_and_prunes_generated_namespac
         export_native_skill_overlay(&profile_root, SkillInstallTarget::Cursor, &plugin_root)
             .unwrap();
     assert_eq!(summary.exported_count, 0);
-    assert!(!plugin_root
-        .join("skills/agent-managed/repo-hygiene/SKILL.md")
-        .exists());
+    assert!(
+        !plugin_root
+            .join("skills/agent-managed/repo-hygiene/SKILL.md")
+            .exists()
+    );
     assert!(plugin_root.join("skills/static-skill/SKILL.md").is_file());
 }
 
@@ -172,9 +183,11 @@ async fn codex_native_overlay_uses_agent_managed_namespace() {
         export_native_skill_overlay(&profile_root, SkillInstallTarget::Codex, &plugin_root)
             .unwrap();
     assert_eq!(summary.exported_count, 1);
-    assert!(plugin_root
-        .join("skills/agent-managed/repo-hygiene/SKILL.md")
-        .is_file());
+    assert!(
+        plugin_root
+            .join("skills/agent-managed/repo-hygiene/SKILL.md")
+            .is_file()
+    );
 }
 
 #[tokio::test]
@@ -215,12 +228,16 @@ async fn codex_plugin_artifact_exports_shareable_bundle_with_managed_skills() {
     assert!(plugin_root.join(".mcp.json").is_file());
     assert!(plugin_root.join("hooks/hooks.json").is_file());
     assert!(plugin_root.join("skills/code-health/SKILL.md").is_file());
-    assert!(plugin_root
-        .join("skills/agent-managed/codex-only/SKILL.md")
-        .is_file());
-    assert!(!plugin_root
-        .join("skills/agent-managed/cursor-only/SKILL.md")
-        .exists());
+    assert!(
+        plugin_root
+            .join("skills/agent-managed/codex-only/SKILL.md")
+            .is_file()
+    );
+    assert!(
+        !plugin_root
+            .join("skills/agent-managed/cursor-only/SKILL.md")
+            .exists()
+    );
     let codex_skill =
         std::fs::read_to_string(plugin_root.join("skills/agent-managed/codex-only/SKILL.md"))
             .unwrap();
@@ -282,9 +299,11 @@ async fn native_overlay_sanitizes_legacy_native_frontmatter_without_blocking_pee
             export_native_skill_overlay(&profile_root, SkillInstallTarget::Cursor, &plugin_root)
                 .unwrap();
         assert_eq!(summary.exported_count, 2);
-        assert!(plugin_root
-            .join("skills/agent-managed/repo-hygiene/SKILL.md")
-            .is_file());
+        assert!(
+            plugin_root
+                .join("skills/agent-managed/repo-hygiene/SKILL.md")
+                .is_file()
+        );
 
         let legacy_skill = std::fs::read_to_string(
             plugin_root
@@ -666,9 +685,11 @@ async fn lifecycle_export_sweep_deploys_and_retracts_across_detected_agents() {
         assert_eq!(report.exports[0].exported_count, 1);
         assert_eq!(report.exports[0].exported[0].id, "repo-hygiene");
     }
-    assert!(cursor_plugin
-        .join("skills/agent-managed/repo-hygiene/SKILL.md")
-        .is_file());
+    assert!(
+        cursor_plugin
+            .join("skills/agent-managed/repo-hygiene/SKILL.md")
+            .is_file()
+    );
     let claude_contents = std::fs::read_to_string(&claude_md).unwrap();
     assert!(claude_contents.contains("`repo-hygiene`"));
     assert!(claude_contents.contains("# Claude rules"));
@@ -681,9 +702,11 @@ async fn lifecycle_export_sweep_deploys_and_retracts_across_detected_agents() {
         assert_eq!(report.error, None, "{} retraction failed", report.agent);
         assert_eq!(report.exports[0].exported_count, 0);
     }
-    assert!(!cursor_plugin
-        .join("skills/agent-managed/repo-hygiene/SKILL.md")
-        .exists());
+    assert!(
+        !cursor_plugin
+            .join("skills/agent-managed/repo-hygiene/SKILL.md")
+            .exists()
+    );
     let claude_contents = std::fs::read_to_string(&claude_md).unwrap();
     assert!(!claude_contents.contains("repo-hygiene"));
     assert!(claude_contents.contains("# Claude rules"));
@@ -728,9 +751,11 @@ async fn lifecycle_export_sweep_isolates_per_agent_failures() {
         .expect("cursor export must still run");
     assert_eq!(cursor.error, None);
     assert_eq!(cursor.exports[0].exported_count, 1);
-    assert!(cursor_plugin
-        .join("skills/agent-managed/repo-hygiene/SKILL.md")
-        .is_file());
+    assert!(
+        cursor_plugin
+            .join("skills/agent-managed/repo-hygiene/SKILL.md")
+            .is_file()
+    );
 }
 
 #[tokio::test]
@@ -1065,11 +1090,13 @@ skills:
         snapshot.skills[0].usage.as_ref().unwrap()["created_by"],
         "agent"
     );
-    assert!(snapshot.skills[0]
-        .body_markdown
-        .as_ref()
-        .unwrap()
-        .contains("Use focused tests"));
+    assert!(
+        snapshot.skills[0]
+            .body_markdown
+            .as_ref()
+            .unwrap()
+            .contains("Use focused tests")
+    );
     assert_eq!(
         snapshot.pending_skills[0].origin.as_deref(),
         Some("background_review")
@@ -1087,10 +1114,12 @@ skills:
         snapshot.pending_skills[1].source_path,
         pending_dir.join("newer.json")
     );
-    assert!(!snapshot
-        .pending_skills
-        .iter()
-        .any(|pending| pending.id == "bad"));
+    assert!(
+        !snapshot
+            .pending_skills
+            .iter()
+            .any(|pending| pending.id == "bad")
+    );
 }
 
 #[test]

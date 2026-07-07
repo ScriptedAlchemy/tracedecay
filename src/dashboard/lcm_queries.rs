@@ -220,10 +220,12 @@ pub(crate) async fn search_message_like(
     limit: i64,
     offset: i64,
 ) -> Result<(Vec<Value>, i64), String> {
-    let mut where_clauses = vec!["(m.index_text LIKE ? ESCAPE '\\'
+    let mut where_clauses = vec![
+        "(m.index_text LIKE ? ESCAPE '\\'
               OR m.snippet_text LIKE ? ESCAPE '\\'
               OR COALESCE(m.content, '') LIKE ? ESCAPE '\\')"
-        .to_string()];
+            .to_string(),
+    ];
     where_clauses.extend(facet_clauses.iter().cloned());
     let mut like_params = vec![
         libsql::Value::Text(like.to_string()),

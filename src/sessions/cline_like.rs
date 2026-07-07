@@ -20,15 +20,15 @@ use std::time::UNIX_EPOCH;
 
 use serde_json::{Map, Value};
 
+use crate::sessions::SessionMessageRecord;
 use crate::sessions::shared::{
-    append_location_metadata, append_tool_calls_metadata, append_usage_metadata,
-    content_storage_text_and_tools, path_belongs_to_project, title_from_messages, StoredCursor,
-    TranscriptLocation, TranscriptLocationMetadataKeys,
+    StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,
+    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
+    path_belongs_to_project, title_from_messages,
 };
 use crate::sessions::source::{
-    read_changed_with_companion, ParsedTranscript, SessionDraft, TranscriptSource,
+    ParsedTranscript, SessionDraft, TranscriptSource, read_changed_with_companion,
 };
-use crate::sessions::SessionMessageRecord;
 
 /// Cap task-directory scans so a long VS Code globalStorage history cannot
 /// block dashboard startup.
@@ -72,16 +72,20 @@ impl ClineLikeSource {
     pub fn cline_with_home(home: &Path) -> Self {
         Self {
             provider: "cline",
-            storage_roots: vec![crate::agents::vscode_data_dir(home)
-                .join("User/globalStorage/saoudrizwan.claude-dev/tasks")],
+            storage_roots: vec![
+                crate::agents::vscode_data_dir(home)
+                    .join("User/globalStorage/saoudrizwan.claude-dev/tasks"),
+            ],
         }
     }
 
     pub fn roo_code_with_home(home: &Path) -> Self {
         Self {
             provider: "roo-code",
-            storage_roots: vec![crate::agents::vscode_data_dir(home)
-                .join("User/globalStorage/rooveterinaryinc.roo-cline/tasks")],
+            storage_roots: vec![
+                crate::agents::vscode_data_dir(home)
+                    .join("User/globalStorage/rooveterinaryinc.roo-cline/tasks"),
+            ],
         }
     }
 

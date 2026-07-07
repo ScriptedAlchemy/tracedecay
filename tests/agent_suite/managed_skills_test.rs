@@ -1,15 +1,15 @@
 use tracedecay::automation::managed_skills::{
+    MAX_MANAGED_SKILL_BODY_BYTES, ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource,
+    ManagedSkillState, ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget,
     approve_managed_skill, archive_managed_skill, create_managed_skill_draft,
     disable_managed_skill, discard_pending_managed_skill_update, list_managed_skills,
     load_managed_skill, managed_skill_dir, restore_managed_skill, save_managed_skill,
-    set_managed_skill_state, stage_managed_skill_update, update_managed_skill, ManagedSkillDraft,
-    ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState, ManagedSkillUpdate,
-    ManagedSupportFile, SkillInstallTarget, MAX_MANAGED_SKILL_BODY_BYTES,
+    set_managed_skill_state, stage_managed_skill_update, update_managed_skill,
 };
 use tracedecay::automation::skill_usage::{
-    ingest_analytics_events, load_skill_usage_records, record_skill_usage,
-    record_skill_usage_event, skill_usage_ledger_path, summarize_skill_usage,
-    summarize_skill_usage_for, SkillUsageAction, SkillUsageEvent,
+    SkillUsageAction, SkillUsageEvent, ingest_analytics_events, load_skill_usage_records,
+    record_skill_usage, record_skill_usage_event, skill_usage_ledger_path, summarize_skill_usage,
+    summarize_skill_usage_for,
 };
 use tracedecay::global_db::AnalyticsEventRecord;
 
@@ -21,11 +21,13 @@ fn draft() -> ManagedSkillDraft {
         category: "maintenance".to_string(),
         targets: vec![SkillInstallTarget::Cursor, SkillInstallTarget::Codex],
         body_markdown: "Use focused checks before changing generated files.".to_string(),
-        support_files: vec![ManagedSupportFile::new(
-            "references/checklist.md",
-            b"- check dirty tree\n- run focused tests\n".to_vec(),
-        )
-        .unwrap()],
+        support_files: vec![
+            ManagedSupportFile::new(
+                "references/checklist.md",
+                b"- check dirty tree\n- run focused tests\n".to_vec(),
+            )
+            .unwrap(),
+        ],
         provenance: ManagedSkillProvenance {
             source: ManagedSkillSource::AutomationRun,
             actor: "tracedecay".to_string(),
@@ -169,9 +171,10 @@ fn rejects_frontmatter_breaking_metadata_and_oversized_body() {
     nested_frontmatter.body_markdown =
         "---\nname: injected\ndescription: duplicate schema\n---\n\nUse this.".to_string();
     let err = nested_frontmatter.materialize().unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("body_markdown cannot include YAML frontmatter"));
+    assert!(
+        err.to_string()
+            .contains("body_markdown cannot include YAML frontmatter")
+    );
 
     let mut oversized_body = draft();
     oversized_body.body_markdown = "x".repeat(MAX_MANAGED_SKILL_BODY_BYTES + 1);
@@ -270,9 +273,10 @@ async fn managed_skill_updates_reject_invalid_metadata_without_mutating_active_r
     )
     .await
     .unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("lowercase letters, numbers, '-' or '_'"));
+    assert!(
+        err.to_string()
+            .contains("lowercase letters, numbers, '-' or '_'")
+    );
 
     let reloaded = load_managed_skill(&profile_root, "repo-hygiene")
         .await
@@ -282,10 +286,12 @@ async fn managed_skill_updates_reject_invalid_metadata_without_mutating_active_r
     assert_eq!(reloaded.metadata.state, ManagedSkillState::Active);
     assert_eq!(reloaded.metadata.checksum, active.metadata.checksum);
     assert!(reloaded.pending_update.is_none());
-    assert!(!managed_skill_dir(&profile_root, "repo-hygiene")
-        .unwrap()
-        .join("pending_update.json")
-        .exists());
+    assert!(
+        !managed_skill_dir(&profile_root, "repo-hygiene")
+            .unwrap()
+            .join("pending_update.json")
+            .exists()
+    );
 
     let err = update_managed_skill(
         &profile_root,
@@ -322,9 +328,10 @@ async fn managed_skill_updates_reject_invalid_metadata_without_mutating_active_r
     )
     .await
     .unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("body_markdown cannot include YAML frontmatter"));
+    assert!(
+        err.to_string()
+            .contains("body_markdown cannot include YAML frontmatter")
+    );
     let reloaded = load_managed_skill(&profile_root, "repo-hygiene")
         .await
         .unwrap();
@@ -722,11 +729,9 @@ async fn managed_skill_update_removes_stale_support_files() {
         &profile_root,
         "repo-hygiene",
         ManagedSkillUpdate {
-            support_files: Some(vec![ManagedSupportFile::new(
-                "templates/new.md",
-                b"new body".to_vec(),
-            )
-            .unwrap()]),
+            support_files: Some(vec![
+                ManagedSupportFile::new("templates/new.md", b"new body".to_vec()).unwrap(),
+            ]),
             ..ManagedSkillUpdate::default()
         },
     )
@@ -761,11 +766,9 @@ async fn staged_managed_skill_update_preserves_active_revision_until_approval() 
             body_markdown: Some(
                 "Review the run ledger before applying generated edits.".to_string(),
             ),
-            support_files: Some(vec![ManagedSupportFile::new(
-                "templates/review.md",
-                b"review body".to_vec(),
-            )
-            .unwrap()]),
+            support_files: Some(vec![
+                ManagedSupportFile::new("templates/review.md", b"review body".to_vec()).unwrap(),
+            ]),
             ..ManagedSkillUpdate::default()
         },
     )
@@ -867,17 +870,20 @@ async fn staged_managed_skill_update_rejects_no_op_patch() {
     .await
     .unwrap_err();
 
-    assert!(err
-        .to_string()
-        .contains("update does not change the active revision"));
+    assert!(
+        err.to_string()
+            .contains("update does not change the active revision")
+    );
     let reloaded = load_managed_skill(&profile_root, "repo-hygiene")
         .await
         .unwrap();
     assert!(reloaded.pending_update.is_none());
-    assert!(!managed_skill_dir(&profile_root, "repo-hygiene")
-        .unwrap()
-        .join("pending_update.json")
-        .exists());
+    assert!(
+        !managed_skill_dir(&profile_root, "repo-hygiene")
+            .unwrap()
+            .join("pending_update.json")
+            .exists()
+    );
 }
 
 #[tokio::test]

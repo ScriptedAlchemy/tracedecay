@@ -1,7 +1,7 @@
 use super::{
-    db_filename, get_project_db_path, get_tracedecay_dir, is_excluded, is_excluded_dir,
-    is_ignored_by_explicit_global_excludes, is_ignored_by_git, is_included,
-    lock_user_data_dir_test_env, user_data_dir, TraceDecayConfig, USER_DATA_DIR_ENV,
+    TraceDecayConfig, USER_DATA_DIR_ENV, db_filename, get_project_db_path, get_tracedecay_dir,
+    is_excluded, is_excluded_dir, is_ignored_by_explicit_global_excludes, is_ignored_by_git,
+    is_included, lock_user_data_dir_test_env, user_data_dir,
 };
 use std::ffi::OsString;
 use std::fs;
@@ -16,16 +16,20 @@ struct EnvRestore {
 impl EnvRestore {
     fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
         let previous = std::env::var_os(key);
-        std::env::set_var(key, value);
+        unsafe {
+            std::env::set_var(key, value);
+        }
         Self { key, previous }
     }
 }
 
 impl Drop for EnvRestore {
     fn drop(&mut self) {
-        match self.previous.take() {
-            Some(previous) => std::env::set_var(self.key, previous),
-            None => std::env::remove_var(self.key),
+        unsafe {
+            match self.previous.take() {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
         }
     }
 }
@@ -224,7 +228,39 @@ fn sync_config_defaults_round_trip() {
     assert_eq!(parsed.sync.watch_debounce_ms, 2000);
     assert_eq!(parsed.sync.full_sync_escalation_files, 500);
     assert_eq!(parsed.sync.max_concurrent_syncs, 2);
-    assert!(!parsed.sync.auto_init);
+    assert!(parsed.sync.auto_init);
+}
+
+#[test]
+fn telemetry_timing_defaults_on_and_round_trips() {
+    let config = TraceDecayConfig::default();
+    assert!(config.telemetry.timings);
+    let json = serde_json::to_string(&config).unwrap();
+    let parsed: TraceDecayConfig = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed.telemetry, super::TelemetryConfig::default());
+
+    let legacy = r#"{
+        "version": 1,
+        "root_dir": "/tmp/proj",
+        "exclude": [],
+        "max_file_size": 1048576,
+        "extract_docstrings": true,
+        "track_call_sites": true
+    }"#;
+    let parsed: TraceDecayConfig = serde_json::from_str(legacy).unwrap();
+    assert!(parsed.telemetry.timings);
+
+    let disabled = r#"{
+        "version": 1,
+        "root_dir": "/tmp/proj",
+        "exclude": [],
+        "max_file_size": 1048576,
+        "extract_docstrings": true,
+        "track_call_sites": true,
+        "telemetry": { "timings": false }
+    }"#;
+    let parsed: TraceDecayConfig = serde_json::from_str(disabled).unwrap();
+    assert!(!parsed.telemetry.timings);
 }
 
 #[test]

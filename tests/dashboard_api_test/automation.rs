@@ -822,9 +822,11 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
 
         let (status, missing) = get_json(&agent, &format!("{artifact_url}/validation_gate"));
         assert_eq!(status, 404);
-        assert!(missing["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("not found")));
+        assert!(
+            missing["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("not found"))
+        );
 
         let artifact_path = tracedecay::automation::run_ledger::run_artifact_path(
             &dashboard_root,
@@ -835,9 +837,11 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
         std::fs::write(&artifact_path, "{\"tampered\":true}\n").unwrap();
         let (status, tampered) = get_json(&agent, &format!("{artifact_url}/codex_handoff"));
         assert_eq!(status, 500);
-        assert!(tampered["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("hash mismatch")));
+        assert!(
+            tampered["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("hash mismatch"))
+        );
 
         server.stop();
     });

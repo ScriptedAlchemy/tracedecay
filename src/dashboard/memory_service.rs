@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use super::memory_analysis::{
-    build_similarity_computation, pca_scores, propose_dedup_actions, propose_hygiene_candidates,
-    score_distribution, score_similar_pairs, SimilarityComputation, SIMILARITY_DEFAULT_THRESHOLD,
-    SIMILARITY_FACT_CAP, SIMILARITY_PAIR_FLOOR, SIMILARITY_SCORE_MAX, SIMILARITY_SCORE_MIN,
+    SIMILARITY_DEFAULT_THRESHOLD, SIMILARITY_FACT_CAP, SIMILARITY_PAIR_FLOOR, SIMILARITY_SCORE_MAX,
+    SIMILARITY_SCORE_MIN, SimilarityComputation, build_similarity_computation, pca_scores,
+    propose_dedup_actions, propose_hygiene_candidates, score_distribution, score_similar_pairs,
 };
 use super::memory_queries::{self, VectorStateFingerprint};
 use super::{CuratePreviewEntry, DashboardState};

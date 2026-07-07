@@ -94,6 +94,9 @@ usage claims can be audited.
 | `memory-supersede-without-dup` | stable | Preference pivots update the existing fact; naive duplicate adds must be flagged by curation dry-run for deletion of the older superseded fact. |
 | `memory-multiturn-continuity` | stable | Facts stored in one session are recalled (with a real retrieval hit) in the next. |
 | `memory-curation-conservatism` | stable | `tracedecay memory curate` never proposes deleting high-trust, high-access facts absent strong similarity, while genuine near-dups collapse — in dry-run and under `--apply`. |
+| `memory-feedback-trust` | stable | `fact_feedback` (helpful) raises `trust_score` above the seed and appends a `memory_feedback_events` audit row. |
+| `memory-ranking-retrieval-reinforcement` | stable | A frequently-retrieved fact out-ranks an equal-trust, never-retrieved rival — the `combined_score` usage boost, through the real search tool. |
+| `memory-ranking-feedback-promotes` | stable | Rating one fact `helpful` and an equally-relevant rival `unhelpful` flips their order in real search results (the full feedback → trust → rank loop). |
 
 ## Adding a scenario
 
@@ -103,3 +106,76 @@ usage claims can be audited.
    `every_scenario_file_is_wired` test fails until you do.
 3. If it has a `real_model` block it is automatically runnable through
    `eval/run_real_model.py`.
+
+## Triggering & adoption scorecard
+
+The layers above test whether the memory *engine* behaves. They do **not** test
+whether a real model *chooses* to use memory unprompted — the behavior that
+actually determines whether durable memory helps a user. That is the
+**fact-store adoption scorecard**, built on the hermetic harness in
+[`eval/hermetic/`](../eval/hermetic/).
+
+### How it works
+
+`eval/hermetic/run.sh` builds the dev binary, stages it at a non-cargo path,
+installs the plugin into a throwaway `CLAUDE_CONFIG_DIR`/`CODEX_HOME`/
+`TRACEDECAY_DATA_DIR`, indexes a project, then drives a **real** agent
+(`claude -p` or `codex exec --json`) at each corpus prompt and records the
+transcript. `score.py` classifies which tracedecay MCP tools and CLI commands
+each session used. The adoption corpus is
+[`eval/hermetic/corpora/fact-store-adoption.jsonl`](../eval/hermetic/corpora/fact-store-adoption.jsonl);
+`eval/hermetic/scorecard.py` rolls a run's `results.jsonl` into an adoption %
+per bucket.
+
+```bash
+ENV=$(eval/hermetic/run.sh setup --agent codex --debug)   # subscription; no API
+eval/hermetic/run.sh index --env-dir "$ENV" --project <repo>
+eval/hermetic/run.sh run   --agent codex --env-dir "$ENV" \
+  --corpus eval/hermetic/corpora/fact-store-adoption.jsonl
+python3 eval/hermetic/scorecard.py "$ENV"/results/results.jsonl \
+  --corpus eval/hermetic/corpora/fact-store-adoption.jsonl
+eval/hermetic/run.sh teardown --env-dir "$ENV"
+```
+
+Cost note: `codex` uses the local subscription (no per-token API); `claude`
+(`--model sonnet|opus`) bills the Anthropic API. `run.sh` supports
+`--agent claude` and `--agent codex` only (no codex app-server mode).
+
+### Scoring rules (why they matter)
+
+- **Prompts are ambiguous, never leading.** They are ordinary user turns —
+  state a preference, ask a question a stored fact answers, give a correction
+  that makes a fact stale — with **no** mention of memory/tools/rating. A prompt
+  that says "remember this" or "rate that fact" measures *compliance*, not
+  natural adoption, and is disallowed.
+- **Path-agnostic.** tracedecay is reachable via the MCP tools **or** the
+  `tracedecay tool …` CLI; a scenario counts as triggered on **either** path,
+  or on its `verify_cmd` store-state change (fact added / `helpful_count` /
+  `unhelpful_count` / `fact_count`). Codex empirically reaches for the CLI, so
+  an MCP-only pass badly undercounts it.
+- **Adoption ≠ precision.** "Use memory when you should" (write/recall/feedback)
+  is scored separately from restraint ("don't store ephemeral state",
+  `factstore-precision`). Correct abstention is **not** counted as adoption, so
+  it can't inflate the headline.
+
+### Findings (2026-07-06, codex CLI)
+
+- **Baseline: 40% overall adoption**, and **proactive-store 0%** — codex used
+  *zero* memory tools when simply told a durable preference. Recall 50%,
+  feedback 50%, precision 100%.
+- **Root cause:** codex's install shipped only the plugin bundle
+  (model-invoked skills) with **no always-on instruction** — the personal
+  digest is bundle-excluded, and install had stopped writing a profile-level
+  `AGENTS.md`. The model never *considered* memory. Sharpening the `fact_store`
+  tool description did **not** help (the model never reached it).
+- **Fix:** `install --agent codex` writes the shared prompt rules plus a
+  proactive-memory paragraph to the **global** `~/.codex/AGENTS.md`
+  (`src/agents/codex.rs::install_codex_global_prompt_rules`).
+- **Result (n=1): proactive-store 0% → 100%, overall adoption 40% → 60%.**
+
+**The lever for adoption is the always-on, profile-level instruction the model
+sees every turn — not tool metadata.** The same behavioral memory rule belongs
+in every host's always-on surface (`CLAUDE.md`, `AGENTS.md`,
+`STANDARD_PARAGRAPHS`). Treat single-run numbers as directional; use
+`run … --reps N` (scorecard aggregates rows across reps) for a confident
+figure.

@@ -16,8 +16,8 @@ use tempfile::TempDir;
 
 use tracedecay::global_db::GlobalDb;
 use tracedecay::sessions::git_correlation::{
-    normalize_worktree, run_backfill, BackfillOptions, BranchTimelineEntry, GitRefFilter,
-    GitReflogSource, SessionsForQuery,
+    BackfillOptions, BranchTimelineEntry, GitRefFilter, GitReflogSource, SessionsForQuery,
+    normalize_worktree, run_backfill,
 };
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 

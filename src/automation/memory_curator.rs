@@ -1,15 +1,15 @@
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::apply_policy::{MemoryApplyDecision, MemoryApplyPolicy};
+use super::apply_policy::{MemoryApplyDecision, MemoryApplyPolicy, value_as_usize};
 use super::artifacts::sha256_json;
 use super::backend::{AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse};
 use super::config::AutomationConfig;
-use super::lifecycle::{failed_backend_fallback_report, AgentTaskRunContext, SchedulerGate};
+use super::lifecycle::{AgentTaskRunContext, SchedulerGate, failed_backend_fallback_report};
 use super::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
 use crate::dashboard::memory_curate::{
-    run_memory_curate, MemoryCurateOptions, CURATION_DEFAULT_MAX_CLUSTERS,
-    CURATION_DEFAULT_MIN_CONFIDENCE,
+    CURATION_DEFAULT_MAX_CLUSTERS, CURATION_DEFAULT_MIN_CONFIDENCE, MemoryCurateOptions,
+    run_memory_curate,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
@@ -322,12 +322,6 @@ fn memory_curation_apply_policy(
         object.insert("apply_instructions".to_string(), json!(apply_instructions));
     }
     payload
-}
-
-fn value_as_usize(value: &Value) -> Option<usize> {
-    value
-        .as_u64()
-        .and_then(|number| usize::try_from(number).ok())
 }
 
 #[derive(Debug, Default)]

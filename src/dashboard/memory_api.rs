@@ -20,13 +20,13 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
+use super::DashboardState;
 use super::automation_run_service;
 use super::memory_analysis::{SIMILARITY_DEFAULT_THRESHOLD, SIMILARITY_PAIR_CAP};
 use super::memory_service;
-use super::util::{coerce_limit, http_detail, query_i64, JsonPath, JsonQuery};
-use super::DashboardState;
+use super::util::{JsonPath, JsonQuery, coerce_limit, http_detail, query_i64};
 use crate::memory::encoding::HolographicEncoder;
 use crate::memory::store::MemoryStore;
 use crate::memory::trust::DEFAULT_MIN_TRUST;

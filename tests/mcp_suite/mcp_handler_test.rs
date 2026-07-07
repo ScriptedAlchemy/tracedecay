@@ -15,24 +15,24 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::sync::{Mutex, MutexGuard};
 use tracedecay::automation::managed_skills::{
-    approve_managed_skill, create_managed_skill_draft, ManagedSkillDraft, ManagedSkillProvenance,
-    ManagedSkillSource, ManagedSupportFile,
+    ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
+    approve_managed_skill, create_managed_skill_draft,
 };
 use tracedecay::automation::run_ledger::{
-    append_run_record, write_run_artifact, AutomationRunArtifactKind, AutomationRunLedgerRecord,
-    AutomationRunStatus, AutomationTrigger,
+    AutomationRunArtifactKind, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
+    append_run_record, write_run_artifact,
 };
 use tracedecay::automation::skill_usage::{
-    load_skill_usage_record, record_skill_usage, SkillUsageAction,
+    SkillUsageAction, load_skill_usage_record, record_skill_usage,
 };
 use tracedecay::db::Database;
 use tracedecay::errors::TraceDecayError;
 use tracedecay::global_db::GlobalDb;
-use tracedecay::mcp::{get_tool_definitions, ToolResult};
+use tracedecay::mcp::{ToolResult, get_tool_definitions};
 use tracedecay::memory::store::MemoryStore;
 use tracedecay::sessions::cursor::{cursor_project_slug, open_project_session_db};
 use tracedecay::sessions::lcm::{
@@ -88,17 +88,14 @@ async fn open_test_db_connection(db_path: &Path) -> TestDbConnection {
     TestDbConnection { _db: db, conn }
 }
 
-async fn handle_tool_call(
+pub(crate) async fn handle_tool_call(
     cg: &TraceDecay,
     tool_name: &str,
     mut args: serde_json::Value,
     server_stats: Option<serde_json::Value>,
     scope_prefix: Option<&str>,
 ) -> tracedecay::errors::Result<ToolResult> {
-    let owns_format = matches!(
-        tool_name,
-        "tracedecay_context" | "tracedecay_dsm" | "tracedecay_files" | "tracedecay_type_hierarchy"
-    );
+    let owns_format = tracedecay::mcp::tools::tool_defaults_to_markdown(tool_name);
     if !owns_format {
         if let Some(obj) = args.as_object_mut() {
             obj.entry("format".to_string())
@@ -108,7 +105,7 @@ async fn handle_tool_call(
     tracedecay::mcp::handle_tool_call(cg, tool_name, args, server_stats, scope_prefix).await
 }
 
-async fn index_all_retrying_sync_lock(cg: &TraceDecay) {
+pub(crate) async fn index_all_retrying_sync_lock(cg: &TraceDecay) {
     for attempt in 0..20 {
         match cg.index_all().await {
             Ok(_) => return,
@@ -128,16 +125,20 @@ impl GlobalDbEnvGuard {
     fn set(db_path: &Path) -> Self {
         let previous = std::env::var_os("TRACEDECAY_GLOBAL_DB");
         let db_path = canonicalize_test_db_path(db_path);
-        std::env::set_var("TRACEDECAY_GLOBAL_DB", db_path);
+        unsafe {
+            std::env::set_var("TRACEDECAY_GLOBAL_DB", db_path);
+        }
         Self { previous }
     }
 }
 
 impl Drop for GlobalDbEnvGuard {
     fn drop(&mut self) {
-        match self.previous.take() {
-            Some(value) => std::env::set_var("TRACEDECAY_GLOBAL_DB", value),
-            None => std::env::remove_var("TRACEDECAY_GLOBAL_DB"),
+        unsafe {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("TRACEDECAY_GLOBAL_DB", value),
+                None => std::env::remove_var("TRACEDECAY_GLOBAL_DB"),
+            }
         }
     }
 }
@@ -154,12 +155,14 @@ impl HomeEnvGuard {
         let previous_userprofile = std::env::var_os("USERPROFILE");
         let previous_data_dir = std::env::var_os(tracedecay::config::USER_DATA_DIR_ENV);
         let home = canonicalize_test_dir(home);
-        std::env::set_var("HOME", &home);
-        std::env::set_var("USERPROFILE", &home);
-        std::env::set_var(
-            tracedecay::config::USER_DATA_DIR_ENV,
-            home.join(tracedecay::config::TRACEDECAY_DIR),
-        );
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("USERPROFILE", &home);
+            std::env::set_var(
+                tracedecay::config::USER_DATA_DIR_ENV,
+                home.join(tracedecay::config::TRACEDECAY_DIR),
+            );
+        }
         Self {
             previous_home,
             previous_userprofile,
@@ -170,17 +173,19 @@ impl HomeEnvGuard {
 
 impl Drop for HomeEnvGuard {
     fn drop(&mut self) {
-        match self.previous_home.take() {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-        match self.previous_userprofile.take() {
-            Some(value) => std::env::set_var("USERPROFILE", value),
-            None => std::env::remove_var("USERPROFILE"),
-        }
-        match self.previous_data_dir.take() {
-            Some(value) => std::env::set_var(tracedecay::config::USER_DATA_DIR_ENV, value),
-            None => std::env::remove_var(tracedecay::config::USER_DATA_DIR_ENV),
+        unsafe {
+            match self.previous_home.take() {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match self.previous_userprofile.take() {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+            match self.previous_data_dir.take() {
+                Some(value) => std::env::set_var(tracedecay::config::USER_DATA_DIR_ENV, value),
+                None => std::env::remove_var(tracedecay::config::USER_DATA_DIR_ENV),
+            }
         }
     }
 }
@@ -214,7 +219,7 @@ fn canonicalize_test_db_path(path: &Path) -> PathBuf {
 // Shared setup
 // ---------------------------------------------------------------------------
 
-struct TestTempDir {
+pub(crate) struct TestTempDir {
     dir: Option<TempDir>,
 }
 
@@ -252,7 +257,7 @@ fn test_temp_dir() -> TestTempDir {
     TestTempDir::new()
 }
 
-struct TestProject {
+pub(crate) struct TestProject {
     dir: Option<TestTempDir>,
     _home_guard: HomeEnvGuard,
     _global_db_guard: GlobalDbEnvGuard,
@@ -277,7 +282,7 @@ impl Drop for TestProject {
     }
 }
 
-struct TestEnv {
+pub(crate) struct TestEnv {
     _home_guard: HomeEnvGuard,
     _global_db_guard: GlobalDbEnvGuard,
     // Drop order = declaration order: the env lock must outlive the guards
@@ -293,7 +298,7 @@ struct CrossProjectMemoryEnv {
     _env_lock: MutexGuard<'static, ()>,
 }
 
-struct TestTraceDecay {
+pub(crate) struct TestTraceDecay {
     inner: Option<TraceDecay>,
 }
 
@@ -353,7 +358,7 @@ impl Drop for TestTraceDecay {
 
 /// Creates a temporary Rust project with cross-file calls, structs, impls,
 /// test files, and doc comments, then initialises and indexes a `TraceDecay`.
-async fn setup_project() -> (TestTraceDecay, TestProject) {
+pub(crate) async fn setup_project() -> (TestTraceDecay, TestProject) {
     let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
     let dir = test_temp_dir();
     let project = dir.path();
@@ -403,7 +408,7 @@ async fn init_test_project(project: &Path) -> (TestTraceDecay, TestEnv) {
     )
 }
 
-async fn setup_empty_project() -> (TestTraceDecay, TestEnv, TestTempDir) {
+pub(crate) async fn setup_empty_project() -> (TestTraceDecay, TestEnv, TestTempDir) {
     let dir = test_temp_dir();
     let (cg, env) = init_test_project(dir.path()).await;
     (cg, env, dir)
@@ -429,8 +434,8 @@ async fn setup_generated_dir_project(include_dist: bool) -> (TestTraceDecay, Tes
     (cg, env, dir)
 }
 
-async fn setup_cross_project_memory_projects(
-) -> (TestTraceDecay, TestTraceDecay, CrossProjectMemoryEnv) {
+async fn setup_cross_project_memory_projects()
+-> (TestTraceDecay, TestTraceDecay, CrossProjectMemoryEnv) {
     let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
     let dir = test_temp_dir();
     let storage_guard = common::isolated_tracedecay_storage(&dir);
@@ -723,13 +728,13 @@ describe('math', () => {
 
 /// Extracts the text content from a `ToolResult` value (the standard
 /// `content[0].text` envelope).
-fn extract_text(value: &Value) -> &str {
+pub(crate) fn extract_text(value: &Value) -> &str {
     value["content"][0]["text"]
         .as_str()
         .unwrap_or("<missing text>")
 }
 
-fn extract_json(value: &Value) -> Value {
+pub(crate) fn extract_json(value: &Value) -> Value {
     serde_json::from_str(extract_text(value)).unwrap()
 }
 
@@ -1045,7 +1050,8 @@ async fn selected_project_read_skips_cache_write_for_read_only_store() {
     let read_args = json!({
         "project_id": "proj_read",
         "file": "src/main.rs",
-        "mode": "full"
+        "mode": "full",
+        "format": "json"
     });
     for attempt in 1..=2 {
         let selected_read = handle_tool_call(&cg, "tracedecay_read", read_args.clone(), None, None)
@@ -1241,9 +1247,11 @@ async fn active_project_tool_reports_resolved_store_metadata() {
         payload["storage"]["graph_db_path"].as_str(),
         Some(graph_db_path.as_str())
     );
-    assert!(payload["storage"]["data_root"]
-        .as_str()
-        .is_some_and(|path| path.contains(".tracedecay") && path.contains("projects")));
+    assert!(
+        payload["storage"]["data_root"]
+            .as_str()
+            .is_some_and(|path| path.contains(".tracedecay") && path.contains("projects"))
+    );
     assert_eq!(payload["branch"]["serving_db_exists"].as_bool(), Some(true));
 }
 
@@ -1276,9 +1284,11 @@ async fn storage_status_tool_summarizes_active_project_store_health() {
         "code_project"
     );
     assert_eq!(payload["writable"].as_bool(), Some(true));
-    assert!(payload["warnings"]
-        .as_array()
-        .is_some_and(|warnings| warnings.is_empty()));
+    assert!(
+        payload["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings.is_empty())
+    );
     assert_eq!(
         payload["paths"]["graph_db_path"].as_str(),
         Some(graph_db_path.as_str())
@@ -1532,13 +1542,17 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         .find(|tool| tool.name == "tracedecay_lcm_load_session")
         .expect("tracedecay_lcm_load_session definition");
     assert_eq!(load.input_schema["required"], json!(["session_id"]));
-    assert!(load.input_schema["properties"]["provider"]["description"]
-        .as_str()
-        .unwrap()
-        .contains("across all providers"));
-    assert!(load.input_schema["properties"]
-        .get("content_limit")
-        .is_some());
+    assert!(
+        load.input_schema["properties"]["provider"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("across all providers")
+    );
+    assert!(
+        load.input_schema["properties"]
+            .get("content_limit")
+            .is_some()
+    );
     assert_eq!(
         load.input_schema["properties"]["limit"]["type"],
         json!("integer")
@@ -1560,10 +1574,12 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
             .is_some_and(|required| required.iter().any(|field| field == "provider")),
         "tracedecay_lcm_grep provider must stay optional"
     );
-    assert!(grep.input_schema["properties"]["provider"]["description"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("all providers"));
+    assert!(
+        grep.input_schema["properties"]["provider"]["description"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("all providers")
+    );
     assert_eq!(
         grep.input_schema["properties"]["limit"]["type"],
         json!("integer")
@@ -1619,7 +1635,7 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
 
 /// Searches for `name` via the search handler and returns the first matching
 /// node id whose name field equals `name`.
-async fn find_node_id(cg: &TraceDecay, name: &str) -> String {
+pub(crate) async fn find_node_id(cg: &TraceDecay, name: &str) -> String {
     let result = handle_tool_call(cg, "tracedecay_search", json!({"query": name}), None, None)
         .await
         .unwrap();
@@ -1668,13 +1684,17 @@ fn retrieve_tool_schema_requires_handle_and_accepts_project_selector() {
     assert!(retrieve.description.contains("tracedecay_retrieve"));
     assert!(retrieve.description.contains("required argument `handle`"));
     assert!(retrieve.description.contains("pass the same selector"));
-    assert!(retrieve
-        .description
-        .contains("Only call it when the missing details are needed"));
-    assert!(properties["handle"]["description"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("required `handle` argument"));
+    assert!(
+        retrieve
+            .description
+            .contains("Only call it when the missing details are needed")
+    );
+    assert!(
+        properties["handle"]["description"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("required `handle` argument")
+    );
 }
 
 #[test]
@@ -2079,7 +2099,7 @@ async fn test_search_returns_index_coverage_hint_for_skipped_generated_dirs() {
 }
 
 #[tokio::test]
-async fn test_search_hints_at_ignored_dependency_candidates() {
+async fn test_search_lazy_indexes_ignored_dependency_candidates() {
     let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
@@ -2103,7 +2123,12 @@ export const value = 1;
     let result = handle_tool_call(
         &cg,
         "tracedecay_search",
-        json!({"query": "Foo", "limit": 5, "format": "json"}),
+        json!({
+            "query": "Foo",
+            "limit": 5,
+            "format": "json",
+            "lazy_index_ignored_dependencies": true
+        }),
         None,
         None,
     )
@@ -2111,17 +2136,82 @@ export const value = 1;
     .unwrap();
     let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
     assert_eq!(
-        payload["ignored_dependency_hint"]["candidates"][0]["module"].as_str(),
-        Some("pkg")
+        payload["lazy_indexed_ignored_dependency_files"][0].as_str(),
+        Some("node_modules/pkg/index.d.ts")
     );
+    assert!(payload["results"].as_array().is_some_and(|results| {
+        results.iter().any(|result| {
+            result["name"].as_str() == Some("Foo")
+                && result["file"].as_str() == Some("node_modules/pkg/index.d.ts")
+        })
+    }));
+}
+
+#[tokio::test]
+async fn test_find_exact_symbol_lazy_indexes_ignored_dependency_candidate() {
+    let dir = test_temp_dir();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::create_dir_all(project.join("node_modules/pkg")).unwrap();
+    fs::write(
+        project.join("src/app.ts"),
+        r#"import type { Foo } from "pkg";
+export const value = 1;
+"#,
+    )
+    .unwrap();
+    fs::write(
+        project.join("node_modules/pkg/index.d.ts"),
+        "export interface Foo { value: string }\n",
+    )
+    .unwrap();
+
+    let (cg, _env) = init_test_project(project).await;
+    cg.index_all().await.unwrap();
+
+    let lookup = handle_tool_call(
+        &cg,
+        "tracedecay_find_exact_symbol",
+        json!({
+            "name": "Foo",
+            "limit": 5,
+            "format": "json",
+            "lazy_index_ignored_dependencies": true
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&lookup.value)).unwrap();
+    let db = cg.open_project_store_db().await.unwrap();
+    let indexed_file = db
+        .get_file("node_modules/pkg/index.d.ts")
+        .await
+        .unwrap()
+        .is_some();
+    assert!(indexed_file, "{payload}");
+    assert_eq!(payload["count"].as_u64(), Some(1), "{payload}");
     assert_eq!(
-        payload["ignored_dependency_hint"]["candidates"][0]["symbol"].as_str(),
-        Some("Foo")
+        payload["matches"][0]["file"].as_str(),
+        Some("node_modules/pkg/index.d.ts")
     );
-    assert!(payload["ignored_dependency_hint"]["message"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("ignored dependency"));
+
+    let body = handle_tool_call(
+        &cg,
+        "tracedecay_body",
+        json!({"symbol": "Foo", "limit": 5, "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&body.value)).unwrap();
+    assert_eq!(payload["match_count"].as_u64(), Some(1));
+    assert_eq!(
+        payload["matches"][0]["body"].as_str(),
+        Some("export interface Foo { value: string }")
+    );
 }
 
 #[tokio::test]
@@ -2168,9 +2258,19 @@ export const value = 1;
         .as_array()
         .expect("scoped ignored dependency candidates");
     assert!(!candidates.is_empty());
-    assert!(candidates.iter().all(|candidate| candidate["import_file"]
-        .as_str()
-        .is_some_and(|path| path.starts_with("tests/"))));
+    assert!(candidates.iter().all(|candidate| {
+        candidate["import_file"]
+            .as_str()
+            .is_some_and(|path| path.starts_with("tests/"))
+    }));
+    let db = cg.open_project_store_db().await.unwrap();
+    assert!(
+        db.get_file("node_modules/pkg/index.d.ts")
+            .await
+            .unwrap()
+            .is_none(),
+        "default search should not lazy-index ignored dependencies"
+    );
 }
 
 #[tokio::test]
@@ -2323,14 +2423,18 @@ async fn retrieve_tool_reports_missing_and_expired_handles_actionably() {
     assert_eq!(missing_payload["content"], Value::Null);
     assert_eq!(missing_payload["reason_code"], "handle_not_found");
     assert_eq!(missing_payload["retryable"], true);
-    assert!(missing_payload["message"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("not found"));
-    assert!(missing_payload["retry_instruction"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("Re-run the original MCP tool"));
+    assert!(
+        missing_payload["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not found")
+    );
+    assert!(
+        missing_payload["retry_instruction"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Re-run the original MCP tool")
+    );
 
     let expired = tracedecay::mcp::response_handles::store_response_handle(
         cg.project_root(),
@@ -2356,14 +2460,18 @@ async fn retrieve_tool_reports_missing_and_expired_handles_actionably() {
     assert_eq!(expired_payload["reason_code"], "handle_expired");
     assert_eq!(expired_payload["retryable"], true);
     assert_eq!(expired_payload["expires_at"], expired.expires_at);
-    assert!(expired_payload["message"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("expired"));
-    assert!(expired_payload["retry_instruction"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("Re-run the original MCP tool"));
+    assert!(
+        expired_payload["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("expired")
+    );
+    assert!(
+        expired_payload["retry_instruction"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Re-run the original MCP tool")
+    );
 }
 
 #[tokio::test]
@@ -2376,6 +2484,7 @@ async fn fact_store_large_list_response_uses_retrieve_handle() {
             "tracedecay_fact_store",
             json!({
                 "action": "add",
+                "format": "json",
                 "content": format!(
                     "LONG_FACT_MARKER_{index:02}: {}",
                     "large fact-store response should remain retrievable ".repeat(180)
@@ -2393,10 +2502,51 @@ async fn fact_store_large_list_response_uses_retrieve_handle() {
     }
     let last_fact_id = last_fact_id.expect("tail fact id");
 
-    let listed = handle_tool_call(
+    let markdown_list = handle_tool_call(
         &cg,
         "tracedecay_fact_store",
         json!({"action": "list", "category": "project", "min_trust": 0.0, "limit": 200}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let markdown_text = extract_text(&markdown_list.value);
+    assert!(
+        markdown_text.starts_with("# Truncated Response"),
+        "large default fact-store response should use Markdown truncation: {markdown_text}"
+    );
+    assert!(markdown_text.contains("## Preview"));
+    assert!(markdown_text.contains("## Fact Store"));
+    assert!(markdown_text.contains("### Facts"));
+    assert!(!markdown_text.contains("| fact_id |"));
+    let markdown_handle = markdown_text
+        .split_once("using handle `")
+        .and_then(|(_, rest)| rest.split_once('`'))
+        .map(|(handle, _)| handle.to_string())
+        .expect("Markdown truncation should expose a retrieve handle");
+    let markdown_retrieved = handle_tool_call(
+        &cg,
+        "tracedecay_retrieve",
+        json!({ "handle": markdown_handle }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let markdown_retrieved_payload: Value =
+        serde_json::from_str(extract_text(&markdown_retrieved.value)).unwrap();
+    let full_markdown = markdown_retrieved_payload["content"]
+        .as_str()
+        .expect("retrieved Markdown response should contain text");
+    assert!(full_markdown.starts_with("## Fact Store"));
+    assert!(full_markdown.contains("LONG_FACT_MARKER_00"));
+    assert!(!full_markdown.contains("| fact_id |"));
+
+    let listed = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({"action": "list", "format": "json", "category": "project", "min_trust": 0.0, "limit": 200}),
         None,
         None,
     )
@@ -2424,7 +2574,7 @@ async fn fact_store_large_list_response_uses_retrieve_handle() {
     let removed = handle_tool_call(
         &cg,
         "tracedecay_fact_store",
-        json!({ "action": "remove", "fact_id": last_fact_id }),
+        json!({ "action": "remove", "format": "json", "fact_id": last_fact_id }),
         None,
         None,
     )
@@ -2468,6 +2618,7 @@ async fn fact_store_large_list_response_reports_store_failure_actionably() {
             "tracedecay_fact_store",
             json!({
                 "action": "add",
+                "format": "json",
                 "content": format!(
                     "STORE_FAILURE_MARKER_{index:02}: {}",
                     "large fact-store response should surface cache failures ".repeat(180)
@@ -2488,7 +2639,7 @@ async fn fact_store_large_list_response_reports_store_failure_actionably() {
     let listed = handle_tool_call(
         &cg,
         "tracedecay_fact_store",
-        json!({"action": "list", "category": "project", "min_trust": 0.0, "limit": 200}),
+        json!({"action": "list", "format": "json", "category": "project", "min_trust": 0.0, "limit": 200}),
         None,
         None,
     )
@@ -2499,23 +2650,29 @@ async fn fact_store_large_list_response_reports_store_failure_actionably() {
     assert_eq!(envelope["truncated"], true);
     assert_eq!(envelope["handle_available"], false);
     assert!(envelope.get("handle").is_none());
-    assert!(envelope["preview"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("STORE_FAILURE_MARKER_"));
+    assert!(
+        envelope["preview"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("STORE_FAILURE_MARKER_")
+    );
     assert_eq!(
         envelope["handle_status"]["reason_code"],
         "handle_store_failed"
     );
     assert_eq!(envelope["handle_status"]["retryable"], true);
-    assert!(envelope["handle_status"]["message"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("could not be cached locally"));
-    assert!(envelope["handle_status"]["retry_instruction"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("re-run the original MCP tool"));
+    assert!(
+        envelope["handle_status"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("could not be cached locally")
+    );
+    assert!(
+        envelope["handle_status"]["retry_instruction"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("re-run the original MCP tool")
+    );
     fs::remove_file(&handle_dir).unwrap();
     fs::create_dir_all(&handle_dir).unwrap();
     close_test_graph(cg).await;
@@ -2606,6 +2763,7 @@ async fn context_includes_matching_memory_facts() {
         "tracedecay_fact_store",
         json!({
             "action": "add",
+            "format": "json",
             "content": "Helper function reviews should check durable memory before broad file search.",
             "category": "decision",
             "entity": "helper function",
@@ -2654,11 +2812,11 @@ async fn context_includes_matching_memory_facts() {
         json_result.internal_analytics().is_some(),
         "direct tool results should carry context analytics on the internal side channel"
     );
-    assert!(payload["memory_matches"]
-        .as_array()
-        .is_some_and(|matches| matches
+    assert!(payload["memory_matches"].as_array().is_some_and(|matches| {
+        matches
             .iter()
-            .any(|hit| hit["fact"]["fact_id"].as_i64() == Some(fact_id))));
+            .any(|hit| hit["fact"]["fact_id"].as_i64() == Some(fact_id))
+    }));
 
     let after_context = cg.get_fact(fact_id).await.unwrap().unwrap();
     assert_eq!(
@@ -2743,13 +2901,15 @@ async fn context_memory_controls_filter_disable_and_preserve_markdown() {
     .await
     .unwrap();
     let filtered_payload: Value = serde_json::from_str(extract_text(&filtered.value)).unwrap();
-    assert!(!filtered_payload["memory_matches"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|hit| hit["fact"]["content"]
-            .as_str()
-            .is_some_and(|content| content.contains("Low trust memory control"))));
+    assert!(
+        !filtered_payload["memory_matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hit| hit["fact"]["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("Low trust memory control")))
+    );
 
     let markdown = handle_tool_call(
         &cg,
@@ -2855,6 +3015,7 @@ async fn context_memory_matches_use_project_store_when_serving_branch_db() {
         "tracedecay_fact_store",
         json!({
             "action": "add",
+            "format": "json",
             "content": "Branch context recall must read project-scoped memory facts",
             "category": "project",
             "entity": "Branch context recall",
@@ -3111,10 +3272,16 @@ async fn test_files_no_filter() {
         .unwrap();
     let text = extract_text(&result.value);
     assert!(!text.is_empty(), "files listing should not be empty");
+    assert!(text.starts_with("## Files"), "should have Files header");
     assert!(
-        text.contains("indexed files"),
-        "should have 'indexed files' header"
+        text.contains("**indexed files:**"),
+        "should include indexed files field"
     );
+    assert!(
+        text.contains("```text"),
+        "should render compact tree/list block"
+    );
+    assert!(!text.contains("|"), "files markdown should not use tables");
 }
 
 // ---------------------------------------------------------------------------
@@ -3169,7 +3336,7 @@ async fn test_files_flat_format() {
     let result = handle_tool_call(
         &cg,
         "tracedecay_files",
-        json!({"format": "flat"}),
+        json!({"layout": "flat"}),
         None,
         None,
     )
@@ -3179,6 +3346,26 @@ async fn test_files_flat_format() {
     assert!(!text.is_empty());
     // Flat format includes "bytes" per entry
     assert!(text.contains("bytes"), "flat format should show byte sizes");
+}
+
+#[tokio::test]
+async fn test_files_json_format_with_grouped_layout() {
+    let (cg, _dir) = setup_project().await;
+    let json_result = handle_tool_call(
+        &cg,
+        "tracedecay_files",
+        json!({"format": "json", "layout": "grouped"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let parsed: Value = serde_json::from_str(extract_text(&json_result.value)).unwrap();
+    assert_eq!(parsed["layout"], "grouped");
+    assert!(parsed["files"].as_array().unwrap().iter().any(|file| {
+        file["path"].as_str() == Some("src/main.rs")
+            && file["symbols"].as_i64().unwrap_or_default() >= 1
+    }));
 }
 
 // ---------------------------------------------------------------------------
@@ -3667,10 +3854,12 @@ async fn test_changelog_no_git() {
     let output: Value = serde_json::from_str(text).unwrap();
     assert_eq!(output["error"]["kind"].as_str(), Some("git"));
     assert_eq!(output["error"]["operation"].as_str(), Some("diff"));
-    assert!(output["error"]["message"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("failed to open git repo"));
+    assert!(
+        output["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("failed to open git repo")
+    );
 }
 
 #[tokio::test]
@@ -4292,7 +4481,7 @@ async fn test_files_grouped_format() {
     let result = handle_tool_call(
         &cg,
         "tracedecay_files",
-        json!({"format": "grouped"}),
+        json!({"layout": "grouped"}),
         None,
         None,
     )
@@ -4300,14 +4489,17 @@ async fn test_files_grouped_format() {
     .unwrap();
     let text = extract_text(&result.value);
     assert!(!text.is_empty());
-    // Grouped format shows directory headers like "src/ (N files)"
     assert!(
         text.contains("indexed files"),
         "grouped format should have 'indexed files' header"
     );
     assert!(
-        text.contains("files)"),
-        "grouped format should show file counts per directory"
+        text.contains("**layout:** grouped"),
+        "grouped format should report grouped layout"
+    );
+    assert!(
+        text.contains("```text") && text.contains("src/"),
+        "grouped format should show compact tree/list block"
     );
 }
 
@@ -4675,7 +4867,7 @@ async fn read_and_outline_preserve_symlink_indexed_file_key() {
     let read = handle_tool_call(
         &cg,
         "tracedecay_read",
-        json!({"file": "src/lib.rs", "mode": "full"}),
+        json!({"file": "src/lib.rs", "mode": "full", "format": "json"}),
         None,
         None,
     )
@@ -4950,10 +5142,12 @@ async fn test_str_replace_multiple_matches_fails() {
     let text = extract_text(&result.value);
     let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
     assert_eq!(parsed["success"], false);
-    assert!(parsed["message"]
-        .as_str()
-        .unwrap()
-        .contains("matches 2 times"));
+    assert!(
+        parsed["message"]
+            .as_str()
+            .unwrap()
+            .contains("matches 2 times")
+    );
 }
 
 #[tokio::test]
@@ -5028,10 +5222,12 @@ async fn test_multi_str_replace_atomic_failure() {
     let text = extract_text(&result.value);
     let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
     assert_eq!(parsed["success"], false);
-    assert!(parsed["message"]
-        .as_str()
-        .unwrap()
-        .contains("must match exactly once"));
+    assert!(
+        parsed["message"]
+            .as_str()
+            .unwrap()
+            .contains("must match exactly once")
+    );
 
     let content = fs::read_to_string(project.join("src/main.rs")).unwrap();
     assert!(content.contains("fn foo() {}"));
@@ -5505,10 +5701,12 @@ async fn test_insert_at_ambiguous_anchor() {
     let text = extract_text(&result.value);
     let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
     assert_eq!(parsed["success"], false);
-    assert!(parsed["message"]
-        .as_str()
-        .unwrap()
-        .contains("matches 2 lines"));
+    assert!(
+        parsed["message"]
+            .as_str()
+            .unwrap()
+            .contains("matches 2 lines")
+    );
 }
 
 // Regression: insert_at must not strip trailing newline (#57)
@@ -5879,14 +6077,14 @@ async fn test_dsm_stats() {
     let result = handle_tool_call(
         &cg,
         "tracedecay_dsm",
-        json!({ "format": "stats" }),
+        json!({ "shape": "stats" }),
         None,
         None,
     )
     .await
     .unwrap();
     let text = extract_text(&result.value);
-    // Shape values (stats/clusters/matrix) render as markdown by default.
+    assert!(text.starts_with("## Design Structure Matrix"));
     assert!(
         text.contains("**files:**"),
         "files field should exist, got: {}",
@@ -5895,6 +6093,11 @@ async fn test_dsm_stats() {
     assert!(
         text.contains("**density:**"),
         "density field should exist, got: {}",
+        text
+    );
+    assert!(
+        text.contains("### Top Clusters"),
+        "default DSM markdown should include top clusters, got: {}",
         text
     );
 }
@@ -5914,14 +6117,15 @@ async fn test_dsm_json_returns_stats_shape() {
     let text = extract_text(&result.value);
     let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
     assert!(
-        parsed.get("files").is_some(),
+        parsed["stats"].get("files").is_some(),
         "files field should exist, got: {}",
         text
     );
     assert!(
-        parsed.get("density").is_some(),
+        parsed["stats"].get("density").is_some(),
         "density field should exist"
     );
+    assert_eq!(parsed["shape"], "stats");
 }
 
 #[tokio::test]
@@ -5930,7 +6134,7 @@ async fn test_dsm_clusters() {
     let result = handle_tool_call(
         &cg,
         "tracedecay_dsm",
-        json!({ "format": "clusters" }),
+        json!({ "shape": "clusters" }),
         None,
         None,
     )
@@ -5938,7 +6142,7 @@ async fn test_dsm_clusters() {
     .unwrap();
     let text = extract_text(&result.value);
     assert!(
-        text.contains("## clusters") || text.contains("**clusters:**"),
+        text.contains("### Top Clusters"),
         "clusters section should exist, got: {}",
         text
     );
@@ -6604,6 +6808,7 @@ async fn memory_fact_store_add_search_update_remove_and_wrappers() {
         "tracedecay_fact_store",
         json!({
             "action": "add",
+            "format": "json",
             "content": "Project Phoenix uses Amari Memory in src/memory/types.rs",
             "category": "project",
             "entity": "Project Phoenix",
@@ -6633,6 +6838,7 @@ async fn memory_fact_store_add_search_update_remove_and_wrappers() {
         "tracedecay_fact_store",
         json!({
             "action": "search",
+            "format": "json",
             "query": "Amari Memory",
             "category": "project",
             "min_trust": 0.1,
@@ -6671,6 +6877,7 @@ async fn memory_fact_store_add_search_update_remove_and_wrappers() {
     ] {
         let mut args = payload;
         args["action"] = json!(action);
+        args["format"] = json!("json");
         let result = handle_tool_call(&cg, "tracedecay_fact_store", args, None, None)
             .await
             .unwrap();
@@ -6697,6 +6904,7 @@ async fn memory_fact_store_add_search_update_remove_and_wrappers() {
         "tracedecay_fact_store",
         json!({
             "action": "update",
+            "format": "json",
             "fact_id": fact_id,
             "content": "Project Phoenix uses deterministic Amari Memory",
             "entities": ["Project Phoenix", "Amari Memory"],
@@ -6717,7 +6925,7 @@ async fn memory_fact_store_add_search_update_remove_and_wrappers() {
     let removed = handle_tool_call(
         &cg,
         "tracedecay_fact_store",
-        json!({"action": "remove", "fact_id": fact_id.to_string()}),
+        json!({"action": "remove", "format": "json", "fact_id": fact_id.to_string()}),
         None,
         None,
     )
@@ -6725,6 +6933,64 @@ async fn memory_fact_store_add_search_update_remove_and_wrappers() {
     .unwrap();
     let removed: Value = serde_json::from_str(extract_text(&removed.value)).unwrap();
     assert_eq!(removed["removed"], true);
+}
+
+#[tokio::test]
+async fn memory_fact_store_defaults_to_compact_markdown() {
+    let (cg, _dir) = setup_project().await;
+
+    let added = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": "Project Phoenix uses readable fact rendering",
+            "category": "project",
+            "entity": "Project Phoenix",
+            "entities": ["Fact Renderer"],
+            "tags": ["memory"],
+            "source": "mcp-test"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let added_text = extract_text(&added.value);
+    assert!(
+        added_text.starts_with("## Fact Store"),
+        "unexpected fact_store markdown:\n{added_text}"
+    );
+    assert!(added_text.contains("**action:** add"));
+    assert!(added_text.contains("- #"));
+    assert!(added_text.contains("Project Phoenix uses readable fact rendering"));
+    assert!(!added_text.contains("| fact_id |"));
+
+    let search = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "search",
+            "query": "readable fact rendering",
+            "category": "project",
+            "min_trust": 0.1,
+            "limit": 5
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let search_text = extract_text(&search.value);
+    assert!(search_text.starts_with("## Fact Store"));
+    assert!(search_text.contains("**action:** search"));
+    assert!(search_text.contains("**query:** readable fact rendering"));
+    assert!(search_text.contains("**category:** project"));
+    assert!(search_text.contains("**count:** 1"));
+    assert!(search_text.contains("### Facts"));
+    assert!(search_text.contains("score "));
+    assert!(search_text.contains("Project Phoenix uses readable fact rendering"));
+    assert!(!search_text.contains("|"));
 }
 
 #[tokio::test]
@@ -6738,15 +7004,18 @@ async fn memory_fact_store_mutations_refresh_recorded_digest_exports() {
         &prompt_path,
     )
     .unwrap();
-    assert!(fs::read_to_string(&prompt_path)
-        .unwrap()
-        .contains("No durable facts exported yet"));
+    assert!(
+        fs::read_to_string(&prompt_path)
+            .unwrap()
+            .contains("No durable facts exported yet")
+    );
 
     let added = handle_tool_call(
         &cg,
         "tracedecay_fact_store",
         json!({
             "action": "add",
+            "format": "json",
             "content": "Refresh exported digest after MCP fact add",
             "category": "decision",
             "trust": 0.9
@@ -6758,15 +7027,18 @@ async fn memory_fact_store_mutations_refresh_recorded_digest_exports() {
     .unwrap();
     let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
     let fact_id = added["fact"]["fact_id"].as_i64().unwrap();
-    assert!(fs::read_to_string(&prompt_path)
-        .unwrap()
-        .contains("Refresh exported digest after MCP fact add"));
+    assert!(
+        fs::read_to_string(&prompt_path)
+            .unwrap()
+            .contains("Refresh exported digest after MCP fact add")
+    );
 
     handle_tool_call(
         &cg,
         "tracedecay_fact_store",
         json!({
             "action": "update",
+            "format": "json",
             "fact_id": fact_id,
             "content": "Refresh exported digest after MCP fact update"
         }),
@@ -6788,14 +7060,16 @@ async fn memory_fact_store_mutations_refresh_recorded_digest_exports() {
     )
     .await
     .unwrap();
-    assert!(fs::read_to_string(&prompt_path)
-        .unwrap()
-        .contains("trust 0.80"));
+    assert!(
+        fs::read_to_string(&prompt_path)
+            .unwrap()
+            .contains("trust 0.80")
+    );
 
     handle_tool_call(
         &cg,
         "tracedecay_fact_store",
-        json!({"action": "remove", "fact_id": fact_id}),
+        json!({"action": "remove", "format": "json", "fact_id": fact_id}),
         None,
         None,
     )
@@ -6822,6 +7096,7 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
         "tracedecay_fact_store",
         json!({
             "action": "add",
+            "format": "json",
             "content": "Target selector fact stays with the registered target project",
             "category": "project",
             "entity": "Target selector"
@@ -6837,6 +7112,7 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
         "tracedecay_fact_store",
         json!({
             "action": "add",
+            "format": "json",
             "content": "Active selector fact stays with the active project",
             "category": "project",
             "entity": "Active selector"
@@ -6852,6 +7128,7 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
         "tracedecay_fact_store",
         json!({
             "action": "list",
+            "format": "json",
             "project_path": target_project_path,
             "category": "project",
             "min_trust": 0.0
@@ -6874,6 +7151,7 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
         "tracedecay_fact_store",
         json!({
             "action": "list",
+            "format": "json",
             "project_selector": {"project_path": target_project_path},
             "category": "project",
             "min_trust": 0.0
@@ -6895,7 +7173,7 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
     let active_list = handle_tool_call(
         &active,
         "tracedecay_fact_store",
-        json!({"action": "list", "category": "project", "min_trust": 0.0}),
+        json!({"action": "list", "format": "json", "category": "project", "min_trust": 0.0}),
         None,
         None,
     )
@@ -6976,6 +7254,7 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
         "tracedecay_fact_store",
         json!({
             "action": "list",
+            "format": "json",
             "path": target_project_path,
             "category": "project",
             "min_trust": 0.0
@@ -7104,6 +7383,7 @@ async fn memory_fact_store_update_rejects_secret_like_content_with_diff_report()
         "tracedecay_fact_store",
         json!({
             "action": "add",
+            "format": "json",
             "content": "Project preference: never store provider API keys",
             "category": "project"
         }),
@@ -7120,6 +7400,7 @@ async fn memory_fact_store_update_rejects_secret_like_content_with_diff_report()
         "tracedecay_fact_store",
         json!({
             "action": "update",
+            "format": "json",
             "fact_id": fact_id,
             "content": "api_key=sk-test-742913 must not be persisted"
         }),
@@ -7157,6 +7438,7 @@ async fn memory_recall_updates_retrieval_count() {
         "tracedecay_fact_store",
         json!({
             "action": "add",
+            "format": "json",
             "content": "Retrieval counters move after search",
             "entity": "Counter Entity"
         }),
@@ -7171,7 +7453,7 @@ async fn memory_recall_updates_retrieval_count() {
     handle_tool_call(
         &cg,
         "tracedecay_fact_store",
-        json!({"action": "search", "query": "Retrieval counters", "limit": 5}),
+        json!({"action": "search", "format": "json", "query": "Retrieval counters", "limit": 5}),
         None,
         None,
     )
@@ -7181,7 +7463,7 @@ async fn memory_recall_updates_retrieval_count() {
     let status = handle_tool_call(
         &cg,
         "tracedecay_fact_store",
-        json!({"action": "list", "min_trust": 0.0, "limit": 10}),
+        json!({"action": "list", "format": "json", "min_trust": 0.0, "limit": 10}),
         None,
         None,
     )
@@ -7208,6 +7490,7 @@ async fn memory_fact_store_update_trust_delta_uses_direct_fact_lookup() {
         "tracedecay_fact_store",
         json!({
             "action": "add",
+            "format": "json",
             "content": "First fact should remain updateable after many later facts",
             "trust": 0.4
         }),
@@ -7243,6 +7526,7 @@ async fn memory_fact_store_update_trust_delta_uses_direct_fact_lookup() {
         "tracedecay_fact_store",
         json!({
             "action": "update",
+            "format": "json",
             "fact_id": first_id,
             "trust_delta": 0.2
         }),
@@ -7267,6 +7551,7 @@ async fn memory_feedback_and_status_include_trust_fields() {
         "tracedecay_fact_store",
         json!({
             "action": "add",
+            "format": "json",
             "content": "Helpful memory fact for feedback",
             "category": "general"
         }),
@@ -7284,7 +7569,7 @@ async fn memory_feedback_and_status_include_trust_fields() {
     let helpful = handle_tool_call(
         &cg,
         "tracedecay_fact_feedback",
-        json!({"fact_id": fact_id, "helpful": true, "source": "mcp-test", "note": "matched"}),
+        json!({"fact_id": fact_id, "format": "json", "helpful": true, "source": "mcp-test", "note": "matched"}),
         None,
         None,
     )
@@ -7303,7 +7588,7 @@ async fn memory_feedback_and_status_include_trust_fields() {
     let unhelpful = handle_tool_call(
         &cg,
         "tracedecay_fact_feedback",
-        json!({"fact_id": fact_id, "unhelpful": true}),
+        json!({"fact_id": fact_id, "format": "json", "unhelpful": true}),
         None,
         None,
     )
@@ -7321,7 +7606,7 @@ async fn memory_feedback_and_status_include_trust_fields() {
     let fetched = handle_tool_call(
         &cg,
         "tracedecay_fact_store",
-        json!({"action": "get", "fact_id": fact_id}),
+        json!({"action": "get", "format": "json", "fact_id": fact_id}),
         None,
         None,
     )
@@ -7338,6 +7623,21 @@ async fn memory_feedback_and_status_include_trust_fields() {
     assert_eq!(trust_history[0]["note"], "matched");
     assert_eq!(trust_history[1]["action"], "unhelpful");
     assert!(trust_history[1]["note"].is_null());
+
+    let markdown_feedback = handle_tool_call(
+        &cg,
+        "tracedecay_fact_feedback",
+        json!({"fact_id": fact_id, "helpful": true, "source": "mcp-test", "note": "markdown"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let markdown_feedback = extract_text(&markdown_feedback.value);
+    assert!(markdown_feedback.contains("**status:** recorded"));
+    assert!(markdown_feedback.contains("**action:** helpful"));
+    assert!(markdown_feedback.contains("**fact_id:**"));
+    assert!(!markdown_feedback.contains("|"));
 
     let status = handle_tool_call(&cg, "tracedecay_memory_status", json!({}), None, None)
         .await
@@ -7401,6 +7701,7 @@ async fn memory_fact_store_uses_project_store_when_serving_branch_db() {
         "tracedecay_fact_store",
         json!({
             "action": "add",
+            "format": "json",
             "content": "Branch memory writes stay project-scoped",
             "category": "project",
             "entity": "Branch memory"
@@ -8553,11 +8854,13 @@ async fn lcm_doctor_clean_dry_run_reports_noise_and_filtered_sessions_without_mu
             .len(),
         1
     );
-    assert!(payload["repairs"]["planned_actions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|action| action["kind"] == "clean_lcm_noise"));
+    assert!(
+        payload["repairs"]["planned_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["kind"] == "clean_lcm_noise")
+    );
     assert_eq!(lcm_raw_message_count(&cg, "cron-20260414").await, 1);
     assert_eq!(lcm_raw_message_count(&cg, "scratch-shell-a").await, 1);
     assert_eq!(lcm_raw_message_count(&cg, "normal-session").await, 2);
@@ -9124,11 +9427,13 @@ async fn lcm_doctor_scoped_payload_diagnostics_ignore_other_session_payload_file
     assert_eq!(payload["status"], "ok");
     assert_eq!(payload["diagnostics"]["payloads"]["missing_files"], 0);
     assert_eq!(payload["diagnostics"]["payloads"]["orphan_files"], 0);
-    assert!(!payload["diagnostics"]["payloads"]["orphan_payload_refs"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|value| value.as_str() == Some(&other_payload_ref)));
+    assert!(
+        !payload["diagnostics"]["payloads"]["orphan_payload_refs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value.as_str() == Some(&other_payload_ref))
+    );
     assert!(!extract_text(&result.value).contains(&other_payload_ref));
 }
 
@@ -9361,11 +9666,13 @@ async fn lcm_doctor_repair_dry_run_reports_fts_rebuild_without_mutating() {
     assert_eq!(payload["mode"], "repair");
     assert_eq!(payload["dry_run"], true);
     assert_eq!(payload["diagnostics"]["fts"]["rebuild_needed"], true);
-    assert!(payload["repairs"]["planned_actions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|action| action["kind"] == "rebuild_raw_fts"));
+    assert!(
+        payload["repairs"]["planned_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["kind"] == "rebuild_raw_fts")
+    );
     assert_eq!(lcm_fts_match_count(&cg, "needle").await, 0);
     close_test_graph(cg).await;
 }
@@ -9402,11 +9709,13 @@ async fn lcm_doctor_repair_apply_rebuilds_damaged_fts() {
         .expect("repair apply should report backup path");
     assert_eq!(payload["repairs"]["backup"]["ok"], true);
     assert!(Path::new(backup_path).is_file());
-    assert!(payload["repairs"]["applied_actions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|action| action["kind"] == "rebuild_raw_fts"));
+    assert!(
+        payload["repairs"]["applied_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["kind"] == "rebuild_raw_fts")
+    );
     assert_eq!(lcm_fts_match_count(&cg, "needle").await, 1);
 }
 
@@ -9440,11 +9749,13 @@ async fn lcm_doctor_retention_reports_candidates_without_deleting() {
 
     assert_eq!(payload["mode"], "retention");
     assert_eq!(payload["diagnostics"]["retention"]["read_only"], true);
-    assert!(payload["diagnostics"]["retention"]["candidates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|candidate| candidate["session_id"] == "lcm-doctor-retention"));
+    assert!(
+        payload["diagnostics"]["retention"]["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|candidate| candidate["session_id"] == "lcm-doctor-retention")
+    );
     assert_eq!(lcm_raw_message_count(&cg, "lcm-doctor-retention").await, 1);
 }
 
@@ -9536,9 +9847,11 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     let loaded_payload: Value = serde_json::from_str(extract_text(&loaded.value)).unwrap();
     assert_eq!(loaded_payload["status"], "ok");
     assert_eq!(loaded_payload["messages"].as_array().unwrap().len(), 1);
-    assert!(loaded_payload["messages"][0]["content_range"]["truncated"]
-        .as_bool()
-        .unwrap());
+    assert!(
+        loaded_payload["messages"][0]["content_range"]["truncated"]
+            .as_bool()
+            .unwrap()
+    );
     assert_eq!(
         loaded_payload["messages"][0]["content"]
             .as_str()
@@ -9674,9 +9987,11 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     let described_payload: Value = serde_json::from_str(extract_text(&described.value)).unwrap();
     assert_eq!(described_payload["status"], "ok");
     assert_eq!(described_payload["description"]["raw_message_count"], 1);
-    assert!(described_payload["description"]["raw_messages"][0]
-        .get("content_preview")
-        .is_some());
+    assert!(
+        described_payload["description"]["raw_messages"][0]
+            .get("content_preview")
+            .is_some()
+    );
     assert!(
         described_payload["description"]["raw_messages"][0]
             .get("content")
@@ -9710,9 +10025,11 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
             .count(),
         16
     );
-    assert!(expanded_payload["expansion"]["content_range"]["truncated"]
-        .as_bool()
-        .unwrap());
+    assert!(
+        expanded_payload["expansion"]["content_range"]["truncated"]
+            .as_bool()
+            .unwrap()
+    );
 
     let result = handle_tool_call(
         &cg,
@@ -9734,15 +10051,19 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     assert_eq!(payload["status"], "ok");
     assert_eq!(payload["needs_synthesis"], true);
     assert_eq!(payload["prompt"], "Summarize orchard dispatch");
-    assert!(payload["context_blocks"]
-        .as_array()
-        .expect("context blocks")
-        .iter()
-        .any(|block| block["kind"] == "raw_message"));
-    assert!(payload["synthesis_prompt"]["user"]
-        .as_str()
-        .unwrap()
-        .contains("EXPANDED CONTEXT"));
+    assert!(
+        payload["context_blocks"]
+            .as_array()
+            .expect("context blocks")
+            .iter()
+            .any(|block| block["kind"] == "raw_message")
+    );
+    assert!(
+        payload["synthesis_prompt"]["user"]
+            .as_str()
+            .unwrap()
+            .contains("EXPANDED CONTEXT")
+    );
     assert!(extract_text(&result.value).len() <= MCP_TEST_RESPONSE_CHAR_LIMIT);
 
     let preflight = handle_tool_call(
@@ -10047,12 +10368,16 @@ async fn lcm_compress_oversized_needs_summary_uses_retrievable_full_payload() {
         source_messages[0]["content"].as_str(),
         Some(huge_source.as_str())
     );
-    assert!(source_messages[0]
-        .get("content_truncated_for_mcp")
-        .is_none());
-    assert!(full_payload["summary_request"]
-        .get("source_messages_truncated_for_mcp")
-        .is_none());
+    assert!(
+        source_messages[0]
+            .get("content_truncated_for_mcp")
+            .is_none()
+    );
+    assert!(
+        full_payload["summary_request"]
+            .get("source_messages_truncated_for_mcp")
+            .is_none()
+    );
     close_test_graph(cg).await;
 }
 
@@ -10090,9 +10415,11 @@ async fn lcm_preflight_oversized_replay_preserves_bridge_contract() {
     assert_eq!(payload["contract_truncated"], true);
     assert!(payload.get("truncated").is_none());
     assert!(text.len() <= MCP_TEST_RESPONSE_CHAR_LIMIT);
-    assert!(payload["replay_messages_compacted_for_mcp"]
-        .as_bool()
-        .unwrap_or(false));
+    assert!(
+        payload["replay_messages_compacted_for_mcp"]
+            .as_bool()
+            .unwrap_or(false)
+    );
     assert_eq!(
         payload["replay_messages"][0]["content_truncated_for_mcp"],
         true
@@ -10914,10 +11241,12 @@ async fn lcm_load_and_grep_use_explicit_hermes_profile_session_db() {
     assert_eq!(grep_payload["status"], "ok");
     assert_eq!(grep_payload["count"], 1);
     assert_eq!(grep_payload["hits"][0]["session_id"], "lcm-profile-read");
-    assert!(grep_payload["hits"][0]["snippet"]
-        .as_str()
-        .unwrap()
-        .contains("profile-local pear evidence"));
+    assert!(
+        grep_payload["hits"][0]["snippet"]
+            .as_str()
+            .unwrap()
+            .contains("profile-local pear evidence")
+    );
 
     let expanded = handle_tool_call(
         &cg,
@@ -10941,10 +11270,12 @@ async fn lcm_load_and_grep_use_explicit_hermes_profile_session_db() {
     assert_eq!(expanded_payload["status"], "ok");
     assert_eq!(expanded_payload["storage_scope"], "hermes_profile");
     assert_eq!(expanded_payload["needs_synthesis"], true);
-    assert!(expanded_payload["context_blocks"][0]["content"]
-        .as_str()
-        .unwrap()
-        .contains("profile-local pear evidence"));
+    assert!(
+        expanded_payload["context_blocks"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("profile-local pear evidence")
+    );
 }
 
 #[tokio::test]
@@ -10975,10 +11306,12 @@ async fn lcm_hermes_profile_requires_explicit_valid_home_without_fallback() {
     let status_payload: Value = serde_json::from_str(extract_text(&status.value)).unwrap();
     assert_eq!(status_payload["status"], "unavailable");
     assert_eq!(status_payload["storage_scope"], "hermes_profile");
-    assert!(status_payload["message"]
-        .as_str()
-        .unwrap()
-        .contains("hermes_home"));
+    assert!(
+        status_payload["message"]
+            .as_str()
+            .unwrap()
+            .contains("hermes_home")
+    );
     assert!(status_payload.get("lcm").is_none());
 
     let loaded = handle_tool_call(
@@ -10998,10 +11331,12 @@ async fn lcm_hermes_profile_requires_explicit_valid_home_without_fallback() {
     let loaded_payload: Value = serde_json::from_str(extract_text(&loaded.value)).unwrap();
     assert_eq!(loaded_payload["status"], "unavailable");
     assert_eq!(loaded_payload["storage_scope"], "hermes_profile");
-    assert!(loaded_payload["message"]
-        .as_str()
-        .unwrap()
-        .contains("absolute hermes_home"));
+    assert!(
+        loaded_payload["message"]
+            .as_str()
+            .unwrap()
+            .contains("absolute hermes_home")
+    );
     assert!(loaded_payload.get("messages").is_none());
 }
 
@@ -11253,14 +11588,18 @@ async fn lcm_expand_query_large_response_preserves_synthesis_contract() {
         payload["prompt"],
         "Summarize oversized expand-query evidence"
     );
-    assert!(payload["synthesis_prompt"]["system"]
-        .as_str()
-        .unwrap()
-        .contains("expanded LCM retrieval context"));
-    assert!(payload["synthesis_prompt"]["user"]
-        .as_str()
-        .unwrap()
-        .contains("Summarize oversized expand-query evidence"));
+    assert!(
+        payload["synthesis_prompt"]["system"]
+            .as_str()
+            .unwrap()
+            .contains("expanded LCM retrieval context")
+    );
+    assert!(
+        payload["synthesis_prompt"]["user"]
+            .as_str()
+            .unwrap()
+            .contains("Summarize oversized expand-query evidence")
+    );
     assert!(payload["context_truncated"].as_bool().is_some());
     assert!(payload["context_budget"]["used_chars"].as_u64().is_some());
     assert!(!payload["matches"].as_array().unwrap().is_empty());
@@ -11351,10 +11690,12 @@ async fn lcm_expand_query_oversized_prompt_preserves_synthesis_contract() {
     assert!(payload["prompt_truncated_for_mcp"].as_bool().unwrap());
     assert!(payload["query_truncated_for_mcp"].as_bool().unwrap());
     assert!(payload["contract_truncated"].as_bool().unwrap());
-    assert!(payload["synthesis_prompt"]["user"]
-        .as_str()
-        .unwrap()
-        .contains("QUESTION:"));
+    assert!(
+        payload["synthesis_prompt"]["user"]
+            .as_str()
+            .unwrap()
+            .contains("QUESTION:")
+    );
     assert!(text.len() <= MCP_TEST_RESPONSE_CHAR_LIMIT);
 }
 
@@ -11655,11 +11996,13 @@ fn managed_skill_test_draft(id: &str, title: &str) -> ManagedSkillDraft {
         category: "maintenance".to_string(),
         targets: tracedecay::automation::managed_skills::default_managed_skill_targets(),
         body_markdown: format!("Use {title} before applying repository changes."),
-        support_files: vec![ManagedSupportFile::new(
-            "references/checklist.md",
-            b"- inspect context\n- run focused tests\n".to_vec(),
-        )
-        .unwrap()],
+        support_files: vec![
+            ManagedSupportFile::new(
+                "references/checklist.md",
+                b"- inspect context\n- run focused tests\n".to_vec(),
+            )
+            .unwrap(),
+        ],
         provenance: ManagedSkillProvenance {
             source: ManagedSkillSource::AutomationRun,
             actor: "tracedecay-test".to_string(),
@@ -11768,10 +12111,26 @@ async fn automation_run_artifact_mcp_tool_reads_verified_payload() {
     .await
     .unwrap();
 
-    let result = handle_tool_call(
+    let markdown_result = handle_tool_call(
         &cg,
         "tracedecay_automation_run_artifact_view",
         json!({"run_id": run_id, "kind": "codex_handoff"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let markdown_text = extract_text(&markdown_result.value);
+    assert!(markdown_text.starts_with("## Automation Run Artifact"));
+    assert!(markdown_text.contains("**run_id:** run-mcp-artifact"));
+    assert!(markdown_text.contains("**kind:** codex_handoff"));
+    assert!(markdown_text.contains("ready_for_review"));
+    assert!(!markdown_text.contains("|"));
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_automation_run_artifact_view",
+        json!({"run_id": run_id, "kind": "codex_handoff", "format": "json"}),
         None,
         None,
     )
@@ -11796,9 +12155,11 @@ async fn automation_run_artifact_mcp_tool_reads_verified_payload() {
     )
     .await
     .unwrap_err();
-    assert!(missing
-        .to_string()
-        .contains("automation run artifact not found"));
+    assert!(
+        missing
+            .to_string()
+            .contains("automation run artifact not found")
+    );
 
     close_test_graph(cg).await;
 }
@@ -11870,10 +12231,26 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
         .await
         .unwrap();
 
-    let list = handle_tool_call(
+    let markdown_list = handle_tool_call(
         &cg,
         "tracedecay_skill_list",
         json!({"state": "active"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let markdown_text = extract_text(&markdown_list.value);
+    assert!(markdown_text.starts_with("## Managed Skills"));
+    assert!(markdown_text.contains("**count:** 1"));
+    assert!(markdown_text.contains("**active-skill**"));
+    assert!(markdown_text.contains("Active skill"));
+    assert!(!markdown_text.contains("|"));
+
+    let list = handle_tool_call(
+        &cg,
+        "tracedecay_skill_list",
+        json!({"state": "active", "format": "json"}),
         None,
         None,
     )
@@ -11906,7 +12283,7 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
     );
     assert!(payload["skills"][0].get("body_markdown").is_none());
 
-    let view = handle_tool_call(
+    let markdown_view = handle_tool_call(
         &cg,
         "tracedecay_skill_view",
         json!({
@@ -11919,11 +12296,32 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
     )
     .await
     .unwrap();
+    let markdown_text = extract_text(&markdown_view.value);
+    assert!(markdown_text.starts_with("## Managed Skill: active-skill"));
+    assert!(markdown_text.contains("**state:** active"));
+    assert!(markdown_text.contains("### Body"));
+    assert!(markdown_text.contains("Active skill"));
+    assert!(!markdown_text.contains("|"));
+
+    let view = handle_tool_call(
+        &cg,
+        "tracedecay_skill_view",
+        json!({
+            "id": "active-skill",
+            "include_support_files": false,
+            "__mcp_request_id": "req-active-view",
+            "format": "json",
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     assert!(view.touched_files.is_empty());
     let payload = extract_json(&view.value);
     assert_eq!(payload["status"], "ok");
     assert_eq!(payload["skill"]["metadata"]["id"], "active-skill");
-    assert_eq!(payload["usage_summary"]["view_count"], 2);
+    assert_eq!(payload["usage_summary"]["view_count"], 3);
     assert_eq!(payload["usage_summary"]["use_count"], 1);
     assert!(
         payload["usage_summary"]["targets"]
@@ -11938,10 +12336,12 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
         payload["improvement_recommendation"]["skill_id"],
         "active-skill"
     );
-    assert!(payload["skill"]["body_markdown"]
-        .as_str()
-        .unwrap()
-        .contains("Active skill"));
+    assert!(
+        payload["skill"]["body_markdown"]
+            .as_str()
+            .unwrap()
+            .contains("Active skill")
+    );
     assert_eq!(
         payload["skill"]["support_files"].as_array().unwrap().len(),
         0
@@ -11951,7 +12351,7 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
         .await
         .unwrap()
         .expect("skill view should write direct usage telemetry");
-    assert_eq!(usage_record.view_count, 2);
+    assert_eq!(usage_record.view_count, 3);
     assert_eq!(usage_record.use_count, 1);
     assert!(usage_record.targets.iter().any(|target| target == "mcp"));
 
@@ -11985,14 +12385,14 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
     let list_after_view = handle_tool_call(
         &cg,
         "tracedecay_skill_list",
-        json!({"state": "active"}),
+        json!({"state": "active", "format": "json"}),
         None,
         None,
     )
     .await
     .unwrap();
     let payload = extract_json(&list_after_view.value);
-    assert_eq!(payload["skills"][0]["usage_summary"]["view_count"], 2);
+    assert_eq!(payload["skills"][0]["usage_summary"]["view_count"], 3);
 
     close_test_graph(cg).await;
     drop(env_lock);
@@ -12186,9 +12586,11 @@ skills:
         payload["bridge"]["usage_records"]["repo-hygiene"]["created_by"],
         "agent"
     );
-    assert!(payload["bridge"]["pending_skills"][0]
-        .get("payload")
-        .is_none());
+    assert!(
+        payload["bridge"]["pending_skills"][0]
+            .get("payload")
+            .is_none()
+    );
 
     close_test_graph(cg).await;
 }
@@ -12217,12 +12619,16 @@ fn message_search_provider_schema_matches_ingested_providers() {
         message_search.input_schema["properties"]["scope"]["enum"],
         serde_json::json!(["all", "parents_only", "subagents_only"])
     );
-    assert!(message_search.input_schema["properties"]
-        .get("parent_session_id")
-        .is_some());
-    assert!(message_search.input_schema["properties"]
-        .get("include_subagents")
-        .is_some());
+    assert!(
+        message_search.input_schema["properties"]
+            .get("parent_session_id")
+            .is_some()
+    );
+    assert!(
+        message_search.input_schema["properties"]
+            .get("include_subagents")
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -12233,6 +12639,7 @@ async fn memory_status_repairs_dirty_banks_before_reporting() {
         "tracedecay_fact_store",
         json!({
             "action": "add",
+            "format": "json",
             "content": "Status should repair dirty holographic banks",
             "category": "project",
             "entity": "Holographic Banks"
@@ -13927,10 +14334,12 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
     let payload: Value = serde_json::from_str(extract_text(&payload_result.value)).unwrap();
     assert_eq!(payload["status"], "ok");
     assert_eq!(payload["expansion"]["kind"], "external_payload");
-    assert!(payload["expansion"]["content"]
-        .as_str()
-        .expect("external payload content")
-        .starts_with("data:image/png;base64,"));
+    assert!(
+        payload["expansion"]["content"]
+            .as_str()
+            .expect("external payload content")
+            .starts_with("data:image/png;base64,")
+    );
 }
 
 #[tokio::test]
@@ -14009,10 +14418,12 @@ async fn lcm_compress_handler_honors_incremental_max_depth_override() {
     assert_eq!(payload["reason"], "condensed_summary_nodes");
     assert_eq!(payload["summary_nodes_created"], 1);
     assert_eq!(payload["summary_nodes"][0]["depth"], 2);
-    assert!(payload["context_recovery_hint"]
-        .as_str()
-        .unwrap()
-        .contains("tracedecay_lcm_expand_query"));
+    assert!(
+        payload["context_recovery_hint"]
+            .as_str()
+            .unwrap()
+            .contains("tracedecay_lcm_expand_query")
+    );
 }
 
 #[tokio::test]
@@ -14486,49 +14897,6 @@ async fn simplify_scan_surfaces_store_failure_instead_of_no_findings() {
     assert!(
         result.is_err(),
         "a failing store query must produce a tool error, not an empty findings list"
-    );
-}
-
-#[tokio::test]
-async fn simplify_scan_markdown_visible_output_is_not_escaped_blob() {
-    let (cg, _env, dir) = setup_empty_project().await;
-    fs::create_dir_all(dir.path().join("src")).unwrap();
-    fs::write(
-        dir.path().join("src/dead.rs"),
-        r#"
-fn abandoned_helper() -> usize {
-    7
-}
-"#,
-    )
-    .unwrap();
-    index_all_retrying_sync_lock(&cg).await;
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_simplify_scan",
-        json!({"files": ["src/dead.rs"], "format": "markdown"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-
-    let text = extract_text(&result.value);
-    assert!(text.contains("# Simplify Scan"), "got: {text}");
-    assert!(text.contains("## Potential Dead Code"), "got: {text}");
-    assert!(text.contains("abandoned_helper"), "got: {text}");
-    assert!(
-        serde_json::from_str::<Value>(text).is_err(),
-        "visible markdown should not be a JSON envelope: {text}"
-    );
-    assert!(
-        !text.contains("\\n") && !text.contains("\\\""),
-        "visible markdown should not contain escaped markdown/json: {text}"
-    );
-    assert!(
-        !text.contains("\"content\""),
-        "visible markdown should not contain a nested MCP envelope: {text}"
     );
 }
 

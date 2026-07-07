@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::artifact_policy::TaskArtifactPolicy;
 use super::run_ledger::AutomationRunLedgerRecord;

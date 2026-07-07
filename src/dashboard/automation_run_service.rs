@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::memory_service::{push_curation_activity, push_curation_activity_with_level};
 use super::DashboardState;
+use super::memory_service::{push_curation_activity, push_curation_activity_with_level};
 use crate::sessions::lcm::{LcmGrepSort, LcmScope};
 
 pub(crate) struct MemoryCuratorRunRequest {
@@ -34,7 +34,7 @@ pub(crate) async fn curation_agent_plan_payload_with_run_id(
 ) -> Result<Value, String> {
     use crate::automation::run_ledger::AutomationTrigger;
     use crate::automation::runner::{
-        run_memory_curator_with_backend, MemoryCuratorAutomationOptions,
+        MemoryCuratorAutomationOptions, run_memory_curator_with_backend,
     };
 
     push_curation_activity(
@@ -261,7 +261,7 @@ pub(crate) async fn session_reflection_run_payload_with_run_id(
 ) -> Result<Value, String> {
     use crate::automation::run_ledger::AutomationTrigger;
     use crate::automation::runner::{
-        run_session_reflector_with_backend, SessionReflectorAutomationOptions,
+        SessionReflectorAutomationOptions, run_session_reflector_with_backend,
     };
 
     push_dashboard_automation_activity_start(
@@ -360,7 +360,7 @@ pub(crate) async fn skill_writing_run_payload_with_run_id(
     run_id: Option<String>,
 ) -> Result<Value, String> {
     use crate::automation::run_ledger::AutomationTrigger;
-    use crate::automation::runner::{run_skill_writer_with_backend, SkillWriterAutomationOptions};
+    use crate::automation::runner::{SkillWriterAutomationOptions, run_skill_writer_with_backend};
 
     push_dashboard_automation_activity_start(
         state,
@@ -567,7 +567,7 @@ async fn dashboard_automation_run_context(
     state: &DashboardState,
 ) -> Result<DashboardAutomationRunContext, String> {
     use crate::automation::backend::CodexAppServerBackend;
-    use crate::automation::config::{effective_config, load_project_config, AutomationBackend};
+    use crate::automation::config::{AutomationBackend, effective_config, load_project_config};
     use crate::tracedecay::TraceDecay;
 
     let cg = TraceDecay::open(&state.project_root)

@@ -11,6 +11,8 @@
 //! enclosing graph node, so callers get structured errors mapped to the
 //! same node IDs the rest of tracedecay's tools speak.
 
+mod cache;
+mod fingerprint;
 pub mod lsp;
 pub mod python;
 pub mod rust;
@@ -21,6 +23,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::errors::Result;
+
+pub use cache::DiagnosticsCache;
 
 /// One diagnostic emitted by a language's type-checker.
 #[derive(Debug, Clone, Serialize)]
@@ -46,7 +50,7 @@ pub struct Diagnostic {
 
 /// Scope of the diagnostic run. Drivers may not honor every scope; the
 /// `Workspace` variant is the universal fallback.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Scope {
     /// Whole workspace / project. The default and most expensive scope.
     Workspace,
@@ -167,4 +171,235 @@ fn canonicalise_file(file_name: &str, project_root: &Path) -> String {
         return rel.to_string_lossy().to_string();
     }
     file_name.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use super::fingerprint::DiagnosticsFingerprint;
+    use super::*;
+
+    fn test_diagnostic(message: &str) -> Diagnostic {
+        Diagnostic {
+            file: "src/lib.rs".to_string(),
+            line_start: 1,
+            line_end: 1,
+            level: "error".to_string(),
+            code: "E0000".to_string(),
+            message: message.to_string(),
+            driver: "test",
+        }
+    }
+
+    #[tokio::test]
+    async fn cache_single_flights_concurrent_identical_requests() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("src")).unwrap();
+        std::fs::write(temp.path().join("src/lib.rs"), "pub fn demo() {}\n").unwrap();
+
+        let cache = Arc::new(DiagnosticsCache::default());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(tokio::sync::Barrier::new(2));
+
+        let mut tasks = Vec::new();
+        for _ in 0..2 {
+            let cache = Arc::clone(&cache);
+            let calls = Arc::clone(&calls);
+            let gate = Arc::clone(&gate);
+            let project_root = temp.path().to_path_buf();
+            tasks.push(tokio::spawn(async move {
+                gate.wait().await;
+                cache
+                    .run_with(&project_root, &Scope::Workspace, || {
+                        let calls = Arc::clone(&calls);
+                        async move {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                            Ok(vec![test_diagnostic("cached")])
+                        }
+                    })
+                    .await
+                    .unwrap()
+            }));
+        }
+
+        let first = tasks.remove(0).await.unwrap();
+        let second = tasks.remove(0).await.unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(first[0].message, "cached");
+        assert_eq!(second[0].message, "cached");
+    }
+
+    #[tokio::test]
+    async fn cache_invalidates_when_inputs_change() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("src")).unwrap();
+        let source = temp.path().join("src/lib.rs");
+        std::fs::write(&source, "pub fn demo() {}\n").unwrap();
+
+        let cache = DiagnosticsCache::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        for message in ["first", "second"] {
+            let calls = Arc::clone(&calls);
+            let diagnostics = cache
+                .run_with(temp.path(), &Scope::Workspace, || async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(vec![test_diagnostic(message)])
+                })
+                .await
+                .unwrap();
+            assert_eq!(diagnostics[0].message, message);
+            std::fs::write(&source, format!("pub fn demo() {{}}\n// {message}\n")).unwrap();
+        }
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn file_scope_cache_invalidates_when_project_inputs_change() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("src")).unwrap();
+        let source = temp.path().join("src/lib.rs");
+        let sibling = temp.path().join("src/other.rs");
+        std::fs::write(&source, "pub fn demo() {}\n").unwrap();
+        std::fs::write(&sibling, "pub fn other() {}\n").unwrap();
+
+        let cache = DiagnosticsCache::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let scope = Scope::File {
+            path: "src/lib.rs".to_string(),
+        };
+
+        for message in ["first", "second"] {
+            let calls = Arc::clone(&calls);
+            let diagnostics = cache
+                .run_with(temp.path(), &scope, || async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(vec![test_diagnostic(message)])
+                })
+                .await
+                .unwrap();
+            assert_eq!(diagnostics[0].message, message);
+            std::fs::write(&sibling, format!("pub fn other() {{}}\n// {message}\n")).unwrap();
+        }
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn cache_runs_different_keys_concurrently() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("src")).unwrap();
+        std::fs::write(temp.path().join("src/lib.rs"), "pub fn demo() {}\n").unwrap();
+
+        let cache = Arc::new(DiagnosticsCache::default());
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(tokio::sync::Barrier::new(2));
+
+        let mut tasks = Vec::new();
+        for scope in [
+            Scope::Workspace,
+            Scope::File {
+                path: "src/lib.rs".to_string(),
+            },
+        ] {
+            let cache = Arc::clone(&cache);
+            let active = Arc::clone(&active);
+            let max_active = Arc::clone(&max_active);
+            let gate = Arc::clone(&gate);
+            let project_root = temp.path().to_path_buf();
+            tasks.push(tokio::spawn(async move {
+                gate.wait().await;
+                cache
+                    .run_with(&project_root, &scope, || {
+                        let active = Arc::clone(&active);
+                        let max_active = Arc::clone(&max_active);
+                        async move {
+                            let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                            max_active.fetch_max(current, Ordering::SeqCst);
+                            tokio::time::sleep(Duration::from_millis(30)).await;
+                            active.fetch_sub(1, Ordering::SeqCst);
+                            Ok(vec![test_diagnostic("concurrent")])
+                        }
+                    })
+                    .await
+                    .unwrap()
+            }));
+        }
+
+        for task in tasks {
+            task.await.unwrap();
+        }
+
+        assert_eq!(max_active.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn cache_clears_running_state_when_owner_is_cancelled() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("src")).unwrap();
+        std::fs::write(temp.path().join("src/lib.rs"), "pub fn demo() {}\n").unwrap();
+
+        let cache = Arc::new(DiagnosticsCache::default());
+        let project_root = temp.path().to_path_buf();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (_release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let running = {
+            let cache = Arc::clone(&cache);
+            tokio::spawn(async move {
+                cache
+                    .run_with(&project_root, &Scope::Workspace, || async move {
+                        let _ = started_tx.send(());
+                        let _ = release_rx.await;
+                        Ok(vec![test_diagnostic("cancelled")])
+                    })
+                    .await
+            })
+        };
+
+        started_rx.await.unwrap();
+        running.abort();
+        let _ = running.await;
+
+        let retry = tokio::time::timeout(Duration::from_secs(1), {
+            let project_root = temp.path().to_path_buf();
+            async move {
+                cache
+                    .run_with(&project_root, &Scope::Workspace, || async {
+                        Ok(vec![test_diagnostic("retry")])
+                    })
+                    .await
+            }
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(retry[0].message, "retry");
+    }
+
+    #[tokio::test]
+    async fn fingerprint_tracks_metadata_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("src")).unwrap();
+        let source = temp.path().join("src/lib.rs");
+        std::fs::write(&source, "pub fn a() {}\n").unwrap();
+        let first = DiagnosticsFingerprint::capture(temp.path(), &Scope::Workspace)
+            .await
+            .unwrap();
+
+        std::fs::write(&source, "pub fn b() {}\n// changed\n").unwrap();
+        let second = DiagnosticsFingerprint::capture(temp.path(), &Scope::Workspace)
+            .await
+            .unwrap();
+
+        assert_eq!(first.files.len(), 1);
+        assert_eq!(second.files.len(), 1);
+        assert_ne!(first, second);
+    }
 }

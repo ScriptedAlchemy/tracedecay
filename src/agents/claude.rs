@@ -28,9 +28,9 @@ use serde_json::json;
 use crate::errors::{Result, TraceDecayError};
 
 use super::{
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, UpdatePluginOutcome,
     backup_and_write_json, expected_tool_perms, load_json_file, load_json_file_strict,
-    safe_write_json_file, safe_write_text_file, write_json_file, AgentIntegration, DoctorCounters,
-    HealthcheckContext, InstallContext, UpdatePluginOutcome,
+    safe_write_json_file, safe_write_text_file, write_json_file,
 };
 
 /// Claude Code agent.
@@ -1077,7 +1077,9 @@ fn install_clean_local_config() {
                                 "\x1b[32m✔\x1b[0m Removed local .mcp.json (plugin provides the MCP server)"
                             );
                         } else if backup_and_write_json(&mcp_json_path, &mcp_val) {
-                            eprintln!("\x1b[32m✔\x1b[0m Removed tracedecay from local .mcp.json (plugin provides the MCP server)");
+                            eprintln!(
+                                "\x1b[32m✔\x1b[0m Removed tracedecay from local .mcp.json (plugin provides the MCP server)"
+                            );
                         }
                     }
                 }

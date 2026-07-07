@@ -49,11 +49,11 @@ fn automation_outcomes_endpoint_returns_live_read_only_outcomes() {
     let runtime = create_runtime();
     runtime.block_on(async {
         use tracedecay::automation::fact_proposals::{
-            save_fact_proposal_store, FactProposalRecord, FactProposalState, FactProposalStore,
+            FactProposalRecord, FactProposalState, FactProposalStore, save_fact_proposal_store,
         };
         use tracedecay::automation::managed_skills::{
-            approve_managed_skill, create_managed_skill_draft, default_managed_skill_targets,
-            ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource,
+            ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, approve_managed_skill,
+            create_managed_skill_draft, default_managed_skill_targets,
         };
 
         let fixture = start_dashboard_fixture(false).await;

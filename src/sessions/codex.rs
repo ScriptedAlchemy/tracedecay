@@ -44,14 +44,14 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::accounting::parser::parse_timestamp;
+use crate::sessions::SessionMessageRecord;
 use crate::sessions::shared::{
-    append_tool_calls_metadata, content_storage_text_and_tools, path_belongs_to_project,
-    title_from_messages, StoredCursor,
+    StoredCursor, append_tool_calls_metadata, content_storage_text_and_tools,
+    path_belongs_to_project, title_from_messages,
 };
 use crate::sessions::source::{
-    collect_files_with_ext, stream_new_jsonl, ParsedTranscript, SessionDraft, TranscriptSource,
+    ParsedTranscript, SessionDraft, TranscriptSource, collect_files_with_ext, stream_new_jsonl,
 };
-use crate::sessions::SessionMessageRecord;
 use context::CodexContextState;
 
 const PROVIDER: &str = "codex";

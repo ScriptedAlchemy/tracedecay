@@ -1,3 +1,4 @@
+#![allow(clippy::collapsible_if)]
 //! Consolidated storage/migration/branch test suite.
 //!
 //! Each module was previously a standalone integration-test binary; merging

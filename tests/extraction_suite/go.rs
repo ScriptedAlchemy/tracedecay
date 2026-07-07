@@ -46,11 +46,13 @@ func helper() {}
     assert_eq!(fns.len(), 2);
     let add_fn = fns.iter().find(|f| f.name == "Add").unwrap();
     assert_eq!(add_fn.visibility, Visibility::Pub); // uppercase = exported
-    assert!(add_fn
-        .docstring
-        .as_ref()
-        .unwrap()
-        .contains("Add adds two numbers"));
+    assert!(
+        add_fn
+            .docstring
+            .as_ref()
+            .unwrap()
+            .contains("Add adds two numbers")
+    );
     let helper_fn = fns.iter().find(|f| f.name == "helper").unwrap();
     assert_eq!(helper_fn.visibility, Visibility::Private); // lowercase = unexported
 }

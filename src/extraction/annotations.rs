@@ -1,6 +1,6 @@
 use tree_sitter::Node as TsNode;
 
-use crate::types::{generate_node_id, Edge, EdgeKind, Node, NodeKind, UnresolvedRef, Visibility};
+use crate::types::{Edge, EdgeKind, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id};
 
 pub(crate) trait AnnotationEmitterState {
     fn extract_annotation_name(&self, annotation_node: TsNode<'_>) -> String;

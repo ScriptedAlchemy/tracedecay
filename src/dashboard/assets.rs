@@ -5,7 +5,7 @@
 //! installed binary serves the UI with no filesystem dependency.
 
 use axum::extract::Path;
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 
 const INDEX_HTML: &str = r#"<!doctype html>

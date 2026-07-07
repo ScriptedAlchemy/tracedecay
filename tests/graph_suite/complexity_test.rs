@@ -1,4 +1,4 @@
-use tracedecay::extraction::complexity::{count_complexity, RUST_COMPLEXITY};
+use tracedecay::extraction::complexity::{RUST_COMPLEXITY, count_complexity};
 
 /// Helper: parse Rust source, find the first `function_item` node, and return its complexity.
 fn rust_fn_complexity(source: &str) -> tracedecay::extraction::complexity::ComplexityMetrics {

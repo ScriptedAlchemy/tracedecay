@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::apply_policy::record_has_auto_applied_memory_ops;
 use super::artifact_feedback::{
@@ -16,7 +16,7 @@ use super::artifact_policy::TaskArtifactPolicy;
 use super::artifact_refs::{automation_run_artifact_api, automation_run_artifacts_api};
 use super::backend::{AgentTaskKind, AgentTaskRequest, AgentTaskResponse};
 use super::outcomes::{
-    outcome_eval_definitions, outcome_feedback_section, AutomationOutcomesSnapshot,
+    AutomationOutcomesSnapshot, outcome_eval_definitions, outcome_feedback_section,
 };
 use super::run_ledger::{AutomationRunArtifactKind, AutomationRunLedgerRecord};
 use super::text::truncate_chars_for_prompt;
@@ -227,6 +227,7 @@ pub(super) fn validation_gate_payload(
 ) -> Value {
     let (trace_ref, feedback_ref, generated_evals_ref) = refs;
     let auto_applied = record_has_auto_applied_memory_ops(ctx.task, ctx.record);
+    let approval_required = ctx.record.accepted_count > 0 && !auto_applied;
     json!({
         "schema_version": 1,
         "run_id": ctx.run_id,
@@ -237,7 +238,7 @@ pub(super) fn validation_gate_payload(
             "accepted_count": ctx.record.accepted_count,
             "rejected_count": ctx.record.rejected_count,
             "reviewed_count": ctx.record.reviewed_count,
-            "approval_required": ctx.record.accepted_count > 0 && !auto_applied,
+            "approval_required": approval_required,
             "report": ctx.record.validation_report,
         },
         "improvement_gate": {
@@ -262,7 +263,7 @@ pub(super) fn validation_gate_payload(
                 "has_feedback": ctx.record.reviewed_count > 0,
                 "has_generated_evals": evals.count > 0,
                 "validation_report_hash": validation_report_hash(ctx.record.validation_report.as_ref()),
-                "approval_required": ctx.record.accepted_count > 0 && !auto_applied,
+                "approval_required": approval_required,
                 "auto_apply_allowed": auto_applied,
             },
             "source_refs": [

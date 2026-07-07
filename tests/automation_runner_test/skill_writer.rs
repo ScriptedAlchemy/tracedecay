@@ -305,9 +305,11 @@ async fn skill_writer_runner_creates_pending_skill_drafts_for_approval() {
         run.report["created_skills"][0]["approval_status"],
         json!("pending_approval")
     );
-    assert!(run.report["created_skills"][0]["target_checksum"]
-        .as_str()
-        .is_some_and(|checksum| checksum.starts_with("sha256:")));
+    assert!(
+        run.report["created_skills"][0]["target_checksum"]
+            .as_str()
+            .is_some_and(|checksum| checksum.starts_with("sha256:"))
+    );
     assert_eq!(
         run.report["created_skills"][0]["metadata"]["targets"],
         json!(["codex", "opencode"])
@@ -332,13 +334,15 @@ async fn skill_writer_runner_creates_pending_skill_drafts_for_approval() {
     let eval_payload = read_artifact(&cg, &run.run_id, &run.ledger_record, "generated_evals").await;
     assert_eq!(eval_payload["task"], json!("skill_writer"));
     assert_eq!(eval_payload["summary"]["eval_count"], json!(3));
-    assert!(eval_payload["eval_definitions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|entry| entry["eval_id"] == json!("skill_writer:accepted:0")
-            && entry["harness"]["commands"][0]
-                == json!("cargo test --test automation_runner_test skill_writer")));
+    assert!(
+        eval_payload["eval_definitions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["eval_id"] == json!("skill_writer:accepted:0")
+                && entry["harness"]["commands"][0]
+                    == json!("cargo test --test automation_runner_test skill_writer"))
+    );
     assert_eq!(
         eval_payload["runner"]["commands"][0],
         json!(
@@ -384,9 +388,11 @@ async fn skill_writer_runner_creates_pending_skill_drafts_for_approval() {
             tracedecay::automation::managed_skills::SkillInstallTarget::OpenCode,
         ]
     );
-    assert!(profile_root
-        .join("agent_managed/skills/automation-run-review/references/checklist.md")
-        .is_file());
+    assert!(
+        profile_root
+            .join("agent_managed/skills/automation-run-review/references/checklist.md")
+            .is_file()
+    );
 
     let records = load_run_records(&cg.store_layout().dashboard_root, 10)
         .await
@@ -472,14 +478,16 @@ async fn skill_writer_evidence_imports_project_skill_usage_analytics_before_summ
     .unwrap();
 
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
-    assert!(run.report["skill_improvement_recommendations"]
-        .as_array()
-        .is_some_and(
-            |recommendations| recommendations.iter().any(|recommendation| {
-                recommendation["id"] == "underused_tool_family:code_search"
-                    && recommendation["source"] == "session_tool_usage"
-            })
-        ));
+    assert!(
+        run.report["skill_improvement_recommendations"]
+            .as_array()
+            .is_some_and(
+                |recommendations| recommendations.iter().any(|recommendation| {
+                    recommendation["id"] == "underused_tool_family:code_search"
+                        && recommendation["source"] == "session_tool_usage"
+                })
+            )
+    );
 }
 
 #[tokio::test]
@@ -647,11 +655,9 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
             category: "workflow".to_string(),
             targets: tracedecay::automation::managed_skills::default_managed_skill_targets(),
             body_markdown: "Check the run ledger before approving changes.".to_string(),
-            support_files: vec![ManagedSupportFile::new(
-                "references/old.md",
-                b"old checklist".to_vec(),
-            )
-            .unwrap()],
+            support_files: vec![
+                ManagedSupportFile::new("references/old.md", b"old checklist".to_vec()).unwrap(),
+            ],
             provenance: ManagedSkillProvenance {
                 source: ManagedSkillSource::UserDraft,
                 actor: "test".to_string(),
@@ -752,9 +758,11 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
         run.report["updated_skills"][0]["metadata"]["targets"],
         json!(["claude", "kimi"])
     );
-    assert!(run.report["updated_skills"][0]["target_checksum"]
-        .as_str()
-        .is_some_and(|checksum| checksum.starts_with("sha256:")));
+    assert!(
+        run.report["updated_skills"][0]["target_checksum"]
+            .as_str()
+            .is_some_and(|checksum| checksum.starts_with("sha256:"))
+    );
 
     let skill = load_managed_skill(&profile_root, "automation-run-review")
         .await
@@ -883,9 +891,10 @@ async fn skill_writer_runner_ledgers_missing_skills_array() {
     .unwrap_err();
 
     assert_eq!(backend.calls(), 1);
-    assert!(err
-        .to_string()
-        .contains("skill writer output must include a skills array"));
+    assert!(
+        err.to_string()
+            .contains("skill writer output must include a skills array")
+    );
     let records = load_run_records(&cg.store_layout().dashboard_root, 10)
         .await
         .unwrap();
@@ -898,10 +907,12 @@ async fn skill_writer_runner_ledgers_missing_skills_array() {
     assert!(records[0].evidence_hash.is_some());
     assert!(records[0].input_hash.is_some());
     assert_eq!(records[0].proposed_ops.as_ref(), Some(&output));
-    assert!(records[0]
-        .error
-        .as_deref()
-        .is_some_and(|error| error.contains("skill writer output must include a skills array")));
+    assert!(
+        records[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("skill writer output must include a skills array"))
+    );
     assert_eq!(
         records[0].error_classification,
         Some(AgentTaskFailureClass::MalformedOutput)
@@ -936,11 +947,12 @@ async fn skill_writer_runner_records_noop_fallback_when_backend_run_task_fails()
         "skill_writer",
         json!({ "skills": [] }),
     );
-    assert!(run
-        .ledger_record
-        .error
-        .as_deref()
-        .is_some_and(|error| error.contains("executable")));
+    assert!(
+        run.ledger_record
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("executable"))
+    );
     let records = load_run_records(&cg.store_layout().dashboard_root, 10)
         .await
         .unwrap();

@@ -14,10 +14,10 @@
 //! (the evidence guard) and applies them through the canonical store paths.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use tokio::sync::RwLock;
 
 use super::memory_queries::normalize_fact_metadata;
@@ -25,7 +25,7 @@ use super::memory_service::{
     apply_delete_op, apply_merge_op, build_delete_plan, delete_fact, similarity_computation,
 };
 use super::util::{qmarks, query_rows};
-use super::{code_diagnostics_broker, storage_mode_label, token_count, DashboardState};
+use super::{DashboardState, code_diagnostics_broker, storage_mode_label, token_count};
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
@@ -36,8 +36,7 @@ const CURATION_CLUSTER_CLASSIFICATIONS: [&str; 2] = ["likely_duplicate", "merge_
 /// Verbatim port of the Hermes wrapper's `_CURATION_SYSTEM_PROMPT`
 /// (dashboard/hermes-wrapper/plugin_api.py), itself adapted from the
 /// `holographic_plus` curator's one-shot LLM review tier.
-const CURATION_SYSTEM_PROMPT: &str =
-    "You are a memory hygiene engine for an AI agent's long-term fact store. \
+const CURATION_SYSTEM_PROMPT: &str = "You are a memory hygiene engine for an AI agent's long-term fact store. \
 You are given candidate fact clusters and must return STRICT JSON \
 describing one op per reviewed cluster. NEVER invent facts. Be \
 conservative: only act when confident.\n\n\
@@ -567,14 +566,18 @@ mod tests {
         assert_eq!(valid.len(), 1);
         assert_eq!(valid[0]["fact_id"], json!(2));
         assert_eq!(rejected.len(), 2);
-        assert!(rejected[0]["rejected_reason"]
-            .as_str()
-            .unwrap()
-            .contains("below floor"));
-        assert!(rejected[1]["rejected_reason"]
-            .as_str()
-            .unwrap()
-            .contains("not in reviewed evidence"));
+        assert!(
+            rejected[0]["rejected_reason"]
+                .as_str()
+                .unwrap()
+                .contains("below floor")
+        );
+        assert!(
+            rejected[1]["rejected_reason"]
+                .as_str()
+                .unwrap()
+                .contains("not in reviewed evidence")
+        );
     }
 
     #[test]
@@ -639,9 +642,11 @@ mod tests {
         assert_eq!(valid.len(), 1);
         assert_eq!(valid[0]["fact_id"], json!(2));
         assert_eq!(rejected.len(), 1);
-        assert!(rejected[0]["rejected_reason"]
-            .as_str()
-            .unwrap()
-            .contains("updated_at is maintenance metadata"));
+        assert!(
+            rejected[0]["rejected_reason"]
+                .as_str()
+                .unwrap()
+                .contains("updated_at is maintenance metadata")
+        );
     }
 }

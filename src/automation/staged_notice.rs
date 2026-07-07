@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::fact_proposals::{load_fact_proposal_store, FactProposalState};
-use super::managed_skills::{list_managed_skills, ManagedSkillState};
+use super::fact_proposals::{FactProposalState, load_fact_proposal_store};
+use super::managed_skills::{ManagedSkillState, list_managed_skills};
 use super::run_ledger::load_run_records;
 use crate::errors::{Result, TraceDecayError};
 
@@ -183,7 +183,7 @@ fn config_error(message: String) -> TraceDecayError {
 mod tests {
     use super::*;
     use crate::automation::fact_proposals::{
-        save_fact_proposal_store, FactProposalRecord, FactProposalStore,
+        FactProposalRecord, FactProposalStore, save_fact_proposal_store,
     };
     use crate::automation::managed_skill_model::{
         ManagedSkill, ManagedSkillMetadata, ManagedSkillProvenance, ManagedSkillSource,

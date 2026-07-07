@@ -166,10 +166,11 @@ async fn global_db_opens_with_session_schema() {
     let db = open_isolated_db(&tmp).await;
 
     assert!(db.get_session("cursor", "missing").await.is_none());
-    assert!(db
-        .search_session_messages("cursor", None, "not-present", 10)
-        .await
-        .is_empty());
+    assert!(
+        db.search_session_messages("cursor", None, "not-present", 10)
+            .await
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -546,13 +547,17 @@ async fn upsert_session_message_round_trips_and_updates() {
         .await
         .expect("message should exist");
     assert_eq!(fetched.session_id, "session-1");
-    assert!(fetched
-        .text
-        .starts_with("Updated answer about parsing transcripts."));
+    assert!(
+        fetched
+            .text
+            .starts_with("Updated answer about parsing transcripts.")
+    );
     assert!(fetched.text.chars().count() <= tracedecay::sessions::lcm::MAX_DERIVED_TEXT_CHARS);
-    assert!(fetched
-        .text
-        .contains(tracedecay::sessions::lcm::DERIVED_TRUNCATION_MARKER));
+    assert!(
+        fetched
+            .text
+            .contains(tracedecay::sessions::lcm::DERIVED_TRUNCATION_MARKER)
+    );
     assert_eq!(fetched.tool_names.as_deref(), Some("tracedecay_context"));
     assert_eq!(fetched.source_offset, Some(99));
 
@@ -579,14 +584,16 @@ async fn upsert_session_message_rejects_missing_session_without_orphan_raw() {
     let message = sample_message("cursor", "orphan-message", "missing-session", "orphan text");
 
     assert!(!db.upsert_session_message(&message).await);
-    assert!(db
-        .get_session_message("cursor", "orphan-message")
-        .await
-        .is_none());
-    assert!(db
-        .lcm_load_raw_message("cursor", "orphan-message")
-        .await
-        .is_none());
+    assert!(
+        db.get_session_message("cursor", "orphan-message")
+            .await
+            .is_none()
+    );
+    assert!(
+        db.lcm_load_raw_message("cursor", "orphan-message")
+            .await
+            .is_none()
+    );
     assert_eq!(
         raw_message_count(&db_path, "cursor", "orphan-message").await,
         0
@@ -627,10 +634,11 @@ async fn upsert_session_message_rolls_back_raw_when_projection_fails() {
         raw_message_count(&db_path, "cursor", "message-rollback").await,
         0
     );
-    assert!(db
-        .lcm_load_raw_message("cursor", "message-rollback")
-        .await
-        .is_none());
+    assert!(
+        db.lcm_load_raw_message("cursor", "message-rollback")
+            .await
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -651,9 +659,11 @@ async fn upsert_session_message_preserves_oversized_text_losslessly() {
     assert!(
         compatibility.text.chars().count() <= tracedecay::sessions::lcm::MAX_DERIVED_TEXT_CHARS
     );
-    assert!(compatibility
-        .text
-        .contains(tracedecay::sessions::lcm::DERIVED_TRUNCATION_MARKER));
+    assert!(
+        compatibility
+            .text
+            .contains(tracedecay::sessions::lcm::DERIVED_TRUNCATION_MARKER)
+    );
 
     let raw = db
         .lcm_load_raw_message("cursor", "message-1")
@@ -690,11 +700,12 @@ async fn upsert_session_message_externalizes_tool_payload_without_indexing_body_
     assert_eq!(raw.storage_kind, LcmStorageKind::External);
     assert!(raw.content.is_empty());
     assert!(!raw.content.contains(body_secret));
-    assert!(!raw
-        .metadata_json
-        .as_deref()
-        .unwrap_or("")
-        .contains(metadata_secret));
+    assert!(
+        !raw.metadata_json
+            .as_deref()
+            .unwrap_or("")
+            .contains(metadata_secret)
+    );
     let payload_ref = raw.payload_ref.as_deref().expect("payload ref");
 
     let fetched = db
@@ -703,9 +714,11 @@ async fn upsert_session_message_externalizes_tool_payload_without_indexing_body_
         .expect("projection should exist");
     assert!(fetched.text.chars().count() <= tracedecay::sessions::lcm::MAX_DERIVED_TEXT_CHARS);
     assert!(!fetched.text.contains(body_secret));
-    assert!(fetched
-        .text
-        .contains("[Externalized LCM ingest payload: kind=tool_result;"));
+    assert!(
+        fetched
+            .text
+            .contains("[Externalized LCM ingest payload: kind=tool_result;")
+    );
     let projection_metadata = fetched.metadata_json.as_deref().unwrap_or("");
     assert!(!projection_metadata.contains(metadata_secret));
     assert!(projection_metadata.contains("\"external_payload\":true"));
@@ -718,10 +731,11 @@ async fn upsert_session_message_externalizes_tool_payload_without_indexing_body_
     assert!(!index_text.contains(metadata_secret));
     assert_eq!(lcm_fts_count(&db_path, body_secret).await, 0);
     assert_eq!(lcm_fts_count(&db_path, metadata_secret).await, 0);
-    assert!(db
-        .search_session_messages("cursor", Some("project-a"), body_secret, 10)
-        .await
-        .is_empty());
+    assert!(
+        db.search_session_messages("cursor", Some("project-a"), body_secret, 10)
+            .await
+            .is_empty()
+    );
 
     let expanded = db
         .lcm_store(&storage_root)
@@ -1123,7 +1137,7 @@ async fn session_ingest_health_reports_pending_transcript_backlog() {
 
 #[tokio::test]
 async fn hook_analytics_import_is_incremental_and_idempotent() {
-    use tracedecay::analytics_bridge::{import_hook_analytics, HookImportSource};
+    use tracedecay::analytics_bridge::{HookImportSource, import_hook_analytics};
 
     let tmp = TempDir::new().unwrap();
     let db = open_isolated_db(&tmp).await;

@@ -2,8 +2,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use tracedecay::automation::config::{
-    apply_project_config_patch, project_config_path, AutomationBackend, AutomationConfigPatch,
-    AutomationHostMode, AutomationTaskPatch,
+    AutomationBackend, AutomationConfigPatch, AutomationHostMode, AutomationTaskPatch,
+    apply_project_config_patch, project_config_path,
 };
 
 pub(crate) fn hermes_profile_targets(
@@ -201,7 +201,13 @@ async fn open_or_init_codex_daemon_automation_project(
             "No TraceDecay store found for {}; initializing one (equivalent to `tracedecay init`).",
             project_path.display()
         );
-        tracedecay::tracedecay::TraceDecay::init(project_path).await
+        let cg = tracedecay::tracedecay::TraceDecay::init_with_options(
+            project_path,
+            tracedecay::tracedecay::TraceDecayOpenOptions::default(),
+        )
+        .await?;
+        cg.index_all().await?;
+        Ok(cg)
     }
 }
 

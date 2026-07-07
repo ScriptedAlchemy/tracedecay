@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::errors::{Result, TraceDecayError};
 use crate::sessions::codex_app_server::{
-    run_prompt_with_codex_app_server, CodexAppServerSummaryConfig,
+    CodexAppServerSummaryConfig, run_prompt_with_codex_app_server,
 };
 
 use super::config::{AutomationBackend, AutomationConfig};

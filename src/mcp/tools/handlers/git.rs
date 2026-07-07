@@ -4,10 +4,10 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::super::render;
 use super::super::ToolResult;
+use super::super::render;
 use super::support::unique_file_paths;
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;

@@ -47,6 +47,7 @@ export interface ProjectDraft {
   extractDocstrings: boolean;
   trackCallSites: boolean;
   gitIgnore: boolean;
+  telemetryTimings: boolean;
 }
 
 export interface UserDraft {
@@ -64,6 +65,7 @@ function projectDraftFrom(settings: SettingsPayload): ProjectDraft {
     extractDocstrings: config.extract_docstrings,
     trackCallSites: config.track_call_sites,
     gitIgnore: config.git_ignore,
+    telemetryTimings: config.telemetry.timings,
   };
 }
 
@@ -105,6 +107,9 @@ export function projectPatchFrom(
   }
   if (!saved || draft.gitIgnore !== saved.gitIgnore) {
     patch.git_ignore = draft.gitIgnore;
+  }
+  if (!saved || draft.telemetryTimings !== saved.telemetryTimings) {
+    patch.telemetry = { timings: draft.telemetryTimings };
   }
 
   return patch;
@@ -365,6 +370,19 @@ export default function SettingsPanel() {
                 disabled={projectSaving}
               />
               <span>Respect .gitignore during indexing</span>
+            </label>
+
+            <label className="tdst-toggle">
+              <input
+                type="checkbox"
+                checked={projectDraft.telemetryTimings}
+                onChange={(event) =>
+                  updateProject({ telemetryTimings: event.currentTarget.checked })
+                }
+                disabled={projectSaving}
+                aria-label="Capture timing telemetry"
+              />
+              <span>Capture timing telemetry</span>
             </label>
 
             <p className="tdst-section-hint">

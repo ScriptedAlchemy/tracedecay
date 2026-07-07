@@ -19,9 +19,9 @@ use serde_json::json;
 use crate::errors::{Result, TraceDecayError};
 
 use super::{
-    load_json_file, load_json_file_strict, load_toml_file, safe_write_json_file,
-    safe_write_text_file, write_toml_file, AgentIntegration, DoctorCounters, HealthcheckContext,
-    InstallContext, InstallScope, UpdatePluginOutcome,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, InstallScope,
+    UpdatePluginOutcome, load_json_file, load_json_file_strict, load_toml_file,
+    safe_write_json_file, safe_write_text_file, write_toml_file,
 };
 
 /// `OpenAI` Codex CLI agent.

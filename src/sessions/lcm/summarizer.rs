@@ -150,9 +150,11 @@ mod tests {
 
         assert!(adapter.is_noop());
         assert!(adapter.persisted_summary_invocation().is_none());
-        assert!(adapter
-            .summary_request("cursor", "session-1", None, &[])
-            .is_none());
+        assert!(
+            adapter
+                .summary_request("cursor", "session-1", None, &[])
+                .is_none()
+        );
     }
 
     #[test]

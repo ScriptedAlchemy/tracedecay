@@ -18,13 +18,15 @@ impl TranscriptHomeEnvGuard {
         let previous_userprofile = std::env::var_os("USERPROFILE");
         let previous_data_dir = std::env::var_os(tracedecay::config::USER_DATA_DIR_ENV);
         let previous_hermes_home = std::env::var_os("HERMES_HOME");
-        std::env::set_var("HOME", home);
-        std::env::set_var("USERPROFILE", home);
-        std::env::set_var(
-            tracedecay::config::USER_DATA_DIR_ENV,
-            home.join(tracedecay::config::TRACEDECAY_DIR),
-        );
-        std::env::set_var("HERMES_HOME", home.join(".hermes"));
+        unsafe {
+            std::env::set_var("HOME", home);
+            std::env::set_var("USERPROFILE", home);
+            std::env::set_var(
+                tracedecay::config::USER_DATA_DIR_ENV,
+                home.join(tracedecay::config::TRACEDECAY_DIR),
+            );
+            std::env::set_var("HERMES_HOME", home.join(".hermes"));
+        }
         Self {
             previous_home,
             previous_userprofile,
@@ -36,21 +38,23 @@ impl TranscriptHomeEnvGuard {
 
 impl Drop for TranscriptHomeEnvGuard {
     fn drop(&mut self) {
-        match self.previous_home.take() {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-        match self.previous_userprofile.take() {
-            Some(value) => std::env::set_var("USERPROFILE", value),
-            None => std::env::remove_var("USERPROFILE"),
-        }
-        match self.previous_data_dir.take() {
-            Some(value) => std::env::set_var(tracedecay::config::USER_DATA_DIR_ENV, value),
-            None => std::env::remove_var(tracedecay::config::USER_DATA_DIR_ENV),
-        }
-        match self.previous_hermes_home.take() {
-            Some(value) => std::env::set_var("HERMES_HOME", value),
-            None => std::env::remove_var("HERMES_HOME"),
+        unsafe {
+            match self.previous_home.take() {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match self.previous_userprofile.take() {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+            match self.previous_data_dir.take() {
+                Some(value) => std::env::set_var(tracedecay::config::USER_DATA_DIR_ENV, value),
+                None => std::env::remove_var(tracedecay::config::USER_DATA_DIR_ENV),
+            }
+            match self.previous_hermes_home.take() {
+                Some(value) => std::env::set_var("HERMES_HOME", value),
+                None => std::env::remove_var("HERMES_HOME"),
+            }
         }
     }
 }

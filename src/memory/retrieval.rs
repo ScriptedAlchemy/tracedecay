@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use libsql::{params, Connection};
+use libsql::{Connection, params};
 
 use super::encoding::HolographicEncoder;
 use super::entities::normalize_entity;
@@ -19,6 +19,8 @@ const DEFAULT_LIMIT: usize = 10;
 const FTS_SCORE_WEIGHT: f64 = 0.40;
 const JACCARD_SCORE_WEIGHT: f64 = 0.30;
 const HOLOGRAPHIC_SCORE_WEIGHT: f64 = 0.30;
+const RETRIEVAL_REINFORCEMENT_WEIGHT: f64 = 0.02;
+const RETRIEVAL_REINFORCEMENT_CAP: f64 = 0.5;
 
 pub struct FactRetriever<'a> {
     store: MemoryStore<'a>,
@@ -130,12 +132,14 @@ impl<'a> FactRetriever<'a> {
                 self.holographic_score_with(query, &fact, candidate_vectors.get(&fact.fact_id));
             let trust_score = fact.trust_score;
             let temporal_decay = temporal_decay_factor(fact.updated_at);
+            let retrieval_count = fact.retrieval_count;
             let score = combined_score(
                 fts_score,
                 jaccard_score,
                 holographic_score,
                 trust_score,
                 temporal_decay,
+                retrieval_count,
             );
             results.push(FactSearchResult {
                 fact,
@@ -145,7 +149,7 @@ impl<'a> FactRetriever<'a> {
                 holographic_score,
                 trust_score,
                 why: Some(format!(
-                    "fts={fts_score:.3}, jaccard={jaccard_score:.3}, holographic={holographic_score:.3}, trust={trust_score:.3}, temporal_decay={temporal_decay:.3}"
+                    "fts={fts_score:.3}, jaccard={jaccard_score:.3}, holographic={holographic_score:.3}, trust={trust_score:.3}, temporal_decay={temporal_decay:.3}, retrieval_count={retrieval_count}"
                 )),
             });
         }
@@ -719,8 +723,8 @@ fn jaccard(left: &[String], right: &[String]) -> f64 {
     }
 }
 
-/// Recall ranking: relevance (FTS + Jaccard + holographic) weighted by trust
-/// and temporal decay.
+/// Recall ranking: relevance (FTS + Jaccard + holographic) weighted by trust,
+/// temporal decay, and a bounded log-scaled `retrieval_count` boost.
 ///
 /// `access_count` is deliberately NOT an input. Folding access frequency into
 /// the ranking would create a rich-get-richer feedback loop: frequently
@@ -733,12 +737,16 @@ fn combined_score(
     holographic: f64,
     trust: f64,
     temporal_decay: f64,
+    retrieval_count: i64,
 ) -> f64 {
     let relevance = fts.mul_add(
         FTS_SCORE_WEIGHT,
         jaccard.mul_add(JACCARD_SCORE_WEIGHT, holographic * HOLOGRAPHIC_SCORE_WEIGHT),
     );
-    relevance * trust * temporal_decay.clamp(0.0, 1.0)
+    let usage_boost = 1.0
+        + (RETRIEVAL_REINFORCEMENT_WEIGHT * (retrieval_count.max(0) as f64).ln_1p())
+            .min(RETRIEVAL_REINFORCEMENT_CAP);
+    relevance * trust * temporal_decay.clamp(0.0, 1.0) * usage_boost
 }
 
 fn temporal_decay_factor(updated_at: i64) -> f64 {
@@ -786,5 +794,47 @@ fn db_error(operation: &str, error: impl fmt::Display) -> TraceDecayError {
     TraceDecayError::Database {
         message: error.to_string(),
         operation: operation.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retrieval_reinforcement_boosts_frequently_retrieved_facts() {
+        let fts = 0.5;
+        let jaccard = 0.4;
+        let holographic = 0.6;
+        let trust = 0.8;
+        let temporal_decay = 0.9;
+
+        let baseline = combined_score(fts, jaccard, holographic, trust, temporal_decay, 0);
+        let boosted = combined_score(fts, jaccard, holographic, trust, temporal_decay, 200);
+
+        assert!(
+            boosted > baseline,
+            "expected retrieval_count=200 to score higher than retrieval_count=0 \
+             (boosted={boosted}, baseline={baseline})"
+        );
+
+        let relevance = fts.mul_add(
+            FTS_SCORE_WEIGHT,
+            jaccard.mul_add(JACCARD_SCORE_WEIGHT, holographic * HOLOGRAPHIC_SCORE_WEIGHT),
+        );
+        let unboosted = relevance * trust * temporal_decay.clamp(0.0, 1.0);
+        assert!(
+            (baseline - unboosted).abs() < 1e-12,
+            "retrieval_count=0 must leave the score unchanged (boost==1.0): \
+             baseline={baseline}, unboosted={unboosted}"
+        );
+
+        let saturated = combined_score(fts, jaccard, holographic, trust, temporal_decay, i64::MAX);
+        let max_boosted = unboosted * (1.0 + RETRIEVAL_REINFORCEMENT_CAP);
+        assert!(
+            saturated <= max_boosted + 1e-12,
+            "usage boost must be capped at +{:.0}% (saturated={saturated}, cap={max_boosted})",
+            RETRIEVAL_REINFORCEMENT_CAP * 100.0
+        );
     }
 }

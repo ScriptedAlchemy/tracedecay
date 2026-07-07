@@ -1,7 +1,7 @@
 use super::*;
 use crate::global_db::StoreInstanceUpsert;
 use crate::storage::{
-    StorageMode, StoreKind, StoreManifest, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION,
+    STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest,
 };
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
@@ -39,8 +39,8 @@ fn format_bytes_fractional_kb() {
 }
 
 #[tokio::test]
-async fn current_project_store_resolves_profile_shard_via_registry_alias(
-) -> std::result::Result<(), Box<dyn std::error::Error>> {
+async fn current_project_store_resolves_profile_shard_via_registry_alias()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::TempDir::new()?;
     let profile_root = dir.path().join("profile");
     let project_root = dir.path().join("repo");
@@ -116,8 +116,8 @@ async fn current_project_store_resolves_profile_shard_via_registry_alias(
 }
 
 #[tokio::test]
-async fn registry_backed_profile_shard_is_not_stale_without_marker(
-) -> std::result::Result<(), Box<dyn std::error::Error>> {
+async fn registry_backed_profile_shard_is_not_stale_without_marker()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::TempDir::new()?;
     let profile_root = dir.path().join("profile");
     let project_root = dir.path().join("repo");
@@ -173,8 +173,8 @@ async fn registry_backed_profile_shard_is_not_stale_without_marker(
 }
 
 #[tokio::test]
-async fn registry_backed_profile_shard_manifest_relpath_uses_profile_root(
-) -> std::result::Result<(), Box<dyn std::error::Error>> {
+async fn registry_backed_profile_shard_manifest_relpath_uses_profile_root()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::TempDir::new()?;
     let profile_root = canonical_temp_path(&dir.path().join("profile"));
     let project_root = canonical_temp_path(&dir.path().join("repo"));
@@ -218,8 +218,8 @@ async fn registry_backed_profile_shard_manifest_relpath_uses_profile_root(
 }
 
 #[tokio::test]
-async fn registry_backed_profile_shard_rejects_unsafe_store_relpath(
-) -> std::result::Result<(), Box<dyn std::error::Error>> {
+async fn registry_backed_profile_shard_rejects_unsafe_store_relpath()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::TempDir::new()?;
     let profile_root = dir.path().join("profile");
     let project_root = dir.path().join("repo");
@@ -262,8 +262,8 @@ async fn registry_backed_profile_shard_rejects_unsafe_store_relpath(
 }
 
 #[tokio::test]
-async fn registry_drift_findings_report_manifest_identity_mismatches(
-) -> std::result::Result<(), Box<dyn std::error::Error>> {
+async fn registry_drift_findings_report_manifest_identity_mismatches()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::TempDir::new()?;
     let profile_root = canonical_temp_path(&dir.path().join("profile"));
     let registry_root = canonical_temp_path(&dir.path().join("registry-repo"));

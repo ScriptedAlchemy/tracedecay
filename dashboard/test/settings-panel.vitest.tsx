@@ -17,6 +17,9 @@ function basePayload(): SettingsPayload {
         extract_docstrings: true,
         track_call_sites: true,
         git_ignore: true,
+        telemetry: {
+          timings: true,
+        },
       },
       tracedecay_dir_gitignored: true,
     },
@@ -154,6 +157,24 @@ describe("SettingsPanel", () => {
     );
     // Draft resets to the saved payload — dirty badge disappears.
     expect(screen.queryByText("Unsaved changes")).toBeNull();
+  });
+
+  it("saves telemetry timing opt-out from project settings", async () => {
+    await renderPanel();
+
+    fireEvent.click(screen.getByLabelText("Capture timing telemetry"));
+
+    const response = basePayload();
+    response.project.config.telemetry.timings = false;
+    apiMock.patchProject.mockResolvedValue(response);
+
+    const [projectSave] = screen.getAllByText("Save");
+    fireEvent.click(projectSave);
+
+    await waitFor(() => expect(apiMock.patchProject).toHaveBeenCalledTimes(1));
+    expect(apiMock.patchProject).toHaveBeenCalledWith({
+      telemetry: { timings: false },
+    });
   });
 
   it("shows inline validation errors from the API on save failure", async () => {

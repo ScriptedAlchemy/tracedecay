@@ -125,7 +125,7 @@ fn config_error(message: impl Into<String>) -> TraceDecayError {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{parse_skill_frontmatter, SkillFrontmatterValue};
+    use super::{SkillFrontmatterValue, parse_skill_frontmatter};
 
     #[test]
     fn parses_scalars_blocks_and_quoting() {

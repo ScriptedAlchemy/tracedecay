@@ -16,8 +16,8 @@ use crate::errors::{Result, TraceDecayError};
 use super::hermes_config_projection::load_config_projection;
 use super::hermes_pending_skills::{load_pending_skill_writes, pending_skill_ids_by_name};
 use super::hermes_skill_inventory::{
-    count_archive_entries, load_skill_ownership_projection, load_skill_summaries,
-    load_usage_records, USAGE_FILE,
+    USAGE_FILE, count_archive_entries, load_skill_ownership_projection, load_skill_summaries,
+    load_usage_records,
 };
 
 pub use super::hermes_config_projection::{

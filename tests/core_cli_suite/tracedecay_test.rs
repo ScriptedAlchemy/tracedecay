@@ -4,7 +4,7 @@
 use std::{fs, process::Command, time::Duration};
 use tempfile::TempDir;
 use tracedecay::errors::TraceDecayError;
-use tracedecay::tracedecay::{is_test_file, TraceDecay};
+use tracedecay::tracedecay::{TraceDecay, is_test_file};
 use tracedecay::types::{EdgeKind, NodeKind};
 
 // ---------------------------------------------------------------------------

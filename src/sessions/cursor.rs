@@ -3,19 +3,19 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::global_db::GlobalDb;
+use crate::sessions::SessionMessageRecord;
 use crate::sessions::shared::{
-    append_location_metadata, append_tool_calls_metadata, append_usage_metadata,
-    content_storage_text_and_tools, paths_equal, title_from_messages, StoredCursor,
-    TranscriptLocation, TranscriptLocationMetadataKeys,
+    StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,
+    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools, paths_equal,
+    title_from_messages,
 };
 use crate::sessions::source::{
-    collect_files_with_ext, ingest_source, stream_new_jsonl, ParsedTranscript, SessionDraft,
-    TranscriptSource,
+    ParsedTranscript, SessionDraft, TranscriptSource, collect_files_with_ext, ingest_source,
+    stream_new_jsonl,
 };
-use crate::sessions::SessionMessageRecord;
 use crate::storage::{
-    default_profile_project_id, default_profile_root, profile_sharded_data_root,
-    resolve_layout_for_current_profile, SESSIONS_DB_FILENAME,
+    SESSIONS_DB_FILENAME, default_profile_project_id, default_profile_root,
+    profile_sharded_data_root, resolve_layout_for_current_profile,
 };
 
 const PROJECT_SESSION_DB_FILENAME: &str = SESSIONS_DB_FILENAME;

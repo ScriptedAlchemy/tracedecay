@@ -10,5 +10,5 @@ pub mod parser;
 pub mod pricing;
 
 pub use classifier::TaskCategory;
-pub use metrics::{quick_cost_summary, CostSummary};
+pub use metrics::{CostSummary, quick_cost_summary};
 pub use parser::ingest;

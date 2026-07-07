@@ -178,10 +178,12 @@ mod tests {
 
     #[test]
     fn detects_high_entropy_blobs_but_not_git_shas() {
-        assert!(detect_secret_like(
-            "value Qm9vZ2llV29vZ2llMTIzNDU2Nzg5MGFiY2RlZmdoaWprbG1ub3A4OTc2NTQzMjE"
-        )
-        .is_some());
+        assert!(
+            detect_secret_like(
+                "value Qm9vZ2llV29vZ2llMTIzNDU2Nzg5MGFiY2RlZmdoaWprbG1ub3A4OTc2NTQzMjE"
+            )
+            .is_some()
+        );
         // 40-char git SHA: hex-only, must NOT be flagged.
         assert!(detect_secret_like("commit 3bc562b8a1f0d9e7c6b5a4d3e2f1a0b9c8d7e6f5").is_none());
     }

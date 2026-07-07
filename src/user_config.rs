@@ -13,8 +13,8 @@ use crate::automation::config::AutomationConfig;
 /// User-level tracedecay configuration.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserConfig {
-    /// Whether to upload pending tokens to the worldwide counter.
-    #[serde(default = "default_true")]
+    /// Whether to upload pending tokens to the optional worldwide counter.
+    #[serde(default)]
     pub upload_enabled: bool,
 
     /// Tokens accumulated locally, not yet uploaded.
@@ -121,7 +121,7 @@ fn default_extraction_timeout_secs() -> u64 {
 impl Default for UserConfig {
     fn default() -> Self {
         Self {
-            upload_enabled: true,
+            upload_enabled: false,
             pending_upload: 0,
             last_upload_at: 0,
             last_worldwide_total: 0,
@@ -251,7 +251,7 @@ pub fn parse_duration(s: &str) -> Option<std::time::Duration> {
 )]
 mod tests {
     use super::*;
-    use crate::config::{lock_user_data_dir_test_env, USER_DATA_DIR_ENV};
+    use crate::config::{USER_DATA_DIR_ENV, lock_user_data_dir_test_env};
     use std::ffi::OsString;
     use std::time::Duration;
     use tempfile::TempDir;
@@ -264,16 +264,20 @@ mod tests {
     impl EnvRestore {
         fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
             let previous = std::env::var_os(key);
-            std::env::set_var(key, value);
+            unsafe {
+                std::env::set_var(key, value);
+            }
             Self { key, previous }
         }
     }
 
     impl Drop for EnvRestore {
         fn drop(&mut self) {
-            match self.previous.take() {
-                Some(previous) => std::env::set_var(self.key, previous),
-                None => std::env::remove_var(self.key),
+            unsafe {
+                match self.previous.take() {
+                    Some(previous) => std::env::set_var(self.key, previous),
+                    None => std::env::remove_var(self.key),
+                }
             }
         }
     }

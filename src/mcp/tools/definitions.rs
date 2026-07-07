@@ -4,10 +4,10 @@
 //! description, JSON Schema for its input parameters, MCP annotations
 //! (readOnlyHint, title), and optional `_meta` (anthropic/alwaysLoad).
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::dispatch_policy::REGISTERED_PROJECT_READER_TOOL_NAMES;
 use super::ToolDefinition;
+use super::dispatch_policy::REGISTERED_PROJECT_READER_TOOL_NAMES;
 
 mod git_scope;
 mod session;
@@ -492,6 +492,22 @@ pub fn format_capable_tool_names() -> &'static [&'static str] {
     FORMAT_CAPABLE_TOOL_NAMES
 }
 
+pub fn tool_defaults_to_markdown(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "tracedecay_context"
+            | "tracedecay_automation_run_artifact_view"
+            | "tracedecay_dsm"
+            | "tracedecay_fact_feedback"
+            | "tracedecay_fact_store"
+            | "tracedecay_files"
+            | "tracedecay_read"
+            | "tracedecay_skill_list"
+            | "tracedecay_skill_view"
+            | "tracedecay_type_hierarchy"
+    )
+}
+
 fn add_format_property(definitions: &mut [ToolDefinition]) {
     for definition in matching_tool_definitions_mut(definitions, FORMAT_CAPABLE_TOOL_NAMES) {
         let properties = definition
@@ -504,7 +520,7 @@ fn add_format_property(definitions: &mut [ToolDefinition]) {
             json!({
                 "type": "string",
                 "enum": ["markdown", "json"],
-                "description": "Output format. Default 'markdown' (compact, LLM-optimized prose/tables). Pass 'json' for compact machine-readable JSON when a program will parse the result."
+                "description": "Output format. Default 'markdown' (compact, LLM-optimized sections and bullets; no tables). Pass 'json' for compact machine-readable JSON when a program will parse the result."
             }),
         );
     }
@@ -689,6 +705,10 @@ fn def_search() -> ToolDefinition {
                 "limit": {
                     "type": "number",
                     "description": "Maximum number of results to return (default: 10)"
+                },
+                "lazy_index_ignored_dependencies": {
+                    "type": "boolean",
+                    "description": "Opt in to bounded indexing of ignored dependency entry files when an import hint matches (default: false)."
                 }
             })),
             "required": ["query"]
@@ -1125,10 +1145,10 @@ fn def_files() -> ToolDefinition {
                     "type": "string",
                     "description": "Filter files matching this glob pattern (e.g. '**/*.rs')"
                 },
-                "format": {
+                "layout": {
                     "type": "string",
                     "enum": ["flat", "grouped"],
-                    "description": "Output format: flat (one per line) or grouped by directory (default: grouped)"
+                    "description": "File listing layout: flat (one per line) or grouped by directory (default: grouped)."
                 }
             }
         }),
@@ -1919,10 +1939,10 @@ fn def_dsm() -> ToolDefinition {
                     "type": "string",
                     "description": "Filter to files under this directory path"
                 },
-                "format": {
+                "shape": {
                     "type": "string",
-                    "enum": ["stats", "clusters", "matrix", "json"],
-                    "description": "Data shape rendered as markdown: stats, clusters, or matrix (default: stats). Pass 'json' for compact machine-readable JSON of the default stats shape."
+                    "enum": ["stats", "clusters", "matrix"],
+                    "description": "DSM data shape: stats, clusters, or matrix (default: stats)."
                 },
                 "max_files": {
                     "type": "number",
@@ -2207,7 +2227,9 @@ fn def_fact_store() -> ToolDefinition {
          (prefer updating it), possible_conflict = a negation/state-change cue suggests supersession (confirm which fact is current), \
          rejected_secret_like = credential-like content was NOT stored. The get action returns the full fact plus trust_history so operators can answer \
          why a trust score changed. Calibrate trust on add instead of defaulting high \
-         (>=0.85 verified/durable, ~0.7 ordinary, ~0.5 unsure — aim for a spread), and search memory before external lookups.",
+         (>=0.85 verified/durable, ~0.7 ordinary, ~0.5 unsure — aim for a spread), and search memory before external lookups. \
+         Use it proactively, without waiting to be asked: when the user states a durable preference, decision, or correction, add or update a fact for it; \
+         and before answering a question about this project or the user, search or probe memory first rather than guessing.",
         json!({
             "type": "object",
             "properties": memory_fact_properties(),
@@ -2221,7 +2243,7 @@ fn def_fact_feedback() -> ToolDefinition {
     def_rw(
         "tracedecay_fact_feedback",
         "Fact Feedback",
-        "Record helpful/unhelpful feedback for an active-project memory fact and adjust its trust score.",
+        "Record helpful/unhelpful feedback for an active-project memory fact and adjust its trust score. Call this on the fact_id values surfaced in tracedecay_context's Memory Matches (or from fact_store search) whenever a recalled fact materially helped or misled you -- feedback is how trust is earned, and recalled facts are almost never rated.",
         json!({
             "type": "object",
             "properties": {
@@ -3156,6 +3178,10 @@ fn def_body() -> ToolDefinition {
                 "limit": {
                     "type": "number",
                     "description": "Maximum number of matching bodies to return when the name is ambiguous (default: 3, max: 20)"
+                },
+                "lazy_index_ignored_dependencies": {
+                    "type": "boolean",
+                    "description": "Opt in to bounded indexing of ignored dependency entry files when an import hint matches (default: false)."
                 }
             },
             "required": ["symbol"]
@@ -3587,6 +3613,10 @@ fn def_find_exact_symbol() -> ToolDefinition {
                 "limit": {
                     "type": "number",
                     "description": "Maximum matches to return (default: 20, max: 200)."
+                },
+                "lazy_index_ignored_dependencies": {
+                    "type": "boolean",
+                    "description": "Opt in to bounded indexing of ignored dependency entry files when an import hint matches (default: false)."
                 }
             },
             "required": ["name"]

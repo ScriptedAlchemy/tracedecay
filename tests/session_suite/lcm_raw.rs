@@ -1,12 +1,12 @@
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tempfile::TempDir;
+use tracedecay::sessions::SessionMessageRecord;
 use tracedecay::sessions::lcm::LcmPreflightRequest;
 use tracedecay::sessions::source::{
-    ingest_source, ParsedTranscript, SessionDraft, StoredCursor, TranscriptSource,
+    ParsedTranscript, SessionDraft, StoredCursor, TranscriptSource, ingest_source,
 };
-use tracedecay::sessions::SessionMessageRecord;
 
 use crate::common::{
     lcm_raw_message as sample_message, lcm_raw_session as sample_session,
@@ -163,9 +163,11 @@ async fn transcript_ingest_preserves_lossless_raw_content() {
     assert!(
         compatibility.text.chars().count() <= tracedecay::sessions::lcm::MAX_DERIVED_TEXT_CHARS
     );
-    assert!(compatibility
-        .text
-        .contains(tracedecay::sessions::lcm::DERIVED_TRUNCATION_MARKER));
+    assert!(
+        compatibility
+            .text
+            .contains(tracedecay::sessions::lcm::DERIVED_TRUNCATION_MARKER)
+    );
 
     let raw = db
         .lcm_load_raw_message("fake", "fake-message-1")
@@ -200,10 +202,12 @@ async fn search_uses_bounded_projection_but_load_recovers_raw() {
         results[0].message.text.chars().count()
             <= tracedecay::sessions::lcm::MAX_DERIVED_TEXT_CHARS
     );
-    assert!(results[0]
-        .message
-        .text
-        .contains(tracedecay::sessions::lcm::DERIVED_TRUNCATION_MARKER));
+    assert!(
+        results[0]
+            .message
+            .text
+            .contains(tracedecay::sessions::lcm::DERIVED_TRUNCATION_MARKER)
+    );
 
     let raw = db
         .lcm_load_raw_message("cursor", "message-1")

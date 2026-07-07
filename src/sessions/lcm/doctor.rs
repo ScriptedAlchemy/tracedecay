@@ -4,13 +4,13 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use libsql::{params, Connection, Value as SqlValue};
-use serde_json::{json, Value};
+use libsql::{Connection, Value as SqlValue, params};
+use serde_json::{Value, json};
 
 use crate::tracedecay::current_timestamp;
 
 use super::{
-    gc, query, schema, security, util, LcmCleanConfig, LcmError, LcmGcConfig, LCM_SCHEMA_VERSION,
+    LCM_SCHEMA_VERSION, LcmCleanConfig, LcmError, LcmGcConfig, gc, query, schema, security, util,
 };
 
 const MAX_SAMPLES: usize = 20;

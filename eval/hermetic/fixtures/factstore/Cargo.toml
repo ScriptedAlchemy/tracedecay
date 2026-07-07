@@ -1,0 +1,11 @@
+# Minimal manifest so `tracedecay init` registers this fixture as a standalone
+# Rust crate (the active project for fact-store adoption scenarios). It is never
+# built by the harness — only indexed — so it carries no dependencies.
+[package]
+name = "factstore-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"

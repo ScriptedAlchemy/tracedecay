@@ -6,7 +6,7 @@ use tracedecay::memory::entities::{extract_entities, normalize_entity};
 use tracedecay::memory::retrieval::FactRetriever;
 use tracedecay::memory::store::MemoryStore;
 use tracedecay::memory::trust::{
-    apply_feedback, clamp_trust, trust_bucket, trust_distribution, DEFAULT_TRUST,
+    DEFAULT_TRUST, apply_feedback, clamp_trust, trust_bucket, trust_distribution,
 };
 use tracedecay::memory::types::{
     AddFactDiffKind, AddFactRequest, FactRecord, FeedbackAction, FeedbackRequest, MemoryCategory,
@@ -767,9 +767,10 @@ async fn memory_store_links_explicit_and_extracted_entities_and_updates_fields()
     assert!(fact.entities.contains(&"Manual Entity".to_string()));
     assert!(fact.entities.contains(&"Project Phoenix".to_string()));
     assert!(fact.entities.contains(&"src/memory/store.rs".to_string()));
-    assert!(fact
-        .entities
-        .contains(&"HolographicEncoder::encode_fact".to_string()));
+    assert!(
+        fact.entities
+            .contains(&"HolographicEncoder::encode_fact".to_string())
+    );
 
     let updated = store
         .update_fact(UpdateFactRequest {
@@ -1510,11 +1511,10 @@ async fn fact_retriever_probe_related_reason_and_contradiction() {
         .contradict(MemoryCategory::Decision, 0.2, 10)
         .await
         .unwrap();
-    assert!(contradictions.iter().any(|result| result
-        .existing_fact
-        .content
-        .contains("uses SQLite")
-        && result.new_content.contains("Do not use SQLite")));
+    assert!(contradictions.iter().any(
+        |result| result.existing_fact.content.contains("uses SQLite")
+            && result.new_content.contains("Do not use SQLite")
+    ));
 }
 
 #[tokio::test]
@@ -1790,12 +1790,16 @@ async fn add_fact_reports_near_duplicates_and_skips_normalized_equivalents() {
     assert_eq!(skipped.diff.closest_fact_id, Some(original_fact.fact_id));
     let skipped_fact = skipped.fact.expect("existing fact returned");
     assert_eq!(skipped_fact.fact_id, original_fact.fact_id);
-    assert!(skipped_fact
-        .entities
-        .contains(&"NewPackageManager".to_string()));
-    assert!(skipped_fact
-        .entities
-        .contains(&"OldPackageManager".to_string()));
+    assert!(
+        skipped_fact
+            .entities
+            .contains(&"NewPackageManager".to_string())
+    );
+    assert!(
+        skipped_fact
+            .entities
+            .contains(&"OldPackageManager".to_string())
+    );
     assert_eq!(
         skipped_fact.metadata,
         serde_json::json!({"source": "normalized"})
@@ -1904,12 +1908,14 @@ async fn add_fact_flags_possible_conflict_on_negation_cues() {
         .unwrap();
     assert_eq!(conflicted.diff.diff, AddFactDiffKind::PossibleConflict);
     assert_eq!(conflicted.diff.closest_fact_id, Some(original_fact.fact_id));
-    assert!(conflicted
-        .diff
-        .reason
-        .as_deref()
-        .unwrap_or("")
-        .contains("supersession"));
+    assert!(
+        conflicted
+            .diff
+            .reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("supersession")
+    );
     // Conflicts are reported, never auto-resolved: both facts remain stored.
     assert!(conflicted.fact.is_some());
     assert_eq!(

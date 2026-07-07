@@ -191,9 +191,11 @@ async fn session_reflector_runner_auto_applies_valid_fact_proposals_by_default()
         json!("tool")
     );
     let rejected = run.report["rejected_facts"].as_array().unwrap();
-    assert!(rejected
-        .iter()
-        .any(|value| value["reason"].as_str().unwrap().contains("duplicate")));
+    assert!(
+        rejected
+            .iter()
+            .any(|value| value["reason"].as_str().unwrap().contains("duplicate"))
+    );
     let has_rejection_reason = |reason: &str| {
         rejected
             .iter()
@@ -263,8 +265,8 @@ async fn session_reflector_runner_auto_applies_valid_fact_proposals_by_default()
         json!(proposals[0].proposal_id)
     );
     assert_eq!(
-        run.ledger_record.validation_report.as_ref().unwrap()["applied_proposals"]
-            ["accepted_facts"][0]["add_fact_request"]["content"],
+        run.ledger_record.validation_report.as_ref().unwrap()["applied_proposals"]["accepted_facts"]
+            [0]["add_fact_request"]["content"],
         json!("TraceDecay automation should manage durable session reflection facts directly")
     );
     let artifact_kinds: Vec<&str> = run
@@ -287,15 +289,17 @@ async fn session_reflector_runner_auto_applies_valid_fact_proposals_by_default()
     let eval_payload = read_artifact(&cg, &run.run_id, &run.ledger_record, "generated_evals").await;
     assert_eq!(eval_payload["task"], json!("session_reflector"));
     assert_eq!(eval_payload["summary"]["eval_count"], json!(11));
-    assert!(eval_payload["eval_definitions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(
-            |entry| entry["eval_id"] == json!("session_reflector:accepted:0")
-                && entry["harness"]["commands"][0]
-                    == json!("cargo test --test automation_runner_test session_reflector")
-        ));
+    assert!(
+        eval_payload["eval_definitions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |entry| entry["eval_id"] == json!("session_reflector:accepted:0")
+                    && entry["harness"]["commands"][0]
+                        == json!("cargo test --test automation_runner_test session_reflector")
+            )
+    );
     assert_eq!(
         eval_payload["runner"]["commands"][0],
         json!(
@@ -1081,9 +1085,10 @@ async fn session_reflector_runner_ledgers_missing_facts_array() {
     .unwrap_err();
 
     assert_eq!(backend.calls(), 1);
-    assert!(err
-        .to_string()
-        .contains("session reflector output must include a facts array"));
+    assert!(
+        err.to_string()
+            .contains("session reflector output must include a facts array")
+    );
     let records = load_run_records(&cg.store_layout().dashboard_root, 10)
         .await
         .unwrap();
@@ -1094,11 +1099,9 @@ async fn session_reflector_runner_ledgers_missing_facts_array() {
     assert!(records[0].evidence_hash.is_some());
     assert!(records[0].input_hash.is_some());
     assert_eq!(records[0].proposed_ops.as_ref(), Some(&output));
-    assert!(
-        records[0].error.as_deref().is_some_and(
-            |error| error.contains("session reflector output must include a facts array")
-        )
-    );
+    assert!(records[0].error.as_deref().is_some_and(|error| {
+        error.contains("session reflector output must include a facts array")
+    }));
     assert_eq!(
         records[0].error_classification,
         Some(AgentTaskFailureClass::MalformedOutput)
@@ -1150,11 +1153,12 @@ async fn session_reflector_runner_records_noop_fallback_when_backend_run_task_fa
         "session_reflector",
         json!({ "facts": [] }),
     );
-    assert!(run
-        .ledger_record
-        .error
-        .as_deref()
-        .is_some_and(|error| error.contains("executable")));
+    assert!(
+        run.ledger_record
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("executable"))
+    );
     let records = load_run_records(&cg.store_layout().dashboard_root, 10)
         .await
         .unwrap();

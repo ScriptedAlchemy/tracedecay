@@ -10,6 +10,7 @@ describe("settings panel patch builders", () => {
       extractDocstrings: true,
       trackCallSites: true,
       gitIgnore: true,
+      telemetryTimings: true,
     };
     const draft = {
       ...saved,

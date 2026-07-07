@@ -10,7 +10,7 @@ use crate::sync;
 use crate::types::*;
 
 use super::indexing::{accumulate_symbol_scope, safe_extract};
-use super::{current_timestamp, TraceDecay};
+use super::{TraceDecay, current_timestamp};
 
 impl TraceDecay {
     /// Resolves a path to a relative path string.
@@ -103,7 +103,7 @@ impl TraceDecay {
                     matched_str: old_str.to_string(),
                     new_str: new_str.to_string(),
                     message: format!("old_str not found in {path}"),
-                })
+                });
             }
             1 => {}
             n => {
@@ -113,7 +113,7 @@ impl TraceDecay {
                     matched_str: old_str.to_string(),
                     new_str: new_str.to_string(),
                     message: format!("old_str matches {n} times, must match exactly once"),
-                })
+                });
             }
         }
 

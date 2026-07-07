@@ -16,8 +16,8 @@
 //! it (preserving line numbers), then delegates to [`TypeScriptExtractor`] so
 //! all existing TS/JS symbol extraction logic is reused without duplication.
 
-use crate::extraction::typescript_extractor::TypeScriptExtractor;
 use crate::extraction::LanguageExtractor;
+use crate::extraction::typescript_extractor::TypeScriptExtractor;
 use crate::types::ExtractionResult;
 
 /// Extracts code graph nodes and edges from Astro component files.

@@ -1,10 +1,10 @@
 use std::path::Path;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use tracedecay::sessions::lcm::payload::{delete_external_payload, DeleteOpts};
-use tracedecay::sessions::lcm::{LcmError, LcmStorageKind, LCM_SCHEMA_VERSION};
+use tracedecay::sessions::lcm::payload::{DeleteOpts, delete_external_payload};
+use tracedecay::sessions::lcm::{LCM_SCHEMA_VERSION, LcmError, LcmStorageKind};
 
 use crate::common::{
     isolated_lcm_db_path as isolated_db_path, lcm_payload_message as raw_message,
@@ -408,12 +408,14 @@ async fn json_key_sensitive_redaction_covers_compact_aliases_and_short_secrets()
     assert!(!raw.content.contains("shortkey1"));
     assert!(!raw.content.contains("tiny66"));
     assert!(!raw.content.contains("tok12"));
-    assert!(raw
-        .content
-        .contains("[LCM sensitive redaction: name=api_key"));
-    assert!(raw
-        .content
-        .contains("[LCM sensitive redaction: name=bearer_token"));
+    assert!(
+        raw.content
+            .contains("[LCM sensitive redaction: name=api_key")
+    );
+    assert!(
+        raw.content
+            .contains("[LCM sensitive redaction: name=bearer_token")
+    );
     assert!(raw.content.contains("keep jsonkeyredactioncanary"));
 
     let metadata: Value = serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
@@ -498,9 +500,10 @@ async fn sensitive_redaction_is_opt_in_lossy_and_not_indexed() {
         .expect("raw message should exist");
     assert_eq!(raw.storage_kind, LcmStorageKind::Inline);
     assert!(!raw.content.contains(secret));
-    assert!(raw
-        .content
-        .contains("[LCM sensitive redaction: name=api_key"));
+    assert!(
+        raw.content
+            .contains("[LCM sensitive redaction: name=api_key")
+    );
     let metadata: Value = serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
     assert_eq!(metadata["ingest_protection"]["lossy"], true);
     assert_eq!(metadata["ingest_protection"]["redacted"], true);
@@ -561,9 +564,10 @@ async fn quoted_password_assignment_redacts_full_quoted_value() {
         .expect("raw message should exist");
     assert_eq!(raw.storage_kind, LcmStorageKind::Inline);
     assert!(!raw.content.contains(secret));
-    assert!(raw
-        .content
-        .contains("[LCM sensitive redaction: name=password_assignment"));
+    assert!(
+        raw.content
+            .contains("[LCM sensitive redaction: name=password_assignment")
+    );
     assert!(raw.content.contains("keep quotedpasswordcanary"));
     assert_eq!(lcm_fts_count(&db_path, "battery").await, 0);
 }
@@ -609,9 +613,10 @@ async fn api_alias_assignments_redact_apikey_and_apitoken() {
     assert_eq!(raw.storage_kind, LcmStorageKind::Inline);
     assert!(!raw.content.contains(api_key_secret));
     assert!(!raw.content.contains(api_token_secret));
-    assert!(raw
-        .content
-        .contains("[LCM sensitive redaction: name=api_key"));
+    assert!(
+        raw.content
+            .contains("[LCM sensitive redaction: name=api_key")
+    );
     assert!(raw.content.contains("keep aliasredactioncanary"));
     assert_eq!(lcm_fts_count(&db_path, "aliaskey1234567890").await, 0);
     assert_eq!(lcm_fts_count(&db_path, "aliastoken1234567890").await, 0);
@@ -659,9 +664,10 @@ async fn private_key_redaction_is_lossy_and_not_indexed_when_enabled() {
     assert_eq!(raw.storage_kind, LcmStorageKind::Inline);
     assert!(!raw.content.contains("BEGIN PRIVATE KEY"));
     assert!(!raw.content.contains("PRIVATEKEYSECRET1234567890"));
-    assert!(raw
-        .content
-        .contains("[LCM sensitive redaction: name=private_key"));
+    assert!(
+        raw.content
+            .contains("[LCM sensitive redaction: name=private_key")
+    );
     let metadata: Value = serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
     assert_eq!(metadata["ingest_protection"]["lossy"], true);
     assert_eq!(metadata["ingest_protection"]["redacted"], true);
@@ -861,10 +867,12 @@ async fn externalized_payload_indexes_placeholder_without_body_text() {
     assert!(!index_text.contains(unique_secret));
 
     let raw_metadata = raw_metadata_json(&db_path, "cursor", "tool-secret").await;
-    assert!(!raw_metadata
-        .as_deref()
-        .unwrap_or("")
-        .contains(metadata_secret));
+    assert!(
+        !raw_metadata
+            .as_deref()
+            .unwrap_or("")
+            .contains(metadata_secret)
+    );
     assert_eq!(lcm_fts_count(&db_path, "externalized").await, 1);
     assert_eq!(lcm_fts_count(&db_path, unique_secret).await, 0);
     assert_eq!(lcm_fts_count(&db_path, metadata_secret).await, 0);
@@ -1136,10 +1144,11 @@ async fn external_payload_write_rejects_preexisting_symlink_ref() {
         std::fs::read_to_string(&outside_target).unwrap(),
         "do not overwrite"
     );
-    assert!(db
-        .lcm_load_raw_message("cursor", "tool-symlink")
-        .await
-        .is_none());
+    assert!(
+        db.lcm_load_raw_message("cursor", "tool-symlink")
+            .await
+            .is_none()
+    );
 }
 
 #[cfg(unix)]
@@ -1169,10 +1178,11 @@ async fn external_payload_write_rejects_symlinked_payload_directory() {
 
     assert!(result.is_err());
     assert!(!outside_dir.join(payload_ref).exists());
-    assert!(db
-        .lcm_load_raw_message("cursor", "tool-dir-symlink")
-        .await
-        .is_none());
+    assert!(
+        db.lcm_load_raw_message("cursor", "tool-dir-symlink")
+            .await
+            .is_none()
+    );
 }
 
 // Substring externalization splices placeholders at byte spans reported by

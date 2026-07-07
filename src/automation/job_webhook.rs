@@ -422,8 +422,8 @@ mod tests {
     }
 
     #[test]
-    fn webhook_http_post_uses_validated_socket_addr_and_preserves_host(
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    fn webhook_http_post_uses_validated_socket_addr_and_preserves_host()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let addr = listener.local_addr()?;
         let (tx, rx) = mpsc::channel();

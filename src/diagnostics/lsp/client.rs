@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;

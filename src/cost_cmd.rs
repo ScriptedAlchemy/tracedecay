@@ -32,7 +32,9 @@ pub(crate) async fn handle_cost(
     let summary = tracedecay::accounting::metrics::cost_summary(&gdb, since, tokens_saved).await;
 
     let Some(summary) = summary else {
-        println!("No session data found. Use Claude Code and then run `tracedecay cost` to see spending.");
+        println!(
+            "No session data found. Use Claude Code and then run `tracedecay cost` to see spending."
+        );
         return Ok(());
     };
 

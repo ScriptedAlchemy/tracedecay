@@ -14,25 +14,25 @@ use crate::serve_harness::{
     init_project_under, init_project_with_file, profile_root, register_global_project,
 };
 use libsql::Builder;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 #[cfg(unix)]
 use tokio::sync::Mutex;
 use tracedecay::automation::managed_skills::{
-    approve_managed_skill, create_managed_skill_draft, ManagedSkillDraft, ManagedSkillProvenance,
-    ManagedSkillSource, ManagedSupportFile,
+    ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
+    approve_managed_skill, create_managed_skill_draft,
 };
 use tracedecay::automation::run_ledger::{
-    append_run_record, write_run_artifact, AutomationRunArtifactKind, AutomationRunLedgerRecord,
-    AutomationRunStatus, AutomationTrigger,
+    AutomationRunArtifactKind, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
+    append_run_record, write_run_artifact,
 };
 use tracedecay::db::Database;
 use tracedecay::mcp::handle_tool_call;
 use tracedecay::serve;
 use tracedecay::storage::{
-    default_profile_sharded_layout, write_enrollment_marker, EnrollmentMarker, StorageMode,
+    EnrollmentMarker, StorageMode, default_profile_sharded_layout, write_enrollment_marker,
 };
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
@@ -75,11 +75,13 @@ fn managed_skill_stdio_draft(id: &str, title: &str) -> ManagedSkillDraft {
         category: "maintenance".to_string(),
         targets: tracedecay::automation::managed_skills::default_managed_skill_targets(),
         body_markdown: format!("Use {title} before applying repository changes."),
-        support_files: vec![ManagedSupportFile::new(
-            "references/checklist.md",
-            b"- inspect context\n- run focused tests\n".to_vec(),
-        )
-        .unwrap()],
+        support_files: vec![
+            ManagedSupportFile::new(
+                "references/checklist.md",
+                b"- inspect context\n- run focused tests\n".to_vec(),
+            )
+            .unwrap(),
+        ],
         provenance: ManagedSkillProvenance {
             source: ManagedSkillSource::AutomationRun,
             actor: "tracedecay-stdio-test".to_string(),
@@ -194,6 +196,25 @@ fn file_uri(path: &Path) -> String {
     } else {
         format!("file:///{normalized}")
     }
+}
+
+#[cfg(unix)]
+fn create_unindexed_git_project_with_file(contents: &str) -> TempDir {
+    let project = TempDir::new().unwrap();
+    let output = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(project.path())
+        .output()
+        .expect("git init should run");
+    assert!(
+        output.status.success(),
+        "git init failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::create_dir_all(project.path().join("src")).unwrap();
+    fs::write(project.path().join("src/lib.rs"), contents).unwrap();
+    project
 }
 
 #[tokio::test]
@@ -341,10 +362,12 @@ async fn serve_stdio_smokes_managed_skill_list_and_view() {
     let view = json_rpc_tool_payload(&output.stdout, 3);
     assert_eq!(view["status"], "ok");
     assert_eq!(view["skill"]["metadata"]["id"], "active-stdio-skill");
-    assert!(view["skill"]["body_markdown"]
-        .as_str()
-        .unwrap()
-        .contains("Active stdio skill"));
+    assert!(
+        view["skill"]["body_markdown"]
+            .as_str()
+            .unwrap()
+            .contains("Active stdio skill")
+    );
     assert_eq!(view["skill"]["support_files"].as_array().unwrap().len(), 0);
     assert_eq!(view["support_files_included"], false);
 }
@@ -826,6 +849,65 @@ async fn no_explicit_path_prefers_discovered_cwd_over_initialize_roots() {
         canonical_path_string(Path::new(&runtime_project_root(&output.stdout, 2))),
         canonical_path_string(cwd_project.path()),
         "discovered cwd project should be preferred over MCP initialize roots"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn no_explicit_path_auto_initializes_unindexed_git_cwd() {
+    let home = TempDir::new().unwrap();
+    let cwd_project =
+        create_unindexed_git_project_with_file("pub fn auto_initialized_project_marker() {}\n");
+    let nested_cwd = cwd_project.path().join("src");
+    let active = init_project_with_file(home.path(), "pub fn active_project_marker() {}\n").await;
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
+
+    let output = run_serve_runtime_with_initialize_root(
+        home.path(),
+        &nested_cwd,
+        None,
+        file_uri(active.path()),
+        "active",
+    );
+    let payload = json_rpc_tool_payload(&output.stdout, 2);
+
+    assert_eq!(
+        canonical_path_string(Path::new(
+            payload["database"]["project_root"]
+                .as_str()
+                .expect("runtime should include database.project_root")
+        )),
+        canonical_path_string(cwd_project.path()),
+        "unindexed git cwd should be initialized before MCP initialize-root fallback"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn initialize_roots_auto_initializes_unindexed_git_repo() {
+    let home = TempDir::new().unwrap();
+    let cwd = TempDir::new().unwrap();
+    let root_project =
+        create_unindexed_git_project_with_file("pub fn auto_initialized_root_marker() {}\n");
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
+
+    let output = run_serve_runtime_with_initialize_root(
+        home.path(),
+        cwd.path(),
+        None,
+        file_uri(root_project.path()),
+        "active",
+    );
+    let payload = json_rpc_tool_payload(&output.stdout, 2);
+
+    assert_eq!(
+        canonical_path_string(Path::new(
+            payload["database"]["project_root"]
+                .as_str()
+                .expect("runtime should include database.project_root")
+        )),
+        canonical_path_string(root_project.path()),
+        "unindexed git initialize root should be initialized and selected"
     );
 }
 

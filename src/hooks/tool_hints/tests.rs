@@ -383,9 +383,11 @@ fn escalation_does_not_count_against_the_budget() {
 fn escalated_hint_prefixes_the_base_message() {
     let base = hint(HintCategory::Search, "use tracedecay_grep", "context", true);
     let escalated = base.escalated();
-    assert!(escalated
-        .message
-        .starts_with("Repeated native search usage this session — "));
+    assert!(
+        escalated
+            .message
+            .starts_with("Repeated native search usage this session — ")
+    );
     assert!(escalated.message.contains("use tracedecay_grep"));
     assert_eq!(escalated.category, base.category);
     assert_eq!(escalated.context, base.context);

@@ -326,10 +326,10 @@ fn collect_files_relative(root: &Path) -> Vec<String> {
             let path = entry.path();
             if path.is_dir() {
                 walk(base, &path, out);
-            } else if path.is_file() {
-                if let Ok(relative) = path.strip_prefix(base) {
-                    out.push(relative.to_string_lossy().replace('\\', "/"));
-                }
+            } else if path.is_file()
+                && let Ok(relative) = path.strip_prefix(base)
+            {
+                out.push(relative.to_string_lossy().replace('\\', "/"));
             }
         }
     }
@@ -415,10 +415,10 @@ fn main() {
     let ansi = logo_art::image_to_ansi(logo_bytes, 90);
     // Only rewrite when the content differs: `cargo package` verification
     // rejects packages whose build script modifies files in the source dir.
-    if !matches!(fs::read(out_path), Ok(current) if current == ansi.as_bytes()) {
-        if let Err(e) = fs::write(out_path, &ansi) {
-            panic!("failed to write {}: {e}", out_path.display());
-        }
+    if !matches!(fs::read(out_path), Ok(current) if current == ansi.as_bytes())
+        && let Err(e) = fs::write(out_path, &ansi)
+    {
+        panic!("failed to write {}: {e}", out_path.display());
     }
     println!("cargo::rerun-if-changed=src/resources/logo.png");
     let asset_stamp = emit_dashboard_asset_inputs();

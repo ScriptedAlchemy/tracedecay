@@ -1,7 +1,7 @@
 use super::*;
 use crate::global_db::WorkflowScopeFilter;
 use crate::sessions::git_correlation::{
-    ensure_git_correlation_schema, record_span_observation, SpanObservation, SpanSource,
+    SpanObservation, SpanSource, ensure_git_correlation_schema, record_span_observation,
 };
 
 async fn mem_conn() -> Connection {
@@ -51,10 +51,12 @@ async fn queries_are_empty_before_schema_exists() {
     let conn = mem_conn().await;
     // No tables yet: readers must fail-open to empty/None.
     assert!(!tables_present(&conn).await.unwrap());
-    assert!(runs_for_session(&conn, "sess", 10)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        runs_for_session(&conn, "sess", 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert!(run_for_id(&conn, "wf_x").await.unwrap().is_none());
     assert!(agents_for_run(&conn, "wf_x", 10).await.unwrap().is_empty());
 }
@@ -229,10 +231,12 @@ async fn runs_for_git_scope_joins_through_parent_session_spans() {
 
     // A branch with no span yields nothing.
     let none = GitScopeFilter::from_args(Some("feat/absent"), None, None).unwrap();
-    assert!(runs_for_git_scope(&conn, &none, 10)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        runs_for_git_scope(&conn, &none, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
     // Empty filter is a caller error.
     let empty = GitScopeFilter::default();

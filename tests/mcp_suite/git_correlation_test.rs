@@ -7,11 +7,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use tracedecay::global_db::GlobalDb;
 use tracedecay::sessions::git_correlation::{
-    CommitSessionRecord, SpanObservation, SpanOverlapKind, SpanSource, DEFAULT_SPAN_MERGE_GAP_SECS,
+    CommitSessionRecord, DEFAULT_SPAN_MERGE_GAP_SECS, SpanObservation, SpanOverlapKind, SpanSource,
 };
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
@@ -233,8 +233,8 @@ async fn sessions_for_and_scoped_search_end_to_end() {
 
     // A commit made inside the `switcher` feature span is attributed to
     // feature/session only.
-    assert!(db
-        .git_upsert_commit_session(&CommitSessionRecord {
+    assert!(
+        db.git_upsert_commit_session(&CommitSessionRecord {
             commit_sha: "abcdef1234567890abcdef1234567890abcdef12".to_string(),
             provider: "claude".to_string(),
             session_id: "switcher".to_string(),
@@ -245,7 +245,8 @@ async fn sessions_for_and_scoped_search_end_to_end() {
             span_id: None,
         })
         .await
-        .unwrap());
+        .unwrap()
+    );
 
     // (a) sessions_for by branch: main matches s1, s2, switcher, ordered by
     // recency (most recent span first: switcher@... vs s2@5000 vs s1@1200).

@@ -1,7 +1,7 @@
 [package]
 name = "tracedecay"
 version = "0.0.33"
-edition = "2021"
+edition = "2024"
 description = "Code intelligence tool that builds a semantic knowledge graph from Rust, Go, Java, Scala, TypeScript, Python, C, C++, Kotlin, C#, Swift, and many more codebases"
 license = "MIT"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"

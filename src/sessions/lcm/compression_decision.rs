@@ -2,9 +2,9 @@ use serde_json::Value;
 
 use super::summarizer::CompressionSummarizerAdapter;
 use super::{
-    LcmCompressionRequest, LcmLifecycleState, LcmMaintenanceDebt, LcmPreflightRequest,
-    LcmRawMessage, LcmSessionBoundaryRequest, LCM_COMPRESSION_BOUNDARY_COOLDOWN_SECONDS,
-    LCM_DEFAULT_SUMMARY_FAN_IN,
+    LCM_COMPRESSION_BOUNDARY_COOLDOWN_SECONDS, LCM_DEFAULT_SUMMARY_FAN_IN, LcmCompressionRequest,
+    LcmLifecycleState, LcmMaintenanceDebt, LcmPreflightRequest, LcmRawMessage,
+    LcmSessionBoundaryRequest,
 };
 
 pub(crate) const DEFAULT_INCREMENTAL_MAX_DEPTH: i64 = 1;

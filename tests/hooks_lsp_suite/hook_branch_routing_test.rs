@@ -7,10 +7,10 @@ use tracedecay::branch_meta::{self, BranchMeta};
 use tracedecay::config::{TraceDecayConfig, USER_DATA_DIR_ENV};
 use tracedecay::db::Database;
 use tracedecay::hooks::{
-    cursor_branch_switch_target, cursor_shell_command_targets_project, cursor_shell_sync_plan,
-    cursor_shell_sync_plan_with_current_branch, CursorShellSyncPlan,
+    CursorShellSyncPlan, cursor_branch_switch_target, cursor_shell_command_targets_project,
+    cursor_shell_sync_plan, cursor_shell_sync_plan_with_current_branch,
 };
-use tracedecay::storage::{write_enrollment_marker, EnrollmentMarker, StorageMode};
+use tracedecay::storage::{EnrollmentMarker, StorageMode, write_enrollment_marker};
 use tracedecay::tracedecay::TraceDecay;
 
 struct HomeEnvGuard {
@@ -24,9 +24,11 @@ impl HomeEnvGuard {
         let previous_home = std::env::var_os("HOME");
         let previous_userprofile = std::env::var_os("USERPROFILE");
         let previous_data_dir = std::env::var_os(USER_DATA_DIR_ENV);
-        std::env::set_var("HOME", home);
-        std::env::set_var("USERPROFILE", home);
-        std::env::set_var(USER_DATA_DIR_ENV, home.join(".tracedecay"));
+        unsafe {
+            std::env::set_var("HOME", home);
+            std::env::set_var("USERPROFILE", home);
+            std::env::set_var(USER_DATA_DIR_ENV, home.join(".tracedecay"));
+        }
         Self {
             previous_home,
             previous_userprofile,
@@ -37,17 +39,19 @@ impl HomeEnvGuard {
 
 impl Drop for HomeEnvGuard {
     fn drop(&mut self) {
-        match self.previous_home.take() {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-        match self.previous_userprofile.take() {
-            Some(value) => std::env::set_var("USERPROFILE", value),
-            None => std::env::remove_var("USERPROFILE"),
-        }
-        match self.previous_data_dir.take() {
-            Some(value) => std::env::set_var(USER_DATA_DIR_ENV, value),
-            None => std::env::remove_var(USER_DATA_DIR_ENV),
+        unsafe {
+            match self.previous_home.take() {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match self.previous_userprofile.take() {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+            match self.previous_data_dir.take() {
+                Some(value) => std::env::set_var(USER_DATA_DIR_ENV, value),
+                None => std::env::remove_var(USER_DATA_DIR_ENV),
+            }
         }
     }
 }

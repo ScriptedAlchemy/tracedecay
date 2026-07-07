@@ -127,10 +127,11 @@ fn no_dashboard_skips_deploy() {
         "--no-dashboard must not deploy the dashboard directory"
     );
     // The agent plugin itself still installs.
-    assert!(home
-        .path()
-        .join(".hermes/plugins/tracedecay/plugin.yaml")
-        .is_file());
+    assert!(
+        home.path()
+            .join(".hermes/plugins/tracedecay/plugin.yaml")
+            .is_file()
+    );
 }
 
 #[test]

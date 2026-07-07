@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use super::claude::is_code_research_prompt;
 use super::codex::codex_project_root_from_event;
-use super::tool_hints::{decide_hint, HintAgent, ToolHintInput};
+use super::tool_hints::{HintAgent, ToolHintInput, decide_hint};
 use super::{
     event_cwd, event_cwd_from_parsed, event_session_id, hook_route_metadata_from_event,
     read_hook_event, record_hook_invoked, rel_under_root, research_block_reason,
@@ -27,7 +27,8 @@ const KIRO_HOT_INGEST_BUDGET: std::time::Duration = std::time::Duration::from_mi
 pub fn hook_kiro_pre_tool_use() -> i32 {
     let event = read_hook_event!();
     let root = codex_project_root_from_event(&event);
-    record_hook_invoked(root.as_deref(), HintAgent::Kiro, "preToolUse", &event);
+    let _hook_telemetry =
+        record_hook_invoked(root.as_deref(), HintAgent::Kiro, "preToolUse", &event);
     if let Some(reason) = evaluate_kiro_pre_tool_use(&event) {
         eprintln!("{reason}");
         2
@@ -130,7 +131,8 @@ fn collect_strings<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
 pub async fn hook_kiro_prompt_submit() -> i32 {
     let event = read_hook_event!();
     let root = codex_project_root_from_event(&event);
-    record_hook_invoked(root.as_deref(), HintAgent::Kiro, "userPromptSubmit", &event);
+    let _hook_telemetry =
+        record_hook_invoked(root.as_deref(), HintAgent::Kiro, "userPromptSubmit", &event);
     reset_counter_for_kiro_event(&event).await;
     ingest_kiro_transcript_for_event(
         &event,
@@ -148,7 +150,8 @@ pub async fn hook_kiro_prompt_submit() -> i32 {
 pub async fn hook_kiro_post_tool_use() -> i32 {
     let event = read_hook_event!();
     let root = codex_project_root_from_event(&event);
-    record_hook_invoked(root.as_deref(), HintAgent::Kiro, "postToolUse", &event);
+    let _hook_telemetry =
+        record_hook_invoked(root.as_deref(), HintAgent::Kiro, "postToolUse", &event);
     notify_kiro_post_tool_use(&event).await;
     0
 }

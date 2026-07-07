@@ -2,18 +2,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use axum::Json;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::{Deserialize, Deserializer};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::util::{http_detail, JsonError};
 use super::DashboardState;
+use super::util::{JsonError, http_detail};
 use crate::diagnostics::lsp::activity::{active_languages_for_files, documents_for_adapter};
 use crate::diagnostics::lsp::adapters::LspAdapterDefinition;
 use crate::diagnostics::lsp::broker::{DiagnosticsSnapshot, EngineState};
-use crate::diagnostics::lsp::settings::{save_settings, IdleBackfillMode};
+use crate::diagnostics::lsp::settings::{IdleBackfillMode, save_settings};
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
 

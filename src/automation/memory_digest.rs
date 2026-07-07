@@ -286,7 +286,9 @@ pub fn compose_digest_body(snapshot: &MemoryDigestSnapshot, char_budget: usize) 
 
     let mut body = String::from(
         "Curated durable facts from TraceDecay project memory (trust-ranked, newest first). \
-         For deeper recall call MCP tool `tracedecay_recall`.\n",
+         For deeper recall call MCP tool `tracedecay_recall`.\n\
+         Rate facts you rely on with `tracedecay_fact_feedback` (fact_id, helpful/unhelpful) \
+         — trust is earned from use; recalled facts are almost never rated.\n",
     );
     let mut budget_hit = false;
     for section in sections {
@@ -499,8 +501,7 @@ fn digest_document(body: &str) -> String {
     format!("# TraceDecay memory digest\n\n{body}")
 }
 
-const EMPTY_DIGEST_NOTE: &str =
-    "No durable facts exported yet. Approved facts from TraceDecay project memory will \
+const EMPTY_DIGEST_NOTE: &str = "No durable facts exported yet. Approved facts from TraceDecay project memory will \
      appear here; use MCP tool `tracedecay_recall` for on-demand memory search.\n";
 
 fn native_digest_relative(target: SkillInstallTarget) -> Result<&'static str> {

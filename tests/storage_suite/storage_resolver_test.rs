@@ -7,20 +7,20 @@ use std::process::Command;
 use std::os::unix::fs::symlink;
 use tempfile::TempDir;
 use tracedecay::branch_meta::{self, BranchMeta};
-use tracedecay::config::{discover_project_root, get_config_path, load_config};
 use tracedecay::config::{TraceDecayConfig, USER_DATA_DIR_ENV};
+use tracedecay::config::{discover_project_root, get_config_path, load_config};
 use tracedecay::db::Database;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::mcp::response_handles::{
-    retrieve_response_handle, store_response_handle, ResponseHandleLookup,
+    ResponseHandleLookup, retrieve_response_handle, store_response_handle,
 };
 use tracedecay::sessions::cursor::{project_session_db_path, resolved_project_session_db_path};
 use tracedecay::storage::{
-    default_profile_project_id, default_profile_sharded_layout, profile_sharded_layout,
-    read_enrollment_marker, read_store_manifest, resolve_layout, resolve_lcm_payload_root,
-    resolve_project_session_db_path, resolve_response_handle_root, write_store_manifest,
-    ActiveProjectContext, EnrollmentMarker, GraphScopeId, PrivateStoreIo, ProjectPath, StorageMode,
-    StoreArtifactPath, STORE_MANIFEST_FILENAME,
+    ActiveProjectContext, EnrollmentMarker, GraphScopeId, PrivateStoreIo, ProjectPath,
+    STORE_MANIFEST_FILENAME, StorageMode, StoreArtifactPath, default_profile_project_id,
+    default_profile_sharded_layout, profile_sharded_layout, read_enrollment_marker,
+    read_store_manifest, resolve_layout, resolve_lcm_payload_root, resolve_project_session_db_path,
+    resolve_response_handle_root, write_store_manifest,
 };
 use tracedecay::tracedecay::TraceDecay;
 
@@ -39,9 +39,11 @@ impl HomeGuard {
         let previous_data_dir = std::env::var_os(USER_DATA_DIR_ENV);
         fs::create_dir_all(home).unwrap();
         let home = canonical_temp_path(home);
-        std::env::set_var("HOME", &home);
-        std::env::set_var("USERPROFILE", &home);
-        std::env::set_var(USER_DATA_DIR_ENV, home.join(".tracedecay"));
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("USERPROFILE", &home);
+            std::env::set_var(USER_DATA_DIR_ENV, home.join(".tracedecay"));
+        }
         Self {
             previous_home,
             previous_userprofile,
@@ -52,17 +54,19 @@ impl HomeGuard {
 
 impl Drop for HomeGuard {
     fn drop(&mut self) {
-        match self.previous_home.take() {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-        match self.previous_userprofile.take() {
-            Some(value) => std::env::set_var("USERPROFILE", value),
-            None => std::env::remove_var("USERPROFILE"),
-        }
-        match self.previous_data_dir.take() {
-            Some(value) => std::env::set_var(USER_DATA_DIR_ENV, value),
-            None => std::env::remove_var(USER_DATA_DIR_ENV),
+        unsafe {
+            match self.previous_home.take() {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match self.previous_userprofile.take() {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+            match self.previous_data_dir.take() {
+                Some(value) => std::env::set_var(USER_DATA_DIR_ENV, value),
+                None => std::env::remove_var(USER_DATA_DIR_ENV),
+            }
         }
     }
 }
@@ -336,9 +340,11 @@ fn store_manifest_write_rejects_symlinked_parent_components() {
         !outside.join("proj_123").exists(),
         "manifest writer must not create directories through a symlinked parent"
     );
-    assert!(!outside
-        .join(format!("proj_123/{STORE_MANIFEST_FILENAME}"))
-        .exists());
+    assert!(
+        !outside
+            .join(format!("proj_123/{STORE_MANIFEST_FILENAME}"))
+            .exists()
+    );
 }
 
 #[test]

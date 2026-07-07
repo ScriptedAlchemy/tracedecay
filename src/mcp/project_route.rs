@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::hook_events;
 use super::tools::tool_dispatches_registered_project_reader;
@@ -239,7 +239,7 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{HookProjectRouteCache, SharedHookProjectRouteCache, MAX_HOOK_ROUTE_CACHE_ENTRIES};
+    use super::{HookProjectRouteCache, MAX_HOOK_ROUTE_CACHE_ENTRIES, SharedHookProjectRouteCache};
     use crate::daemon::{HookAgent, HookRouteMetadata};
     use crate::mcp::hook_events::{HookEvent, HookEventKind};
 

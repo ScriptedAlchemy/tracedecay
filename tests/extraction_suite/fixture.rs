@@ -44,28 +44,36 @@ fn test_fixture_typescript() {
     assert!(consts.iter().any(|n| n.name == "MAX_RETRIES"));
 
     // Type alias
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::TypeAlias && n.name == "UserId"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::TypeAlias && n.name == "UserId")
+    );
 
     // Interface
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Interface && n.name == "IUser"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Interface && n.name == "IUser")
+    );
 
     // Enum
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Enum && n.name == "Role"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Enum && n.name == "Role")
+    );
 
     // Function
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Function && n.name == "log"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Function && n.name == "log")
+    );
 
     // Exported class with decorator
     let class = result
@@ -87,10 +95,12 @@ fn test_fixture_typescript() {
     assert!(fetch.unwrap().is_async, "fetchProfile should be async");
 
     // Arrow function (export const createUser = ...)
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::ArrowFunction && n.name == "createUser"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::ArrowFunction && n.name == "createUser")
+    );
 
     // Namespace (Auth module — may or may not be detected depending on TS grammar version)
     // assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Namespace && n.name == "Auth"));
@@ -100,10 +110,12 @@ fn test_fixture_typescript() {
         !result.unresolved_refs.is_empty(),
         "expected call site refs"
     );
-    assert!(result
-        .unresolved_refs
-        .iter()
-        .any(|r| r.reference_kind == EdgeKind::Calls));
+    assert!(
+        result
+            .unresolved_refs
+            .iter()
+            .any(|r| r.reference_kind == EdgeKind::Calls)
+    );
 
     // Contains edges
     assert!(result.edges.iter().any(|e| e.kind == EdgeKind::Contains));
@@ -127,24 +139,30 @@ fn test_fixture_javascript() {
     let result = extractor.extract("sample.js", &source);
     assert!(result.errors.is_empty(), "JS errors: {:?}", result.errors);
 
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Class && n.name == "Handler"));
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Class && n.name == "JsonHandler"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Class && n.name == "Handler")
+    );
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Class && n.name == "JsonHandler")
+    );
     let fetch_fn = result
         .nodes
         .iter()
         .find(|n| n.kind == NodeKind::Function && n.name == "fetchData");
     assert!(fetch_fn.is_some());
     assert!(fetch_fn.unwrap().is_async);
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::ArrowFunction && n.name == "double"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::ArrowFunction && n.name == "double")
+    );
 }
 
 // ── Python ──────────────────────────────────────────────────────────────────
@@ -176,20 +194,26 @@ fn test_fixture_python() {
     );
 
     // Module-level constants
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Const && n.name == "MAX_CONNECTIONS"));
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Const && n.name == "DEFAULT_TIMEOUT"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Const && n.name == "MAX_CONNECTIONS")
+    );
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Const && n.name == "DEFAULT_TIMEOUT")
+    );
 
     // Functions
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Function && n.name == "log"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Function && n.name == "log")
+    );
     let log_fn = result
         .nodes
         .iter()
@@ -201,18 +225,24 @@ fn test_fixture_python() {
     assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Decorator));
 
     // Classes
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Class && n.name == "Base"));
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Class && n.name == "Connection"));
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Class && n.name == "Pool"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Class && n.name == "Base")
+    );
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Class && n.name == "Connection")
+    );
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Class && n.name == "Pool")
+    );
 
     // Docstring on class
     let conn = result
@@ -245,10 +275,12 @@ fn test_fixture_python() {
     assert_eq!(internal.unwrap().visibility, Visibility::Private);
 
     // Nested class
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Class && n.name == "Config"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Class && n.name == "Config")
+    );
 
     // Inheritance
     assert!(
@@ -260,10 +292,12 @@ fn test_fixture_python() {
     );
 
     // Call sites
-    assert!(result
-        .unresolved_refs
-        .iter()
-        .any(|r| r.reference_kind == EdgeKind::Calls));
+    assert!(
+        result
+            .unresolved_refs
+            .iter()
+            .any(|r| r.reference_kind == EdgeKind::Calls)
+    );
 
     // Signature with type annotations should not be truncated
     let log_sig = log_fn.signature.as_ref().unwrap();
@@ -300,10 +334,12 @@ fn test_fixture_c() {
     assert!(defs.iter().any(|n| n.name == "MAX_BUFFER_SIZE"));
 
     // Typedef struct
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Typedef && n.name == "Point"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Typedef && n.name == "Point")
+    );
 
     // Struct with fields
     let fields: Vec<_> = result
@@ -326,20 +362,26 @@ fn test_fixture_c() {
     assert!(variants.len() >= 4, "expected >= 4 enum variants");
 
     // Function pointer typedef
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Typedef && n.name == "Callback"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Typedef && n.name == "Callback")
+    );
 
     // Functions
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Function && n.name == "point_distance"));
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Function && n.name == "main"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Function && n.name == "point_distance")
+    );
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Function && n.name == "main")
+    );
 
     // Static function is private
     let set_err = result
@@ -361,10 +403,12 @@ fn test_fixture_c() {
     );
 
     // Call sites
-    assert!(result
-        .unresolved_refs
-        .iter()
-        .any(|r| r.reference_kind == EdgeKind::Calls));
+    assert!(
+        result
+            .unresolved_refs
+            .iter()
+            .any(|r| r.reference_kind == EdgeKind::Calls)
+    );
 }
 
 // ── C header ────────────────────────────────────────────────────────────────
@@ -384,16 +428,20 @@ fn test_fixture_c_header() {
     assert!(result.nodes.iter().any(|n| n.kind == NodeKind::File));
 
     // Preprocessor def
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::PreprocessorDef && n.name == "API_VERSION"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::PreprocessorDef && n.name == "API_VERSION")
+    );
 
     // Typedef struct
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Typedef && n.name == "Rect"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Typedef && n.name == "Rect")
+    );
 
     // Enum
     assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Enum));
@@ -409,32 +457,42 @@ fn test_fixture_cpp() {
     assert!(result.errors.is_empty(), "C++ errors: {:?}", result.errors);
 
     // Namespace
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Namespace && n.name == "geom"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Namespace && n.name == "geom")
+    );
 
     // Struct
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Struct && n.name == "Vec2"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Struct && n.name == "Vec2")
+    );
 
     // Abstract class
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Class && n.name == "Shape"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Class && n.name == "Shape")
+    );
 
     // Derived classes
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Class && n.name == "Circle"));
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Class && n.name == "Rectangle"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Class && n.name == "Circle")
+    );
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Class && n.name == "Rectangle")
+    );
 
     // Template class
     assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Template));
@@ -454,25 +512,31 @@ fn test_fixture_cpp() {
     assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Union));
 
     // Typedef
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Typedef && n.name == "EntityId"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Typedef && n.name == "EntityId")
+    );
 
     // Typedef
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Typedef && n.name == "EntityId"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Typedef && n.name == "EntityId")
+    );
 
     // Includes
     assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Include));
 
     // Preprocessor def
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::PreprocessorDef && n.name == "DEFAULT_CAPACITY"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::PreprocessorDef && n.name == "DEFAULT_CAPACITY")
+    );
 
     // Static function is private
     let helper = result
@@ -492,10 +556,12 @@ fn test_fixture_cpp() {
     );
 
     // Call sites
-    assert!(result
-        .unresolved_refs
-        .iter()
-        .any(|r| r.reference_kind == EdgeKind::Calls));
+    assert!(
+        result
+            .unresolved_refs
+            .iter()
+            .any(|r| r.reference_kind == EdgeKind::Calls)
+    );
 }
 
 // ── Kotlin ──────────────────────────────────────────────────────────────────
@@ -512,10 +578,12 @@ fn test_fixture_kotlin() {
     );
 
     // Package
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::KotlinPackage));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::KotlinPackage)
+    );
 
     // Imports
     let imports: Vec<_> = result
@@ -526,10 +594,12 @@ fn test_fixture_kotlin() {
     assert!(imports.len() >= 2, "expected >= 2 imports");
 
     // Data class
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::DataClass && n.name == "Point"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::DataClass && n.name == "Point")
+    );
 
     // Sealed class
     assert!(result.nodes.iter().any(|n| n.kind == NodeKind::SealedClass));
@@ -549,16 +619,20 @@ fn test_fixture_kotlin() {
     assert!(has_annotation, "expected annotation nodes");
 
     // Abstract class
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Class && n.name == "Entity"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Class && n.name == "Entity")
+    );
 
     // Regular class with properties
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Class && n.name == "User"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Class && n.name == "User")
+    );
     let properties: Vec<_> = result
         .nodes
         .iter()
@@ -567,25 +641,31 @@ fn test_fixture_kotlin() {
     assert!(properties.len() >= 2, "expected >= 2 properties");
 
     // Companion object
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::CompanionObject));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::CompanionObject)
+    );
 
     // Enum class
     assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Enum));
 
     // Object declaration (singleton)
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::KotlinObject && n.name == "Logger"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::KotlinObject && n.name == "Logger")
+    );
 
     // Extension function
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Function && n.name.contains("toSlug")));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Function && n.name.contains("toSlug"))
+    );
 
     // Visibility: protected helper
     let helper = result.nodes.iter().find(|n| n.name == "helperFunction");
@@ -598,10 +678,12 @@ fn test_fixture_kotlin() {
     }
 
     // Call sites
-    assert!(result
-        .unresolved_refs
-        .iter()
-        .any(|r| r.reference_kind == EdgeKind::Calls));
+    assert!(
+        result
+            .unresolved_refs
+            .iter()
+            .any(|r| r.reference_kind == EdgeKind::Calls)
+    );
 }
 
 // ── Dart ────────────────────────────────────────────────────────────────────
@@ -632,22 +714,28 @@ fn test_fixture_dart() {
     assert!(serializable.is_some(), "Serializable not found");
 
     // Mixin
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Mixin && n.name == "Timestamped"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Mixin && n.name == "Timestamped")
+    );
 
     // Class
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Class && n.name == "User"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Class && n.name == "User")
+    );
 
     // Extension
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Extension && n.name == "StringUtils"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Extension && n.name == "StringUtils")
+    );
 
     // Methods
     let methods: Vec<_> = result
@@ -705,10 +793,12 @@ fn test_fixture_csharp() {
     assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Enum));
 
     // Record
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Record && n.name == "AppConfig"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Record && n.name == "AppConfig")
+    );
 
     // Delegate
     assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Delegate));
@@ -722,22 +812,28 @@ fn test_fixture_csharp() {
     assert!(ifaces.len() >= 2, "expected >= 2 interfaces");
 
     // Attribute (decorator)
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::AnnotationUsage || n.kind == NodeKind::Decorator));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::AnnotationUsage || n.kind == NodeKind::Decorator)
+    );
 
     // Abstract class
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Class && n.name == "Entity"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Class && n.name == "Entity")
+    );
 
     // Class with methods
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Class && n.name == "User"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Class && n.name == "User")
+    );
     let methods: Vec<_> = result
         .nodes
         .iter()
@@ -763,20 +859,26 @@ fn test_fixture_csharp() {
     assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Field));
 
     // Struct
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Struct && n.name == "Point"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Struct && n.name == "Point")
+    );
 
     // Visibility: private, internal, protected
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.visibility == Visibility::Private));
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.visibility == Visibility::PubCrate)); // internal
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.visibility == Visibility::Private)
+    );
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.visibility == Visibility::PubCrate)
+    ); // internal
 
     // Async method
     let fetch = methods.iter().find(|m| m.name == "FetchProfileAsync");
@@ -795,10 +897,12 @@ fn test_fixture_csharp() {
     );
 
     // Call sites
-    assert!(result
-        .unresolved_refs
-        .iter()
-        .any(|r| r.reference_kind == EdgeKind::Calls));
+    assert!(
+        result
+            .unresolved_refs
+            .iter()
+            .any(|r| r.reference_kind == EdgeKind::Calls)
+    );
 }
 
 // ── PHP ─────────────────────────────────────────────────────────────────────
@@ -958,42 +1062,54 @@ fn test_fixture_pascal() {
     assert!(uses.len() >= 2, "expected >= 2 uses");
 
     // Constants
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Const && n.name == "MaxRetries"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Const && n.name == "MaxRetries")
+    );
 
     // Record type
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::PascalRecord && n.name == "TPoint"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::PascalRecord && n.name == "TPoint")
+    );
 
     // Interface type
     assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Interface));
 
     // Classes
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Class && n.name == "TEntity"));
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Class && n.name == "TUser"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Class && n.name == "TEntity")
+    );
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Class && n.name == "TUser")
+    );
 
     // Constructor
     assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Constructor));
 
     // Functions and procedures
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Function && n.name == "PointDistance"));
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Procedure && n.name == "LogMessage"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Function && n.name == "PointDistance")
+    );
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Procedure && n.name == "LogMessage")
+    );
 
     // Methods
     let methods: Vec<_> = result
@@ -1012,10 +1128,12 @@ fn test_fixture_pascal() {
     assert!(!properties.is_empty(), "expected >= 1 property");
 
     // Visibility: private members
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.visibility == Visibility::Private));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.visibility == Visibility::Private)
+    );
 
     // Contains edges
     assert!(result.edges.iter().any(|e| e.kind == EdgeKind::Contains));
@@ -1708,10 +1826,12 @@ fn test_fixture_proto() {
     assert!(msgs.iter().any(|m| m.name == "AuthConfig")); // nested
 
     // Enum + variants
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Enum && n.name == "LogLevel"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Enum && n.name == "LogLevel")
+    );
     let variants: Vec<_> = result
         .nodes
         .iter()
@@ -1818,20 +1938,26 @@ fn test_fixture_nix() {
     );
 
     // Constants
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Const && n.name == "defaultPort"));
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Const && n.name == "maxRetries"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Const && n.name == "defaultPort")
+    );
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Const && n.name == "maxRetries")
+    );
 
     // Module
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Module && n.name == "networking"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Module && n.name == "networking")
+    );
 
     // Nested functions inside networking
     assert!(fns.iter().any(|f| f.name == "mkPool"), "mkPool not found");
@@ -1918,9 +2044,11 @@ fn test_fixture_vbnet() {
         imports.len()
     );
     assert!(imports.iter().any(|u| u.name == "System"));
-    assert!(imports
-        .iter()
-        .any(|u| u.name == "System.Collections.Generic"));
+    assert!(
+        imports
+            .iter()
+            .any(|u| u.name == "System.Collections.Generic")
+    );
 
     // Const (top-level)
     let consts: Vec<_> = result
@@ -1934,10 +2062,12 @@ fn test_fixture_vbnet() {
     );
 
     // Enum with variants
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Enum && n.name == "LogLevel"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Enum && n.name == "LogLevel")
+    );
     let variants: Vec<_> = result
         .nodes
         .iter()
@@ -2357,10 +2487,12 @@ fn test_fixture_objc() {
     assert!(defs.iter().any(|n| n.name == "DEFAULT_PORT"));
 
     // Enum (NS_ENUM)
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Enum && n.name == "LogLevel"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Enum && n.name == "LogLevel")
+    );
     let variants: Vec<_> = result
         .nodes
         .iter()
@@ -2369,20 +2501,26 @@ fn test_fixture_objc() {
     assert_eq!(variants.len(), 4, "expected 4 enum variants");
 
     // Protocol
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Interface && n.name == "Serializable"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Interface && n.name == "Serializable")
+    );
 
     // Classes
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Class && n.name == "Base"));
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Class && n.name == "Connection"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Class && n.name == "Base")
+    );
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Class && n.name == "Connection")
+    );
 
     // Docstring on Base class
     let base = result
@@ -2425,10 +2563,12 @@ fn test_fixture_objc() {
     );
 
     // C function
-    assert!(result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Function && n.name == "logMessage"));
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Function && n.name == "logMessage")
+    );
     let log_fn = result
         .nodes
         .iter()
@@ -2465,10 +2605,12 @@ fn test_fixture_objc() {
     );
 
     // Call sites
-    assert!(result
-        .unresolved_refs
-        .iter()
-        .any(|r| r.reference_kind == EdgeKind::Calls));
+    assert!(
+        result
+            .unresolved_refs
+            .iter()
+            .any(|r| r.reference_kind == EdgeKind::Calls)
+    );
 
     // Contains edges
     let contains: Vec<_> = result
@@ -2623,10 +2765,12 @@ fn test_fixture_fortran() {
     );
 
     // Call sites
-    assert!(result
-        .unresolved_refs
-        .iter()
-        .any(|r| r.reference_kind == EdgeKind::Calls));
+    assert!(
+        result
+            .unresolved_refs
+            .iter()
+            .any(|r| r.reference_kind == EdgeKind::Calls)
+    );
 
     // Contains edges
     let contains: Vec<_> = result

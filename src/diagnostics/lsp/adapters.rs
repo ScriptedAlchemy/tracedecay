@@ -45,7 +45,11 @@ pub fn builtin_adapters() -> Vec<LspAdapterDefinition> {
             args: &[],
             extensions: &["rs"],
             root_markers: &["Cargo.toml"],
-            install_options: &[install("rustup", "rustup component add rust-analyzer", None)],
+            install_options: &[install(
+                "rustup",
+                "rustup component add rust-analyzer",
+                None,
+            )],
             diagnostics: DiagnosticMode::Push,
         }),
         adapter(AdapterSpec {
@@ -152,7 +156,9 @@ pub fn builtin_adapters() -> Vec<LspAdapterDefinition> {
             install_options: &[install(
                 "package manager",
                 "brew install zls",
-                Some("Use your platform package manager or the zigtools/zls release for non-macOS systems."),
+                Some(
+                    "Use your platform package manager or the zigtools/zls release for non-macOS systems.",
+                ),
             )],
             diagnostics: DiagnosticMode::Push,
         }),

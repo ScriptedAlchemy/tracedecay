@@ -8,8 +8,8 @@ use crate::global_db::{
     CodeProjectRecord, GlobalDb, GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert,
 };
 use crate::storage::{
-    read_store_manifest, validate_project_id, StorageMode, StoreKind, STORE_MANIFEST_FILENAME,
-    STORE_MANIFEST_SCHEMA_VERSION,
+    STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind,
+    read_store_manifest, validate_project_id,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

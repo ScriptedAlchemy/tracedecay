@@ -219,7 +219,7 @@ pub async fn find_run_record(
             return Err(config_error(format!(
                 "failed to read automation run ledger '{}': {e}",
                 path.display()
-            )))
+            )));
         }
     };
     Ok(contents.lines().rev().find_map(|line| {
@@ -290,7 +290,7 @@ pub async fn load_run_records(
             return Err(config_error(format!(
                 "failed to read automation run ledger '{}': {e}",
                 path.display()
-            )))
+            )));
         }
     };
     let mut records = Vec::new();
@@ -351,7 +351,7 @@ fn artifact_path_from_relative(
             _ => {
                 return Err(config_error(format!(
                     "automation run artifact path '{relative}' is not safe"
-                )))
+                )));
             }
         }
     }
