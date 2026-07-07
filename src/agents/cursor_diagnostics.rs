@@ -83,6 +83,7 @@ pub(crate) fn scan_cursor_mcp_logs(logs_root: &Path) -> CursorMcpLogFindings {
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| !name.contains("tracedecay"));
             let mut affected = false;
+            let stale_ambiguity = stale_degraded_ambiguity(&contents);
             for line in contents.lines() {
                 if require_tracedecay_mention && !line.contains("tracedecay") {
                     continue;
@@ -95,7 +96,7 @@ pub(crate) fn scan_cursor_mcp_logs(logs_root: &Path) -> CursorMcpLogFindings {
                     findings.connection_failures += 1;
                     affected = true;
                 }
-                if line.contains(DEGRADED_SERVE_STDERR_MARKER) {
+                if line.contains(DEGRADED_SERVE_STDERR_MARKER) && !stale_ambiguity {
                     findings.degraded_mode_notices += 1;
                     affected = true;
                 }
@@ -106,6 +107,24 @@ pub(crate) fn scan_cursor_mcp_logs(logs_root: &Path) -> CursorMcpLogFindings {
         }
     }
     findings
+}
+
+fn stale_degraded_ambiguity(contents: &str) -> bool {
+    let Some(ambiguity_start) = contents.find("Multiple tracedecay projects found") else {
+        return false;
+    };
+    let ambiguity = &contents[ambiguity_start..];
+    let mut paths = Vec::new();
+    for line in ambiguity.lines().skip(1) {
+        if line.contains(DEGRADED_SERVE_STDERR_MARKER) {
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.starts_with('/') {
+            paths.push(Path::new(trimmed));
+        }
+    }
+    !paths.is_empty() && paths.iter().any(|path| !path.exists())
 }
 
 /// Reports Cursor MCP log findings through the doctor counters, with the
@@ -286,6 +305,60 @@ mod tests {
             &format!(
                 "2026-07-02 03:00:00.000 [warning] {DEGRADED_SERVE_STDERR_MARKER} — MCP \
                  handshake will complete\n"
+            ),
+        );
+
+        let findings = scan_cursor_mcp_logs(logs.path());
+        assert_eq!(findings.degraded_mode_notices, 1);
+        assert!(findings.has_findings());
+    }
+
+    #[test]
+    fn scan_ignores_stale_degraded_ambiguity_after_worktree_removed() {
+        let logs = TempDir::new().unwrap();
+        let repo = logs.path().join("repo");
+        let stale_worktree = logs.path().join("repo/.worktrees/codex-read-context");
+        std::fs::create_dir_all(&repo).unwrap();
+        write_session_log(
+            logs.path(),
+            "20260702T030000",
+            "mcp-server-plugin-tracedecay-tracedecay.log",
+            &format!(
+                "2026-07-02 03:00:00.000 [error] Error: config error: Multiple tracedecay \
+                 projects found — pass -p <path> to select one:\n\
+                   {}\n\
+                   {}\n\
+                 {DEGRADED_SERVE_STDERR_MARKER} — MCP handshake will complete\n",
+                repo.display(),
+                stale_worktree.display()
+            ),
+        );
+
+        let findings = scan_cursor_mcp_logs(logs.path());
+        assert!(findings.scanned_any_log);
+        assert_eq!(findings.degraded_mode_notices, 0);
+        assert!(!findings.has_findings(), "{findings:?}");
+    }
+
+    #[test]
+    fn scan_keeps_degraded_ambiguity_when_paths_still_exist() {
+        let logs = TempDir::new().unwrap();
+        let repo = logs.path().join("repo");
+        let worktree = logs.path().join("repo/.worktrees/codex-read-context");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        write_session_log(
+            logs.path(),
+            "20260702T030000",
+            "mcp-server-plugin-tracedecay-tracedecay.log",
+            &format!(
+                "2026-07-02 03:00:00.000 [error] Error: config error: Multiple tracedecay \
+                 projects found — pass -p <path> to select one:\n\
+                   {}\n\
+                   {}\n\
+                 {DEGRADED_SERVE_STDERR_MARKER} — MCP handshake will complete\n",
+                repo.display(),
+                worktree.display()
             ),
         );
 
