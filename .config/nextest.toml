@@ -1,6 +1,6 @@
 [profile.ci]
 fail-fast = false
-retries = 0
+retries = 1
 flaky-result = "fail"
 slow-timeout = { period = "10s", terminate-after = 36 }
 final-status-level = "slow"
