@@ -646,7 +646,7 @@ def _storage_args(project_root=None, hermes_home=None):
         return {"project_root": str(project_root)}
     home = hermes_home or _resolve_hermes_home()
     if home:
-        return {"storage_scope": "hermes_profile", "hermes_home": str(home)}
+        return {"project_root": str(home)}
     return {}
 
 # Conventional config home: a `plugins.tracedecay` block in the profile
@@ -2393,7 +2393,8 @@ class TraceDecayContextEngine(ContextEngine):
             "lcm_session_db_path": None,
             "storage_note": (
                 "Hermes LCM conversation state is stored in the unified "
-                "user-level tracedecay store; unpinned profiles use hermes_profile storage."
+                "user-level tracedecay store; unpinned profiles use the Hermes home "
+                "as a profile-sharded project identity."
             ),
             "project_root": self.project_root,
             "tracedecay_binary_path": tools.TRACEDECAY_BIN,

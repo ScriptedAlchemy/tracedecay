@@ -269,6 +269,17 @@ fn profile_scoped_lcm_dispatch_rejects_non_profile_or_non_lcm_calls() {
     ));
 }
 
+#[test]
+fn explicit_project_lcm_dispatch_allows_first_touch_init() {
+    let dispatch = DaemonToolDispatch::project_scoped(
+        Some("/tmp/hermes-profile".to_string()),
+        "tracedecay_lcm_status",
+    );
+
+    assert!(dispatch.allow_init);
+    assert!(!dispatch.allow_profile_scoped_fallback);
+}
+
 // Registry integrity guardrail (companion to the handler lockstep tests in
 // `mcp::tools::handlers`): the CLI routes profile-scoped LCM calls through
 // `is_profile_scoped_lcm_dispatch`, which consults the hand-maintained
