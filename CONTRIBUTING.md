@@ -111,11 +111,11 @@ section so the contributor command and blocking/advisory split still match CI.
 
 ## Validating Plugins and Skills
 
-Changes under `cursor-plugin/`, `codex-plugin/`, or `src/agents/` are covered
+Changes under `plugin/` or `src/agents/` are covered
 by a layered validation system: vendored JSON-schema checks, per-host skill
 frontmatter contracts, cross-bundle sync/parity tests, and a CI
-schema-validation workflow. `cursor-plugin/` is the source of truth — never
-hand-edit mirrored Codex skills. Before submitting, run:
+schema-validation workflow. `plugin/skills/` is the shared source of truth for
+bundled skills — do not fork host-specific copies. Before submitting, run:
 
 ```bash
 cargo nextest run -E 'binary(=agent_suite)'
