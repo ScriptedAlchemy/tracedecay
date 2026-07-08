@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.39](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.38...v0.0.39) - 2026-07-08
+
+### Fixed
+
+- lock private jsonl appends ([#323](https://github.com/ScriptedAlchemy/tracedecay/pull/323))
+
 ## [0.0.38](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.37...v0.0.38) - 2026-07-08
 
 ### Fixed
