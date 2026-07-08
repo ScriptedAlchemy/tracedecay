@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.37](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.36...v0.0.37) - 2026-07-08
+
+### Fixed
+
+- simplify autonomous memory curation
+
+### Other
+
+- remove dead legacy automation config knobs
+
 ## [0.0.36](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.35...v0.0.36) - 2026-07-07
 
 ### Fixed
