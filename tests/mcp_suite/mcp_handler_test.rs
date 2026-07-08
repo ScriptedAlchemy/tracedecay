@@ -15127,6 +15127,20 @@ async fn message_search_selects_registered_project_session_db_by_project_id() {
         .await
         .expect("session artifact should upsert");
 
+    for index in 0..500 {
+        let dummy_project = cg.project_root().join(format!("registered-dummy-{index}"));
+        registry
+            .upsert_code_project(
+                &format!("proj_cross_messages_dummy_{index}"),
+                &dummy_project,
+                None,
+                None,
+                Some("main"),
+            )
+            .await
+            .expect("dummy registered project should upsert");
+    }
+
     let target_db = GlobalDb::open_at(&target_session_db)
         .await
         .expect("registered project session db should open");
@@ -15276,10 +15290,50 @@ async fn message_search_selects_registered_project_session_db_by_project_id() {
             >= 1,
         "{parsed}"
     );
-    assert_eq!(parsed["skipped_project_count"], 0, "{parsed}");
+    assert!(
+        parsed["skipped_project_count"].as_u64().unwrap_or_default() >= 500,
+        "{parsed}"
+    );
     assert_eq!(parsed["count"], 1, "{parsed}");
     assert_eq!(
         parsed["results"][0]["message"]["message_id"], "target-message",
+        "{parsed}"
+    );
+
+    let cursor_slug = cursor_project_slug(&target_project).expect("target project should slug");
+    let cursor_dir = cg
+        .project_root()
+        .join("home/.cursor/projects")
+        .join(cursor_slug)
+        .join("agent-transcripts");
+    fs::create_dir_all(&cursor_dir).unwrap();
+    fs::write(
+        cursor_dir.join("registered-catchup.jsonl"),
+        r#"{"role":"assistant","message":{"content":[{"type":"text","text":"regcatchuptokenzz appears only in transcript."}]}}
+"#,
+    )
+    .unwrap();
+    let catch_up_registered = handle_tool_call(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "query": "regcatchuptokenzz",
+            "provider": "cursor",
+            "project_scope": "all_registered",
+            "limit": 5
+        }),
+        None,
+        None,
+    )
+    .await
+    .expect("all_registered default catch_up should ingest registered transcripts");
+    let parsed = extract_json(&catch_up_registered.value);
+    assert_eq!(parsed["status"], "ok", "{parsed}");
+    assert_eq!(parsed["catch_up"], true, "{parsed}");
+    assert_eq!(parsed["catch_up_performed"], true, "{parsed}");
+    assert_eq!(parsed["count"], 1, "{parsed}");
+    assert_eq!(
+        parsed["results"][0]["message"]["provider"], "cursor",
         "{parsed}"
     );
 

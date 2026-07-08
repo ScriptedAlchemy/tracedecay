@@ -1644,6 +1644,7 @@ impl GlobalDb {
                     OR cp.canonical_root LIKE ?{index} ESCAPE '\\'
                     OR cp.display_root LIKE ?{index} ESCAPE '\\'
                     OR COALESCE(cp.git_common_dir, '') LIKE ?{index} ESCAPE '\\'
+                    OR COALESCE(cp.git_remote_url, '') LIKE ?{index} ESCAPE '\\'
                     OR COALESCE(cp.default_branch, '') LIKE ?{index} ESCAPE '\\'
                     OR COALESCE(pa.alias_path, '') LIKE ?{index} ESCAPE '\\')"
             ));
@@ -1703,7 +1704,7 @@ impl GlobalDb {
             .map(|project| project.project_id.clone())
             .collect::<Vec<_>>();
         let mut aliases_by_project = BTreeMap::<String, Vec<ProjectAliasRecord>>::new();
-        let mut rows = match self
+        let Some(mut rows) = self
             .query_string_ids(
                 "SELECT alias_path, project_id, last_seen_at
                  FROM project_aliases
@@ -1712,19 +1713,16 @@ impl GlobalDb {
                 &project_ids,
             )
             .await
-        {
-            Some(rows) => rows,
-            None => {
-                return projects
-                    .iter()
-                    .cloned()
-                    .map(|project| ProjectRegistryContext {
-                        project,
-                        aliases: Vec::new(),
-                        stores: Vec::new(),
-                    })
-                    .collect();
-            }
+        else {
+            return projects
+                .iter()
+                .cloned()
+                .map(|project| ProjectRegistryContext {
+                    project,
+                    aliases: Vec::new(),
+                    stores: Vec::new(),
+                })
+                .collect();
         };
         while let Ok(Some(row)) = rows.next().await {
             let alias = ProjectAliasRecord {

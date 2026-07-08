@@ -456,7 +456,7 @@ fn sort_and_truncate_message_results(results: &mut Vec<SessionMessageSearchResul
 
 fn message_search_payload(
     request: &MessageSearchRequest<'_>,
-    results: Vec<SessionMessageSearchResult>,
+    results: &[SessionMessageSearchResult],
     catch_up_performed: bool,
 ) -> Value {
     let mut payload = json!({
@@ -2203,7 +2203,7 @@ pub(super) async fn handle_message_search(
         let mut results = Vec::new();
         let mut searched_project_count = 0usize;
         let mut skipped_project_count = 0usize;
-        for project in global.list_code_projects(500).await {
+        for project in global.list_code_projects(usize::MAX).await {
             let Some(context) = global
                 .project_registry_context_by_id(&project.project_id)
                 .await
@@ -2216,16 +2216,29 @@ pub(super) async fn handle_message_search(
                 skipped_project_count += 1;
                 continue;
             };
-            let Some(db) = GlobalDb::open_read_only_at(&db_path).await else {
+            let db = if request.catch_up {
+                open_session_db_with_cached_ensure(&db_path).await
+            } else {
+                GlobalDb::open_read_only_at(&db_path).await
+            };
+            let Some(db) = db else {
                 skipped_project_count += 1;
                 continue;
             };
             searched_project_count += 1;
+            if request.catch_up {
+                let _ = crate::sessions::ingest_global_sources_for_provider(
+                    &db,
+                    Path::new(&context.project.canonical_root),
+                    request.provider_scope.provider(),
+                )
+                .await;
+            }
             let mut project_results = search_session_messages_in_db(&db, &request).await;
             results.append(&mut project_results);
         }
         sort_and_truncate_message_results(&mut results, request.limit);
-        let mut payload = message_search_payload(&request, results, false);
+        let mut payload = message_search_payload(&request, &results, request.catch_up);
         if let Some(map) = payload.as_object_mut() {
             map.insert(
                 "project_scope".to_string(),
@@ -2301,7 +2314,7 @@ pub(super) async fn handle_message_search(
         None => None,
     };
     let results = search_session_messages_in_db(&db, &request).await;
-    let mut payload = message_search_payload(&request, results, catch_up_performed);
+    let mut payload = message_search_payload(&request, &results, catch_up_performed);
     if let Some(map) = payload.as_object_mut() {
         map.insert("selected_project_root".to_string(), json!(target_root));
         if request.workflow_scope.is_some() {

@@ -30,13 +30,15 @@ pub(crate) async fn handle_projects_action(action: ProjectsAction) -> Result<()>
             let active_project_id = active_project_id(&db).await;
             print_projects(
                 &db,
-                "registered projects",
                 projects,
-                limit,
-                truncated,
-                active_project_id.as_deref(),
-                None,
-                json,
+                ProjectPrintOptions {
+                    label: "registered projects",
+                    limit,
+                    truncated,
+                    active_project_id: active_project_id.as_deref(),
+                    query: None,
+                    json_output: json,
+                },
             )
             .await?;
         }
@@ -48,13 +50,15 @@ pub(crate) async fn handle_projects_action(action: ProjectsAction) -> Result<()>
             let active_project_id = active_project_id(&db).await;
             print_projects(
                 &db,
-                &format!("projects matching \"{query}\""),
                 projects,
-                limit,
-                truncated,
-                active_project_id.as_deref(),
-                Some(("query", query.as_str())),
-                json,
+                ProjectPrintOptions {
+                    label: &format!("projects matching \"{query}\""),
+                    limit,
+                    truncated,
+                    active_project_id: active_project_id.as_deref(),
+                    query: Some(("query", query.as_str())),
+                    json_output: json,
+                },
             )
             .await?;
         }
@@ -100,36 +104,40 @@ async fn active_project_id(db: &GlobalDb) -> Option<String> {
         .map(|context| context.project.project_id)
 }
 
-async fn print_projects(
-    db: &GlobalDb,
-    label: &str,
-    projects: Vec<CodeProjectRecord>,
+struct ProjectPrintOptions<'a> {
+    label: &'a str,
     limit: usize,
     truncated: bool,
-    active_project_id: Option<&str>,
-    query: Option<(&str, &str)>,
+    active_project_id: Option<&'a str>,
+    query: Option<(&'a str, &'a str)>,
     json_output: bool,
+}
+
+async fn print_projects(
+    db: &GlobalDb,
+    projects: Vec<CodeProjectRecord>,
+    options: ProjectPrintOptions<'_>,
 ) -> Result<()> {
     let contexts = db.project_registry_contexts_for_projects(&projects).await;
-    let view = build_project_registry_view(&contexts, active_project_id, truncated);
-    if json_output {
+    let view = build_project_registry_view(&contexts, options.active_project_id, options.truncated);
+    if options.json_output {
         let projects = projects
             .iter()
-            .map(|project| PublicCodeProject::from_record(project, active_project_id))
+            .map(|project| PublicCodeProject::from_record(project, options.active_project_id))
             .collect::<Vec<_>>();
         let mut payload = json!({
-            "limit": limit,
-            "truncated": truncated,
+            "limit": options.limit,
+            "truncated": options.truncated,
             "summary": view.summary,
             "project_tree": view.project_tree,
             "projects": projects,
         });
-        if let Some((key, value)) = query {
+        if let Some((key, value)) = options.query {
             payload[key] = json!(value);
         }
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else {
-        print!("{}", render_project_registry_view(label, &view));
+        print!("{}", render_project_registry_view(options.label, &view));
     }
     Ok(())
 }
