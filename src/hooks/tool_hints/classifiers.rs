@@ -1,10 +1,5 @@
 use super::ToolHintInput;
-use crate::hooks::shell_words;
-
-struct ShellInvocation {
-    base: String,
-    args: Vec<String>,
-}
+use crate::shell::{shell_invocations, shell_words};
 
 pub(super) fn is_single_file_read(input: &ToolHintInput) -> bool {
     let is_read_tool = input
@@ -336,89 +331,6 @@ fn looks_like_source_path(token: &str) -> bool {
             | "yml"
             | "json"
     )
-}
-
-fn shell_invocations(command: &str) -> Vec<ShellInvocation> {
-    let tokens = shell_words(command);
-    let mut invocations = Vec::new();
-    let mut idx = 0;
-    while idx < tokens.len() {
-        let token = clean_shell_token(&tokens[idx]);
-        let lower = token.to_ascii_lowercase();
-        if is_shell_separator(&lower) || is_env_assignment(&token) {
-            idx += 1;
-            continue;
-        }
-        if matches!(lower.as_str(), "env" | "time" | "command" | "noglob") {
-            idx += 1;
-            continue;
-        }
-        if matches!(lower.as_str(), "cd" | "pushd") {
-            idx += 1;
-            while idx < tokens.len() {
-                let separator = clean_shell_token(&tokens[idx]);
-                idx += 1;
-                if is_shell_separator(&separator) {
-                    break;
-                }
-            }
-            continue;
-        }
-        if matches!(lower.as_str(), "bash" | "sh" | "zsh")
-            && tokens
-                .get(idx + 1)
-                .is_some_and(|token| matches!(token.as_str(), "-lc" | "-c"))
-        {
-            if let Some(nested) = tokens.get(idx + 2) {
-                invocations.extend(shell_invocations(nested));
-            }
-            idx += 3;
-            continue;
-        }
-
-        let base = program_base(&token);
-        idx += 1;
-        let mut args = Vec::new();
-        while idx < tokens.len() {
-            let arg = clean_shell_token(&tokens[idx]);
-            if is_shell_separator(&arg) {
-                break;
-            }
-            args.push(arg);
-            idx += 1;
-        }
-        invocations.push(ShellInvocation { base, args });
-    }
-    invocations
-}
-
-fn clean_shell_token(token: &str) -> String {
-    token
-        .trim_matches(|c| matches!(c, '(' | ')' | '"' | '\''))
-        .to_string()
-}
-
-fn is_shell_separator(token: &str) -> bool {
-    matches!(token, "&&" | "||" | "|" | ";" | "then" | "do")
-}
-
-fn is_env_assignment(token: &str) -> bool {
-    let Some((key, _)) = token.split_once('=') else {
-        return false;
-    };
-    !key.is_empty()
-        && key
-            .chars()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
-}
-
-fn program_base(program: &str) -> String {
-    let program = program.trim_start_matches('(').to_ascii_lowercase();
-    program
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(&program)
-        .to_string()
 }
 
 pub(super) fn is_parent_or_projects_path(token: &str) -> bool {
