@@ -40,8 +40,6 @@ MCP can never diverge. Preserve one router builder.
   `{"project_local","global"}` records which.
 - `savings_db: Option<Arc<GlobalDb>>` — savings ledger (out of scope here).
 - `project_root`, `mem_db_path`, `lcm_db_path`, `lcm_scope` — display/feature-detect fields.
-- `curate_preview: Arc<RwLock<Option<CuratePreviewEntry>>>` — last dry-run
-  curation preview, also persisted to disk via `curate_preview_store`.
 - `token_counts` — BPE token-count cache for the Savings tab.
 
 **Auth / context model — IMPORTANT.** There is **no auth, no middleware, no
@@ -90,13 +88,11 @@ bundles and the Hermes host working unmodified:**
    holographic/*`, `/lcm/* → …/hermes-lcm/*`, `/graph/*`, `/savings/*`, and
    exposes upstream `/api/capabilities` at `/capabilities`. It also adds the
    **Hermes session-token middleware** — the only auth in the stack.
-3. **The one Hermes-only extension: LLM curation.** `POST /curation/llm-plan`
-   lives in the wrapper and flips `llm_curation` true. The standalone binary
-   mirrors that exact contract *outside the dashboard* via
-   `src/dashboard/memory_curate.rs` (`tracedecay memory curate --llm` /
-   `--llm-ops`), which ports the wrapper's `_CURATION_SYSTEM_PROMPT` verbatim.
-   **This is why `memory_api.rs` is also a curation library, not just routes**
-   (see §5).
+3. **Curation is automation-owned.** The Hermes wrapper is a thin proxy; it no
+   longer hosts a separate LLM plan/apply endpoint. Standalone automation and
+   the `tracedecay memory curate --llm` / `--llm-ops` CLI path share the
+   reusable curation core, while dashboard mutation goes through explicit
+   automation runs or `POST /curate/apply`.
 
 ---
 
@@ -113,11 +109,9 @@ in several handlers and omitted from the table for brevity.
 | 2 | GET | `/api/plugins/holographic/fact/{fact_id}` | `fact_detail` | path `fact_id:i64` | `{fact, error}` | Fact row + linked entities. **404** `{detail}` if missing. |
 | 3 | GET | `/api/plugins/holographic/projection` | `projection` | `q`, `limit`(25/`PROJECTION_POINT_CAP`=2000) | `{exists, dim, limit, method, points, error}` | `vector_facts` decodes HRR blobs → PCA on `spawn_blocking`. **Cached** by `(query,limit,VectorStateFingerprint)`. |
 | 4 | GET | `/api/plugins/holographic/similarity` | `similarity` | `min_similarity`, `limit`(25/`SIMILARITY_PAIR_CAP`) | `{exists, dim, count, limit, threshold, min_similarity, total_pairs, score_distribution, pairs, error}` | O(n²·d) pairwise phase-cosine on `spawn_blocking`. **Cached** by fingerprint. Emits `threshold` AND `min_similarity` for shape compat. |
-| 5 | GET | `/api/plugins/holographic/curation/status` | `curation_status` | — | curator status stub | Reads `curate_preview`. Mostly static (`paused:false`, `mode:"similarity_dedup"`). |
-| 6 | GET | `/api/plugins/holographic/curation/activity` | `curation_activity` | `limit` | `{events, count, limit, error}` | In-memory deterministic curation activity stream capped to the newest events. Preview/apply, agent-plan, and queued automation paths emit phases such as `queued`, `evidence`, `backend`, `validation`, `apply`, `report`, `finish`, `failure`, and `rejection`. |
-| 7 | GET | `/api/plugins/holographic/curation/preview` | `curation_preview` | — | `{report, saved_at, stale, stale_reason, error}` | Reads saved dry-run preview; recomputes `memory_facts` fingerprint to flag staleness. |
-| 8 | POST | `/api/plugins/holographic/curate` | `curate` | body `{dry_run:bool}` (default true) | `{ran, dry_run, actions, hygiene_candidates, counts, applied_counts, llm_calls, coverage, provider, mode}` | `build_delete_plan` (similarity dedup). dry_run saves preview to state + disk; apply **hard-deletes** losers via `MemoryStore::remove_fact`, records oplog summary. |
-| 9 | POST | `/api/plugins/holographic/curate/apply` | `curate_apply` | body `{ops:[{op:"delete"\|"merge", ...}]}` | `{results, counts:{deleted, merged, errors}}` | Generic ops endpoint. `delete`→`MemoryStore::remove_fact`; `merge`→`MemoryStore::merge_facts` (optional content rewrite + hard-delete losers). Per-op failures reported inline (HTTP 200). |
+| 5 | GET | `/api/plugins/holographic/curation/status` | `curation_status` | — | curator status | Reports autonomous curation status, last applied run metadata, and dashboard activity availability. |
+| 6 | GET | `/api/plugins/holographic/curation/activity` | `curation_activity` | `limit` | `{events, count, limit, error}` | Curation activity stream capped to the newest events. Automation paths emit phases such as `queued`, `evidence`, `backend`, `validation`, `apply`, `report`, `finish`, `failure`, and `rejection`. |
+| 7 | POST | `/api/plugins/holographic/curate/apply` | `curate_apply` | body `{ops:[{op:"delete"\|"merge", ...}]}` | `{results, counts:{deleted, merged, errors}}` | Generic ops endpoint. `delete`→`MemoryStore::remove_fact`; `merge`→`MemoryStore::merge_facts` (optional content rewrite + hard-delete losers). Per-op failures reported inline (HTTP 200). |
 | 10 | GET | `/api/plugins/holographic/oplog` | `oplog` | `limit`(50/300) | `{events, count, limit, error}` | `SELECT … FROM memory_oplog ORDER BY id DESC`. Parses `detail_json`. |
 
 ### 3b. `lcm_api.rs` — `/api/plugins/hermes-lcm/*` (6 routes)
@@ -233,7 +227,6 @@ Observations:
 | `PROJECTION_CACHE` | `memory_api` | `mem_db_path` → `Arc<ProjectionComputation>` | `(query, limit, VectorStateFingerprint)` |
 | `SIMILARITY_CACHE` | `memory_api` | `mem_db_path` → `Arc<SimilarityComputation>` | `VectorStateFingerprint` |
 | `VALIDATED_METADATA_STORES` | `lcm_api` | `HashSet<lcm_db_path>` | one-shot; **failures NOT cached** |
-| `curate_preview` | `DashboardState` | per-state `RwLock` | cleared on any apply; persisted to disk |
 
 `VectorStateFingerprint` = `(count, max_updated_at, sum_fact_id, hash)` — it
 **deliberately does not hash the HRR blobs** (at the 2000-fact cap that was ~32 MB
@@ -258,7 +251,6 @@ pulled out of SQLite per request). All projection/similarity computation runs on
   │    reuses 5 pub(crate) fns)   ├──▶ crate::memory::store::MemoryStore
   │                               │      (remove_fact / merge_facts / record_oplog)
   │                               ├──▶ crate::memory::encoding::HolographicEncoder
-  │                               ├──▶ super::curate_preview_store (save/clear/load)
   │                               └──▶ super::util  (query_rows/query_i64/...)
   │
   ├── HTTP ──▶ lcm_api.rs   ──▶ super::util, DashboardState   (self-contained)
@@ -277,8 +269,7 @@ pulled out of SQLite per request). All projection/similarity computation runs on
    `build_delete_plan`, `delete_fact`, `apply_delete_op`, `apply_merge_op`,
    `similarity_computation` (`memory_curate.rs:22`). `memory_curate` is the
    dashboard-free curation core (`tracedecay memory curate`, including the
-   `--llm`/`--llm-ops` review tier that mirrors the Hermes wrapper's
-   `/curation/llm-plan`).
+   `--llm`/`--llm-ops` review tier used by automation and CLI workflows).
 
    → **memory_api is not just a route module; it is a curation library.** Moving,
    renaming, or inlining these 5 functions breaks the CLI curation path and the

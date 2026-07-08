@@ -228,14 +228,10 @@ Detects duplicate and related facts using phase-vector cosine similarity:
 
 *(Availability controlled by capability flag `features.curation`)*
 
-The Curation panel is organized into five sub-tabs:
+The Curation panel is organized into four sub-tabs:
 
-- **Plan**: Dry-run analysis showing proposed actions (persisted to
-  `.tracedecay/dashboard/curation_preview.json` so it survives server
-  restarts), plus the Preview / Apply controls. Applying deduplicates by
-  permanently deleting the lower-trust fact in each duplicate pair.
 - **Automation**: Scheduler state (with pause/resume), the effective
-  automation config editor (backend, host mode, model, per-task schedules),
+  automation config editor (app-server backend, standalone host, per-task schedules),
   per-task **Run** buttons for the memory curator / session reflector /
   skill writer loops, and the automation run ledger with hash-verified
   artifact drill-down.
@@ -243,9 +239,9 @@ The Curation panel is organized into five sub-tabs:
   for inspection (recent first; resolved proposals are collapsed) and managed-skill
   drafts with approve/disable/archive/restore actions. The tab label shows
   the pending count.
-- **History**: Curator run history, recent snapshots, the memory operation
-  log (oplog), and the saved preview state.
-- **Activity**: Live event log of curation phases from preview and apply runs.
+- **History**: Curator run history, recent snapshots, and the memory operation
+  log (oplog).
+- **Activity**: Live event log of autonomous curation phases and apply outcomes.
 
 Curation is implemented as similarity-based deduplication (no LLM calls). It proposes hard-deleting the lower-trust fact in each `likely_duplicate` pair (similarity ≥ 0.95 with lexical overlap). Rule-based hygiene signals are emitted separately as `hygiene_candidates`; they are review evidence for a human or external LLM curator, not deterministic apply operations.
 
@@ -722,99 +718,12 @@ Curation system status and configuration.
 
 Recent curation activity log.
 
-#### `GET /api/plugins/holographic/curation/preview`
+#### `POST /api/automation/run/memory-curator`
 
-Last saved dry-run preview. Persisted to
-`.tracedecay/dashboard/curation_preview.json`, so it survives server restarts;
-applying curation (or any `/curate/apply` mutation) clears it. Staleness is
-recomputed against the live fact count on every read.
-
-**Response:**
-```json
-{
-  "report": { /* curation plan */ },
-  "saved_at": "2026-06-10T12:34:56Z",
-  "stale": false,
-  "stale_reason": "",
-  "error": ""
-}
-```
-
-#### `POST /api/plugins/holographic/curate`
-
-Run similarity-based deduplication curation. Applying (`dry_run=false`)
-**permanently deletes** the flagged facts via the canonical store delete path
-(transactional row delete, FK-cascaded entity links, FTS trigger cleanup,
-memory-bank dirty marking).
-
-**Request Body:**
-```json
-{
-  "dry_run": true  // default: true; set false to apply (DELETE) changes
-}
-```
-
-**Response (dry_run=true):**
-```json
-{
-  "ran": true,
-  "dry_run": true,
-  "actions": [
-    {
-      "op": "delete",
-      "fact_id": 5,
-      "duplicate_of": 3,
-      "reason": "Likely duplicate of #3 (similarity 0.9623)",
-      "content": "Fact content preview...",
-      "similarity": 0.9623,
-      "tier": "duplicate"
-    }
-  ],
-  "hygiene_candidates": {
-    "secret_like": [ /* review_required candidates, tier "secret_like" */ ],
-    "transient": [ /* review_required candidates, tier "transient" */ ],
-    "supersession": [
-      {
-        "recommended_op": "delete",
-        "fact_id": 4,
-        "superseded_by": 7,
-        "similarity": 0.8123,
-        "reason": "Possible supersession: negation/state-change cue ...",
-        "content": "Fact content preview...",
-        "status": "candidate",
-        "review_required": true,
-        "access_count": 2,
-        "tier": "supersession"
-      }
-    ]
-  },
-  "counts": { "delete": 1 },
-  "coverage": {
-    "scanned": 500,
-    "active_total": 500,
-    "due_remaining": 0
-  },
-  "provider": "tracedecay",
-  "mode": "similarity_dedup"
-}
-```
-
-`hygiene_candidates` is the deterministic rule-based evidence set
-(secret-like content, transient run output, negation-cue supersession pairs).
-These entries are **never auto-applied** — `dry_run=false` only executes
-`actions` (dedup deletes); a reviewer (human, the `tracedecay memory curate
---llm` two-phase flow, or the Hermes LLM wrapper) confirms hygiene candidates by
-submitting explicit delete/merge ops through `POST /curate/apply`. Low trust by
-itself is not a delete signal; trust only helps calibrate candidate confidence.
-The dedup planner also applies access-count delete-reluctance: the
-higher-access fact of a pair is never auto-proposed as the loser unless the
-similarity is extreme (≥ 0.98). Helpful feedback raises trust, and recall access
-updates `access_count`/`last_recalled_at`, giving useful facts protection during
-curation review.
-
-**Response (dry_run=false):**
-Same structure with `applied_counts` showing what was actually deleted and
-`skipped_actions` counting per-action failures (e.g. already-deleted ids).
+Queue an autonomous app-server memory-curator run. The dashboard does not
+expose a saved human review form; accepted curation operations are validated
+and applied by the automation policy, with each phase recorded in the run
+ledger, artifacts, telemetry, and curation activity stream.
 
 #### `POST /api/plugins/holographic/curate/apply`
 
@@ -1152,7 +1061,7 @@ fetch('/api/capabilities')
 | `features.savings` | Savings & Cost API is available | Show Savings & Cost tab |
 | `features.settings` | Aggregated Settings API is available | Show Settings tab |
 | `features.curation` | Similarity-dedup curation tools are available | Show Curation panel, enable curate actions |
-| `features.llm_curation` | An LLM-backed curation planner is available through standalone automation or a delegated host wrapper | Enable LLM plan actions that target `POST /curate/apply` |
+| `features.llm_curation` | LLM-backed curation is available through standalone automation | Show autonomous curation status and run history |
 
 There is no archive flag: curation deletes are permanent, and no archive or
 restore endpoints exist. Always check the capability flags rather than

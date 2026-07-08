@@ -32,7 +32,6 @@ mod automation_run_service;
 mod automation_scheduler_api;
 mod automation_skills_api;
 mod code_diagnostics_api;
-mod curate_preview_store;
 mod graph_api;
 mod graph_queries;
 mod graph_service;
@@ -79,20 +78,6 @@ use crate::tracedecay::TraceDecay;
 pub const DEFAULT_PORT: u16 = 7341;
 pub(crate) type AutomationSchedulerReconciler = Arc<dyn Fn() + Send + Sync + 'static>;
 
-pub(crate) type CuratePreviewFingerprint = (i64, i64, i64, i64);
-
-/// Cached last curation preview, written by `POST /curate?dry_run=true`.
-#[derive(Debug, Clone)]
-pub(crate) struct CuratePreviewEntry {
-    pub(crate) report: Value,
-    /// ISO 8601 UTC timestamp when this preview was saved.
-    pub(crate) saved_at: String,
-    /// Active fact count at the time the preview was generated (for stale detection).
-    pub(crate) active_facts_at_save: i64,
-    /// `(active count, max updated_at, sum fact_id, sum updated_at)` at preview generation.
-    pub(crate) memory_fingerprint_at_save: CuratePreviewFingerprint,
-}
-
 #[derive(Clone)]
 pub(crate) struct DashboardState {
     /// Registered project id for profile-backed stores, when known.
@@ -126,8 +111,6 @@ pub(crate) struct DashboardState {
     pub(crate) config_path: PathBuf,
     /// Resolved dashboard sidecar root inside the active project store.
     pub(crate) dashboard_root: PathBuf,
-    /// Last saved dry-run curation preview (shared across all clones of the state).
-    pub(crate) curate_preview: Arc<RwLock<Option<CuratePreviewEntry>>>,
     /// Recent deterministic curation activity emitted by the standalone dashboard.
     pub(crate) curation_activity: Arc<RwLock<Vec<Value>>>,
     /// In-process BPE token-count cache for the Savings & Cost tab (backed
@@ -260,13 +243,10 @@ async fn build_state_inner(
 ) -> DashboardState {
     let (mem_conn, mem_db_path) = resolve_project_memory_store(cg).await;
     let lcm = resolve_lcm_store(cg).await;
-    // Re-hydrate the last dry-run curation preview from its sidecar so it
-    // survives server restarts (staleness is recomputed on read anyway).
     let dashboard_root = cg.store_layout().dashboard_root.clone();
     let store_root = cg.store_layout().data_root.clone();
     let config_path = cg.store_layout().config_path.clone();
     let storage_mode = storage_mode_label(&cg.store_layout().storage_mode).to_string();
-    let persisted_preview = curate_preview_store::load(&dashboard_root).await;
     let code_diagnostics_settings = lsp::settings::load_settings(&dashboard_root)
         .await
         .unwrap_or_default();
@@ -292,7 +272,6 @@ async fn build_state_inner(
         store_root,
         config_path,
         dashboard_root,
-        curate_preview: Arc::new(RwLock::new(persisted_preview)),
         curation_activity: Arc::new(RwLock::new(Vec::new())),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
         code_diagnostics: Arc::new(RwLock::new(code_diagnostics)),
@@ -561,18 +540,10 @@ fn project_api_router() -> Router<DashboardState> {
             post(memory_api::fact_proposal_reject),
         )
         .route(
-            "/api/plugins/holographic/curation/preview",
-            get(memory_api::curation_preview),
-        )
-        .route(
             "/api/plugins/holographic/curation/config",
             get(automation_config_api::get_config)
                 .patch(automation_config_api::patch_config)
                 .delete(automation_config_api::reset_config),
-        )
-        .route(
-            "/api/plugins/holographic/curation/agent-plan",
-            post(memory_api::curation_agent_plan),
         )
         .route(
             "/api/automation/skills",
@@ -672,7 +643,6 @@ fn project_api_router() -> Router<DashboardState> {
             "/api/automation/runs/{run_id}/artifacts/{kind}",
             get(automation_run_api::artifact_payload),
         )
-        .route("/api/plugins/holographic/curate", post(memory_api::curate))
         .route(
             "/api/plugins/holographic/curate/apply",
             post(memory_api::curate_apply),
@@ -885,9 +855,9 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
             "graph": true,
             "analytics": true,
             "code_diagnostics": true,
-            // Similarity-based dedup curation (delete/merge ops via /curate
-            // and /curate/apply). LLM-proposed curation is served by the
-            // configured standalone automation backend when enabled.
+            // Memory curation/refinement is served by the configured
+            // standalone automation backend. Explicit agent ops apply through
+            // /curate/apply.
             "curation": true,
             "automation": automation_configured,
             "llm_curation": standalone_automation,

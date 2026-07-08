@@ -261,10 +261,7 @@ async fn skill_writer_runner_creates_pending_skill_drafts_for_approval() {
             }
         ]
     }));
-    let config = AutomationConfig {
-        model: Some("configured-model".to_string()),
-        ..enabled_skill_writer_config()
-    };
+    let config = enabled_skill_writer_config();
 
     let run = run_skill_writer_with_backend(
         &cg,

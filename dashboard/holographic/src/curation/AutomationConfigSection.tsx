@@ -7,7 +7,6 @@ import type {
   AutomationTaskConfig,
   MemoryAutomationConfig,
   MemoryAutomationConfigPatch,
-  SelectableAutomationBackend,
 } from "../types";
 import { AutomationTaskConfigRow, ConfigFieldError } from "./AutomationTaskConfigRow";
 import { AUTOMATION_TASKS, type AutomationRunTask } from "./automationTasks";
@@ -126,63 +125,16 @@ export function AutomationConfigSection({
               checked={configDraft.enabled}
               onCheckedChange={(enabled) => updateConfigDraft({ enabled })}
             />
-            <ConfigCheckbox
-              label="Require manual apply"
-              ariaLabel="Require manual dashboard apply"
-              checked={configDraft.require_dashboard_approval}
-              error={configFieldErrors.require_dashboard_approval}
-              onCheckedChange={(require_dashboard_approval) =>
-                updateConfigDraft({ require_dashboard_approval })
-              }
-            />
+            <MetadataRow label="Memory apply" value="autonomous" />
           </div>
+          <div className="grid gap-2 sm:grid-cols-3">
+            <MetadataRow label="Backend" value="codex_app_server" />
+            <MetadataRow label="Host mode" value="standalone" />
+            <MetadataRow label="Model" value="auto" />
+          </div>
+          <ConfigFieldError message={configFieldErrors.backend} />
+          <ConfigFieldError message={configFieldErrors.host_mode} />
           <div className="grid gap-2 sm:grid-cols-2">
-            <label className="grid gap-1 text-xs text-text-secondary">
-              Backend
-              <select
-                aria-label="Backend"
-                className="h-8 border border-border bg-background px-2 text-xs"
-                value={configDraft.backend}
-                onChange={(event) =>
-                  updateConfigDraft({
-                    backend: event.currentTarget.value as SelectableAutomationBackend,
-                  })
-                }
-              >
-                <option value="disabled">Disabled</option>
-                <option value="codex_app_server">Codex app server</option>
-              </select>
-              <ConfigFieldError message={configFieldErrors.backend} />
-            </label>
-            <label className="grid gap-1 text-xs text-text-secondary">
-              Host mode
-              <select
-                aria-label="Host mode"
-                className="h-8 border border-border bg-background px-2 text-xs"
-                value={configDraft.host_mode}
-                onChange={(event) =>
-                  updateConfigDraft({
-                    host_mode: event.currentTarget.value as typeof configDraft.host_mode,
-                  })
-                }
-              >
-                <option value="standalone">Standalone</option>
-                <option value="delegated_host">Delegated host</option>
-              </select>
-              <ConfigFieldError message={configFieldErrors.host_mode} />
-            </label>
-          </div>
-          <div className="grid gap-2 sm:grid-cols-[1fr_8rem_8rem]">
-            <label className="grid gap-1 text-xs text-text-secondary">
-              Model
-              <Input
-                aria-label="Model"
-                value={configDraft.model ?? ""}
-                onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                  updateConfigDraft({ model: event.currentTarget.value || null })
-                }
-              />
-            </label>
             <label className="grid gap-1 text-xs text-text-secondary">
               Timeout
               <Input
@@ -212,43 +164,6 @@ export function AutomationConfigSection({
                 }
               />
               <ConfigFieldError message={configFieldErrors.scheduler_tick_secs} />
-            </label>
-          </div>
-          <div className="grid gap-2 sm:grid-cols-2">
-            <label className="grid gap-1 text-xs text-text-secondary">
-              Max tokens
-              <Input
-                aria-label="Max tokens"
-                type="number"
-                min={1}
-                value={configDraft.max_tokens ?? ""}
-                onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                  updateConfigDraft({
-                    max_tokens: event.currentTarget.value
-                      ? Math.max(1, Number(event.currentTarget.value) || 1)
-                      : null,
-                  })
-                }
-              />
-              <ConfigFieldError message={configFieldErrors.max_tokens} />
-            </label>
-            <label className="grid gap-1 text-xs text-text-secondary">
-              Temperature
-              <Input
-                aria-label="Temperature"
-                type="number"
-                min={0}
-                step={0.1}
-                value={configDraft.temperature ?? ""}
-                onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                  updateConfigDraft({
-                    temperature: event.currentTarget.value
-                      ? Math.max(0, Number(event.currentTarget.value) || 0)
-                      : null,
-                  })
-                }
-              />
-              <ConfigFieldError message={configFieldErrors.temperature} />
             </label>
           </div>
           {AUTOMATION_TASKS.map((descriptor) => (

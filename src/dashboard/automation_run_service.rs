@@ -11,23 +11,7 @@ pub(crate) struct MemoryCuratorRunRequest {
     pub min_confidence: f64,
 }
 
-pub(crate) async fn curation_agent_plan_payload(
-    state: &DashboardState,
-    max_clusters: usize,
-    min_confidence: f64,
-) -> Result<Value, String> {
-    Box::pin(curation_agent_plan_payload_with_run_id(
-        state,
-        MemoryCuratorRunRequest {
-            max_clusters,
-            min_confidence,
-        },
-        None,
-    ))
-    .await
-}
-
-pub(crate) async fn curation_agent_plan_payload_with_run_id(
+pub(crate) async fn memory_curator_run_payload_with_run_id(
     state: &DashboardState,
     request: MemoryCuratorRunRequest,
     run_id: Option<String>,
@@ -40,7 +24,7 @@ pub(crate) async fn curation_agent_plan_payload_with_run_id(
     push_curation_activity(
         state,
         "queued",
-        "Queued standalone memory-curator agent plan",
+        "Queued standalone memory-curator automation run",
         true,
     )
     .await;
@@ -58,7 +42,7 @@ pub(crate) async fn curation_agent_plan_payload_with_run_id(
             push_curation_activity(
                 state,
                 "finish",
-                "Finished standalone memory-curator agent plan with setup failure",
+                "Finished standalone memory-curator automation run with setup failure",
                 true,
             )
             .await;
@@ -76,6 +60,7 @@ pub(crate) async fn curation_agent_plan_payload_with_run_id(
         true,
     )
     .await;
+
     push_curation_activity(
         state,
         "backend",
@@ -109,7 +94,7 @@ pub(crate) async fn curation_agent_plan_payload_with_run_id(
             push_curation_activity(
                 state,
                 "finish",
-                "Finished standalone memory-curator agent plan with backend failure",
+                "Finished standalone memory-curator automation run with backend failure",
                 true,
             )
             .await;
@@ -129,7 +114,7 @@ pub(crate) async fn curation_agent_plan_payload_with_run_id(
             state,
             "report",
             format!(
-                "Agent plan {}: backend unavailable; no changes proposed",
+                "Memory-curator automation run {}: backend unavailable; no changes proposed",
                 run.ledger_record.status.as_str()
             ),
             true,
@@ -138,7 +123,7 @@ pub(crate) async fn curation_agent_plan_payload_with_run_id(
         push_curation_activity(
             state,
             "finish",
-            "Finished standalone memory-curator agent plan with no-op fallback",
+            "Finished standalone memory-curator automation run with no-op fallback",
             true,
         )
         .await;
@@ -203,7 +188,7 @@ pub(crate) async fn curation_agent_plan_payload_with_run_id(
         state,
         "report",
         format!(
-            "Agent plan {}: {} accepted op(s), {} rejected op(s)",
+            "Memory-curator automation run {}: {} accepted op(s), {} rejected op(s)",
             run.ledger_record.status.as_str(),
             run.ledger_record.accepted_count,
             run.ledger_record.rejected_count
@@ -215,7 +200,7 @@ pub(crate) async fn curation_agent_plan_payload_with_run_id(
         state,
         "finish",
         format!(
-            "Finished standalone memory-curator agent plan: {}",
+            "Finished standalone memory-curator automation run: {}",
             run.ledger_record.status.as_str()
         ),
         true,
@@ -515,6 +500,7 @@ async fn push_dashboard_automation_activity_result(
         .await;
         return;
     }
+    let mutates_store = automation_record_mutates_store(record);
 
     push_curation_activity(
         state,
@@ -529,8 +515,15 @@ async fn push_dashboard_automation_activity_result(
     push_curation_activity(
         state,
         "apply",
-        format!("Dashboard {task_label} run kept mutations gated behind approval controls"),
-        true,
+        format!(
+            "Dashboard {task_label} automation run recorded store mutation {}",
+            if mutates_store {
+                "performed"
+            } else {
+                "not performed"
+            }
+        ),
+        !mutates_store,
     )
     .await;
     push_curation_activity(
@@ -542,7 +535,7 @@ async fn push_dashboard_automation_activity_result(
             record.accepted_count,
             record.rejected_count
         ),
-        true,
+        !mutates_store,
     )
     .await;
     push_curation_activity(
@@ -552,9 +545,22 @@ async fn push_dashboard_automation_activity_result(
             "Finished dashboard {task_label} automation run: {}",
             record.status.as_str()
         ),
-        true,
+        !mutates_store,
     )
     .await;
+}
+
+fn automation_record_mutates_store(
+    record: &crate::automation::run_ledger::AutomationRunLedgerRecord,
+) -> bool {
+    let Some(report) = record.validation_report.as_ref() else {
+        return false;
+    };
+    report
+        .pointer("/automation_apply_policy/mutates_store")
+        .or_else(|| report.pointer("/session_fact_apply_policy/mutates_store"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 struct DashboardAutomationRunContext {
@@ -598,7 +604,6 @@ fn automation_run_payload(
 ) -> Value {
     json!({
         "run_id": run_id,
-        "dry_run": true,
         "status": ledger_record.status,
         "report": report,
         "ledger_record": ledger_record,

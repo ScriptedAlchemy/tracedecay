@@ -561,7 +561,7 @@ pub async fn run_user_job_with_backend(
     };
 
     let mut record = ctx.base_record(AutomationRunStatus::Succeeded, None);
-    record.model = response.model.clone().or_else(|| config.model.clone());
+    record.model = response.model.clone();
     record.input_hash = input_hash;
     record.output_hash = Some(sha256_json(&json!(response.output_text)));
     record.validation_report = Some(json!({
@@ -643,7 +643,7 @@ impl JobRunContext<'_> {
             ),
             response_schema: None,
             strict_json: Some(false),
-            model: self.config.model.clone(),
+            model: None,
             status,
             evidence_hash: None,
             input_hash: None,

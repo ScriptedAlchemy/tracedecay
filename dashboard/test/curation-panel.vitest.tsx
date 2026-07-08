@@ -4,9 +4,6 @@ import { describe, expect, it, vi } from "vitest";
 import CurationPanel from "../holographic/src/CurationPanel";
 
 const apiMock = vi.hoisted(() => ({
-  getMemoryCuratorPreview: vi
-    .fn()
-    .mockResolvedValue({ report: null, saved_at: null }),
   getMemoryCuratorActivity: vi.fn().mockResolvedValue({ events: [] }),
   getMemoryCuratorStatus: vi.fn().mockResolvedValue({
     provider: "tracedecay",
@@ -21,12 +18,8 @@ const apiMock = vi.hoisted(() => ({
       enabled: true,
       backend: "codex_app_server",
       host_mode: "standalone",
-      model: null,
       timeout_secs: 60,
       scheduler_tick_secs: 60,
-      max_tokens: null,
-      temperature: null,
-      require_dashboard_approval: true,
       auto_apply_memory_ops: false,
       auto_enable_skills: false,
       tasks: {
@@ -50,12 +43,8 @@ const apiMock = vi.hoisted(() => ({
         enabled: patch.enabled ?? false,
         backend: patch.backend ?? "disabled",
         host_mode: patch.host_mode ?? "standalone",
-        model: patch.model ?? null,
         timeout_secs: patch.timeout_secs ?? 60,
         scheduler_tick_secs: patch.scheduler_tick_secs ?? 60,
-        max_tokens: patch.max_tokens ?? null,
-        temperature: patch.temperature ?? null,
-        require_dashboard_approval: patch.require_dashboard_approval ?? true,
         auto_apply_memory_ops: patch.auto_apply_memory_ops ?? false,
         auto_enable_skills: patch.auto_enable_skills ?? false,
         tasks: {
@@ -88,12 +77,8 @@ const apiMock = vi.hoisted(() => ({
       enabled: true,
       backend: "codex_app_server",
       host_mode: "standalone",
-      model: null,
       timeout_secs: 60,
       scheduler_tick_secs: 60,
-      max_tokens: null,
-      temperature: null,
-      require_dashboard_approval: true,
       auto_apply_memory_ops: false,
       auto_enable_skills: false,
       tasks: {
@@ -420,7 +405,6 @@ const apiMock = vi.hoisted(() => ({
   getMemoryOplog: vi.fn().mockResolvedValue({ events: [] }),
   postAutomationRunMemoryCurator: vi.fn().mockResolvedValue({
     run_id: "queued-memory-curator",
-    dry_run: true,
     status: "queued",
     report: { queued: true },
     ledger_record: {
@@ -430,7 +414,6 @@ const apiMock = vi.hoisted(() => ({
       task: "memory_curator",
       backend: "codex_app_server",
       host_mode: "standalone",
-      model: null,
       status: "queued",
       accepted_count: 0,
       rejected_count: 0,
@@ -440,7 +423,6 @@ const apiMock = vi.hoisted(() => ({
   }),
   postAutomationRunSessionReflection: vi.fn().mockResolvedValue({
     run_id: "queued-session-reflector",
-    dry_run: true,
     status: "queued",
     ledger_record: {
       schema_version: 2,
@@ -449,7 +431,6 @@ const apiMock = vi.hoisted(() => ({
       task: "session_reflector",
       backend: "codex_app_server",
       host_mode: "standalone",
-      model: null,
       status: "queued",
       accepted_count: 0,
       rejected_count: 0,
@@ -459,7 +440,6 @@ const apiMock = vi.hoisted(() => ({
   }),
   postAutomationRunSkillWriting: vi.fn().mockResolvedValue({
     run_id: "queued-skill-writer",
-    dry_run: true,
     status: "queued",
     ledger_record: {
       schema_version: 2,
@@ -468,7 +448,6 @@ const apiMock = vi.hoisted(() => ({
       task: "skill_writer",
       backend: "codex_app_server",
       host_mode: "standalone",
-      model: null,
       status: "queued",
       accepted_count: 0,
       rejected_count: 0,
@@ -476,7 +455,6 @@ const apiMock = vi.hoisted(() => ({
       completed_at: "2026-06-24T12:00:04Z",
     },
   }),
-  postMemoryCurate: vi.fn(),
 }));
 
 vi.mock("../holographic/src/api", () => ({
@@ -498,9 +476,8 @@ describe("CurationPanel", () => {
 
     const tabs = screen.getAllByRole("tab");
 
-    expect(tabs).toHaveLength(5);
+    expect(tabs).toHaveLength(4);
     expect(tabs.map((tab) => tab.getAttribute("tabindex"))).toEqual([
-      "0",
       "0",
       "0",
       "0",
@@ -508,17 +485,16 @@ describe("CurationPanel", () => {
     ]);
   });
 
-  it("saves automation runtime limits from dashboard controls", async () => {
+  it("saves automation scheduler timing from dashboard controls", async () => {
     renderAutomationPanel();
 
-    const maxTokens = await screen.findByLabelText("Max tokens");
-    const temperature = await screen.findByLabelText("Temperature");
     const schedulerTick = await screen.findByLabelText(
       "Scheduler tick seconds",
     );
 
-    fireEvent.change(maxTokens, { target: { value: "4096" } });
-    fireEvent.change(temperature, { target: { value: "0.2" } });
+    expect(screen.queryByLabelText("Max tokens")).toBeNull();
+    expect(screen.queryByLabelText("Temperature")).toBeNull();
+    expect(screen.queryByLabelText("Model")).toBeNull();
     fireEvent.change(schedulerTick, { target: { value: "15" } });
     fireEvent.click(screen.getByRole("button", { name: /save config/i }));
 
@@ -526,8 +502,6 @@ describe("CurationPanel", () => {
       expect(apiMock.patchMemoryAutomationConfig).toHaveBeenCalledWith(
         expect.objectContaining({
           scheduler_tick_secs: 15,
-          max_tokens: 4096,
-          temperature: 0.2,
         }),
       );
     });
@@ -536,7 +510,7 @@ describe("CurationPanel", () => {
   it("resets automation overrides from dashboard controls", async () => {
     renderAutomationPanel();
 
-    await screen.findByLabelText("Max tokens");
+    await screen.findByLabelText("Scheduler tick seconds");
     fireEvent.click(screen.getByRole("button", { name: /reset defaults/i }));
 
     await waitFor(() => {
@@ -564,12 +538,8 @@ describe("CurationPanel", () => {
         enabled: true,
         backend: "codex_app_server",
         host_mode: "standalone",
-        model: null,
         timeout_secs: 60,
         scheduler_tick_secs: 60,
-        max_tokens: null,
-        temperature: null,
-        require_dashboard_approval: true,
         auto_apply_memory_ops: false,
         auto_enable_skills: false,
         tasks: {
@@ -665,14 +635,12 @@ describe("CurationPanel", () => {
     ).toBeTruthy();
   });
 
-  it("does not offer the unimplemented external command backend", async () => {
+  it("shows the fixed app-server backend instead of a backend selector", async () => {
     renderAutomationPanel();
 
-    const backend = (await screen.findByLabelText(
-      "Backend",
-    )) as HTMLSelectElement;
-    const values = Array.from(backend.options).map((option) => option.value);
-    expect(values).toEqual(["disabled", "codex_app_server"]);
+    await screen.findByText("Backend");
+    await screen.findByText("codex_app_server");
+    expect(screen.queryByLabelText("Backend")).toBeNull();
   });
 
   it("renders automation run ledger entries in the automation tab", async () => {
@@ -714,28 +682,33 @@ describe("CurationPanel", () => {
 
     await screen.findByLabelText("Session reflector schedule");
 
+    fireEvent.click(screen.getByRole("button", { name: "Run Memory curator" }));
+
+    await waitFor(() => {
+      expect(apiMock.postAutomationRunMemoryCurator).toHaveBeenCalledWith({});
+    });
+    await waitFor(() => {
+      expect(
+        (screen.getByRole("button", { name: "Run Session reflector" }) as HTMLButtonElement)
+          .disabled,
+      ).toBe(false);
+    });
+
     fireEvent.click(screen.getByRole("button", { name: "Run Session reflector" }));
 
     await waitFor(() => {
-      expect(apiMock.postAutomationRunSessionReflection).toHaveBeenCalledWith({
-        dry_run: true,
-      });
+      expect(apiMock.postAutomationRunSessionReflection).toHaveBeenCalledWith({});
+    });
+    await waitFor(() => {
+      expect(
+        (screen.getByRole("button", { name: "Run Skill writer" }) as HTMLButtonElement).disabled,
+      ).toBe(false);
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Run Skill writer" }));
 
     await waitFor(() => {
-      expect(apiMock.postAutomationRunSkillWriting).toHaveBeenCalledWith({
-        dry_run: true,
-      });
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: "Run Memory curator" }));
-
-    await waitFor(() => {
-      expect(apiMock.postAutomationRunMemoryCurator).toHaveBeenCalledWith({
-        dry_run: true,
-      });
+      expect(apiMock.postAutomationRunSkillWriting).toHaveBeenCalledWith({});
     });
   });
 

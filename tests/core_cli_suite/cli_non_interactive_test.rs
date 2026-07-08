@@ -514,11 +514,8 @@ fn install_codex_automation_enables_tracedecay_daemon_loop_noninteractively() {
     assert_eq!(sidecar["enabled"], true);
     assert_eq!(sidecar["backend"], "codex_app_server");
     assert_eq!(sidecar["host_mode"], "standalone");
-    assert_eq!(sidecar["model"], "gpt-5.5");
-    assert!(
-        sidecar.get("require_dashboard_approval").is_none(),
-        "install must not weaken the approval default: {sidecar}"
-    );
+    assert!(sidecar.get("model").is_none());
+    assert!(sidecar.get("require_dashboard_approval").is_none());
     assert!(
         sidecar.get("auto_apply_memory_ops").is_none(),
         "install must not enable unattended memory ops by default: {sidecar}"
@@ -555,7 +552,7 @@ fn install_codex_automation_auto_apply_flag_opts_into_unattended_memory_ops() {
 
     let sidecar = read_codex_automation_sidecar(&home);
     assert_eq!(sidecar["enabled"], true);
-    assert_eq!(sidecar["require_dashboard_approval"], false);
+    assert!(sidecar.get("require_dashboard_approval").is_none());
     assert_eq!(sidecar["auto_apply_memory_ops"], true);
     assert!(
         sidecar.get("auto_enable_skills").is_none(),
@@ -643,14 +640,8 @@ fn automation_config_set_global_defaults_noninteractively() {
         "global",
         "--backend",
         "codex-app-server",
-        "--model",
-        "global-model",
         "--timeout-secs",
         "75",
-        "--max-tokens",
-        "4096",
-        "--temperature",
-        "0.2",
         "--session-reflector",
         "true",
         "--session-reflector-schedule",
@@ -669,13 +660,9 @@ fn automation_config_set_global_defaults_noninteractively() {
         serde_json::from_slice(&output.stdout).expect("global set should print JSON");
     assert_eq!(payload["project"], serde_json::Value::Null);
     assert_eq!(payload["global"]["backend"], "codex_app_server");
-    assert_eq!(payload["effective"]["model"], "global-model");
-    assert_eq!(payload["effective"]["max_tokens"], 4096);
-    assert!(
-        (payload["effective"]["temperature"].as_f64().unwrap() - 0.2).abs() < 0.0001,
-        "temperature should round-trip near 0.2: {}",
-        payload["effective"]["temperature"]
-    );
+    assert!(payload["effective"].get("model").is_none());
+    assert!(payload["effective"].get("max_tokens").is_none());
+    assert!(payload["effective"].get("temperature").is_none());
     assert_eq!(
         payload["effective"]["tasks"]["session_reflector"]["interval_secs"],
         1800
@@ -684,7 +671,7 @@ fn automation_config_set_global_defaults_noninteractively() {
     let config_toml = std::fs::read_to_string(profile_root(home.path()).join("config.toml"))
         .expect("global config should be saved");
     assert!(config_toml.contains("[automation]"));
-    assert!(config_toml.contains("global-model"));
+    assert!(!config_toml.contains("model"));
 
     let projects_dir = profile_root(home.path()).join("projects");
     assert!(
@@ -704,7 +691,7 @@ fn automation_config_set_global_defaults_noninteractively() {
     let get_payload: serde_json::Value =
         serde_json::from_slice(&get_output.stdout).expect("global get should print JSON");
     assert_eq!(get_payload["effective"]["backend"], "codex_app_server");
-    assert_eq!(get_payload["effective"]["model"], "global-model");
+    assert!(get_payload["effective"].get("model").is_none());
 }
 
 #[test]
@@ -753,16 +740,8 @@ fn automation_config_set_writes_complete_project_sidecar_noninteractively() {
         "codex-app-server",
         "--host-mode",
         "standalone",
-        "--model",
-        "project-model",
         "--timeout-secs",
         "90",
-        "--max-tokens",
-        "2048",
-        "--temperature",
-        "0.3",
-        "--require-dashboard-approval",
-        "true",
         "--auto-apply-memory-ops",
         "true",
         "--auto-enable-skills",
@@ -802,11 +781,13 @@ fn automation_config_set_writes_complete_project_sidecar_noninteractively() {
     let payload: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("project set should print JSON");
     assert_eq!(payload["project"]["backend"], "codex_app_server");
-    assert_eq!(payload["project"]["max_tokens"], 2048);
+    assert!(payload["project"].get("model").is_none());
+    assert!(payload["project"].get("max_tokens").is_none());
+    assert!(payload["project"].get("temperature").is_none());
     assert!(
-        (payload["project"]["temperature"].as_f64().unwrap() - 0.3).abs() < 0.0001,
-        "temperature should round-trip near 0.3: {}",
-        payload["project"]["temperature"]
+        payload["project"]
+            .get("require_dashboard_approval")
+            .is_none()
     );
     assert_eq!(payload["project"]["auto_apply_memory_ops"], true);
     assert_eq!(payload["project"]["auto_enable_skills"], true);
@@ -817,7 +798,7 @@ fn automation_config_set_writes_complete_project_sidecar_noninteractively() {
         1800
     );
     assert_eq!(payload["project"]["skill_writer"]["stale_lock_secs"], 7200);
-    assert_eq!(payload["effective"]["model"], "project-model");
+    assert!(payload["effective"].get("model").is_none());
     assert_eq!(
         payload["effective"]["tasks"]["memory_curator"]["cooldown_secs"],
         300

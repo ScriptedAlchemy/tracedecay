@@ -13,7 +13,6 @@ pub(crate) enum MemoryApplySubject {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MemoryApplyDecision {
     AutoApplyAllowed,
-    RequiresDashboardApproval,
     DryRunOnly,
     ProposalOnly,
     NoValidOps,
@@ -24,7 +23,6 @@ impl MemoryApplyDecision {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::AutoApplyAllowed => "auto_apply_allowed",
-            Self::RequiresDashboardApproval => "requires_dashboard_approval",
             Self::DryRunOnly => "dry_run_only",
             Self::ProposalOnly => "proposal_only",
             Self::NoValidOps => "no_valid_ops",
@@ -54,7 +52,6 @@ pub(crate) struct MemoryApplyPolicy {
     subject: MemoryApplySubject,
     accepted_count: usize,
     auto_apply_memory_ops: bool,
-    require_dashboard_approval: bool,
     mutates_store: bool,
     fully_applied: bool,
 }
@@ -86,7 +83,6 @@ impl MemoryApplyPolicy {
     }
 
     pub(crate) fn session_facts(
-        config: &AutomationConfig,
         accepted_count: usize,
         applied_count: usize,
         auto_managed: bool,
@@ -94,8 +90,7 @@ impl MemoryApplyPolicy {
         Self {
             subject: MemoryApplySubject::SessionFacts,
             accepted_count,
-            auto_apply_memory_ops: should_auto_apply_session_facts(config, accepted_count),
-            require_dashboard_approval: session_facts_require_dashboard_approval(config),
+            auto_apply_memory_ops: accepted_count > 0,
             mutates_store: auto_managed,
             fully_applied: accepted_count > 0 && applied_count >= accepted_count,
         }
@@ -112,14 +107,13 @@ impl MemoryApplyPolicy {
             subject,
             accepted_count,
             auto_apply_memory_ops: config.auto_apply_memory_ops,
-            require_dashboard_approval: config.require_dashboard_approval,
             mutates_store,
             fully_applied,
         }
     }
 
-    pub(crate) fn should_apply(config: &AutomationConfig, accepted_count: usize) -> bool {
-        should_auto_apply_session_facts(config, accepted_count)
+    pub(crate) fn should_apply(accepted_count: usize) -> bool {
+        accepted_count > 0
     }
 
     pub(crate) fn decision(self) -> MemoryApplyDecision {
@@ -129,8 +123,6 @@ impl MemoryApplyPolicy {
             || (self.subject == MemoryApplySubject::SessionFacts && self.mutates_store)
         {
             MemoryApplyDecision::AutoApplyAllowed
-        } else if self.require_dashboard_approval {
-            MemoryApplyDecision::RequiresDashboardApproval
         } else {
             self.subject.dry_run_decision()
         }
@@ -141,9 +133,8 @@ impl MemoryApplyPolicy {
         json!({
             "decision": decision.as_str(),
             "auto_apply_memory_ops": self.auto_apply_memory_ops,
-            "require_dashboard_approval": self.require_dashboard_approval,
-            "approval_required": self.accepted_count > 0
-                && decision != MemoryApplyDecision::AutoApplyAllowed,
+            "require_dashboard_approval": false,
+            "approval_required": false,
             "autonomous_memory_apply": self.mutates_store,
             "mutates_store": self.mutates_store,
         })
@@ -249,13 +240,5 @@ pub(super) fn value_as_usize(value: &Value) -> Option<usize> {
 }
 
 fn should_auto_apply_memory_ops(config: &AutomationConfig, accepted_count: usize) -> bool {
-    accepted_count > 0 && config.auto_apply_memory_ops && !config.require_dashboard_approval
-}
-
-fn should_auto_apply_session_facts(config: &AutomationConfig, accepted_count: usize) -> bool {
-    accepted_count > 0 && !session_facts_require_dashboard_approval(config)
-}
-
-fn session_facts_require_dashboard_approval(config: &AutomationConfig) -> bool {
-    config.require_dashboard_approval && config.auto_apply_memory_ops
+    accepted_count > 0 && config.auto_apply_memory_ops
 }

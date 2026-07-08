@@ -46,28 +46,23 @@ function cloneTaskSet(tasks: AutomationTaskSet): AutomationTaskSet {
 function cloneConfig(config: MemoryAutomationConfig): MemoryAutomationConfig {
   return {
     ...config,
+    backend: "codex_app_server",
+    host_mode: "standalone",
     tasks: cloneTaskSet(config.tasks),
   };
 }
 
 function configToPatch(config: MemoryAutomationConfig): MemoryAutomationConfigPatch {
-  const patch: MemoryAutomationConfigPatch = {
+  return {
     enabled: config.enabled,
-    host_mode: config.host_mode,
-    model: config.model || null,
+    backend: "codex_app_server",
+    host_mode: "standalone",
     timeout_secs: config.timeout_secs,
     scheduler_tick_secs: config.scheduler_tick_secs,
-    max_tokens: config.max_tokens ?? null,
-    temperature: config.temperature ?? null,
-    require_dashboard_approval: config.require_dashboard_approval,
     auto_apply_memory_ops: config.auto_apply_memory_ops,
     auto_enable_skills: config.auto_enable_skills,
     ...cloneTaskSet(config.tasks),
   };
-  if (config.backend !== "external_command") {
-    patch.backend = config.backend;
-  }
-  return patch;
 }
 
 function sameConfig(a: MemoryAutomationConfig | null, b: MemoryAutomationConfig | null) {

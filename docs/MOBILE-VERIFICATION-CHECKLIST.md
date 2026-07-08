@@ -240,15 +240,13 @@ Source: `AssociationGraph.tsx` (SVG force graph, `touch-action:none`).
     No horizontal overflow on pair rows.
 
 ### 4.6 Curation view
-Source: `CurationPanel.tsx` (tabs: Plan / Activity / History; Preview/Apply
-orchestration; polling).
-19. **Plan / Activity / History tabs** are reachable on a phone; switching tabs
+Source: `CurationPanel.tsx` (tabs: Automation / Proposals / History / Activity;
+run orchestration; polling).
+19. **Automation / Proposals / History / Activity tabs** are reachable on a phone; switching tabs
     lazy-loads the right data once each. PASS = no duplicate fetches, no blank
     tab.
-20. **Preview button** (disabled until a dry-run plan exists) and **Apply**
-    (confirm-gated) are tappable; Preview flips to Activity while running then
-    back to Plan on completion. Regression target: §7 R-H4 (preview/apply
-    multi-setter orchestration + double tab switch).
+20. **Run buttons** queue autonomous memory-curator, session-reflector, and
+    skill-writer jobs; Activity and History update without a human review gate.
 21. **Polling suspends while hidden.** The panel polls every 900ms while
     loading/applying, 2500ms otherwise, and **stops when the panel is hidden**
     (`panelRef.offsetParent===null`). Because visited shell tabs stay mounted,
@@ -390,9 +388,9 @@ any failure here as a real regression, not a cosmetic nit.
   `useCallback`s read via refs so `GraphNodes` don't re-render during pan/zoom).
   Check §4.4.16. *A break regresses pan/zoom smoothness — the #1 mobile
   perceptual issue.*
-- **R-H4 — CurationPanel preview()/apply() orchestration** (double tab switch +
-  multi-setter sequencing). Check §4.6.20. *A break leaves the panel on the
-  wrong tab or with stale flags after a run.*
+- **R-H4 — CurationPanel autonomous-run orchestration** (task queue + refresh
+  sequencing). Check §4.6.20. *A break leaves the panel on the wrong tab or
+  with stale activity/history after a run.*
 - **R-H5 — CurationPanel polling-while-hidden** (`panelRef.offsetParent===null`).
   Check §4.6.21. *A break silently polls a hidden tab.* Especially important on
   mobile because the shell keeps visited tabs mounted.
@@ -412,7 +410,7 @@ Apply these across all three dashboards:
    (`styles.css:652`) and Association Graph (`styles.css:673`).
 2. **Tap targets ≥ 44×44px** for all primary controls: shell tabs, theme toggle,
    view-switch tabs, chip toggles, Find-path/Fit/Clear, drawer ✕/Back, pager
-   buttons, Preview/Apply.
+   buttons, and curation run buttons.
 3. **No accidental text selection / callout on long-press** over canvas/SVG
    interaction surfaces (the gesture handlers should prevent it; a regression
    shows the iOS callout menu mid-drag).

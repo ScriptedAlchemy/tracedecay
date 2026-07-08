@@ -22,14 +22,6 @@ export function RunHistorySection({
         label="Last applied summary"
         value={status.state.last_run_summary || "none"}
       />
-      <MetadataRow
-        label="Last preview"
-        value={formatHistoryTime(status.state.last_preview_at) || "never"}
-      />
-      <MetadataRow
-        label="Last preview summary"
-        value={status.state.last_preview_summary || "none"}
-      />
     </div>
   );
 }

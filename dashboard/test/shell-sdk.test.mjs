@@ -108,13 +108,13 @@ test("project scoping routes mutating API calls through the selected project gua
     },
     async () => {
       sdk.setShellSelectedProjectId("proj_gamma");
-      await sdk.fetchJSON("/api/plugins/holographic/curate", { method: "POST" });
+      await sdk.fetchJSON("/api/plugins/holographic/curate/apply", { method: "POST" });
       await sdk.authedFetch("/api/plugins/holographic/curation/config", { method: "PATCH" });
     },
   );
 
   assert.deepEqual(seen, [
-    ["/api/projects/proj_gamma/plugins/holographic/curate", { method: "POST" }],
+    ["/api/projects/proj_gamma/plugins/holographic/curate/apply", { method: "POST" }],
     ["/api/projects/proj_gamma/plugins/holographic/curation/config", { method: "PATCH" }],
   ]);
   sdk.setShellSelectedProjectId("");

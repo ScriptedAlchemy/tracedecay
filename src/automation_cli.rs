@@ -682,12 +682,8 @@ async fn handle_automation_config_command(
         AutomationConfigAction::Set {
             backend,
             host_mode,
-            model,
             timeout_secs,
             scheduler_tick_secs,
-            max_tokens,
-            temperature,
-            require_dashboard_approval,
             auto_apply_memory_ops,
             auto_enable_skills,
             export_memory_digest,
@@ -719,12 +715,8 @@ async fn handle_automation_config_command(
                 .as_deref()
                 .map(parse_automation_host_mode)
                 .transpose()?,
-            model: model.map(empty_string_or_none_clears),
             timeout_secs,
             scheduler_tick_secs,
-            max_tokens: parse_optional_u32(max_tokens, "max_tokens")?,
-            temperature: parse_optional_f32(temperature, "temperature")?,
-            require_dashboard_approval,
             auto_apply_memory_ops,
             auto_enable_skills,
             export_memory_digest,
@@ -813,20 +805,6 @@ fn parse_optional_u64(
     parse_optional_number(value, field, str::parse::<u64>)
 }
 
-fn parse_optional_u32(
-    value: Option<String>,
-    field: &str,
-) -> tracedecay::errors::Result<Option<Option<u32>>> {
-    parse_optional_number(value, field, str::parse::<u32>)
-}
-
-fn parse_optional_f32(
-    value: Option<String>,
-    field: &str,
-) -> tracedecay::errors::Result<Option<Option<f32>>> {
-    parse_optional_number(value, field, str::parse::<f32>)
-}
-
 fn parse_optional_number<T, E>(
     value: Option<String>,
     field: &str,
@@ -879,7 +857,6 @@ fn print_automation_config(
             "source": source,
             "trace_decay_backend_calls": trace_decay_backend_calls,
             "delegated_host": delegated_host,
-            "approval_required": effective.require_dashboard_approval,
             "auto_apply_memory_ops": effective.auto_apply_memory_ops,
             "auto_enable_skills": effective.auto_enable_skills,
             "export_memory_digest": effective.export_memory_digest,
@@ -903,10 +880,7 @@ fn print_automation_config(
         if let Some(reason) = availability.reason.as_deref() {
             println!("backend_reason: {reason}");
         }
-        println!(
-            "model: {}",
-            effective.model.as_deref().unwrap_or("<provider default>")
-        );
+        println!("model: auto");
         println!("timeout_secs: {}", effective.timeout_secs);
         println!("scheduler_tick_secs: {}", effective.scheduler_tick_secs);
         println!("memory_curator: {}", effective.tasks.memory_curator.enabled);
@@ -916,10 +890,6 @@ fn print_automation_config(
                 effective.tasks.session_reflector.enabled
             );
             println!("skill_writer: {}", effective.tasks.skill_writer.enabled);
-            println!(
-                "require_dashboard_approval: {}",
-                effective.require_dashboard_approval
-            );
             println!("auto_apply_memory_ops: {}", effective.auto_apply_memory_ops);
             println!("auto_enable_skills: {}", effective.auto_enable_skills);
             println!("export_memory_digest: {}", effective.export_memory_digest);

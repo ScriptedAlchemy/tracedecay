@@ -260,8 +260,6 @@ fn fake_codex_app_server_returns_summary_and_logs_protocol() {
         codex_bin: fake.bin.display().to_string(),
         model: Some("configured-model".to_string()),
         timeout: fake_codex_response_timeout(),
-        max_tokens: Some(2048),
-        temperature: Some(0.2),
     };
 
     let summary =
@@ -280,12 +278,8 @@ fn fake_codex_app_server_returns_summary_and_logs_protocol() {
     assert_eq!(messages[3]["method"], "turn/start");
     assert_eq!(messages[3]["params"]["threadId"], "thread-1");
     assert_eq!(messages[3]["params"]["model"], "configured-model");
-    assert_eq!(messages[3]["params"]["maxOutputTokens"], 2048);
-    assert!(
-        (messages[3]["params"]["temperature"].as_f64().unwrap() - 0.2).abs() < 0.0001,
-        "temperature should be forwarded: {}",
-        messages[3]["params"]["temperature"]
-    );
+    assert!(messages[3]["params"].get("maxOutputTokens").is_none());
+    assert!(messages[3]["params"].get("temperature").is_none());
     assert_eq!(messages[3]["params"]["effort"], "low");
     assert_eq!(messages[3]["params"]["summary"], "concise");
     assert_eq!(
@@ -302,8 +296,6 @@ fn codex_app_server_backend_run_task_uses_injected_config() {
         codex_bin: fake.bin.display().to_string(),
         model: Some("configured-model".to_string()),
         timeout: fake_codex_response_timeout(),
-        max_tokens: None,
-        temperature: None,
     });
     let request = AgentTaskRequest::new(
         "run_app_server".to_string(),
@@ -348,8 +340,6 @@ fn codex_app_server_backend_uses_first_schema_matching_json_object() {
         codex_bin: fake.bin.display().to_string(),
         model: Some("configured-model".to_string()),
         timeout: fake_codex_response_timeout(),
-        max_tokens: None,
-        temperature: None,
     });
     let request = AgentTaskRequest::new(
         "run_app_server_echo".to_string(),
@@ -384,8 +374,6 @@ fn codex_app_server_backend_falls_back_to_configured_model_when_server_omits_mod
         codex_bin: fake.bin.display().to_string(),
         model: Some("configured-model".to_string()),
         timeout: fake_codex_response_timeout(),
-        max_tokens: None,
-        temperature: None,
     });
     let request = AgentTaskRequest::new(
         "run_app_server".to_string(),
@@ -404,7 +392,7 @@ fn codex_app_server_backend_falls_back_to_configured_model_when_server_omits_mod
 }
 
 #[test]
-fn codex_app_server_backend_from_automation_config_forwards_runtime_limits() {
+fn codex_app_server_backend_from_automation_config_lets_app_server_choose_model() {
     let fake = FakeCodexAppServer::new_with_behavior("json");
     // Env vars are only read while the backend is constructed, so hold the
     // env lock just for that window instead of across the subprocess run.
@@ -413,10 +401,7 @@ fn codex_app_server_backend_from_automation_config_forwards_runtime_limits() {
         let _codex_bin = EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &fake.bin);
         CodexAppServerBackend::from_automation_config(&AutomationConfig {
             backend: AutomationBackend::CodexAppServer,
-            model: Some("automation-model".to_string()),
             timeout_secs: fake_codex_response_timeout_secs(),
-            max_tokens: Some(1024),
-            temperature: Some(0.4),
             ..AutomationConfig::default()
         })
     };
@@ -433,19 +418,15 @@ fn codex_app_server_backend_from_automation_config_forwards_runtime_limits() {
     assert_eq!(response.run_id, "run_runtime_options");
     assert_eq!(response.output_json.unwrap()["facts"], json!([]));
     let messages = fake.logged_messages();
-    assert_eq!(messages[2]["params"]["model"], "automation-model");
-    assert_eq!(messages[3]["params"]["model"], "automation-model");
-    assert_eq!(messages[3]["params"]["maxOutputTokens"], 1024);
-    assert!(
-        (messages[3]["params"]["temperature"].as_f64().unwrap() - 0.4).abs() < 0.0001,
-        "temperature should be forwarded: {}",
-        messages[3]["params"]["temperature"]
-    );
+    assert!(messages[2]["params"].get("model").is_none());
+    assert!(messages[3]["params"].get("model").is_none());
+    assert!(messages[3]["params"].get("maxOutputTokens").is_none());
+    assert!(messages[3]["params"].get("temperature").is_none());
     assert_process_gone(fake.child_pid());
 }
 
 #[test]
-fn codex_app_server_backend_uses_env_runtime_limits_when_config_omits_them() {
+fn codex_app_server_backend_ignores_env_generation_options() {
     let fake = FakeCodexAppServer::new_with_behavior("json");
     // Env vars are only read while the backend is constructed, so hold the
     // env lock just for that window instead of across the subprocess run.
@@ -456,10 +437,7 @@ fn codex_app_server_backend_uses_env_runtime_limits_when_config_omits_them() {
         let _temperature = EnvVarGuard::set("TRACEDECAY_CODEX_SUMMARY_TEMPERATURE", "0.25");
         CodexAppServerBackend::from_automation_config(&AutomationConfig {
             backend: AutomationBackend::CodexAppServer,
-            model: Some("automation-model".to_string()),
             timeout_secs: fake_codex_response_timeout_secs(),
-            max_tokens: None,
-            temperature: None,
             ..AutomationConfig::default()
         })
     };
@@ -476,12 +454,8 @@ fn codex_app_server_backend_uses_env_runtime_limits_when_config_omits_them() {
     assert_eq!(response.run_id, "run_env_runtime_options");
     assert_eq!(response.output_json.unwrap()["skills"], json!([]));
     let messages = fake.logged_messages();
-    assert_eq!(messages[3]["params"]["maxOutputTokens"], 2048);
-    assert!(
-        (messages[3]["params"]["temperature"].as_f64().unwrap() - 0.25).abs() < 0.0001,
-        "temperature should fall back to env config: {}",
-        messages[3]["params"]["temperature"]
-    );
+    assert!(messages[3]["params"].get("maxOutputTokens").is_none());
+    assert!(messages[3]["params"].get("temperature").is_none());
     assert_process_gone(fake.child_pid());
 }
 
@@ -571,8 +545,6 @@ fn fake_codex_app_server_uses_thread_model_when_turn_omits_model() {
         codex_bin: fake.bin.display().to_string(),
         model: Some("configured-model".to_string()),
         timeout: fake_codex_response_timeout(),
-        max_tokens: None,
-        temperature: None,
     };
 
     let summary =
@@ -590,8 +562,6 @@ fn fake_codex_app_server_rejects_empty_turn_output() {
         codex_bin: fake.bin.display().to_string(),
         model: None,
         timeout: fake_codex_response_timeout(),
-        max_tokens: None,
-        temperature: None,
     };
 
     let err = run_prompt_with_codex_app_server("summarize this", &config, "test_source")
@@ -612,8 +582,6 @@ fn fake_codex_app_server_times_out_and_reaps_child() {
         codex_bin: fake.bin.display().to_string(),
         model: None,
         timeout: Duration::from_millis(300),
-        max_tokens: None,
-        temperature: None,
     };
 
     let err = run_prompt_with_codex_app_server("summarize this", &config, "test_source")
@@ -634,8 +602,6 @@ fn fake_codex_app_server_rejects_malformed_json_and_reaps_child() {
         codex_bin: fake.bin.display().to_string(),
         model: None,
         timeout: fake_codex_response_timeout(),
-        max_tokens: None,
-        temperature: None,
     };
 
     let err = run_prompt_with_codex_app_server("summarize this", &config, "test_source")
@@ -662,8 +628,6 @@ fn backend_error_for_behavior(behavior: &str, timeout: Duration) -> (String, u32
         codex_bin: fake.bin.display().to_string(),
         model: Some("configured-model".to_string()),
         timeout,
-        max_tokens: None,
-        temperature: None,
     });
     let request = AgentTaskRequest::new(
         format!("run_{behavior}"),

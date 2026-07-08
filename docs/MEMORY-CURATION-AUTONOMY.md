@@ -4,18 +4,22 @@
 
 This guide turns the autonomous memory curation design into an operator runbook.
 It applies to TraceDecay project memory, the standalone dashboard curation UI,
-the `tracedecay memory curate` CLI, and wrappers such as Hermes that layer LLM
-planning on top of the TraceDecay curation contracts.
+the `tracedecay memory curate` CLI, and automation backends that submit
+validated operations through TraceDecay curation contracts.
 
-The operating principle is conservative: agents may mine, explain, cluster,
-score, and draft curation operations. Durable mutation remains gated by
-evidence, risk tier, policy, and review. Memory deletion is permanent by
-design. There is no archive, soft-delete state, restore flow, undo flow, or
-recycle-bin behavior.
+The operating principle is conservative and autonomous: agents may mine,
+explain, cluster, score, validate, and apply accepted curation operations.
+Durable mutation is gated by evidence, risk tier, apply policy, logs, and
+telemetry rather than a dashboard preview/review form. Memory deletion is
+permanent by design. There is no archive, soft-delete state, restore flow, undo
+flow, or recycle-bin behavior.
 
 ## Current Curation Surfaces
 
-Destructive memory curation is parent-agent only. Subagents may inspect, classify, and draft proposed actions within their assigned scope, but they must not apply deletes, merges, retention sweeps, or other irreversible memory mutations. The parent agent owns the final review, tool invocation, and post-action verification.
+Destructive memory curation is automation-owned. Subagents may inspect,
+classify, and draft proposed actions within their assigned scope, but durable
+store mutation must flow through the configured automation/apply policy so runs
+produce ledger records, activity events, artifacts, and post-action telemetry.
 
 
 Use existing TraceDecay surfaces before inventing a new plan format:
@@ -24,13 +28,11 @@ Use existing TraceDecay surfaces before inventing a new plan format:
   add, update, remove, and contradiction checks.
 - `tracedecay_memory_status`: memory health and vector/bank repair; use only
   when health/counts are part of the task because it may mutate derived state.
-- Dashboard preview:
-  `POST /api/plugins/holographic/curate` with `{"dry_run": true}`. Dry-run is
-  the default. It returns a report and persists the latest preview to
-  `.tracedecay/dashboard/curation_preview.json`.
-- Dashboard apply:
-  `POST /api/plugins/holographic/curate` with `{"dry_run": false}` applies the
-  deterministic similarity-dedup plan by hard-deleting duplicate loser facts.
+- Dashboard automation:
+  `POST /api/automation/run/memory-curator` queues an autonomous app-server
+  memory-curator run. Accepted operations are applied according to automation
+  policy and every phase is logged to the run ledger and curation activity
+  stream.
 - Generic apply:
   `POST /api/plugins/holographic/curate/apply` with `{"ops": [...]}` applies
   explicit `delete` and `merge` operations and reports per-op results.
@@ -284,7 +286,6 @@ Existing code already covers core dry-run/apply behavior. When curation logic
 changes, run the focused tests that match the touched surface:
 
 - `cargo nextest run curation_delete_lifecycle`
-- `cargo nextest run curation_preview_persists_across_dashboard_restarts`
 - `cargo nextest run curate_apply_merge_with_missing_loser_is_atomic`
 - `cargo nextest run validate_llm_ops_allows_delete_and_merge_with_candidate_evidence`
 

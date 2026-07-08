@@ -10,27 +10,8 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-interface Deferred<T> {
-  promise: Promise<T>;
-  resolve: (value: T | PromiseLike<T>) => void;
-  reject: (reason?: unknown) => void;
-}
-
-function deferred<T = unknown>(): Deferred<T> {
-  let resolve!: Deferred<T>["resolve"];
-  let reject!: Deferred<T>["reject"];
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
-}
-
 function makeApi(overrides: Partial<CurationApi> = {}): CurationApi {
   return {
-    getMemoryCuratorPreview: vi
-      .fn()
-      .mockResolvedValue({ report: null, saved_at: null }),
     getMemoryCuratorActivity: vi.fn().mockResolvedValue({ events: [] }),
     getMemoryAutomationRuns: vi.fn().mockResolvedValue({ records: [] }),
     getAutomationSchedulerStatus: vi.fn().mockResolvedValue({
@@ -101,12 +82,8 @@ function makeApi(overrides: Partial<CurationApi> = {}): CurationApi {
     disableManagedSkill: vi.fn(),
     archiveManagedSkill: vi.fn(),
     restoreManagedSkill: vi.fn(),
-    postMemoryCurate: vi
-      .fn()
-      .mockResolvedValue({ dry_run: true, actions: [], counts: {} }),
     postAutomationRunMemoryCurator: vi.fn().mockResolvedValue({
       run_id: "memory-run",
-      dry_run: true,
       status: "skipped",
       report: {
         dry_run: true,
@@ -130,7 +107,6 @@ function makeApi(overrides: Partial<CurationApi> = {}): CurationApi {
     }),
     postAutomationRunSessionReflection: vi.fn().mockResolvedValue({
       run_id: "reflection-run",
-      dry_run: true,
       status: "skipped",
       report: { status: "skipped", reason: "automation_disabled" },
       ledger_record: {
@@ -149,7 +125,6 @@ function makeApi(overrides: Partial<CurationApi> = {}): CurationApi {
     }),
     postAutomationRunSkillWriting: vi.fn().mockResolvedValue({
       run_id: "skill-run",
-      dry_run: true,
       status: "skipped",
       report: { status: "skipped", reason: "automation_disabled" },
       ledger_record: {
@@ -174,12 +149,8 @@ function makeApi(overrides: Partial<CurationApi> = {}): CurationApi {
         enabled: false,
         backend: "disabled",
         host_mode: "standalone",
-        model: null,
         timeout_secs: 60,
         scheduler_tick_secs: 60,
-        max_tokens: null,
-        temperature: null,
-        require_dashboard_approval: true,
         auto_apply_memory_ops: false,
         auto_enable_skills: false,
         tasks: {
@@ -197,12 +168,8 @@ function makeApi(overrides: Partial<CurationApi> = {}): CurationApi {
           enabled: patch.enabled ?? false,
           backend: patch.backend ?? "disabled",
           host_mode: patch.host_mode ?? "standalone",
-          model: patch.model ?? null,
           timeout_secs: patch.timeout_secs ?? 60,
           scheduler_tick_secs: patch.scheduler_tick_secs ?? 60,
-          max_tokens: patch.max_tokens ?? null,
-          temperature: patch.temperature ?? null,
-          require_dashboard_approval: patch.require_dashboard_approval ?? true,
           auto_apply_memory_ops: patch.auto_apply_memory_ops ?? false,
           auto_enable_skills: patch.auto_enable_skills ?? false,
           tasks: {
@@ -229,12 +196,8 @@ function makeApi(overrides: Partial<CurationApi> = {}): CurationApi {
         enabled: false,
         backend: "disabled",
         host_mode: "standalone",
-        model: null,
         timeout_secs: 60,
         scheduler_tick_secs: 60,
-        max_tokens: null,
-        temperature: null,
-        require_dashboard_approval: true,
         auto_apply_memory_ops: false,
         auto_enable_skills: false,
         tasks: {
@@ -250,131 +213,6 @@ function makeApi(overrides: Partial<CurationApi> = {}): CurationApi {
 }
 
 describe("useCurationData", () => {
-  it("preview() flips to activity while running, then lands on plan with a fresh saved preview timestamp", async () => {
-    vi.useFakeTimers();
-    const run = deferred();
-    const savedPreview = {
-      dry_run: true,
-      actions: [{ op: "retag" }],
-      counts: { retag: 1 },
-    };
-    const api = makeApi({
-      postMemoryCurate: vi.fn().mockImplementation(() => run.promise),
-      getMemoryCuratorPreview: vi
-        .fn()
-        .mockResolvedValueOnce({ report: null, saved_at: null })
-        .mockResolvedValue({
-          report: savedPreview,
-          saved_at: "2026-06-14T12:00:00.000Z",
-        }),
-    });
-
-    const { result } = renderHook(() =>
-      useCurationData({
-        api,
-        now: () => "2026-06-14T12:00:00.000Z",
-      }),
-    );
-
-    await act(async () => {
-      await Promise.resolve();
-    });
-
-    let pending!: Promise<unknown>;
-    act(() => {
-      pending = result.current.preview();
-    });
-    expect(result.current.loading).toBe(true);
-    expect(result.current.activeTab).toBe("activity");
-    expect(api.getMemoryCuratorActivity).toHaveBeenCalled();
-
-    await act(async () => {
-      run.resolve({
-        dry_run: true,
-        actions: [{ op: "retag" }],
-        counts: { retag: 1 },
-      });
-      await pending;
-      await Promise.resolve();
-    });
-
-    expect(result.current.loading).toBe(false);
-    expect(result.current.activeTab).toBe("plan");
-    expect(result.current.report).toMatchObject({
-      dry_run: true,
-      actions: [{ op: "retag" }],
-    });
-    expect(result.current.previewSavedAt).toBe("2026-06-14T12:00:00.000Z");
-    expect(result.current.previewStale).toBe(false);
-    vi.useRealTimers();
-  });
-
-  it("apply() clears the saved preview, closes confirmation, and notifies the parent callback", async () => {
-    const applyRun = deferred();
-    const onApplied = vi.fn();
-    const savedPreview = {
-      dry_run: true,
-      actions: [{ op: "delete" }],
-      counts: { delete: 1 },
-    };
-    const api = makeApi({
-      getMemoryCuratorPreview: vi
-        .fn()
-        .mockResolvedValueOnce({ report: null, saved_at: null })
-        .mockResolvedValue({
-          report: savedPreview,
-          saved_at: "2026-06-14T12:00:00.000Z",
-        }),
-      postMemoryCurate: vi
-        .fn()
-        .mockImplementation(({ dry_run }) =>
-          dry_run ? Promise.resolve(savedPreview) : applyRun.promise,
-        ),
-    });
-
-    const { result } = renderHook(() =>
-      useCurationData({
-        api,
-        onApplied,
-        now: () => "2026-06-14T12:00:00.000Z",
-      }),
-    );
-
-    await act(async () => {
-      await Promise.resolve();
-    });
-
-    await act(async () => {
-      await result.current.preview();
-    });
-
-    expect(result.current.previewSavedAt).toBe("2026-06-14T12:00:00.000Z");
-    act(() => result.current.setConfirmOpen(true));
-
-    let pending!: Promise<unknown>;
-    act(() => {
-      pending = result.current.apply();
-    });
-    expect(result.current.applying).toBe(true);
-    expect(result.current.activeTab).toBe("activity");
-
-    await act(async () => {
-      applyRun.resolve({
-        dry_run: false,
-        actions: [],
-        counts: {},
-        applied_counts: { delete: 1 },
-      });
-      await pending;
-      await Promise.resolve();
-    });
-
-    expect(result.current.applying).toBe(false);
-    expect(result.current.confirmOpen).toBe(false);
-    expect(result.current.previewStale).toBe(false);
-    expect(onApplied).toHaveBeenCalledTimes(1);
-  });
-
   it("polling respects panel visibility and skips hidden activity tabs", async () => {
     vi.useFakeTimers();
     const api = makeApi();
@@ -424,10 +262,7 @@ describe("useCurationData", () => {
     act(() => {
       result.current.updateConfigDraft({
         enabled: true,
-        model: "project-model",
         scheduler_tick_secs: 15,
-        max_tokens: 4096,
-        temperature: 0.2,
       });
       result.current.updateConfigTaskDraft("memory_curator", {
         enabled: true,
@@ -452,10 +287,9 @@ describe("useCurationData", () => {
     expect(api.patchMemoryAutomationConfig).toHaveBeenCalledWith(
       expect.objectContaining({
         enabled: true,
-        model: "project-model",
+        backend: "codex_app_server",
+        host_mode: "standalone",
         scheduler_tick_secs: 15,
-        max_tokens: 4096,
-        temperature: 0.2,
         memory_curator: {
           enabled: true,
           schedule: "manual",
@@ -466,12 +300,18 @@ describe("useCurationData", () => {
         },
       }),
     );
+    const patchCalls = vi.mocked(api.patchMemoryAutomationConfig).mock.calls;
+    const savedPatch = patchCalls[patchCalls.length - 1]?.[0];
+    expect(savedPatch).not.toHaveProperty("model");
+    expect(savedPatch).not.toHaveProperty("max_tokens");
+    expect(savedPatch).not.toHaveProperty("temperature");
+    expect(savedPatch).not.toHaveProperty("require_dashboard_approval");
     expect(result.current.configDirty).toBe(false);
 
-    act(() => result.current.updateConfigDraft({ model: "changed" }));
+    act(() => result.current.updateConfigDraft({ timeout_secs: 75 }));
     expect(result.current.configDirty).toBe(true);
     act(() => result.current.resetConfigDraft());
-    expect(result.current.configDraft.model).toBe("project-model");
+    expect(result.current.configDraft?.backend).toBe("codex_app_server");
     expect(result.current.configDirty).toBe(false);
   });
 
@@ -479,17 +319,13 @@ describe("useCurationData", () => {
     const api = makeApi({
       getMemoryAutomationConfig: vi.fn().mockResolvedValue({
         global: null,
-        project: { model: "project-model" },
+        project: { timeout_secs: 90 },
         effective: {
           enabled: true,
           backend: "codex_app_server",
           host_mode: "standalone",
-          model: "project-model",
           timeout_secs: 90,
           scheduler_tick_secs: 20,
-          max_tokens: 4096,
-          temperature: 0.2,
-          require_dashboard_approval: true,
           auto_apply_memory_ops: false,
           auto_enable_skills: false,
           tasks: {
@@ -503,7 +339,7 @@ describe("useCurationData", () => {
     const { result } = renderHook(() => useCurationData({ api }));
 
     await waitFor(() => {
-      expect(result.current.configDraft?.model).toBe("project-model");
+      expect(result.current.configDraft?.timeout_secs).toBe(90);
     });
 
     await act(async () => {
@@ -512,7 +348,7 @@ describe("useCurationData", () => {
 
     expect(api.resetMemoryAutomationConfig).toHaveBeenCalledTimes(1);
     expect(result.current.configResponse?.project).toBeNull();
-    expect(result.current.configDraft?.model).toBeNull();
+    expect(result.current.configDraft?.backend).toBe("codex_app_server");
     expect(result.current.configDirty).toBe(false);
   });
 
@@ -527,12 +363,8 @@ describe("useCurationData", () => {
             enabled: true,
             backend: "codex_app_server",
             host_mode: "standalone",
-            model: null,
             timeout_secs: 60,
             scheduler_tick_secs: 60,
-            max_tokens: null,
-            temperature: null,
-            require_dashboard_approval: true,
             auto_apply_memory_ops: false,
             auto_enable_skills: false,
             tasks: {
@@ -549,12 +381,8 @@ describe("useCurationData", () => {
             enabled: true,
             backend: "codex_app_server",
             host_mode: "standalone",
-            model: null,
             timeout_secs: 60,
             scheduler_tick_secs: 60,
-            max_tokens: null,
-            temperature: null,
-            require_dashboard_approval: true,
             auto_apply_memory_ops: false,
             auto_enable_skills: false,
             tasks: {
@@ -571,12 +399,8 @@ describe("useCurationData", () => {
             enabled: true,
             backend: "codex_app_server",
             host_mode: "standalone",
-            model: null,
             timeout_secs: 60,
             scheduler_tick_secs: 60,
-            max_tokens: null,
-            temperature: null,
-            require_dashboard_approval: true,
             auto_apply_memory_ops: false,
             auto_enable_skills: false,
             tasks: {
@@ -765,9 +589,7 @@ describe("useCurationData", () => {
       await result.current.runAutomationTask("session_reflector");
     });
 
-    expect(api.postAutomationRunSessionReflection).toHaveBeenCalledWith({
-      dry_run: true,
-    });
+    expect(api.postAutomationRunSessionReflection).toHaveBeenCalledWith({});
     expect(api.getMemoryAutomationRuns).toHaveBeenCalledWith({ limit: 20 });
     expect(api.getFactProposals).toHaveBeenCalledWith({ limit: 50 });
 
@@ -775,18 +597,14 @@ describe("useCurationData", () => {
       await result.current.runAutomationTask("skill_writer");
     });
 
-    expect(api.postAutomationRunSkillWriting).toHaveBeenCalledWith({
-      dry_run: true,
-    });
+    expect(api.postAutomationRunSkillWriting).toHaveBeenCalledWith({});
     expect(api.getManagedSkills).toHaveBeenCalled();
 
     await act(async () => {
       await result.current.runAutomationTask("memory_curator");
     });
 
-    expect(api.postAutomationRunMemoryCurator).toHaveBeenCalledWith({
-      dry_run: true,
-    });
+    expect(api.postAutomationRunMemoryCurator).toHaveBeenCalledWith({});
     expect(api.getMemoryCuratorActivity).toHaveBeenCalled();
   });
 
@@ -811,7 +629,6 @@ describe("useCurationData", () => {
     const api = makeApi({
       postAutomationRunMemoryCurator: vi.fn().mockResolvedValue({
         run_id: "queued-memory-run",
-        dry_run: true,
         status: "queued",
         ledger_record: queuedRun,
       }),
@@ -834,6 +651,12 @@ describe("useCurationData", () => {
           count: 1,
           limit: 20,
           error: "",
+        })
+        .mockResolvedValue({
+          records: [succeededRun],
+          count: 1,
+          limit: 20,
+          error: "",
         }),
     });
     const { result } = renderHook(() =>
@@ -844,13 +667,26 @@ describe("useCurationData", () => {
       expect(result.current.configDraft).toBeTruthy();
     });
 
+    vi.mocked(api.getMemoryAutomationRuns)
+      .mockReset()
+      .mockResolvedValueOnce({
+        records: [queuedRun],
+        count: 1,
+        limit: 20,
+        error: "",
+      })
+      .mockResolvedValue({
+        records: [succeededRun],
+        count: 1,
+        limit: 20,
+        error: "",
+      });
     vi.useFakeTimers();
 
     await act(async () => {
       await result.current.runAutomationTask("memory_curator");
     });
 
-    expect(result.current.report).toBeNull();
     expect(result.current.automationRuns[0]).toMatchObject({
       run_id: "queued-memory-run",
       status: "queued",
@@ -907,6 +743,16 @@ describe("useCurationData", () => {
           count: 3,
           limit: 20,
           error: "",
+        })
+        .mockResolvedValue({
+          records: [
+            { ...queuedMemoryRun, status: "succeeded" },
+            { ...queuedReflectionRun, status: "succeeded" },
+            { ...queuedSkillRun, status: "succeeded" },
+          ],
+          count: 3,
+          limit: 20,
+          error: "",
         }),
     });
     const { result } = renderHook(() =>
@@ -917,13 +763,30 @@ describe("useCurationData", () => {
       expect(result.current.configDraft).toBeTruthy();
     });
 
+    vi.mocked(api.getMemoryAutomationRuns)
+      .mockReset()
+      .mockResolvedValueOnce({
+        records: [queuedMemoryRun, queuedReflectionRun, queuedSkillRun],
+        count: 3,
+        limit: 20,
+        error: "",
+      })
+      .mockResolvedValue({
+        records: [
+          { ...queuedMemoryRun, status: "succeeded" },
+          { ...queuedReflectionRun, status: "succeeded" },
+          { ...queuedSkillRun, status: "succeeded" },
+        ],
+        count: 3,
+        limit: 20,
+        error: "",
+      });
     vi.useFakeTimers();
 
     await act(async () => {
       await result.current.loadAutomationRuns();
     });
 
-    vi.mocked(api.getMemoryCuratorPreview).mockClear();
     vi.mocked(api.getMemoryCuratorActivity).mockClear();
     vi.mocked(api.getMemoryCuratorStatus).mockClear();
     vi.mocked(api.getFactProposals).mockClear();
@@ -933,7 +796,6 @@ describe("useCurationData", () => {
       await vi.advanceTimersByTimeAsync(25);
     });
 
-    expect(api.getMemoryCuratorPreview).toHaveBeenCalledTimes(1);
     expect(api.getMemoryCuratorActivity).toHaveBeenCalledTimes(1);
     expect(api.getMemoryCuratorStatus).toHaveBeenCalledTimes(1);
     expect(api.getFactProposals).toHaveBeenCalledTimes(1);

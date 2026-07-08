@@ -689,18 +689,10 @@ fn automation_config_commands_parse_project_sidecar_flags() {
         "codex-app-server",
         "--host-mode",
         "delegated-host",
-        "--model",
-        "gpt-test",
         "--timeout-secs",
         "120",
         "--scheduler-tick-secs",
         "30",
-        "--max-tokens",
-        "4096",
-        "--temperature",
-        "0.2",
-        "--require-dashboard-approval",
-        "true",
         "--auto-apply-memory-ops",
         "false",
         "--auto-enable-skills",
@@ -749,12 +741,8 @@ fn automation_config_commands_parse_project_sidecar_flags() {
                         scope,
                         backend,
                         host_mode,
-                        model,
                         timeout_secs,
                         scheduler_tick_secs,
-                        max_tokens,
-                        temperature,
-                        require_dashboard_approval,
                         auto_apply_memory_ops,
                         auto_enable_skills,
                         export_memory_digest,
@@ -786,12 +774,8 @@ fn automation_config_commands_parse_project_sidecar_flags() {
     assert_eq!(scope, AutomationConfigScope::Project);
     assert_eq!(backend.as_deref(), Some("codex-app-server"));
     assert_eq!(host_mode.as_deref(), Some("delegated-host"));
-    assert_eq!(model.as_deref(), Some("gpt-test"));
     assert_eq!(timeout_secs, Some(120));
     assert_eq!(scheduler_tick_secs, Some(30));
-    assert_eq!(max_tokens.as_deref(), Some("4096"));
-    assert_eq!(temperature.as_deref(), Some("0.2"));
-    assert_eq!(require_dashboard_approval, Some(true));
     assert_eq!(auto_apply_memory_ops, Some(false));
     assert_eq!(auto_enable_skills, Some(false));
     assert_eq!(export_memory_digest, Some(false));

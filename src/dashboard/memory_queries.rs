@@ -2,8 +2,8 @@ use std::hash::{Hash, Hasher};
 
 use serde_json::Value;
 
+use super::DashboardState;
 use super::util::{like_pattern, query_rows};
-use super::{CuratePreviewFingerprint, DashboardState};
 use crate::memory::encoding::HolographicEncoder;
 
 pub(crate) type VectorStateFingerprint = (i64, i64, i64, u64);
@@ -394,32 +394,6 @@ pub(crate) async fn vector_state_fingerprint(
         last_recalled_at.hash(&mut hasher);
     }
     Ok((count, max_updated_at, sum_fact_id, hasher.finish()))
-}
-
-pub(crate) async fn curation_preview_fingerprint(
-    state: &DashboardState,
-) -> Result<CuratePreviewFingerprint, String> {
-    let mut rows = state
-        .mem_conn
-        .query(
-            "SELECT COUNT(*),
-                    COALESCE(MAX(updated_at), 0),
-                    COALESCE(SUM(fact_id), 0),
-                    COALESCE(SUM(updated_at), 0)
-             FROM memory_facts",
-            (),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    let Some(row) = rows.next().await.map_err(|e| e.to_string())? else {
-        return Ok((0, 0, 0, 0));
-    };
-    Ok((
-        row.get::<i64>(0).unwrap_or(0),
-        row.get::<i64>(1).unwrap_or(0),
-        row.get::<i64>(2).unwrap_or(0),
-        row.get::<i64>(3).unwrap_or(0),
-    ))
 }
 
 pub(crate) async fn oplog_rows(state: &DashboardState, limit: i64) -> Result<Vec<Value>, String> {

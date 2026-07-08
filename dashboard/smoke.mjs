@@ -183,31 +183,17 @@ async function runViewportSmoke(browser, baseUrl, profile, expectLcmMode) {
   await similarityViewButton.click();
   await page.getByText("Similar Pairs").waitFor({ state: "visible" });
 
-  // --- Curation tab: check the panel renders and Preview button is present ---
+  // --- Curation tab: check the panel renders and autonomous run controls are present ---
   const curationViewButton = page
     .getByRole("tab", { name: "Curation", exact: true })
     .or(page.getByRole("button", { name: "Curation", exact: true }));
   await curationViewButton.waitFor({ state: "visible" });
   await curationViewButton.click();
   await page.getByText("Curation").first().waitFor({ state: "visible" });
-  const previewButton = page.getByRole("button", { name: "Preview" });
-  await previewButton.waitFor({ state: "visible" });
-
-  // Click Preview — triggers dry-run curation; wait for a delete plan or the
-  // "no changes" empty state (the plan proposes permanent deletions now).
-  await previewButton.click();
-  await page.waitForFunction(
-    () => {
-      const text = document.body.innerText;
-      return (
-        text.includes("delete") ||
-        text.includes("no changes") ||
-        text.includes("proposed actions")
-      );
-    },
-    undefined,
-    { timeout: 10000 },
-  );
+  const runMemoryCuratorButton = page.getByRole("button", { name: "Run Memory curator" });
+  await runMemoryCuratorButton.waitFor({ state: "visible" });
+  await page.getByText("Activity").first().waitFor({ state: "visible" });
+  await page.getByText("codex_app_server").first().waitFor({ state: "visible" });
 
   // --- Code Graph tab: the canvas self-populates with the seedless default
   // slice (no search required); the empty state must not be visible.

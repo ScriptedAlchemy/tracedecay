@@ -6,12 +6,8 @@
 //! original routes so the ported UI bundle works unchanged.
 //!
 //! Differences from the Hermes backend, by design:
-//! - Curation is implemented as similarity-based deduplication (no LLM).
-//!   `POST /curate` proposes hard-DELETING the lower-trust fact in each
-//!   `likely_duplicate` pair; `dry_run=false` applies those deletions.
 //! - `POST /curate/apply` is a generic curation-ops endpoint (`delete` /
-//!   `merge`) that external planners (e.g. an LLM-backed Hermes wrapper)
-//!   can call with their own proposed operations.
+//!   `merge`) for validated agent operations.
 //! - There is no fact archive: deletion is permanent (the original
 //!   `holographic_plus` soft-archived facts; tracedecay does not).
 //! - Banks are named after their category directly (no `cat:` prefix).
@@ -23,7 +19,6 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use super::DashboardState;
-use super::automation_run_service;
 use super::memory_analysis::{SIMILARITY_DEFAULT_THRESHOLD, SIMILARITY_PAIR_CAP};
 use super::memory_service;
 use super::util::{JsonPath, JsonQuery, coerce_limit, http_detail, query_i64};
@@ -75,29 +70,9 @@ pub(crate) struct FactProposalRejectBody {
     reason: Option<String>,
 }
 
-#[derive(Deserialize, Default)]
-pub(crate) struct CurateBody {
-    #[serde(default = "default_dry_run")]
-    dry_run: bool,
-}
-
-pub(crate) fn default_dry_run() -> bool {
-    true
-}
-
 #[derive(Deserialize)]
 pub(crate) struct CurateApplyBody {
     ops: Vec<Value>,
-}
-
-#[derive(Deserialize)]
-pub(crate) struct AgentPlanBody {
-    #[serde(default = "default_dry_run")]
-    dry_run: bool,
-    #[serde(default = "default_agent_plan_max_clusters")]
-    max_clusters: usize,
-    #[serde(default = "default_agent_plan_min_confidence")]
-    min_confidence: f64,
 }
 
 pub(crate) fn default_agent_plan_max_clusters() -> usize {
@@ -544,59 +519,6 @@ fn fact_proposal_error(err: &crate::errors::TraceDecayError) -> (StatusCode, Jso
         StatusCode::INTERNAL_SERVER_ERROR
     };
     (status, Json(http_detail(&message)))
-}
-
-/// `GET /api/plugins/holographic/curation/preview` — returns the last saved
-/// dry-run preview, or null if none has been run this server session.
-pub(crate) async fn curation_preview(State(state): State<DashboardState>) -> Json<Value> {
-    Json(memory_service::curation_preview_payload(&state).await)
-}
-
-/// `POST /api/plugins/holographic/curation/agent-plan` — standalone backend
-/// curation planner. Delegated-host mode skips TraceDecay-owned backend calls.
-pub(crate) async fn curation_agent_plan(
-    State(state): State<DashboardState>,
-    axum::Json(body): axum::Json<AgentPlanBody>,
-) -> (StatusCode, Json<Value>) {
-    if !body.dry_run {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(http_detail(
-                "agent-plan currently supports dry_run=true only; apply validated ops separately",
-            )),
-        );
-    }
-    match Box::pin(automation_run_service::curation_agent_plan_payload(
-        &state,
-        body.max_clusters,
-        body.min_confidence,
-    ))
-    .await
-    {
-        Ok(payload) => (StatusCode::OK, Json(payload)),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(http_detail(&format!("Agent curation plan failed: {e}"))),
-        ),
-    }
-}
-
-/// `POST /api/plugins/holographic/curate` — similarity-based deduplication
-/// curation. `dry_run=true` (default) returns the proposed plan without
-/// mutating; `dry_run=false` applies the plan by hard-DELETING duplicate
-/// losers (no archive — deletion is permanent).
-pub(crate) async fn curate(
-    State(state): State<DashboardState>,
-    body: Option<axum::extract::Json<CurateBody>>,
-) -> (StatusCode, Json<Value>) {
-    let dry_run = body.is_none_or(|b| b.dry_run);
-    match memory_service::curate_payload(&state, dry_run).await {
-        Ok(payload) => (StatusCode::OK, Json(payload)),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(http_detail(&format!("Curation analysis failed: {e}"))),
-        ),
-    }
 }
 
 /// `POST /api/plugins/holographic/curate/apply` — generic curation-ops apply

@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api as defaultApi } from "../api";
 import type {
-  MemoryCurateResponse,
   MemoryCuratorActivityEvent,
   MemoryCuratorStatusResponse,
   MemoryOplogEvent,
@@ -14,7 +13,7 @@ import { useFactProposals } from "./useFactProposals";
 import { useManagedSkills } from "./useManagedSkills";
 
 export type CurationTab =
-  "plan" | "automation" | "proposals" | "history" | "activity";
+  "automation" | "proposals" | "history" | "activity";
 
 export type CurationApi = Pick<
   typeof defaultApi,
@@ -32,13 +31,11 @@ export type CurationApi = Pick<
   | "getMemoryAutomationRunArtifacts"
   | "getMemoryAutomationRuns"
   | "getMemoryCuratorActivity"
-  | "getMemoryCuratorPreview"
   | "getMemoryCuratorStatus"
   | "getMemoryOplog"
   | "patchMemoryAutomationConfig"
   | "pauseAutomationScheduler"
   | AutomationRunApiMethod
-  | "postMemoryCurate"
   | "rejectFactProposal"
   | "resetMemoryAutomationConfig"
   | "restoreManagedSkill"
@@ -48,25 +45,15 @@ export type CurationApi = Pick<
 export function useCurationData({
   api = defaultApi,
   onApplied,
-  now = () => new Date().toISOString(),
   pollFastMs = 900,
   pollIdleMs = 2500,
 }: {
   api?: CurationApi;
   onApplied?: () => void;
-  now?: () => string;
   pollFastMs?: number;
   pollIdleMs?: number;
 }) {
-  const [report, setReport] = useState<MemoryCurateResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [applying, setApplying] = useState(false);
-  const [previewSavedAt, setPreviewSavedAt] = useState<string | null>(null);
-  const [previewStale, setPreviewStale] = useState(false);
-  const [previewStaleReason, setPreviewStaleReason] = useState("");
-  const [confirmOpen, setConfirmOpen] = useState(false);
-  const [error, setError] = useState("");
-  const [activeTab, setActiveTab] = useState<CurationTab>("plan");
+  const [activeTab, setActiveTab] = useState<CurationTab>("automation");
   const [status, setStatus] = useState<MemoryCuratorStatusResponse | null>(
     null,
   );
@@ -123,70 +110,7 @@ export function useCurationData({
     runFactProposalAction,
   } = useFactProposals({ api, onApplied });
   const activityRef = useRef<HTMLDivElement>(null);
-  const previewSavedAtRef = useRef<string | null>(null);
-  const previewLoadSeq = useRef(0);
   const panelRef = useRef<HTMLDivElement>(null);
-
-  const applySavedPreview = useCallback(
-    (
-      savedReport: MemoryCurateResponse,
-      savedAt?: string | null,
-      stale = false,
-      staleReason = "",
-    ) => {
-      previewSavedAtRef.current = savedAt ?? null;
-      setReport(savedReport);
-      setPreviewSavedAt(savedAt ?? null);
-      setPreviewStale(stale);
-      setPreviewStaleReason(staleReason);
-    },
-    [],
-  );
-
-  const clearSavedPreview = useCallback(() => {
-    previewSavedAtRef.current = null;
-    setReport(null);
-    setPreviewSavedAt(null);
-    setPreviewStale(false);
-    setPreviewStaleReason("");
-  }, []);
-
-  const setMemoryPreviewFromRun = useCallback(
-    (nextReport: MemoryCurateResponse) => {
-      setReport(nextReport);
-      setPreviewSavedAt(null);
-      setPreviewStale(false);
-      setPreviewStaleReason("");
-    },
-    [],
-  );
-
-  const loadSavedPreview = useCallback(
-    (force = false) => {
-      const ticket = ++previewLoadSeq.current;
-      return api
-        .getMemoryCuratorPreview()
-        .then((response) => {
-          if (ticket !== previewLoadSeq.current) return response;
-          if (
-            response.report &&
-            (force || response.saved_at !== previewSavedAtRef.current)
-          ) {
-            applySavedPreview(
-              response.report,
-              response.saved_at ?? null,
-              Boolean(response.stale),
-              response.stale_reason || "",
-            );
-          } else if (!response.report && !loading && !applying) {
-            clearSavedPreview();
-          }
-          return response;
-        })
-        .catch(() => {});
-    },
-    [api, applySavedPreview, applying, clearSavedPreview, loading],
-  );
 
   const loadActivity = useCallback(
     (showSpinner = false) => {
@@ -195,21 +119,14 @@ export function useCurationData({
       api
         .getMemoryCuratorActivity({ limit: 120 })
         .then((response) => {
-          const events = response.events || [];
-          setActivity(events);
-          const latestFinish = [...events]
-            .reverse()
-            .find((event) => event.phase === "finish" && !event.synthetic);
-          if (latestFinish?.dry_run) {
-            loadSavedPreview(false);
-          }
+          setActivity(response.events || []);
         })
         .catch((err) => setActivityError(errorMessage(err)))
         .finally(() => {
           if (showSpinner) setActivityLoading(false);
         });
     },
-    [api, loadSavedPreview],
+    [api],
   );
 
   const loadStatus = useCallback(() => {
@@ -249,17 +166,11 @@ export function useCurationData({
     api,
     pollFastMs,
     setActiveTab,
-    setMemoryPreviewFromRun,
-    loadMemoryPreview: loadSavedPreview,
     loadActivity,
     loadStatus,
     loadFactProposals,
     loadManagedSkills,
   });
-
-  useEffect(() => {
-    loadSavedPreview(true);
-  }, [loadSavedPreview]);
 
   useEffect(() => {
     loadConfig().catch(() => {});
@@ -268,56 +179,6 @@ export function useCurationData({
   useEffect(() => {
     loadSchedulerStatus(false).catch(() => {});
   }, [loadSchedulerStatus]);
-
-  const preview = useCallback(async () => {
-    setLoading(true);
-    setError("");
-    setActiveTab("activity");
-    loadActivity(true);
-    try {
-      const response = await api.postMemoryCurate({ dry_run: true });
-      const savedAt = now();
-      applySavedPreview(response, savedAt);
-      await loadSavedPreview(true);
-      loadActivity();
-      loadStatus();
-      setActiveTab("plan");
-      return response;
-    } catch (err) {
-      setError(errorMessage(err));
-      throw err;
-    } finally {
-      setLoading(false);
-    }
-  }, [api, applySavedPreview, loadActivity, loadSavedPreview, loadStatus, now]);
-
-  const apply = useCallback(async () => {
-    previewLoadSeq.current += 1;
-    setApplying(true);
-    setError("");
-    setActiveTab("activity");
-    loadActivity(true);
-    try {
-      const response = await api.postMemoryCurate({ dry_run: false });
-      applySavedPreview(response, null);
-      setConfirmOpen(false);
-      loadActivity();
-      loadStatus();
-      onApplied?.();
-      return response;
-    } catch (err) {
-      setError(errorMessage(err));
-      throw err;
-    } finally {
-      setApplying(false);
-    }
-  }, [api, applySavedPreview, loadActivity, loadStatus, onApplied]);
-
-  useEffect(() => {
-    if (activeTab === "plan" && !loading && !applying) {
-      loadSavedPreview(false);
-    }
-  }, [activeTab, applying, loadSavedPreview, loading]);
 
   useEffect(() => {
     if (
@@ -375,16 +236,16 @@ export function useCurationData({
   }, [activeTab, activity.length, loadActivity]);
 
   useEffect(() => {
-    if (activeTab !== "activity" && !loading && !applying) return undefined;
+    if (activeTab !== "activity") return undefined;
     const interval = window.setInterval(
       () => {
         if (panelRef.current?.offsetParent === null) return;
         loadActivity(false);
       },
-      loading || applying ? pollFastMs : pollIdleMs,
+      pollIdleMs,
     );
     return () => window.clearInterval(interval);
-  }, [activeTab, applying, loadActivity, loading, pollFastMs, pollIdleMs]);
+  }, [activeTab, loadActivity, pollIdleMs]);
 
   useEffect(() => {
     const element = activityRef.current;
@@ -393,14 +254,6 @@ export function useCurationData({
   }, [activity]);
 
   return {
-    report,
-    loading,
-    applying,
-    previewSavedAt,
-    previewStale,
-    previewStaleReason,
-    confirmOpen,
-    error,
     activeTab,
     status,
     statusLoading,
@@ -446,10 +299,7 @@ export function useCurationData({
     configDirty,
     activityRef,
     panelRef,
-    setConfirmOpen,
     setActiveTab,
-    preview,
-    apply,
     runAutomationTask,
     loadActivity,
     loadStatus,

@@ -11,9 +11,7 @@ use super::DashboardState;
 use super::automation_run_service::{
     self, MemoryCuratorRunRequest, SessionReflectionRunRequest, SkillWritingRunRequest,
 };
-use super::memory_api::{
-    default_agent_plan_max_clusters, default_agent_plan_min_confidence, default_dry_run,
-};
+use super::memory_api::{default_agent_plan_max_clusters, default_agent_plan_min_confidence};
 use super::memory_service::{push_curation_activity, push_curation_activity_with_level};
 use super::util::http_detail;
 use crate::automation::backend::{
@@ -31,8 +29,6 @@ use crate::tracedecay::current_timestamp;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct MemoryCuratorRunBody {
-    #[serde(default = "default_dry_run")]
-    dry_run: bool,
     #[serde(default = "default_agent_plan_max_clusters")]
     max_clusters: usize,
     #[serde(default = "default_agent_plan_min_confidence")]
@@ -42,7 +38,6 @@ pub(crate) struct MemoryCuratorRunBody {
 impl Default for MemoryCuratorRunBody {
     fn default() -> Self {
         Self {
-            dry_run: default_dry_run(),
             max_clusters: default_agent_plan_max_clusters(),
             min_confidence: default_agent_plan_min_confidence(),
         }
@@ -61,8 +56,6 @@ impl From<MemoryCuratorRunBody> for MemoryCuratorRunRequest {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SessionReflectionRunBody {
-    #[serde(default = "default_dry_run")]
-    dry_run: bool,
     provider: Option<String>,
     query: Option<String>,
     evidence_limit: Option<usize>,
@@ -101,8 +94,6 @@ impl From<SessionReflectionRunBody> for SessionReflectionRunRequest {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SkillWritingRunBody {
-    #[serde(default = "default_dry_run")]
-    dry_run: bool,
     provider: Option<String>,
     query: Option<String>,
     evidence_limit: Option<usize>,
@@ -127,16 +118,13 @@ pub(crate) async fn memory_curator(
     body: Option<axum::extract::Json<MemoryCuratorRunBody>>,
 ) -> (StatusCode, Json<Value>) {
     let body = body.map(|body| body.0).unwrap_or_default();
-    let dry_run = body.dry_run;
     let request = MemoryCuratorRunRequest::from(body);
     run_dashboard_task_endpoint(
         state,
-        dry_run,
-        "memory-curator",
         AgentTaskKind::MemoryCurator,
         move |state, run_id| async move {
             Box::pin(
-                automation_run_service::curation_agent_plan_payload_with_run_id(
+                automation_run_service::memory_curator_run_payload_with_run_id(
                     &state,
                     request,
                     Some(run_id),
@@ -153,12 +141,9 @@ pub(crate) async fn session_reflection(
     body: Option<axum::extract::Json<SessionReflectionRunBody>>,
 ) -> (StatusCode, Json<Value>) {
     let body = body.map(|body| body.0).unwrap_or_default();
-    let dry_run = body.dry_run;
     let request = SessionReflectionRunRequest::from(body);
     run_dashboard_task_endpoint(
         state,
-        dry_run,
-        "session-reflection",
         AgentTaskKind::SessionReflector,
         move |state, run_id| async move {
             Box::pin(
@@ -179,12 +164,9 @@ pub(crate) async fn skill_writing(
     body: Option<axum::extract::Json<SkillWritingRunBody>>,
 ) -> (StatusCode, Json<Value>) {
     let body = body.map(|body| body.0).unwrap_or_default();
-    let dry_run = body.dry_run;
     let request = SkillWritingRunRequest::from(body);
     run_dashboard_task_endpoint(
         state,
-        dry_run,
-        "skill-writing",
         AgentTaskKind::SkillWriter,
         move |state, run_id| async move {
             Box::pin(
@@ -202,8 +184,6 @@ pub(crate) async fn skill_writing(
 
 async fn run_dashboard_task_endpoint<F, Fut>(
     state: DashboardState,
-    dry_run: bool,
-    task_label: &'static str,
     task: AgentTaskKind,
     run_job: F,
 ) -> (StatusCode, Json<Value>)
@@ -211,9 +191,6 @@ where
     F: FnOnce(DashboardState, String) -> Fut + Send + 'static,
     Fut: Future<Output = Result<Value, String>> + Send + 'static,
 {
-    if !dry_run {
-        return dry_run_only_response(task_label);
-    }
     enqueue_dashboard_run(state, task, run_job).await
 }
 
@@ -270,15 +247,6 @@ pub(crate) async fn artifact_payload(
         ),
         Err(err) => internal_error(&format!("Failed to read automation run artifact: {err}")),
     }
-}
-
-fn dry_run_only_response(task: &str) -> (StatusCode, Json<Value>) {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(http_detail(&format!(
-            "{task} currently supports dry_run=true only; approval controls apply accepted drafts separately"
-        ))),
-    )
 }
 
 fn not_found(message: &str) -> (StatusCode, Json<Value>) {
@@ -604,7 +572,6 @@ async fn load_effective_dashboard_config(
 fn automation_job_payload(run_id: &str, ledger_record: &AutomationRunLedgerRecord) -> Value {
     json!({
         "run_id": run_id,
-        "dry_run": true,
         "status": ledger_record.status,
         "report": {
             "status": ledger_record.status,
@@ -642,7 +609,7 @@ fn dashboard_job_record(
         prompt_version: Some(prompt_version(task).to_string()),
         response_schema: Some(contract.response_schema),
         strict_json: Some(contract.strict_json),
-        model: config.model.clone(),
+        model: None,
         status,
         evidence_hash: None,
         input_hash: None,

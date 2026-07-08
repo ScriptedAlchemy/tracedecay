@@ -284,13 +284,10 @@ fn memory_curation_apply_policy(
     );
     let apply_instructions = match policy.decision() {
         MemoryApplyDecision::AutoApplyAllowed => {
-            "Accepted memory curation ops were applied because auto-apply is enabled and dashboard approval is not required."
-        }
-        MemoryApplyDecision::RequiresDashboardApproval => {
-            "Review accepted memory curation ops in the dashboard before applying permanent deletes or merge losers."
+            "Accepted memory curation ops were applied autonomously and recorded in automation telemetry."
         }
         MemoryApplyDecision::DryRunOnly | MemoryApplyDecision::ProposalOnly => {
-            "Re-run with an explicit apply policy before mutating the memory store."
+            "Automation recorded accepted memory curation ops without mutating the memory store."
         }
         MemoryApplyDecision::NoValidOps | MemoryApplyDecision::NoValidFacts => {
             "No accepted memory curation ops require apply."
