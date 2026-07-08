@@ -415,9 +415,6 @@ pub fn jaccard_similarity(a: &[u32], b: &[u32]) -> f64 {
 /// less harsh when two larger bodies share a strong core but differ in a few
 /// surrounding shingles.
 pub fn vector_cosine_similarity(a: &[u32], b: &[u32]) -> f64 {
-    if a.is_empty() && b.is_empty() {
-        return 1.0;
-    }
     if a.is_empty() || b.is_empty() {
         return 0.0;
     }
@@ -663,6 +660,29 @@ mod tests {
         let cosine = vector_cosine_similarity(&a, &b);
         assert!(cosine > j, "cosine={cosine}, jaccard={j}");
         assert!((vector_cosine_similarity(&a, &a) - 1.0).abs() < 1e-9);
+        assert!(vector_cosine_similarity(&[], &[]).abs() < 1e-9);
+    }
+
+    #[test]
+    fn redundancy_match_score_rejects_empty_body_vectors() {
+        let a = Fingerprint {
+            ast_hash: "ast_a".into(),
+            cfg_hash: "cfg_a".into(),
+            call_seq_hash: "call_a".into(),
+            shingles: Vec::new(),
+            body_tokens: 1,
+            source_hash: "src_a".into(),
+        };
+        let b = Fingerprint {
+            ast_hash: "ast_b".into(),
+            cfg_hash: "cfg_b".into(),
+            call_seq_hash: "call_b".into(),
+            shingles: Vec::new(),
+            body_tokens: 1,
+            source_hash: "src_b".into(),
+        };
+
+        assert!(redundancy_match_score("a", &a, "b", &b, 0.55, true).is_none());
     }
 
     #[test]
