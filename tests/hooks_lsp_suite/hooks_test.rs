@@ -864,8 +864,6 @@ fn test_build_cursor_session_context_initialized_includes_freshness() {
 
 #[test]
 fn test_build_codex_session_context_carries_compact_steering() {
-    // Codex session context should steer to the graph without repeating the
-    // full using-tracedecay skill body on every session start.
     let context = tracedecay::hooks::build_codex_session_context(true, Some("last indexed 2m ago"));
     assert!(
         context.len() <= 2_600,
@@ -893,8 +891,6 @@ fn test_build_codex_session_context_carries_compact_steering() {
 
 #[tokio::test]
 async fn test_claude_session_context_injects_compact_bootstrap_when_initialized() {
-    // On an initialized project Claude's SessionStart additionalContext carries
-    // compact graph routing, not the full using-tracedecay skill body.
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join(".tracedecay")).unwrap();
     std::fs::write(dir.path().join(".tracedecay/tracedecay.db"), "").unwrap();

@@ -1,5 +1,5 @@
 use super::ToolHintInput;
-use crate::shell::{shell_invocations, shell_words};
+use crate::shell::shell_invocations;
 
 pub(super) fn is_single_file_read(input: &ToolHintInput) -> bool {
     let is_read_tool = input
@@ -177,28 +177,26 @@ fn is_build_diagnostics_invocation(base: &str, args: &[String]) -> bool {
 }
 
 pub(super) fn is_diff_review_command(command: &str, text: &str) -> bool {
-    let tokens = shell_words(command);
-    let Some(first) = tokens.first() else {
-        return false;
-    };
-    let program = first.trim_start_matches('(').to_ascii_lowercase();
-    let base = program.rsplit(['/', '\\']).next().unwrap_or(&program);
-    match base {
-        "gh" => {
-            tokens
-                .windows(2)
-                .any(|window| window[0] == "pr" && window[1] == "diff")
-                || (tokens.iter().any(|token| token == "--patch") && asks_for_review_changes(text))
-        }
-        "git" => {
-            tokens
-                .iter()
-                .skip(1)
-                .any(|token| matches!(token.as_str(), "diff" | "show"))
-                && asks_for_review_changes(text)
-        }
-        _ => false,
-    }
+    shell_invocations(command)
+        .into_iter()
+        .any(|invocation| match invocation.base.as_str() {
+            "gh" => {
+                invocation
+                    .args
+                    .windows(2)
+                    .any(|window| window[0] == "pr" && window[1] == "diff")
+                    || (invocation.args.iter().any(|token| token == "--patch")
+                        && asks_for_review_changes(text))
+            }
+            "git" => {
+                invocation
+                    .args
+                    .iter()
+                    .any(|token| matches!(token.as_str(), "diff" | "show"))
+                    && asks_for_review_changes(text)
+            }
+            _ => false,
+        })
 }
 
 pub(super) fn looks_like_pasted_diagnostic(text: &str) -> bool {
