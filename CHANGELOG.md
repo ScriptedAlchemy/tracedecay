@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.38](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.37...v0.0.38) - 2026-07-08
+
+### Fixed
+
+- *(hooks)* broaden hint eval coverage
+- *(hooks)* compact TraceDecay hook steering
+
+### Other
+
+- Merge pull request #318 from ScriptedAlchemy/release-plz-2026-07-08T00-48-50Z
+- *(hooks)* make hint eval coverage explicit
+- *(hooks)* table-drive hint eval cleanup
+- *(hooks)* centralize hint category metadata
+- simplify hook eval helpers
+- *(hooks)* deslop hint classifier changes
+- *(hooks)* share shell command parsing
+- *(hooks)* deslop hint eval coverage
+- *(hooks)* expand hint scenario evals
+
 ## [0.0.37](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.36...v0.0.37) - 2026-07-08
 
 ### Fixed
