@@ -2227,9 +2227,15 @@ pub(super) async fn handle_message_search(
             };
             searched_project_count += 1;
             if request.catch_up {
+                let display_root = Path::new(&context.project.display_root);
+                let project_root = if display_root.is_absolute() {
+                    display_root
+                } else {
+                    Path::new(&context.project.canonical_root)
+                };
                 let _ = crate::sessions::ingest_global_sources_for_provider(
                     &db,
-                    Path::new(&context.project.canonical_root),
+                    project_root,
                     request.provider_scope.provider(),
                 )
                 .await;
