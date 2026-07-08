@@ -133,6 +133,16 @@ async fn search_code_projects_matches_any_whitespace_term() {
     assert!(ids.contains(&"proj_rspack"), "ids: {ids:?}");
     assert!(!ids.contains(&"proj_unrelated"), "ids: {ids:?}");
 
+    let remote_name_matches = db.search_code_projects("remote-only.git", 10).await;
+    let remote_name_ids: Vec<&str> = remote_name_matches
+        .iter()
+        .map(|project| project.project_id.as_str())
+        .collect();
+    assert!(
+        remote_name_ids.contains(&"proj_remote_only"),
+        "remote_name_ids: {remote_name_ids:?}"
+    );
+
     let remote_matches = db.search_code_projects("secret", 10).await;
     assert!(
         remote_matches.is_empty(),

@@ -649,6 +649,24 @@ fn repo_identity_aliases(git_common_dir: Option<&Path>) -> Vec<String> {
     aliases
 }
 
+fn git_remote_search_alias(remote: Option<&str>) -> Option<String> {
+    let remote = remote?.trim().trim_end_matches('/');
+    if remote.is_empty() {
+        return None;
+    }
+    let name = remote
+        .rsplit_once('/')
+        .map(|(_, name)| name)
+        .or_else(|| remote.rsplit_once(':').map(|(_, name)| name))
+        .unwrap_or(remote)
+        .trim()
+        .trim_end_matches('/');
+    if name.is_empty() || name.contains('@') || name.contains("://") {
+        return None;
+    }
+    Some(format!("git-remote-name:{}", name.to_ascii_lowercase()))
+}
+
 fn project_identity_aliases(project_root: &Path, git_common_dir: Option<&Path>) -> Vec<String> {
     let mut aliases = Vec::with_capacity(2);
     aliases.push(GlobalDb::canonical_project_key(project_root));
@@ -1289,6 +1307,9 @@ impl GlobalDb {
         for alias in repo_identity_aliases(git_common_dir) {
             self.upsert_project_alias_key(&alias, project_id).await?;
         }
+        if let Some(alias) = git_remote_search_alias(git_remote_url) {
+            self.upsert_project_alias_key(&alias, project_id).await?;
+        }
         self.get_code_project(project_id).await
     }
 
@@ -1644,7 +1665,6 @@ impl GlobalDb {
                     OR cp.canonical_root LIKE ?{index} ESCAPE '\\'
                     OR cp.display_root LIKE ?{index} ESCAPE '\\'
                     OR COALESCE(cp.git_common_dir, '') LIKE ?{index} ESCAPE '\\'
-                    OR COALESCE(cp.git_remote_url, '') LIKE ?{index} ESCAPE '\\'
                     OR COALESCE(cp.default_branch, '') LIKE ?{index} ESCAPE '\\'
                     OR COALESCE(pa.alias_path, '') LIKE ?{index} ESCAPE '\\')"
             ));
