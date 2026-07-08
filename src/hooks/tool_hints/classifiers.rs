@@ -348,6 +348,15 @@ pub(super) fn asks_for_session_recall(text: &str) -> bool {
             "session search",
             "session recall",
             "conversation history",
+            "raw codex jsonl transcript",
+            "raw codex jsonl transcripts",
+            "transcript files",
+            "transcripts",
+            "hook usage",
+            "hint displayed",
+            "hints displayed",
+            "lcm",
+            "sessions",
         ],
     )
 }

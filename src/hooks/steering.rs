@@ -23,23 +23,20 @@ pub const CURSOR_PLUGIN_SKILLS: &[&str] = &[
     "using-tracedecay",
 ];
 
-const TRACEDECAY_BOOTSTRAP_SKILL: &str =
-    include_str!("../../plugin/skills/using-tracedecay/SKILL.md");
-
 pub(super) fn append_tracedecay_bootstrap_context(s: &mut String) {
     s.push_str(
-        "<EXTREMELY_IMPORTANT>\n\
-         This project has TraceDecay code-graph support. Below is the full `tracedecay:using-tracedecay` \
-         skill; follow it before native search or broad file reads.\n\n",
+        "TraceDecay project hint: use graph tools when code context is needed; \
+         deferred tools may require ToolSearch. Route literal or regex text -> \
+         tracedecay_grep; symbol names -> tracedecay_search or \
+         tracedecay_find_exact_symbol; concepts -> tracedecay_context; call \
+         questions -> tracedecay_callers/callees; impact/tests -> \
+         tracedecay_impact, tracedecay_affected, or tracedecay_test_map. Use \
+         tracedecay_message_search or \
+         tracedecay_lcm_expand_query for prior-session context, and \
+         tracedecay_fact_store only for durable non-secret facts. If workflow \
+         details are needed, open the bundled tracedecay skill for that task \
+         instead of relying on repeated session-start instructions.\n",
     );
-    s.push_str(TRACEDECAY_BOOTSTRAP_SKILL);
-    s.push_str(
-        "\nCore TraceDecay MCP tools: tracedecay_context, tracedecay_grep, \
-         tracedecay_search, tracedecay_callers, tracedecay_callees, \
-         tracedecay_impact, tracedecay_project_search, tracedecay_message_search, \
-         tracedecay_fact_store.\n",
-    );
-    s.push_str("\n</EXTREMELY_IMPORTANT>\n");
 }
 
 pub(super) const COMPACTION_CONTEXT_RECOVERY_HINT: &str = "Context was just compacted. If important prior-session context seems missing, query TraceDecay session context before assuming the compacted summary is complete. Start with `tracedecay_message_search` or `tracedecay_lcm_expand_query`; use `tracedecay_lcm_describe` and `tracedecay_lcm_expand` when you need the summary DAG sources.";

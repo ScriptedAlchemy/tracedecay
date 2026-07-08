@@ -1,0 +1,4 @@
+interface:
+  display_name: "Evaluating Hook Hints"
+  short_description: "Evaluate TraceDecay hook hint behavior"
+  default_prompt: "Use $evaluating-hook-hints to audit TraceDecay hook hint behavior against real and synthetic scenarios."

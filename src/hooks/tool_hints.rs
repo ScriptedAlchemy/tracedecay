@@ -621,11 +621,37 @@ pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
 }
 
 fn hint(category: HintCategory, message: &str, context: &str, nonblocking: bool) -> ToolHint {
+    let context = match category_skill(category) {
+        Some(skill) => format!("{context}\nSkill: tracedecay:{skill}."),
+        None => context.to_string(),
+    };
     ToolHint {
         category,
         message: message.to_string(),
-        context: context.to_string(),
+        context,
         nonblocking,
+    }
+}
+
+fn category_skill(category: HintCategory) -> Option<&'static str> {
+    match category {
+        HintCategory::Search
+        | HintCategory::SemanticSearch
+        | HintCategory::FileRead
+        | HintCategory::BroadRead
+        | HintCategory::SymbolLookup
+        | HintCategory::FileLookup
+        | HintCategory::TypeOrientation => Some("exploring-code"),
+        HintCategory::ToolDescriptorRead | HintCategory::CallGraph => Some("tracing-functions"),
+        HintCategory::Impact => Some("assessing-impact"),
+        HintCategory::ProjectContext => Some("code-health"),
+        HintCategory::SessionRecall => Some("managing-session-context"),
+        HintCategory::AtomicEdit => Some("editing-safely"),
+        HintCategory::ExploreSubagent | HintCategory::SubagentStartContext => {
+            Some("using-tracedecay")
+        }
+        HintCategory::BuildDiagnostics => Some("fixing-build-and-type-errors"),
+        HintCategory::MemoryStore => Some("project-memory"),
     }
 }
 
@@ -639,6 +665,10 @@ use classifiers::{
     is_shell_search_command, is_single_file_read, is_tracedecay_tool_descriptor_read,
     matches_normalized,
 };
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod evals;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
