@@ -4,8 +4,8 @@ use tempfile::tempdir;
 
 use tracedecay::automation::config::{
     AutomationBackend, AutomationConfig, AutomationConfigPatch, AutomationHostMode,
-    AutomationTaskConfig, AutomationTaskPatch, AutomationTaskSet, effective_config,
-    load_project_config, merge_project_config, save_project_config,
+    AutomationTaskPatch, effective_config, load_project_config, merge_project_config,
+    save_project_config,
 };
 use tracedecay::user_config::UserConfig;
 
@@ -18,7 +18,6 @@ fn automation_defaults_are_conservative() {
     assert_eq!(config.host_mode, AutomationHostMode::Standalone);
     assert_eq!(config.timeout_secs, 60);
     assert_eq!(config.scheduler_tick_secs, 60);
-    assert!(!config.require_dashboard_approval);
     assert!(!config.auto_apply_memory_ops);
     assert!(!config.auto_enable_skills);
     assert!(!config.tasks.memory_curator.enabled);
@@ -70,62 +69,13 @@ fn effective_config_applies_project_sidecar_over_global_defaults() {
     assert_eq!(config.host_mode, AutomationHostMode::DelegatedHost);
     assert_eq!(config.timeout_secs, 45);
     assert_eq!(config.scheduler_tick_secs, 30);
-    assert_eq!(config.model, None);
     assert!(config.tasks.memory_curator.enabled);
     assert_eq!(
         config.tasks.memory_curator.schedule.as_deref(),
         Some("manual")
     );
-    assert!(!config.require_dashboard_approval);
     assert!(!config.auto_apply_memory_ops);
     assert!(!config.auto_enable_skills);
-}
-
-#[test]
-fn effective_config_ignores_legacy_backend_runtime_fields() {
-    let global = AutomationConfig {
-        model: Some("global-model".to_string()),
-        max_tokens: Some(4096),
-        temperature: Some(0.2),
-        tasks: AutomationTaskSet {
-            memory_curator: AutomationTaskConfig {
-                schedule: Some("interval".to_string()),
-                interval_secs: Some(3600),
-                cooldown_secs: Some(300),
-                min_idle_secs: Some(60),
-                stale_lock_secs: Some(120),
-                ..Default::default()
-            },
-            ..Default::default()
-        },
-        ..AutomationConfig::default()
-    };
-    let patch: AutomationConfigPatch = serde_json::from_str(
-        r#"{
-            "model": null,
-            "max_tokens": null,
-            "temperature": null,
-            "memory_curator": {
-                "schedule": null,
-                "interval_secs": null,
-                "cooldown_secs": null,
-                "min_idle_secs": null,
-                "stale_lock_secs": null
-            }
-        }"#,
-    )
-    .unwrap();
-
-    let config = effective_config(&global, Some(&patch)).unwrap();
-
-    assert_eq!(config.model, None);
-    assert_eq!(config.max_tokens, None);
-    assert_eq!(config.temperature, None);
-    assert_eq!(config.tasks.memory_curator.schedule, None);
-    assert_eq!(config.tasks.memory_curator.interval_secs, None);
-    assert_eq!(config.tasks.memory_curator.cooldown_secs, None);
-    assert_eq!(config.tasks.memory_curator.min_idle_secs, None);
-    assert_eq!(config.tasks.memory_curator.stale_lock_secs, None);
 }
 
 #[test]
@@ -244,7 +194,6 @@ fn validation_allows_explicit_memory_auto_apply_without_dashboard_approval() {
     let config = effective_config(&AutomationConfig::default(), Some(&patch)).unwrap();
 
     assert!(config.auto_apply_memory_ops);
-    assert!(!config.require_dashboard_approval);
 }
 
 #[test]
@@ -258,7 +207,6 @@ fn validation_allows_skill_auto_enable_without_dashboard_approval() {
     let config = effective_config(&AutomationConfig::default(), Some(&patch)).unwrap();
 
     assert!(config.auto_enable_skills);
-    assert!(!config.require_dashboard_approval);
 }
 
 #[test]

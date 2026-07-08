@@ -356,7 +356,7 @@ fn ledger_record_with_model(
         prompt_version: Some(prompt_version(task).to_string()),
         response_schema: Some(contract.response_schema),
         strict_json: Some(contract.strict_json),
-        model: model.or_else(|| config.model.clone()),
+        model,
         status,
         evidence_hash,
         input_hash: None,

@@ -83,7 +83,6 @@ impl MemoryApplyPolicy {
     }
 
     pub(crate) fn session_facts(
-        config: &AutomationConfig,
         accepted_count: usize,
         applied_count: usize,
         auto_managed: bool,
@@ -91,7 +90,7 @@ impl MemoryApplyPolicy {
         Self {
             subject: MemoryApplySubject::SessionFacts,
             accepted_count,
-            auto_apply_memory_ops: should_auto_apply_session_facts(config, accepted_count),
+            auto_apply_memory_ops: accepted_count > 0,
             mutates_store: auto_managed,
             fully_applied: accepted_count > 0 && applied_count >= accepted_count,
         }
@@ -113,8 +112,8 @@ impl MemoryApplyPolicy {
         }
     }
 
-    pub(crate) fn should_apply(config: &AutomationConfig, accepted_count: usize) -> bool {
-        should_auto_apply_session_facts(config, accepted_count)
+    pub(crate) fn should_apply(accepted_count: usize) -> bool {
+        accepted_count > 0
     }
 
     pub(crate) fn decision(self) -> MemoryApplyDecision {
@@ -242,9 +241,4 @@ pub(super) fn value_as_usize(value: &Value) -> Option<usize> {
 
 fn should_auto_apply_memory_ops(config: &AutomationConfig, accepted_count: usize) -> bool {
     accepted_count > 0 && config.auto_apply_memory_ops
-}
-
-fn should_auto_apply_session_facts(config: &AutomationConfig, accepted_count: usize) -> bool {
-    let _ = config;
-    accepted_count > 0
 }

@@ -285,7 +285,6 @@ pub async fn run_session_reflector_with_backend(
         .await?;
     let (report, record) = finalize_session_reflector_success(
         cg,
-        config,
         &finalizer,
         &run.dashboard_root,
         &run.run_id,
@@ -313,7 +312,6 @@ pub async fn run_session_reflector_with_backend(
 #[allow(clippy::too_many_arguments)]
 async fn finalize_session_reflector_success(
     cg: &TraceDecay,
-    config: &AutomationConfig,
     finalizer: &AgentRunFinalizer<'_>,
     dashboard_root: &std::path::Path,
     run_id: &str,
@@ -334,7 +332,7 @@ async fn finalize_session_reflector_success(
         &rejected_facts,
     )
     .await?;
-    let auto_apply_facts = MemoryApplyPolicy::should_apply(config, accepted_count);
+    let auto_apply_facts = MemoryApplyPolicy::should_apply(accepted_count);
     let applied_fact_proposals = if auto_apply_facts {
         auto_apply_session_fact_proposals(cg, dashboard_root, std::mem::take(&mut proposal_records))
             .await?
@@ -360,8 +358,7 @@ async fn finalize_session_reflector_success(
     let applied_count = applied_proposal_ids.len();
     let fully_applied = accepted_count > 0 && applied_count == accepted_count;
     let mut session_fact_apply_policy =
-        MemoryApplyPolicy::session_facts(config, accepted_count, applied_count, auto_apply_facts)
-            .to_json();
+        MemoryApplyPolicy::session_facts(accepted_count, applied_count, auto_apply_facts).to_json();
     if let Some(object) = session_fact_apply_policy.as_object_mut() {
         object.insert(
             "applied_proposal_ids".to_string(),
@@ -1225,7 +1222,6 @@ pub async fn run_combined_review_with_backend(
 
     let (reflector_report, reflector_record) = finalize_session_reflector_success(
         cg,
-        config,
         &reflector_finalizer,
         &dashboard_root,
         &reflector_run_id,

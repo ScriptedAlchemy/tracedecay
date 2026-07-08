@@ -609,7 +609,7 @@ fn dashboard_job_record(
         prompt_version: Some(prompt_version(task).to_string()),
         response_schema: Some(contract.response_schema),
         strict_json: Some(contract.strict_json),
-        model: config.model.clone(),
+        model: None,
         status,
         evidence_hash: None,
         input_hash: None,

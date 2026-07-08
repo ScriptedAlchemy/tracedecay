@@ -55,7 +55,6 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
         enabled: true,
         backend: AutomationBackend::CodexAppServer,
         host_mode: AutomationHostMode::Standalone,
-        model: Some("configured-model".to_string()),
         tasks: AutomationTaskSet {
             memory_curator: AutomationTaskConfig {
                 enabled: true,
@@ -745,7 +744,6 @@ async fn memory_curator_runner_auto_apply_is_blocked_by_dashboard_approval() {
         backend: AutomationBackend::CodexAppServer,
         host_mode: AutomationHostMode::Standalone,
         auto_apply_memory_ops: true,
-        require_dashboard_approval: true,
         tasks: AutomationTaskSet {
             memory_curator: AutomationTaskConfig {
                 enabled: true,
@@ -825,7 +823,6 @@ async fn memory_curator_runner_preserves_review_gate_when_auto_apply_applies_zer
         backend: AutomationBackend::CodexAppServer,
         host_mode: AutomationHostMode::Standalone,
         auto_apply_memory_ops: true,
-        require_dashboard_approval: false,
         tasks: AutomationTaskSet {
             memory_curator: AutomationTaskConfig {
                 enabled: true,
@@ -931,7 +928,6 @@ async fn memory_curator_runner_auto_applies_only_when_approval_is_not_required()
         backend: AutomationBackend::CodexAppServer,
         host_mode: AutomationHostMode::Standalone,
         auto_apply_memory_ops: true,
-        require_dashboard_approval: false,
         tasks: AutomationTaskSet {
             memory_curator: AutomationTaskConfig {
                 enabled: true,

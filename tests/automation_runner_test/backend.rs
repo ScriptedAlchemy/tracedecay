@@ -401,10 +401,7 @@ fn codex_app_server_backend_from_automation_config_lets_app_server_choose_model(
         let _codex_bin = EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &fake.bin);
         CodexAppServerBackend::from_automation_config(&AutomationConfig {
             backend: AutomationBackend::CodexAppServer,
-            model: Some("automation-model".to_string()),
             timeout_secs: fake_codex_response_timeout_secs(),
-            max_tokens: Some(1024),
-            temperature: Some(0.4),
             ..AutomationConfig::default()
         })
     };
@@ -440,10 +437,7 @@ fn codex_app_server_backend_ignores_env_generation_options() {
         let _temperature = EnvVarGuard::set("TRACEDECAY_CODEX_SUMMARY_TEMPERATURE", "0.25");
         CodexAppServerBackend::from_automation_config(&AutomationConfig {
             backend: AutomationBackend::CodexAppServer,
-            model: Some("automation-model".to_string()),
             timeout_secs: fake_codex_response_timeout_secs(),
-            max_tokens: None,
-            temperature: None,
             ..AutomationConfig::default()
         })
     };

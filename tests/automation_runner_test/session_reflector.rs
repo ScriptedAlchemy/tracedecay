@@ -137,7 +137,6 @@ async fn session_reflector_runner_auto_applies_valid_fact_proposals_by_default()
         enabled: true,
         backend: AutomationBackend::CodexAppServer,
         host_mode: AutomationHostMode::Standalone,
-        model: Some("configured-model".to_string()),
         tasks: AutomationTaskSet {
             session_reflector: AutomationTaskConfig {
                 enabled: true,
@@ -368,8 +367,6 @@ async fn session_reflector_runner_auto_apply_ignores_dashboard_approval_gate() {
         enabled: true,
         backend: AutomationBackend::CodexAppServer,
         host_mode: AutomationHostMode::Standalone,
-        model: Some("configured-model".to_string()),
-        require_dashboard_approval: true,
         auto_apply_memory_ops: true,
         tasks: AutomationTaskSet {
             session_reflector: AutomationTaskConfig {
@@ -493,9 +490,7 @@ async fn session_reflector_runner_self_manages_partial_noops_without_review_gate
         enabled: true,
         backend: AutomationBackend::CodexAppServer,
         host_mode: AutomationHostMode::Standalone,
-        model: Some("configured-model".to_string()),
         auto_apply_memory_ops: true,
-        require_dashboard_approval: false,
         tasks: AutomationTaskSet {
             session_reflector: AutomationTaskConfig {
                 enabled: true,

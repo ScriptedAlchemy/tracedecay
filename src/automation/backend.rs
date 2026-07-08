@@ -358,15 +358,11 @@ pub struct CodexAppServerBackend {
 }
 
 impl CodexAppServerBackend {
-    pub fn new(model: Option<String>, timeout_secs: u64) -> Self {
-        Self::new_with_runtime_options(model, timeout_secs)
-    }
-
     pub fn from_automation_config(config: &AutomationConfig) -> Self {
-        Self::new_with_runtime_options(None, config.timeout_secs)
+        Self::new(None, config.timeout_secs)
     }
 
-    pub fn new_with_runtime_options(model: Option<String>, timeout_secs: u64) -> Self {
+    pub fn new(model: Option<String>, timeout_secs: u64) -> Self {
         let mut config = CodexAppServerSummaryConfig::from_env();
         if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
             config.model = Some(model);
