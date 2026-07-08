@@ -23,6 +23,7 @@ row below, run it, and stop when the question is answered.
 | A file by role or path | `tracedecay_files` | find/ls -R |
 | Half-remembered name | `tracedecay_similar` | guessing greps |
 | Code by shape (return type, params, async) | `tracedecay_signature_search` | reading modules |
+| Duplicate code / similar function bodies / repeated helper logic | `tracedecay_redundancy` (`path`, `min_lines`, `max_pairs`) | name-only search |
 
 ## Read cheaply — stop at the first rung that answers
 
@@ -53,6 +54,8 @@ For other git branches without switching checkout — `tracedecay_branch_list` /
   the repo is unindexed; the index auto-syncs — do not run manual sync commands.
 - Search came up empty and a new helper seems needed → run the
   `tracedecay:editing-safely` duplicate probe first.
+- Similarity by functionality/body, not just by name → run
+  `tracedecay_redundancy` before concluding no duplicate exists.
 - "Who calls X / what does X call / what breaks" → hand off to
   `tracedecay:tracing-functions` / `tracedecay:assessing-impact` after resolving
   the symbol; do not grep for call sites.
@@ -62,7 +65,7 @@ For other git branches without switching checkout — `tracedecay_branch_list` /
 ## If tools are deferred or MCP fails
 
 - Deferred (names listed without schemas): load once with ToolSearch —
-  `select:tracedecay_context,tracedecay_search,tracedecay_grep,tracedecay_outline,tracedecay_body,tracedecay_read`
+  `select:tracedecay_context,tracedecay_search,tracedecay_grep,tracedecay_outline,tracedecay_body,tracedecay_read,tracedecay_redundancy`
   (one batched call, add others needed) — then call normally.
 - MCP error/timeout/disconnect: same tool, same args, via shell:
   `tracedecay tool <name>` (see `tracedecay:using-the-cli`). Never

@@ -1201,6 +1201,28 @@ mod tests {
     }
 
     #[test]
+    fn redundancy_tool_definition_describes_ranking_contract() {
+        let tools = get_tool_definitions();
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == "tracedecay_redundancy")
+            .expect("tracedecay_redundancy tool definition");
+        for required in [
+            "body-vector cosine",
+            "ranking_score",
+            "body_vector_cosine",
+            "generic_helper_downranked",
+            "grouped duplicate components",
+        ] {
+            assert!(
+                tool.description.contains(required),
+                "redundancy definition should mention {required}: {}",
+                tool.description
+            );
+        }
+    }
+
+    #[test]
     fn test_tool_definitions_have_annotations() {
         let tools = get_tool_definitions();
         let write_tools = [

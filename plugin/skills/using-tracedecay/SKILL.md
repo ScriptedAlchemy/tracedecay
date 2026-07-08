@@ -50,6 +50,7 @@ errors or times out, the same tool runs as `tracedecay tool <name> --args '<json
 | Wondering what breaks or which tests to run | `tracedecay:assessing-impact` |
 | About to run `gh pr diff` / read a raw diff to review | `tracedecay_pr_context` / `tracedecay_diff_context` (offline, no gh needed) — `tracedecay:reviewing-changes` |
 | About to write a new helper, rename, or mass-edit | `tracedecay:editing-safely` |
+| Looking for duplicate code, similar function bodies, repeated helper logic, or consolidation targets | `tracedecay_redundancy` first for body/functionality matches; `tracedecay_similar` only for near-duplicate names — `tracedecay:code-health` / `tracedecay:editing-safely` |
 | Build/type errors present, or about to run cargo check/tsc | `tracedecay:fixing-build-and-type-errors` |
 | About to write MEMORY.md/CLAUDE.md notes, or asked about a past decision | `tracedecay:project-memory` (`fact_store`) |
 | Need raw past-session transcripts or compaction recovery | `tracedecay:managing-session-context` |

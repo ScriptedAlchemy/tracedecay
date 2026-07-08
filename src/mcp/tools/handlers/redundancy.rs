@@ -20,8 +20,8 @@ use serde_json::{Value, json};
 
 use crate::errors::Result;
 use crate::redundancy::{
-    Fingerprint, composite_similarity, compute_fingerprint, find_node_at_lines, jaccard_similarity,
-    overlap_kind, parse_file, severity_bucket,
+    Fingerprint, RedundancyMatchScore, compute_fingerprint, find_node_at_lines, parse_file,
+    redundancy_match_score,
 };
 use crate::tracedecay::TraceDecay;
 use crate::types::{Node, NodeKind};
@@ -102,16 +102,17 @@ fn redundancy_output(
     options: &RedundancyOptions<'_>,
     total_candidates: usize,
     scanned: usize,
-    pairs: &[Value],
+    pairs: &[RedundantPair<'_>],
 ) -> Value {
-    let pair_count = pairs.len();
+    let rendered_pairs: Vec<Value> = pairs.iter().map(redundant_pair_json).collect();
     json!({
         "candidates": total_candidates,
         "scanned": scanned,
         "skipped_for_size": total_candidates.saturating_sub(scanned),
-        "pair_count": pair_count,
-        "pairs": pairs,
-        "ranked_by": "similarity desc",
+        "pair_count": rendered_pairs.len(),
+        "pairs": rendered_pairs,
+        "groups": duplicate_groups(pairs),
+        "ranked_by": "ranking_score desc (composite similarity plus body-vector signal, generic helpers downranked)",
         "scope": options.path_prefix.unwrap_or("(whole project)"),
         "thresholds": {
             "min_lines": options.min_lines,
@@ -345,21 +346,20 @@ fn quick_body_hash(body: &str) -> String {
 type ScopedFingerprint<'a> = (&'a Node, &'a Fingerprint);
 
 struct RedundantPair<'a> {
-    score: f64,
-    kind: &'static str,
+    score: RedundancyMatchScore,
     node_a: &'a Node,
     node_b: &'a Node,
     fp_a: &'a Fingerprint,
     fp_b: &'a Fingerprint,
 }
 
-fn find_redundant_pairs(
-    nodes: &[Node],
-    fingerprints: &HashMap<String, Fingerprint>,
+fn find_redundant_pairs<'a>(
+    nodes: &'a [Node],
+    fingerprints: &'a HashMap<String, Fingerprint>,
     threshold: f64,
     include_naming: bool,
     max_pairs: usize,
-) -> Vec<Value> {
+) -> Vec<RedundantPair<'a>> {
     // Sort by body_tokens so the size-window check is a linear scan.
     let mut sorted = scoped_fingerprints(nodes, fingerprints);
     sorted.sort_by_key(|(_, fp)| fp.body_tokens);
@@ -384,12 +384,26 @@ fn find_redundant_pairs(
 
     found.sort_by(|a: &RedundantPair<'_>, b: &RedundantPair<'_>| {
         b.score
-            .partial_cmp(&a.score)
+            .ranking_score
+            .partial_cmp(&a.score.ranking_score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                b.score
+                    .similarity
+                    .partial_cmp(&a.score.similarity)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| {
+                b.score
+                    .vector_cosine
+                    .partial_cmp(&a.score.vector_cosine)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.node_a.name.cmp(&b.node_a.name))
     });
     found.truncate(max_pairs);
 
-    found.iter().map(redundant_pair_json).collect()
+    found
 }
 
 fn scoped_fingerprints<'a>(
@@ -417,17 +431,16 @@ fn redundant_pair<'a>(
     threshold: f64,
     include_naming: bool,
 ) -> Option<RedundantPair<'a>> {
-    let score = composite_similarity(fp_a, fp_b);
-    if score < threshold {
-        return None;
-    }
-    let kind = overlap_kind(fp_a, fp_b);
-    if !include_naming && kind == "naming" {
-        return None;
-    }
+    let score = redundancy_match_score(
+        &node_a.name,
+        fp_a,
+        &node_b.name,
+        fp_b,
+        threshold,
+        include_naming,
+    )?;
     Some(RedundantPair {
         score,
-        kind,
         node_a,
         node_b,
         fp_a,
@@ -436,32 +449,86 @@ fn redundant_pair<'a>(
 }
 
 fn redundant_pair_json(pair: &RedundantPair<'_>) -> Value {
-    let shingle_jaccard = jaccard_similarity(&pair.fp_a.shingles, &pair.fp_b.shingles);
-    let severity = severity_bucket(pair.score, pair.kind);
     json!({
-        "similarity": (pair.score * 10000.0).round() / 10000.0,
-        "severity": severity,
-        "overlap_kind": pair.kind,
-        "a": {
-            "file": pair.node_a.file_path,
-            "line": pair.node_a.start_line,
-            "name": pair.node_a.name,
-            "id": pair.node_a.id,
-        },
-        "b": {
-            "file": pair.node_b.file_path,
-            "line": pair.node_b.start_line,
-            "name": pair.node_b.name,
-            "id": pair.node_b.id,
-        },
+        "similarity": round4(pair.score.similarity),
+        "ranking_score": round4(pair.score.ranking_score),
+        "severity": pair.score.severity,
+        "overlap_kind": pair.score.overlap_kind,
+        "a": node_json(pair.node_a),
+        "b": node_json(pair.node_b),
         "signals": {
             "ast_match": pair.fp_a.ast_hash == pair.fp_b.ast_hash,
             "cfg_match": pair.fp_a.cfg_hash == pair.fp_b.cfg_hash,
             "call_seq_match": pair.fp_a.call_seq_hash == pair.fp_b.call_seq_hash,
-            "shingle_jaccard": (shingle_jaccard * 10000.0).round() / 10000.0,
+            "shingle_jaccard": round4(pair.score.shingle_jaccard),
+            "body_vector_cosine": round4(pair.score.vector_cosine),
+            "generic_helper_downranked": pair.score.generic_helper_downranked,
             "body_tokens": [pair.fp_a.body_tokens, pair.fp_b.body_tokens],
         },
     })
+}
+
+fn round4(value: f64) -> f64 {
+    (value * 10000.0).round() / 10000.0
+}
+
+fn node_json(node: &Node) -> Value {
+    json!({
+        "file": node.file_path,
+        "line": node.start_line,
+        "name": node.name,
+        "id": node.id,
+    })
+}
+
+fn duplicate_groups<'a>(pairs: &'a [RedundantPair<'a>]) -> Vec<Value> {
+    let mut groups: Vec<Vec<&'a Node>> = Vec::new();
+    for pair in pairs {
+        let mut matching_groups = Vec::new();
+        for (idx, group) in groups.iter().enumerate() {
+            if group
+                .iter()
+                .any(|node| node.id == pair.node_a.id || node.id == pair.node_b.id)
+            {
+                matching_groups.push(idx);
+            }
+        }
+
+        let nodes = [pair.node_a, pair.node_b];
+        if matching_groups.is_empty() {
+            groups.push(Vec::from(nodes));
+            continue;
+        }
+
+        let first = matching_groups[0];
+        for node in nodes {
+            push_unique_node(&mut groups[first], node);
+        }
+        for idx in matching_groups.into_iter().skip(1).rev() {
+            let merged = groups.remove(idx);
+            for node in merged {
+                push_unique_node(&mut groups[first], node);
+            }
+        }
+    }
+
+    groups
+        .into_iter()
+        .filter(|nodes| nodes.len() > 1)
+        .map(|nodes| {
+            json!({
+                "size": nodes.len(),
+                "nodes": nodes.into_iter().map(node_json).collect::<Vec<_>>(),
+            })
+        })
+        .collect()
+}
+
+fn push_unique_node<'a>(nodes: &mut Vec<&'a Node>, node: &'a Node) {
+    if nodes.iter().any(|existing| existing.id == node.id) {
+        return;
+    }
+    nodes.push(node);
 }
 
 #[cfg(test)]
