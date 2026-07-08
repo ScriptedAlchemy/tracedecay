@@ -50,10 +50,10 @@ pub enum HintCategory {
 
 impl HintCategory {
     fn spec(self) -> &'static HintCategorySpec {
-        CATEGORY_SPECS
-            .iter()
-            .find(|spec| spec.category == self)
-            .expect("every HintCategory has a spec")
+        match CATEGORY_SPECS.iter().find(|spec| spec.category == self) {
+            Some(spec) => spec,
+            None => unreachable!("every HintCategory has a spec"),
+        }
     }
 
     pub(crate) fn as_key(self) -> &'static str {
@@ -568,117 +568,166 @@ pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
 }
 
 fn classify_hint(input: &ToolHintInput) -> Option<HintCategory> {
-    if is_explore_subagent(input) {
-        return Some(HintCategory::ExploreSubagent);
-    }
-
-    if is_subagent_context_handoff(input) {
-        return Some(HintCategory::SubagentStartContext);
-    }
-
-    if is_semantic_search_tool(input) {
-        return Some(HintCategory::SemanticSearch);
-    }
-
-    let text = combined_text(input);
-    let prompt_text = input
-        .prompt
-        .as_deref()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let command = input.command.as_deref();
-    let tool_name = input.tool_name.as_deref();
-    let command_is_shell_search = command.is_some_and(is_shell_text_search_command);
-    let prompt_has_diagnostic = looks_like_pasted_diagnostic(&prompt_text);
-
-    if asks_for_session_recall(&text) {
-        return Some(HintCategory::SessionRecall);
-    }
-
-    if asks_for_project_context(&text) || command.is_some_and(is_project_discovery_command) {
-        return Some(HintCategory::ProjectContext);
-    }
-
-    if asks_for_call_graph(&text) {
-        return Some(HintCategory::CallGraph);
-    }
-
-    if asks_for_impact(&text) {
-        return Some(HintCategory::Impact);
-    }
-
-    if (!command_is_shell_search && asks_for_build_diagnostics(&prompt_text))
-        || prompt_has_diagnostic
-    {
-        return Some(HintCategory::BuildDiagnostics);
-    }
-
-    if asks_for_atomic_edit(&text) {
-        return Some(HintCategory::AtomicEdit);
-    }
-
-    if asks_for_review_changes(&text)
-        || command.is_some_and(|command| is_diff_review_command(command, &text))
-    {
-        return Some(HintCategory::ReviewChanges);
-    }
-
-    if asks_for_type_orientation(&text) {
-        return Some(HintCategory::TypeOrientation);
-    }
-
-    if asks_for_text_search(&text) {
-        return Some(HintCategory::Search);
-    }
-
-    if command.is_some_and(is_build_diagnostics_command) {
-        return Some(HintCategory::BuildDiagnostics);
-    }
-
-    if is_memory_store_edit(input) {
-        return Some(HintCategory::MemoryStore);
-    }
-
-    if tool_name.is_some_and(|name| matches_normalized(name, &["glob", "listdir", "list_dir"]))
-        || command.is_some_and(is_file_lookup_command)
-    {
-        return Some(HintCategory::FileLookup);
-    }
-
-    if command.is_some_and(is_shell_file_read_command) {
-        return Some(HintCategory::FileRead);
-    }
-
-    if command.is_some_and(is_shell_search_command) {
-        return Some(HintCategory::Search);
-    }
-
-    if tool_name.is_some_and(|name| matches_normalized(name, &["grep", "search"])) {
-        return Some(HintCategory::Search);
-    }
-
-    if is_tracedecay_tool_descriptor_read(input) {
-        return Some(HintCategory::ToolDescriptorRead);
-    }
-
-    if is_single_file_read(input) {
-        return Some(HintCategory::FileRead);
-    }
-
-    if asks_for_broad_read(&text) {
-        return Some(HintCategory::BroadRead);
-    }
-
-    if asks_for_symbol_lookup(&text) {
-        return Some(HintCategory::SymbolLookup);
-    }
-
-    if asks_for_file_lookup(&text) {
-        return Some(HintCategory::FileLookup);
-    }
-
-    None
+    let facts = HintRequestFacts::new(input);
+    CLASSIFICATION_RULES
+        .iter()
+        .find(|rule| (rule.matches)(&facts))
+        .map(|rule| rule.category)
 }
+
+struct HintRequestFacts<'a> {
+    input: &'a ToolHintInput,
+    text: String,
+    prompt_text: String,
+    command: Option<&'a str>,
+    tool_name: Option<&'a str>,
+    command_is_shell_search: bool,
+    prompt_has_diagnostic: bool,
+}
+
+impl<'a> HintRequestFacts<'a> {
+    fn new(input: &'a ToolHintInput) -> Self {
+        let text = combined_text(input);
+        let prompt_text = input
+            .prompt
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let command = input.command.as_deref();
+        let prompt_has_diagnostic = looks_like_pasted_diagnostic(&prompt_text);
+        Self {
+            input,
+            text,
+            prompt_text,
+            command,
+            tool_name: input.tool_name.as_deref(),
+            command_is_shell_search: command.is_some_and(is_shell_text_search_command),
+            prompt_has_diagnostic,
+        }
+    }
+}
+
+type ClassificationPredicate = fn(&HintRequestFacts<'_>) -> bool;
+
+struct ClassificationRule {
+    category: HintCategory,
+    matches: ClassificationPredicate,
+}
+
+const CLASSIFICATION_RULES: &[ClassificationRule] = &[
+    ClassificationRule {
+        category: HintCategory::ExploreSubagent,
+        matches: |facts| is_explore_subagent(facts.input),
+    },
+    ClassificationRule {
+        category: HintCategory::SubagentStartContext,
+        matches: |facts| is_subagent_context_handoff(facts.input),
+    },
+    ClassificationRule {
+        category: HintCategory::SemanticSearch,
+        matches: |facts| is_semantic_search_tool(facts.input),
+    },
+    ClassificationRule {
+        category: HintCategory::SessionRecall,
+        matches: |facts| asks_for_session_recall(&facts.text),
+    },
+    ClassificationRule {
+        category: HintCategory::ProjectContext,
+        matches: |facts| {
+            asks_for_project_context(&facts.text)
+                || facts.command.is_some_and(is_project_discovery_command)
+        },
+    },
+    ClassificationRule {
+        category: HintCategory::CallGraph,
+        matches: |facts| asks_for_call_graph(&facts.text),
+    },
+    ClassificationRule {
+        category: HintCategory::Impact,
+        matches: |facts| asks_for_impact(&facts.text),
+    },
+    ClassificationRule {
+        category: HintCategory::BuildDiagnostics,
+        matches: |facts| {
+            (!facts.command_is_shell_search && asks_for_build_diagnostics(&facts.prompt_text))
+                || facts.prompt_has_diagnostic
+        },
+    },
+    ClassificationRule {
+        category: HintCategory::AtomicEdit,
+        matches: |facts| asks_for_atomic_edit(&facts.text),
+    },
+    ClassificationRule {
+        category: HintCategory::ReviewChanges,
+        matches: |facts| {
+            asks_for_review_changes(&facts.text)
+                || facts
+                    .command
+                    .is_some_and(|command| is_diff_review_command(command, &facts.text))
+        },
+    },
+    ClassificationRule {
+        category: HintCategory::TypeOrientation,
+        matches: |facts| asks_for_type_orientation(&facts.text),
+    },
+    ClassificationRule {
+        category: HintCategory::Search,
+        matches: |facts| asks_for_text_search(&facts.text),
+    },
+    ClassificationRule {
+        category: HintCategory::BuildDiagnostics,
+        matches: |facts| facts.command.is_some_and(is_build_diagnostics_command),
+    },
+    ClassificationRule {
+        category: HintCategory::MemoryStore,
+        matches: |facts| is_memory_store_edit(facts.input),
+    },
+    ClassificationRule {
+        category: HintCategory::FileLookup,
+        matches: |facts| {
+            facts
+                .tool_name
+                .is_some_and(|name| matches_normalized(name, &["glob", "listdir", "list_dir"]))
+                || facts.command.is_some_and(is_file_lookup_command)
+        },
+    },
+    ClassificationRule {
+        category: HintCategory::FileRead,
+        matches: |facts| facts.command.is_some_and(is_shell_file_read_command),
+    },
+    ClassificationRule {
+        category: HintCategory::Search,
+        matches: |facts| facts.command.is_some_and(is_shell_search_command),
+    },
+    ClassificationRule {
+        category: HintCategory::Search,
+        matches: |facts| {
+            facts
+                .tool_name
+                .is_some_and(|name| matches_normalized(name, &["grep", "search"]))
+        },
+    },
+    ClassificationRule {
+        category: HintCategory::ToolDescriptorRead,
+        matches: |facts| is_tracedecay_tool_descriptor_read(facts.input),
+    },
+    ClassificationRule {
+        category: HintCategory::FileRead,
+        matches: |facts| is_single_file_read(facts.input),
+    },
+    ClassificationRule {
+        category: HintCategory::BroadRead,
+        matches: |facts| asks_for_broad_read(&facts.text),
+    },
+    ClassificationRule {
+        category: HintCategory::SymbolLookup,
+        matches: |facts| asks_for_symbol_lookup(&facts.text),
+    },
+    ClassificationRule {
+        category: HintCategory::FileLookup,
+        matches: |facts| asks_for_file_lookup(&facts.text),
+    },
+];
 
 fn hint_for_category(category: HintCategory) -> ToolHint {
     let spec = category.spec();
@@ -690,6 +739,7 @@ fn hint_for_category(category: HintCategory) -> ToolHint {
     }
 }
 
+#[cfg(test)]
 fn category_skill(category: HintCategory) -> &'static str {
     category.spec().skill
 }
