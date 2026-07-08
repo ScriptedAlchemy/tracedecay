@@ -177,7 +177,7 @@ fn eval(
     expected: Option<HintCategory>,
     must_contain: &'static [&'static str],
 ) -> HintEval {
-    let families = default_families(name, family, &input, expected);
+    let families = default_families(family, &input, expected);
     HintEval {
         name,
         families,
@@ -238,34 +238,11 @@ fn coverage_families(eval: &HintEval) -> Vec<ScenarioFamily> {
 }
 
 fn default_families(
-    name: &'static str,
     family: ScenarioFamily,
     input: &ToolHintInput,
     expected: Option<HintCategory>,
 ) -> Vec<ScenarioFamily> {
     let mut families = vec![family];
-    let text = [
-        Some(name),
-        input.prompt.as_deref(),
-        input.command.as_deref(),
-        input.tool_name.as_deref(),
-        input.file_path.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>()
-    .join("\n")
-    .to_ascii_lowercase();
-
-    if text.contains("claude") {
-        families.push(ScenarioFamily::ClaudePrompt);
-    }
-    if text.contains("cursor") {
-        families.push(ScenarioFamily::CursorPrompt);
-    }
-    if text.contains("quoted") {
-        families.push(ScenarioFamily::QuotedData);
-    }
     if input.command.is_some() {
         families.push(ScenarioFamily::ShellSearch);
     }
@@ -641,7 +618,8 @@ fn synthetic_prompt_cases() -> Vec<HintEval> {
             "search source for a quoted string",
             Some(HintCategory::Search),
             &["tracedecay_grep"],
-        ),
+        )
+        .with_families(&[ScenarioFamily::QuotedData]),
         shell_eval(
             "cargo-test-diagnostics",
             "cargo test hooks::tool_hints",
@@ -704,14 +682,16 @@ fn synthetic_prompt_cases() -> Vec<HintEval> {
             "look for docs mentioning cargo check",
             None,
             &[],
-        ),
+        )
+        .with_families(&[ScenarioFamily::QuotedData]),
         shell_eval(
             "quoted-git-command-is-search-data",
             "grep \"git status\" README.md",
             "look for docs mentioning git status",
             None,
             &[],
-        ),
+        )
+        .with_families(&[ScenarioFamily::QuotedData]),
         shell_eval(
             "git-status-no-hint",
             "git status --short --branch",
