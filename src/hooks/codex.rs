@@ -230,21 +230,11 @@ pub fn evaluate_codex_subagent_start(event_json: &str) -> Option<String> {
         .and_then(Value::as_str)
         .unwrap_or_default();
 
-    let hint = decide_hint(&ToolHintInput {
-        agent: HintAgent::Codex,
-        session_id: event_session_id(&parsed),
-        tool_name: Some("SubagentStart".to_string()),
-        command: None,
-        prompt: (!task.is_empty()).then(|| task.to_string()),
-        subagent_type: (!agent_type.is_empty()).then(|| agent_type.to_string()),
-        file_path: None,
-        hints_enabled: true,
-    });
     let is_explore = agent_type.eq_ignore_ascii_case("explore");
     let is_research = is_explore || is_code_research_prompt(task);
     let needs_context = codex_subagent_needs_context(&parsed);
     if is_research || needs_context {
-        let dedupe_hint = ToolHint {
+        let hint = ToolHint {
             category: if is_research {
                 HintCategory::ExploreSubagent
             } else {
@@ -263,10 +253,10 @@ pub fn evaluate_codex_subagent_start(event_json: &str) -> Option<String> {
             HintAgent::Codex,
             event_session_id(&parsed).as_deref(),
             &hint_id,
-            &dedupe_hint,
+            &hint,
         );
-        let _ = deduped_codex_hint(event_json, &parsed, &hint_id, dedupe_hint)?;
-        let context = codex_subagent_start_context(hint, needs_context);
+        let _ = deduped_codex_hint(event_json, &parsed, &hint_id, hint.clone())?;
+        let context = codex_subagent_start_context(Some(hint), needs_context);
         return Some(codex_additional_context_json("SubagentStart", &context));
     }
     None

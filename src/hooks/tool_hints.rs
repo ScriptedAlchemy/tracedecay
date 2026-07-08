@@ -459,16 +459,16 @@ fn classify_hint(input: &ToolHintInput) -> Option<HintCategory> {
         .as_deref()
         .unwrap_or_default()
         .to_ascii_lowercase();
+    let command = input.command.as_deref();
+    let tool_name = input.tool_name.as_deref();
+    let command_is_shell_search = command.is_some_and(is_shell_text_search_command);
+    let prompt_has_diagnostic = looks_like_pasted_diagnostic(&prompt_text);
+
     if asks_for_session_recall(&text) {
         return Some(HintCategory::SessionRecall);
     }
 
-    if asks_for_project_context(&text)
-        || input
-            .command
-            .as_deref()
-            .is_some_and(is_project_discovery_command)
-    {
+    if asks_for_project_context(&text) || command.is_some_and(is_project_discovery_command) {
         return Some(HintCategory::ProjectContext);
     }
 
@@ -480,12 +480,8 @@ fn classify_hint(input: &ToolHintInput) -> Option<HintCategory> {
         return Some(HintCategory::Impact);
     }
 
-    let command_is_shell_search = input
-        .command
-        .as_deref()
-        .is_some_and(is_shell_text_search_command);
     if (!command_is_shell_search && asks_for_build_diagnostics(&prompt_text))
-        || looks_like_pasted_diagnostic(&prompt_text)
+        || prompt_has_diagnostic
     {
         return Some(HintCategory::BuildDiagnostics);
     }
@@ -495,10 +491,7 @@ fn classify_hint(input: &ToolHintInput) -> Option<HintCategory> {
     }
 
     if asks_for_review_changes(&text)
-        || input
-            .command
-            .as_deref()
-            .is_some_and(|command| is_diff_review_command(command, &text))
+        || command.is_some_and(|command| is_diff_review_command(command, &text))
     {
         return Some(HintCategory::ReviewChanges);
     }
@@ -511,12 +504,7 @@ fn classify_hint(input: &ToolHintInput) -> Option<HintCategory> {
         return Some(HintCategory::Search);
     }
 
-    if input
-        .command
-        .as_deref()
-        .is_some_and(is_build_diagnostics_command)
-        || looks_like_pasted_diagnostic(&prompt_text)
-    {
+    if command.is_some_and(is_build_diagnostics_command) {
         return Some(HintCategory::BuildDiagnostics);
     }
 
@@ -524,36 +512,21 @@ fn classify_hint(input: &ToolHintInput) -> Option<HintCategory> {
         return Some(HintCategory::MemoryStore);
     }
 
-    if input
-        .tool_name
-        .as_deref()
-        .is_some_and(|name| matches_normalized(name, &["glob"]))
-        || input.command.as_deref().is_some_and(is_file_lookup_command)
+    if tool_name.is_some_and(|name| matches_normalized(name, &["glob", "listdir", "list_dir"]))
+        || command.is_some_and(is_file_lookup_command)
     {
         return Some(HintCategory::FileLookup);
     }
 
-    if input
-        .command
-        .as_deref()
-        .is_some_and(is_shell_file_read_command)
-    {
+    if command.is_some_and(is_shell_file_read_command) {
         return Some(HintCategory::FileRead);
     }
 
-    if input
-        .command
-        .as_deref()
-        .is_some_and(is_shell_search_command)
-    {
+    if command.is_some_and(is_shell_search_command) {
         return Some(HintCategory::Search);
     }
 
-    if input
-        .tool_name
-        .as_deref()
-        .is_some_and(|name| matches_normalized(name, &["grep", "search"]))
-    {
+    if tool_name.is_some_and(|name| matches_normalized(name, &["grep", "search"])) {
         return Some(HintCategory::Search);
     }
 
@@ -694,19 +667,16 @@ fn hint_for_category(category: HintCategory) -> ToolHint {
 }
 
 fn hint(category: HintCategory, message: &str, context: &str, nonblocking: bool) -> ToolHint {
-    let context = match category_skill(category) {
-        Some(skill) => format!("{context}\nSkill: tracedecay:{skill}."),
-        None => context.to_string(),
-    };
+    let skill = category_skill(category);
     ToolHint {
         category,
         message: message.to_string(),
-        context,
+        context: format!("{context}\nSkill: tracedecay:{skill}."),
         nonblocking,
     }
 }
 
-fn category_skill(category: HintCategory) -> Option<&'static str> {
+fn category_skill(category: HintCategory) -> &'static str {
     match category {
         HintCategory::Search
         | HintCategory::SemanticSearch
@@ -714,18 +684,16 @@ fn category_skill(category: HintCategory) -> Option<&'static str> {
         | HintCategory::BroadRead
         | HintCategory::SymbolLookup
         | HintCategory::FileLookup
-        | HintCategory::TypeOrientation => Some("exploring-code"),
-        HintCategory::ToolDescriptorRead | HintCategory::CallGraph => Some("tracing-functions"),
-        HintCategory::Impact => Some("assessing-impact"),
-        HintCategory::ProjectContext => Some("code-health"),
-        HintCategory::SessionRecall => Some("managing-session-context"),
-        HintCategory::AtomicEdit => Some("editing-safely"),
-        HintCategory::ExploreSubagent | HintCategory::SubagentStartContext => {
-            Some("using-tracedecay")
-        }
-        HintCategory::BuildDiagnostics => Some("fixing-build-and-type-errors"),
-        HintCategory::ReviewChanges => Some("reviewing-changes"),
-        HintCategory::MemoryStore => Some("project-memory"),
+        | HintCategory::TypeOrientation => "exploring-code",
+        HintCategory::ToolDescriptorRead | HintCategory::CallGraph => "tracing-functions",
+        HintCategory::Impact => "assessing-impact",
+        HintCategory::ProjectContext => "code-health",
+        HintCategory::SessionRecall => "managing-session-context",
+        HintCategory::AtomicEdit => "editing-safely",
+        HintCategory::ExploreSubagent | HintCategory::SubagentStartContext => "using-tracedecay",
+        HintCategory::BuildDiagnostics => "fixing-build-and-type-errors",
+        HintCategory::ReviewChanges => "reviewing-changes",
+        HintCategory::MemoryStore => "project-memory",
     }
 }
 

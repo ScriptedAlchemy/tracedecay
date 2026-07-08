@@ -786,8 +786,32 @@ fn cursor_tool_hint_input(parsed: &Value) -> ToolHintInput {
             )
         }),
         subagent_type: text_field(parsed, &["subagent_type", "subagentType", "agent_type"]),
-        file_path: text_field(tool_input, &["file_path", "filePath", "path"])
-            .or_else(|| text_field(parsed, &["file_path", "filePath", "path"])),
+        file_path: text_field(
+            tool_input,
+            &[
+                "file_path",
+                "filePath",
+                "path",
+                "target_file",
+                "targetFile",
+                "relative_workspace_path",
+                "relativeWorkspacePath",
+            ],
+        )
+        .or_else(|| {
+            text_field(
+                parsed,
+                &[
+                    "file_path",
+                    "filePath",
+                    "path",
+                    "target_file",
+                    "targetFile",
+                    "relative_workspace_path",
+                    "relativeWorkspacePath",
+                ],
+            )
+        }),
         hints_enabled: true,
     }
 }

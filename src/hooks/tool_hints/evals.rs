@@ -56,6 +56,12 @@ const COVERAGE_FAMILIES: &[ScenarioFamily] = &[
     ScenarioFamily::Dedupe,
 ];
 
+const STATIC_BOILERPLATE: &[&str] = &[
+    "tracedecay is available via MCP",
+    "Prefer tracedecay MCP tools",
+    "run `tracedecay init`",
+];
+
 #[derive(Clone)]
 struct HintEval {
     name: &'static str,
@@ -82,11 +88,7 @@ fn prompt_eval(
         },
         expected,
         must_contain,
-        must_not_contain: &[
-            "tracedecay is available via MCP",
-            "Prefer tracedecay MCP tools",
-            "run `tracedecay init`",
-        ],
+        must_not_contain: STATIC_BOILERPLATE,
     }
 }
 
@@ -109,11 +111,20 @@ fn shell_eval(
         },
         expected,
         must_contain,
-        must_not_contain: &[
-            "tracedecay is available via MCP",
-            "Prefer tracedecay MCP tools",
-            "run `tracedecay init`",
-        ],
+        must_not_contain: STATIC_BOILERPLATE,
+    }
+}
+
+fn dedupe_eval(
+    name: &'static str,
+    command: &'static str,
+    prompt: &'static str,
+    expected: Option<HintCategory>,
+    must_contain: &'static [&'static str],
+) -> HintEval {
+    HintEval {
+        family: ScenarioFamily::Dedupe,
+        ..shell_eval(name, command, prompt, expected, must_contain)
     }
 }
 
@@ -135,11 +146,7 @@ fn tool_eval(
         },
         expected,
         must_contain,
-        must_not_contain: &[
-            "tracedecay is available via MCP",
-            "Prefer tracedecay MCP tools",
-            "run `tracedecay init`",
-        ],
+        must_not_contain: STATIC_BOILERPLATE,
     }
 }
 
@@ -158,11 +165,7 @@ fn input_eval(
         },
         expected,
         must_contain,
-        must_not_contain: &[
-            "tracedecay is available via MCP",
-            "Prefer tracedecay MCP tools",
-            "run `tracedecay init`",
-        ],
+        must_not_contain: STATIC_BOILERPLATE,
     }
 }
 
@@ -179,14 +182,13 @@ fn run_eval(eval: &HintEval) {
         return;
     };
     let visible = format!("{}\n{}", hint.message, hint.context);
-    if let Some(skill) = category_skill(hint.category) {
-        assert!(
-            visible.contains(&format!("Skill: tracedecay:{skill}.")),
-            "{} missing bundled skill trigger `tracedecay:{skill}` in:\n{}",
-            eval.name,
-            visible
-        );
-    }
+    let skill = category_skill(hint.category);
+    assert!(
+        visible.contains(&format!("Skill: tracedecay:{skill}.")),
+        "{} missing bundled skill trigger `tracedecay:{skill}` in:\n{}",
+        eval.name,
+        visible
+    );
     assert!(
         visible.len() <= 850,
         "{} hint is too verbose: {} chars\n{}",
@@ -309,8 +311,8 @@ fn real_world_prompt_cases() -> Vec<HintEval> {
         prompt_eval(
             "generic-non-code-chat-complaint",
             "hooks should be smarter when a chat is not inside a git repo; it should be generic like lcm or sessions, not code graph parts",
-            Some(HintCategory::SessionRecall),
-            &["tracedecay_message_search"],
+            None,
+            &[],
         ),
         prompt_eval(
             "what-did-we-decide-before",
@@ -985,7 +987,7 @@ fn expanded_transcript_host_evals() -> Vec<HintEval> {
             &["tracedecay_diff_context"],
         ),
         shell_eval(
-            "fd-current-repo-files",
+            "fd-current-repo-rust-files",
             "fd -e rs . src/hooks",
             "list Rust hook files",
             Some(HintCategory::FileLookup),
@@ -1094,6 +1096,20 @@ fn expanded_transcript_host_evals() -> Vec<HintEval> {
             &["tracedecay_outline"],
         ),
         tool_eval(
+            "cursor-read-file-alias",
+            "read_file",
+            Some("src/hooks/cursor.rs"),
+            Some(HintCategory::FileRead),
+            &["tracedecay_outline"],
+        ),
+        tool_eval(
+            "cursor-list-dir-alias",
+            "list_dir",
+            Some("src/hooks"),
+            Some(HintCategory::FileLookup),
+            &["tracedecay_files"],
+        ),
+        tool_eval(
             "claude-memory-file-edit",
             "Write",
             Some("/home/zack/.claude/projects/foo/memory/notes.md"),
@@ -1126,6 +1142,16 @@ fn expanded_transcript_host_evals() -> Vec<HintEval> {
     ]
 }
 
+fn dedupe_scenario_cases() -> Vec<HintEval> {
+    vec![dedupe_eval(
+        "dedupe-repeated-search-trigger",
+        "rg -n \"ToolHint\" src/hooks",
+        "find literal matches, repeated later in the same session",
+        Some(HintCategory::Search),
+        &["tracedecay_grep"],
+    )]
+}
+
 #[test]
 fn expanded_transcript_host_scenario_eval_matrix() {
     for eval in &expanded_transcript_host_evals() {
@@ -1135,17 +1161,23 @@ fn expanded_transcript_host_scenario_eval_matrix() {
 
 #[test]
 fn scenario_coverage_reaches_high_value_target() {
-    const BASELINE_MATRIX_CASES_BEFORE_TRANSCRIPT_EXPANSION: usize = 35;
     const HIGH_VALUE_SCENARIO_SLOTS: usize = 80;
     const TARGET_PERCENT: usize = 90;
 
     let expanded = expanded_transcript_host_evals().len();
-    let covered = BASELINE_MATRIX_CASES_BEFORE_TRANSCRIPT_EXPANSION + expanded;
     let mut all_cases = Vec::new();
     all_cases.extend(real_world_prompt_cases());
     all_cases.extend(dynamic_action_context_cases());
     all_cases.extend(synthetic_prompt_cases());
     all_cases.extend(expanded_transcript_host_evals());
+    all_cases.extend(dedupe_scenario_cases());
+    let unique_names: BTreeSet<_> = all_cases.iter().map(|eval| eval.name).collect();
+    assert_eq!(
+        unique_names.len(),
+        all_cases.len(),
+        "scenario names must be unique"
+    );
+    let covered = unique_names.len();
     let covered_categories: BTreeSet<_> =
         all_cases.iter().filter_map(|eval| eval.expected).collect();
     let expected_categories: BTreeSet<_> = [
@@ -1170,8 +1202,7 @@ fn scenario_coverage_reaches_high_value_target() {
     ]
     .into_iter()
     .collect();
-    let mut covered_families: BTreeSet<_> = all_cases.iter().flat_map(coverage_families).collect();
-    covered_families.insert(ScenarioFamily::Dedupe);
+    let covered_families: BTreeSet<_> = all_cases.iter().flat_map(coverage_families).collect();
     let negative_cases = all_cases
         .iter()
         .filter(|eval| eval.expected.is_none())
@@ -1197,6 +1228,10 @@ fn scenario_coverage_reaches_high_value_target() {
 
 #[test]
 fn session_stream_eval_rotates_repeated_hints() {
+    for eval in &dedupe_scenario_cases() {
+        run_eval(eval);
+    }
+
     let mut dedupe = ToolHintDedupe::default();
     let sequence = [
         HintCategory::Search,

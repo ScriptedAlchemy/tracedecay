@@ -291,6 +291,7 @@ fn every_category_has_compact_skill_backed_rendering() {
         HintCategory::ExploreSubagent,
         HintCategory::SubagentStartContext,
         HintCategory::BuildDiagnostics,
+        HintCategory::ReviewChanges,
         HintCategory::MemoryStore,
     ];
 
@@ -306,12 +307,11 @@ fn every_category_has_compact_skill_backed_rendering() {
             visible.len(),
             visible
         );
-        if let Some(skill) = category_skill(category) {
-            assert!(
-                visible.contains(&format!("Skill: tracedecay:{skill}.")),
-                "{category:?} missing skill trigger"
-            );
-        }
+        let skill = category_skill(category);
+        assert!(
+            visible.contains(&format!("Skill: tracedecay:{skill}.")),
+            "{category:?} missing skill trigger"
+        );
     }
 }
 

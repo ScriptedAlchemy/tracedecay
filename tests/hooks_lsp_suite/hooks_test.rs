@@ -333,7 +333,7 @@ fn test_cursor_post_tool_use_hints_for_grep_search() {
         v["additional_context"]
             .as_str()
             .unwrap_or_default()
-            .contains("tracedecay_search")
+            .contains("tracedecay_grep")
     );
     assert!(v.get("hookSpecificOutput").is_none());
     assert!(v.get("permission").is_none());
@@ -397,6 +397,49 @@ fn test_cursor_post_tool_use_hints_for_single_file_read() {
     let context = v["additional_context"].as_str().unwrap_or_default();
     assert!(context.contains("tracedecay_outline"));
     assert!(context.contains("tracedecay_body"));
+}
+
+#[test]
+fn test_cursor_post_tool_use_hints_for_target_file_read() {
+    let input = r#"{
+        "hook_event_name": "postToolUse",
+        "tool_name": "read_file",
+        "tool_input": {
+            "target_file": "src/hooks/cursor.rs"
+        },
+        "session_id": "cursor-test-target-file"
+    }"#;
+
+    let output = evaluate_cursor_post_tool_use(input).expect("read_file should get a soft hint");
+    let v: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert!(
+        v["additional_context"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("tracedecay_outline")
+    );
+}
+
+#[test]
+fn test_cursor_post_tool_use_hints_for_list_dir() {
+    let input = r#"{
+        "hook_event_name": "postToolUse",
+        "tool_name": "list_dir",
+        "tool_input": {
+            "relative_workspace_path": "src/hooks"
+        },
+        "session_id": "cursor-test-list-dir"
+    }"#;
+
+    let output =
+        evaluate_cursor_post_tool_use(input).expect("list_dir should get a file lookup hint");
+    let v: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert!(
+        v["additional_context"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("tracedecay_files")
+    );
 }
 
 #[test]

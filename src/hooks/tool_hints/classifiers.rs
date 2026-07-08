@@ -134,63 +134,9 @@ pub(super) fn is_shell_text_search_command(command: &str) -> bool {
 /// `tsc`, `npx tsc`, or `pyright`. Quote-aware like the other shell classifiers
 /// so a needle such as `grep "cargo check"` is data, not a program.
 pub(super) fn is_build_diagnostics_command(command: &str) -> bool {
-    let invocations = shell_invocations(command);
-    if invocations
+    shell_invocations(command)
         .iter()
         .any(|invocation| is_build_diagnostics_invocation(&invocation.base, &invocation.args))
-    {
-        return true;
-    }
-    let tokens = shell_words(command);
-    let Some(first) = tokens.first() else {
-        return false;
-    };
-    let program = first.trim_start_matches('(').to_ascii_lowercase();
-    // The program name without any directory prefix (e.g. `/usr/bin/tsc` -> `tsc`).
-    let base = program.rsplit(['/', '\\']).next().unwrap_or(&program);
-    match base {
-        "cargo" => tokens.iter().skip(1).any(|token| {
-            matches!(
-                token.trim_start_matches('(').to_ascii_lowercase().as_str(),
-                "check" | "build" | "clippy" | "test" | "nextest"
-            )
-        }),
-        "make" => tokens.iter().skip(1).any(|token| {
-            contains_any(
-                &token.to_ascii_lowercase(),
-                &["check", "build", "clippy", "test", "typecheck"],
-            )
-        }),
-        "tsc" | "pyright" | "pyright-python" | "pytest" | "py.test" => true,
-        "npx" | "pnpm" | "yarn" | "bunx" => tokens.iter().skip(1).any(|token| {
-            let token = token.trim_start_matches('(').to_ascii_lowercase();
-            matches!(token.as_str(), "tsc" | "pyright" | "test" | "build")
-                || contains_any(&token, &["typecheck", "type-check", "check-types"])
-                || matches_test_or_build_script(&token)
-        }),
-        "npm" => tokens.windows(2).any(|pair| {
-            pair[0].trim_start_matches('(').eq_ignore_ascii_case("run")
-                && matches!(
-                    pair[1].to_ascii_lowercase().as_str(),
-                    "build" | "test" | "lint" | "typecheck" | "type-check" | "check"
-                )
-        }),
-        "bun" => tokens
-            .iter()
-            .skip(1)
-            .any(|token| matches_test_or_build_script(token)),
-        "go" => tokens
-            .iter()
-            .skip(1)
-            .any(|token| token.trim_start_matches('(').eq_ignore_ascii_case("test")),
-        "mvn" | "mvnw" | "gradle" | "gradlew" | "swift" => tokens.iter().skip(1).any(|token| {
-            matches!(
-                token.trim_start_matches('(').to_ascii_lowercase().as_str(),
-                "test" | "build" | "check"
-            )
-        }),
-        _ => false,
-    }
 }
 
 fn is_build_diagnostics_invocation(base: &str, args: &[String]) -> bool {
@@ -324,94 +270,44 @@ pub(in crate::hooks) fn is_harness_memory_path(path: &str) -> bool {
 }
 
 pub(super) fn is_project_discovery_command(command: &str) -> bool {
-    let invocations = shell_invocations(command);
-    if !invocations.is_empty() {
-        return invocations.into_iter().any(|invocation| {
-            matches!(
-                invocation.base.as_str(),
-                "find" | "fd" | "fdfind" | "rg" | "ripgrep" | "grep"
-            ) && invocation
-                .args
-                .iter()
-                .any(|token| is_parent_or_projects_path(token))
-        });
-    }
-    let tokens = shell_words(command);
-    let Some(first) = tokens.first() else {
-        return false;
-    };
-    let program = first.trim_start_matches('(').to_ascii_lowercase();
-    match program.as_str() {
-        "find" | "fd" | "fdfind" => tokens
+    shell_invocations(command).into_iter().any(|invocation| {
+        matches!(
+            invocation.base.as_str(),
+            "find" | "fd" | "fdfind" | "rg" | "ripgrep" | "grep"
+        ) && invocation
+            .args
             .iter()
-            .skip(1)
-            .any(|token| is_parent_or_projects_path(token)),
-        "rg" | "ripgrep" | "grep" => tokens
-            .iter()
-            .skip(1)
-            .any(|token| is_parent_or_projects_path(token)),
-        _ => false,
-    }
+            .any(|token| is_parent_or_projects_path(token))
+    })
 }
 
 pub(super) fn is_file_lookup_command(command: &str) -> bool {
-    let invocations = shell_invocations(command);
-    if !invocations.is_empty() {
-        return invocations
-            .into_iter()
-            .any(|invocation| match invocation.base.as_str() {
-                "rg" | "ripgrep" => invocation.args.iter().any(|token| token == "--files"),
-                "git" => invocation
-                    .args
-                    .first()
-                    .is_some_and(|arg| *arg == "ls-files"),
-                "find" | "fd" | "fdfind" => !invocation
-                    .args
-                    .iter()
-                    .any(|token| is_parent_or_projects_path(token)),
-                _ => false,
-            });
-    }
-    let tokens = shell_words(command);
-    let Some(first) = tokens.first() else {
-        return false;
-    };
-    let program = first.trim_start_matches('(').to_ascii_lowercase();
-    let base = program.rsplit(['/', '\\']).next().unwrap_or(&program);
-    match base {
-        "rg" | "ripgrep" => tokens.iter().skip(1).any(|token| token == "--files"),
-        "find" | "fd" | "fdfind" => !tokens
-            .iter()
-            .skip(1)
-            .any(|token| is_parent_or_projects_path(token)),
-        _ => false,
-    }
+    shell_invocations(command)
+        .into_iter()
+        .any(|invocation| match invocation.base.as_str() {
+            "rg" | "ripgrep" => invocation.args.iter().any(|token| token == "--files"),
+            "git" => invocation
+                .args
+                .first()
+                .is_some_and(|arg| *arg == "ls-files"),
+            "find" | "fd" | "fdfind" => !invocation
+                .args
+                .iter()
+                .any(|token| is_parent_or_projects_path(token)),
+            _ => false,
+        })
 }
 
 pub(super) fn is_shell_file_read_command(command: &str) -> bool {
-    let invocations = shell_invocations(command);
-    if !invocations.is_empty() {
-        return invocations.into_iter().any(|invocation| {
-            matches!(
-                invocation.base.as_str(),
-                "cat" | "head" | "tail" | "sed" | "nl"
-            ) && invocation
-                .args
-                .iter()
-                .any(|token| looks_like_source_path(token))
-        });
-    }
-    let tokens = shell_words(command);
-    let Some(first) = tokens.first() else {
-        return false;
-    };
-    let program = first.trim_start_matches('(').to_ascii_lowercase();
-    let base = program.rsplit(['/', '\\']).next().unwrap_or(&program);
-    matches!(base, "cat" | "head" | "tail" | "sed" | "nl")
-        && tokens
+    shell_invocations(command).into_iter().any(|invocation| {
+        matches!(
+            invocation.base.as_str(),
+            "cat" | "head" | "tail" | "sed" | "nl"
+        ) && invocation
+            .args
             .iter()
-            .skip(1)
             .any(|token| looks_like_source_path(token))
+    })
 }
 
 fn looks_like_source_path(token: &str) -> bool {
@@ -758,7 +654,7 @@ pub(super) fn mentions_current_project_scope(text: &str) -> bool {
 }
 
 pub(super) fn asks_for_session_recall(text: &str) -> bool {
-    contains_any(
+    let prior_context = contains_any(
         text,
         &[
             "where did we",
@@ -791,20 +687,26 @@ pub(super) fn asks_for_session_recall(text: &str) -> bool {
             "session search",
             "session recall",
             "conversation history",
-            "raw codex jsonl transcript",
-            "raw codex jsonl transcripts",
-            "transcript files",
-            "transcripts",
-            "hook input",
-            "hook usage",
-            "hint displayed",
-            "hints displayed",
-            "model gets",
-            "user submitted",
-            "lcm",
-            "sessions",
         ],
-    )
+    );
+    let raw_transcript_context =
+        contains_any(
+            text,
+            &[
+                "raw codex jsonl transcript",
+                "raw codex jsonl transcripts",
+                "transcript files",
+                "hook input",
+                "hook usage",
+                "hint displayed",
+                "hints displayed",
+                "model gets",
+                "user submitted",
+            ],
+        ) || (contains_any(text, &["lcm sessions", "past sessions", "prior sessions"])
+            && contains_any(text, &["check", "search", "find", "look", "review"]));
+
+    prior_context || raw_transcript_context
 }
 
 pub(super) fn asks_for_symbol_lookup(text: &str) -> bool {
