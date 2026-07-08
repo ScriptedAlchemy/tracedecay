@@ -246,18 +246,18 @@ def call_tracedecay_tool(name: str, args: dict, **kwargs) -> str:
         #   2. Hermes state tools use the active code project when one is
         #      pinned/resolved, so LCM and memory share the unified
         #      user-level tracedecay store for that project.
-        #   3. Unpinned Hermes profile-store calls use the hermes_profile
-        #      storage scope instead of synthesizing a project root.
+        #   3. Unpinned Hermes profile-store calls use the Hermes home as
+        #      project identity, which routes through the user-level
+        #      profile-sharded tracedecay store. Explicit hermes_profile
+        #      storage remains supported as a legacy escape hatch.
         project_root = kwargs.get("project_root") or tool_args.get("project_root")
-        if not project_root and tool_args.get("storage_scope") == "hermes_profile":
-            project_root = None
         if not project_root and tool_args.get("storage_scope") != "hermes_profile":
             project_root = code_project_root(cwd=kwargs.get("cwd") or tool_args.get("cwd"))
             if not project_root and name in PROFILE_STORE_TOOLS:
                 tool_args = dict(tool_args)
-                tool_args.setdefault("storage_scope", "hermes_profile")
-                tool_args.setdefault("hermes_home", hermes_home_dir())
-                project_root = None
+                home = tool_args.get("hermes_home") or hermes_home_dir()
+                tool_args.setdefault("project_root", str(home))
+                project_root = tool_args["project_root"]
         payload = json.dumps(tool_args)
         argv = [TRACEDECAY_BIN, "tool"]
         if project_root:

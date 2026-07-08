@@ -1283,7 +1283,7 @@ fn test_hermes_plugin_init_snapshot_matches_embedded_asset() {
     hasher.update(body.as_bytes());
     assert_eq!(
         hex::encode(hasher.finalize()),
-        "30608faf4faf37d78e23826031f7b5422ad81ef5030b8c8bc1a7d3381e1ba85a",
+        "167f7a24ab448980e063f09c1581d81cc69f3e1605223e538616ebda5062f976",
         "templates/plugin_init.py payload hash changed — verify the edit is intentional and update this snapshot"
     );
 }

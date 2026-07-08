@@ -269,6 +269,17 @@ fn profile_scoped_lcm_dispatch_rejects_non_profile_or_non_lcm_calls() {
     ));
 }
 
+#[test]
+fn explicit_project_lcm_dispatch_allows_first_touch_init() {
+    let dispatch = DaemonToolDispatch::project_scoped(
+        Some("/tmp/hermes-profile".to_string()),
+        "tracedecay_lcm_status",
+    );
+
+    assert!(dispatch.allow_init);
+    assert!(!dispatch.allow_profile_scoped_fallback);
+}
+
 // Registry integrity guardrail (companion to the handler lockstep tests in
 // `mcp::tools::handlers`): the CLI routes profile-scoped LCM calls through
 // `is_profile_scoped_lcm_dispatch`, which consults the hand-maintained
@@ -683,4 +694,14 @@ fn join_content_text_skips_empty_blocks() {
 fn join_content_text_empty_when_no_content() {
     assert_eq!(join_content_text(&json!({})), "");
     assert_eq!(join_content_text(&json!({ "content": [] })), "");
+}
+
+#[test]
+fn first_touch_store_tools_superset_of_profile_scoped_lcm_tools() {
+    for tool in PROFILE_SCOPED_LCM_TOOLS {
+        assert!(
+            FIRST_TOUCH_STORE_TOOLS.contains(tool),
+            "profile-scoped LCM tool {tool} must also be a first-touch store tool; keep the two allowlists in lockstep",
+        );
+    }
 }
