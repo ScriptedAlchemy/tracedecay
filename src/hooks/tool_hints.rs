@@ -49,78 +49,205 @@ pub enum HintCategory {
 }
 
 impl HintCategory {
+    fn spec(self) -> &'static HintCategorySpec {
+        CATEGORY_SPECS
+            .iter()
+            .find(|spec| spec.category == self)
+            .expect("every HintCategory has a spec")
+    }
+
     pub(crate) fn as_key(self) -> &'static str {
-        match self {
-            HintCategory::Search => "search",
-            HintCategory::SemanticSearch => "semantic_search",
-            HintCategory::FileRead => "file_read",
-            HintCategory::ToolDescriptorRead => "tool_descriptor_read",
-            HintCategory::BroadRead => "broad_read",
-            HintCategory::CallGraph => "call_graph",
-            HintCategory::Impact => "impact",
-            HintCategory::SymbolLookup => "symbol_lookup",
-            HintCategory::FileLookup => "file_lookup",
-            HintCategory::ProjectContext => "project_context",
-            HintCategory::SessionRecall => "session_recall",
-            HintCategory::AtomicEdit => "atomic_edit",
-            HintCategory::TypeOrientation => "type_orientation",
-            HintCategory::ExploreSubagent => "explore_subagent",
-            HintCategory::SubagentStartContext => "subagent_start_context",
-            HintCategory::BuildDiagnostics => "build_diagnostics",
-            HintCategory::ReviewChanges => "review_changes",
-            HintCategory::MemoryStore => "memory_store",
-        }
+        self.spec().key
     }
 
     /// Human-readable name used in the escalation message prefix
     /// ("Repeated native <label> usage this session — ...").
     fn label(self) -> &'static str {
-        match self {
-            HintCategory::Search => "search",
-            HintCategory::SemanticSearch => "semantic search",
-            HintCategory::FileRead => "file read",
-            HintCategory::ToolDescriptorRead => "tool descriptor read",
-            HintCategory::BroadRead => "broad read",
-            HintCategory::CallGraph => "call-graph",
-            HintCategory::Impact => "impact",
-            HintCategory::SymbolLookup => "symbol lookup",
-            HintCategory::FileLookup => "file lookup",
-            HintCategory::ProjectContext => "project context",
-            HintCategory::SessionRecall => "session recall",
-            HintCategory::AtomicEdit => "atomic edit",
-            HintCategory::TypeOrientation => "type orientation",
-            HintCategory::ExploreSubagent => "explore subagent",
-            HintCategory::SubagentStartContext => "subagent start context",
-            HintCategory::BuildDiagnostics => "build diagnostics",
-            HintCategory::ReviewChanges => "review changes",
-            HintCategory::MemoryStore => "memory store",
-        }
+        self.spec().label
     }
 
     fn from_key(key: &str) -> Option<Self> {
-        match key {
-            "search" => Some(HintCategory::Search),
-            "semantic_search" => Some(HintCategory::SemanticSearch),
-            "file_read" => Some(HintCategory::FileRead),
-            "tool_descriptor_read" => Some(HintCategory::ToolDescriptorRead),
-            "broad_read" => Some(HintCategory::BroadRead),
-            "call_graph" => Some(HintCategory::CallGraph),
-            "impact" => Some(HintCategory::Impact),
-            "symbol_lookup" => Some(HintCategory::SymbolLookup),
-            "file_lookup" => Some(HintCategory::FileLookup),
-            "project_context" => Some(HintCategory::ProjectContext),
-            "session_recall" => Some(HintCategory::SessionRecall),
-            "atomic_edit" => Some(HintCategory::AtomicEdit),
-            "type_orientation" => Some(HintCategory::TypeOrientation),
-            "explore_subagent" => Some(HintCategory::ExploreSubagent),
-            "subagent_start_context" => Some(HintCategory::SubagentStartContext),
-            "build_diagnostics" => Some(HintCategory::BuildDiagnostics),
-            "review_changes" => Some(HintCategory::ReviewChanges),
-            "memory_store" => Some(HintCategory::MemoryStore),
-            _ => None,
-        }
+        CATEGORY_SPECS
+            .iter()
+            .find(|spec| spec.key == key)
+            .map(|spec| spec.category)
     }
 }
+
+struct HintCategorySpec {
+    category: HintCategory,
+    key: &'static str,
+    label: &'static str,
+    skill: &'static str,
+    message: &'static str,
+    context: &'static str,
+    nonblocking: bool,
+}
+
+const CATEGORY_SPECS: &[HintCategorySpec] = &[
+    HintCategorySpec {
+        category: HintCategory::Search,
+        key: "search",
+        label: "search",
+        skill: "exploring-code",
+        message: "For codebase search, route by what you're matching: literal/regex text -> tracedecay_grep; symbol name -> tracedecay_search; concept -> tracedecay_context.",
+        context: "tracedecay_grep runs a literal or regex content search over the indexed tree (pattern, fixed_strings, path_glob) and enriches each hit with its enclosing symbol; tracedecay_search ranks symbols by name; tracedecay_context answers concept-level questions. Grep/ripgrep still fit prose and un-indexed files.",
+        nonblocking: false,
+    },
+    HintCategorySpec {
+        category: HintCategory::SemanticSearch,
+        key: "semantic_search",
+        label: "semantic search",
+        skill: "exploring-code",
+        message: "For conceptual codebase questions, consider tracedecay_context.",
+        context: "tracedecay_context answers concept-level queries from the pre-built code graph (add keywords to expand synonyms); tracedecay_search ranks symbols by name/keyword; tracedecay_grep matches a literal or regex string when you want exact text, not a concept.",
+        nonblocking: true,
+    },
+    HintCategorySpec {
+        category: HintCategory::FileRead,
+        key: "file_read",
+        label: "file read",
+        skill: "exploring-code",
+        message: "Before reading whole files, consider tracedecay_outline, tracedecay_body, or tracedecay_read.",
+        context: "tracedecay_outline gives a file's table of contents, tracedecay_body returns one symbol's source, and tracedecay_read (mode: \"lines\") slices a range — usually far cheaper than a full-file read. If you are opening the file only to find a string in it, tracedecay_grep locates the literal or regex match with its enclosing symbol instead.",
+        nonblocking: true,
+    },
+    HintCategorySpec {
+        category: HintCategory::ToolDescriptorRead,
+        key: "tool_descriptor_read",
+        label: "tool descriptor read",
+        skill: "tracing-functions",
+        message: "This looks like a TraceDecay MCP tool descriptor; use the tool surface instead of reading schema JSON.",
+        context: "Call the named tracedecay_* MCP tool directly when available, or use tool discovery for its schema; for function tracing that usually means tracedecay_find_exact_symbol plus tracedecay_callers/tracedecay_callees.",
+        nonblocking: true,
+    },
+    HintCategorySpec {
+        category: HintCategory::BroadRead,
+        key: "broad_read",
+        label: "broad read",
+        skill: "exploring-code",
+        message: "For broad codebase reading, consider starting with focused tracedecay context.",
+        context: "tracedecay_context gathers relevant code slices without reading entire directories or the whole repository; tracedecay_grep sweeps the indexed tree for a literal or regex string when you are hunting for exact text rather than a concept.",
+        nonblocking: false,
+    },
+    HintCategorySpec {
+        category: HintCategory::CallGraph,
+        key: "call_graph",
+        label: "call-graph",
+        skill: "tracing-functions",
+        message: "For function tracing, use the indexed call graph before grep/file reads.",
+        context: "Resolve the symbol with tracedecay_find_exact_symbol or tracedecay_search, then use tracedecay_callers for who depends on it and tracedecay_callees for what it calls; use tracedecay_impact for broader dependents before opening files.",
+        nonblocking: false,
+    },
+    HintCategorySpec {
+        category: HintCategory::Impact,
+        key: "impact",
+        label: "impact",
+        skill: "assessing-impact",
+        message: "For impact, affected-test, or blast-radius questions, use TraceDecay's dependency tools.",
+        context: "Start with tracedecay_diff_context when you have changed files, tracedecay_impact for a resolved symbol, tracedecay_affected for affected tests, and tracedecay_test_map when you need direct test attribution.",
+        nonblocking: false,
+    },
+    HintCategorySpec {
+        category: HintCategory::SymbolLookup,
+        key: "symbol_lookup",
+        label: "symbol lookup",
+        skill: "exploring-code",
+        message: "For symbol lookup, consider using tracedecay indexed symbol tools.",
+        context: "tracedecay_context and tracedecay_node can locate definitions and nearby relationships from the code graph.",
+        nonblocking: false,
+    },
+    HintCategorySpec {
+        category: HintCategory::FileLookup,
+        key: "file_lookup",
+        label: "file lookup",
+        skill: "exploring-code",
+        message: "For finding files by role or path, consider using tracedecay_files.",
+        context: "tracedecay_files can list indexed files and narrow file lookup before opening individual files.",
+        nonblocking: false,
+    },
+    HintCategorySpec {
+        category: HintCategory::ProjectContext,
+        key: "project_context",
+        label: "project context",
+        skill: "code-health",
+        message: "For other repos or registered projects, consider TraceDecay project registry tools.",
+        context: "tracedecay_project_list shows known projects; tracedecay_project_search can find a sibling repo by name/path/remote; pass project_path or project_id to tracedecay_context/search for cross-project code context before scanning parent directories.",
+        nonblocking: false,
+    },
+    HintCategorySpec {
+        category: HintCategory::SessionRecall,
+        key: "session_recall",
+        label: "session recall",
+        skill: "managing-session-context",
+        message: "For prior conversation context, consider TraceDecay session search.",
+        context: "tracedecay_message_search searches ingested agent transcripts across providers; tracedecay_lcm_grep can search bounded raw-message snippets and summaries when you need session-level recall before re-discovering context.",
+        nonblocking: false,
+    },
+    HintCategorySpec {
+        category: HintCategory::AtomicEdit,
+        key: "atomic_edit",
+        label: "atomic edit",
+        skill: "editing-safely",
+        message: "For safe mechanical edits, use TraceDecay's anchored edit tools.",
+        context: "Use tracedecay_multi_str_replace for all-or-nothing anchored replacements, tracedecay_ast_grep_rewrite for structural rewrites, and tracedecay_replace_symbol when replacing one resolved symbol.",
+        nonblocking: false,
+    },
+    HintCategorySpec {
+        category: HintCategory::TypeOrientation,
+        key: "type_orientation",
+        label: "type orientation",
+        skill: "exploring-code",
+        message: "For type, constructor, field, trait, or duplicate-logic questions, use TraceDecay's AST orientation tools.",
+        context: "Use tracedecay_constructors for struct literal sites, tracedecay_field_sites for reads/writes, tracedecay_impls or tracedecay_implementations for trait methods, and tracedecay_redundancy before adding similar helpers.",
+        nonblocking: false,
+    },
+    HintCategorySpec {
+        category: HintCategory::ExploreSubagent,
+        key: "explore_subagent",
+        label: "explore subagent",
+        skill: "using-tracedecay",
+        message: "For code research subagents, consider adding tracedecay MCP context before broad exploration.",
+        context: "tracedecay_context can gather focused code context, while tracedecay_search, tracedecay_callers, and tracedecay_impact can answer common research questions without a broad scan.",
+        nonblocking: true,
+    },
+    HintCategorySpec {
+        category: HintCategory::SubagentStartContext,
+        key: "subagent_start_context",
+        label: "subagent start context",
+        skill: "using-tracedecay",
+        message: "For subagent handoff, include focused TraceDecay context instead of broad repo instructions.",
+        context: "Use tracedecay_context, tracedecay_search, and tracedecay_impact to provide only the code graph slices the subagent needs; keep workflow depth in bundled skills.",
+        nonblocking: true,
+    },
+    HintCategorySpec {
+        category: HintCategory::BuildDiagnostics,
+        key: "build_diagnostics",
+        label: "build diagnostics",
+        skill: "fixing-build-and-type-errors",
+        message: "For build/type-check errors, use TraceDecay's diagnostics tools instead of parsing raw compiler output.",
+        context: "tracedecay_diagnostics runs (or reads) the project's diagnostics and maps each error to its enclosing symbol; tracedecay_diagnose adds caller/impact context for a specific failure so you fix the root cause, not just the line the compiler points at.",
+        nonblocking: false,
+    },
+    HintCategorySpec {
+        category: HintCategory::ReviewChanges,
+        key: "review_changes",
+        label: "review changes",
+        skill: "reviewing-changes",
+        message: "For reviewing diffs or PR changes, use TraceDecay's change-context tools before raw diff reading.",
+        context: "tracedecay_diff_context maps local changed files to touched symbols, dependents, and tests; tracedecay_pr_context does the same for a PR branch when available, so use GitHub only for review comments, metadata, and CI state.",
+        nonblocking: false,
+    },
+    HintCategorySpec {
+        category: HintCategory::MemoryStore,
+        key: "memory_store",
+        label: "memory store",
+        skill: "project-memory",
+        message: "For durable facts, prefer tracedecay_fact_store over hand-editing harness memory files.",
+        context: "tracedecay_fact_store persists a trust-ranked project/user fact that survives across sessions and is recalled by tracedecay_context and tracedecay_recall; a memory markdown edit is only visible to the current harness. Keep secrets and unnecessary PII out of stored facts.",
+        nonblocking: false,
+    },
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolHintInput {
@@ -554,147 +681,17 @@ fn classify_hint(input: &ToolHintInput) -> Option<HintCategory> {
 }
 
 fn hint_for_category(category: HintCategory) -> ToolHint {
-    match category {
-        HintCategory::ExploreSubagent => hint(
-            category,
-            "For code research subagents, consider adding tracedecay MCP context before broad exploration.",
-            "tracedecay_context can gather focused code context, while tracedecay_search, tracedecay_callers, and tracedecay_impact can answer common research questions without a broad scan.",
-            true,
-        ),
-        HintCategory::SemanticSearch => hint(
-            category,
-            "For conceptual codebase questions, consider tracedecay_context.",
-            "tracedecay_context answers concept-level queries from the pre-built code graph (add keywords to expand synonyms); tracedecay_search ranks symbols by name/keyword; tracedecay_grep matches a literal or regex string when you want exact text, not a concept.",
-            true,
-        ),
-        HintCategory::SessionRecall => hint(
-            category,
-            "For prior conversation context, consider TraceDecay session search.",
-            "tracedecay_message_search searches ingested agent transcripts across providers; tracedecay_lcm_grep can search bounded raw-message snippets and summaries when you need session-level recall before re-discovering context.",
-            false,
-        ),
-        HintCategory::ProjectContext => hint(
-            category,
-            "For other repos or registered projects, consider TraceDecay project registry tools.",
-            "tracedecay_project_list shows known projects; tracedecay_project_search can find a sibling repo by name/path/remote; pass project_path or project_id to tracedecay_context/search for cross-project code context before scanning parent directories.",
-            false,
-        ),
-        HintCategory::CallGraph => hint(
-            category,
-            "For function tracing, use the indexed call graph before grep/file reads.",
-            "Resolve the symbol with tracedecay_find_exact_symbol or tracedecay_search, then use tracedecay_callers for who depends on it and tracedecay_callees for what it calls; use tracedecay_impact for broader dependents before opening files.",
-            false,
-        ),
-        HintCategory::Impact => hint(
-            category,
-            "For impact, affected-test, or blast-radius questions, use TraceDecay's dependency tools.",
-            "Start with tracedecay_diff_context when you have changed files, tracedecay_impact for a resolved symbol, tracedecay_affected for affected tests, and tracedecay_test_map when you need direct test attribution.",
-            false,
-        ),
-        HintCategory::AtomicEdit => hint(
-            category,
-            "For safe mechanical edits, use TraceDecay's anchored edit tools.",
-            "Use tracedecay_multi_str_replace for all-or-nothing anchored replacements, tracedecay_ast_grep_rewrite for structural rewrites, and tracedecay_replace_symbol when replacing one resolved symbol.",
-            false,
-        ),
-        HintCategory::TypeOrientation => hint(
-            category,
-            "For type, constructor, field, trait, or duplicate-logic questions, use TraceDecay's AST orientation tools.",
-            "Use tracedecay_constructors for struct literal sites, tracedecay_field_sites for reads/writes, tracedecay_impls or tracedecay_implementations for trait methods, and tracedecay_redundancy before adding similar helpers.",
-            false,
-        ),
-        HintCategory::BuildDiagnostics => hint(
-            category,
-            "For build/type-check errors, use TraceDecay's diagnostics tools instead of parsing raw compiler output.",
-            "tracedecay_diagnostics runs (or reads) the project's diagnostics and maps each error to its enclosing symbol; tracedecay_diagnose adds caller/impact context for a specific failure so you fix the root cause, not just the line the compiler points at.",
-            false,
-        ),
-        HintCategory::ReviewChanges => hint(
-            category,
-            "For reviewing diffs or PR changes, use TraceDecay's change-context tools before raw diff reading.",
-            "tracedecay_diff_context maps local changed files to touched symbols, dependents, and tests; tracedecay_pr_context does the same for a PR branch when available, so use GitHub only for review comments, metadata, and CI state.",
-            false,
-        ),
-        HintCategory::MemoryStore => hint(
-            category,
-            "For durable facts, prefer tracedecay_fact_store over hand-editing harness memory files.",
-            "tracedecay_fact_store persists a trust-ranked project/user fact that survives across sessions and is recalled by tracedecay_context and tracedecay_recall; a memory markdown edit is only visible to the current harness. Keep secrets and unnecessary PII out of stored facts.",
-            false,
-        ),
-        HintCategory::FileLookup => hint(
-            category,
-            "For finding files by role or path, consider using tracedecay_files.",
-            "tracedecay_files can list indexed files and narrow file lookup before opening individual files.",
-            false,
-        ),
-        HintCategory::Search => hint(
-            category,
-            "For codebase search, route by what you're matching: literal/regex text -> tracedecay_grep; symbol name -> tracedecay_search; concept -> tracedecay_context.",
-            "tracedecay_grep runs a literal or regex content search over the indexed tree (pattern, fixed_strings, path_glob) and enriches each hit with its enclosing symbol; tracedecay_search ranks symbols by name; tracedecay_context answers concept-level questions. Grep/ripgrep still fit prose and un-indexed files.",
-            false,
-        ),
-        HintCategory::ToolDescriptorRead => hint(
-            category,
-            "This looks like a TraceDecay MCP tool descriptor; use the tool surface instead of reading schema JSON.",
-            "Call the named tracedecay_* MCP tool directly when available, or use tool discovery for its schema; for function tracing that usually means tracedecay_find_exact_symbol plus tracedecay_callers/tracedecay_callees.",
-            true,
-        ),
-        HintCategory::FileRead => hint(
-            category,
-            "Before reading whole files, consider tracedecay_outline, tracedecay_body, or tracedecay_read.",
-            "tracedecay_outline gives a file's table of contents, tracedecay_body returns one symbol's source, and tracedecay_read (mode: \"lines\") slices a range — usually far cheaper than a full-file read. If you are opening the file only to find a string in it, tracedecay_grep locates the literal or regex match with its enclosing symbol instead.",
-            true,
-        ),
-        HintCategory::BroadRead => hint(
-            category,
-            "For broad codebase reading, consider starting with focused tracedecay context.",
-            "tracedecay_context gathers relevant code slices without reading entire directories or the whole repository; tracedecay_grep sweeps the indexed tree for a literal or regex string when you are hunting for exact text rather than a concept.",
-            false,
-        ),
-        HintCategory::SymbolLookup => hint(
-            category,
-            "For symbol lookup, consider using tracedecay indexed symbol tools.",
-            "tracedecay_context and tracedecay_node can locate definitions and nearby relationships from the code graph.",
-            false,
-        ),
-        HintCategory::SubagentStartContext => hint(
-            category,
-            "For subagent handoff, include focused TraceDecay context instead of broad repo instructions.",
-            "Use tracedecay_context, tracedecay_search, and tracedecay_impact to provide only the code graph slices the subagent needs; keep workflow depth in bundled skills.",
-            true,
-        ),
-    }
-}
-
-fn hint(category: HintCategory, message: &str, context: &str, nonblocking: bool) -> ToolHint {
-    let skill = category_skill(category);
+    let spec = category.spec();
     ToolHint {
         category,
-        message: message.to_string(),
-        context: format!("{context}\nSkill: tracedecay:{skill}."),
-        nonblocking,
+        message: spec.message.to_string(),
+        context: format!("{}\nSkill: tracedecay:{}.", spec.context, spec.skill),
+        nonblocking: spec.nonblocking,
     }
 }
 
 fn category_skill(category: HintCategory) -> &'static str {
-    match category {
-        HintCategory::Search
-        | HintCategory::SemanticSearch
-        | HintCategory::FileRead
-        | HintCategory::BroadRead
-        | HintCategory::SymbolLookup
-        | HintCategory::FileLookup
-        | HintCategory::TypeOrientation => "exploring-code",
-        HintCategory::ToolDescriptorRead | HintCategory::CallGraph => "tracing-functions",
-        HintCategory::Impact => "assessing-impact",
-        HintCategory::ProjectContext => "code-health",
-        HintCategory::SessionRecall => "managing-session-context",
-        HintCategory::AtomicEdit => "editing-safely",
-        HintCategory::ExploreSubagent | HintCategory::SubagentStartContext => "using-tracedecay",
-        HintCategory::BuildDiagnostics => "fixing-build-and-type-errors",
-        HintCategory::ReviewChanges => "reviewing-changes",
-        HintCategory::MemoryStore => "project-memory",
-    }
+    category.spec().skill
 }
 
 mod classifiers;
