@@ -44,6 +44,17 @@ fn dashboard_projects_endpoint_lists_registered_projects_and_active_project() {
             .as_array()
             .unwrap_or_else(|| panic!("expected project list array: {projects}"));
         assert!(
+            projects["project_tree"].as_array().is_some(),
+            "project list should include compact tree: {projects}"
+        );
+        assert!(
+            projects["summary"]["project_count"]
+                .as_u64()
+                .unwrap_or_default()
+                >= 2,
+            "project list should include summary counts: {projects}"
+        );
+        assert!(
             rows.iter().any(|row| row["project_root"]
                 == fixture.project_root.display().to_string()
                 && row["is_active"] == true),
@@ -55,6 +66,21 @@ fn dashboard_projects_endpoint_lists_registered_projects_and_active_project() {
                     && row["is_active"] == false
             ),
             "other registered project should be listed for selection: {projects}"
+        );
+
+        let target_project_id = rows
+            .iter()
+            .find(|row| row["project_root"] == target_root.display().to_string())
+            .and_then(|row| row["project_id"].as_str())
+            .expect("target project id should be listed");
+        let (status, context) = get_json(
+            &agent,
+            &format!("{}/api/projects/{target_project_id}", fixture.base_url),
+        );
+        assert_eq!(status, 200);
+        assert!(
+            !context.to_string().contains("git_remote_url"),
+            "project context should omit credential-bearing remote metadata: {context}"
         );
     });
 }

@@ -3,6 +3,10 @@ use std::path::Path;
 use serde_json::json;
 use tracedecay::errors::{Result, TraceDecayError};
 use tracedecay::global_db::{CodeProjectRecord, GlobalDb, ProjectRegistryContext};
+use tracedecay::project_registry::{
+    PublicCodeProject, PublicProjectRegistryContext, build_project_registry_view,
+    render_project_registry_view,
+};
 
 use crate::cli::ProjectsAction;
 
@@ -20,24 +24,39 @@ pub(crate) async fn handle_projects_action(action: ProjectsAction) -> Result<()>
     match action {
         ProjectsAction::List { limit, json } => {
             let limit = bounded_limit(limit);
-            let projects = db.list_code_projects(limit).await;
-            print_projects("registered projects", projects, limit, json)?;
+            let mut projects = db.list_code_projects(limit + 1).await;
+            let truncated = projects.len() > limit;
+            projects.truncate(limit);
+            let active_project_id = active_project_id(&db).await;
+            print_projects(
+                &db,
+                "registered projects",
+                projects,
+                limit,
+                truncated,
+                active_project_id.as_deref(),
+                None,
+                json,
+            )
+            .await?;
         }
         ProjectsAction::Search { query, limit, json } => {
             let limit = bounded_limit(limit);
-            let projects = db.search_code_projects(&query, limit).await;
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&json!({
-                        "query": query,
-                        "limit": limit,
-                        "projects": projects,
-                    }))?
-                );
-            } else {
-                print_project_table(&format!("projects matching \"{query}\""), &projects);
-            }
+            let mut projects = db.search_code_projects(&query, limit + 1).await;
+            let truncated = projects.len() > limit;
+            projects.truncate(limit);
+            let active_project_id = active_project_id(&db).await;
+            print_projects(
+                &db,
+                &format!("projects matching \"{query}\""),
+                projects,
+                limit,
+                truncated,
+                active_project_id.as_deref(),
+                Some(("query", query.as_str())),
+                json,
+            )
+            .await?;
         }
         ProjectsAction::Context { selector, json } => {
             let context = project_context(&db, &selector).await.ok_or_else(|| {
@@ -73,72 +92,52 @@ async fn project_context(db: &GlobalDb, selector: &str) -> Option<ProjectRegistr
         .await
 }
 
-fn print_projects(
+async fn active_project_id(db: &GlobalDb) -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    let git_common_dir = tracedecay::worktree::git_common_dir(&cwd);
+    db.project_registry_context_by_identity(&cwd, git_common_dir.as_deref())
+        .await
+        .map(|context| context.project.project_id)
+}
+
+async fn print_projects(
+    db: &GlobalDb,
     label: &str,
     projects: Vec<CodeProjectRecord>,
     limit: usize,
+    truncated: bool,
+    active_project_id: Option<&str>,
+    query: Option<(&str, &str)>,
     json_output: bool,
 ) -> Result<()> {
+    let contexts = db.project_registry_contexts_for_projects(&projects).await;
+    let view = build_project_registry_view(&contexts, active_project_id, truncated);
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({
-                "limit": limit,
-                "projects": projects,
-            }))?
-        );
+        let projects = projects
+            .iter()
+            .map(|project| PublicCodeProject::from_record(project, active_project_id))
+            .collect::<Vec<_>>();
+        let mut payload = json!({
+            "limit": limit,
+            "truncated": truncated,
+            "summary": view.summary,
+            "project_tree": view.project_tree,
+            "projects": projects,
+        });
+        if let Some((key, value)) = query {
+            payload[key] = json!(value);
+        }
+        println!("{}", serde_json::to_string_pretty(&payload)?);
     } else {
-        print_project_table(label, &projects);
+        print!("{}", render_project_registry_view(label, &view));
     }
     Ok(())
 }
 
-fn print_project_table(label: &str, projects: &[CodeProjectRecord]) {
-    if projects.is_empty() {
-        println!("No {label} found.");
-        return;
-    }
-
-    let id_width = projects
-        .iter()
-        .map(|project| project.project_id.len())
-        .max()
-        .unwrap_or("project_id".len())
-        .max("project_id".len());
-    let branch_width = projects
-        .iter()
-        .map(|project| {
-            project
-                .default_branch
-                .as_deref()
-                .unwrap_or("-")
-                .chars()
-                .count()
-        })
-        .max()
-        .unwrap_or("branch".len())
-        .max("branch".len());
-
-    println!("Found {} {label}:", projects.len());
-    println!();
-    println!(
-        "  {id:<id_width$}  {branch:<branch_width$}  root",
-        id = "project_id",
-        branch = "branch",
-    );
-    for project in projects {
-        let branch = project.default_branch.as_deref().unwrap_or("-");
-        println!(
-            "  {id:<id_width$}  {branch:<branch_width$}  {root}",
-            id = project.project_id,
-            root = project.display_root,
-        );
-    }
-}
-
 fn print_project_context(context: &ProjectRegistryContext, json_output: bool) -> Result<()> {
     if json_output {
-        println!("{}", serde_json::to_string_pretty(context)?);
+        let payload = PublicProjectRegistryContext::new(context, None);
+        println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());
     }
 
@@ -147,9 +146,6 @@ fn print_project_context(context: &ProjectRegistryContext, json_output: bool) ->
     println!("root: {}", project.display_root);
     if let Some(branch) = &project.default_branch {
         println!("default branch: {branch}");
-    }
-    if let Some(remote) = &project.git_remote_url {
-        println!("remote: {remote}");
     }
     if let Some(git_common_dir) = &project.git_common_dir {
         println!("git common dir: {git_common_dir}");

@@ -11,6 +11,10 @@ use crate::context::read_modes::{LineRange, ReadMode, render_symbol_context};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::{GlobalDb, SessionIngestHealth, global_db_path};
 use crate::path_tree::format_compact_annotated_path_list;
+use crate::project_registry::{
+    ProjectRegistryView, PublicCodeProject, PublicProjectRegistryContext,
+    build_project_registry_view, render_project_registry_view,
+};
 use crate::storage::{ProjectPath, StorageMode, StoreKind};
 use crate::tracedecay::{BranchDiagnostics, TraceDecay};
 use crate::types::{NodeKind, Visibility};
@@ -413,7 +417,22 @@ fn registry_result(args: &Value, payload: &Value) -> ToolResult {
 }
 
 fn render_registry_result(root: Option<&Path>, args: &Value, payload: &Value) -> ToolResult {
-    let text = render::finalize(root, args, payload, || render::generic_md(payload));
+    let text = render::finalize(root, args, payload, || {
+        if payload.get("project_tree").is_some() {
+            let view = serde_json::from_value::<ProjectRegistryView>(json!({
+                "summary": payload.get("summary").cloned().unwrap_or_else(|| json!({})),
+                "project_tree": payload.get("project_tree").cloned().unwrap_or_else(|| json!([])),
+            }));
+            if let Ok(view) = view {
+                let title = payload
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("registered projects");
+                return render_project_registry_view(title, &view);
+            }
+        }
+        render::generic_md(payload)
+    });
     ToolResult::new(
         json!({
             "content": [{ "type": "text", "text": text }]
@@ -428,14 +447,6 @@ fn registry_missing_payload() -> Value {
         "message": "project registry is not present for this profile",
         "projects": [],
     })
-}
-
-fn registry_project_value(project: &crate::global_db::CodeProjectRecord) -> Value {
-    let mut value = serde_json::to_value(project).unwrap_or_else(|_| json!({}));
-    if let Value::Object(map) = &mut value {
-        map.remove("git_remote_url");
-    }
-    value
 }
 
 /// Handles `tracedecay_project_list` tool calls.
@@ -456,14 +467,25 @@ pub(super) async fn handle_project_list(
     let mut projects = db.db().list_code_projects(limit + 1).await;
     let truncated = projects.len() > limit;
     projects.truncate(limit);
-    let projects: Vec<Value> = projects.iter().map(registry_project_value).collect();
+    let contexts = db
+        .db()
+        .project_registry_contexts_for_projects(&projects)
+        .await;
+    let view = build_project_registry_view(&contexts, None, truncated);
+    let projects = projects
+        .iter()
+        .map(|project| PublicCodeProject::from_record(project, None))
+        .collect::<Vec<_>>();
     Ok(registry_result(
         &args,
         &json!({
             "status": "ok",
+            "title": "registered projects",
             "registry_path": display_path(&registry_path),
             "limit": limit,
             "truncated": truncated,
+            "summary": view.summary,
+            "project_tree": view.project_tree,
             "projects": projects,
         }),
     ))
@@ -494,15 +516,26 @@ pub(super) async fn handle_project_search(
     let mut projects = db.db().search_code_projects(query, limit + 1).await;
     let truncated = projects.len() > limit;
     projects.truncate(limit);
-    let projects: Vec<Value> = projects.iter().map(registry_project_value).collect();
+    let contexts = db
+        .db()
+        .project_registry_contexts_for_projects(&projects)
+        .await;
+    let view = build_project_registry_view(&contexts, None, truncated);
+    let projects = projects
+        .iter()
+        .map(|project| PublicCodeProject::from_record(project, None))
+        .collect::<Vec<_>>();
     Ok(registry_result(
         &args,
         &json!({
             "status": "ok",
+            "title": format!("projects matching \"{query}\""),
             "registry_path": display_path(&registry_path),
             "query": query,
             "limit": limit,
             "truncated": truncated,
+            "summary": view.summary,
+            "project_tree": view.project_tree,
             "projects": projects,
         }),
     ))
@@ -572,7 +605,7 @@ pub(super) async fn handle_project_context(
         &json!({
             "status": "ok",
             "registry_path": display_path(&registry_path),
-            "project": registry_project_value(&context.project),
+            "project": PublicProjectRegistryContext::new(&context, None).project,
             "aliases": context.aliases,
             "stores": context.stores,
         }),

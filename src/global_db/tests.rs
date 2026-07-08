@@ -96,3 +96,46 @@ async fn code_projects_seen_within_applies_window_and_limit() {
     let capped_ids: Vec<&str> = capped.iter().map(|p| p.project_id.as_str()).collect();
     assert_eq!(capped_ids, vec!["proj_recent"]);
 }
+
+#[tokio::test]
+async fn search_code_projects_matches_any_whitespace_term() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .expect("open global db");
+
+    for (project_id, root) in [
+        ("proj_rsbuild", "/repos/rsbuild-plugin-react-router"),
+        ("proj_rspack", "/repos/rspack"),
+        ("proj_unrelated", "/repos/unrelated"),
+    ] {
+        db.upsert_code_project(project_id, Path::new(root), None, None, Some("main"))
+            .await
+            .expect("code project should upsert");
+    }
+    db.upsert_code_project(
+        "proj_remote_only",
+        Path::new("/repos/remote-only"),
+        None,
+        Some("https://token:secret@example.test/remote-only.git"),
+        Some("main"),
+    )
+    .await
+    .expect("code project with remote should upsert");
+
+    let matches = db.search_code_projects("rsbuild rspack", 10).await;
+    let ids: Vec<&str> = matches
+        .iter()
+        .map(|project| project.project_id.as_str())
+        .collect();
+
+    assert!(ids.contains(&"proj_rsbuild"), "ids: {ids:?}");
+    assert!(ids.contains(&"proj_rspack"), "ids: {ids:?}");
+    assert!(!ids.contains(&"proj_unrelated"), "ids: {ids:?}");
+
+    let remote_matches = db.search_code_projects("secret", 10).await;
+    assert!(
+        remote_matches.is_empty(),
+        "remote credential text must not be searchable: {remote_matches:?}"
+    );
+}

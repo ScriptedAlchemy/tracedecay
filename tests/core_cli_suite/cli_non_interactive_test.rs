@@ -1168,6 +1168,15 @@ async fn projects_list_json_reads_global_registry() {
     let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(payload["projects"][0]["project_id"], "proj_cli");
     assert_eq!(payload["projects"][0]["default_branch"], "main");
+    assert_eq!(payload["summary"]["project_count"], 1);
+    assert_eq!(
+        payload["project_tree"][0]["projects"][0]["project_id"],
+        "proj_cli"
+    );
+    assert_eq!(
+        payload["project_tree"][0]["projects"][0]["branches"][0],
+        "main"
+    );
 }
 
 #[tokio::test]
@@ -1194,6 +1203,10 @@ async fn projects_search_text_matches_registered_alias() {
     assert!(
         stdout.contains("proj_cli") && stdout.contains("main"),
         "search output should include project id and branch\nstdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Repositories") && stdout.contains("branches: main"),
+        "search output should render compact project tree\nstdout:\n{stdout}"
     );
 }
 

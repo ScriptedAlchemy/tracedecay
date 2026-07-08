@@ -899,7 +899,7 @@ fn def_project_search() -> ToolDefinition {
     def(
         "tracedecay_project_search",
         "Project Search",
-        "Search registered projects by project id, root path, aliases, remote URL, or default branch. This is read-only and bounded.",
+        "Search registered projects by project id, root path, aliases, or default branch. This is read-only and bounded; output omits credential-bearing remotes.",
         json!({
             "type": "object",
             "properties": {
