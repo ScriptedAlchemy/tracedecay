@@ -333,7 +333,7 @@ fn test_cursor_post_tool_use_hints_for_grep_search() {
         v["additional_context"]
             .as_str()
             .unwrap_or_default()
-            .contains("tracedecay_search")
+            .contains("tracedecay_grep")
     );
     assert!(v.get("hookSpecificOutput").is_none());
     assert!(v.get("permission").is_none());
@@ -397,6 +397,49 @@ fn test_cursor_post_tool_use_hints_for_single_file_read() {
     let context = v["additional_context"].as_str().unwrap_or_default();
     assert!(context.contains("tracedecay_outline"));
     assert!(context.contains("tracedecay_body"));
+}
+
+#[test]
+fn test_cursor_post_tool_use_hints_for_target_file_read() {
+    let input = r#"{
+        "hook_event_name": "postToolUse",
+        "tool_name": "read_file",
+        "tool_input": {
+            "target_file": "src/hooks/cursor.rs"
+        },
+        "session_id": "cursor-test-target-file"
+    }"#;
+
+    let output = evaluate_cursor_post_tool_use(input).expect("read_file should get a soft hint");
+    let v: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert!(
+        v["additional_context"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("tracedecay_outline")
+    );
+}
+
+#[test]
+fn test_cursor_post_tool_use_hints_for_list_dir() {
+    let input = r#"{
+        "hook_event_name": "postToolUse",
+        "tool_name": "list_dir",
+        "tool_input": {
+            "relative_workspace_path": "src/hooks"
+        },
+        "session_id": "cursor-test-list-dir"
+    }"#;
+
+    let output =
+        evaluate_cursor_post_tool_use(input).expect("list_dir should get a file lookup hint");
+    let v: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert!(
+        v["additional_context"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("tracedecay_files")
+    );
 }
 
 #[test]
@@ -800,28 +843,41 @@ fn test_build_cursor_session_context_uninitialized_suggests_init() {
 #[test]
 fn test_build_cursor_session_context_initialized_includes_freshness() {
     let context = build_cursor_session_context(true, Some("last indexed 2m ago"), None);
+    assert!(
+        context.len() <= 1_300,
+        "cursor initialized context should stay compact, got {} chars: {context}",
+        context.len()
+    );
     assert!(context.contains("last indexed 2m ago"));
     assert!(
         !context.contains("tracedecay init"),
         "initialized workspaces should not be told to run init: {context}"
     );
-    assert!(context.contains("<EXTREMELY_IMPORTANT>"));
-    assert!(context.contains("tracedecay:using-tracedecay"));
-    assert!(context.contains("Grep is faster for this"));
+    assert!(context.contains("TraceDecay project hint:"));
+    assert!(!context.contains("<EXTREMELY_IMPORTANT>"));
+    assert!(!context.contains("Below is the full `tracedecay:using-tracedecay`"));
+    assert!(!context.contains("Grep is faster for this"));
     assert!(context.contains("ToolSearch"));
-    assert!(context.contains("GRAPH BEFORE GREP"));
-    assert!(context.contains("SUBAGENT-STOP"));
+    assert!(context.contains("tracedecay_find_exact_symbol"));
+    assert!(context.contains("tracedecay_test_map"));
 }
 
 #[test]
-fn test_build_codex_session_context_carries_full_steering() {
-    // Codex has no always-applied tracedecay rule, so its session context must
-    // keep the full tool-routing steering.
+fn test_build_codex_session_context_carries_compact_steering() {
     let context = tracedecay::hooks::build_codex_session_context(true, Some("last indexed 2m ago"));
+    assert!(
+        context.len() <= 2_600,
+        "codex initialized context should stay compact, got {} chars: {context}",
+        context.len()
+    );
+    assert!(context.contains("TraceDecay project hint:"));
     assert!(context.contains("tracedecay_context"));
     assert!(context.contains("ToolSearch"));
-    assert!(context.contains("GRAPH BEFORE GREP"));
-    assert!(context.contains("SUBAGENT-STOP"));
+    assert!(context.contains("tracedecay_find_exact_symbol"));
+    assert!(context.contains("tracedecay_test_map"));
+    assert!(!context.contains("<EXTREMELY_IMPORTANT>"));
+    assert!(!context.contains("Below is the full `tracedecay:using-tracedecay`"));
+    assert!(!context.contains("Grep is faster for this"));
     assert!(context.contains("last indexed 2m ago"));
     assert!(context.contains("tracedecay_project_search"));
     assert!(context.contains("tracedecay_message_search"));
@@ -834,10 +890,7 @@ fn test_build_codex_session_context_carries_full_steering() {
 }
 
 #[tokio::test]
-async fn test_claude_session_context_injects_bootstrap_when_initialized() {
-    // On an initialized project Claude's SessionStart additionalContext must
-    // carry the full using-tracedecay adoption contract, not just the index
-    // status line (matching Cursor and Codex).
+async fn test_claude_session_context_injects_compact_bootstrap_when_initialized() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join(".tracedecay")).unwrap();
     std::fs::write(dir.path().join(".tracedecay/tracedecay.db"), "").unwrap();
@@ -849,22 +902,25 @@ async fn test_claude_session_context_injects_bootstrap_when_initialized() {
 
     let context = claude_session_context_for_event(&event).await;
     assert!(
+        context.len() <= 1_400,
+        "claude initialized context should stay compact, got {} chars: {context}",
+        context.len()
+    );
+    assert!(
         context.contains("tracedecay index status: "),
         "initialized Claude context keeps the index status line: {context}"
     );
     assert!(
-        context.contains("<EXTREMELY_IMPORTANT>"),
-        "initialized Claude context must inject the bootstrap contract: {context}"
+        context.contains("TraceDecay project hint:"),
+        "initialized Claude context must inject compact graph steering: {context}"
     );
-    assert!(context.contains("tracedecay:using-tracedecay"));
-    assert!(context.contains("Grep is faster for this"));
-    assert!(
-        context.contains("SUBAGENT-STOP"),
-        "bootstrap must carry the scoped-subagent guard: {context}"
-    );
+    assert!(context.contains("tracedecay_find_exact_symbol"));
+    assert!(!context.contains("<EXTREMELY_IMPORTANT>"));
+    assert!(!context.contains("Below is the full `tracedecay:using-tracedecay`"));
+    assert!(!context.contains("Grep is faster for this"));
     // The additionalContext channel wraps it as SessionStart context.
     let json = codex_additional_context_json("SessionStart", &context);
-    assert!(json.contains("<EXTREMELY_IMPORTANT>"));
+    assert!(json.contains("TraceDecay project hint:"));
 }
 
 #[tokio::test]

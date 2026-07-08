@@ -59,8 +59,6 @@ pub use steering::{
     build_codex_session_context_for_workspace, build_cursor_session_context, cursor_staleness_hint,
 };
 
-pub(crate) use cursor_shell::shell_words;
-
 #[cfg(test)]
 use analytics::HOOK_ANALYTICS_FILENAME;
 use analytics::{

@@ -63,6 +63,7 @@ pub mod resolution;
 pub mod runtime_telemetry;
 pub mod serve;
 pub mod sessions;
+mod shell;
 pub mod storage;
 pub mod sync;
 pub mod text;

@@ -244,6 +244,78 @@ fn read_without_file_path_gets_no_hint() {
 }
 
 #[test]
+fn classifier_priority_handles_overlapping_signals() {
+    let recall = ToolHintInput {
+        prompt: Some("remember when we traced setup_project last time?".to_string()),
+        session_id: Some("session-1".to_string()),
+        ..ToolHintInput::default()
+    };
+    assert_eq!(classify_hint(&recall), Some(HintCategory::SessionRecall));
+
+    let file_list = ToolHintInput {
+        tool_name: Some("Bash".to_string()),
+        command: Some("rg --files src/hooks".to_string()),
+        prompt: Some("find files, do not search contents".to_string()),
+        session_id: Some("session-1".to_string()),
+        ..ToolHintInput::default()
+    };
+    assert_eq!(classify_hint(&file_list), Some(HintCategory::FileLookup));
+
+    let call_vs_impact = ToolHintInput {
+        prompt: Some("who calls setup_project and which tests depend on it?".to_string()),
+        session_id: Some("session-1".to_string()),
+        ..ToolHintInput::default()
+    };
+    assert_eq!(
+        classify_hint(&call_vs_impact),
+        Some(HintCategory::CallGraph)
+    );
+}
+
+#[test]
+fn every_category_has_compact_skill_backed_rendering() {
+    let categories = [
+        HintCategory::Search,
+        HintCategory::SemanticSearch,
+        HintCategory::FileRead,
+        HintCategory::ToolDescriptorRead,
+        HintCategory::BroadRead,
+        HintCategory::CallGraph,
+        HintCategory::Impact,
+        HintCategory::SymbolLookup,
+        HintCategory::FileLookup,
+        HintCategory::ProjectContext,
+        HintCategory::SessionRecall,
+        HintCategory::AtomicEdit,
+        HintCategory::TypeOrientation,
+        HintCategory::ExploreSubagent,
+        HintCategory::SubagentStartContext,
+        HintCategory::BuildDiagnostics,
+        HintCategory::ReviewChanges,
+        HintCategory::MemoryStore,
+    ];
+
+    for category in categories {
+        let hint = hint_for_category(category);
+        let visible = format!("{}\n{}", hint.message, hint.context);
+        assert_eq!(hint.category, category);
+        assert!(!hint.message.is_empty(), "{category:?}");
+        assert!(!hint.context.is_empty(), "{category:?}");
+        assert!(
+            visible.len() <= 850,
+            "{category:?} hint is too verbose: {} chars\n{}",
+            visible.len(),
+            visible
+        );
+        let skill = category_skill(category);
+        assert!(
+            visible.contains(&format!("Skill: tracedecay:{skill}.")),
+            "{category:?} missing skill trigger"
+        );
+    }
+}
+
+#[test]
 fn dedupe_emits_each_category_once_per_session() {
     let mut dedupe = ToolHintDedupe::default();
     assert_eq!(
@@ -381,14 +453,14 @@ fn escalation_does_not_count_against_the_budget() {
 
 #[test]
 fn escalated_hint_prefixes_the_base_message() {
-    let base = hint(HintCategory::Search, "use tracedecay_grep", "context", true);
+    let base = hint_for_category(HintCategory::Search);
     let escalated = base.escalated();
     assert!(
         escalated
             .message
             .starts_with("Repeated native search usage this session — ")
     );
-    assert!(escalated.message.contains("use tracedecay_grep"));
+    assert!(escalated.message.contains(&base.message));
     assert_eq!(escalated.category, base.category);
     assert_eq!(escalated.context, base.context);
     assert_eq!(escalated.nonblocking, base.nonblocking);

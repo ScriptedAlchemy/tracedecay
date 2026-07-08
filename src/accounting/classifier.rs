@@ -5,6 +5,8 @@
 
 use std::fmt;
 
+use crate::shell::{ShellInvocation, shell_invocations, shell_words};
+
 /// Task category for a single API turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TaskCategory {
@@ -82,69 +84,52 @@ pub fn classify(tool_names: &[&str], bash_commands: &[&str]) -> TaskCategory {
         || tool_names.contains(&"Glob")
         || tool_names.contains(&"WebSearch");
 
-    // Check Bash commands for specific patterns
-    let any_bash = |patterns: &[&str]| -> bool {
-        bash_commands.iter().any(|cmd| {
-            let lower = cmd.to_ascii_lowercase();
-            patterns.iter().any(|p| lower.contains(p))
-        })
-    };
+    let invocations = bash_commands
+        .iter()
+        .flat_map(|command| shell_invocations(command))
+        .collect::<Vec<_>>();
+    let bash_words = bash_commands
+        .iter()
+        .flat_map(|command| shell_words(command))
+        .map(|word| word.to_ascii_lowercase())
+        .collect::<Vec<_>>();
 
     // Git operations
-    if any_bash(&["git "]) {
+    if invocations
+        .iter()
+        .any(|invocation| invocation.base == "git")
+    {
         return TaskCategory::GitOps;
     }
 
     // Testing: test runner commands
-    if any_bash(&[
-        "cargo test",
-        "cargo nextest",
-        "pytest",
-        "vitest",
-        "jest ",
-        "mocha ",
-        "npm test",
-        "npm run test",
-        "pnpm test",
-        "pnpm run test",
-        "go test",
-        "dotnet test",
-        "flutter test",
-    ]) {
+    if invocations.iter().any(is_test_invocation) {
         return TaskCategory::Testing;
     }
 
     // Build/deploy
-    if any_bash(&[
-        "cargo build",
-        "cargo check",
-        "npm run build",
-        "pnpm build",
-        "docker ",
-        "kubectl ",
-        "pm2 ",
-        "tsc",
-        "next build",
-    ]) {
+    if invocations.iter().any(is_build_invocation) {
         return TaskCategory::BuildDeploy;
     }
 
     // Debugging: error/fix keywords in bash output context
-    if any_bash(&[
-        "fix",
-        "debug",
-        "error",
-        "bug",
-        "issue",
-        "stacktrace",
-        "panic",
-    ]) && has_edit
+    if bash_words.iter().any(|word| {
+        matches!(
+            word.as_str(),
+            "fix" | "debug" | "error" | "bug" | "issue" | "stacktrace" | "panic"
+        )
+    }) && has_edit
     {
         return TaskCategory::Debugging;
     }
 
     // Refactoring keywords in bash commands
-    if any_bash(&["refactor", "rename", "simplify", "extract", "inline"]) {
+    if bash_words.iter().any(|word| {
+        matches!(
+            word.as_str(),
+            "refactor" | "rename" | "simplify" | "extract" | "inline"
+        )
+    }) {
         return TaskCategory::Refactoring;
     }
 
@@ -159,6 +144,46 @@ pub fn classify(tool_names: &[&str], bash_commands: &[&str]) -> TaskCategory {
     }
 
     TaskCategory::General
+}
+
+fn is_test_invocation(invocation: &ShellInvocation) -> bool {
+    match invocation.base.as_str() {
+        "cargo" => invocation
+            .args
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "test" | "nextest")),
+        "pytest" | "py.test" | "vitest" | "jest" | "mocha" => true,
+        "npm" => {
+            invocation.args.first().is_some_and(|arg| arg == "test")
+                || has_run_script(&invocation.args, "test")
+        }
+        "pnpm" | "yarn" | "bun" => has_arg(&invocation.args, "test"),
+        "go" | "dotnet" | "flutter" => invocation.args.iter().any(|arg| arg == "test"),
+        _ => false,
+    }
+}
+
+fn is_build_invocation(invocation: &ShellInvocation) -> bool {
+    match invocation.base.as_str() {
+        "cargo" => invocation
+            .args
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "build" | "check" | "clippy")),
+        "npm" => has_run_script(&invocation.args, "build"),
+        "pnpm" | "yarn" | "bun" => has_arg(&invocation.args, "build"),
+        "docker" | "kubectl" | "pm2" | "tsc" => true,
+        "next" => invocation.args.iter().any(|arg| arg == "build"),
+        _ => false,
+    }
+}
+
+fn has_arg(args: &[String], expected: &str) -> bool {
+    args.iter().any(|arg| arg == expected)
+}
+
+fn has_run_script(args: &[String], script: &str) -> bool {
+    args.windows(2)
+        .any(|pair| pair[0] == "run" && pair[1] == script)
 }
 
 #[cfg(test)]
@@ -214,6 +239,18 @@ mod tests {
         assert_eq!(
             classify(&["Bash"], &["docker build -t myapp ."]),
             TaskCategory::BuildDeploy
+        );
+    }
+
+    #[test]
+    fn quoted_command_names_do_not_drive_task_category() {
+        assert_eq!(
+            classify(&["Bash"], &[r#"grep "cargo test" README.md"#]),
+            TaskCategory::General
+        );
+        assert_eq!(
+            classify(&["Bash"], &["echo git status"]),
+            TaskCategory::General
         );
     }
 

@@ -140,6 +140,7 @@ sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 tree-sitter-hlsl = { version = "0.2.0", optional = true }
 amari-holographic = "0.23.0"
 regex = "1.12.3"
+shell-words = "1.1"
 open = "5.3"
 tiktoken-rs = { version = "0.12", optional = true }
 # Raw filesystem watcher for the daemon git-metadata watcher (src/daemon/git_watch.rs).

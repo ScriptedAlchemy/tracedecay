@@ -4,6 +4,8 @@
 
 use std::path::{Component, Path, PathBuf};
 
+use crate::shell::shell_words;
+
 /// Returns `true` when `command` is a git invocation that changes the working
 /// tree / HEAD enough that a broad re-sync is warranted (checkout, switch,
 /// pull, merge, rebase, reset, cherry-pick, `stash pop`/`stash apply`).
@@ -205,62 +207,6 @@ fn is_obvious_checkout_pathspec(token: &str) -> bool {
             .is_some_and(|(_, ext)| !ext.is_empty())
 }
 
-/// Splits a shell command line into words, honoring single/double quotes and
-/// backslash escapes. Shared with `tool_hints` so search-command
-/// classification sees the same tokens as the checkout/sync parsing here.
-pub(crate) fn shell_words(command: &str) -> Vec<String> {
-    shell_words_for_platform(command, cfg!(windows))
-}
-
-fn shell_words_for_platform(command: &str, windows: bool) -> Vec<String> {
-    let mut words = Vec::new();
-    let mut current = String::new();
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-
-    for c in command.chars() {
-        if escaped {
-            current.push(c);
-            escaped = false;
-            continue;
-        }
-
-        match quote {
-            Some('\'') => {
-                if c == '\'' {
-                    quote = None;
-                } else {
-                    current.push(c);
-                }
-            }
-            Some('"') => match c {
-                '"' => quote = None,
-                '\\' => escaped = true,
-                _ => current.push(c),
-            },
-            _ => match c {
-                '\'' | '"' => quote = Some(c),
-                '\\' if windows => current.push(c),
-                '\\' => escaped = true,
-                c if c.is_whitespace() => {
-                    if !current.is_empty() {
-                        words.push(std::mem::take(&mut current));
-                    }
-                }
-                _ => current.push(c),
-            },
-        }
-    }
-
-    if escaped {
-        current.push('\\');
-    }
-    if !current.is_empty() {
-        words.push(current);
-    }
-    words
-}
-
 fn git_subcommand_pos(tokens: &[String]) -> Option<usize> {
     if !tokens.first()?.eq_ignore_ascii_case("git") {
         return None;
@@ -390,18 +336,6 @@ pub(super) fn paths_same(a: &Path, b: &Path) -> bool {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn shell_words_preserves_unquoted_windows_paths() {
-        assert_eq!(
-            shell_words_for_platform(r"git --work-tree=C:\Users\me\repo pull", true),
-            vec!["git", r"--work-tree=C:\Users\me\repo", "pull"]
-        );
-        assert_eq!(
-            shell_words_for_platform(r"git --work-tree=C:\Users\me\repo pull", false),
-            vec!["git", r"--work-tree=C:Usersmerepo", "pull"]
-        );
-    }
 
     #[test]
     fn git_work_tree_overrides_prior_c_directory() {

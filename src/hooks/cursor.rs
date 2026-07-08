@@ -40,6 +40,16 @@ const CURSOR_SESSION_INGEST_BUDGET: Duration = Duration::from_secs(4);
 /// Budget for the end-of-turn `stop` catch-up ingest (registered with a 30s timeout).
 const CURSOR_STOP_INGEST_BUDGET: Duration = Duration::from_secs(25);
 
+const CURSOR_FILE_PATH_FIELDS: &[&str] = &[
+    "file_path",
+    "filePath",
+    "path",
+    "target_file",
+    "targetFile",
+    "relative_workspace_path",
+    "relativeWorkspacePath",
+];
+
 /// Cursor `subagentStart` hook handler.
 ///
 /// Allows Cursor subagents while preserving legacy hook compatibility.
@@ -786,8 +796,8 @@ fn cursor_tool_hint_input(parsed: &Value) -> ToolHintInput {
             )
         }),
         subagent_type: text_field(parsed, &["subagent_type", "subagentType", "agent_type"]),
-        file_path: text_field(tool_input, &["file_path", "filePath", "path"])
-            .or_else(|| text_field(parsed, &["file_path", "filePath", "path"])),
+        file_path: text_field(tool_input, CURSOR_FILE_PATH_FIELDS)
+            .or_else(|| text_field(parsed, CURSOR_FILE_PATH_FIELDS)),
         hints_enabled: true,
     }
 }
