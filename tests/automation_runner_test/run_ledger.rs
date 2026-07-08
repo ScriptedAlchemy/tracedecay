@@ -1,4 +1,5 @@
 use tempfile::tempdir;
+use tokio::sync::Barrier;
 
 use tracedecay::automation::backend::AgentTaskKind;
 use tracedecay::automation::run_ledger::{
@@ -75,6 +76,46 @@ async fn run_ledger_appends_jsonl_under_dashboard_root() {
     assert_eq!(loaded[0].host_mode.as_deref(), Some("standalone"));
     assert_eq!(loaded[0].input_hash.as_deref(), Some("sha256:input"));
     assert_eq!(loaded[0].output_hash.as_deref(), Some("sha256:output"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn run_ledger_keeps_concurrent_jsonl_writes_intact() {
+    let temp = tempdir().unwrap();
+    let dashboard_root = std::sync::Arc::new(temp.path().join("dashboard"));
+    let writers = 8;
+    let lines_per_writer = 50;
+    let barrier = std::sync::Arc::new(Barrier::new(writers));
+    let mut handles = Vec::new();
+
+    for writer in 0..writers {
+        let dashboard_root = std::sync::Arc::clone(&dashboard_root);
+        let barrier = std::sync::Arc::clone(&barrier);
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            for line in 0..lines_per_writer {
+                let run_id = format!("run-{writer}-{line}");
+                append_run_record(
+                    &dashboard_root,
+                    &record(&run_id, AutomationRunStatus::Succeeded),
+                )
+                .await
+                .unwrap();
+            }
+        }));
+    }
+
+    for handle in handles {
+        handle.await.unwrap();
+    }
+
+    let raw = tokio::fs::read_to_string(run_ledger_path(&dashboard_root))
+        .await
+        .unwrap();
+    let lines = raw.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), writers * lines_per_writer);
+    for line in lines {
+        serde_json::from_str::<AutomationRunLedgerRecord>(line).unwrap();
+    }
 }
 
 #[tokio::test]
