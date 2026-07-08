@@ -5,7 +5,7 @@
 
 use std::fmt;
 
-use crate::shell::{ShellInvocation, shell_invocations};
+use crate::shell::{ShellInvocation, shell_invocations, shell_words};
 
 /// Task category for a single API turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -90,7 +90,7 @@ pub fn classify(tool_names: &[&str], bash_commands: &[&str]) -> TaskCategory {
         .collect::<Vec<_>>();
     let bash_words = bash_commands
         .iter()
-        .flat_map(|command| crate::shell::shell_words(command))
+        .flat_map(|command| shell_words(command))
         .map(|word| word.to_ascii_lowercase())
         .collect::<Vec<_>>();
 
@@ -155,18 +155,9 @@ fn is_test_invocation(invocation: &ShellInvocation) -> bool {
         "pytest" | "py.test" | "vitest" | "jest" | "mocha" => true,
         "npm" => {
             invocation.args.first().is_some_and(|arg| arg == "test")
-                || invocation
-                    .args
-                    .windows(2)
-                    .any(|pair| pair == ["run", "test"])
+                || has_run_script(&invocation.args, "test")
         }
-        "pnpm" | "yarn" | "bun" => {
-            invocation.args.iter().any(|arg| arg == "test")
-                || invocation
-                    .args
-                    .windows(2)
-                    .any(|pair| pair == ["run", "test"])
-        }
+        "pnpm" | "yarn" | "bun" => has_arg(&invocation.args, "test"),
         "go" | "dotnet" | "flutter" => invocation.args.iter().any(|arg| arg == "test"),
         _ => false,
     }
@@ -178,15 +169,21 @@ fn is_build_invocation(invocation: &ShellInvocation) -> bool {
             .args
             .iter()
             .any(|arg| matches!(arg.as_str(), "build" | "check" | "clippy")),
-        "npm" => invocation
-            .args
-            .windows(2)
-            .any(|pair| pair == ["run", "build"]),
-        "pnpm" | "yarn" | "bun" => invocation.args.iter().any(|arg| arg == "build"),
+        "npm" => has_run_script(&invocation.args, "build"),
+        "pnpm" | "yarn" | "bun" => has_arg(&invocation.args, "build"),
         "docker" | "kubectl" | "pm2" | "tsc" => true,
         "next" => invocation.args.iter().any(|arg| arg == "build"),
         _ => false,
     }
+}
+
+fn has_arg(args: &[String], expected: &str) -> bool {
+    args.iter().any(|arg| arg == expected)
+}
+
+fn has_run_script(args: &[String], script: &str) -> bool {
+    args.windows(2)
+        .any(|pair| pair[0] == "run" && pair[1] == script)
 }
 
 #[cfg(test)]

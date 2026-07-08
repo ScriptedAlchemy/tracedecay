@@ -33,7 +33,6 @@ class Record:
     timestamp: str
     role: str
     text: str
-    kind: str
 
 
 @dataclass(frozen=True)
@@ -86,15 +85,18 @@ def parse_args() -> argparse.Namespace:
 
 
 def default_paths() -> list[Path]:
-    pattern = os.path.expanduser("~/.codex/sessions/**/*.jsonl")
-    return [Path(path) for path in glob.glob(pattern, recursive=True)]
+    return glob_paths("~/.codex/sessions/**/*.jsonl")
+
+
+def glob_paths(pattern: str) -> list[Path]:
+    return [Path(path) for path in glob.glob(os.path.expanduser(pattern), recursive=True)]
 
 
 def resolve_paths(args: argparse.Namespace) -> list[Path]:
     if args.paths:
         return args.paths
     if args.glob:
-        return [Path(path) for path in glob.glob(os.path.expanduser(args.glob), recursive=True)]
+        return glob_paths(args.glob)
     return default_paths()
 
 
@@ -133,7 +135,7 @@ def parse_file(path: Path) -> tuple[list[Record], list[Record]]:
                 message = payload.get("message")
                 if isinstance(message, str):
                     submitted_users.append(
-                        Record(path, line_no, timestamp, "user", message, "event_msg.user_message")
+                        Record(path, line_no, timestamp, "user", message)
                     )
                 continue
             if record.get("type") != "response_item" or payload.get("type") != "message":
@@ -142,7 +144,7 @@ def parse_file(path: Path) -> tuple[list[Record], list[Record]]:
             text = text_from_content(payload.get("content"))
             if text:
                 model_messages.append(
-                    Record(path, line_no, timestamp, role, text, "response_item.message")
+                    Record(path, line_no, timestamp, role, text)
                 )
     return model_messages, submitted_users
 
