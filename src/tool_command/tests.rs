@@ -695,3 +695,13 @@ fn join_content_text_empty_when_no_content() {
     assert_eq!(join_content_text(&json!({})), "");
     assert_eq!(join_content_text(&json!({ "content": [] })), "");
 }
+
+#[test]
+fn first_touch_store_tools_superset_of_profile_scoped_lcm_tools() {
+    for tool in PROFILE_SCOPED_LCM_TOOLS {
+        assert!(
+            FIRST_TOUCH_STORE_TOOLS.contains(tool),
+            "profile-scoped LCM tool {tool} must also be a first-touch store tool; keep the two allowlists in lockstep",
+        );
+    }
+}

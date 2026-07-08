@@ -251,8 +251,6 @@ def call_tracedecay_tool(name: str, args: dict, **kwargs) -> str:
         #      profile-sharded tracedecay store. Explicit hermes_profile
         #      storage remains supported as a legacy escape hatch.
         project_root = kwargs.get("project_root") or tool_args.get("project_root")
-        if not project_root and tool_args.get("storage_scope") == "hermes_profile":
-            project_root = None
         if not project_root and tool_args.get("storage_scope") != "hermes_profile":
             project_root = code_project_root(cwd=kwargs.get("cwd") or tool_args.get("cwd"))
             if not project_root and name in PROFILE_STORE_TOOLS:
