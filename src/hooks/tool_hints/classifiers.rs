@@ -177,6 +177,23 @@ pub(super) fn is_project_discovery_command(command: &str) -> bool {
     }
 }
 
+pub(super) fn is_file_lookup_command(command: &str) -> bool {
+    let tokens = shell_words(command);
+    let Some(first) = tokens.first() else {
+        return false;
+    };
+    let program = first.trim_start_matches('(').to_ascii_lowercase();
+    let base = program.rsplit(['/', '\\']).next().unwrap_or(&program);
+    match base {
+        "rg" | "ripgrep" => tokens.iter().skip(1).any(|token| token == "--files"),
+        "find" | "fd" | "fdfind" => !tokens
+            .iter()
+            .skip(1)
+            .any(|token| is_parent_or_projects_path(token)),
+        _ => false,
+    }
+}
+
 pub(super) fn is_parent_or_projects_path(token: &str) -> bool {
     let token = token.trim_matches(|c| matches!(c, '(' | ')' | '"' | '\''));
     token == ".."
@@ -339,9 +356,17 @@ pub(super) fn asks_for_session_recall(text: &str) -> bool {
             "what did we",
             "when did we",
             "did we talk",
+            "remind me",
+            "remember when",
+            "last time",
+            "earlier we",
             "talk about",
             "discuss before",
             "mentioned before",
+            "previously discussed",
+            "prior run",
+            "previous run",
+            "past session",
             "prior conversation",
             "previous conversation",
             "earlier conversation",

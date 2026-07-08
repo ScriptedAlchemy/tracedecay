@@ -534,6 +534,20 @@ pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
     }
 
     if input
+        .tool_name
+        .as_deref()
+        .is_some_and(|name| matches_normalized(name, &["glob"]))
+        || input.command.as_deref().is_some_and(is_file_lookup_command)
+    {
+        return Some(hint(
+            HintCategory::FileLookup,
+            "For finding files by role or path, consider using tracedecay_files.",
+            "tracedecay_files can list indexed files and narrow file lookup before opening individual files.",
+            false,
+        ));
+    }
+
+    if input
         .command
         .as_deref()
         .is_some_and(is_shell_search_command)
@@ -555,19 +569,6 @@ pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
             HintCategory::Search,
             "For codebase search, route by what you're matching: literal/regex text -> tracedecay_grep; symbol name -> tracedecay_search; concept -> tracedecay_context.",
             "tracedecay_grep runs a literal or regex content search over the indexed tree (pattern, fixed_strings, path_glob) and enriches each hit with its enclosing symbol; tracedecay_search ranks symbols by name; tracedecay_context answers concept-level questions. Grep/ripgrep still fit prose and un-indexed files.",
-            false,
-        ));
-    }
-
-    if input
-        .tool_name
-        .as_deref()
-        .is_some_and(|name| matches_normalized(name, &["glob"]))
-    {
-        return Some(hint(
-            HintCategory::FileLookup,
-            "For finding files by role or path, consider using tracedecay_files.",
-            "tracedecay_files can list indexed files and narrow file lookup before opening individual files.",
             false,
         ));
     }
@@ -661,9 +662,9 @@ use classifiers::{
     asks_for_atomic_edit, asks_for_broad_read, asks_for_call_graph, asks_for_file_lookup,
     asks_for_impact, asks_for_project_context, asks_for_session_recall, asks_for_symbol_lookup,
     asks_for_type_orientation, combined_text, is_build_diagnostics_command, is_explore_subagent,
-    is_memory_store_edit, is_project_discovery_command, is_semantic_search_tool,
-    is_shell_search_command, is_single_file_read, is_tracedecay_tool_descriptor_read,
-    matches_normalized,
+    is_file_lookup_command, is_memory_store_edit, is_project_discovery_command,
+    is_semantic_search_tool, is_shell_search_command, is_single_file_read,
+    is_tracedecay_tool_descriptor_read, matches_normalized,
 };
 
 #[cfg(test)]

@@ -185,12 +185,24 @@ fn real_world_prompt_eval_matrix() {
             &["tracedecay_message_search"],
         ),
         prompt_eval(
+            "informal-prior-session-recall",
+            "remind me what we concluded about hook hints last time",
+            Some(HintCategory::SessionRecall),
+            &["tracedecay_message_search"],
+        ),
+        prompt_eval(
             "branch-or-pr-status",
             "What branch this on or pr",
             None,
             &[],
         ),
         prompt_eval("merge-pr-number", "Merge 64", None, &[]),
+        prompt_eval(
+            "generic-browser-help",
+            "how do I open a new browser tab?",
+            None,
+            &[],
+        ),
     ];
 
     for eval in &evals {
@@ -237,6 +249,16 @@ fn dynamic_action_context_eval_matrix() {
             &["tracedecay_context", "tracedecay_search", "tracedecay_grep"],
         ),
         input_eval(
+            "glob-tool-file-lookup",
+            ToolHintInput {
+                tool_name: Some("Glob".to_string()),
+                prompt: Some("find src hook files".to_string()),
+                ..ToolHintInput::default()
+            },
+            Some(HintCategory::FileLookup),
+            &["tracedecay_files"],
+        ),
+        input_eval(
             "literal-shell-search-in-current-repo",
             ToolHintInput {
                 tool_name: Some("Bash".to_string()),
@@ -256,6 +278,16 @@ fn dynamic_action_context_eval_matrix() {
             },
             Some(HintCategory::FileRead),
             &["tracedecay_outline", "tracedecay_body", "tracedecay_read"],
+        ),
+        input_eval(
+            "windows-tool-descriptor-read",
+            ToolHintInput {
+                tool_name: Some("Read".to_string()),
+                file_path: Some("C:\\tmp\\plugin\\tools\\tracedecay_impact.json".to_string()),
+                ..ToolHintInput::default()
+            },
+            Some(HintCategory::ToolDescriptorRead),
+            &["tracedecay_find_exact_symbol", "tracedecay_callers"],
         ),
         input_eval(
             "harness-memory-edit-action",
@@ -320,11 +352,62 @@ fn synthetic_prompt_eval_matrix() {
             Some(HintCategory::BuildDiagnostics),
             &["tracedecay_diagnostics", "tracedecay_diagnose"],
         ),
+        shell_eval(
+            "current-repo-find-files",
+            "find src/hooks -name '*.rs'",
+            "list hook source files",
+            Some(HintCategory::FileLookup),
+            &["tracedecay_files"],
+        ),
+        shell_eval(
+            "rg-files-current-repo",
+            "rg --files src/hooks",
+            "which hook files exist?",
+            Some(HintCategory::FileLookup),
+            &["tracedecay_files"],
+        ),
+        shell_eval(
+            "quoted-compiler-command-is-search-data",
+            "grep \"cargo check\" README.md",
+            "look for docs mentioning cargo check",
+            None,
+            &[],
+        ),
         prompt_eval(
             "call-chain-question",
             "what calls record_hint_analytics and what does it call?",
             Some(HintCategory::CallGraph),
             &["tracedecay_callers", "tracedecay_callees"],
+        ),
+        prompt_eval(
+            "affected-tests-question",
+            "which tests should I run after changing src/hooks/tool_hints.rs?",
+            Some(HintCategory::Impact),
+            &["tracedecay_affected", "tracedecay_test_map"],
+        ),
+        prompt_eval(
+            "symbol-definition-question",
+            "find definition of ToolHintInput",
+            Some(HintCategory::SymbolLookup),
+            &["tracedecay_context", "tracedecay_node"],
+        ),
+        prompt_eval(
+            "broad-codebase-scan-question",
+            "scan the entire codebase for hook hint behavior",
+            Some(HintCategory::BroadRead),
+            &["tracedecay_context", "tracedecay_grep"],
+        ),
+        prompt_eval(
+            "file-list-question",
+            "list files under src/hooks matching hook adapters",
+            Some(HintCategory::FileLookup),
+            &["tracedecay_files"],
+        ),
+        prompt_eval(
+            "type-orientation-question",
+            "where are ToolHintInput field writes and constructor sites?",
+            Some(HintCategory::TypeOrientation),
+            &["tracedecay_constructors", "tracedecay_field_sites"],
         ),
         prompt_eval(
             "safe-mechanical-edit",
