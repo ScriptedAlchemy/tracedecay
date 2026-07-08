@@ -694,9 +694,26 @@ fn read_hook_analytics_file(
     };
     let mut rows_total = 0i64;
     let mut rows_included = 0i64;
-    for line in text.lines() {
-        let Ok(row) = serde_json::from_str::<Value>(line) else {
-            continue;
+    let mut rows_malformed = 0i64;
+    let mut first_malformed_line = None;
+    let mut first_malformed_error = None;
+    for (index, line) in text.lines().enumerate() {
+        let row = match serde_json::from_str::<Value>(line) {
+            Ok(row) => row,
+            Err(err) => {
+                rows_malformed += 1;
+                if first_malformed_line.is_none() {
+                    first_malformed_line = Some(index + 1);
+                    first_malformed_error = Some(err.to_string());
+                }
+                tracing::warn!(
+                    hook_analytics_path = %path.display(),
+                    line_number = index + 1,
+                    error = %err,
+                    "skipping malformed hook analytics jsonl row"
+                );
+                continue;
+            }
         };
         rows_total += 1;
         let included = match project_filter {
@@ -712,6 +729,9 @@ fn read_hook_analytics_file(
         "path": path.display().to_string(),
         "rows_total": rows_total,
         "rows_included": rows_included,
+        "rows_malformed": rows_malformed,
+        "first_malformed_line": first_malformed_line,
+        "first_malformed_error": first_malformed_error,
     }));
 }
 
@@ -803,4 +823,43 @@ async fn underused_tool_families(conn: Option<&libsql::Connection>) -> Value {
 
 fn normalize(value: &str) -> String {
     value.trim().to_ascii_lowercase().replace('-', "_")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HookAnalyticsRows, read_hook_analytics_file};
+
+    #[test]
+    fn hook_analytics_sources_report_malformed_jsonl_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_root = dir.path().join("store");
+        std::fs::create_dir_all(&store_root).unwrap();
+        std::fs::write(
+            store_root.join("hook_analytics.jsonl"),
+            concat!(
+                "{\"event\":\"hook_invoked\",\"ts_unix_ms\":1}\n",
+                "{\"event\":\"hook_invoked\"\n",
+                "{\"event\":\"hook_completed\",\"ts_unix_ms\":2}\n",
+            ),
+        )
+        .unwrap();
+
+        let mut rows = HookAnalyticsRows {
+            rows: Vec::new(),
+            sources: Vec::new(),
+        };
+        read_hook_analytics_file(&store_root.join("hook_analytics.jsonl"), None, &mut rows);
+
+        assert_eq!(rows.rows.len(), 2);
+        assert_eq!(rows.sources.len(), 1);
+        assert_eq!(rows.sources[0]["rows_total"], 2);
+        assert_eq!(rows.sources[0]["rows_included"], 2);
+        assert_eq!(rows.sources[0]["rows_malformed"], 1);
+        assert_eq!(rows.sources[0]["first_malformed_line"], 2);
+        assert!(
+            rows.sources[0]["first_malformed_error"]
+                .as_str()
+                .is_some_and(|error| error.contains("EOF"))
+        );
+    }
 }

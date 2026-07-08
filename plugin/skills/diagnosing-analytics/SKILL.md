@@ -46,6 +46,8 @@ store databases directly.
 - `hook_sources` lists each hook-log file with `rows_total` vs
   `rows_included`. A large gap means rows written before project attribution
   existed; they are visible under `--all` but cannot be assigned to a project.
+  `rows_malformed` / `first_malformed_line` show JSONL corruption that the
+  reader skipped and should usually be investigated as a concurrent append bug.
 - `project_id: null` means the command ran outside an indexed project and
   reported globally. Run from an indexed project root for per-project scope,
   or pass `--all` deliberately.

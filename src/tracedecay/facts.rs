@@ -69,7 +69,7 @@ impl TraceDecay {
         &self,
         request: SearchFactsRequest,
     ) -> Result<Vec<FactSearchResult>> {
-        let db = self.open_project_store_db().await?;
+        let db = self.open_project_store_db_read_only().await?;
         let mut results = FactRetriever::new(db.conn())
             .search_untracked(
                 &request.query,

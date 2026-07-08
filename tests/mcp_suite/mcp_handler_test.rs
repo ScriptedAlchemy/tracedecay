@@ -3031,8 +3031,16 @@ async fn context_memory_matches_use_project_store_when_serving_branch_db() {
         .as_i64()
         .expect("fact_store add should return numeric id");
 
+    let read_only_cg = TestTraceDecay::new(TraceDecay::open_read_only(&project).await.unwrap());
+    assert!(read_only_cg.is_read_only());
+    assert_ne!(
+        read_only_cg.db_path(),
+        read_only_cg.store_layout().graph_db_path,
+        "test must serve a read-only branch DB distinct from the shared project store"
+    );
+
     let result = handle_tool_call(
-        &cg,
+        &read_only_cg,
         "tracedecay_context",
         json!({"task": "branch context recall project-scoped memory", "format": "json"}),
         None,
@@ -14161,7 +14169,14 @@ async fn mcp_server_owns_watcher_and_refreshes_token_map_on_change() {
     // `maybe_sync_if_stale`.
     std::fs::write(project.join("b.rs"), "fn b() {}").unwrap();
     let server_cg = server.cg().await;
-    let stale = server_cg.find_stale_files().await;
+    let mut stale = Vec::new();
+    for _ in 0..20 {
+        stale = server_cg.find_stale_files().await;
+        if !stale.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
     assert!(
         !stale.is_empty(),
         "find_stale_files should detect newly written b.rs"

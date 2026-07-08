@@ -1,9 +1,10 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tokio::io::AsyncWriteExt;
 
 use super::backend::{AgentTaskFailureClass, AgentTaskKind};
 use crate::errors::{Result, TraceDecayError};
@@ -243,39 +244,34 @@ pub async fn append_run_record(
             .await
             .map_err(|e| config_error(format!("failed to create run ledger directory: {e}")))?;
     }
-    // The record and its trailing newline must land in a single append.
-    // Concurrent runs (e.g. two dashboard automation jobs finishing at the
-    // same time) each append to this file; O_APPEND keeps one write atomic,
-    // but splitting the line across two writes let them interleave into
-    // `{recA}{recB}\n\n`, silently destroying both records at read time
-    // (load_run_records skips unparseable lines) and leaving the runs stuck
-    // at their previous status forever.
-    let mut line = serde_json::to_string(record).map_err(TraceDecayError::from)?;
-    line.push('\n');
-    let mut file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
+    let line = serde_json::to_string(record).map_err(TraceDecayError::from)?;
+    let write_path = path.clone();
+    tokio::task::spawn_blocking(move || append_jsonl_line_locked(&write_path, &line))
         .await
+        .map_err(|e| config_error(format!("failed to join automation run ledger write: {e}")))?
         .map_err(|e| {
             config_error(format!(
-                "failed to open automation run ledger '{}': {e}",
+                "failed to write automation run ledger '{}': {e}",
                 path.display()
             ))
         })?;
-    file.write_all(line.as_bytes()).await.map_err(|e| {
-        config_error(format!(
-            "failed to write automation run ledger '{}': {e}",
-            path.display()
-        ))
-    })?;
-    file.flush().await.map_err(|e| {
-        config_error(format!(
-            "failed to finish automation run ledger '{}': {e}",
-            path.display()
-        ))
-    })?;
     Ok(())
+}
+
+fn append_jsonl_line_locked(path: &Path, line: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    file.lock_exclusive()?;
+    let write_result = file.write_all(format!("{line}\n").as_bytes());
+    let flush_result = write_result.and_then(|()| file.flush());
+    let unlock_result = file.unlock();
+    flush_result?;
+    unlock_result
 }
 
 pub async fn load_run_records(
@@ -295,7 +291,8 @@ pub async fn load_run_records(
     };
     let mut records = Vec::new();
     let mut seen_run_ids = std::collections::BTreeSet::new();
-    for line in contents.lines().rev() {
+    let lines = contents.lines().collect::<Vec<_>>();
+    for (index, line) in lines.iter().enumerate().rev() {
         if records.len() >= limit {
             break;
         }
@@ -303,11 +300,21 @@ pub async fn load_run_records(
         if trimmed.is_empty() {
             continue;
         }
-        if let Ok(record) = serde_json::from_str::<AutomationRunLedgerRecord>(trimmed) {
-            if !seen_run_ids.insert(record.run_id.clone()) {
-                continue;
+        match serde_json::from_str::<AutomationRunLedgerRecord>(trimmed) {
+            Ok(record) => {
+                if !seen_run_ids.insert(record.run_id.clone()) {
+                    continue;
+                }
+                records.push(record);
             }
-            records.push(record);
+            Err(err) => {
+                tracing::warn!(
+                    automation_run_ledger = %path.display(),
+                    line_number = index + 1,
+                    error = %err,
+                    "skipping malformed automation run ledger jsonl row"
+                );
+            }
         }
     }
     Ok(records)

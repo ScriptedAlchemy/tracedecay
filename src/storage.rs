@@ -2,6 +2,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -471,16 +472,19 @@ impl PrivateStoreIo {
         set_private_file_permissions(path)
     }
 
-    /// Appends one line via a single `O_APPEND` write so concurrent hook
-    /// processes never interleave partial lines or lose each other's entries
-    /// the way read-modify-rewrite appends do.
+    /// Appends one line while holding an advisory file lock so concurrent hook
+    /// processes never interleave partial lines.
     pub fn append_line(path: &Path, line: &str) -> io::Result<()> {
         if let Some(parent) = path.parent() {
             Self::create_dir_all(parent)?;
         }
         reject_symlink_components(path, "private store file")?;
-        Self::open_private(path, fs::OpenOptions::new().append(true))?
-            .write_all(format!("{line}\n").as_bytes())?;
+        let mut file = Self::open_private(path, fs::OpenOptions::new().append(true))?;
+        file.lock_exclusive()?;
+        let write_result = file.write_all(format!("{line}\n").as_bytes());
+        let unlock_result = file.unlock();
+        write_result?;
+        unlock_result?;
         set_private_file_permissions(path)
     }
 
@@ -747,4 +751,54 @@ fn apply_private_create_mode(_options: &mut fs::OpenOptions) {}
 #[cfg(not(unix))]
 fn set_private_file_permissions(_path: &Path) -> std::io::Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PrivateStoreIo;
+    use serde_json::Value;
+    use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn append_line_keeps_concurrent_jsonl_writes_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = Arc::new(
+            dir.path()
+                .canonicalize()
+                .unwrap()
+                .join("hook_analytics.jsonl"),
+        );
+        let writers = 8;
+        let lines_per_writer = 100;
+        let barrier = Arc::new(Barrier::new(writers));
+        let mut handles = Vec::new();
+
+        for writer in 0..writers {
+            let path = Arc::clone(&path);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                for line in 0..lines_per_writer {
+                    let payload = serde_json::json!({
+                        "event": "hook_invoked",
+                        "writer": writer,
+                        "line": line,
+                        "padding": "x".repeat(4096),
+                    });
+                    PrivateStoreIo::append_line(&path, &payload.to_string()).unwrap();
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let contents = std::fs::read_to_string(&*path).unwrap();
+        let rows = contents.lines().collect::<Vec<_>>();
+        assert_eq!(rows.len(), writers * lines_per_writer);
+        for row in rows {
+            serde_json::from_str::<Value>(row).unwrap();
+        }
+    }
 }
