@@ -418,7 +418,8 @@ fn refresh_managed_skill_exports_for_cli(profile_root: &std::path::Path) {
     let Some(home) = tracedecay::agents::home_dir() else {
         return;
     };
-    let project_root = std::env::current_dir().unwrap_or_else(|_| home.clone());
+    let start = std::env::current_dir().unwrap_or_else(|_| home.clone());
+    let project_root = tracedecay::automation::skill_materialization::resolve_project_root(&start);
     for report in
         tracedecay::agents::export_managed_skills_to_agent_hosts(&home, &project_root, profile_root)
     {

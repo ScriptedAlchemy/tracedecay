@@ -421,10 +421,11 @@ fn reconcile_materialized_managed_skills_after_update() {
     let Ok(profile_root) = tracedecay::storage::default_profile_root() else {
         return;
     };
-    let project_root = std::env::current_dir()
+    let start = std::env::current_dir()
         .ok()
         .or_else(tracedecay::agents::home_dir)
         .unwrap_or_else(|| PathBuf::from("."));
+    let project_root = tracedecay::automation::skill_materialization::resolve_project_root(&start);
     tracedecay::automation::skill_materialization::reconcile_after_activation(
         &profile_root,
         &project_root,

@@ -141,6 +141,38 @@ pub enum ManagedSkillState {
     Archived,
 }
 
+/// Where an active managed skill is host-materialized as a real `SKILL.md`.
+///
+/// Defaults to [`Self::Global`]: a skill is written only into the user's global
+/// host dirs (`~/.claude`, `~/.codex`) and is never poured into every project
+/// checkout, so repos are not polluted with untracked `.claude/skills/**` files
+/// and hosts do not load duplicate copies. Skills whose evidence is genuinely
+/// project-local opt into [`Self::Project`] to also materialize into the
+/// enclosing project root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedSkillMaterializationScope {
+    #[default]
+    Global,
+    Project,
+}
+
+impl ManagedSkillMaterializationScope {
+    /// Whether this skill should also be materialized into project checkouts.
+    pub fn materializes_into_projects(self) -> bool {
+        matches!(self, Self::Project)
+    }
+
+    /// Whether this is the default (global-only) scope. Used to keep the
+    /// serialized record additive: the field is omitted for global skills, so
+    /// existing `skill.json` payloads are byte-for-byte unchanged.
+    // `serde(skip_serializing_if)` requires a `&self` predicate.
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    fn is_global(&self) -> bool {
+        matches!(self, Self::Global)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManagedSkillProvenance {
     pub source: ManagedSkillSource,
@@ -190,6 +222,7 @@ impl ManagedSkillDraft {
                 category: self.category,
                 targets: self.targets,
                 state: ManagedSkillState::PendingApproval,
+                materialization_scope: ManagedSkillMaterializationScope::default(),
                 pinned: false,
                 checksum: String::new(),
                 created_at: now,
@@ -216,6 +249,14 @@ pub struct ManagedSkillMetadata {
     #[serde(default = "default_managed_skill_targets")]
     pub targets: Vec<SkillInstallTarget>,
     pub state: ManagedSkillState,
+    /// Host-materialization reach. Defaults to global-only so records written
+    /// before this field existed (and every automation-authored skill) never
+    /// spray materialized files into project checkouts.
+    #[serde(
+        default,
+        skip_serializing_if = "ManagedSkillMaterializationScope::is_global"
+    )]
+    pub materialization_scope: ManagedSkillMaterializationScope,
     pub pinned: bool,
     pub checksum: String,
     #[serde(default)]
