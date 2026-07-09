@@ -24,9 +24,11 @@ Pin the objective facts first; do not act on a hunch.
    - Uncommitted working-tree drift → `tracedecay_commit_context` (changed
      symbols, file roles, recent commit style) to see *what* moved without
      reading raw diffs.
-   - Branch moved vs. where you expected → `tracedecay_branch_diff`
-     (`base`, `head`) for symbols added / removed / signature-changed between
-     two branches.
+   - Branch moved vs. where you expected → use Git's live merge-base and
+     `git diff --name-only <base>...<head>` as the file boundary, then pass
+     those paths to `tracedecay_diff_context`. Treat `tracedecay_branch_diff`
+     as a summary only after its commits/files agree with that live boundary;
+     never act on a stale graph snapshot alone.
 
 ## Attribute it
 
@@ -81,11 +83,12 @@ next session inherits it — see `tracedecay:project-memory`.
 ## If tools are deferred or MCP fails
 
 - Deferred (names listed without schemas): load once with ToolSearch —
-  `select:tracedecay_sessions_for,tracedecay_commit_context,tracedecay_branch_diff,tracedecay_message_search,tracedecay_lcm_grep`
+  `select:tracedecay_sessions_for,tracedecay_commit_context,tracedecay_diff_context,tracedecay_branch_diff,tracedecay_message_search,tracedecay_lcm_grep`
   (one batched call) — then call normally.
 - MCP error / timeout / disconnect: same tools via shell —
   `tracedecay tool sessions_for --args '{"git_ref":"commit","value":"<sha>"}'`,
-  `tracedecay tool commit_context`, `tracedecay tool branch_diff`,
+  `tracedecay tool commit_context`, `tracedecay tool diff_context`,
+  `tracedecay tool branch_diff`,
   `tracedecay tool message_search`, `tracedecay tool lcm_grep` (see
   `tracedecay:using-the-cli`). Never query `.tracedecay` databases directly;
   never fall back to blind git archaeology when the correlation index can name
