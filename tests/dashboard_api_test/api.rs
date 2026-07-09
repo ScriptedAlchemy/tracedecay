@@ -106,6 +106,9 @@ fn automation_outcomes_endpoint_returns_live_read_only_outcomes() {
                     apply_outcome: None,
                     created_at: 1_700_000_400,
                     updated_at: 1_700_000_400,
+                    duplicate_count: 0,
+                    last_duplicate_run_id: None,
+                    folded_contents: Vec::new(),
                 }],
             },
         )

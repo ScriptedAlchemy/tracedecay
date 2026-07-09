@@ -847,6 +847,9 @@ fn automation_outcomes_endpoint_reports_applied_fact_trajectories() {
                 apply_outcome: None,
                 created_at: 1_700_000_000,
                 updated_at: 1_700_000_050,
+                duplicate_count: 0,
+                last_duplicate_run_id: None,
+                folded_contents: Vec::new(),
             }
         };
         tracedecay::automation::fact_proposals::save_fact_proposal_store(
