@@ -5,7 +5,7 @@
 //! `plugin_config_schema_test.rs`, `plugin_skill_contract_test.rs`) but operate
 //! purely on the on-disk shared tree, asserting Claude's manifests, MCP config,
 //! lifecycle hooks, skills, commands, and agents are shaped correctly and stay
-//! in sync with the agent source of truth (`src/agents/claude_agents/`).
+//! in sync with the canonical agent catalog (`plugin/agents/`).
 //!
 //! The embedded-file-list coverage check (asserting a Rust `const` registry
 //! matches the on-disk tree) is intentionally omitted here; it is handled with
@@ -70,11 +70,16 @@ const EXPECTED_COMMANDS: &[&str] = &[
     "test-changes",
 ];
 
-/// The 3 subagent definitions, byte-identical to `src/agents/claude_agents/`.
+/// The canonical product-plugin subagent definitions.
 const EXPECTED_AGENTS: &[&str] = &[
+    "automation-auditor.md",
+    "change-risk-reviewer.md",
     "code-explorer.md",
     "code-health-auditor.md",
+    "cross-host-integration-auditor.md",
+    "runtime-storage-doctor.md",
     "session-historian.md",
+    "usage-intelligence-analyst.md",
 ];
 
 /// Reads a required scalar frontmatter field from a `---`-fenced markdown file,
@@ -408,7 +413,12 @@ fn claude_bundle_commands_have_valid_frontmatter_and_body() {
 #[test]
 fn claude_bundle_agents_are_byte_identical_to_the_source_of_truth() {
     let bundle_agents = bundle_root().join("agents");
-    let source_agents = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/agents/claude_agents");
+    let manifest_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source_agents = manifest_root.join("plugin/agents");
+    assert!(
+        !manifest_root.join("src/agents/claude_agents").exists(),
+        "plugin/agents must be the only Claude agent source of truth"
+    );
 
     // The bundle ships exactly the expected agent set.
     let mut expected: Vec<String> = EXPECTED_AGENTS.iter().map(|a| a.to_string()).collect();
@@ -440,19 +450,17 @@ fn claude_bundle_agents_are_byte_identical_to_the_source_of_truth() {
     }
 }
 
-/// The tracedecay MCP server registers as `tracedecay` when configured
-/// directly (e.g. project `.mcp.json`) but as `plugin_tracedecay_graph`
-/// when installed via the Claude Code plugin marketplace. An agent allowlist
-/// naming only one of the two silently strips every tracedecay tool from the
-/// subagent under the other install mode, so each grant and each denied tool
-/// must be declared under BOTH namespaces, and ToolSearch must be granted so
-/// deferred tracedecay tool schemas can be loaded inside the subagent.
+/// Claude agents use a positive allowlist. A denylist would fail open whenever
+/// a new mutating MCP tool ships.
 #[test]
-fn claude_agents_grant_tracedecay_tools_under_both_mcp_namespaces() {
-    const DIRECT_NS: &str = "mcp__tracedecay";
-    const PLUGIN_NS: &str = "mcp__plugin_tracedecay_graph";
+fn claude_agents_allow_only_live_read_only_mcp_tools() {
+    const DIRECT_PREFIX: &str = "mcp__tracedecay__";
+    const PLUGIN_PREFIX: &str = "mcp__plugin_tracedecay_graph__";
 
-    let source_agents = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/agents/claude_agents");
+    let source_agents = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/agents");
+    let live_read_only: BTreeSet<String> = tracedecay::agents::read_only_tool_names()
+        .into_iter()
+        .collect();
     for agent in EXPECTED_AGENTS {
         let path = source_agents.join(agent);
         let raw = fs::read_to_string(&path)
@@ -460,43 +468,124 @@ fn claude_agents_grant_tracedecay_tools_under_both_mcp_namespaces() {
 
         let tools = required_scalar(&raw, "tools", &path);
         let tool_entries: Vec<&str> = tools.split(',').map(str::trim).collect();
-        for required in ["ToolSearch", DIRECT_NS, PLUGIN_NS] {
+        for required in ["Read", "Grep", "Glob", "ToolSearch"] {
             assert!(
                 tool_entries.contains(&required),
                 "{} tools allowlist must grant {required}; got: {tools}",
                 path.display()
             );
         }
-
-        let disallowed = required_scalar(&raw, "disallowedTools", &path);
-        let direct_prefix = format!("{DIRECT_NS}__");
-        let plugin_prefix = format!("{PLUGIN_NS}__");
-        let mut direct: Vec<&str> = Vec::new();
-        let mut plugin: Vec<&str> = Vec::new();
-        for entry in disallowed.split(',').map(str::trim) {
-            if let Some(tool) = entry.strip_prefix(&plugin_prefix) {
-                plugin.push(tool);
-            } else if let Some(tool) = entry.strip_prefix(&direct_prefix) {
-                direct.push(tool);
-            } else {
-                panic!(
-                    "{} disallowedTools entry '{entry}' is not under either tracedecay namespace",
-                    path.display()
-                );
-            }
+        for entry in &tool_entries {
+            assert!(
+                ["Read", "Grep", "Glob", "ToolSearch"].contains(entry)
+                    || entry.starts_with(DIRECT_PREFIX)
+                    || entry.starts_with(PLUGIN_PREFIX),
+                "{} grants unexpected tool {entry}",
+                path.display()
+            );
         }
-        direct.sort_unstable();
-        plugin.sort_unstable();
+        assert!(
+            !tool_entries.contains(&"Bash"),
+            "{} grants Bash",
+            path.display()
+        );
+        assert!(
+            !tool_entries
+                .iter()
+                .any(|entry| matches!(*entry, "mcp__tracedecay" | "mcp__plugin_tracedecay_graph")),
+            "{} grants a server-wide MCP wildcard",
+            path.display()
+        );
+
+        let direct: BTreeSet<&str> = tool_entries
+            .iter()
+            .filter_map(|entry| entry.strip_prefix(DIRECT_PREFIX))
+            .collect();
+        let plugin: BTreeSet<&str> = tool_entries
+            .iter()
+            .filter_map(|entry| entry.strip_prefix(PLUGIN_PREFIX))
+            .collect();
         assert!(
             !direct.is_empty(),
-            "{} must deny mutating tracedecay tools",
+            "{} grants no TraceDecay tools",
             path.display()
         );
         assert_eq!(
             direct,
             plugin,
-            "{} must deny the same tracedecay tools under both MCP namespaces",
+            "{} namespace grants drifted",
             path.display()
+        );
+        for tool in direct {
+            assert!(
+                live_read_only.contains(tool),
+                "{} grants {tool}, but its live readOnlyHint is not true",
+                path.display()
+            );
+        }
+        assert!(
+            !raw.contains("disallowedTools:"),
+            "{} must not rely on a finite mutator denylist",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn cursor_and_codex_agents_are_generated_from_the_canonical_catalog() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    assert!(
+        !root.join("plugin/overlays/cursor/agents").exists(),
+        "Cursor adapters must be generated, not hand-authored"
+    );
+    assert!(
+        !root.join("src/agents/codex_agents").exists(),
+        "Codex adapters must be generated, not hand-authored"
+    );
+
+    let cursor_files = tracedecay::agents::plugin_bundle::cursor_files();
+    let temp = tempfile::tempdir().unwrap();
+    tracedecay::automation::agent_targets::install_codex_managed_agents(temp.path()).unwrap();
+    for agent in EXPECTED_AGENTS {
+        let stem = agent.trim_end_matches(".md");
+        let claude_path = root.join("plugin/agents").join(agent);
+        let claude = fs::read_to_string(&claude_path).unwrap();
+        let cursor = cursor_files
+            .iter()
+            .find(|(path, _)| *path == format!("agents/{agent}"))
+            .map(|(_, contents)| *contents)
+            .unwrap_or_else(|| panic!("missing generated Cursor adapter for {agent}"));
+        let codex_path = temp
+            .path()
+            .join(".codex/agents")
+            .join(format!("tracedecay-{stem}.toml"));
+        let codex = fs::read_to_string(&codex_path).unwrap();
+        let codex_toml: toml::Value = toml::from_str(&codex).unwrap();
+
+        assert_eq!(required_scalar(cursor, "name", Path::new(agent)), stem);
+        assert_eq!(
+            required_scalar(cursor, "description", Path::new(agent)),
+            required_scalar(&claude, "description", &claude_path)
+        );
+        let canonical_body = body_after_frontmatter(&claude).replace("\r\n", "\n");
+        assert_eq!(
+            body_after_frontmatter(cursor).replace("\r\n", "\n"),
+            canonical_body
+        );
+        assert!(cursor.contains("readonly: true"));
+        let expected_codex_name = format!("tracedecay-{stem}");
+        assert_eq!(
+            codex_toml["name"].as_str(),
+            Some(expected_codex_name.as_str())
+        );
+        assert_eq!(
+            codex_toml["description"].as_str(),
+            Some(required_scalar(&claude, "description", &claude_path).as_str())
+        );
+        assert_eq!(codex_toml["sandbox_mode"].as_str(), Some("read-only"));
+        assert_eq!(
+            codex_toml["developer_instructions"].as_str().map(str::trim),
+            Some(canonical_body.trim())
         );
     }
 }

@@ -3728,6 +3728,12 @@ fn test_codex_install_sweeps_legacy_global_config() {
 fn test_codex_local_install_creates_repo_plugin_bundle_and_marketplace() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
+    std::fs::create_dir_all(home.path().join(".codex/agents")).unwrap();
+    std::fs::write(
+        home.path().join(".codex/agents/user-agent.toml"),
+        "name = \"user-agent\"\n",
+    )
+    .unwrap();
 
     assert_local_install_success("codex", project.path(), home.path());
 
@@ -3750,6 +3756,16 @@ fn test_codex_local_install_creates_repo_plugin_bundle_and_marketplace() {
     assert!(
         !project.path().join("AGENTS.md").exists(),
         "local Codex install should use plugin skills, not write project AGENTS.md"
+    );
+    assert!(
+        home.path()
+            .join(".codex/agents/tracedecay-code-explorer.toml")
+            .is_file(),
+        "local Codex install must materialize managed agents in the user profile"
+    );
+    assert!(
+        home.path().join(".codex/agents/user-agent.toml").is_file(),
+        "local Codex install must preserve foreign user agents"
     );
 }
 

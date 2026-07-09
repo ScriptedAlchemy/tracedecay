@@ -54,7 +54,7 @@ fn install_ctx(home: &Path) -> InstallContext {
 
 /// The composed Claude deploy set (sourced from the shared `plugin/` tree
 /// via `claude_files`) must cover every shared model-invocable skill, the
-/// 13 canonical `tracedecay-*` dispatchers, all 3 subagents, all 13 slash
+/// 13 canonical `tracedecay-*` dispatchers, all 8 subagents, all 13 slash
 /// commands, and Claude's manifest/marketplace/mcp/hooks/README. The single
 /// shared tree removes the old cross-bundle parity checks; this guards that
 /// nothing on disk is left unwired for Claude.

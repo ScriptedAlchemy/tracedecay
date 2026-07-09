@@ -63,6 +63,7 @@ impl AgentIntegration for CodexIntegration {
             super::ensure_project_local_safe_path(project_path, &path)?;
         }
         install_codex_repo_plugin(&ctx.home, project_path, &ctx.tracedecay_bin)?;
+        install_codex_managed_agents(&ctx.home)?;
         sweep_legacy_project_codex_config(project_path);
         Ok(())
     }

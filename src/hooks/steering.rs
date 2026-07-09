@@ -128,16 +128,16 @@ pub fn build_codex_session_context_for_workspace(
                 );
             }
             s.push_str(
-                "Before running cargo check/tsc/clippy in the shell, or when shell output shows \
-                 compile errors, use tracedecay diagnostics instead of eyeballing raw output: \
-                 paste captured output into tracedecay_diagnose, or run tracedecay_diagnostics \
-                 for fresh structured errors mapped to the enclosing symbols and callers.\n",
+                "Before `cargo check`/tsc/clippy or after compile errors, use \
+                 tracedecay_diagnostics for fresh errors or pass captured output to \
+                 tracedecay_diagnose; both map errors to symbols and callers.\n",
             );
             s.push_str(
-                "Managed subagents installed: tracedecay-code-explorer (scoped code \
-                 exploration), tracedecay-code-health-auditor (health audits), \
-                 tracedecay-session-historian (past-session recall) — prefer them over \
-                 generic subagents for those jobs.\n",
+                "Specialists: tracedecay-code-explorer, tracedecay-code-health-auditor, \
+                 tracedecay-session-historian, tracedecay-runtime-storage-doctor, \
+                 tracedecay-cross-host-integration-auditor, tracedecay-change-risk-reviewer, \
+                 tracedecay-usage-intelligence-analyst, tracedecay-automation-auditor. \
+                 Delegate matching read-only research; the parent owns changes and releases.\n",
             );
             s.push_str(crate::agents::CLI_FALLBACK_PROMPT_RULES);
             s.push('\n');
@@ -309,30 +309,37 @@ mod tests {
         // tracedecay-* subagents besides this steering line, so it must
         // survive on both the initialized and unindexed code-workspace
         // surfaces, and stay off the generic (non-code-workspace) surface.
+        const AGENTS: &[&str] = &[
+            "tracedecay-code-explorer",
+            "tracedecay-code-health-auditor",
+            "tracedecay-session-historian",
+            "tracedecay-runtime-storage-doctor",
+            "tracedecay-cross-host-integration-auditor",
+            "tracedecay-change-risk-reviewer",
+            "tracedecay-usage-intelligence-analyst",
+            "tracedecay-automation-auditor",
+        ];
         for status in [
             HookWorkspaceStatus::Initialized,
             HookWorkspaceStatus::UnindexedProject,
         ] {
             let context = build_codex_session_context_for_workspace(status, None);
-            assert!(
-                context.contains("tracedecay-code-explorer"),
-                "missing tracedecay-code-explorer mention for {status:?}"
-            );
-            assert!(
-                context.contains("tracedecay-code-health-auditor"),
-                "missing tracedecay-code-health-auditor mention for {status:?}"
-            );
-            assert!(
-                context.contains("tracedecay-session-historian"),
-                "missing tracedecay-session-historian mention for {status:?}"
-            );
+            for agent in AGENTS {
+                assert_eq!(
+                    context.matches(agent).count(),
+                    1,
+                    "{agent} must be advertised exactly once for {status:?}"
+                );
+            }
         }
 
         let generic = build_codex_session_context_for_workspace(HookWorkspaceStatus::Generic, None);
-        assert!(
-            !generic.contains("tracedecay-code-explorer"),
-            "generic (non-code-workspace) surface should stay compact"
-        );
+        for agent in AGENTS {
+            assert!(
+                !generic.contains(agent),
+                "generic (non-code-workspace) surface should omit {agent}"
+            );
+        }
     }
 
     #[test]

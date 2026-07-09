@@ -54,7 +54,7 @@ Nothing here is wired into `cargo test` or CI.
 # scenario x host commands, launches no agent.
 evals/agent_adoption/run.sh
 
-# Full live run, Claude only (cheapest default model = haiku):
+# Full live run, Claude only (default matrix: Opus and Sonnet):
 TRACEDECAY_AGENT_EVALS=1 HOSTS=claude evals/agent_adoption/run.sh
 
 # Smoke: three representative scenarios, one host:
@@ -62,9 +62,9 @@ TRACEDECAY_AGENT_EVALS=1 HOSTS=claude \
   SCENARIOS="explore_reserve_stock recall_discount_decision feedback_currency" \
   evals/agent_adoption/run.sh
 
-# Both hosts, a stronger model, longer budget:
+# Both host matrices, longer budget:
 TRACEDECAY_AGENT_EVALS=1 HOSTS="claude codex" \
-  CLAUDE_MODEL=sonnet SCENARIO_TIMEOUT=360 evals/agent_adoption/run.sh
+  SCENARIO_TIMEOUT=360 evals/agent_adoption/run.sh
 ```
 
 Outputs land in a throwaway work dir (`$TMPDIR/agent-evals.XXXX/run/`):
@@ -79,22 +79,20 @@ paths, so do **not** commit run artifacts.
 |-----|---------|---------|
 | `TRACEDECAY_AGENT_EVALS` | unset | must be `1` to launch agents (else dry run) |
 | `HOSTS` | `claude` | `claude`, `codex`, or `claude codex` |
-| `CHANNELS` | `full` | ablation conditions: any of `full no-hints no-skills bare` |
+| `CHANNELS` | `full` | ablation conditions: any of `full no-hints no-skills bare cli-only` |
 | `SCENARIOS` | all active | space-separated scenario ids to run |
 | `EVAL_INCLUDE_DEFERRED` | `0` | also run `status:"deferred"` scenarios |
-| `CLAUDE_MODEL` | `haiku` | `claude --model` alias |
-| `CODEX_MODEL` | codex default | `codex exec -m` |
+| `CLAUDE_MODELS` | `opus sonnet` | space-separated `claude --model` matrix |
+| `CODEX_MODELS` | `gpt-5.5 gpt-5.6-terra` | space-separated `codex exec -m` matrix |
 | `SCENARIO_TIMEOUT` | `240` | per scenario wall-clock seconds |
-| `TRACEDECAY_BIN` | from `PATH` | tracedecay binary |
+| `TRACEDECAY_BIN` | candidate branch (live) | explicit tracedecay binary override |
 | `EVAL_OUT` | unset | dir to copy scoreboard + report into |
 
 ### Cost expectations
 
-One scenario x host is a single short headless agent turn (a few tool calls).
-14 active scenarios x 1 host ≈ 14 short agent sessions. Keep smoke runs to 2-3
-scenarios. `haiku` is the cheapest model that still does tool use; use a real
-coding model (`sonnet`/`opus`, or the Codex default) when you actually want a
-representative adoption baseline rather than a harness smoke test. `--max-turns`
+One scenario x host x model is a single short headless agent turn. There are 44
+active scenarios, so keep smoke runs to 2-3 scenarios before starting the full
+Opus/Sonnet and GPT-5.5/Terra matrix. `--max-turns`
 does not exist in the installed Claude Code (2.1.x), so the only hard guardrail
 is `SCENARIO_TIMEOUT`; the tool budget is scored, not enforced.
 
@@ -103,20 +101,30 @@ is `SCENARIO_TIMEOUT`; the tool budget is scored, not enforced.
 The runner points `TRACEDECAY_DATA_DIR` at a throwaway dir and sets
 `TRACEDECAY_ENABLE_GLOBAL_DB=0`, so the fixture graph and seeded facts never
 touch your real tracedecay store, and `tracedecay init` stays fast (indexing the
-multi-thousand-node global DB is what makes a naive `init` hang). `HOME` is left
-alone, so Claude OAuth and `~/.codex` auth keep working; the `tracedecay serve`
-MCP process the agents spawn inherits `TRACEDECAY_DATA_DIR` and therefore sees
-the same fixture store the runner seeded.
+multi-thousand-node global DB is what makes a naive `init` hang). Each host gets
+a throwaway `HOME` and config directory. Only its auth file is copied in, mode
+`0400`; the copy is deleted on runner exit. The real Claude/Codex profile is
+never loaded or mutated.
 
-## Known confound: ambient steering
+Live runs build a debug `tracedecay` binary from the checked-out candidate branch
+in the configured Cargo target (the machine-local `/fast/cargo-target` when
+available) and use it for fixture setup, MCP, hooks, and the throwaway Codex plugin install.
+`TRACEDECAY_BIN` is an explicit override for release-binary comparisons. Every
+Claude condition, including `full`, loads the candidate `plugin/` via
+`--plugin-dir`; Codex `full` installs candidate assets into its throwaway
+profile. Ambient global plugins, skills, hooks, and steering cannot leak in.
 
-Agents run inside the fixture temp dir but still load your **user-global**
-`~/.claude/CLAUDE.md` (Claude) / `~/.codex` config. If that global config
-contains a strong "always use tracedecay, never grep" mandate, it will inflate
-adoption numbers — the harness then measures *steered* behavior, not cold-start
-default behavior. To measure a true cold-start baseline, run against a profile
-whose global memory does **not** pre-steer tool choice. The tracedecay plugin's
-own hint hooks are part of the product and are intentionally left in.
+## Safety boundary
+
+Codex runs `--ephemeral` with approval policy `never` inside its
+`workspace-write` sandbox, rooted at the throwaway fixture. Claude has no
+equivalent OS sandbox: it runs noninteractively in `dontAsk` mode with an
+allowlist limited to read/search, agent/skill delegation, candidate TraceDecay
+MCP tools, and `tracedecay tool ...` CLI fallback. TraceDecay edit tools may
+still mutate the fixture and throwaway store by design, and model/API processes
+still have network and any OS-keychain access granted by the host. Run live
+evals only against trusted candidate code; the Claude allowlist is a permission
+boundary, not an OS sandbox.
 
 ## Fixture contents
 
@@ -186,6 +194,7 @@ Each `scenarios/<id>.json`:
   },
   "ground_truth": ["reserve_stock", "check_availability"], // fragments expected in the answer
   "max_tool_calls": 6,                // efficiency budget
+  "expected_agent": "change-risk-reviewer", // optional specialist routing target
   "seeded_fact": "currency_fact_id",  // (optional) key in seeded_facts.json
   "grade_feedback": true              // (optional) also score fact_feedback behavior
 }
@@ -202,6 +211,12 @@ Weighted, applicable-subscore-normalized:
 | `outcome` | 0.25 | fraction of `ground_truth` fragments present in the final answer |
 | `efficiency` | 0.10 | meaningful tool-call count ≤ `max_tool_calls` |
 | `feedback` | 0.30 | (feedback scenarios) `tracedecay_fact_feedback` called `helpful` on the seeded fact |
+| `agent_selected` | 0.30 | (specialist scenarios) expected bundled agent was invoked |
+
+Specialist scenarios use `agent_selected` as a binary routing gate: the overall
+score is `1` only when the expected specialist is invoked, otherwise `0`.
+Generic efficiency or a plausible direct answer cannot compensate for missing
+the specialist.
 
 Aggregated per host into `scoreboard.json` (mean score plus each rate) and a
 compact `report.md`.
@@ -219,6 +234,7 @@ tracedecay call**:
 | `skill-driven` | a `tracedecay:*` skill invocation (a `Skill` tool call) precedes the first tracedecay call. |
 | `steering-or-description` | nothing fired before the call: the session-start CLAUDE.md steering block or the MCP tool descriptions are the only prior mention that could have driven it. |
 | `unprompted` | the `bare` ablation adopted a tracedecay tool with hints + skills + steering all removed — pure tool-description pull. |
+| `cli-only` | the supported `tracedecay tool ...` shell fallback was used with plugin MCP configuration removed. |
 | `none` | no tracedecay tool fired at all. |
 
 The run's ablation `condition` gates channels that were disabled: a stray hint
@@ -254,21 +270,22 @@ default is `full` only; opt in explicitly.**
 
 | condition | hooks (hints) | skills | steering | MCP descriptions | mechanism |
 |-----------|---------------|--------|----------|------------------|-----------|
-| `full`    | on  | on  | ambient (`~/.claude/CLAUDE.md`) | on | production parity — the current invocation, unchanged, using the globally-installed plugin. |
+| `full`    | on  | on  | candidate plugin | on | hermetic candidate plugin/profile; no ambient host assets |
 | `no-hints`| **off** | on | fixed | on | isolates skill/description efficacy |
 | `no-skills`| on | **off** | fixed | on | isolates hint/description efficacy |
 | `bare`    | **off** | **off** | **none** | on | pure MCP-description / unprompted pull |
+| `cli-only`| **off** | on | plugin agent/skill | **off** | supported shell fallback without MCP |
 
-**How the ablations work (Claude host).** A globally-installed plugin bundles
+**How the ablations work (Claude host).** A plugin bundles
 hooks + skills + MCP together, so cleanly removing *one* channel requires a
-hermetic, componentized plugin. For each non-`full` condition `run.sh`:
+hermetic, componentized plugin. For every condition `run.sh`:
 
 * copies `plugin/` into `$work/plugins/<condition>` and strips the ablated part
-  (`hooks/*.json` for `no-hints`/`bare`, `skills/` for `no-skills`/`bare`),
+  (`hooks/*.json` for `no-hints`/`bare`/`cli-only`, `skills/` for
+  `no-skills`/`bare`, and MCP manifests for `cli-only`),
   substituting the hook binary path;
-* launches `claude` with `--setting-sources project,local` (drops the ambient
-  user config — the global plugin **and** `~/.claude/CLAUDE.md`, which also
-  removes the [ambient-steering confound](#known-confound-ambient-steering)),
+* launches `claude` with a throwaway `HOME`, `--setting-sources project,local`
+  (drops the ambient user config, global plugin, and user `CLAUDE.md`),
   `--strict-mcp-config --mcp-config <hermetic tracedecay server>` (descriptions
   held constant), `--plugin-dir <the componentized copy>`, and `--add-dir
   <fixture>`;
@@ -276,23 +293,21 @@ hermetic, componentized plugin. For each non-`full` condition `run.sh`:
   `--append-system-prompt` so steering is constant while one channel varies;
   `bare` gets none.
 
-`full` is left byte-for-byte identical to the validated global-install
-invocation, so enabling ablations never regresses the baseline. Because `full`
-uses the ambient plugin while ablations use the hermetic componentized copy, the
-most meaningful comparisons are **between the ablation conditions** (they share
-the hermetic base and fixed steering, differing only in the ablated channel);
-`full` is the production-parity reference.
+`full` uses the same candidate plugin source and hermetic profile as the
+ablations, retaining every product channel. Comparisons therefore measure the
+candidate under test, never whichever release happens to be installed globally.
 
 > The ablation flag wiring is implemented to the documented Claude Code 2.1.x
 > flag semantics (`--setting-sources`, `--strict-mcp-config`, `--plugin-dir`,
 > `--append-system-prompt`). Confirm the isolation against one live ablation run
 > — eyeball that a `no-hints` transcript carries no hint text and a `no-skills`
 > transcript exposes no `tracedecay:*` skills — before trusting ablation
-> aggregates, the same way the Codex normalizer is hedged below.
+> aggregates.
 
-**Codex.** Ablation conditions are Claude-only. Codex hooks/skills live
-host-global under `~/.codex` and are not hermetically componentized here, so
-`codex` runs only `full`; other conditions are skipped with a notice.
+**Codex.** Ablation conditions are Claude-only. Codex runs only `full`: the
+candidate binary installs its plugin, agents, skills, hooks, and MCP bootstrap
+into a throwaway `HOME`/`CODEX_HOME`, with a read-only copy of `auth.json`.
+Other conditions are skipped with a notice.
 
 Example:
 
@@ -311,17 +326,16 @@ TRACEDECAY_AGENT_EVALS=1 HOSTS=claude \
 
 * **Claude** `--output-format stream-json`: `assistant` events carry
   `tool_use` items; the `result` event carries the final answer.
-* **Codex** `codex exec --json`: `msg.type` of `mcp_tool_call_begin` /
-  `exec_command_begin` / `function_call` become tool calls; `agent_message`
-  is the final answer.
+* **Codex 0.144+** `codex exec --json`: `item.started` / `item.completed`
+  envelopes normalize `command_execution`, `mcp_tool_call`,
+  `collab_tool_call` (`spawn_agent`), and `agent_message`. Lifecycle pairs are
+  deduplicated by `item.id`. Legacy `msg.type` events remain accepted.
 
 Host-specific MCP tool names collapse to canonical form, e.g.
-`mcp__plugin_tracedecay_tracedecay__tracedecay_context` → `tracedecay_context`.
+`mcp__plugin_tracedecay_graph__tracedecay_context` → `tracedecay_context`.
 
-> The Claude path is validated by a live smoke run. The Codex path is
-> implemented to the documented `codex exec --json` event schema but should be
-> confirmed against a live Codex transcript before trusting Codex aggregates
-> (run one `codex` scenario and eyeball `report.md`).
+Successful exits that contain neither a parsed tool call nor a final answer are
+recorded as `unparseable_empty` invalid runs and excluded from aggregates.
 
 ## Adding a scenario
 

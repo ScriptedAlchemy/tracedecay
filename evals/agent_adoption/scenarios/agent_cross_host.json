@@ -1,0 +1,12 @@
+{
+  "id": "agent_cross_host",
+  "category": "specialist_agent",
+  "pack": "pack_specialist_agents",
+  "hosts": ["claude", "codex"],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Check whether our installed coding integrations expose the same commands, skills, hooks, and assistants.",
+  "expected_agent": "cross-host-integration-auditor",
+  "max_tool_calls": 8,
+  "notes": "Neutral routing eval for product-source, packaging, and lifecycle parity."
+}

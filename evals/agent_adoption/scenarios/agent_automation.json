@@ -1,0 +1,12 @@
+{
+  "id": "agent_automation",
+  "category": "specialist_agent",
+  "pack": "pack_specialist_agents",
+  "hosts": ["claude", "codex"],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Audit the recent background improvement runs for skipped cycles, unsafe retries, or weak evidence.",
+  "expected_agent": "automation-auditor",
+  "max_tool_calls": 10,
+  "notes": "Neutral routing eval for automation artifacts, retries, policy, and adoption outcomes."
+}

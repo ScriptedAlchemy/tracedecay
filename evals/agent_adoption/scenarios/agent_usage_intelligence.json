@@ -1,0 +1,12 @@
+{
+  "id": "agent_usage_intelligence",
+  "category": "specialist_agent",
+  "pack": "pack_specialist_agents",
+  "hosts": ["claude", "codex"],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Measure whether remembered facts, hints, and specialist assistants are actually being used effectively.",
+  "expected_agent": "usage-intelligence-analyst",
+  "max_tool_calls": 10,
+  "notes": "Neutral routing eval for adoption metrics validated against transcript evidence."
+}

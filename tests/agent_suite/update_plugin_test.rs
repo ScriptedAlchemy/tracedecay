@@ -1103,12 +1103,6 @@ fn staged_host_source(host: &str) -> TempDir {
                     format!("commands/{file}"),
                 ));
             }
-            for name in ["code-explorer", "code-health-auditor", "session-historian"] {
-                copies.push((
-                    format!("overlays/cursor/agents/{name}.md"),
-                    format!("agents/{name}.md"),
-                ));
-            }
             copies.push((
                 ".cursor-plugin/plugin.json".into(),
                 ".cursor-plugin/plugin.json".into(),
@@ -1136,6 +1130,16 @@ fn staged_host_source(host: &str) -> TempDir {
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
         std::fs::copy(src.join(&source), &target)
             .unwrap_or_else(|e| panic!("copy {source} -> {deploy}: {e}"));
+    }
+    if host == "cursor" {
+        for (relative, contents) in tracedecay::agents::plugin_bundle::cursor_files()
+            .into_iter()
+            .filter(|(relative, _)| relative.starts_with("agents/"))
+        {
+            let target = staged.path().join(relative);
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::write(target, contents).unwrap();
+        }
     }
     staged
 }

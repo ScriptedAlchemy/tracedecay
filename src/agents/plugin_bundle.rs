@@ -13,8 +13,8 @@
 //! - `plugin/overlays/cursor/commands/tracedecay-*.md` — Cursor 1.6+ native
 //!   slash commands, one per workflow slug, deployed to `commands/<slug>.md`.
 //!   These provide the explicit workflow dispatch (no dispatcher *skills*).
-//! - `plugin/agents/*.md` — Claude-form subagents (deployed by Claude).
-//! - `plugin/overlays/cursor/agents/*.md` — Cursor-form subagents.
+//! - `plugin/agents/*.md` — canonical subagents. Claude deploys them verbatim;
+//!   build.rs derives Cursor markdown and Codex TOML adapters from them.
 //! - `plugin/commands/*.md` — Claude slash commands.
 //! - `plugin/rules/*.mdc` — Cursor rules.
 //! - `plugin/hooks/hooks-<host>.json` — per-host hook wiring; each deploys to
@@ -81,8 +81,12 @@ macro_rules! plugin_file {
     };
 }
 
-// Every file under `plugin/skills/`, including support files, embedded by build.rs.
+// Every shared skill and canonical/generated agent file, embedded by build.rs.
 include!(concat!(env!("OUT_DIR"), "/plugin_bundle_generated.rs"));
+
+pub(crate) fn codex_agent_files() -> &'static [PluginFile] {
+    GENERATED_CODEX_AGENT_FILES
+}
 
 /// Prefix of the dispatcher skills that Cursor does **not** deploy (they are
 /// native commands on Cursor). Claude/Codex deploy every skill.
@@ -151,32 +155,6 @@ const CURSOR_COMMAND_FILES: &[PluginFile] = &[
     plugin_file!(
         "commands/tracedecay-test-changes.md",
         "overlays/cursor/commands/tracedecay-test-changes.md"
-    ),
-];
-
-/// Claude-form subagents.
-const CLAUDE_AGENT_FILES: &[PluginFile] = &[
-    plugin_file!("agents/code-explorer.md", "agents/code-explorer.md"),
-    plugin_file!(
-        "agents/code-health-auditor.md",
-        "agents/code-health-auditor.md"
-    ),
-    plugin_file!("agents/session-historian.md", "agents/session-historian.md"),
-];
-
-/// Cursor-form subagents.
-const CURSOR_AGENT_FILES: &[PluginFile] = &[
-    plugin_file!(
-        "agents/code-explorer.md",
-        "overlays/cursor/agents/code-explorer.md"
-    ),
-    plugin_file!(
-        "agents/code-health-auditor.md",
-        "overlays/cursor/agents/code-health-auditor.md"
-    ),
-    plugin_file!(
-        "agents/session-historian.md",
-        "overlays/cursor/agents/session-historian.md"
     ),
 ];
 
@@ -256,7 +234,7 @@ pub fn claude_files() -> Vec<(&'static str, &'static str)> {
     compose(
         &[
             CLAUDE_MANIFEST_FILES,
-            CLAUDE_AGENT_FILES,
+            GENERATED_CLAUDE_AGENT_FILES,
             CLAUDE_COMMAND_FILES,
         ],
         all_skill_files(),
@@ -271,7 +249,7 @@ pub fn cursor_files() -> Vec<(&'static str, &'static str)> {
         &[
             CURSOR_MANIFEST_FILES,
             CURSOR_RULE_FILES,
-            CURSOR_AGENT_FILES,
+            GENERATED_CURSOR_AGENT_FILES,
             CURSOR_COMMAND_FILES,
         ],
         cursor_skill_files(),
@@ -343,12 +321,18 @@ mod tests {
         let all_skills = GENERATED_SKILL_FILES.len();
         let cursor_skills = cursor_skill_files().count();
 
-        // Claude: skills + 5 manifest (2 dot + mcp + hooks + README) + 3 agents
-        //   + 13 commands.
-        assert_eq!(claude_files().len(), all_skills + 5 + 3 + 13);
+        // Claude: skills + 5 manifest (2 dot + mcp + hooks + README) + native
+        // agents + 13 commands.
+        assert_eq!(
+            claude_files().len(),
+            all_skills + 5 + GENERATED_CLAUDE_AGENT_FILES.len() + 13
+        );
         // Cursor: cursor-subset skills + 4 manifest (dot + mcp + hooks +
-        //   README) + 2 rules + 3 agents + 13 native commands.
-        assert_eq!(cursor_files().len(), cursor_skills + 4 + 2 + 3 + 13);
+        //   README) + 2 rules + native agents + 13 native commands.
+        assert_eq!(
+            cursor_files().len(),
+            cursor_skills + 4 + 2 + GENERATED_CURSOR_AGENT_FILES.len() + 13
+        );
         // Codex: skills + 4 manifest (dot + mcp + hooks + README).
         assert_eq!(codex_files().len(), all_skills + 4);
     }
