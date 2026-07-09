@@ -47,6 +47,7 @@ pub enum HintCategory {
     ReviewChanges,
     MemoryStore,
     EditRedundancy,
+    UnexpectedChanges,
 }
 
 impl HintCategory {
@@ -340,6 +341,21 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         context: "tracedecay_redundancy surfaces near-duplicate function bodies and tracedecay_similar finds structurally similar code; if a match exists, reuse or refactor the existing helper instead of keeping a second copy.",
         expected_tools: &["tracedecay_redundancy", "tracedecay_similar"],
         nonblocking: true,
+    },
+    HintCategorySpec {
+        category: HintCategory::UnexpectedChanges,
+        key: "unexpected_changes",
+        label: "unexpected changes",
+        skill: "investigating-unexpected-changes",
+        message: "Unexpected commits or edits on your branch? Attribute them with the session-git index before reacting.",
+        context: "tracedecay_sessions_for (git_ref commit/branch/worktree) names the sessions that produced or observed the change; tracedecay_commit_context and tracedecay_branch_diff show what moved; tracedecay_message_search recovers the acting session's intent. Do not force-push over another agent's work or theorize from blind git log.",
+        expected_tools: &[
+            "tracedecay_sessions_for",
+            "tracedecay_commit_context",
+            "tracedecay_branch_diff",
+            "tracedecay_message_search",
+        ],
+        nonblocking: false,
     },
 ];
 
@@ -728,6 +744,10 @@ const CLASSIFICATION_RULES: &[ClassificationRule] = &[
         matches: |facts| is_semantic_search_tool(facts.input),
     },
     ClassificationRule {
+        category: HintCategory::UnexpectedChanges,
+        matches: |facts| signals_unexpected_change(&facts.text),
+    },
+    ClassificationRule {
         category: HintCategory::SessionRecall,
         matches: |facts| asks_for_session_recall(&facts.text),
     },
@@ -859,7 +879,7 @@ use classifiers::{
     is_project_discovery_command, is_redundancy_candidate_edit, is_semantic_search_tool,
     is_shell_file_read_command, is_shell_search_command, is_shell_text_search_command,
     is_single_file_read, is_subagent_context_handoff, is_tracedecay_tool_descriptor_read,
-    looks_like_pasted_diagnostic, matches_normalized,
+    looks_like_pasted_diagnostic, matches_normalized, signals_unexpected_change,
 };
 
 #[cfg(test)]

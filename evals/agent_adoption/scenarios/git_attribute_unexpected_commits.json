@@ -1,0 +1,43 @@
+{
+  "id": "git_attribute_unexpected_commits",
+  "category": "change_attribution",
+  "pack": "pack_git",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "deferred",
+  "prompt": "I'm on a feature branch and there are commits here I don't remember making, plus a file I didn't write. Before I keep going, work out where these changes came from and who actually made them.",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_sessions_for",
+      "tracedecay_commit_context",
+      "tracedecay_branch_diff",
+      "tracedecay_message_search"
+    ],
+    "acceptable": [
+      "tracedecay_lcm_grep",
+      "tracedecay_context",
+      "Read"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [],
+  "max_tool_calls": 6,
+  "requires_fixture": "seeded-sessions",
+  "notes": "DEFERRED: attribution needs a fixture branch carrying commits the agent did not author AND ingested sessions correlated to those commits/branch so tracedecay_sessions_for can name the producing session; the current fixture has no seeded session-git correlation rows."
+}
