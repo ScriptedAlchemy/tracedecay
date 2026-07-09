@@ -829,6 +829,19 @@ async fn add_session_parent_column_after_missing_check(
 static BACKGROUND_STRUCTURED_BACKFILL_ENABLED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(true);
 
+/// Whether this process is a long-lived host that may run the detached
+/// structured-row sweep. Off by default: one-shot CLI and (crucially) hook
+/// processes never opt in, so [`GlobalDb::spawn_structured_backfill`] is a
+/// no-op for them. A hook process exits within milliseconds of the open that
+/// scheduled the sweep, and dropping its runtime cancels the sweep's async
+/// task mid-parse — the parsed rows and the cursor advance are discarded, so a
+/// hook-spawned sweep makes zero durable progress and only adds exit latency.
+/// The long-lived MCP `serve` loop and the daemon set this via
+/// [`mark_process_long_lived_for_structured_backfill`]; because every store is
+/// also opened under one of those hosts, coverage still converges there.
+static STRUCTURED_BACKFILL_LONG_LIVED_PROCESS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Store paths (by db path) that already have a structured-row sweep running in
 /// this process, so concurrent opens don't stack duplicate sweeps.
 fn structured_backfill_in_flight() -> &'static std::sync::Mutex<HashSet<PathBuf>> {
@@ -843,6 +856,24 @@ fn structured_backfill_in_flight() -> &'static std::sync::Mutex<HashSet<PathBuf>
 #[doc(hidden)]
 pub fn set_background_structured_backfill_enabled(enabled: bool) {
     BACKGROUND_STRUCTURED_BACKFILL_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Marks this process as a long-lived host (the MCP `serve` loop or the daemon)
+/// that is allowed to run the detached structured-row sweep. Called once at
+/// those entry points before any store is opened. One-shot CLI and hook
+/// processes must never call this: see [`STRUCTURED_BACKFILL_LONG_LIVED_PROCESS`].
+pub fn mark_process_long_lived_for_structured_backfill() {
+    STRUCTURED_BACKFILL_LONG_LIVED_PROCESS.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether [`GlobalDb::spawn_structured_backfill`] will schedule a sweep: the
+/// background switch is on *and* this process is a long-lived host. This is the
+/// single predicate the spawn path consults, exposed so tests can assert that a
+/// one-shot process never spawns the sweep.
+#[doc(hidden)]
+pub fn structured_backfill_will_spawn() -> bool {
+    BACKGROUND_STRUCTURED_BACKFILL_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+        && STRUCTURED_BACKFILL_LONG_LIVED_PROCESS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 impl GlobalDb {
@@ -1182,14 +1213,21 @@ impl GlobalDb {
     ///
     /// Concurrency: the sweep opens its own connection, its writes are
     /// idempotent upserts keyed on `(provider, message_id)`, and its path
-    /// watermark advances per file — so overlapping with live ingest is safe.
-    /// A process-wide in-flight guard (keyed by store path) skips the spawn
-    /// when a sweep for this store is already running, so stacked opens don't
-    /// stack sweeps. A short-lived runtime may drop the task before it
-    /// finishes; that is fine — the marker/watermark simply let a later open
-    /// resume where it left off.
+    /// watermark advances per file under a cross-process lock — so overlapping
+    /// with live ingest is safe. A process-wide in-flight guard (keyed by store
+    /// path) skips the spawn when a sweep for this store is already running in
+    /// *this* process; a sibling file lock (see
+    /// `transcript_backfill::try_acquire_structured_backfill_lock`) excludes
+    /// other processes so concurrent hook processes never run duplicate sweeps.
+    ///
+    /// Only long-lived hosts spawn: [`structured_backfill_will_spawn`] gates on
+    /// [`mark_process_long_lived_for_structured_backfill`], so short-lived hook
+    /// and one-shot CLI processes never schedule the sweep at all (their
+    /// runtime would drop the task mid-parse before it made durable progress).
+    /// The daemon and MCP server open every store too, so coverage converges
+    /// there.
     fn spawn_structured_backfill(&self) {
-        if !BACKGROUND_STRUCTURED_BACKFILL_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+        if !structured_backfill_will_spawn() {
             return;
         }
         let db_path = self.db_path.clone();

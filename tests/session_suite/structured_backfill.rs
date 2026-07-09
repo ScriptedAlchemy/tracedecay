@@ -400,3 +400,136 @@ async fn structured_backfill_version_bump_reparses_from_start() {
         "a stale un-versioned cursor must not block a fresh version-bumped sweep"
     );
 }
+
+// --- Process-safety coverage (adversarial-review findings on #357) ---
+
+/// A one-shot process (CLI/hook) must never schedule the detached sweep, even
+/// with the background switch on: it would drop the sweep mid-parse on exit.
+#[tokio::test]
+async fn structured_backfill_one_shot_process_never_spawns() {
+    // Fresh process state (nextest runs each test in its own process): the
+    // background switch defaults on, but a one-shot process is not long-lived.
+    assert!(
+        !tracedecay::global_db::structured_backfill_will_spawn(),
+        "a one-shot process must not spawn the sweep"
+    );
+    // A long-lived host (MCP serve / daemon) opts in and then does spawn.
+    tracedecay::global_db::mark_process_long_lived_for_structured_backfill();
+    assert!(
+        tracedecay::global_db::structured_backfill_will_spawn(),
+        "a long-lived host must spawn the sweep"
+    );
+}
+
+/// Two concurrent openers of the same store contend on the sibling lock file:
+/// exactly one may sweep at a time; the loser is excluded and reacquires only
+/// after the winner releases. Models the cross-process race between short-lived
+/// hook processes (advisory `flock` excludes across open file descriptions).
+#[tokio::test]
+async fn structured_backfill_lock_excludes_concurrent_openers() {
+    use tracedecay::sessions::transcript_backfill::try_acquire_structured_backfill_lock;
+
+    let tmp = TempDir::new().unwrap();
+    let (_home, project) = init_project(&tmp);
+    // Ensure the session store (and its parent dir) exists.
+    let _db = open_project_session_db(&project).await.unwrap();
+    let db_path = project_session_db_path(&project);
+
+    let winner = try_acquire_structured_backfill_lock(&db_path);
+    assert!(winner.is_some(), "first opener acquires the sweep lock");
+    let loser = try_acquire_structured_backfill_lock(&db_path);
+    assert!(
+        loser.is_none(),
+        "a concurrent opener must be excluded while the lock is held"
+    );
+
+    drop(winner);
+    let reacquired = try_acquire_structured_backfill_lock(&db_path);
+    assert!(
+        reacquired.is_some(),
+        "the lock must be reusable once the holder releases it"
+    );
+}
+
+/// Two sweeps driven concurrently against the same store: the lock lets exactly
+/// one do the work (insert the missing row) while the other skips with an empty
+/// result — no duplicate whole-file re-parse, no double insert.
+#[tokio::test]
+async fn structured_backfill_concurrent_sweeps_run_once() {
+    tracedecay::global_db::set_background_structured_backfill_enabled(false);
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = init_project(&tmp);
+    write_codex_rollout_with_goal(&home, &project, "codex-concurrent");
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = CodexSource::with_home(&home);
+    ingest_source(&db, &source, &project, None).await;
+    db.run_structured_backfill().await;
+    drop(db);
+
+    // Drop the one goal row so a sweep has exactly one row to re-insert.
+    simulate_old_parser_store(&project, "codex", "goal").await;
+    assert_eq!(count_kind(&project, "codex", "goal").await, 0);
+
+    // Two independent openers (separate connections) sweep the same store at
+    // once. The cross-process lock admits one; the other returns empty stats.
+    let db_a = open_project_session_db(&project).await.unwrap();
+    let db_b = open_project_session_db(&project).await.unwrap();
+    let (a, b) = tokio::join!(
+        db_a.run_structured_backfill(),
+        db_b.run_structured_backfill()
+    );
+
+    let a = a.expect("sweep a returns stats");
+    let b = b.expect("sweep b returns stats");
+    assert!(
+        (a > 0) ^ (b > 0),
+        "exactly one concurrent sweep inserts the missing row; the other is locked out (a={a}, b={b})"
+    );
+    assert_eq!(
+        count_kind(&project, "codex", "goal").await,
+        1,
+        "the store converges to a single goal row"
+    );
+}
+
+/// The watermark write is compare-and-set: it only ever moves forward, so a
+/// slower concurrent sweep writing an earlier path cannot regress the cursor
+/// and re-queue already-covered files.
+#[tokio::test]
+async fn structured_backfill_watermark_never_regresses() {
+    use tracedecay::sessions::transcript_backfill::{
+        read_structured_backfill_cursor_for_test, write_structured_backfill_cursor_for_test,
+    };
+
+    let tmp = TempDir::new().unwrap();
+    let (_home, project) = init_project(&tmp);
+    let db = open_project_session_db(&project).await.unwrap();
+
+    write_structured_backfill_cursor_for_test(&db, "codex/aaa.jsonl")
+        .await
+        .unwrap();
+    assert_eq!(
+        read_structured_backfill_cursor_for_test(&db).await,
+        "codex/aaa.jsonl"
+    );
+
+    // A forward move advances the cursor.
+    write_structured_backfill_cursor_for_test(&db, "codex/zzz.jsonl")
+        .await
+        .unwrap();
+    assert_eq!(
+        read_structured_backfill_cursor_for_test(&db).await,
+        "codex/zzz.jsonl"
+    );
+
+    // A backwards move (an earlier path from a slower/racing sweep) is a no-op.
+    write_structured_backfill_cursor_for_test(&db, "codex/mmm.jsonl")
+        .await
+        .unwrap();
+    assert_eq!(
+        read_structured_backfill_cursor_for_test(&db).await,
+        "codex/zzz.jsonl",
+        "the watermark must never move backwards"
+    );
+}
