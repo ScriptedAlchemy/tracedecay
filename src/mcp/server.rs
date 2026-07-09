@@ -240,6 +240,13 @@ fn match_initialize_root_to_registered_project(
 /// Cache duration for version checks (15 minutes).
 const VERSION_CHECK_INTERVAL: Duration = Duration::from_mins(15);
 
+/// Upper bound for [`McpServer::ledger_writes_settled`]. Savings-ledger writes
+/// are fire-and-forget `SQLite` appends that finish in well under a second on a
+/// healthy machine, so 10 s is generous headroom; the point is that the wait
+/// is *finite* — a wedged recorder task can never hang the caller (tests,
+/// shutdown drains) indefinitely as the previous unbounded loop allowed.
+const LEDGER_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
+
 // Global accounting (savings ledger + worldwide-counter flushes) is enabled
 // by default; see `crate::global_db::global_accounting_mode` for the env
 // override precedence.
@@ -855,6 +862,31 @@ pub struct McpServer {
     /// connection that gets re-initialized by a different client picks up
     /// the new identity.
     client_name: std::sync::Mutex<Option<String>>,
+    /// Stable per-process instance id (random hex token minted once when this
+    /// server is constructed). Recorded in every analytics event's
+    /// `metadata.mcp_instance_id`.
+    ///
+    /// The MCP transport negotiates only `clientInfo` (host name) at
+    /// `initialize` — never a session/conversation id — and no session env var
+    /// is passed to the server process, so a call's `session_id` column is
+    /// populated only when the client happens to thread `session_id`/`sessionId`
+    /// through the tool arguments (rare; historically ~97.6% of events had a
+    /// NULL `session_id`). This id is the honest fallback: it cannot recover a
+    /// true session identity, but it lets every event from one server lifetime
+    /// be grouped. It is deliberately kept out of the `session_id` column so it
+    /// never masquerades as a real session.
+    mcp_instance_id: String,
+}
+
+/// Mint a random per-process MCP instance id (32 lowercase hex chars from 16
+/// random bytes). Best-effort: if the OS RNG is unavailable, fall back to a
+/// timestamped token so the field is always populated and never panics.
+fn new_mcp_instance_id() -> String {
+    let mut buf = [0u8; 16];
+    match getrandom::getrandom(&mut buf) {
+        Ok(()) => hex::encode(buf),
+        Err(_) => format!("mcp-{}", crate::tracedecay::current_timestamp()),
+    }
 }
 
 impl McpServer {
@@ -992,6 +1024,7 @@ impl McpServer {
                 crate::sessions::git_correlation::SpanObservationDebounce::new(),
             ),
             client_name: std::sync::Mutex::new(None),
+            mcp_instance_id: new_mcp_instance_id(),
         });
 
         tokio::task::spawn_blocking(move || {
@@ -1251,18 +1284,55 @@ impl McpServer {
     /// production code never calls this, so the request path stays
     /// non-blocking, while tests can await durability deterministically
     /// instead of polling the DB against a wall-clock deadline.
+    ///
+    /// Bounded by [`LEDGER_SETTLE_TIMEOUT`] so a spawned write that wedges
+    /// (a stuck DB handle, a task that never resolves) can never hang the
+    /// caller forever — the earlier unbounded loop made a wedged write
+    /// manifest as an un-observable, indefinitely-hung integration test.
     pub async fn ledger_writes_settled(&self) {
-        loop {
-            // Register interest *before* re-checking so a completion between
-            // the check and the await cannot be missed.
-            let notified = self.ledger_write_notify.notified();
-            let started = self.ledger_writes_started.load(Ordering::SeqCst);
-            let finished = self.ledger_writes_finished.load(Ordering::SeqCst);
-            if finished >= started {
-                return;
+        self.ledger_writes_settled_within(LEDGER_SETTLE_TIMEOUT)
+            .await;
+    }
+
+    /// Like [`Self::ledger_writes_settled`] but bounded by an explicit
+    /// `timeout`. Returns `true` when every spawned ledger write settled
+    /// within the bound, `false` when the bound elapsed with writes still
+    /// pending. A timeout is never silent: it logs a warning naming how many
+    /// writes were still outstanding so a wedged recorder is diagnosable.
+    pub async fn ledger_writes_settled_within(&self, timeout: std::time::Duration) -> bool {
+        let wait = async {
+            loop {
+                // Register interest *before* re-checking so a completion
+                // between the check and the await cannot be missed.
+                let notified = self.ledger_write_notify.notified();
+                let started = self.ledger_writes_started.load(Ordering::SeqCst);
+                let finished = self.ledger_writes_finished.load(Ordering::SeqCst);
+                if finished >= started {
+                    return;
+                }
+                notified.await;
             }
-            notified.await;
+        };
+        if tokio::time::timeout(timeout, wait).await.is_ok() {
+            return true;
         }
+        let started = self.ledger_writes_started.load(Ordering::SeqCst);
+        let finished = self.ledger_writes_finished.load(Ordering::SeqCst);
+        let pending = started.saturating_sub(finished);
+        eprintln!(
+            "[tracedecay] ledger_writes_settled timed out after {timeout:?} with \
+             {pending} savings-ledger write(s) still pending"
+        );
+        false
+    }
+
+    /// Test-only hook: spawn an observed ledger write that never completes, so
+    /// tests can prove [`Self::ledger_writes_settled`] stays bounded when a
+    /// recorder task wedges. Uses the same [`Self::spawn_observed_ledger_write`]
+    /// accounting the production path uses, so the counters advance identically.
+    #[cfg(test)]
+    pub(crate) fn spawn_wedged_ledger_write_for_test(&self) {
+        self.spawn_observed_ledger_write(std::future::pending::<()>());
     }
 
     /// Re-read the file-to-token-count map from the DB and swap it into the
@@ -2692,6 +2762,7 @@ impl McpServer {
                         arguments: &analytics_arguments,
                         internal_analytics: result.internal_analytics(),
                         client_name: client_name.as_deref(),
+                        mcp_instance_id: Some(self.mcp_instance_id.as_str()),
                         failure_reason: failure_reason.as_deref(),
                     });
                     self.spawn_observed_ledger_write(async move {
@@ -2919,6 +2990,7 @@ impl McpServer {
             arguments,
             internal_analytics: None,
             client_name: client_name.as_deref(),
+            mcp_instance_id: Some(self.mcp_instance_id.as_str()),
             failure_reason: Some(&failure_reason),
         });
         self.spawn_observed_ledger_write(async move {
