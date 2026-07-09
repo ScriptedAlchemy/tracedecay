@@ -45,6 +45,11 @@ pub struct SpanScanTarget {
     pub worktree: String,
     pub window_start: i64,
     pub window_end: i64,
+    /// Newest span write time (`updated_at`) in this target. The sweep
+    /// watermark advances on this — ingest/write order — not on `window_end`
+    /// (event time), so a session ingested late for old commits is still
+    /// scanned even though its events predate the watermark.
+    pub max_updated_at: i64,
 }
 
 /// One span row a candidate commit may fall inside. Kept minimal so the
@@ -124,18 +129,22 @@ pub fn match_commit_to_spans(
     records
 }
 
-/// Loads the `(branch, worktree)` scan targets touched by spans updated at or
-/// after `since_ts` (the sweep watermark), each carrying the widest span
-/// window observed for it so the git scan can be time-bounded.
+/// Loads the `(branch, worktree)` scan targets whose spans were *written*
+/// (`updated_at`) at or after `since_ts` (the sweep watermark), each carrying
+/// the widest span window observed for it so the git scan can be time-bounded.
+///
+/// Selecting on `updated_at` (ingest/write time) rather than `last_ts` (event
+/// time) is deliberate: historical sessions ingested after the watermark carry
+/// old event times but a fresh `updated_at`, so they still get attributed.
 async fn scan_targets_since(
     conn: &Connection,
     since_ts: i64,
 ) -> Result<Vec<SpanScanTarget>, GitCorrelationError> {
     let mut rows = conn
         .query(
-            "SELECT branch, worktree, MIN(first_ts), MAX(last_ts)
+            "SELECT branch, worktree, MIN(first_ts), MAX(last_ts), MAX(updated_at)
              FROM session_git_spans
-             WHERE last_ts >= ?1
+             WHERE updated_at >= ?1
              GROUP BY branch, worktree",
             params![since_ts],
         )
@@ -147,6 +156,7 @@ async fn scan_targets_since(
             worktree: row.get(1)?,
             window_start: row.get(2)?,
             window_end: row.get(3)?,
+            max_updated_at: row.get(4)?,
         });
     }
     Ok(targets)
@@ -179,7 +189,32 @@ async fn span_windows_for(
             last_ts: row.get(6)?,
         });
     }
+    canonicalize_span_providers(&mut spans);
     Ok(spans)
+}
+
+/// Collapses the multiple provider identities of one session onto its single
+/// real provider. A live session is span-observed by the hook route (which
+/// stores `provider ''`, since it cannot know the provider) and again by
+/// transcript ingest (which stores the real provider). Left split, both
+/// windows attribute the same commit under different `(commit_sha, provider,
+/// session_id)` keys, double-counting the session. Resolving every window to
+/// the session's non-empty provider makes those attributions collapse onto one
+/// `commit_sessions` row via the upsert primary key.
+fn canonicalize_span_providers(spans: &mut [SpanWindow]) {
+    let mut canonical: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for span in spans.iter() {
+        if !span.provider.is_empty() {
+            canonical
+                .entry(span.session_id.clone())
+                .or_insert_with(|| span.provider.clone());
+        }
+    }
+    for span in spans.iter_mut() {
+        if let Some(provider) = canonical.get(&span.session_id) {
+            span.provider = provider.clone();
+        }
+    }
 }
 
 /// One commit observed by the bounded git scan.
@@ -208,7 +243,9 @@ where
     let mut inserted = 0usize;
     let mut new_watermark = watermark;
     for target in &targets {
-        new_watermark = new_watermark.max(target.window_end);
+        // Advance on write time, not event time, so the watermark reflects how
+        // far ingestion has progressed rather than how recent the commits are.
+        new_watermark = new_watermark.max(target.max_updated_at);
         let spans = span_windows_for(conn, target.branch.as_deref(), &target.worktree).await?;
         if spans.is_empty() {
             continue;
