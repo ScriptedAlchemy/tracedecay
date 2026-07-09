@@ -1,0 +1,46 @@
+{
+  "id": "nav_structural_reserve_stock_call_shape",
+  "category": "code_exploration",
+  "pack": "pack_navigation",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Find every call in this crate that reserves stock by passing a warehouse, a SKU, and a quantity. I want the exact call sites that match that three-argument shape, not just where the function is defined.",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_ast_grep_search",
+      "tracedecay_context",
+      "tracedecay_search",
+      "tracedecay_grep",
+      "tracedecay_callers"
+    ],
+    "acceptable": [
+      "tracedecay_body",
+      "tracedecay_callers_for",
+      "Read"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [
+    "reserve_stock",
+    "place_order"
+  ],
+  "max_tool_calls": 4,
+  "notes": "structural call-shape search; the sole three-argument reserve_stock(...) call site is inside place_order (orders.rs). The neutral prompt stresses the argument shape so ast_grep_search is the natural opener, though callers/grep/context can also resolve it."
+}

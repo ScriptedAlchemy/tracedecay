@@ -1,0 +1,43 @@
+{
+  "id": "edit_structural_swap_reserve_stock_args",
+  "category": "edit_refactor",
+  "pack": "pack_edit_refactor",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "deferred",
+  "prompt": "Swap the first two arguments at every call site of the stock-reservation helper across this crate, so the SKU is passed before the warehouse.",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_ast_grep_rewrite"
+    ],
+    "acceptable": [
+      "tracedecay_ast_grep_search",
+      "tracedecay_context",
+      "tracedecay_search",
+      "tracedecay_body",
+      "Read",
+      "Edit"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [],
+  "max_tool_calls": 6,
+  "requires_tool": "ast_grep_rewrite",
+  "notes": "PENDING: structural cross-file argument-order swap targeting tracedecay_ast_grep_rewrite. Deferred because (a) ast_grep_rewrite is only advertised when the host ast-grep CLI is on PATH, and (b) the current fixture has a single reserve_stock(...) call site, so a true 'across the crate' multi-site swap is not yet gradable. Promote to active once the fixture grows additional call sites and live-run adoption is verified. Pair with tracedecay_ast_grep_search (in-process) to locate the sites first."
+}

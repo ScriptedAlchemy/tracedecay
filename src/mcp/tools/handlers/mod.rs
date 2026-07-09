@@ -6,6 +6,7 @@
 
 pub mod analysis;
 mod analytics;
+pub mod ast_grep_search;
 pub mod dashboard;
 mod dependency_hints;
 pub mod edit;
@@ -286,6 +287,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
     match tool_name {
         "tracedecay_search" => graph::handle_search(cg, args, selected_scope_prefix).await,
         "tracedecay_grep" => grep::handle_grep(cg, args, selected_scope_prefix).await,
+        "tracedecay_ast_grep_search" => ast_grep_search::handle_ast_grep_search(cg, args).await,
         "tracedecay_retrieve" => handle_retrieve(cg, &args),
         "tracedecay_context" => graph::handle_context(cg, args, selected_scope_prefix).await,
         "tracedecay_callers" => graph::handle_callers(cg, args).await,
@@ -1116,6 +1118,9 @@ mod tests {
         assert!(tool_names.contains(&"tracedecay_str_replace"));
         assert!(tool_names.contains(&"tracedecay_multi_str_replace"));
         assert!(tool_names.contains(&"tracedecay_insert_at"));
+        // Structural search runs in-process (bundled grammars), so it is always
+        // advertised — unlike the CLI-backed rewrite tool gated just below.
+        assert!(tool_names.contains(&"tracedecay_ast_grep_search"));
         if super::super::definitions::ast_grep_available() {
             assert!(tool_names.contains(&"tracedecay_ast_grep_rewrite"));
         } else {

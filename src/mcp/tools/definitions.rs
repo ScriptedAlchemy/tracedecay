@@ -238,6 +238,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     let mut definitions = vec![
         def_search(),
         def_grep(),
+        def_ast_grep_search(),
         def_retrieve(),
         def_context(),
         def_callers(),
@@ -381,6 +382,7 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     // graph
     "tracedecay_search",
     "tracedecay_grep",
+    "tracedecay_ast_grep_search",
     "tracedecay_context",
     "tracedecay_callers",
     "tracedecay_callees",
@@ -3178,6 +3180,43 @@ fn def_lcm_session_boundary() -> ToolDefinition {
             },
             "allOf": lcm_storage_scope_requires_hermes_home(),
             "required": ["provider", "session_id"]
+        }),
+    )
+}
+
+fn def_ast_grep_search() -> ToolDefinition {
+    def(
+        "tracedecay_ast_grep_search",
+        "AST Structural Search",
+        "Structural (AST) code search: find call shapes, argument orders, and other \
+         syntax-tree patterns that a text regex cannot express. Uses ast-grep's SGPattern \
+         syntax (metavariables: `$X` one node, `$$$` many). Runs IN-PROCESS over the project \
+         working tree using the bundled tree-sitter grammars — no external ast-grep binary, no \
+         gating. Each hit resolves its enclosing symbol, so the natural next call is \
+         tracedecay_body. Routing: use this when the pattern is structural (e.g. `foo($$$)`, \
+         `if ($C) { $$$ }`); for a literal/regex string use tracedecay_grep; for a symbol name \
+         use tracedecay_search. To rewrite a structural match, pair with tracedecay_ast_grep_rewrite.",
+        json!({
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "ast-grep structural pattern (SGPattern syntax), e.g. 'reserve_stock($$$)' or 'Result<$T, $E>'."
+                },
+                "lang": {
+                    "type": "string",
+                    "description": "Optional language key to force (e.g. 'rust', 'typescript', 'python'). Omit to auto-detect each file from its extension."
+                },
+                "path_glob": {
+                    "type": "string",
+                    "description": "Optional glob restricting which files are searched, matched against project-relative paths (e.g. 'src/**/*.rs')."
+                },
+                "max_results": {
+                    "type": "number",
+                    "description": "Maximum number of matches to return (default: 50, max: 200)."
+                }
+            },
+            "required": ["pattern"]
         }),
     )
 }
