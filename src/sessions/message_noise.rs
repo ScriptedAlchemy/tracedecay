@@ -86,9 +86,58 @@ fn is_branch_inventory(lower: &str) -> bool {
     if !mentions_branch_or_worktree {
         return false;
     }
+    if shows_substantive_work(lower) {
+        return false;
+    }
     LISTING_INDICATORS
         .iter()
         .any(|indicator| lower.contains(indicator))
+}
+
+/// True when a branch/worktree listing also contains concrete work evidence.
+fn shows_substantive_work(lower: &str) -> bool {
+    const WORK_VERBS: [&str; 4] = ["implemented", "fixed", "refactored", "committed"];
+    if lower.contains("diff --git") || lower.contains("@@ ") {
+        return true;
+    }
+    WORK_VERBS
+        .iter()
+        .any(|verb| contains_affirmative_verb(lower, verb))
+}
+
+/// True when `verb` appears as a standalone word without nearby preceding negation.
+fn contains_affirmative_verb(lower: &str, verb: &str) -> bool {
+    let mut search_from = 0;
+    while let Some(rel) = lower[search_from..].find(verb) {
+        let idx = search_from + rel;
+        let end = idx + verb.len();
+        let before = &lower[..idx];
+        let after = &lower[end..];
+        let left_boundary = before
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_ascii_alphanumeric());
+        let right_boundary = after
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_ascii_alphanumeric());
+        if left_boundary && right_boundary && !negated_before(before) {
+            return true;
+        }
+        search_from = end;
+    }
+    false
+}
+
+/// True when the last three words before a work verb negate it.
+fn negated_before(before: &str) -> bool {
+    const NEGATIONS: [&str; 4] = ["nothing", "never", "not", "no"];
+    before
+        .split_whitespace()
+        .rev()
+        .take(3)
+        .map(|word| word.trim_matches(|c: char| !c.is_ascii_alphanumeric()))
+        .any(|word| NEGATIONS.contains(&word))
 }
 
 /// True when a message is mostly a list of filesystem paths rather than prose:
@@ -172,6 +221,39 @@ mod tests {
         assert!(is_inventory_text(
             "Daily branch roster mentions codex/retrieval-evals-analytics once more among the \
              archived and stale branches tracked across every worktree."
+        ));
+    }
+
+    #[test]
+    fn branch_listing_work_with_evidence_is_not_inventory() {
+        assert!(!is_inventory_text(
+            "Implemented the branch listing feature on codex/foo; diff attached."
+        ));
+        assert!(!is_inventory_text(
+            "Fixed the worktree sweep inventory bug; here's the diff:\n\
+             ```\ndiff --git a/src/sweep.rs b/src/sweep.rs\n@@ -1 +1 @@\n```"
+        ));
+        assert!(!is_inventory_text(
+            "Refactored the branch roster listing into a shared helper and committed it."
+        ));
+    }
+
+    #[test]
+    fn fenced_branch_roster_stays_inventory() {
+        assert!(is_inventory_text(
+            "Branch inventory sweep:\n```\ncodex/foo\ncodex/bar\ncodex/baz\n```"
+        ));
+    }
+
+    #[test]
+    fn genuine_roster_with_negated_work_verb_stays_inventory() {
+        assert!(is_inventory_text(
+            "Worktree fleet status again names codex/retrieval-evals-analytics amid twelve \
+             other branches; nothing is implemented in this session, it is only an index of \
+             branch names."
+        ));
+        assert!(is_inventory_text(
+            "Branch inventory listing of codex/a, codex/b, and codex/c across every worktree."
         ));
     }
 
