@@ -1,5 +1,13 @@
 use std::collections::HashSet;
 
+/// Hard upper bound on an entity's character length. An entity name is a short
+/// identifier-like or proper-noun span, never a sentence, so anything longer is
+/// a mangled extraction (e.g. a run captured between two apostrophes) and is
+/// dropped.
+const MAX_ENTITY_CHARS: usize = 80;
+/// Hard upper bound on an entity's word count for the same reason.
+const MAX_ENTITY_WORDS: usize = 6;
+
 pub fn normalize_entity(entity: &str) -> String {
     entity
         .trim_matches(|c: char| {
@@ -25,7 +33,7 @@ pub fn extract_entities(text: &str) -> Vec<String> {
     let mut entities = Vec::new();
     for (_, entity) in matches {
         let normalized = normalize_entity(&entity);
-        if normalized.is_empty() {
+        if normalized.is_empty() || !is_valid_entity(&normalized) {
             continue;
         }
 
@@ -38,13 +46,87 @@ pub fn extract_entities(text: &str) -> Vec<String> {
     entities
 }
 
+/// Returns true when a normalized span is shaped like a real entity name.
+///
+/// Two accepted shapes:
+/// 1. A single code-like token — a file path, a `::`-qualified symbol, a
+///    `snake_case` / `camelCase` identifier, or a `tracedecay_*` tool name. These
+///    legitimately contain `.`, `/`, `:` and `_`, so they bypass the
+///    sentence-punctuation checks below.
+/// 2. A short proper-noun / phrase span (<= [`MAX_ENTITY_WORDS`] words) whose
+///    every word is an identifier-ish or alphanumeric token. Anything carrying
+///    sentence punctuation (`.`, `;`, `—`, unbalanced parens, ...) or exceeding
+///    the length caps is rejected — that is what a mangled multi-sentence
+///    fragment looks like, and it must never become an "entity".
+fn is_valid_entity(entity: &str) -> bool {
+    if entity.is_empty() || entity.chars().count() > MAX_ENTITY_CHARS {
+        return false;
+    }
+
+    let words: Vec<&str> = entity.split_whitespace().collect();
+    if words.is_empty() || words.len() > MAX_ENTITY_WORDS {
+        return false;
+    }
+
+    // Shape 1: a single trusted code token.
+    if words.len() == 1 && is_code_like_token(words[0]) {
+        return true;
+    }
+
+    // Shape 2: a short phrase of clean words. Reject any word carrying stray
+    // symbols or sentence punctuation (commas, dots, semicolons, dashes,
+    // parentheses, slashes, colons) — an entity is not a sentence fragment.
+    words
+        .iter()
+        .all(|word| word.chars().all(is_entity_word_char))
+}
+
+/// Characters allowed inside a non-code phrase-entity word: letters, digits,
+/// intra-word hyphen/underscore, and apostrophe (for names like "O'Neil").
+fn is_entity_word_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '\'')
+}
+
+/// A single token that is trusted verbatim as an entity: a file path, a
+/// `::`-qualified Rust symbol, a `snake_case` / `camelCase` identifier, or a
+/// `tracedecay_*` tool name.
+fn is_code_like_token(token: &str) -> bool {
+    is_file_path(token)
+        || is_rust_symbol(token)
+        || is_tracedecay_tool(token)
+        || is_code_identifier(token)
+}
+
 fn extract_quoted(text: &str, delimiter: char) -> Vec<(usize, String)> {
     let mut results = Vec::new();
     let mut start = None;
 
-    for (index, ch) in text.char_indices() {
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    for i in 0..chars.len() {
+        let (index, ch) = chars[i];
         if ch != delimiter {
             continue;
+        }
+
+        // A single quote is overwhelmingly an intra-word apostrophe
+        // (possessive "session's", contraction "don't"), not a quotation
+        // delimiter. Treating those as delimiters paired two apostrophes across
+        // a whole sentence and captured a giant mangled span as an "entity".
+        // Skip a `'` when it sits between two alphanumeric characters; genuine
+        // quotation marks always have a non-alphanumeric char on their outer
+        // side.
+        if delimiter == '\'' {
+            let prev_alnum = i
+                .checked_sub(1)
+                .map(|j| chars[j].1.is_alphanumeric())
+                .unwrap_or(false);
+            let next_alnum = chars
+                .get(i + 1)
+                .map(|(_, c)| c.is_alphanumeric())
+                .unwrap_or(false);
+            if prev_alnum && next_alnum {
+                continue;
+            }
         }
 
         if let Some(open_index) = start {
@@ -109,7 +191,7 @@ fn extract_code_tokens(text: &str) -> Vec<(usize, String)> {
         .into_iter()
         .filter_map(|(index, token)| {
             let cleaned = clean_code_token(token);
-            if is_file_path(&cleaned) || is_rust_symbol(&cleaned) || is_tracedecay_tool(&cleaned) {
+            if is_code_like_token(&cleaned) {
                 Some((index, cleaned))
             } else {
                 None
@@ -451,7 +533,66 @@ fn clean_name_token(token: &str) -> String {
 }
 
 fn is_file_path(token: &str) -> bool {
-    token.contains('/') || token.contains('\\') || token.starts_with('.')
+    // Unambiguous leading path prefixes: "/etc/config", "./x", "../x", "~/x",
+    // and their Windows backslash forms.
+    if token.starts_with('/')
+        || token.starts_with('\\')
+        || token.starts_with("./")
+        || token.starts_with("../")
+        || token.starts_with(".\\")
+        || token.starts_with("..\\")
+        || token.starts_with("~/")
+    {
+        return token.chars().any(|c| c.is_ascii_alphanumeric());
+    }
+
+    // Dotfiles without a separator: ".gitignore", ".env". Require a single
+    // leading dot followed by an identifier-ish body so prose like "e.g." (no
+    // leading dot) and "v1.2.3" are not mistaken for files.
+    if token.starts_with('.') && !token.contains('/') && !token.contains('\\') {
+        let body = &token[1..];
+        return !body.is_empty()
+            && !body.contains('.')
+            && body
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'));
+    }
+
+    // Otherwise a path must have a directory separator AND at least one
+    // dotted (extension-bearing) segment. This rejects prose slash-runs such as
+    // "approval/sandbox/effort" and "X/Y/Z" that carry no file extension while
+    // still accepting "src/sessions/codex.rs" and "src\memory\mod.rs".
+    if token.contains('/') || token.contains('\\') {
+        return token
+            .split(['/', '\\'])
+            .any(|segment| segment.len() > 1 && segment.contains('.'));
+    }
+
+    false
+}
+
+/// Returns true for `snake_case` / `camelCase` code identifiers (`update_plan`,
+/// `turn_context`, `cursorDiskKV`). Requires a structural signal — an
+/// underscore or an internal lower→upper "hump" — so plain words (`Postgres`,
+/// `database`) are left to the capitalized-name path instead of being force
+/// captured here.
+fn is_code_identifier(token: &str) -> bool {
+    if token.chars().count() < 2 {
+        return false;
+    }
+    if !token.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return false;
+    }
+    let first = token.chars().next().unwrap_or(' ');
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    let has_underscore = token.contains('_');
+    let has_camel_hump = token
+        .chars()
+        .zip(token.chars().skip(1))
+        .any(|(a, b)| a.is_ascii_lowercase() && b.is_ascii_uppercase());
+    has_underscore || has_camel_hump
 }
 
 fn is_rust_symbol(token: &str) -> bool {
@@ -485,6 +626,102 @@ fn is_capitalized_word(token: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Representative of the live fact #122 that motivated the fix: long,
+    // em-dash-heavy, apostrophe-laden prose with file paths, snake/camelCase
+    // identifiers, parentheticals and "X/Y/Z" slash-runs.
+    const REPRO_FACT: &str = "Codex session ingestion (src/sessions/codex.rs:378) reads the session's own JSONL — update_plan, turn_context governance (approval/sandbox/effort) — while src/sessions/claude.rs and src/sessions/cursor.rs read cursorDiskKV; the pipeline's ingestion path normalizes each provider's records before the reducer merges them into a single turn-ordered transcript that downstream tooling can replay deterministically.";
+
+    #[test]
+    fn long_punctuation_heavy_fact_yields_only_sane_entities() {
+        let entities = extract_entities(REPRO_FACT);
+
+        // Every entity must be short and free of sentence punctuation — no
+        // mangled multi-sentence fragments.
+        for entity in &entities {
+            assert!(
+                entity.chars().count() <= MAX_ENTITY_CHARS,
+                "entity too long: <<{entity}>>"
+            );
+            assert!(
+                entity.split_whitespace().count() <= MAX_ENTITY_WORDS,
+                "entity has too many words: <<{entity}>>"
+            );
+            assert!(
+                is_valid_entity(entity),
+                "entity is not a valid shape: <<{entity}>>"
+            );
+        }
+
+        // The old apostrophe-paired giant span and the prose slash-run must be
+        // gone entirely.
+        assert!(
+            !entities.iter().any(|e| e.contains('—') || e.contains(';')),
+            "sentence punctuation leaked into an entity: {entities:?}"
+        );
+        assert!(
+            !entities.contains(&"approval/sandbox/effort".to_string()),
+            "prose slash-run must not be captured as a file path"
+        );
+        assert!(
+            !entities.iter().any(|e| e.split_whitespace().count() > 6),
+            "no multi-sentence fragment entities: {entities:?}"
+        );
+
+        // Genuinely useful entities must survive.
+        for expected in [
+            "src/sessions/codex.rs:378",
+            "src/sessions/claude.rs",
+            "src/sessions/cursor.rs",
+            "cursorDiskKV",
+            "update_plan",
+            "turn_context",
+        ] {
+            assert!(
+                entities.contains(&expected.to_string()),
+                "expected {expected:?} in {entities:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn file_paths_and_line_numbers_still_extract() {
+        let entities = extract_entities("see src/sessions/codex.rs:378 and /etc/config.toml");
+        assert!(entities.contains(&"src/sessions/codex.rs:378".to_string()));
+        assert!(entities.contains(&"/etc/config.toml".to_string()));
+    }
+
+    #[test]
+    fn snake_and_camel_case_identifiers_extract() {
+        let entities = extract_entities("the ingest reads cursorDiskKV then calls update_plan");
+        assert!(entities.contains(&"cursorDiskKV".to_string()));
+        assert!(entities.contains(&"update_plan".to_string()));
+    }
+
+    #[test]
+    fn prose_slash_runs_are_not_entities() {
+        let entities = extract_entities("governs approval/sandbox/effort across X/Y/Z tiers");
+        assert!(!entities.contains(&"approval/sandbox/effort".to_string()));
+        assert!(!entities.contains(&"X/Y/Z".to_string()));
+    }
+
+    #[test]
+    fn possessives_and_contractions_do_not_pair_into_spans() {
+        // Two apostrophes ("session's" ... "pipeline's") must not be paired into
+        // a quoted span.
+        let entities =
+            extract_entities("the session's data flows before the pipeline's reducer runs");
+        assert!(
+            !entities.iter().any(|e| e.split_whitespace().count() > 6),
+            "apostrophes paired into a span: {entities:?}"
+        );
+    }
+
+    #[test]
+    fn genuine_single_quoted_phrase_still_extracts() {
+        let entities = extract_entities("the mode is 'holographic recall' by default");
+        assert!(entities.contains(&"holographic recall".to_string()));
+    }
 
     #[test]
     fn leading_verbs_match_across_inflections() {
