@@ -86,9 +86,73 @@ fn is_branch_inventory(lower: &str) -> bool {
     if !mentions_branch_or_worktree {
         return false;
     }
+    // Over-match guard: a message that shows real work — a fenced code block, a
+    // unified diff, or an affirmative completion verb — is substantive even
+    // when it also discusses a listing/inventory/sweep feature ("implemented
+    // the branch listing, diff attached"). Never demote such a message.
+    if shows_substantive_work(lower) {
+        return false;
+    }
     LISTING_INDICATORS
         .iter()
         .any(|indicator| lower.contains(indicator))
+}
+
+/// Cheap substantive-work signal over already-lowercased text: a fenced code
+/// block, a unified diff (a `diff --git` header or an `@@ ` hunk marker), or an
+/// affirmative completion verb (implemented/fixed/refactored/committed). Guards
+/// [`is_branch_inventory`] so a message that shows work is not demoted merely
+/// for also naming a listing feature. A verb negated by a nearby preceding
+/// "no"/"not"/"nothing"/"never" (e.g. "nothing is implemented in this session")
+/// does not count — that message is still a bare inventory.
+fn shows_substantive_work(lower: &str) -> bool {
+    const WORK_VERBS: [&str; 4] = ["implemented", "fixed", "refactored", "committed"];
+    if lower.contains("```") || lower.contains("diff --git") || lower.contains("@@ ") {
+        return true;
+    }
+    WORK_VERBS
+        .iter()
+        .any(|verb| contains_affirmative_verb(lower, verb))
+}
+
+/// True when `verb` appears in `lower` as a standalone word (ASCII-alphanumeric
+/// boundaries on both sides) that is not negated by one of the last three words
+/// before it. The word-window negation check is char-boundary safe (it splits
+/// on whitespace) and stays cheap.
+fn contains_affirmative_verb(lower: &str, verb: &str) -> bool {
+    let mut search_from = 0;
+    while let Some(rel) = lower[search_from..].find(verb) {
+        let idx = search_from + rel;
+        let end = idx + verb.len();
+        let before = &lower[..idx];
+        let after = &lower[end..];
+        let left_boundary = before
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_ascii_alphanumeric());
+        let right_boundary = after
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_ascii_alphanumeric());
+        if left_boundary && right_boundary && !negated_before(before) {
+            return true;
+        }
+        search_from = end;
+    }
+    false
+}
+
+/// True when the text immediately preceding a work verb ends in a negation
+/// ("no"/"not"/"nothing"/"never") within the last three words, so the verb is
+/// asserting the *absence* of work rather than work done.
+fn negated_before(before: &str) -> bool {
+    const NEGATIONS: [&str; 4] = ["nothing", "never", "not", "no"];
+    before
+        .split_whitespace()
+        .rev()
+        .take(3)
+        .map(|word| word.trim_matches(|c: char| !c.is_ascii_alphanumeric()))
+        .any(|word| NEGATIONS.contains(&word))
 }
 
 /// True when a message is mostly a list of filesystem paths rather than prose:
@@ -172,6 +236,36 @@ mod tests {
         assert!(is_inventory_text(
             "Daily branch roster mentions codex/retrieval-evals-analytics once more among the \
              archived and stale branches tracked across every worktree."
+        ));
+    }
+
+    #[test]
+    fn branch_listing_work_with_evidence_is_not_inventory() {
+        // Discussing a listing/sweep feature while showing real work must not
+        // be demoted, even though the text contains listing vocabulary.
+        assert!(!is_inventory_text(
+            "Implemented the branch listing feature on codex/foo; diff attached."
+        ));
+        assert!(!is_inventory_text(
+            "Fixed the worktree sweep inventory bug; here's the diff:\n\
+             ```\ndiff --git a/src/sweep.rs b/src/sweep.rs\n@@ -1 +1 @@\n```"
+        ));
+        assert!(!is_inventory_text(
+            "Refactored the branch roster listing into a shared helper and committed it."
+        ));
+    }
+
+    #[test]
+    fn genuine_roster_with_negated_work_verb_stays_inventory() {
+        // A roster that explicitly says nothing was implemented is still a bare
+        // inventory: the negated verb must not trip the work-evidence guard.
+        assert!(is_inventory_text(
+            "Worktree fleet status again names codex/retrieval-evals-analytics amid twelve \
+             other branches; nothing is implemented in this session, it is only an index of \
+             branch names."
+        ));
+        assert!(is_inventory_text(
+            "Branch inventory listing of codex/a, codex/b, and codex/c across every worktree."
         ));
     }
 

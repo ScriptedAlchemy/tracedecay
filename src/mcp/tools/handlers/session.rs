@@ -526,16 +526,28 @@ fn sort_and_truncate_message_results_by_relevance(
     results: &mut Vec<SessionMessageSearchResult>,
     limit: usize,
 ) {
-    results.sort_by(|a, b| {
-        crate::sessions::message_noise::is_inventory_text(&a.message.text)
-            .cmp(&crate::sessions::message_noise::is_inventory_text(
-                &b.message.text,
-            ))
+    // Decorate-sort-undecorate: classify each hit's inventory status exactly
+    // once up front rather than re-running the full-text classifier inside the
+    // O(n log n) comparator (each comparison would otherwise scan both message
+    // bodies, amplified on large transcripts). The sort key is byte-identical
+    // to the previous inline comparator, so ranking is unchanged.
+    let mut decorated: Vec<(bool, SessionMessageSearchResult)> = results
+        .drain(..)
+        .map(|result| {
+            let is_inventory =
+                crate::sessions::message_noise::is_inventory_text(&result.message.text);
+            (is_inventory, result)
+        })
+        .collect();
+    decorated.sort_by(|(a_inventory, a), (b_inventory, b)| {
+        a_inventory
+            .cmp(b_inventory)
             .then_with(|| b.score.total_cmp(&a.score))
             .then_with(|| b.message.timestamp.cmp(&a.message.timestamp))
             .then_with(|| a.session.session_id.cmp(&b.session.session_id))
             .then_with(|| a.message.message_id.cmp(&b.message.message_id))
     });
+    results.extend(decorated.into_iter().map(|(_, result)| result));
     results.truncate(limit);
 }
 
