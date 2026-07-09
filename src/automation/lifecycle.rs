@@ -7,8 +7,9 @@ use serde_json::{Value, json};
 
 use super::artifacts::{sha256_json, write_improvement_artifacts};
 use super::backend::{
-    AgentTaskKind, AgentTaskRequest, AgentTaskResponse, agent_task_contract,
-    classify_agent_task_error_message, extract_json_object_prefix, prompt_version, task_key,
+    AgentTaskKind, AgentTaskRequest, AgentTaskResponse, BackendRetryPolicy, agent_task_contract,
+    classify_agent_task_error_message, extract_json_object_prefix, prompt_version,
+    run_agent_task_with_retry, task_key,
 };
 use super::config::{AutomationBackend, AutomationConfig, AutomationHostMode};
 use super::run_ledger::{
@@ -456,7 +457,8 @@ impl<'a> AgentRunFinalizer<'a> {
         request: &AgentTaskRequest,
         evidence_hash: Option<String>,
     ) -> Result<BackendTaskRun> {
-        match backend.run_task(request) {
+        let retry_policy = BackendRetryPolicy::from_timeout_secs(self.config.timeout_secs);
+        match run_agent_task_with_retry(backend, request, &retry_policy).await {
             Ok(response) => Ok(BackendTaskRun::Response(response)),
             Err(err) => self
                 .append_backend_fallback_record(evidence_hash, err.to_string())

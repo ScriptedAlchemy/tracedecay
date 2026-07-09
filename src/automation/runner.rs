@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 use super::apply_policy::MemoryApplyPolicy;
 use super::artifacts::sha256_json;
 use super::backend::{
-    AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
-    extract_json_object_prefix,
+    AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse, BackendRetryPolicy,
+    extract_json_object_prefix, run_agent_task_with_retry,
 };
 use super::config::AutomationConfig;
 use super::fact_proposals::{
@@ -1143,7 +1143,8 @@ pub async fn run_combined_review_with_backend(
     )
     .for_combined_run(run_id.clone());
 
-    let response = match backend.run_task(&request) {
+    let retry_policy = BackendRetryPolicy::from_timeout_secs(config.timeout_secs);
+    let response = match run_agent_task_with_retry(backend, &request, &retry_policy).await {
         Ok(response) => response,
         Err(err) => {
             let reflector_record = reflector_finalizer

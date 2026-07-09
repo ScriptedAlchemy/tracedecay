@@ -659,7 +659,10 @@ async fn user_job_backend_failure_records_failed_ledger_entry() {
     fs::create_dir_all(&profile_root).unwrap();
 
     let job = sample_job("fails");
-    let config = enabled_job_config();
+    let config = AutomationConfig {
+        timeout_secs: 1,
+        ..enabled_job_config()
+    };
     let backend = FailingBackend::new(AgentTaskKind::UserJob);
     let run = run_user_job_with_backend(
         &dashboard_root,
@@ -676,6 +679,9 @@ async fn user_job_backend_failure_records_failed_ledger_entry() {
     .await
     .unwrap();
 
+    // The backend failure is transient, but this test pins the failed-ledger
+    // record, not retry semantics (covered by backend.rs retry tests) —
+    // timeout_secs: 1 short-circuits the backoff so the test stays fast.
     assert_eq!(backend.calls(), 1);
     assert_eq!(run.report["status"], json!("failed"));
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Failed);

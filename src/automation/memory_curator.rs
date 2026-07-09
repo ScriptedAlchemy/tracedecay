@@ -3,7 +3,10 @@ use serde_json::{Value, json};
 
 use super::apply_policy::{MemoryApplyDecision, MemoryApplyPolicy, value_as_usize};
 use super::artifacts::sha256_json;
-use super::backend::{AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse};
+use super::backend::{
+    AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse, BackendRetryPolicy,
+    run_agent_task_with_retry,
+};
 use super::config::AutomationConfig;
 use super::lifecycle::{AgentTaskRunContext, SchedulerGate, failed_backend_fallback_report};
 use super::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
@@ -108,7 +111,8 @@ pub async fn run_memory_curator_with_backend(
     let input_hash = Some(request.input_hash.clone());
     let finalizer = run.finalizer(input_hash.clone());
 
-    let response = match backend.run_task(&request) {
+    let retry_policy = BackendRetryPolicy::from_timeout_secs(config.timeout_secs);
+    let response = match run_agent_task_with_retry(backend, &request, &retry_policy).await {
         Ok(response) => response,
         Err(err) => {
             let record = finalizer
