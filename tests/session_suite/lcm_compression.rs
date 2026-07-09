@@ -1666,7 +1666,8 @@ async fn structured_active_content_replay_preserves_shape_while_grep_snippet_sta
             git_filter: Default::default(),
         })
         .await
-        .unwrap();
+        .unwrap()
+        .hits;
     assert_eq!(hits.len(), 1);
     assert!(hits[0].snippet.chars().count() <= MAX_DERIVED_SNIPPET_CHARS);
     assert!(!hits[0].snippet.contains("::structured-tail"));

@@ -6,7 +6,9 @@ use libsql::{Connection, Value, params};
 
 use crate::tracedecay::current_timestamp;
 
-use super::types::{LcmLifecycleStatus, LcmPayloadGcStatus, LcmPayloadStatus, LcmRedactionStatus};
+use super::types::{
+    LcmGrepOutcome, LcmLifecycleStatus, LcmPayloadGcStatus, LcmPayloadStatus, LcmRedactionStatus,
+};
 use super::{
     LCM_COMPRESSION_BOUNDARY_COOLDOWN_SECONDS, LCM_DEFAULT_FRESH_TAIL_COUNT,
     LCM_DEFAULT_SUMMARY_FAN_IN, LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT, LCM_SCHEMA_VERSION,
@@ -369,21 +371,21 @@ fn bounded_replay_snippet(text: &str, max_chars: usize) -> (String, bool) {
 pub(crate) async fn grep(
     conn: &Connection,
     request: LcmGrepRequest,
-) -> Result<Vec<LcmGrepHit>, LcmError> {
+) -> Result<LcmGrepOutcome, LcmError> {
     let query_plan = grep_query_plan(&request.query);
     if query_plan.is_empty() {
-        return Ok(Vec::new());
+        return Ok(LcmGrepOutcome::default());
     }
     let limit = clamp_limit(request.limit);
     let session_filter = scoped_session_filter(request.scope, request.session_id.as_deref());
     if matches!(request.scope, LcmScope::Current | LcmScope::Session) && session_filter.is_none() {
-        return Ok(Vec::new());
+        return Ok(LcmGrepOutcome::default());
     }
     // A git-scoped grep against a store predating the git-correlation schema
     // can never match; short-circuit rather than issue a `no such table`
     // EXISTS subquery.
     if !request.git_filter.is_empty() && !lcm_table_exists(conn, "session_git_spans").await? {
-        return Ok(Vec::new());
+        return Ok(LcmGrepOutcome::default());
     }
 
     let raw_only_filters =
@@ -399,9 +401,12 @@ pub(crate) async fn grep(
         );
     }
     sort_hits(&mut hits, request.sort);
-    rerank_grep_hits(&mut hits, request.sort, request.scope);
+    let capped_sessions = rerank_grep_hits(&mut hits, request.sort, request.scope);
     hits.truncate(limit);
-    Ok(hits)
+    Ok(LcmGrepOutcome {
+        hits,
+        capped_sessions,
+    })
 }
 
 /// Fetch budget before the re-rank stage: over-fetch by the shared
@@ -424,7 +429,11 @@ fn rerank_fetch_limit(limit: usize) -> usize {
 ///
 /// Both stages are stable, preserving the relative order established by the
 /// requested `sort` within each retained group.
-fn rerank_grep_hits(hits: &mut Vec<LcmGrepHit>, sort: LcmGrepSort, scope: LcmScope) {
+fn rerank_grep_hits(
+    hits: &mut Vec<LcmGrepHit>,
+    sort: LcmGrepSort,
+    scope: LcmScope,
+) -> BTreeMap<String, usize> {
     if !matches!(sort, LcmGrepSort::Recency) {
         let mut substantive = Vec::with_capacity(hits.len());
         let mut inventory = Vec::new();
@@ -439,18 +448,48 @@ fn rerank_grep_hits(hits: &mut Vec<LcmGrepHit>, sort: LcmGrepSort, scope: LcmSco
         *hits = substantive;
     }
 
+    let mut capped: BTreeMap<String, usize> = BTreeMap::new();
     if matches!(scope, LcmScope::All) {
-        let mut per_session: BTreeMap<String, usize> = BTreeMap::new();
-        hits.retain(|hit| {
-            let count = per_session.entry(hit.session_id.clone()).or_insert(0);
+        let mut kept: Vec<LcmGrepHit> = Vec::with_capacity(hits.len());
+        let mut kept_count: BTreeMap<String, usize> = BTreeMap::new();
+        let mut kept_last_idx: BTreeMap<String, usize> = BTreeMap::new();
+        let mut kept_has_tool: BTreeMap<String, bool> = BTreeMap::new();
+        let mut dropped_tool: BTreeMap<String, LcmGrepHit> = BTreeMap::new();
+        for hit in hits.drain(..) {
+            let session_id = hit.session_id.clone();
+            let count = kept_count.entry(session_id.clone()).or_insert(0);
+            let is_tool = hit.role.as_deref() == Some("tool");
             if *count >= PER_SESSION_HIT_CAP {
-                false
+                *capped.entry(session_id.clone()).or_insert(0) += 1;
+                // Remember the best capped tool-role hit: narration routinely
+                // outranks exact action rows (tool calls, file edits), and a
+                // session capped to narration only cannot answer "what did it
+                // actually do". One slot is reserved for it below.
+                if is_tool && !kept_has_tool.get(&session_id).copied().unwrap_or(false) {
+                    dropped_tool.entry(session_id).or_insert(hit);
+                }
             } else {
                 *count += 1;
-                true
+                if is_tool {
+                    kept_has_tool.insert(session_id.clone(), true);
+                }
+                kept_last_idx.insert(session_id, kept.len());
+                kept.push(hit);
             }
-        });
+        }
+        for (session_id, tool_hit) in dropped_tool {
+            if kept_has_tool.get(&session_id).copied().unwrap_or(false) {
+                continue;
+            }
+            if let Some(&idx) = kept_last_idx.get(&session_id) {
+                // Swap the session's weakest kept hit for its top tool hit;
+                // one hit still drops, so the capped count stays accurate.
+                kept[idx] = tool_hit;
+            }
+        }
+        *hits = kept;
     }
+    capped
 }
 
 /// Cheap, deterministic heuristic: is this hit a transcript inventory/listing
@@ -1662,7 +1701,7 @@ async fn raw_grep_hits(
         Some(RAW_ROLE_PENALTY_CASE),
     );
     let sql = format!(
-        "SELECT r.provider, r.session_id, r.message_id, r.store_id, r.snippet_text
+        "SELECT r.provider, r.session_id, r.message_id, r.store_id, r.snippet_text, r.role
          FROM lcm_raw_messages_fts
          JOIN lcm_raw_messages r ON r.store_id = lcm_raw_messages_fts.rowid
          WHERE lcm_raw_messages_fts MATCH ?
@@ -1755,7 +1794,7 @@ async fn raw_like_grep_hits(
         Some(RAW_ROLE_PENALTY_CASE),
     );
     let sql = format!(
-        "SELECT r.provider, r.session_id, r.message_id, r.store_id, r.snippet_text, 0.0 AS rank
+        "SELECT r.provider, r.session_id, r.message_id, r.store_id, r.snippet_text, r.role, 0.0 AS rank
          FROM lcm_raw_messages r
          WHERE {}
          ORDER BY {order_by}
@@ -1917,6 +1956,7 @@ fn push_summary_grep_filters(
 
 fn raw_hit_from_row(row: &libsql::Row, like_terms: &[String]) -> Result<LcmGrepHit, LcmError> {
     let snippet: String = row.get(4)?;
+    let role: Option<String> = row.get::<Option<String>>(5).unwrap_or(None);
     Ok(LcmGrepHit {
         kind: "raw_message".to_string(),
         provider: row.get(0)?,
@@ -1924,6 +1964,7 @@ fn raw_hit_from_row(row: &libsql::Row, like_terms: &[String]) -> Result<LcmGrepH
         message_id: Some(row.get(2)?),
         node_id: None,
         store_id: Some(row.get(3)?),
+        role: role.filter(|r| !r.is_empty()),
         snippet: match_centered_snippet(&snippet, like_terms),
     })
 }
@@ -1937,6 +1978,7 @@ fn summary_hit_from_row(row: &libsql::Row, like_terms: &[String]) -> Result<LcmG
         message_id: None,
         node_id: Some(row.get(2)?),
         store_id: None,
+        role: None,
         snippet: match_centered_snippet(&summary_text, like_terms),
     })
 }

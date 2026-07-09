@@ -3450,7 +3450,7 @@ impl GlobalDb {
     pub async fn lcm_grep(
         &self,
         request: crate::sessions::lcm::LcmGrepRequest,
-    ) -> Result<Vec<crate::sessions::lcm::LcmGrepHit>, crate::sessions::lcm::LcmError> {
+    ) -> Result<crate::sessions::lcm::LcmGrepOutcome, crate::sessions::lcm::LcmError> {
         crate::sessions::lcm::query::grep(&self.conn, request).await
     }
 
