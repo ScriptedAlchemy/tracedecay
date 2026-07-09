@@ -25,8 +25,9 @@ doubled `tracedecay` — and that single convention is applied to every
 
 - `skills/`: shared `SKILL.md` workflow instructions.
 - `hooks/hooks-claude.json`: Claude Code lifecycle hooks. `PostToolUse`
-  observes edit, shell, grep, glob, and read tools so the plugin can refresh
-  the index and steer broad search toward TraceDecay.
+  observes edit, shell, grep, glob, and read tools; `PostToolUseFailure`
+  observes Bash failures so real compiler failures route to structured
+  diagnostics without treating successful command text as failure evidence.
 - `hooks/hooks-codex.json`: repo-local Codex hook seed. It is intentionally
   empty; the global Codex plugin fills hooks at install time.
 - `hooks/hooks-cursor.json`: Cursor lifecycle hooks.

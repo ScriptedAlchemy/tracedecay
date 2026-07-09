@@ -698,7 +698,10 @@ fn successful_or_running_build_commands_do_not_get_a_diagnostics_hint() {
 #[test]
 fn build_failure_prompt_gets_a_diagnostics_hint() {
     let hint = decide_hint(&ToolHintInput {
-        prompt: Some("cargo check failed with error[E0308]: mismatched types".to_string()),
+        prompt: Some(
+            "cargo check failed with error[E0308]: mismatched types\n --> src/lib.rs:42:5"
+                .to_string(),
+        ),
         ..ToolHintInput::default()
     })
     .expect("an explicit compiler failure must produce a diagnostics hint");
@@ -706,6 +709,24 @@ fn build_failure_prompt_gets_a_diagnostics_hint() {
     assert_eq!(hint.category, HintCategory::BuildDiagnostics);
     assert!(hint.context.contains("tracedecay_diagnostics"));
     assert!(hint.context.contains("tracedecay_diagnose"));
+}
+
+#[test]
+fn behavioral_test_failure_output_does_not_get_a_diagnostics_hint() {
+    let input = ToolHintInput {
+        prompt: Some(
+            "thread 'tests::works' panicked at src/lib.rs:42:5\n\
+             test result: FAILED. 3 passed; 1 failed\n\
+             error: test failed, to rerun pass `--lib`"
+                .to_string(),
+        ),
+        ..ToolHintInput::default()
+    };
+
+    assert!(
+        decide_hint(&input).is_none(),
+        "behavioral test failures must use the affected-test path, not compiler diagnostics"
+    );
 }
 
 #[test]

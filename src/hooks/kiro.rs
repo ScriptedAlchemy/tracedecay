@@ -59,6 +59,8 @@ pub fn evaluate_kiro_pre_tool_use(event_json: &str) -> Option<String> {
             prompt: Some(prompt),
             subagent_type: Some(tool_name.to_string()),
             file_path: None,
+            captured_output: None,
+            trusted_failure: false,
             edit_text: None,
             hints_enabled: true,
         });

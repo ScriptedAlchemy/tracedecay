@@ -978,7 +978,7 @@ struct CodexHookTrustSyncOutcome {
 /// Uses the marketplace identity and hook payload actually installed on disk,
 /// pruning stale active/legacy-personal entries while preserving every other
 /// plugin's and the user's own config. Hooks whose command does not exactly
-/// match a generated TraceDecay command are skipped (see
+/// match a generated `TraceDecay` command are skipped (see
 /// [`codex_hook_command_invokes_tracedecay`]). An unreadable/unparseable
 /// `config.toml` surfaces as `Err`, so callers leave it untouched and fall back
 /// to printed guidance.

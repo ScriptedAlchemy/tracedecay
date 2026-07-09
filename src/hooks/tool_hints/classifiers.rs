@@ -124,6 +124,41 @@ pub(super) fn is_shell_text_search_command(command: &str) -> bool {
         })
 }
 
+/// Build, type-check, and compiler-lint commands for which a host-authenticated
+/// failure is actionable diagnostics evidence. Behavioral test runners are
+/// deliberately excluded; their failures belong to the affected-test path.
+pub(super) fn is_build_or_typecheck_command(command: &str) -> bool {
+    shell_invocations(command)
+        .iter()
+        .any(|invocation| match invocation.base.as_str() {
+            "cargo" => invocation.args.iter().any(|token| {
+                matches!(
+                    token.trim_start_matches('(').to_ascii_lowercase().as_str(),
+                    "check" | "build" | "clippy"
+                )
+            }),
+            "rustc" | "tsc" | "pyright" | "pyright-python" => true,
+            "npx" | "pnpm" | "yarn" | "bunx" => invocation.args.iter().any(|token| {
+                matches!(
+                    token.trim_start_matches('(').to_ascii_lowercase().as_str(),
+                    "tsc" | "pyright" | "build" | "typecheck" | "type-check" | "check-types"
+                )
+            }),
+            "npm" => invocation.args.windows(2).any(|pair| {
+                pair[0].trim_start_matches('(').eq_ignore_ascii_case("run")
+                    && matches!(
+                        pair[1].to_ascii_lowercase().as_str(),
+                        "build" | "typecheck" | "type-check" | "check-types"
+                    )
+            }),
+            "python" | "python3" => invocation
+                .args
+                .windows(2)
+                .any(|pair| pair[0] == "-m" && pair[1].eq_ignore_ascii_case("pyright")),
+            _ => false,
+        })
+}
+
 pub(super) fn is_diff_review_command(command: &str, text: &str) -> bool {
     shell_invocations(command)
         .into_iter()
@@ -148,6 +183,30 @@ pub(super) fn is_diff_review_command(command: &str, text: &str) -> bool {
 }
 
 pub(super) fn looks_like_pasted_diagnostic(text: &str) -> bool {
+    let looks_like_test_failure = contains_any(
+        text,
+        &[
+            "test result: failed",
+            "error: test failed",
+            "panicked at",
+            "failures:",
+        ],
+    );
+    let has_strong_compiler_signal = contains_any(
+        text,
+        &[
+            "error[e",
+            "error ts",
+            "typeerror:",
+            "syntaxerror:",
+            "warning:",
+            " - error:",
+        ],
+    );
+    if looks_like_test_failure && !has_strong_compiler_signal {
+        return false;
+    }
+
     contains_any(
         text,
         &[
@@ -155,15 +214,12 @@ pub(super) fn looks_like_pasted_diagnostic(text: &str) -> bool {
             "error ts",
             "typeerror:",
             "syntaxerror:",
-            "failed tests",
-            "test result: failed",
-            "panicked at",
-            "thread '",
-            "warning: `",
+            "warning:",
+            "error:",
         ],
     ) && contains_any(
         text,
-        &["-->", ".rs:", ".ts(", ".tsx(", ".js(", ".jsx(", "failed"],
+        &["-->", ".rs:", ".ts(", ".tsx(", ".js(", ".jsx(", ".py:"],
     )
 }
 
@@ -487,12 +543,6 @@ pub(super) fn asks_for_build_diagnostics(text: &str) -> bool {
             "build errors",
             "build failure",
             "build failing",
-            "test failure",
-            "test failures",
-            "tests failing",
-            "failing ci",
-            "ci failure",
-            "ci failures",
         ],
     )
 }

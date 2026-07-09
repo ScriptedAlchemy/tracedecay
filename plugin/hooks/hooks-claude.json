@@ -68,6 +68,20 @@
         ]
       }
     ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__TRACEDECAY_BIN__",
+            "args": [
+              "hook-claude-post-tool-use"
+            ]
+          }
+        ]
+      }
+    ],
     "SubagentStart": [
       {
         "hooks": [

@@ -209,11 +209,49 @@ pub(super) fn expanded_transcript_host_evals() -> Vec<HintEval> {
             &["tracedecay_outline", "tracedecay_read"],
         ),
         shell_eval(
-            "cargo-nextest-diagnostics",
+            "cargo-nextest-behavioral-failure-silent",
             "cargo nextest run --workspace --profile ci",
             "reproduce CI test failures",
+            None,
+            &[],
+        ),
+        input_eval(
+            "trusted-cargo-check-failure",
+            ToolHintInput {
+                tool_name: Some("Bash".to_string()),
+                command: Some("cargo check --workspace".to_string()),
+                trusted_failure: true,
+                ..ToolHintInput::default()
+            },
             Some(HintCategory::BuildDiagnostics),
             &["tracedecay_diagnostics"],
+        ),
+        input_eval(
+            "captured-rust-compiler-output",
+            ToolHintInput {
+                tool_name: Some("Bash".to_string()),
+                command: Some("cargo check --workspace".to_string()),
+                captured_output: Some(
+                    "error[E0308]: mismatched types\n --> src/lib.rs:42:5".to_string(),
+                ),
+                ..ToolHintInput::default()
+            },
+            Some(HintCategory::BuildDiagnostics),
+            &["tracedecay_diagnostics"],
+        ),
+        input_eval(
+            "trusted-cargo-test-behavioral-failure-silent",
+            ToolHintInput {
+                tool_name: Some("Bash".to_string()),
+                command: Some("cargo test hooks::tool_hints".to_string()),
+                captured_output: Some(
+                    "test result: FAILED. 3 passed; 1 failed\nerror: test failed".to_string(),
+                ),
+                trusted_failure: true,
+                ..ToolHintInput::default()
+            },
+            None,
+            &[],
         ),
         shell_eval(
             "pnpm-build-diagnostics",
