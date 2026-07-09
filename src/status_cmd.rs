@@ -41,7 +41,8 @@ pub(crate) fn format_memory_status_report(
             "unhelpful feedback: {}\n",
             "trust buckets: <0.25={}  0.25-0.50={}  0.50-0.75={}  0.75-1.00={}\n",
             "legacy backfill complete: {}\n",
-            "repair: missing_vectors_repaired={}  banks_rebuilt={}\n"
+            "repair: missing_vectors_repaired={}  banks_rebuilt={}\n",
+            "feedback funnel: retrieved={} accessed={} facts_retrieved={} facts_rated={} feedback_total={} seen:feedback={}\n"
         ),
         status.fact_count,
         status.entity_count,
@@ -67,6 +68,15 @@ pub(crate) fn format_memory_status_report(
         },
         status.repair.missing_vectors_repaired,
         status.repair.banks_rebuilt,
+        status.feedback_funnel.retrieval_count_total,
+        status.feedback_funnel.access_count_total,
+        status.feedback_funnel.retrieved_fact_count,
+        status.feedback_funnel.rated_fact_count,
+        status.feedback_funnel.feedback_total,
+        status
+            .feedback_funnel
+            .seen_to_feedback_ratio
+            .map_or_else(|| "dead".to_string(), |ratio| format!("{ratio}:1")),
     )
 }
 

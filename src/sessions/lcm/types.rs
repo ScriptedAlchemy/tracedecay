@@ -348,10 +348,12 @@ pub struct LcmExpandQueryRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmExpandQueryResponse {
-    pub prompt: String,
-    pub query: Option<String>,
+    // `answer` and `needs_synthesis` lead the payload so the synthesized answer
+    // renders first in both JSON and generic markdown output.
     pub answer: Option<String>,
     pub needs_synthesis: bool,
+    pub prompt: String,
+    pub query: Option<String>,
     pub synthesis_prompt: Option<LcmExpandQuerySynthesisPrompt>,
     pub max_tokens: usize,
     pub context_max_tokens: usize,

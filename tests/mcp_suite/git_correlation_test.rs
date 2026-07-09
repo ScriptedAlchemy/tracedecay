@@ -446,6 +446,111 @@ async fn sessions_for_and_scoped_search_end_to_end() {
     cg.close();
 }
 
+/// An empty correlation index (sessions present, but no spans recorded) must be
+/// reported distinctly from "no sessions matched", both through
+/// `tracedecay_sessions_for` and the `tracedecay_diagnostics` health block, so
+/// callers never mistake an unpopulated index for an answered-and-empty query.
+#[tokio::test]
+async fn sessions_for_and_diagnostics_flag_empty_correlation_index() {
+    let dir = common::tempdir_or_panic();
+    #[cfg(windows)]
+    let base = dir.path().to_path_buf();
+    #[cfg(not(windows))]
+    let base = dir.path().canonicalize().unwrap();
+    let (project_root, _worktree_root) = setup_linked_worktree_under(&base);
+
+    let profile_root = base.join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap_or_else(|e| panic!("create profile root: {e}"));
+    let profile_root = profile_root
+        .canonicalize()
+        .unwrap_or_else(|e| panic!("canonicalize profile root: {e}"));
+    let cg = TraceDecay::init_with_options(
+        &project_root,
+        TraceDecayOpenOptions {
+            profile_root: Some(profile_root),
+            global_db_path: Some(base.join("global.db")),
+        },
+    )
+    .await
+    .unwrap_or_else(|e| panic!("init project: {e}"));
+    let project_key = cg.project_root().to_string_lossy().to_string();
+    let main_worktree = project_root.to_string_lossy().to_string();
+
+    // Seed sessions and messages but record NO git spans: the correlation
+    // index exists (schema is ensured on open) yet holds nothing.
+    let db_path = cg.store_layout().sessions_db_path.clone();
+    let db = GlobalDb::open_at(&db_path)
+        .await
+        .unwrap_or_else(|| panic!("open sessions.db"));
+    assert!(db.upsert_session(&session("s1", &project_key, 1_000)).await);
+    assert!(
+        db.upsert_session_message(&message("s1", "s1-m1", 1_050, "work on main"))
+            .await
+    );
+
+    // sessions_for on an empty index: no results, explicitly flagged empty.
+    let empty = call(
+        &cg,
+        "tracedecay_sessions_for",
+        json!({ "git_ref": "branch", "value": "main" }),
+    )
+    .await;
+    assert_eq!(empty["count"], 0, "{empty}");
+    assert_eq!(empty["index_empty"], true, "{empty}");
+    assert_eq!(empty["index"]["span_count"], 0, "{empty}");
+    assert!(
+        empty["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("empty")),
+        "empty-index message should say the index is empty: {empty}"
+    );
+
+    // diagnostics surfaces the same empty-index health.
+    let diag_empty = call(&cg, "tracedecay_diagnostics", json!({})).await;
+    assert_eq!(
+        diag_empty["session_correlation"]["index_empty"], true,
+        "{diag_empty}"
+    );
+    assert_eq!(
+        diag_empty["session_correlation"]["span_count"], 0,
+        "{diag_empty}"
+    );
+
+    // Record one span on main; the index is no longer empty.
+    record_span(&db, &span("s1", Some("main"), &main_worktree, 1_000)).await;
+
+    // A ref with no matching span now reads as "no match", not "empty index".
+    let no_match = call(
+        &cg,
+        "tracedecay_sessions_for",
+        json!({ "git_ref": "branch", "value": "does-not-exist" }),
+    )
+    .await;
+    assert_eq!(no_match["count"], 0, "{no_match}");
+    assert_eq!(no_match["index_empty"], false, "{no_match}");
+    assert!(
+        no_match["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("no sessions matched")),
+        "populated index should report no-match, not empty: {no_match}"
+    );
+
+    // diagnostics now reports a populated index.
+    let diag_populated = call(&cg, "tracedecay_diagnostics", json!({})).await;
+    assert_eq!(
+        diag_populated["session_correlation"]["index_empty"], false,
+        "{diag_populated}"
+    );
+    assert_eq!(
+        diag_populated["session_correlation"]["span_count"], 1,
+        "{diag_populated}"
+    );
+    assert_eq!(
+        diag_populated["session_correlation"]["tables_present"], true,
+        "{diag_populated}"
+    );
+}
+
 fn unique_sorted(mut ids: Vec<String>) -> Vec<String> {
     ids.sort();
     ids.dedup();

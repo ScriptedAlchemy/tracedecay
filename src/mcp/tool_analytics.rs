@@ -16,6 +16,12 @@ pub(super) struct McpToolAnalyticsEvent<'a> {
     pub(super) request_id: &'a Value,
     pub(super) arguments: &'a Value,
     pub(super) internal_analytics: Option<&'a Value>,
+    /// The negotiated MCP client name from the `initialize` handshake's
+    /// `clientInfo.name` (e.g. `"claude-code"`, `"codex"`, `"cursor"`).
+    /// `None` when the client omitted `clientInfo` or no `initialize` was
+    /// observed yet (e.g. a daemon-proxied first call). Bounded to the
+    /// negotiated name only — never the full `clientInfo` payload.
+    pub(super) client_name: Option<&'a str>,
 }
 
 pub(super) fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> AnalyticsEventInsert {
@@ -29,6 +35,7 @@ pub(super) fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> Anal
         "tokens_saved": input.net_saved_tokens,
         "duration_us": input.duration_us,
         "duration_ms": input.duration_us.map(|us| us / 1000),
+        "client_name": input.client_name,
     });
     if input.outcome == "error" {
         metadata["failure_reason"] = json!("tool_dispatch_error");
@@ -39,6 +46,18 @@ pub(super) fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> Anal
             "name": input.tool_name,
             "arguments": input.arguments,
         });
+    }
+    // Fact-store adoption is currently invisible in analytics: add/search/list
+    // (tracedecay_fact_store) and helpful/unhelpful (tracedecay_fact_feedback)
+    // calls all look identical without this. Record only the bounded action
+    // string — never the fact content/arguments body.
+    if matches!(
+        input.tool_name,
+        "tracedecay_fact_store" | "tracedecay_fact_feedback"
+    ) {
+        if let Some(action) = input.arguments.get("action").and_then(Value::as_str) {
+            metadata["action"] = json!(action);
+        }
     }
     append_tool_response_analytics(
         input.tool_name,
@@ -140,10 +159,12 @@ fn append_tool_response_analytics(
 mod tests {
     use std::path::{Path, PathBuf};
 
+    use serde_json::json;
+
     use crate::daemon::HookRouteMetadata;
     use crate::mcp::hook_events::{HookAgent, HookEvent, HookEventKind};
 
-    use super::hook_route_analytics_event;
+    use super::{McpToolAnalyticsEvent, hook_route_analytics_event, mcp_tool_analytics_event};
 
     #[test]
     fn hook_route_analytics_event_preserves_correlation_fields() {
@@ -183,5 +204,93 @@ mod tests {
         assert_eq!(metadata["route_branch"], "feature/hook-route");
         assert_eq!(metadata["current_branch"], "main");
         assert_eq!(metadata["has_command"], true);
+    }
+
+    #[test]
+    fn mcp_tool_analytics_event_records_action_and_client_for_fact_store() {
+        let request_id = json!(1);
+        let arguments = json!({"action": "add", "content": "secret fact body"});
+        let event = mcp_tool_analytics_event(McpToolAnalyticsEvent {
+            project_root: Path::new("/repo"),
+            session_id: Some("session-abc".to_string()),
+            tool_name: "tracedecay_fact_store",
+            outcome: "success",
+            raw_file_tokens: 0,
+            response_tokens: 0,
+            net_saved_tokens: 0,
+            duration_us: Some(500),
+            timestamp: 12345,
+            request_id: &request_id,
+            arguments: &arguments,
+            internal_analytics: None,
+            client_name: Some("claude-code"),
+        });
+
+        let metadata: serde_json::Value =
+            serde_json::from_str(event.metadata_json.as_deref().unwrap_or("{}"))
+                .expect("metadata should parse");
+
+        assert_eq!(event.tool_name.as_deref(), Some("tracedecay_fact_store"));
+        assert_eq!(metadata["action"], "add");
+        assert_eq!(metadata["client_name"], "claude-code");
+        // The action string is recorded, but never the fact content/arguments body.
+        assert!(metadata.get("content").is_none());
+        assert!(metadata.get("arguments").is_none());
+    }
+
+    #[test]
+    fn mcp_tool_analytics_event_records_action_for_fact_feedback() {
+        let request_id = json!(2);
+        let arguments = json!({"action": "unhelpful", "fact_id": 42});
+        let event = mcp_tool_analytics_event(McpToolAnalyticsEvent {
+            project_root: Path::new("/repo"),
+            session_id: None,
+            tool_name: "tracedecay_fact_feedback",
+            outcome: "success",
+            raw_file_tokens: 0,
+            response_tokens: 0,
+            net_saved_tokens: 0,
+            duration_us: None,
+            timestamp: 12345,
+            request_id: &request_id,
+            arguments: &arguments,
+            internal_analytics: None,
+            client_name: None,
+        });
+
+        let metadata: serde_json::Value =
+            serde_json::from_str(event.metadata_json.as_deref().unwrap_or("{}"))
+                .expect("metadata should parse");
+
+        assert_eq!(metadata["action"], "unhelpful");
+        assert!(metadata["client_name"].is_null());
+    }
+
+    #[test]
+    fn mcp_tool_analytics_event_omits_action_for_unrelated_tools() {
+        let request_id = json!(3);
+        let arguments = json!({"action": "add"});
+        let event = mcp_tool_analytics_event(McpToolAnalyticsEvent {
+            project_root: Path::new("/repo"),
+            session_id: None,
+            tool_name: "tracedecay_search",
+            outcome: "success",
+            raw_file_tokens: 0,
+            response_tokens: 0,
+            net_saved_tokens: 0,
+            duration_us: None,
+            timestamp: 12345,
+            request_id: &request_id,
+            arguments: &arguments,
+            internal_analytics: None,
+            client_name: Some("codex"),
+        });
+
+        let metadata: serde_json::Value =
+            serde_json::from_str(event.metadata_json.as_deref().unwrap_or("{}"))
+                .expect("metadata should parse");
+
+        assert!(metadata.get("action").is_none());
+        assert_eq!(metadata["client_name"], "codex");
     }
 }

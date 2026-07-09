@@ -26,6 +26,11 @@ pub const DEFAULT_SPAN_MERGE_GAP_SECS: i64 = 30 * 60;
 /// Hard cap on rows returned by [`sessions_for`].
 pub const MAX_SESSIONS_FOR_LIMIT: usize = 100;
 
+/// `git_correlation_meta` key holding the auto-backfill activity watermark:
+/// the highest session-activity timestamp the incremental backfill has already
+/// attempted. See [`run_incremental_backfill`].
+pub(crate) const AUTO_BACKFILL_WATERMARK_KEY: &str = "auto_backfill_activity_watermark";
+
 /// Errors from the git-correlation store.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitCorrelationError {
@@ -604,10 +609,10 @@ pub(crate) async fn upsert_commit_session(
 }
 
 mod attribution;
-pub(crate) use attribution::run_commit_attribution_sweep;
 pub use attribution::{
     ScannedCommit, SpanScanTarget, SpanWindow, commit_overlap_kind, match_commit_to_spans,
 };
+pub(crate) use attribution::{read_meta_value, run_commit_attribution_sweep, write_meta_value};
 
 /// Returns sessions correlated with a branch, worktree, or commit, most
 /// recently active first. Branch/worktree queries aggregate span rows per
@@ -816,6 +821,75 @@ async fn correlation_tables_present(conn: &Connection) -> Result<bool, GitCorrel
     Ok(row.get::<i64>(0)? == 2)
 }
 
+/// Per-project health of the session↔git correlation index. Surfaced by
+/// diagnostics and by [`sessions_for`]'s empty-result path so an empty index is
+/// never mistaken for "no sessions matched".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CorrelationIndexHealth {
+    /// Whether the `session_git_spans` / `commit_sessions` tables exist. A
+    /// read-only store written before the correlation schema shipped has none.
+    pub tables_present: bool,
+    /// Rows in `session_git_spans`. Zero means the index was never populated.
+    pub span_count: i64,
+    /// Rows in `commit_sessions`.
+    pub commit_count: i64,
+    /// Newest `session_git_spans.updated_at`, or `None` when empty.
+    pub last_span_write: Option<i64>,
+    /// The auto-backfill activity watermark, or `None` when a pass never ran.
+    pub backfill_watermark: Option<i64>,
+}
+
+impl CorrelationIndexHealth {
+    /// True when the correlation index holds no spans — either the tables are
+    /// missing or no observation/backfill ever wrote a row. Distinct from a
+    /// populated index that simply had no rows matching a given git ref.
+    pub const fn is_empty(&self) -> bool {
+        self.span_count == 0
+    }
+}
+
+/// Reads the correlation index health for a project store. Cheap: two counts
+/// plus a metadata lookup. Never runs DDL, so a store predating the schema
+/// reports `tables_present = false` with zero counts rather than erroring.
+pub(crate) async fn correlation_index_health(
+    conn: &Connection,
+) -> Result<CorrelationIndexHealth, GitCorrelationError> {
+    if !correlation_tables_present(conn).await? {
+        return Ok(CorrelationIndexHealth {
+            tables_present: false,
+            span_count: 0,
+            commit_count: 0,
+            last_span_write: None,
+            backfill_watermark: None,
+        });
+    }
+    let mut span_rows = conn
+        .query(
+            "SELECT COUNT(*), MAX(updated_at) FROM session_git_spans",
+            (),
+        )
+        .await?;
+    let (span_count, last_span_write) = match span_rows.next().await? {
+        Some(row) => (row.get::<i64>(0)?, row.get::<Option<i64>>(1)?),
+        None => (0, None),
+    };
+    let mut commit_rows = conn
+        .query("SELECT COUNT(*) FROM commit_sessions", ())
+        .await?;
+    let commit_count = match commit_rows.next().await? {
+        Some(row) => row.get::<i64>(0)?,
+        None => 0,
+    };
+    let backfill_watermark = read_meta_value(conn, AUTO_BACKFILL_WATERMARK_KEY).await?;
+    Ok(CorrelationIndexHealth {
+        tables_present: true,
+        span_count,
+        commit_count,
+        last_span_write,
+        backfill_watermark,
+    })
+}
+
 async fn span_hits(
     conn: &Connection,
     ref_predicate: &str,
@@ -938,12 +1012,13 @@ async fn commit_hits(
 }
 
 mod backfill;
-pub(crate) use backfill::session_activity_rows;
 pub use backfill::{
-    BackfillOptions, BackfillSkipReason, BackfillStats, BranchTimelineEntry, GitReflogSource,
-    SessionActivityRow, SystemGit, WindowBranchSegment, branch_timeline_from_reflog,
-    parse_commit_log, run_backfill, window_branch_segments,
+    BackfillOptions, BackfillSkipReason, BackfillStats, BranchTimelineEntry,
+    DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS, GitReflogSource, SessionActivityRow, SystemGit,
+    WindowBranchSegment, branch_timeline_from_reflog, parse_commit_log, run_backfill,
+    run_incremental_backfill, window_branch_segments,
 };
+pub(crate) use backfill::{session_activity_rows, session_activity_rows_since};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

@@ -25,7 +25,7 @@ use super::util::{JsonPath, JsonQuery, coerce_limit, http_detail, query_i64};
 use crate::memory::encoding::HolographicEncoder;
 use crate::memory::store::MemoryStore;
 use crate::memory::trust::DEFAULT_MIN_TRUST;
-use crate::memory::types::{MemoryRepairStats, MemoryStatus};
+use crate::memory::types::{MemoryFeedbackFunnel, MemoryRepairStats, MemoryStatus};
 
 #[derive(Deserialize)]
 pub(crate) struct OverviewParams {
@@ -122,9 +122,66 @@ pub(crate) async fn repair_derived_memory(
     })
 }
 
+/// Fact-store adoption funnel (seen vs. rated) for the dashboard memory
+/// status payload — mirrors the funnel computed in
+/// [`crate::tracedecay::TraceDecay::memory_status_for_conn`] for the MCP
+/// `tracedecay_memory_status` tool, kept as a separate query here since the
+/// dashboard builds `MemoryStatus` from ad-hoc `query_i64` calls rather than
+/// sharing that connection-taking helper.
+async fn memory_feedback_funnel(state: &DashboardState) -> MemoryFeedbackFunnel {
+    let retrieval_count_total = query_i64(
+        &state.mem_conn,
+        "SELECT COALESCE(SUM(retrieval_count), 0) FROM memory_facts",
+        (),
+    )
+    .await;
+    let access_count_total = query_i64(
+        &state.mem_conn,
+        "SELECT COALESCE(SUM(access_count), 0) FROM memory_facts",
+        (),
+    )
+    .await;
+    let retrieved_fact_count = query_i64(
+        &state.mem_conn,
+        "SELECT COALESCE(SUM(retrieval_count > 0), 0) FROM memory_facts",
+        (),
+    )
+    .await
+    .max(0) as usize;
+    let rated_fact_count = query_i64(
+        &state.mem_conn,
+        "SELECT COALESCE(SUM(helpful_count + unhelpful_count > 0), 0) FROM memory_facts",
+        (),
+    )
+    .await
+    .max(0) as usize;
+    let feedback_total = query_i64(
+        &state.mem_conn,
+        "SELECT COALESCE(SUM(helpful_count + unhelpful_count), 0) FROM memory_facts",
+        (),
+    )
+    .await
+    .max(0) as usize;
+    let seen_total = retrieval_count_total + access_count_total;
+    let seen_to_feedback_ratio = if feedback_total > 0 {
+        Some(seen_total / feedback_total as i64)
+    } else {
+        None
+    };
+    MemoryFeedbackFunnel {
+        retrieval_count_total,
+        access_count_total,
+        retrieved_fact_count,
+        rated_fact_count,
+        feedback_total,
+        seen_to_feedback_ratio,
+    }
+}
+
 async fn memory_status_payload(state: &DashboardState) -> Result<Value, String> {
     let hrr_dim = HolographicEncoder::DIMENSIONS;
     let repair = repair_derived_memory(state).await?;
+    let feedback_funnel = memory_feedback_funnel(state).await;
     let status = MemoryStatus {
         fact_count: query_i64(&state.mem_conn, "SELECT COUNT(*) FROM memory_facts", ()).await
             as usize,
@@ -193,6 +250,7 @@ async fn memory_status_payload(state: &DashboardState) -> Result<Value, String> 
         .await
             > 0,
         repair,
+        feedback_funnel,
     };
     let largest_bank_fact_count = largest_bank_fact_count(state).await?;
     let largest_bank_utilization_pct = if status.estimated_capacity > 0 {

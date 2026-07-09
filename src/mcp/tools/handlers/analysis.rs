@@ -1613,6 +1613,51 @@ fn diagnostics_warming_result(project_root: &std::path::Path, args: &Value) -> T
     )
 }
 
+/// Best-effort per-project session↔git correlation index health for the
+/// diagnostics payload. Read-only and fail-open: a missing or unopenable store,
+/// or absent correlation tables, is reported as an explicitly *empty* index
+/// (with a remediation notice) rather than omitted — so an unpopulated
+/// `session_git_spans` (which makes `tracedecay_sessions_for` silently return
+/// nothing) is always visible here.
+async fn session_correlation_health_json(cg: &TraceDecay) -> Value {
+    let db_path = cg.store_layout().sessions_db_path.clone();
+    let health = if db_path.is_file() {
+        match crate::global_db::GlobalDb::open_read_only_at(&db_path).await {
+            Some(db) => db.git_correlation_index_health().await.ok(),
+            None => None,
+        }
+    } else {
+        None
+    };
+    match health {
+        Some(health) if health.tables_present => {
+            let empty = health.is_empty();
+            json!({
+                "tables_present": true,
+                "span_count": health.span_count,
+                "commit_count": health.commit_count,
+                "last_span_write": health.last_span_write,
+                "backfill_watermark": health.backfill_watermark,
+                "index_empty": empty,
+                "notice": if empty {
+                    "correlation index empty — `tracedecay_sessions_for` will return nothing until it is populated; it auto-backfills on the next MCP server startup, or run `tracedecay sessions git-backfill` to populate it now"
+                } else {
+                    "correlation index populated"
+                },
+            })
+        }
+        _ => json!({
+            "tables_present": false,
+            "span_count": 0,
+            "commit_count": 0,
+            "last_span_write": Value::Null,
+            "backfill_watermark": Value::Null,
+            "index_empty": true,
+            "notice": "correlation index not yet created — `tracedecay_sessions_for` will return nothing until it is populated; it auto-backfills on the next MCP server startup, or run `tracedecay sessions git-backfill` to populate it now",
+        }),
+    }
+}
+
 pub(super) async fn handle_diagnostics(
     cg: &TraceDecay,
     args: Value,
@@ -1683,6 +1728,7 @@ pub(super) async fn handle_diagnostics(
         "error_count": error_count,
         "warning_count": warning_count,
         "diagnostics": entries,
+        "session_correlation": session_correlation_health_json(cg).await,
     });
     let text = render::finalize(Some(cg.project_root()), &args, &payload, || {
         render::generic_md(&payload)

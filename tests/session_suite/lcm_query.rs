@@ -2530,3 +2530,179 @@ async fn session_replay_slice_short_session_has_no_tail_overlap() {
     assert_eq!(slice.head[0].snippet, "only turn one");
     assert!(slice.summary_nodes.is_empty());
 }
+
+#[tokio::test]
+async fn grep_downranks_transcript_inventory_below_substantive_hits() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    // Genuine implementation message in one session.
+    insert_raw_messages(
+        &db,
+        &isolated_db_path(&tmp),
+        "cursor",
+        "impl-session",
+        &["implemented branch redundancy scoring in the ranker".to_string()],
+    )
+    .await;
+    // Inventory tool call in another session: it also matches the query but is
+    // just a glob listing over transcript directories.
+    insert_raw_messages(
+        &db,
+        &isolated_db_path(&tmp),
+        "cursor",
+        "review-session",
+        &["Glob **/*.jsonl over .claude sessions for branch redundancy".to_string()],
+    )
+    .await;
+
+    let hits = db
+        .lcm_grep(LcmGrepRequest {
+            provider: "cursor".into(),
+            query: "branch redundancy".into(),
+            scope: LcmScope::All,
+            session_id: None,
+            include_summaries: false,
+            limit: 10,
+            sort: LcmGrepSort::Relevance,
+            source: None,
+            role: None,
+            start_time: None,
+            end_time: None,
+            git_filter: Default::default(),
+        })
+        .await
+        .expect("grep should succeed");
+
+    let impl_idx = hits.iter().position(|h| h.session_id == "impl-session");
+    let inv_idx = hits.iter().position(|h| h.session_id == "review-session");
+    assert!(
+        impl_idx.is_some(),
+        "substantive hit should be present: {hits:?}"
+    );
+    assert!(
+        inv_idx.is_some(),
+        "inventory hit should still be present: {hits:?}"
+    );
+    assert!(
+        impl_idx < inv_idx,
+        "substantive hit must rank above transcript inventory: {hits:?}"
+    );
+}
+
+#[tokio::test]
+async fn grep_caps_hits_per_session_in_cross_session_scope() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let flood: Vec<String> = (0..5)
+        .map(|i| format!("apricot ledger note number {i}"))
+        .collect();
+    insert_raw_messages(
+        &db,
+        &isolated_db_path(&tmp),
+        "cursor",
+        "flood-session",
+        &flood,
+    )
+    .await;
+    insert_raw_messages(
+        &db,
+        &isolated_db_path(&tmp),
+        "cursor",
+        "other-session",
+        &["apricot ledger summary".to_string()],
+    )
+    .await;
+
+    let hits = db
+        .lcm_grep(LcmGrepRequest {
+            provider: "cursor".into(),
+            query: "apricot ledger".into(),
+            scope: LcmScope::All,
+            session_id: None,
+            include_summaries: false,
+            limit: 10,
+            sort: LcmGrepSort::Relevance,
+            source: None,
+            role: None,
+            start_time: None,
+            end_time: None,
+            git_filter: Default::default(),
+        })
+        .await
+        .expect("grep should succeed");
+
+    let flood_hits = hits
+        .iter()
+        .filter(|h| h.session_id == "flood-session")
+        .count();
+    assert!(
+        flood_hits <= 3,
+        "one session must not flood a cross-session page: {flood_hits}"
+    );
+    assert!(
+        hits.iter().any(|h| h.session_id == "other-session"),
+        "the distinct session must still appear: {hits:?}"
+    );
+}
+
+#[tokio::test]
+async fn expand_query_filters_base64_noise_blocks_from_context() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    // A realistic high-entropy base64 thinking-signature blob (mixed case and
+    // digits, no whitespace), well over the noise-token length threshold.
+    let noise = "Ab3Cd9Ef2Gh7Jk1Lm5".repeat(20);
+    let store_ids = insert_raw_messages(
+        &db,
+        &isolated_db_path(&tmp),
+        "cursor",
+        "session-1",
+        &["raw apricot migration detail".to_string(), noise.clone()],
+    )
+    .await;
+    let summary = db
+        .lcm_insert_summary_node(summary_draft(
+            "cursor",
+            "session-1",
+            "summary apricot migration decision",
+            vec![
+                LcmSourceRef::RawMessage {
+                    store_id: store_ids[0],
+                },
+                LcmSourceRef::RawMessage {
+                    store_id: store_ids[1],
+                },
+            ],
+        ))
+        .await
+        .expect("summary should insert");
+
+    let response = db
+        .lcm_expand_query(LcmExpandQueryRequest {
+            provider: "cursor".into(),
+            session_id: "session-1".into(),
+            prompt: "What happened with apricot migration?".into(),
+            query: None,
+            node_ids: vec![summary.node_id.clone()],
+            max_results: 5,
+            max_tokens: 512,
+            context_max_tokens: 8192,
+        })
+        .await
+        .expect("expand query should assemble context");
+
+    assert!(
+        response
+            .context_blocks
+            .iter()
+            .any(|block| block.content.contains("raw apricot migration")),
+        "the genuine source block should survive"
+    );
+    assert!(
+        !response
+            .context_blocks
+            .iter()
+            .any(|block| block.content.contains(&noise)),
+        "the base64 signature blob block should be filtered out of context"
+    );
+}

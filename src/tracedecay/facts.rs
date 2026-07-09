@@ -7,8 +7,8 @@ use crate::memory::store::MemoryStore;
 use crate::memory::trust::{DEFAULT_MIN_TRUST, DEFAULT_TRUST};
 use crate::memory::types::{
     AddFactOutcome, AddFactRequest, ContradictionResult, FactRecord, FactSearchResult,
-    FeedbackRequest, FeedbackResult, MemoryCategory, MemoryRepairStats, MemoryStatus,
-    SearchFactsRequest, TrustHistoryEntry, UpdateFactRequest,
+    FeedbackRequest, FeedbackResult, MemoryCategory, MemoryFeedbackFunnel, MemoryRepairStats,
+    MemoryStatus, SearchFactsRequest, TrustHistoryEntry, UpdateFactRequest,
 };
 
 use super::TraceDecay;
@@ -297,7 +297,11 @@ impl TraceDecay {
                             WHEN hrr_vector IS NULL
                               OR hrr_algebra != 'amari_fhrr'
                               OR hrr_dim != ?1
-                            THEN 1 ELSE 0 END), 0)
+                            THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(retrieval_count), 0),
+                        COALESCE(SUM(access_count), 0),
+                        COALESCE(SUM(retrieval_count > 0), 0),
+                        COALESCE(SUM(helpful_count + unhelpful_count > 0), 0)
                  FROM memory_facts",
                 libsql::params![hrr_dim as i64],
             )
@@ -312,6 +316,25 @@ impl TraceDecay {
         let helpful_count = aggregate_row.get::<i64>(0).map_err(row_err)?;
         let unhelpful_count = aggregate_row.get::<i64>(1).map_err(row_err)?;
         let missing_vector_count = aggregate_row.get::<i64>(2).map_err(row_err)?;
+        let retrieval_count_total = aggregate_row.get::<i64>(3).map_err(row_err)?;
+        let access_count_total = aggregate_row.get::<i64>(4).map_err(row_err)?;
+        let retrieved_fact_count = aggregate_row.get::<i64>(5).map_err(row_err)?;
+        let rated_fact_count = aggregate_row.get::<i64>(6).map_err(row_err)?;
+        let feedback_total = (helpful_count + unhelpful_count).max(0) as usize;
+        let seen_total = retrieval_count_total + access_count_total;
+        let seen_to_feedback_ratio = if feedback_total > 0 {
+            Some(seen_total / feedback_total as i64)
+        } else {
+            None
+        };
+        let feedback_funnel = MemoryFeedbackFunnel {
+            retrieval_count_total,
+            access_count_total,
+            retrieved_fact_count: retrieved_fact_count.max(0) as usize,
+            rated_fact_count: rated_fact_count.max(0) as usize,
+            feedback_total,
+            seen_to_feedback_ratio,
+        };
         let mut backfill_rows = conn
             .query(
                 "SELECT COUNT(*) FROM memory_facts
@@ -343,6 +366,7 @@ impl TraceDecay {
             missing_vector_count: missing_vector_count as usize,
             legacy_backfill_complete: backfilled_count > 0,
             repair,
+            feedback_funnel,
         })
     }
 

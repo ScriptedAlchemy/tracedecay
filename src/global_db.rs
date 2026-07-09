@@ -3505,6 +3505,50 @@ impl GlobalDb {
         crate::sessions::git_correlation::sessions_for(&self.conn, query).await
     }
 
+    /// Reports the per-project session↔git correlation index health (span/commit
+    /// counts, last write, auto-backfill watermark).
+    /// See [`crate::sessions::git_correlation::correlation_index_health`].
+    pub async fn git_correlation_index_health(
+        &self,
+    ) -> Result<
+        crate::sessions::git_correlation::CorrelationIndexHealth,
+        crate::sessions::git_correlation::GitCorrelationError,
+    > {
+        crate::sessions::git_correlation::correlation_index_health(&self.conn).await
+    }
+
+    /// Reads one `git_correlation_meta` integer value (e.g. the auto-backfill
+    /// watermark). Used by the incremental backfill to resume where it left off.
+    pub async fn git_correlation_meta_get(
+        &self,
+        key: &str,
+    ) -> Result<Option<i64>, crate::sessions::git_correlation::GitCorrelationError> {
+        crate::sessions::git_correlation::read_meta_value(&self.conn, key).await
+    }
+
+    /// Writes one `git_correlation_meta` integer value (upsert).
+    pub async fn git_correlation_meta_set(
+        &self,
+        key: &str,
+        value: i64,
+    ) -> Result<(), crate::sessions::git_correlation::GitCorrelationError> {
+        crate::sessions::git_correlation::write_meta_value(&self.conn, key, value).await
+    }
+
+    /// Runs one bounded, idempotent incremental git-span backfill pass, advancing
+    /// the persisted watermark.
+    /// See [`crate::sessions::git_correlation::run_incremental_backfill`].
+    pub async fn git_run_incremental_backfill(
+        &self,
+        git: &dyn crate::sessions::git_correlation::GitReflogSource,
+        limit_sessions: usize,
+    ) -> Result<
+        crate::sessions::git_correlation::BackfillStats,
+        crate::sessions::git_correlation::GitCorrelationError,
+    > {
+        crate::sessions::git_correlation::run_incremental_backfill(self, git, limit_sessions).await
+    }
+
     /// Resolves the `(provider, session_id)` pairs matching a git-scope filter.
     /// See [`crate::sessions::git_correlation::session_ids_for_scope`].
     pub async fn git_session_ids_for_scope(
@@ -3599,6 +3643,22 @@ impl GlobalDb {
         limit: usize,
     ) -> Result<Vec<crate::sessions::git_correlation::SessionActivityRow>, String> {
         crate::sessions::git_correlation::session_activity_rows(&self.conn, limit).await
+    }
+
+    /// Lists session activity windows whose activity timestamp is strictly newer
+    /// than `since_exclusive`, oldest-first and capped at `limit`. Backs the
+    /// incremental auto-backfill's watermark-advancing passes.
+    pub async fn session_activity_rows_since(
+        &self,
+        since_exclusive: i64,
+        limit: usize,
+    ) -> Result<Vec<crate::sessions::git_correlation::SessionActivityRow>, String> {
+        crate::sessions::git_correlation::session_activity_rows_since(
+            &self.conn,
+            since_exclusive,
+            limit,
+        )
+        .await
     }
 
     /// Searches message text for a provider, optionally constrained to one project.

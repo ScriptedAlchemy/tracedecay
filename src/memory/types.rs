@@ -210,6 +210,37 @@ pub struct MemoryStatus {
     pub missing_vector_count: usize,
     pub legacy_backfill_complete: bool,
     pub repair: MemoryRepairStats,
+    /// Adoption-funnel numbers for the fact store's feedback loop: how many
+    /// facts get seen (retrieved) vs. how many ever get rated. Surfaced so a
+    /// model or user can see funnel health in one call instead of running
+    /// ad-hoc SQL against `memory_facts` / `memory_feedback_events`.
+    pub feedback_funnel: MemoryFeedbackFunnel,
+}
+
+/// Fact-store adoption funnel: seen (retrieved/accessed) vs. rated
+/// (helpful/unhelpful). A dead funnel — facts seen many times but never
+/// rated — means trust scores stay entirely seed-time values, never earned.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MemoryFeedbackFunnel {
+    /// Sum of `memory_facts.retrieval_count` across all facts — total times
+    /// any fact was returned by a recall/search query.
+    pub retrieval_count_total: i64,
+    /// Sum of `memory_facts.access_count` across all facts — total
+    /// recall-search-return accesses (see [`crate::memory::types::FactRecord::access_count`]).
+    pub access_count_total: i64,
+    /// Facts that have ever been retrieved at least once
+    /// (`retrieval_count > 0`).
+    pub retrieved_fact_count: usize,
+    /// Facts that have ever received at least one helpful or unhelpful
+    /// rating via `tracedecay_fact_feedback`.
+    pub rated_fact_count: usize,
+    /// `helpful_count + unhelpful_count` summed across all facts — total
+    /// feedback events recorded.
+    pub feedback_total: usize,
+    /// `(retrieval_count_total + access_count_total) / feedback_total`,
+    /// rounded down. `None` when `feedback_total` is zero (undefined ratio;
+    /// the loop is entirely dead rather than merely sparse).
+    pub seen_to_feedback_ratio: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
