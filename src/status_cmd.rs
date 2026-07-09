@@ -149,7 +149,9 @@ pub(crate) async fn handle_status_command(
     } else if let Some(total) = tracedecay::cloud::fetch_worldwide_total() {
         config.last_worldwide_total = total;
         config.last_worldwide_fetch_at = now;
-        config.save_if_exists();
+        if let Err(err) = config.save_if_exists() {
+            eprintln!("warning: could not save tracedecay config: {err}");
+        }
         Some(total)
     } else {
         (config.last_worldwide_total > 0).then_some(config.last_worldwide_total)
@@ -163,7 +165,9 @@ pub(crate) async fn handle_status_command(
         if !fresh.is_empty() {
             config.cached_country_flags = fresh.clone();
             config.last_flags_fetch_at = now;
-            config.save_if_exists();
+            if let Err(err) = config.save_if_exists() {
+                eprintln!("warning: could not save tracedecay config: {err}");
+            }
         }
         if fresh.is_empty() && !config.cached_country_flags.is_empty() {
             config.cached_country_flags.clone()

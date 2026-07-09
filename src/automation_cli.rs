@@ -754,10 +754,19 @@ async fn handle_automation_config_command(
     if scope == AutomationConfigScope::Global {
         let effective = effective_config(&global, Some(&patch))?;
         user_config.automation = effective.clone();
-        if !user_config.save() {
-            return Err(tracedecay::errors::TraceDecayError::Config {
-                message: "failed to save global automation config".to_string(),
-            });
+        match user_config.save_with_recovery() {
+            Ok(Some(backup)) => {
+                eprintln!(
+                    "note: the previous config.toml was corrupt and was backed up to {} before regenerating",
+                    backup.display()
+                );
+            }
+            Ok(None) => {}
+            Err(err) => {
+                return Err(tracedecay::errors::TraceDecayError::Config {
+                    message: format!("failed to save global automation config: {err}"),
+                });
+            }
         }
         return print_automation_config(&user_config.automation, None, &effective, true, false);
     }

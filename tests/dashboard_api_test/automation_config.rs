@@ -24,7 +24,9 @@ fn automation_config_is_dashboard_controllable_and_persistent() {
         global_config.automation.enabled = true;
         global_config.automation.backend =
             tracedecay::automation::config::AutomationBackend::CodexAppServer;
-        assert!(global_config.save(), "global user config should save");
+        global_config
+            .save()
+            .expect("global user config should save");
 
         let cg = setup_project(&project_root).await;
         let sidecar = cg

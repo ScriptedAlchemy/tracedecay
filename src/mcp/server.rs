@@ -1594,10 +1594,14 @@ impl McpServer {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs() as i64;
-                config.save();
+                if let Err(err) = config.save() {
+                    eprintln!("[tracedecay] warning: could not save config: {err}");
+                }
                 return true;
             }
-            config.save();
+            if let Err(err) = config.save() {
+                eprintln!("[tracedecay] warning: could not save config: {err}");
+            }
             false
         })
         .await
@@ -1919,7 +1923,9 @@ impl McpServer {
                     config.last_upload_at = now;
                 }
             }
-            config.save();
+            if let Err(err) = config.save() {
+                eprintln!("[tracedecay] warning: could not save config: {err}");
+            }
         }
 
         // Checkpoint WAL to merge it into the main database file

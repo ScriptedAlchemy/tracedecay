@@ -241,7 +241,9 @@ async fn run_startup_preamble(command: &Commands) {
         global::try_flush(&mut user_config, is_force_flush);
     }
     if !is_local_install_command(command) {
-        user_config.save_if_exists();
+        if let Err(err) = user_config.save_if_exists() {
+            eprintln!("warning: could not save tracedecay config: {err}");
+        }
     }
 
     if is_first_run && !skip_startup_maintenance {
@@ -320,7 +322,9 @@ async fn maybe_run_silent_reinstall(user_config: &mut tracedecay::user_config::U
         SilentReinstallAction::Reinstall => run_silent_reinstall(user_config, running).await,
         SilentReinstallAction::AdvanceMarker => {
             user_config.previous_version = running.to_string();
-            user_config.save();
+            if let Err(err) = user_config.save() {
+                eprintln!("warning: could not save tracedecay config: {err}");
+            }
         }
         SilentReinstallAction::Nothing => {}
     }
@@ -334,7 +338,9 @@ async fn run_silent_reinstall(
         update_cmd::reinstall_tracked_agents(user_config).await
     {
         user_config.mark_version_installed(running);
-        user_config.save();
+        if let Err(err) = user_config.save() {
+            eprintln!("warning: could not save tracedecay config: {err}");
+        }
     }
 }
 

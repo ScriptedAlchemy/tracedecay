@@ -714,9 +714,9 @@ fn record_previous_version() {
         return;
     }
     cfg.previous_version = current.to_string();
-    if !cfg.save() {
+    if let Err(err) = cfg.save() {
         eprintln!(
-            "  \x1b[33mwarning:\x1b[0m could not record previous version; \
+            "  \x1b[33mwarning:\x1b[0m could not record previous version ({err}); \
              run `tracedecay reinstall` manually if new tools aren't registered"
         );
     }
