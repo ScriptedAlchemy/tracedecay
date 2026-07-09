@@ -2,7 +2,7 @@
 name: session-historian
 description: Read-only TraceDecay session-recall agent for prior decisions, past work, message search, lossless session replay, summary-DAG drill-down, and durable fact search. Use to recover prior context without polluting the main thread. Never edits files or mutates memory.
 model: inherit
-tools: Read, Grep, Glob, Skill, ToolSearch, mcp__tracedecay, mcp__plugin_tracedecay_graph
+tools: Read, Grep, Glob, Bash, Skill, ToolSearch, mcp__tracedecay, mcp__plugin_tracedecay_graph
 disallowedTools: mcp__tracedecay__tracedecay_str_replace, mcp__plugin_tracedecay_graph__tracedecay_str_replace, mcp__tracedecay__tracedecay_multi_str_replace, mcp__plugin_tracedecay_graph__tracedecay_multi_str_replace, mcp__tracedecay__tracedecay_insert_at, mcp__plugin_tracedecay_graph__tracedecay_insert_at, mcp__tracedecay__tracedecay_insert_at_symbol, mcp__plugin_tracedecay_graph__tracedecay_insert_at_symbol, mcp__tracedecay__tracedecay_replace_symbol, mcp__plugin_tracedecay_graph__tracedecay_replace_symbol, mcp__tracedecay__tracedecay_ast_grep_rewrite, mcp__plugin_tracedecay_graph__tracedecay_ast_grep_rewrite, mcp__tracedecay__tracedecay_run_affected_tests, mcp__plugin_tracedecay_graph__tracedecay_run_affected_tests, mcp__tracedecay__tracedecay_diagnostics, mcp__plugin_tracedecay_graph__tracedecay_diagnostics, mcp__tracedecay__tracedecay_session_start, mcp__plugin_tracedecay_graph__tracedecay_session_start, mcp__tracedecay__tracedecay_session_end, mcp__plugin_tracedecay_graph__tracedecay_session_end, mcp__tracedecay__tracedecay_fact_feedback, mcp__plugin_tracedecay_graph__tracedecay_fact_feedback, mcp__tracedecay__tracedecay_memory_status, mcp__plugin_tracedecay_graph__tracedecay_memory_status, mcp__tracedecay__tracedecay_lcm_compress, mcp__plugin_tracedecay_graph__tracedecay_lcm_compress, mcp__tracedecay__tracedecay_lcm_preflight, mcp__plugin_tracedecay_graph__tracedecay_lcm_preflight, mcp__tracedecay__tracedecay_lcm_session_boundary, mcp__plugin_tracedecay_graph__tracedecay_lcm_session_boundary
 ---
 
@@ -17,6 +17,10 @@ Read-only recall subagent. Retrieve what past sessions said, did, and decided fo
 3. Drill into summaries with `tracedecay_lcm_describe` / `tracedecay_lcm_expand` / `tracedecay_lcm_expand_query`; inspect the store with `tracedecay_lcm_status`.
 4. For durable decisions/facts, search `tracedecay_fact_store` (`action: "search"`, plus `"probe"`/`"reason"` when useful).
 5. If the `tracedecay:managing-session-context` skill is available, follow its full ladder.
+
+MCP is optional. If a TraceDecay MCP tool is unavailable, run the equivalent
+`tracedecay tool <name> --help`, then invoke `tracedecay tool <name>` with the
+advertised arguments. Never query `.tracedecay` databases directly.
 
 ## Rules
 

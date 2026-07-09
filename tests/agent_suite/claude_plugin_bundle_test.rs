@@ -72,9 +72,14 @@ const EXPECTED_COMMANDS: &[&str] = &[
 
 /// The canonical product-plugin subagent definitions.
 const EXPECTED_AGENTS: &[&str] = &[
+    "automation-auditor.md",
+    "change-risk-reviewer.md",
     "code-explorer.md",
     "code-health-auditor.md",
+    "cross-host-integration-auditor.md",
+    "runtime-storage-doctor.md",
     "session-historian.md",
+    "usage-intelligence-analyst.md",
 ];
 
 /// Reads a required scalar frontmatter field from a `---`-fenced markdown file,
@@ -457,7 +462,7 @@ fn claude_agents_grant_tracedecay_tools_under_both_mcp_namespaces() {
     const DIRECT_NS: &str = "mcp__tracedecay";
     const PLUGIN_NS: &str = "mcp__plugin_tracedecay_graph";
 
-    let source_agents = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/agents/claude_agents");
+    let source_agents = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/agents");
     for agent in EXPECTED_AGENTS {
         let path = source_agents.join(agent);
         let raw = fs::read_to_string(&path)
@@ -503,5 +508,51 @@ fn claude_agents_grant_tracedecay_tools_under_both_mcp_namespaces() {
             "{} must deny the same tracedecay tools under both MCP namespaces",
             path.display()
         );
+    }
+}
+
+#[test]
+fn bundled_agents_are_read_only_and_cli_native_across_hosts() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for agent in EXPECTED_AGENTS {
+        let stem = agent.trim_end_matches(".md");
+        let claude_path = root.join("plugin/agents").join(agent);
+        let cursor_path = root.join("plugin/overlays/cursor/agents").join(agent);
+        let codex_path = root
+            .join("src/agents/codex_agents")
+            .join(format!("{stem}.toml"));
+
+        let claude = fs::read_to_string(&claude_path).unwrap();
+        let cursor = fs::read_to_string(&cursor_path).unwrap();
+        let codex = fs::read_to_string(&codex_path).unwrap();
+
+        assert!(
+            required_scalar(&claude, "tools", &claude_path)
+                .split(',')
+                .map(str::trim)
+                .any(|tool| tool == "Bash"),
+            "{} must allow the CLI fallback",
+            claude_path.display()
+        );
+        for (path, body) in [
+            (&claude_path, claude.as_str()),
+            (&cursor_path, cursor.as_str()),
+            (&codex_path, codex.as_str()),
+        ] {
+            assert!(
+                body.contains("tracedecay tool <name> --help"),
+                "{} must discover live CLI arguments",
+                path.display()
+            );
+            for forbidden in ["sqlite3 ", "libsql "] {
+                assert!(
+                    !body.to_ascii_lowercase().contains(forbidden),
+                    "{} contains direct database access: {forbidden}",
+                    path.display()
+                );
+            }
+        }
+        assert!(cursor.contains("readonly: true"));
+        assert!(codex.contains("sandbox_mode = \"read-only\""));
     }
 }

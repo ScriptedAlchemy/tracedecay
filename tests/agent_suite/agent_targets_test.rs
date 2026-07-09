@@ -1,5 +1,16 @@
 use tracedecay::automation::agent_targets::{install_codex_managed_agents, remove_managed_agents};
 
+const EXPECTED_AGENT_IDS: &[&str] = &[
+    "code-explorer",
+    "code-health-auditor",
+    "session-historian",
+    "runtime-storage-doctor",
+    "cross-host-integration-auditor",
+    "change-risk-reviewer",
+    "usage-intelligence-analyst",
+    "automation-auditor",
+];
+
 #[test]
 fn codex_managed_agents_export_to_user_agents_dir() {
     let temp = tempfile::tempdir().unwrap();
@@ -7,8 +18,18 @@ fn codex_managed_agents_export_to_user_agents_dir() {
 
     let summary = install_codex_managed_agents(home).unwrap();
 
-    assert_eq!(summary.exported_count, 3);
+    assert_eq!(summary.exported_count, EXPECTED_AGENT_IDS.len());
     assert_eq!(summary.output, home.join(".codex/agents"));
+    let exported: std::collections::BTreeSet<&str> = summary
+        .exported
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect();
+    assert_eq!(
+        exported,
+        EXPECTED_AGENT_IDS.iter().copied().collect(),
+        "the Codex plugin lifecycle must materialize every bundled specialist"
+    );
     assert!(
         home.join(".codex/agents/tracedecay-code-explorer.toml")
             .is_file()

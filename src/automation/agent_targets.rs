@@ -46,6 +46,26 @@ const AGENTS: &[AgentTemplate] = &[
         id: "session-historian",
         codex: include_str!("../agents/codex_agents/session-historian.toml"),
     },
+    AgentTemplate {
+        id: "runtime-storage-doctor",
+        codex: include_str!("../agents/codex_agents/runtime-storage-doctor.toml"),
+    },
+    AgentTemplate {
+        id: "cross-host-integration-auditor",
+        codex: include_str!("../agents/codex_agents/cross-host-integration-auditor.toml"),
+    },
+    AgentTemplate {
+        id: "change-risk-reviewer",
+        codex: include_str!("../agents/codex_agents/change-risk-reviewer.toml"),
+    },
+    AgentTemplate {
+        id: "usage-intelligence-analyst",
+        codex: include_str!("../agents/codex_agents/usage-intelligence-analyst.toml"),
+    },
+    AgentTemplate {
+        id: "automation-auditor",
+        codex: include_str!("../agents/codex_agents/automation-auditor.toml"),
+    },
 ];
 
 pub fn install_codex_managed_agents(home: &Path) -> Result<ManagedAgentInstallSummary> {

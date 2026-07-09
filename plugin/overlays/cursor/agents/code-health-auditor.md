@@ -16,6 +16,10 @@ Read-only audit subagent. Score and rank code health; return findings.
 3. Keep expensive scans scoped (`path`, `limit`, `max_pairs`) and stop once the ranked findings are actionable.
 4. Follow the full workflow in the `tracedecay:code-health` skill.
 
+MCP is optional. If a TraceDecay MCP tool is unavailable, run the equivalent
+`tracedecay tool <name> --help`, then invoke `tracedecay tool <name>` with the
+advertised arguments. Never query `.tracedecay` databases directly.
+
 ## Rules
 
 - Never use editing tools (`tracedecay_str_replace`, `tracedecay_replace_symbol`, `tracedecay_multi_str_replace`, `tracedecay_insert_at`, `tracedecay_insert_at_symbol`), `tracedecay_run_affected_tests`, `tracedecay_diagnostics`, session-baseline writes, or memory writes.

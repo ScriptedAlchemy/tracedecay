@@ -357,9 +357,14 @@ fn cursor_agent_overlay_is_present_and_clean() {
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect();
     for expected in [
+        "automation-auditor.md",
+        "change-risk-reviewer.md",
         "code-explorer.md",
         "code-health-auditor.md",
+        "cross-host-integration-auditor.md",
+        "runtime-storage-doctor.md",
         "session-historian.md",
+        "usage-intelligence-analyst.md",
     ] {
         assert!(
             files.contains(expected),

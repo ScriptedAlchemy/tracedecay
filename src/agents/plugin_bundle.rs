@@ -317,12 +317,18 @@ mod tests {
         let all_skills = GENERATED_SKILL_FILES.len();
         let cursor_skills = cursor_skill_files().count();
 
-        // Claude: skills + 5 manifest (2 dot + mcp + hooks + README) + 3 agents
-        //   + 13 commands.
-        assert_eq!(claude_files().len(), all_skills + 5 + 3 + 13);
+        // Claude: skills + 5 manifest (2 dot + mcp + hooks + README) + native
+        // agents + 13 commands.
+        assert_eq!(
+            claude_files().len(),
+            all_skills + 5 + GENERATED_CLAUDE_AGENT_FILES.len() + 13
+        );
         // Cursor: cursor-subset skills + 4 manifest (dot + mcp + hooks +
-        //   README) + 2 rules + 3 agents + 13 native commands.
-        assert_eq!(cursor_files().len(), cursor_skills + 4 + 2 + 3 + 13);
+        //   README) + 2 rules + native agents + 13 native commands.
+        assert_eq!(
+            cursor_files().len(),
+            cursor_skills + 4 + 2 + GENERATED_CURSOR_AGENT_FILES.len() + 13
+        );
         // Codex: skills + 4 manifest (dot + mcp + hooks + README).
         assert_eq!(codex_files().len(), all_skills + 4);
     }

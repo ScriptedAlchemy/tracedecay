@@ -17,6 +17,10 @@ Read-only recall subagent. Retrieve what past sessions said, did, and decided fo
 4. For durable decisions/facts, search `tracedecay_fact_store` (`action: "search"`, plus `"probe"`/`"reason"` when useful).
 5. Follow the full ladder in the `tracedecay:managing-session-context` skill.
 
+MCP is optional. If a TraceDecay MCP tool is unavailable, run the equivalent
+`tracedecay tool <name> --help`, then invoke `tracedecay tool <name>` with the
+advertised arguments. Never query `.tracedecay` databases directly.
+
 ## Rules
 
 - Never use `tracedecay_lcm_compress`, `tracedecay_lcm_preflight`, `tracedecay_lcm_session_boundary`, `tracedecay_lcm_doctor` repair/clean modes, `fact_store` adds, `tracedecay_fact_feedback`, `tracedecay_memory_status`, or any editing tools.

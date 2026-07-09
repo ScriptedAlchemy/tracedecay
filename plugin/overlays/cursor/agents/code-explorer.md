@@ -16,6 +16,10 @@ Read-only exploration subagent. Investigate the repository and return findings.
 3. Trace with `tracedecay_callers` / `tracedecay_callees` / `tracedecay_call_chain`; assess reach with `tracedecay_impact`.
 4. Fall back to Grep/Read only for non-indexed content or after TraceDecay pinpoints files.
 
+MCP is optional. If a TraceDecay MCP tool is unavailable, run the equivalent
+`tracedecay tool <name> --help`, then invoke `tracedecay tool <name>` with the
+advertised arguments. Never query `.tracedecay` databases directly.
+
 ## Rules
 
 - Never use editing tools (`tracedecay_str_replace`, `tracedecay_replace_symbol`, `tracedecay_multi_str_replace`, `tracedecay_insert_at`, `tracedecay_insert_at_symbol`), test runners (`tracedecay_run_affected_tests`), `tracedecay_diagnostics`, or memory writes.
