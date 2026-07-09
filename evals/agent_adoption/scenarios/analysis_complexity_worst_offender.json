@@ -1,0 +1,43 @@
+{
+  "id": "analysis_complexity_worst_offender",
+  "category": "complexity",
+  "pack": "pack_analysis",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Which function in this crate has the most going on -- the widest fan-out or the most branching?",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_complexity",
+      "tracedecay_hotspots",
+      "tracedecay_context"
+    ],
+    "acceptable": [
+      "tracedecay_search",
+      "tracedecay_body",
+      "Read"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [
+    "place_order"
+  ],
+  "max_tool_calls": 5,
+  "notes": "complexity worst-offenders; place_order loops over items calling reserve_stock then compute_total, the widest fan-out in the crate."
+}

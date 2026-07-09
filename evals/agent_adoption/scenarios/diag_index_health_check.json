@@ -1,0 +1,39 @@
+{
+  "id": "diag_index_health_check",
+  "category": "admin",
+  "pack": "pack_diagnostics_admin",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Is the code index for this project up to date and healthy, or does it need attention?",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_status",
+      "tracedecay_storage_status",
+      "tracedecay_context"
+    ],
+    "acceptable": [
+      "tracedecay_health"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [],
+  "max_tool_calls": 4,
+  "notes": "is-the-index-healthy; no fixed ground_truth since freshness/size are run-dependent, graded on tool choice."
+}

@@ -1,0 +1,44 @@
+{
+  "id": "edit_insert_average_unit_price",
+  "category": "edit_refactor",
+  "pack": "pack_edit_refactor",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Add a new function right after compute_total that returns the average unit price across the line items.",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_insert_at_symbol",
+      "tracedecay_insert_at",
+      "tracedecay_str_replace"
+    ],
+    "acceptable": [
+      "tracedecay_body",
+      "tracedecay_context",
+      "Read",
+      "Edit"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [
+    "average"
+  ],
+  "max_tool_calls": 6,
+  "notes": "add-a-function-after-X; anchors on compute_total via tracedecay_insert_at_symbol."
+}

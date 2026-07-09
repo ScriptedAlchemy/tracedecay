@@ -1,0 +1,43 @@
+{
+  "id": "mem_feedback_discount_cap",
+  "category": "feedback_behavior",
+  "pack": "pack_session_memory",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Is there a cap on discounts we're allowed to apply to an order? Base your answer on the project's recorded decisions.",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_fact_store",
+      "tracedecay_context"
+    ],
+    "acceptable": [
+      "tracedecay_memory_status",
+      "tracedecay_search"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [
+    "25"
+  ],
+  "max_tool_calls": 4,
+  "seeded_fact": "discount_fact_id",
+  "grade_feedback": true,
+  "notes": "rate-the-fact flow on the discount seed (feedback_currency.json already covers the currency seed); scores whether the agent calls tracedecay_fact_feedback(helpful) after relying on it."
+}

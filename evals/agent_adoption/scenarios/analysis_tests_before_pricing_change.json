@@ -1,0 +1,45 @@
+{
+  "id": "analysis_tests_before_pricing_change",
+  "category": "impact",
+  "pack": "pack_analysis",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Before I touch how LineItem totals are calculated, which existing tests have me covered?",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_test_map",
+      "tracedecay_affected",
+      "tracedecay_impact",
+      "tracedecay_run_affected_tests",
+      "tracedecay_context"
+    ],
+    "acceptable": [
+      "tracedecay_callers",
+      "tracedecay_search",
+      "Read"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [
+    "pricing_test"
+  ],
+  "max_tool_calls": 6,
+  "notes": "which-tests-to-run; pricing_test.rs is the only test and it covers compute_total."
+}

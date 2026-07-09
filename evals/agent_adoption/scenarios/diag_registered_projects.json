@@ -1,0 +1,37 @@
+{
+  "id": "diag_registered_projects",
+  "category": "admin",
+  "pack": "pack_diagnostics_admin",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "What other codebases have already been set up alongside this one?",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_project_list"
+    ],
+    "acceptable": [
+      "tracedecay_context"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [],
+  "max_tool_calls": 3,
+  "notes": "what-projects-are-registered; registry contents are run-environment-dependent, graded on tool choice."
+}

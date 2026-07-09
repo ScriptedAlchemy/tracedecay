@@ -1,0 +1,39 @@
+{
+  "id": "edit_move_compute_grand_total_out",
+  "category": "edit_refactor",
+  "pack": "pack_edit_refactor",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "deferred",
+  "prompt": "Move compute_grand_total out of pricing.rs into its own module.",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_move_symbol"
+    ],
+    "acceptable": [
+      "tracedecay_context",
+      "tracedecay_search"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [],
+  "max_tool_calls": 6,
+  "requires_tool": "move_symbol",
+  "notes": "PENDING: forward-looking scenario for a move_symbol tool that does not exist yet in the refactor toolset."
+}
