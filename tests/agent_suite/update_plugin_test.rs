@@ -144,6 +144,28 @@ fn write_codex_legacy_config(home: &Path) -> PathBuf {
     config_path
 }
 
+/// After a legacy-config migration, `config.toml` no longer holds a direct
+/// tracedecay MCP registration, but the installer now records hook trust there,
+/// so the file exists with `[hooks.state]` entries instead of being deleted.
+fn assert_codex_legacy_config_migrated(config_path: &Path) {
+    let migrated: toml::Value = toml::from_str(&text(config_path)).unwrap();
+    assert!(
+        migrated
+            .get("mcp_servers")
+            .and_then(|servers| servers.get("tracedecay"))
+            .is_none(),
+        "Codex update-plugin should sweep the legacy MCP server entry"
+    );
+    assert!(
+        migrated["hooks"]["state"]
+            .as_table()
+            .unwrap()
+            .keys()
+            .any(|key| key.starts_with("tracedecay@personal:hooks/hooks.json:")),
+        "and record tracedecay hook trust in config.toml in its place"
+    );
+}
+
 fn write_stale_codex_skill(plugin_dir: &Path) {
     std::fs::create_dir_all(plugin_dir.join("skills/stale-skill")).unwrap();
     std::fs::write(
@@ -488,7 +510,7 @@ fn claude_update_plugin_reports_not_installed_without_a_bundle() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn codex_update_plugin_refreshes_bundle_without_touching_config() {
+fn codex_update_plugin_refreshes_bundle_and_records_hook_trust() {
     let home = TempDir::new().unwrap();
     let _agent_env = AgentEnvLock::pin(&home);
     let project_root = home.path().join("workspace");
@@ -515,7 +537,6 @@ fn codex_update_plugin_refreshes_bundle_without_touching_config() {
         "---\nname: project-status\ndescription: My private project status workflow\n---\n",
     )
     .unwrap();
-    let config_before = bytes(&codex_config);
 
     let outcome = codex
         .update_plugin(&ctx_with_project(home.path(), NEW_BIN, &project_root))
@@ -525,7 +546,18 @@ fn codex_update_plugin_refreshes_bundle_without_touching_config() {
     };
     assert_eq!(paths, vec![plugin_dir.clone()]);
 
-    assert_eq!(bytes(&codex_config), config_before);
+    // update-plugin auto-trusts the refreshed hooks by recording their content
+    // hashes in config.toml, while leaving the user's unrelated keys intact.
+    let updated: toml::Value = toml::from_str(&text(&codex_config)).unwrap();
+    assert_eq!(updated["model"].as_str().unwrap(), "gpt-5");
+    assert!(
+        updated["hooks"]["state"]
+            .as_table()
+            .unwrap()
+            .keys()
+            .any(|key| key.starts_with("tracedecay@personal:hooks/hooks.json:")),
+        "update-plugin should record tracedecay hook trust entries"
+    );
     assert_eq!(text(&plugin_dir.join("user-note.txt")), "mine\n");
     assert_eq!(
         text(&plugin_dir.join("skills/private-skill/SKILL.md")),
@@ -709,10 +741,7 @@ fn codex_update_plugin_sweeps_legacy_config_when_cache_exists() {
         paths,
         vec![cached_plugin_dir.clone(), codex_bootstrap_dir(home.path())]
     );
-    assert!(
-        !legacy_config.exists(),
-        "Codex update-plugin should remove legacy config even when a plugin cache exists"
-    );
+    assert_codex_legacy_config_migrated(&legacy_config);
 }
 
 #[test]
@@ -834,10 +863,7 @@ fn codex_update_plugin_migrates_legacy_config_only_install_to_plugin() {
         panic!("expected codex update_plugin to migrate legacy config to plugin");
     };
     assert_eq!(paths, vec![home.path().join("plugins/tracedecay")]);
-    assert!(
-        !legacy_config.exists(),
-        "Codex update-plugin should remove the migrated legacy config-managed install"
-    );
+    assert_codex_legacy_config_migrated(&legacy_config);
     assert_codex_bundle_contains_bin(
         &home.path().join("plugins/tracedecay"),
         NEW_BIN,
@@ -879,10 +905,7 @@ fn codex_update_plugin_migrates_legacy_config_even_when_repo_bundle_refreshes() 
             .exists(),
         "personal plugin bundle must exist after migrating a legacy install"
     );
-    assert!(
-        !legacy_config.exists(),
-        "legacy config-managed install should be swept after migration"
-    );
+    assert_codex_legacy_config_migrated(&legacy_config);
 }
 
 #[test]
