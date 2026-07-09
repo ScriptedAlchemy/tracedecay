@@ -369,7 +369,7 @@ async fn structured_backfill_inserts_codex_goal_rows_once() {
     drop(db);
     assert_eq!(
         structured_marker_version(&project, Some("codex")).await,
-        Some(2)
+        Some(4)
     );
 }
 
@@ -457,7 +457,7 @@ async fn structured_backfill_version_bump_reparses_from_start() {
     db.run_structured_backfill().await; // no candidates: marks complete, clears cursors
     assert_eq!(
         structured_marker_version(&project, Some("codex")).await,
-        Some(2)
+        Some(4)
     );
     drop(db);
 
@@ -538,7 +538,7 @@ async fn structured_backfill_provider_bump_isolates_other_providers() {
     write_codex_rollout_with_goal(&home, &project, "codex-isolate");
 
     // Ingest both providers and drive the sweep to completion: claude reaches
-    // v3, codex reaches v2, and both version-namespaced cursors are cleared.
+    // v3, codex reaches v4, and both version-namespaced cursors are cleared.
     let db = open_project_session_db(&project).await.unwrap();
     ingest_source(&db, &ClaudeSource::with_home(&home), &project, None).await;
     ingest_source(&db, &CodexSource::with_home(&home), &project, None).await;
@@ -550,15 +550,15 @@ async fn structured_backfill_provider_bump_isolates_other_providers() {
     );
     assert_eq!(
         structured_marker_version(&project, Some("codex")).await,
-        Some(2)
+        Some(4)
     );
     // Codex's cursor was cleared on completion; capture that baseline.
-    assert_eq!(structured_cursor_value(&project, "codex", 2).await, None);
+    assert_eq!(structured_cursor_value(&project, "codex", 4).await, None);
     let codex_goal_before = load_only_goal_row(&project).await;
     drop(db);
 
     // Model a claude-only version bump: reset ONLY claude's marker and drop its
-    // reasoning rows. Codex's marker (v2) and goal row are left fully intact.
+    // reasoning rows. Codex's marker (v4) and goal row are left fully intact.
     let conn = raw_conn(&project).await;
     conn.execute(
         "DELETE FROM lcm_raw_messages
@@ -585,7 +585,7 @@ async fn structured_backfill_provider_bump_isolates_other_providers() {
     assert_eq!(count_kind(&project, "claude", "reasoning").await, 0);
 
     // Re-sweep to completion. Claude re-enters (its marker fell behind v3);
-    // codex is skipped outright (marker v2 >= target v2).
+    // codex is skipped outright (marker v4 >= target v4).
     let db = open_project_session_db(&project).await.unwrap();
     db.run_structured_backfill().await;
     db.run_structured_backfill().await;
@@ -602,9 +602,9 @@ async fn structured_backfill_provider_bump_isolates_other_providers() {
     // codex's cursor row).
     assert_eq!(
         structured_marker_version(&project, Some("codex")).await,
-        Some(2)
+        Some(4)
     );
-    assert_eq!(structured_cursor_value(&project, "codex", 2).await, None);
+    assert_eq!(structured_cursor_value(&project, "codex", 4).await, None);
     assert_eq!(count_kind(&project, "codex", "goal").await, 1);
     assert_eq!(load_only_goal_row(&project).await, codex_goal_before);
 }
@@ -670,7 +670,8 @@ async fn structured_backfill_migrates_legacy_global_marker() {
     );
 
     // First run migrates: seed every provider to N=3, retire the global marker
-    // and legacy cursors. No provider re-sweeps (both seeded >= their targets).
+    // and legacy cursors. Claude is already current; Codex alone re-sweeps to
+    // its v4 custom-exec target.
     let db = open_project_session_db(&project).await.unwrap();
     db.run_structured_backfill().await;
     drop(db);
@@ -682,8 +683,8 @@ async fn structured_backfill_migrates_legacy_global_marker() {
     );
     assert_eq!(
         structured_marker_version(&project, Some("codex")).await,
-        Some(3),
-        "codex marker seeded to the legacy global version"
+        Some(4),
+        "codex marker advances from the legacy baseline to its current target"
     );
     assert_eq!(
         structured_marker_version(&project, None).await,

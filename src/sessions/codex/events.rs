@@ -466,9 +466,11 @@ fn extract_exec_command_args(input: &str) -> Option<ExecInvocation> {
     let bytes = input.as_bytes();
     let mut cmds: Vec<String> = Vec::new();
     let mut workdir: Option<String> = None;
+    let mut found_exec = false;
     let mut search = 0;
-    while let Some(rel) = input[search..].find(EXEC_MARKER) {
-        let after_marker = search + rel + EXEC_MARKER.len();
+    while let Some(marker) = find_exec_marker(input, search) {
+        found_exec = true;
+        let after_marker = marker + EXEC_MARKER.len();
         // Skip whitespace to the opening brace of the argument object.
         let mut i = after_marker;
         while i < bytes.len() && bytes[i].is_ascii_whitespace() {
@@ -487,12 +489,54 @@ fn extract_exec_command_args(input: &str) -> Option<ExecInvocation> {
             search = after_marker;
         }
     }
+    if !found_exec {
+        return None;
+    }
     let cmd = (!cmds.is_empty()).then(|| cmds.join("\n"));
     Some(ExecInvocation { cmd, workdir })
 }
 
+/// Find an executed `tools.exec_command(` marker outside JS strings and
+/// comments. Plain substring search misclassifies examples or comments that
+/// merely mention the call shape as real shell execution.
+fn find_exec_marker(input: &str, mut i: usize) -> Option<usize> {
+    let bytes = input.as_bytes();
+    while i < input.len() {
+        match bytes[i] {
+            b'"' | b'\'' | b'`' => {
+                i = read_js_string(input, i).map_or(i + 1, |(_, next)| next);
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                i += 2;
+                while i < input.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i + 1 < input.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i = (i + 2).min(input.len());
+            }
+            _ if input[i..].starts_with(EXEC_MARKER)
+                && (i == 0 || !is_js_identifier_byte(bytes[i - 1])) =>
+            {
+                return Some(i);
+            }
+            _ => {
+                i += input[i..].chars().next()?.len_utf8();
+            }
+        }
+    }
+    None
+}
+
+fn is_js_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')
+}
+
 /// Walk the JS object literal beginning at `brace_idx` (`{`), returning the
-/// top-level `cmd` and `workdir` string values and the byte index just past the
 /// object. Nested objects/arrays and string contents (single/double/backtick)
 /// are skipped so only genuine top-level keys are matched.
 fn scan_js_exec_object(s: &str, brace_idx: usize) -> (Option<String>, Option<String>, usize) {
@@ -1703,6 +1747,15 @@ mod tests {
 
         // Non-exec JS has no marker at all.
         assert!(extract_exec_command_args("const x = ALL_TOOLS.filter(t => t.exec);\n").is_none());
+
+        // Marker text inside a string or comment is not an executed call.
+        assert!(
+            extract_exec_command_args("text(\"tools.exec_command({cmd:'not run'})\");\n").is_none()
+        );
+        assert!(
+            extract_exec_command_args("// tools.exec_command({cmd:\"not run\"})\ntext('done');\n")
+                .is_none()
+        );
     }
 
     #[test]
