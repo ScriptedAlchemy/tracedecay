@@ -259,7 +259,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn fenced_branch_roster_stays_inventory() {
         // A bare Markdown fence must not vouch for work: a fenced branch
         // roster is still an inventory (review finding on PR #361).
@@ -268,6 +267,7 @@ mod tests {
         ));
     }
 
+    #[test]
     fn genuine_roster_with_negated_work_verb_stays_inventory() {
         // A roster that explicitly says nothing was implemented is still a bare
         // inventory: the negated verb must not trip the work-evidence guard.
