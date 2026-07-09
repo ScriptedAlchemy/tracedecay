@@ -21,11 +21,15 @@
 pub(crate) const RERANK_OVERFETCH_FACTOR: usize = 4;
 
 /// Fetch budget before the re-rank stage: over-fetch by
-/// [`RERANK_OVERFETCH_FACTOR`], clamped into `[limit, max_fetch]`.
+/// [`RERANK_OVERFETCH_FACTOR`], capped at `max_fetch` but never below the
+/// caller's explicit `limit`. The `min`-then-`max` order (rather than
+/// `clamp`) is deliberate: a limit above `max_fetch` must widen the fetch to
+/// honor the request, not panic on an inverted clamp range.
 pub(crate) fn rerank_fetch_limit(limit: usize, max_fetch: usize) -> usize {
     limit
         .saturating_mul(RERANK_OVERFETCH_FACTOR)
-        .clamp(limit, max_fetch)
+        .min(max_fetch)
+        .max(limit)
 }
 
 /// Cheap, deterministic heuristic: is this message text a transcript
@@ -121,6 +125,17 @@ fn token_is_path_like(token: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rerank_fetch_limit_never_panics_when_limit_exceeds_cap() {
+        // limit > max_fetch used to invert the clamp range and panic
+        // (e.g. `sessions search --limit 500` against the 200 fetch cap);
+        // the request must widen the fetch instead.
+        assert_eq!(super::rerank_fetch_limit(500, 200), 500);
+        assert_eq!(super::rerank_fetch_limit(10, 200), 40);
+        assert_eq!(super::rerank_fetch_limit(80, 200), 200);
+        assert_eq!(super::rerank_fetch_limit(0, 200), 0);
+    }
+
     use super::*;
 
     #[test]
