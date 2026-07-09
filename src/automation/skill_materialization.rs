@@ -28,6 +28,7 @@
 //! - **`tracedecay update` / install** → reconcile every detected host+scope.
 //! - **`tracedecay doctor`** → report missing/forked/orphaned materializations.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -42,6 +43,8 @@ use crate::errors::Result;
 pub use crate::automation::managed_skill_model::MATERIALIZED_SKILL_MANAGED_BY;
 
 const SKILL_FILE: &str = "SKILL.md";
+const MATERIALIZATION_MANIFEST_FILE: &str = ".tracedecay-materialization.json";
+const MATERIALIZATION_PENDING_FILE: &str = ".tracedecay-materialization.pending.json";
 
 /// A host whose native skills directory can load a materialized `SKILL.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -293,6 +296,43 @@ struct FileProvenance {
     body_hash: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct MaterializationManifest {
+    managed_by: String,
+    skill_id: String,
+    package_hash: String,
+    files: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PendingMaterialization {
+    managed_by: String,
+    skill_id: String,
+    previous_files: BTreeMap<String, String>,
+    remove_files: BTreeMap<String, String>,
+    next_manifest: MaterializationManifest,
+    artifacts_hex: BTreeMap<String, String>,
+}
+
+enum ManifestState {
+    Missing,
+    Owned(MaterializationManifest),
+    Foreign,
+}
+
+enum PendingState {
+    Missing,
+    Owned(Box<PendingMaterialization>),
+    Foreign,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArtifactState {
+    Missing,
+    Clean,
+    Forked,
+}
+
 impl FileProvenance {
     fn is_managed(&self) -> bool {
         self.managed_by.as_deref() == Some(MATERIALIZED_SKILL_MANAGED_BY)
@@ -300,7 +340,7 @@ impl FileProvenance {
 
     /// A managed file is forked when the body on disk no longer hashes to the
     /// `content-hash` we recorded when we wrote it.
-    fn is_forked(&self) -> bool {
+    fn is_legacy_forked(&self) -> bool {
         match (&self.content_hash, &self.body_hash) {
             (Some(recorded), Some(actual)) => recorded != actual,
             // A managed file missing a content-hash is treated as forked so we
@@ -358,6 +398,523 @@ fn read_file_provenance(path: &Path) -> Result<Option<FileProvenance>> {
     }))
 }
 
+fn relative_artifact_path(relative: &str) -> Result<&Path> {
+    let path = Path::new(relative);
+    safe_support_relative(path)?;
+    if matches!(
+        relative,
+        MATERIALIZATION_MANIFEST_FILE | MATERIALIZATION_PENDING_FILE
+    ) {
+        return Err(config_error(format!(
+            "reserved materialized support path '{relative}'"
+        )));
+    }
+    Ok(path)
+}
+
+fn ensure_not_symlink(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(config_error(format!(
+            "refusing materialized skill path through symlink '{}'",
+            path.display()
+        ))),
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn ensure_no_symlink_components(base: &Path, relative: &Path) -> Result<()> {
+    let mut current = PathBuf::new();
+    for component in base.components() {
+        current.push(component.as_os_str());
+        ensure_not_symlink(&current)?;
+    }
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        ensure_not_symlink(&current)?;
+    }
+    Ok(())
+}
+
+fn checked_descendant_path(base: &Path, relative: &Path) -> Result<PathBuf> {
+    safe_support_relative(relative)?;
+    ensure_no_symlink_components(base, relative)?;
+    Ok(base.join(relative))
+}
+
+fn artifact_path(dir: &Path, relative: &str) -> Result<PathBuf> {
+    checked_descendant_path(dir, relative_artifact_path(relative)?)
+}
+
+fn ensure_scope_package_path_safe(scope: &MaterializationScope, slug: &str) -> Result<()> {
+    let relative = Path::new(scope.host.skills_subdir()).join(slug);
+    safe_support_relative(&relative)?;
+    ensure_no_symlink_components(&scope.base_dir, &relative)
+}
+
+fn support_relative_key(path: &Path) -> Result<String> {
+    use std::path::Component;
+    safe_support_relative(path)?;
+    Ok(path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/"))
+}
+
+fn read_materialization_manifest(dir: &Path, skill_id: &str) -> Result<ManifestState> {
+    let path = checked_descendant_path(dir, Path::new(MATERIALIZATION_MANIFEST_FILE))?;
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ManifestState::Missing);
+        }
+        Err(err) => return Err(err.into()),
+    };
+    if !metadata.file_type().is_file() {
+        return Ok(ManifestState::Foreign);
+    }
+    let Ok(manifest) = serde_json::from_str::<MaterializationManifest>(&fs::read_to_string(path)?)
+    else {
+        return Ok(ManifestState::Foreign);
+    };
+    if manifest.managed_by != MATERIALIZED_SKILL_MANAGED_BY
+        || manifest.skill_id != skill_id
+        || !manifest.files.contains_key(SKILL_FILE)
+        || manifest
+            .files
+            .keys()
+            .any(|relative| relative_artifact_path(relative).is_err())
+    {
+        return Ok(ManifestState::Foreign);
+    }
+    Ok(ManifestState::Owned(manifest))
+}
+
+fn hash_bytes(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
+}
+
+fn current_artifact_hash(path: &Path) -> Result<Option<String>> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+    if !metadata.file_type().is_file() {
+        return Ok(None);
+    }
+    Ok(Some(hash_bytes(&fs::read(path)?)))
+}
+
+fn artifact_state(dir: &Path, relative: &str, expected_hash: &str) -> Result<ArtifactState> {
+    let path = artifact_path(dir, relative)?;
+    match current_artifact_hash(&path)? {
+        Some(actual) if actual == expected_hash => Ok(ArtifactState::Clean),
+        Some(_) => Ok(ArtifactState::Forked),
+        None if fs::symlink_metadata(path).is_ok() => Ok(ArtifactState::Forked),
+        None => Ok(ArtifactState::Missing),
+    }
+}
+
+fn desired_artifacts(skill: &ManagedSkill) -> Result<BTreeMap<String, Vec<u8>>> {
+    let mut artifacts = BTreeMap::new();
+    artifacts.insert(
+        SKILL_FILE.to_string(),
+        skill.render_materialized_skill_markdown()?.into_bytes(),
+    );
+    for support in &skill.support_files {
+        let relative = support_relative_key(&support.path)?;
+        if relative == SKILL_FILE
+            || matches!(
+                relative.as_str(),
+                MATERIALIZATION_MANIFEST_FILE | MATERIALIZATION_PENDING_FILE
+            )
+        {
+            return Err(config_error(format!(
+                "reserved materialized support path '{relative}'"
+            )));
+        }
+        if artifacts
+            .insert(relative.clone(), support.bytes.clone())
+            .is_some()
+        {
+            return Err(config_error(format!(
+                "duplicate materialized support path '{relative}'"
+            )));
+        }
+    }
+    Ok(artifacts)
+}
+
+fn write_artifact_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let staging = PathBuf::from(format!("{}.new", path.display()));
+    ensure_not_symlink(&staging)?;
+    if path_exists_without_following_links(&staging)? {
+        if current_artifact_hash(&staging)?.as_deref() != Some(hash_bytes(bytes).as_str()) {
+            return Err(config_error(format!(
+                "refusing to overwrite foreign materialization staging file '{}'",
+                staging.display()
+            )));
+        }
+    } else if let Err(err) = fs::write(&staging, bytes) {
+        fs::remove_file(&staging).ok();
+        return Err(err.into());
+    }
+    fs::rename(staging, path)?;
+    Ok(())
+}
+
+fn write_artifacts(dir: &Path, artifacts: &BTreeMap<String, Vec<u8>>) -> Result<()> {
+    for (relative, bytes) in artifacts {
+        write_artifact_atomically(&artifact_path(dir, relative)?, bytes)?;
+    }
+    Ok(())
+}
+
+fn build_materialization_manifest(
+    skill: &ManagedSkill,
+    package_hash: String,
+    artifacts: &BTreeMap<String, Vec<u8>>,
+) -> MaterializationManifest {
+    MaterializationManifest {
+        managed_by: MATERIALIZED_SKILL_MANAGED_BY.to_string(),
+        skill_id: skill.metadata.id.clone(),
+        package_hash,
+        files: artifacts
+            .iter()
+            .map(|(relative, bytes)| (relative.clone(), hash_bytes(bytes)))
+            .collect(),
+    }
+}
+
+fn write_materialization_manifest(dir: &Path, manifest: &MaterializationManifest) -> Result<()> {
+    let value = serde_json::to_value(manifest).map_err(|err| {
+        config_error(format!(
+            "failed to serialize materialization manifest: {err}"
+        ))
+    })?;
+    let path = checked_descendant_path(dir, Path::new(MATERIALIZATION_MANIFEST_FILE))?;
+    ensure_not_symlink(&PathBuf::from(format!("{}.new", path.display())))?;
+    crate::agents::safe_write_json_file(&path, &value, None)
+}
+
+fn write_pending_materialization(dir: &Path, pending: &PendingMaterialization) -> Result<()> {
+    let value = serde_json::to_value(pending).map_err(|err| {
+        config_error(format!(
+            "failed to serialize pending materialization: {err}"
+        ))
+    })?;
+    let path = checked_descendant_path(dir, Path::new(MATERIALIZATION_PENDING_FILE))?;
+    ensure_not_symlink(&PathBuf::from(format!("{}.new", path.display())))?;
+    crate::agents::safe_write_json_file(&path, &value, None)
+}
+
+fn decode_pending_artifacts(pending: &PendingMaterialization) -> Result<BTreeMap<String, Vec<u8>>> {
+    let mut artifacts = BTreeMap::new();
+    for (relative, encoded) in &pending.artifacts_hex {
+        relative_artifact_path(relative)?;
+        let bytes = hex::decode(encoded).map_err(|err| {
+            config_error(format!(
+                "invalid pending materialization artifact '{relative}': {err}"
+            ))
+        })?;
+        if pending.next_manifest.files.get(relative) != Some(&hash_bytes(&bytes)) {
+            return Err(config_error(format!(
+                "pending materialization hash mismatch for '{relative}'"
+            )));
+        }
+        artifacts.insert(relative.clone(), bytes);
+    }
+    if artifacts.keys().ne(pending.next_manifest.files.keys()) {
+        return Err(config_error(
+            "pending materialization artifact inventory mismatch".to_string(),
+        ));
+    }
+    Ok(artifacts)
+}
+
+fn read_pending_materialization(dir: &Path, skill_id: Option<&str>) -> Result<PendingState> {
+    let path = checked_descendant_path(dir, Path::new(MATERIALIZATION_PENDING_FILE))?;
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PendingState::Missing);
+        }
+        Err(err) => return Err(err.into()),
+    };
+    if !metadata.file_type().is_file() {
+        return Ok(PendingState::Foreign);
+    }
+    let Ok(pending) = serde_json::from_str::<PendingMaterialization>(&fs::read_to_string(path)?)
+    else {
+        return Ok(PendingState::Foreign);
+    };
+    let valid_paths = pending
+        .previous_files
+        .keys()
+        .chain(pending.remove_files.keys())
+        .chain(pending.next_manifest.files.keys())
+        .all(|relative| relative_artifact_path(relative).is_ok());
+    if pending.managed_by != MATERIALIZED_SKILL_MANAGED_BY
+        || skill_id.is_some_and(|expected| pending.skill_id != expected)
+        || pending.next_manifest.managed_by != MATERIALIZED_SKILL_MANAGED_BY
+        || pending.next_manifest.skill_id != pending.skill_id
+        || !pending.next_manifest.files.contains_key(SKILL_FILE)
+        || !valid_paths
+        || decode_pending_artifacts(&pending).is_err()
+    {
+        return Ok(PendingState::Foreign);
+    }
+    Ok(PendingState::Owned(Box::new(pending)))
+}
+
+fn path_exists_without_following_links(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn prune_empty_parents(path: &Path, package_dir: &Path) {
+    let mut current = path.parent();
+    while let Some(dir) = current {
+        if dir == package_dir || fs::remove_dir(dir).is_err() {
+            break;
+        }
+        current = dir.parent();
+    }
+}
+
+fn remove_clean_artifact(dir: &Path, relative: &str, expected_hash: &str) -> Result<()> {
+    if artifact_state(dir, relative, expected_hash)? != ArtifactState::Clean {
+        return Ok(());
+    }
+    let path = artifact_path(dir, relative)?;
+    fs::remove_file(&path)?;
+    prune_empty_parents(&path, dir);
+    Ok(())
+}
+
+fn current_artifact_hashes(
+    dir: &Path,
+    artifacts: &BTreeMap<String, Vec<u8>>,
+) -> Result<BTreeMap<String, String>> {
+    let mut hashes = BTreeMap::new();
+    for relative in artifacts.keys() {
+        let path = artifact_path(dir, relative)?;
+        if let Some(hash) = current_artifact_hash(&path)? {
+            hashes.insert(relative.clone(), hash);
+        } else if path_exists_without_following_links(&path)? {
+            return Err(config_error(format!(
+                "materialized artifact path '{}' is not a regular file",
+                path.display()
+            )));
+        }
+    }
+    Ok(hashes)
+}
+
+fn validate_transaction_paths(
+    dir: &Path,
+    next_manifest: &MaterializationManifest,
+    remove_files: &BTreeMap<String, String>,
+) -> Result<()> {
+    for relative in next_manifest.files.keys().chain(remove_files.keys()) {
+        let path = artifact_path(dir, relative)?;
+        ensure_not_symlink(&PathBuf::from(format!("{}.new", path.display())))?;
+    }
+    Ok(())
+}
+
+fn apply_pending_materialization(
+    dir: &Path,
+    pending: &PendingMaterialization,
+) -> Result<MaterializeAction> {
+    let artifacts = decode_pending_artifacts(pending)?;
+    validate_transaction_paths(dir, &pending.next_manifest, &pending.remove_files)?;
+
+    for (relative, next_hash) in &pending.next_manifest.files {
+        let path = artifact_path(dir, relative)?;
+        match current_artifact_hash(&path)? {
+            Some(current)
+                if current == *next_hash
+                    || pending.previous_files.get(relative) == Some(&current) => {}
+            Some(_) => return Ok(MaterializeAction::SkippedForked),
+            None if path_exists_without_following_links(&path)? => {
+                return Ok(MaterializeAction::SkippedForked);
+            }
+            None => {}
+        }
+    }
+    for (relative, expected_hash) in &pending.remove_files {
+        let _ = artifact_state(dir, relative, expected_hash)?;
+    }
+
+    write_artifacts(dir, &artifacts)?;
+    for (relative, expected_hash) in &pending.remove_files {
+        remove_clean_artifact(dir, relative, expected_hash)?;
+    }
+    write_materialization_manifest(dir, &pending.next_manifest)?;
+
+    let path = checked_descendant_path(dir, Path::new(MATERIALIZATION_PENDING_FILE))?;
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
+    }
+    Ok(MaterializeAction::Written)
+}
+
+fn commit_materialization_transaction(
+    dir: &Path,
+    skill: &ManagedSkill,
+    package_hash: String,
+    artifacts: &BTreeMap<String, Vec<u8>>,
+    previous_files: BTreeMap<String, String>,
+    remove_files: BTreeMap<String, String>,
+) -> Result<MaterializeAction> {
+    let next_manifest = build_materialization_manifest(skill, package_hash, artifacts);
+    validate_transaction_paths(dir, &next_manifest, &remove_files)?;
+    if !matches!(
+        read_pending_materialization(dir, Some(&skill.metadata.id))?,
+        PendingState::Missing
+    ) {
+        return Err(config_error(format!(
+            "materialization transaction already exists for '{}'",
+            skill.metadata.id
+        )));
+    }
+    let pending = PendingMaterialization {
+        managed_by: MATERIALIZED_SKILL_MANAGED_BY.to_string(),
+        skill_id: skill.metadata.id.clone(),
+        previous_files,
+        remove_files,
+        next_manifest,
+        artifacts_hex: artifacts
+            .iter()
+            .map(|(relative, bytes)| (relative.clone(), hex::encode(bytes)))
+            .collect(),
+    };
+    write_pending_materialization(dir, &pending)?;
+    apply_pending_materialization(dir, &pending)
+}
+
+fn recover_pending_materialization(
+    dir: &Path,
+    skill_id: Option<&str>,
+) -> Result<Option<MaterializeAction>> {
+    match read_pending_materialization(dir, skill_id)? {
+        PendingState::Missing => Ok(None),
+        PendingState::Foreign => Ok(Some(MaterializeAction::SkippedForeign)),
+        PendingState::Owned(pending) => Ok(Some(apply_pending_materialization(dir, &pending)?)),
+    }
+}
+
+fn reconcile_owned_package(
+    dir: &Path,
+    skill: &ManagedSkill,
+    manifest: &MaterializationManifest,
+    package_hash: String,
+    artifacts: &BTreeMap<String, Vec<u8>>,
+) -> Result<MaterializeAction> {
+    for relative in artifacts.keys() {
+        if let Some(expected_hash) = manifest.files.get(relative) {
+            if artifact_state(dir, relative, expected_hash)? == ArtifactState::Forked {
+                return Ok(MaterializeAction::SkippedForked);
+            }
+        } else if path_exists_without_following_links(&artifact_path(dir, relative)?)? {
+            return Ok(MaterializeAction::SkippedForeign);
+        }
+    }
+
+    let exact_files = manifest.files.keys().eq(artifacts.keys());
+    let mut all_clean = true;
+    for (relative, expected_hash) in &manifest.files {
+        all_clean &= artifact_state(dir, relative, expected_hash)? == ArtifactState::Clean;
+    }
+    if manifest.package_hash == package_hash && exact_files && all_clean {
+        return Ok(MaterializeAction::Unchanged);
+    }
+
+    let mut remove_files = BTreeMap::new();
+    for (relative, expected_hash) in &manifest.files {
+        if !artifacts.contains_key(relative)
+            && artifact_state(dir, relative, expected_hash)? == ArtifactState::Clean
+        {
+            remove_files.insert(relative.clone(), expected_hash.clone());
+        }
+    }
+    commit_materialization_transaction(
+        dir,
+        skill,
+        package_hash,
+        artifacts,
+        manifest.files.clone(),
+        remove_files,
+    )
+}
+
+fn legacy_support_files_are_forked(
+    dir: &Path,
+    artifacts: &BTreeMap<String, Vec<u8>>,
+) -> Result<bool> {
+    for (relative, desired) in artifacts {
+        if relative == SKILL_FILE {
+            continue;
+        }
+        let path = artifact_path(dir, relative)?;
+        if !path_exists_without_following_links(&path)? {
+            continue;
+        }
+        let desired_hash = hash_bytes(desired);
+        if current_artifact_hash(&path)?.as_deref() != Some(desired_hash.as_str()) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn initial_support_path_conflicts(
+    dir: &Path,
+    artifacts: &BTreeMap<String, Vec<u8>>,
+) -> Result<bool> {
+    for relative in artifacts.keys().filter(|relative| *relative != SKILL_FILE) {
+        if path_exists_without_following_links(&artifact_path(dir, relative)?)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn materialized_package_is_forked(
+    dir: &Path,
+    skill_id: &str,
+    provenance: &FileProvenance,
+) -> Result<bool> {
+    match read_materialization_manifest(dir, skill_id)? {
+        ManifestState::Missing => Ok(provenance.is_legacy_forked()),
+        ManifestState::Foreign => Ok(true),
+        ManifestState::Owned(manifest) => {
+            for (relative, expected_hash) in &manifest.files {
+                if artifact_state(dir, relative, expected_hash)? == ArtifactState::Forked {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Single-skill operations
 // ---------------------------------------------------------------------------
@@ -370,19 +927,51 @@ pub fn materialize_skill(
     skill: &ManagedSkill,
 ) -> Result<MaterializeEntry> {
     let slug = skill.host_skill_slug();
-    let path = scope.skill_md(&slug);
+    ensure_scope_package_path_safe(scope, &slug)?;
+    let dir = scope.skill_dir(&slug);
+    let path = artifact_path(&dir, SKILL_FILE)?;
+    let package_hash = skill.materialized_package_hash()?;
+    let artifacts = desired_artifacts(skill)?;
+    if let Some(action @ (MaterializeAction::SkippedForeign | MaterializeAction::SkippedForked)) =
+        recover_pending_materialization(&dir, Some(&skill.metadata.id))?
+    {
+        return Ok(MaterializeEntry {
+            skill_id: skill.metadata.id.clone(),
+            path,
+            action,
+        });
+    }
+    let provenance = read_file_provenance(&path)?;
+    let manifest = read_materialization_manifest(&dir, &skill.metadata.id)?;
+    let initial_support_conflict = initial_support_path_conflicts(&dir, &artifacts)?;
 
-    let action = match read_file_provenance(&path)? {
-        Some(existing) if !existing.is_managed() => MaterializeAction::SkippedForeign,
-        Some(existing) if existing.is_forked() => MaterializeAction::SkippedForked,
-        Some(existing)
-            if existing.content_hash.as_deref() == Some(&skill.materialized_body_hash()) =>
-        {
-            MaterializeAction::Unchanged
+    let action = match (&provenance, manifest) {
+        (Some(existing), _) if !existing.is_managed() => MaterializeAction::SkippedForeign,
+        (_, ManifestState::Foreign) => MaterializeAction::SkippedForeign,
+        (_, ManifestState::Owned(manifest)) => {
+            fs::create_dir_all(&dir)?;
+            reconcile_owned_package(&dir, skill, &manifest, package_hash, &artifacts)?
+        }
+        (Some(existing), ManifestState::Missing) if existing.is_legacy_forked() => {
+            MaterializeAction::SkippedForked
+        }
+        (Some(_), ManifestState::Missing) if legacy_support_files_are_forked(&dir, &artifacts)? => {
+            MaterializeAction::SkippedForked
+        }
+        (None, ManifestState::Missing) if initial_support_conflict => {
+            MaterializeAction::SkippedForeign
         }
         _ => {
-            write_skill_file(scope, skill, &slug)?;
-            MaterializeAction::Written
+            fs::create_dir_all(&dir)?;
+            let previous_files = current_artifact_hashes(&dir, &artifacts)?;
+            commit_materialization_transaction(
+                &dir,
+                skill,
+                package_hash,
+                &artifacts,
+                previous_files,
+                BTreeMap::new(),
+            )?
         }
     };
 
@@ -391,27 +980,6 @@ pub fn materialize_skill(
         path,
         action,
     })
-}
-
-fn write_skill_file(scope: &MaterializationScope, skill: &ManagedSkill, slug: &str) -> Result<()> {
-    let dir = scope.skill_dir(slug);
-    fs::create_dir_all(&dir)?;
-    let markdown = skill.render_materialized_skill_markdown()?;
-    crate::agents::safe_write_text_file(&dir.join(SKILL_FILE), &markdown, None)?;
-    write_support_files(&dir, skill)?;
-    Ok(())
-}
-
-fn write_support_files(dir: &Path, skill: &ManagedSkill) -> Result<()> {
-    for support in &skill.support_files {
-        let relative = safe_support_relative(&support.path)?;
-        let path = dir.join(relative);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(&path, &support.bytes)?;
-    }
-    Ok(())
 }
 
 fn safe_support_relative(path: &Path) -> Result<&Path> {
@@ -440,15 +1008,52 @@ fn safe_support_relative(path: &Path) -> Result<&Path> {
 /// user-edited managed file is preserved (and later surfaces as a doctor
 /// `Forked` finding); a foreign file is never touched.
 pub fn remove_materialized_skill(scope: &MaterializationScope, slug: &str) -> Result<RemoveAction> {
-    let path = scope.skill_md(slug);
+    ensure_scope_package_path_safe(scope, slug)?;
+    let dir = scope.skill_dir(slug);
+    let path = artifact_path(&dir, SKILL_FILE)?;
+    if let Some(action) = recover_pending_materialization(&dir, None)? {
+        match action {
+            MaterializeAction::SkippedForeign => return Ok(RemoveAction::SkippedForeign),
+            MaterializeAction::SkippedForked => return Ok(RemoveAction::SkippedForked),
+            MaterializeAction::Written | MaterializeAction::Unchanged => {}
+        }
+    }
     let action = match read_file_provenance(&path)? {
         None => RemoveAction::Absent,
         Some(existing) if !existing.is_managed() => RemoveAction::SkippedForeign,
-        Some(existing) if existing.is_forked() => RemoveAction::SkippedForked,
-        Some(_) => {
-            fs::remove_file(&path)?;
-            prune_skill_dir(scope, slug);
-            RemoveAction::Removed
+        Some(existing) => {
+            match read_materialization_manifest(&dir, existing.skill_id.as_deref().unwrap_or(slug))?
+            {
+                ManifestState::Foreign => RemoveAction::SkippedForked,
+                ManifestState::Missing if existing.is_legacy_forked() => {
+                    RemoveAction::SkippedForked
+                }
+                ManifestState::Missing => {
+                    fs::remove_file(&path)?;
+                    prune_skill_dir(scope, slug);
+                    RemoveAction::Removed
+                }
+                ManifestState::Owned(manifest) => {
+                    let mut forked = false;
+                    for (relative, expected_hash) in &manifest.files {
+                        forked |=
+                            artifact_state(&dir, relative, expected_hash)? == ArtifactState::Forked;
+                    }
+                    if forked {
+                        RemoveAction::SkippedForked
+                    } else {
+                        for (relative, expected_hash) in &manifest.files {
+                            remove_clean_artifact(&dir, relative, expected_hash)?;
+                        }
+                        fs::remove_file(checked_descendant_path(
+                            &dir,
+                            Path::new(MATERIALIZATION_MANIFEST_FILE),
+                        )?)?;
+                        prune_skill_dir(scope, slug);
+                        RemoveAction::Removed
+                    }
+                }
+            }
         }
     };
     Ok(action)
@@ -458,17 +1063,7 @@ pub fn remove_materialized_skill(scope: &MaterializationScope, slug: &str) -> Re
 /// user-added files keep the directory and are left in place.
 fn prune_skill_dir(scope: &MaterializationScope, slug: &str) {
     let dir = scope.skill_dir(slug);
-    remove_dir_if_only_managed_leftovers(&dir);
-}
-
-fn remove_dir_if_only_managed_leftovers(dir: &Path) {
-    // Try a plain remove first (empty dir). If support files remain that we
-    // wrote, remove the whole package. We only reach here after deleting a
-    // managed SKILL.md, so the package is ours.
-    if fs::remove_dir(dir).is_ok() {
-        return;
-    }
-    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir(dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -527,10 +1122,18 @@ pub fn doctor_scope(
                 skill_id: skill.metadata.id.clone(),
                 path,
             }),
-            Some(existing) if existing.is_forked() => drift.push(SkillDrift::Forked {
-                skill_id: skill.metadata.id.clone(),
-                path,
-            }),
+            Some(existing)
+                if materialized_package_is_forked(
+                    &scope.skill_dir(&slug),
+                    &skill.metadata.id,
+                    &existing,
+                )? =>
+            {
+                drift.push(SkillDrift::Forked {
+                    skill_id: skill.metadata.id.clone(),
+                    path,
+                });
+            }
             Some(_) => {}
         }
     }

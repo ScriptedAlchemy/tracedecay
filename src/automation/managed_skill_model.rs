@@ -408,14 +408,21 @@ impl ManagedSkill {
         native_skill_name(&self.metadata.id)
     }
 
-    /// `sha256` of the skill body markdown. Embedded as the `content-hash`
-    /// provenance field so the reconciler can detect user edits (forks) of a
-    /// materialized file without re-reading the profile store.
-    pub fn materialized_body_hash(&self) -> String {
-        format!(
-            "sha256:{}",
-            hex::encode(Sha256::digest(self.body_markdown.as_bytes()))
-        )
+    /// Stable identity of the complete host-loadable package contract: the
+    /// rendered `SKILL.md` fields/body plus every support path and payload.
+    pub fn materialized_package_hash(&self) -> Result<String> {
+        let markdown = self.render_materialized_skill_markdown_with_hash("<package-hash>")?;
+        let mut hasher = Sha256::new();
+        hasher.update(markdown.as_bytes());
+        let mut support_files = self.support_files.iter().collect::<Vec<_>>();
+        support_files.sort_by(|left, right| left.path.cmp(&right.path));
+        for support in support_files {
+            hasher.update(b"\0file:");
+            hasher.update(support.path.to_string_lossy().as_bytes());
+            hasher.update(b"\0");
+            hasher.update(&support.bytes);
+        }
+        Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
     }
 
     /// Renders a host-loadable `SKILL.md` with provenance frontmatter marking
@@ -424,6 +431,11 @@ impl ManagedSkill {
     /// `content-hash`/`skill-version` keys are ignored by the host but let the
     /// reconciler own exactly its own files and detect drift.
     pub fn render_materialized_skill_markdown(&self) -> Result<String> {
+        let package_hash = self.materialized_package_hash()?;
+        self.render_materialized_skill_markdown_with_hash(&package_hash)
+    }
+
+    fn render_materialized_skill_markdown_with_hash(&self, package_hash: &str) -> Result<String> {
         // Reuse the native name/description derivation + bounds so the host
         // frontmatter shape matches the overlay exactly.
         let name = native_skill_name(&self.metadata.id);
@@ -449,7 +461,7 @@ impl ManagedSkill {
             "skill-id: {}",
             frontmatter_string(&self.metadata.id)
         );
-        let _ = writeln!(output, "content-hash: {}", self.materialized_body_hash());
+        let _ = writeln!(output, "content-hash: {package_hash}");
         let _ = writeln!(output, "skill-version: {}", self.metadata.updated_at);
         output.push_str("---\n\n");
         output.push_str(&self.body_markdown);
