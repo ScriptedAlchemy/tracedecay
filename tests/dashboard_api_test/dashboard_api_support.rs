@@ -72,33 +72,32 @@ impl Drop for DashboardServer {
 }
 
 pub(crate) fn spawn_dashboard_server(cg: TraceDecay, port: u16) -> DashboardServer {
-    spawn_dashboard_server_with_runner(cg, port, false)
+    spawn_dashboard_server_with_runner(cg, port, true)
 }
 
 pub(crate) fn spawn_dashboard_server_lightweight(cg: TraceDecay, port: u16) -> DashboardServer {
-    spawn_dashboard_server_with_runner(cg, port, true)
+    spawn_dashboard_server_with_runner(cg, port, false)
 }
 
 fn spawn_dashboard_server_with_runner(
     cg: TraceDecay,
     port: u16,
-    lightweight: bool,
+    repair_memory_on_startup: bool,
 ) -> DashboardServer {
     let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let thread = thread::spawn(move || {
         let runtime = create_runtime();
         runtime.block_on(async move {
-            let result = if lightweight {
-                dashboard::run_until_shutdown_for_tests(&cg, "127.0.0.1", port, async move {
+            let result = dashboard::run_until_shutdown_for_tests(
+                &cg,
+                "127.0.0.1",
+                port,
+                repair_memory_on_startup,
+                async move {
                     let _ = shutdown_rx.await;
-                })
-                .await
-            } else {
-                dashboard::run_until_shutdown(&cg, "127.0.0.1", port, false, async move {
-                    let _ = shutdown_rx.await;
-                })
-                .await
-            };
+                },
+            )
+            .await;
             let _ = cg.checkpoint().await;
             cg.close();
             let _ = result;

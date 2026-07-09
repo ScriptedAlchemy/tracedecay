@@ -367,12 +367,20 @@ pub async fn run_until_shutdown_for_tests<F>(
     cg: &TraceDecay,
     host: &str,
     port: u16,
+    repair_memory_on_startup: bool,
     shutdown: F,
 ) -> Result<()>
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    run_until_shutdown_inner(cg, host, port, shutdown, DashboardRunOptions::test()).await
+    run_until_shutdown_inner(
+        cg,
+        host,
+        port,
+        shutdown,
+        DashboardRunOptions::test(repair_memory_on_startup),
+    )
+    .await
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -393,10 +401,10 @@ impl DashboardRunOptions {
         }
     }
 
-    fn test() -> Self {
+    fn test(repair_memory_on_startup: bool) -> Self {
         Self {
             open: false,
-            repair_memory_on_startup: false,
+            repair_memory_on_startup,
             warm_token_counts: false,
             start_session_catch_up: false,
         }
