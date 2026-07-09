@@ -179,6 +179,44 @@ async fn current_project_store_resolves_profile_shard_via_registry_alias()
 }
 
 #[tokio::test]
+async fn current_project_store_resolves_moved_repository_identity_read_only()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::TempDir::new()?;
+    let profile_root = dir.path().join("profile");
+    let original = dir.path().join("repo");
+    let moved = dir.path().join("repo-moved");
+    std::fs::create_dir_all(&original)?;
+    let status = std::process::Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&original)
+        .status()?;
+    assert!(status.success());
+
+    let project_id = "proj_doctor_moved";
+    let shard_root = crate::storage::profile_sharded_data_root(&profile_root, project_id);
+    std::fs::create_dir_all(&shard_root)?;
+    std::fs::write(
+        shard_root.join(crate::config::db_filename(&shard_root)),
+        b"graph",
+    )?;
+    crate::storage::write_repository_identity_marker(&original, project_id)?;
+    std::fs::rename(&original, &moved)?;
+
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(profile_root),
+        global_db_path: Some(dir.path().join("global.db")),
+    };
+    match resolve_current_project_store(&moved, &open_options).await {
+        CurrentProjectStore::Resolved(layout) => {
+            assert_eq!(layout.data_root, shard_root);
+            assert_eq!(layout.identity.project_id.as_deref(), Some(project_id));
+        }
+        other => panic!("expected moved repository identity, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn registry_backed_profile_shard_is_not_stale_without_marker()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::TempDir::new()?;

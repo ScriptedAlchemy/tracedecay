@@ -678,7 +678,7 @@ async fn trace_decay_open_matches_renamed_git_checkout_by_registered_remote() {
 }
 
 #[tokio::test]
-async fn ensure_initialized_with_options_uses_registered_remote_store() {
+async fn ensure_initialized_with_options_uses_persisted_repository_identity() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let root = canonical_temp_path(dir.path());
@@ -711,8 +711,8 @@ async fn ensure_initialized_with_options_uses_registered_remote_store() {
     fs::rename(&project, &renamed).unwrap();
 
     assert!(
-        !TraceDecay::is_initialized_with_options(&renamed, &open_options),
-        "the synchronous marker check cannot see renamed registered stores"
+        TraceDecay::is_initialized_with_options(&renamed, &open_options),
+        "the durable git marker should resolve the moved profile store synchronously"
     );
     let reopened = serve::ensure_initialized_with_options(&renamed, open_options)
         .await
