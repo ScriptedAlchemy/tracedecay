@@ -874,7 +874,7 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
     let list = handle_tool_call(
         &cg,
         "tracedecay_project_list",
-        json!({"limit": 1}),
+        json!({"limit": 1, "format": "json"}),
         None,
         None,
     )
@@ -884,16 +884,52 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
     assert_eq!(list_payload["projects"].as_array().unwrap().len(), 1);
     assert_eq!(list_payload["limit"], 1);
     assert_eq!(list_payload["truncated"], true);
+    assert_eq!(list_payload["summary"]["project_count"], 1);
+    assert_eq!(list_payload["project_tree"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        list_payload["project_tree"][0]["projects"][0]["project_id"],
+        "proj_alpha"
+    );
+    assert_eq!(
+        list_payload["project_tree"][0]["projects"][0]["branches"][0],
+        "main"
+    );
+    // `proj_alpha` was registered at `cg.project_root()`, so it is the
+    // calling project and must be marked active in both the flat project
+    // list and the grouped project_tree.
+    assert_eq!(
+        list_payload["projects"][0]["is_active"], true,
+        "the calling project must be marked is_active in project list: {list_payload}"
+    );
+    assert_eq!(
+        list_payload["project_tree"][0]["projects"][0]["is_active"], true,
+        "the calling project must be marked is_active in the project_tree: {list_payload}"
+    );
     let list_text = extract_text(&list.value);
     assert!(
         !list_text.contains("secret") && !list_text.contains("git_remote_url"),
         "project list must not expose credential-bearing remotes: {list_text}"
     );
+    let list_markdown = handle_tool_call(
+        &cg,
+        "tracedecay_project_list",
+        json!({"limit": 1, "format": "markdown"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let list_markdown_text = extract_text(&list_markdown.value);
+    assert!(
+        list_markdown_text.contains("Repositories")
+            && list_markdown_text.contains("branches: main"),
+        "project list should render compact grouped markdown: {list_markdown_text}"
+    );
 
     let search = handle_tool_call(
         &cg,
         "tracedecay_project_search",
-        json!({"query": "alpha", "limit": 10}),
+        json!({"query": "alpha", "limit": 10, "format": "json"}),
         None,
         None,
     )
@@ -903,16 +939,60 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
     let search_projects = search_payload["projects"].as_array().unwrap();
     assert_eq!(search_projects.len(), 1);
     assert_eq!(search_projects[0]["project_id"], "proj_alpha");
+    assert_eq!(
+        search_projects[0]["is_active"], true,
+        "the calling project must be marked is_active in project search: {search_payload}"
+    );
+    assert_eq!(search_payload["project_tree"].as_array().unwrap().len(), 1);
     let search_text = extract_text(&search.value);
     assert!(
         !search_text.contains("secret") && !search_text.contains("git_remote_url"),
         "project search must not expose credential-bearing remotes: {search_text}"
     );
 
+    let multi_term_search = handle_tool_call(
+        &cg,
+        "tracedecay_project_search",
+        json!({"query": "alpha beta", "limit": 10, "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let multi_term_payload: Value =
+        serde_json::from_str(extract_text(&multi_term_search.value)).unwrap();
+    let multi_term_ids: Vec<&str> = multi_term_payload["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|project| project["project_id"].as_str())
+        .collect();
+    assert!(
+        multi_term_ids.contains(&"proj_alpha") && multi_term_ids.contains(&"proj_beta"),
+        "multi-term project search should match either term: {multi_term_payload}"
+    );
+
+    let remote_secret_search = handle_tool_call(
+        &cg,
+        "tracedecay_project_search",
+        json!({"query": "secret", "limit": 10, "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let remote_secret_payload: Value =
+        serde_json::from_str(extract_text(&remote_secret_search.value)).unwrap();
+    assert_eq!(
+        remote_secret_payload["projects"].as_array().unwrap().len(),
+        0,
+        "project search must not match credential-bearing remote URL text: {remote_secret_payload}"
+    );
+
     let context = handle_tool_call(
         &cg,
         "tracedecay_project_context",
-        json!({"project_id": "proj_alpha"}),
+        json!({"project_id": "proj_alpha", "format": "json"}),
         None,
         None,
     )
@@ -920,6 +1000,14 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
     .unwrap();
     let context_payload: Value = serde_json::from_str(extract_text(&context.value)).unwrap();
     assert_eq!(context_payload["project"]["project_id"], "proj_alpha");
+    assert_eq!(
+        context_payload["is_active"], true,
+        "the calling project must be marked is_active in project context: {context_payload}"
+    );
+    assert_eq!(
+        context_payload["project"]["is_active"], true,
+        "the nested project record must also carry is_active: {context_payload}"
+    );
     let context_text = extract_text(&context.value);
     assert!(
         !context_text.contains("secret") && !context_text.contains("git_remote_url"),
@@ -934,6 +1022,56 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
         context_payload["stores"][0]["artifacts"][0]["artifact_kind"],
         "graph_db"
     );
+}
+
+/// When no project registry is present for the profile, `tracedecay_project_list`
+/// and `tracedecay_project_search` must still return the same top-level keys
+/// as the ok-shape (`title`, `summary`, `project_tree`) with zeroed/empty
+/// values, mirroring `src/dashboard/projects.rs`'s missing-registry branch,
+/// so callers can rely on a stable payload shape either way.
+#[tokio::test]
+async fn project_registry_tools_missing_registry_carries_stable_shape() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let registry_dir = test_temp_dir();
+    // Point at a path with no file on disk so the registry resolves to "missing".
+    let registry_path = registry_dir.path().join("does-not-exist.db");
+    let _env_guard = GlobalDbEnvGuard::set(&registry_path);
+
+    let list = handle_tool_call(
+        &cg,
+        "tracedecay_project_list",
+        json!({"format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let list_payload: Value = serde_json::from_str(extract_text(&list.value)).unwrap();
+    assert_eq!(list_payload["status"], "not_found");
+    assert_eq!(list_payload["title"], "registered projects");
+    assert_eq!(list_payload["summary"]["project_count"], 0);
+    assert_eq!(list_payload["summary"]["repo_count"], 0);
+    assert_eq!(list_payload["summary"]["truncated"], false);
+    assert_eq!(list_payload["project_tree"].as_array().unwrap().len(), 0);
+    assert_eq!(list_payload["projects"].as_array().unwrap().len(), 0);
+
+    let search = handle_tool_call(
+        &cg,
+        "tracedecay_project_search",
+        json!({"query": "alpha", "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let search_payload: Value = serde_json::from_str(extract_text(&search.value)).unwrap();
+    assert_eq!(search_payload["status"], "not_found");
+    assert_eq!(search_payload["title"], "projects matching \"alpha\"");
+    assert_eq!(search_payload["summary"]["project_count"], 0);
+    assert_eq!(search_payload["summary"]["repo_count"], 0);
+    assert_eq!(search_payload["summary"]["truncated"], false);
+    assert_eq!(search_payload["project_tree"].as_array().unwrap().len(), 0);
+    assert_eq!(search_payload["projects"].as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]
@@ -15208,6 +15346,213 @@ async fn type_hierarchy_surfaces_store_failure_instead_of_empty_tree() {
     );
 }
 
+/// `project_scope` is a closed enum: any value other than `all_registered`
+/// must fail closed rather than silently degrade to a single-project search.
+#[tokio::test]
+async fn message_search_rejects_unsupported_project_scope() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    for invalid in ["everything", "all", "registered", "ALL_REGISTERED"] {
+        let err = expect_tool_error(
+            handle_tool_call(
+                &cg,
+                "tracedecay_message_search",
+                json!({"query": "anything", "project_scope": invalid}),
+                None,
+                None,
+            )
+            .await,
+        );
+        assert!(
+            err.contains("project_scope must be omitted or all_registered"),
+            "unexpected error for project_scope {invalid:?}: {err}"
+        );
+    }
+}
+
+/// `all_registered` sweeps every registered project, so pairing it with a
+/// single-project selector is contradictory and must be rejected.
+#[tokio::test]
+async fn message_search_rejects_all_registered_with_project_selector() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    for selector in [
+        json!({"project_id": "proj_x"}),
+        json!({"project_path": "/some/path"}),
+        json!({"project_root": "/some/path"}),
+        json!({"project_selector": {"path": "/some/path"}}),
+    ] {
+        let mut args = json!({"query": "anything", "project_scope": "all_registered"});
+        args.as_object_mut()
+            .unwrap()
+            .extend(selector.as_object().unwrap().clone());
+        let err = expect_tool_error(
+            handle_tool_call(&cg, "tracedecay_message_search", args, None, None).await,
+        );
+        assert!(
+            err.contains(
+                "project_scope cannot be combined with project_id, project_path, project_root, or project_selector"
+            ),
+            "unexpected error for selector {selector}: {err}"
+        );
+    }
+}
+
+/// Regression (fault isolation): a single registered project whose store
+/// artifact carries a malformed (path-escaping) relpath must be skipped, not
+/// abort the whole cross-project sweep. The healthy project must still be
+/// searched and its hit returned.
+#[tokio::test]
+async fn message_search_all_registered_skips_project_with_malformed_relpath() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let profile_root = cg.project_root().join("home/.tracedecay");
+    let registry = GlobalDb::open().await.expect("global registry should open");
+
+    // Healthy registered project with a real, searchable session db.
+    let good_project = cg.project_root().join("registered-good");
+    fs::create_dir_all(&good_project).unwrap();
+    let good_store_relpath = "projects/proj_good";
+    let good_store_root = profile_root.join(good_store_relpath);
+    fs::create_dir_all(&good_store_root).unwrap();
+    let good_session_db = good_store_root.join("sessions.db");
+    let good = registry
+        .upsert_code_project("proj_good", &good_project, None, None, Some("main"))
+        .await
+        .expect("good project should upsert");
+    let good_store = registry
+        .upsert_store_instance(tracedecay::global_db::StoreInstanceUpsert {
+            store_id: "store_good".to_string(),
+            project_id: good.project_id,
+            store_kind: "code_project".to_string(),
+            storage_mode: "profile_sharded".to_string(),
+            store_relpath: good_store_relpath.to_string(),
+            manifest_relpath: None,
+            last_verified_at: Some(1),
+            last_write_at: Some(1),
+        })
+        .await
+        .expect("good store should upsert");
+    registry
+        .upsert_store_artifact(tracedecay::global_db::StoreArtifactUpsert {
+            store_id: good_store.store_id,
+            artifact_kind: "sessions_db".to_string(),
+            relpath: format!("{good_store_relpath}/sessions.db"),
+            size_bytes: None,
+            schema_version: Some("1".to_string()),
+            updated_at: Some(1),
+        })
+        .await
+        .expect("good session artifact should upsert");
+
+    // Malformed registered project: the sessions_db artifact relpath escapes
+    // the profile root, so `registry_session_db_candidates` errors on it.
+    let bad_project = cg.project_root().join("registered-bad");
+    fs::create_dir_all(&bad_project).unwrap();
+    let bad = registry
+        .upsert_code_project("proj_bad", &bad_project, None, None, Some("main"))
+        .await
+        .expect("bad project should upsert");
+    let bad_store = registry
+        .upsert_store_instance(tracedecay::global_db::StoreInstanceUpsert {
+            store_id: "store_bad".to_string(),
+            project_id: bad.project_id,
+            store_kind: "code_project".to_string(),
+            storage_mode: "profile_sharded".to_string(),
+            store_relpath: "projects/proj_bad".to_string(),
+            manifest_relpath: None,
+            last_verified_at: Some(1),
+            last_write_at: Some(1),
+        })
+        .await
+        .expect("bad store should upsert");
+    registry
+        .upsert_store_artifact(tracedecay::global_db::StoreArtifactUpsert {
+            store_id: bad_store.store_id,
+            artifact_kind: "sessions_db".to_string(),
+            relpath: "../escape/sessions.db".to_string(),
+            size_bytes: None,
+            schema_version: Some("1".to_string()),
+            updated_at: Some(1),
+        })
+        .await
+        .expect("bad session artifact should upsert");
+
+    let good_db = GlobalDb::open_at(&good_session_db)
+        .await
+        .expect("good session db should open");
+    let good_project_path = good_project.to_string_lossy().to_string();
+    assert!(
+        good_db
+            .upsert_session(&SessionRecord {
+                provider: "cursor".to_string(),
+                session_id: "good-session".to_string(),
+                project_key: good_project_path.clone(),
+                project_path: good_project_path.clone(),
+                title: Some("Good project".to_string()),
+                started_at: Some(1),
+                ended_at: None,
+                transcript_path: Some("good-session.jsonl".to_string()),
+                metadata_json: None,
+                parent_session_id: None,
+                is_subagent: false,
+                agent_id: None,
+                parent_tool_use_id: None,
+            })
+            .await
+    );
+    assert!(
+        good_db
+            .upsert_session_message(&SessionMessageRecord {
+                provider: "cursor".to_string(),
+                message_id: "good-message".to_string(),
+                session_id: "good-session".to_string(),
+                role: "assistant".to_string(),
+                timestamp: Some(2),
+                ordinal: 1,
+                text: "isolationtokenzz stays searchable despite a broken neighbor.".to_string(),
+                kind: Some("message".to_string()),
+                model: Some("test-model".to_string()),
+                tool_names: None,
+                source_path: Some("good-session.jsonl".to_string()),
+                source_offset: Some(0),
+                metadata_json: None,
+            })
+            .await
+    );
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "query": "isolationtokenzz",
+            "provider": "cursor",
+            "project_scope": "all_registered",
+            "limit": 5,
+            "catch_up": false
+        }),
+        None,
+        None,
+    )
+    .await
+    .expect("a malformed neighbor must not abort the cross-project sweep");
+    let parsed = extract_json(&result.value);
+    assert_eq!(parsed["status"], "ok", "{parsed}");
+    assert_eq!(parsed["count"], 1, "{parsed}");
+    assert_eq!(
+        parsed["results"][0]["message"]["message_id"], "good-message",
+        "healthy project must still be searched: {parsed}"
+    );
+    assert!(
+        parsed["searched_project_count"]
+            .as_u64()
+            .unwrap_or_default()
+            >= 1,
+        "the healthy project must still be searched: {parsed}"
+    );
+    assert!(
+        parsed["skipped_project_count"].as_u64().unwrap_or_default() >= 1,
+        "the malformed project must be counted as skipped: {parsed}"
+    );
+}
+
 #[tokio::test]
 async fn message_search_selects_registered_project_session_db_by_project_id() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -15298,6 +15643,20 @@ async fn message_search_selects_registered_project_session_db_by_project_id() {
         .await
         .expect("session artifact should upsert");
 
+    for index in 0..500 {
+        let dummy_project = cg.project_root().join(format!("registered-dummy-{index}"));
+        registry
+            .upsert_code_project(
+                &format!("proj_cross_messages_dummy_{index}"),
+                &dummy_project,
+                None,
+                None,
+                Some("main"),
+            )
+            .await
+            .expect("dummy registered project should upsert");
+    }
+
     let target_db = GlobalDb::open_at(&target_session_db)
         .await
         .expect("registered project session db should open");
@@ -15339,7 +15698,6 @@ async fn message_search_selects_registered_project_session_db_by_project_id() {
             })
             .await
     );
-
     fn message_search_args(selector: Value) -> Value {
         let mut args = json!({
             "query": "dragonfruit",
@@ -15400,6 +15758,100 @@ async fn message_search_selects_registered_project_session_db_by_project_id() {
             "{label}: {parsed}"
         );
     }
+
+    assert!(
+        target_db
+            .upsert_session_message(&SessionMessageRecord {
+                provider: "cursor".to_string(),
+                message_id: "target-old-message".to_string(),
+                session_id: "target-session".to_string(),
+                role: "assistant".to_string(),
+                timestamp: Some(5),
+                ordinal: 0,
+                text: "Cross project dragonfruit belongs to the registered database but is old."
+                    .to_string(),
+                kind: Some("message".to_string()),
+                model: Some("test-model".to_string()),
+                tool_names: None,
+                source_path: Some("target-session.jsonl".to_string()),
+                source_offset: Some(0),
+                metadata_json: None,
+            })
+            .await
+    );
+
+    let all_registered = handle_tool_call(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "query": "dragonfruit",
+            "provider": "cursor",
+            "project_scope": "all_registered",
+            "since": 10,
+            "limit": 5,
+            "catch_up": false
+        }),
+        None,
+        None,
+    )
+    .await
+    .expect("all_registered project scope should search registered session DBs");
+    let parsed = extract_json(&all_registered.value);
+    assert_eq!(parsed["status"], "ok", "{parsed}");
+    assert_eq!(parsed["project_scope"], "all_registered", "{parsed}");
+    assert!(
+        parsed["searched_project_count"]
+            .as_u64()
+            .unwrap_or_default()
+            >= 1,
+        "{parsed}"
+    );
+    assert!(
+        parsed["skipped_project_count"].as_u64().unwrap_or_default() >= 500,
+        "{parsed}"
+    );
+    assert_eq!(parsed["count"], 1, "{parsed}");
+    assert_eq!(
+        parsed["results"][0]["message"]["message_id"], "target-message",
+        "{parsed}"
+    );
+
+    let cursor_slug = cursor_project_slug(&target_project).expect("target project should slug");
+    let cursor_dir = cg
+        .project_root()
+        .join("home/.cursor/projects")
+        .join(cursor_slug)
+        .join("agent-transcripts");
+    fs::create_dir_all(&cursor_dir).unwrap();
+    fs::write(
+        cursor_dir.join("registered-catchup.jsonl"),
+        r#"{"role":"assistant","message":{"content":[{"type":"text","text":"regcatchuptokenzz appears only in transcript."}]}}
+"#,
+    )
+    .unwrap();
+    let catch_up_registered = handle_tool_call(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "query": "regcatchuptokenzz",
+            "provider": "cursor",
+            "project_scope": "all_registered",
+            "limit": 5
+        }),
+        None,
+        None,
+    )
+    .await
+    .expect("all_registered default catch_up should ingest registered transcripts");
+    let parsed = extract_json(&catch_up_registered.value);
+    assert_eq!(parsed["status"], "ok", "{parsed}");
+    assert_eq!(parsed["catch_up"], true, "{parsed}");
+    assert_eq!(parsed["catch_up_performed"], true, "{parsed}");
+    assert_eq!(parsed["count"], 1, "{parsed}");
+    assert_eq!(
+        parsed["results"][0]["message"]["provider"], "cursor",
+        "{parsed}"
+    );
 
     for (label, selector) in [
         (

@@ -301,6 +301,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         "tracedecay_storage_status" => info::handle_storage_status(cg, args, scope_prefix).await,
         "tracedecay_project_list" => {
             info::handle_project_list(
+                cg,
                 args,
                 options.global_db,
                 options.allow_default_registry_fallback,
@@ -309,6 +310,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         }
         "tracedecay_project_search" => {
             info::handle_project_search(
+                cg,
                 args,
                 options.global_db,
                 options.allow_default_registry_fallback,

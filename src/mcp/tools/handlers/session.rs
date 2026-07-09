@@ -27,7 +27,8 @@ use crate::sessions::lcm::{
     LcmSummarizerMode,
 };
 use crate::sessions::{
-    ProviderScope, SessionSearchFilters, SessionSearchScope, SessionSearchTimeRange,
+    ProviderScope, SessionMessageSearchResult, SessionSearchFilters, SessionSearchScope,
+    SessionSearchTimeRange,
 };
 use crate::timeutil::SearchTimeBound;
 use crate::tracedecay::{TraceDecay, current_timestamp};
@@ -61,6 +62,18 @@ fn render_message_search_md(value: &Value) -> String {
         }
     }
     md.field("count", &render::field_i64(value, "count").to_string());
+    if let Some(scope) = value
+        .get("project_scope")
+        .and_then(Value::as_str)
+        .filter(|scope| !scope.is_empty())
+    {
+        let searched = render::field_i64(value, "searched_project_count");
+        let skipped = render::field_i64(value, "skipped_project_count");
+        md.field(
+            "project scope",
+            &format!("{scope} (searched {searched}, skipped {skipped})"),
+        );
+    }
     if let Some(summary) = git_filter_summary(value) {
         md.field("git filter", &summary);
     }
@@ -305,6 +318,218 @@ fn registry_session_db_candidates(
         );
     }
     Ok(candidates)
+}
+
+fn message_search_has_registered_project_selector(args: &Value) -> bool {
+    args.get("project_selector").is_some()
+        || args.get("project_id").is_some()
+        || args.get("project_path").is_some()
+        || args.get("project_root").is_some()
+}
+
+struct MessageSearchRequest<'a> {
+    query: &'a str,
+    provider_scope: ProviderScope,
+    requested_provider: Option<&'static str>,
+    project_key: Option<&'a str>,
+    parent_session_id: Option<&'a str>,
+    workflow_run: Option<&'a str>,
+    workflow_agent: Option<&'a str>,
+    include_subagents: bool,
+    catch_up: bool,
+    scope: SessionSearchScope,
+    limit: usize,
+    git_filter: GitScopeFilter,
+    time_range: SessionSearchTimeRange,
+    workflow_scope: Option<WorkflowScopeFilter>,
+}
+
+fn parse_message_search_request(args: &Value) -> Result<MessageSearchRequest<'_>> {
+    let query = args
+        .get("query")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "missing required parameter: query".to_string(),
+        })?;
+    let provider_scope = parse_message_search_provider_scope(args)?;
+    let workflow_run = string_arg(args, "workflow_run");
+    let workflow_agent = string_arg(args, "workflow_agent");
+    let include_subagents = args
+        .get("include_subagents")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let mut scope = parse_message_search_scope(args)?;
+    if !include_subagents && matches!(scope, SessionSearchScope::All) {
+        scope = SessionSearchScope::ParentsOnly;
+    }
+    Ok(MessageSearchRequest {
+        query,
+        provider_scope,
+        requested_provider: provider_scope.provider_id(),
+        project_key: args
+            .get("project_key")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|project_key| !project_key.is_empty()),
+        parent_session_id: args
+            .get("parent_session_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|parent_session_id| !parent_session_id.is_empty()),
+        workflow_run,
+        workflow_agent,
+        include_subagents,
+        catch_up: args
+            .get("catch_up")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        scope,
+        limit: args
+            .get("limit")
+            .and_then(Value::as_u64)
+            .unwrap_or(10)
+            .clamp(1, 50) as usize,
+        git_filter: parse_git_scope_filter(args)?,
+        time_range: message_search_time_range(args)?,
+        workflow_scope: workflow_run.map(|run_id| WorkflowScopeFilter {
+            run_id: run_id.to_string(),
+            agent_label: workflow_agent.map(str::to_string),
+        }),
+    })
+}
+
+fn message_search_filters<'a>(request: &MessageSearchRequest<'a>) -> SessionSearchFilters<'a> {
+    SessionSearchFilters {
+        scope: request.scope,
+        parent_session_id: request.parent_session_id,
+        time_range: request.time_range,
+    }
+}
+
+async fn search_session_messages_in_db(
+    db: &GlobalDb,
+    request: &MessageSearchRequest<'_>,
+) -> Vec<SessionMessageSearchResult> {
+    if let Some(workflow_filter) = &request.workflow_scope {
+        db.search_session_messages_workflow_scoped(
+            request.requested_provider,
+            request.project_key,
+            request.query,
+            request.limit,
+            message_search_filters(request),
+            workflow_filter,
+        )
+        .await
+    } else if !request.git_filter.is_empty() {
+        db.search_session_messages_git_scoped(
+            request.requested_provider,
+            request.project_key,
+            request.query,
+            request.limit,
+            message_search_filters(request),
+            &request.git_filter,
+        )
+        .await
+    } else if let Some(provider) = request.requested_provider {
+        db.search_session_messages_filtered(
+            provider,
+            request.project_key,
+            request.query,
+            request.limit,
+            message_search_filters(request),
+        )
+        .await
+    } else {
+        db.search_session_messages_all_providers_filtered(
+            request.project_key,
+            request.query,
+            request.limit,
+            message_search_filters(request),
+        )
+        .await
+    }
+}
+
+/// Merge per-project shards into a single relevance-ordered top-K.
+///
+/// Each shard is truncated in SQL by BM25 relevance (`ORDER BY bm25(...) LIMIT
+/// k`, see `search_session_messages_*` in `global_db`), so the merged set must
+/// be re-sorted by the *same* key for the distributed top-K to be exact.
+/// Sorting by recency here would drop a top-relevance row a shard kept while
+/// surfacing lower-relevance-but-newer rows the shards never returned. Key:
+/// score DESC (relevance), then timestamp DESC, then a stable session/message
+/// id tie-break so equal-score rows order deterministically. This matches the
+/// single-project path, which returns DB rows already in BM25 order without a
+/// resort.
+fn sort_and_truncate_message_results_by_relevance(
+    results: &mut Vec<SessionMessageSearchResult>,
+    limit: usize,
+) {
+    results.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| b.message.timestamp.cmp(&a.message.timestamp))
+            .then_with(|| a.session.session_id.cmp(&b.session.session_id))
+            .then_with(|| a.message.message_id.cmp(&b.message.message_id))
+    });
+    results.truncate(limit);
+}
+
+fn message_search_payload(
+    request: &MessageSearchRequest<'_>,
+    results: &[SessionMessageSearchResult],
+    catch_up_performed: bool,
+) -> Value {
+    let mut payload = json!({
+        "status": "ok",
+        "provider": request.requested_provider.unwrap_or("all"),
+        "requested_provider": request.requested_provider,
+        "project_key": request.project_key,
+        "parent_session_id": request.parent_session_id,
+        "include_subagents": request.include_subagents,
+        "catch_up": request.catch_up,
+        "catch_up_performed": catch_up_performed,
+        "catch_up_provider": request.provider_scope.response_label(),
+        "scope": match request.scope {
+            SessionSearchScope::All => "all",
+            SessionSearchScope::ParentsOnly => "parents_only",
+            SessionSearchScope::SubagentsOnly => "subagents_only",
+        },
+        "since": request.time_range.start_time,
+        "until": request.time_range.end_time,
+        "query": request.query,
+        "count": results.len(),
+        "results": results,
+    });
+    if !request.git_filter.is_empty() {
+        if let Some(map) = payload.as_object_mut() {
+            map.insert(
+                "git_filter".to_string(),
+                serde_json::to_value(&request.git_filter).unwrap_or(Value::Null),
+            );
+            map.insert("git_filter_applied".to_string(), Value::Bool(true));
+        }
+    }
+    if request.workflow_scope.is_some() {
+        if let Some(map) = payload.as_object_mut() {
+            map.insert(
+                "workflow_run".to_string(),
+                request
+                    .workflow_run
+                    .map_or(Value::Null, |run| Value::String(run.to_string())),
+            );
+            if let Some(label) = request.workflow_agent {
+                map.insert(
+                    "workflow_agent".to_string(),
+                    Value::String(label.to_string()),
+                );
+            }
+            map.insert("workflow_filter_applied".to_string(), Value::Bool(true));
+        }
+    }
+    payload
 }
 
 fn lcm_preflight_tool_json(project_root: Option<&Path>, args: &Value, value: &Value) -> ToolResult {
@@ -1944,54 +2169,132 @@ pub(super) async fn handle_message_search(
     global_db: Option<&GlobalDb>,
     allow_default_registry_fallback: bool,
 ) -> Result<ToolResult> {
-    let query = args
-        .get("query")
+    let request = parse_message_search_request(&args)?;
+    let project_scope = args
+        .get("project_scope")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|query| !query.is_empty())
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "missing required parameter: query".to_string(),
-        })?;
-    let provider_scope = parse_message_search_provider_scope(&args)?;
-    let requested_provider = provider_scope.provider_id();
-    let project_key = args
-        .get("project_key")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|project_key| !project_key.is_empty());
-    let parent_session_id = args
-        .get("parent_session_id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|parent_session_id| !parent_session_id.is_empty());
-    // Workflow-run scoping narrows a search to the agent transcripts of one
-    // run via an EXISTS pushdown against `workflow_agents` (see
-    // `search_session_messages_workflow_scoped`), so a hit is kept only when it
-    // belongs to an agent of the run — not the whole parent thread.
-    // `workflow_agent`, when set, pins the scope to a single agent. Both are
-    // echoed in the payload so callers see the applied filter.
-    let workflow_run = string_arg(&args, "workflow_run");
-    let workflow_agent = string_arg(&args, "workflow_agent");
-    let include_subagents = args
-        .get("include_subagents")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    let catch_up = args
-        .get("catch_up")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    let mut scope = parse_message_search_scope(&args)?;
-    if !include_subagents && matches!(scope, SessionSearchScope::All) {
-        scope = SessionSearchScope::ParentsOnly;
+        .filter(|scope| !scope.is_empty());
+
+    if let Some(project_scope) = project_scope {
+        if project_scope != "all_registered" {
+            return Err(argument_error(
+                "project_scope must be omitted or all_registered",
+            ));
+        }
+        if message_search_has_registered_project_selector(&args) {
+            return Err(argument_error(
+                "project_scope cannot be combined with project_id, project_path, project_root, or project_selector",
+            ));
+        }
+        let owned_global;
+        let global = match global_db {
+            Some(global) => global,
+            None if allow_default_registry_fallback => {
+                owned_global = match GlobalDb::open().await {
+                    Some(global) => global,
+                    None => {
+                        return Ok(tool_json(
+                            Some(cg.project_root()),
+                            &args,
+                            &json!({
+                                "status": "unavailable",
+                                "message": "registered project search requires the global project registry",
+                                "project_scope": project_scope,
+                                "results": [],
+                                "count": 0
+                            }),
+                        ));
+                    }
+                };
+                &owned_global
+            }
+            None => {
+                return Err(TraceDecayError::Config {
+                    message: "client project registry is unavailable for selector resolution"
+                        .to_string(),
+                });
+            }
+        };
+        let profile_root = global
+            .db_path()
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "could not resolve tracedecay profile root".to_string(),
+            })?;
+        let mut results = Vec::new();
+        let mut searched_project_count = 0usize;
+        let mut skipped_project_count = 0usize;
+        for project in global.list_code_projects(usize::MAX).await {
+            let Some(context) = global
+                .project_registry_context_by_id(&project.project_id)
+                .await
+            else {
+                skipped_project_count += 1;
+                continue;
+            };
+            // One project's malformed store relpath must not abort the whole
+            // cross-project sweep; skip it like the neighboring missing-context
+            // / missing-db / open-failure branches.
+            let Ok(candidates) = registry_session_db_candidates(&context, &profile_root) else {
+                skipped_project_count += 1;
+                continue;
+            };
+            let Some(db_path) = candidates.into_iter().find(|path| path.is_file()) else {
+                skipped_project_count += 1;
+                continue;
+            };
+            let db = if request.catch_up {
+                open_session_db_with_cached_ensure(&db_path).await
+            } else {
+                GlobalDb::open_read_only_at(&db_path).await
+            };
+            let Some(db) = db else {
+                skipped_project_count += 1;
+                continue;
+            };
+            searched_project_count += 1;
+            if request.catch_up {
+                let display_root = Path::new(&context.project.display_root);
+                let project_root = if display_root.is_absolute() {
+                    display_root
+                } else {
+                    Path::new(&context.project.canonical_root)
+                };
+                let _ = crate::sessions::ingest_global_sources_for_provider(
+                    &db,
+                    project_root,
+                    request.provider_scope.provider(),
+                )
+                .await;
+            }
+            let mut project_results = search_session_messages_in_db(&db, &request).await;
+            results.append(&mut project_results);
+        }
+        sort_and_truncate_message_results_by_relevance(&mut results, request.limit);
+        let mut payload = message_search_payload(&request, &results, request.catch_up);
+        if let Some(map) = payload.as_object_mut() {
+            map.insert(
+                "project_scope".to_string(),
+                Value::String(project_scope.to_string()),
+            );
+            map.insert(
+                "searched_project_count".to_string(),
+                json!(searched_project_count),
+            );
+            map.insert(
+                "skipped_project_count".to_string(),
+                json!(skipped_project_count),
+            );
+        }
+        return Ok(tool_json_with_md(
+            Some(cg.project_root()),
+            &args,
+            &payload,
+            || render_message_search_md(&payload),
+        ));
     }
-    let limit = args
-        .get("limit")
-        .and_then(Value::as_u64)
-        .unwrap_or(10)
-        .clamp(1, 50) as usize;
-    let git_filter = parse_git_scope_filter(&args)?;
-    let git_filter_applied = !git_filter.is_empty();
-    let time_range = message_search_time_range(&args)?;
 
     let Some((db_path, target_root)) = selected_project_session_db_path(
         cg.project_root(),
@@ -2025,12 +2328,12 @@ pub(super) async fn handle_message_search(
             }),
         ));
     };
-    let catch_up_performed = catch_up;
+    let catch_up_performed = request.catch_up;
     if catch_up_performed {
         let _ = crate::sessions::ingest_global_sources_for_provider(
             &db,
             &target_root,
-            provider_scope.provider(),
+            request.provider_scope.provider(),
         )
         .await;
     }
@@ -2038,121 +2341,22 @@ pub(super) async fn handle_message_search(
     // parent thread purely for the echoed `workflow_run_parent_session` field
     // (the scope itself is authoritative via the `workflow_agents` EXISTS
     // pushdown, so an unknown/orphan parent no longer needs a sentinel).
-    let workflow_scope = workflow_run.map(|run_id| WorkflowScopeFilter {
-        run_id: run_id.to_string(),
-        agent_label: workflow_agent.map(str::to_string),
-    });
-    let workflow_filter_applied = workflow_scope.is_some();
-    let resolved_workflow_parent: Option<String> = match workflow_run {
+    let resolved_workflow_parent: Option<String> = match request.workflow_run {
         Some(run_id) => match db.workflow_run_for_id(run_id).await {
             Ok(Some(run)) if !run.parent_session_id.is_empty() => Some(run.parent_session_id),
             _ => None,
         },
         None => None,
     };
-    let results = if let Some(workflow_filter) = &workflow_scope {
-        db.search_session_messages_workflow_scoped(
-            requested_provider,
-            project_key,
-            query,
-            limit,
-            SessionSearchFilters {
-                scope,
-                parent_session_id,
-                time_range,
-            },
-            workflow_filter,
-        )
-        .await
-    } else if git_filter_applied {
-        db.search_session_messages_git_scoped(
-            requested_provider,
-            project_key,
-            query,
-            limit,
-            SessionSearchFilters {
-                scope,
-                parent_session_id,
-                time_range,
-            },
-            &git_filter,
-        )
-        .await
-    } else if let Some(provider) = requested_provider {
-        db.search_session_messages_filtered(
-            provider,
-            project_key,
-            query,
-            limit,
-            SessionSearchFilters {
-                scope,
-                parent_session_id,
-                time_range,
-            },
-        )
-        .await
-    } else {
-        db.search_session_messages_all_providers_filtered(
-            project_key,
-            query,
-            limit,
-            SessionSearchFilters {
-                scope,
-                parent_session_id,
-                time_range,
-            },
-        )
-        .await
-    };
-
-    let mut payload = json!({
-        "status": "ok",
-        "provider": requested_provider.unwrap_or("all"),
-        "requested_provider": requested_provider,
-        "selected_project_root": target_root,
-        "project_key": project_key,
-        "parent_session_id": parent_session_id,
-        "include_subagents": include_subagents,
-        "catch_up": catch_up,
-        "catch_up_performed": catch_up_performed,
-        "catch_up_provider": provider_scope.response_label(),
-        "scope": match scope {
-            SessionSearchScope::All => "all",
-            SessionSearchScope::ParentsOnly => "parents_only",
-            SessionSearchScope::SubagentsOnly => "subagents_only",
-        },
-        "since": time_range.start_time,
-        "until": time_range.end_time,
-        "query": query,
-        "count": results.len(),
-        "results": results,
-    });
-    if git_filter_applied {
-        if let Some(map) = payload.as_object_mut() {
-            map.insert(
-                "git_filter".to_string(),
-                serde_json::to_value(&git_filter).unwrap_or(Value::Null),
-            );
-            map.insert("git_filter_applied".to_string(), Value::Bool(true));
-        }
-    }
-    if workflow_filter_applied {
-        if let Some(map) = payload.as_object_mut() {
-            map.insert(
-                "workflow_run".to_string(),
-                workflow_run.map_or(Value::Null, |run| Value::String(run.to_string())),
-            );
-            if let Some(label) = workflow_agent {
-                map.insert(
-                    "workflow_agent".to_string(),
-                    Value::String(label.to_string()),
-                );
-            }
+    let results = search_session_messages_in_db(&db, &request).await;
+    let mut payload = message_search_payload(&request, &results, catch_up_performed);
+    if let Some(map) = payload.as_object_mut() {
+        map.insert("selected_project_root".to_string(), json!(target_root));
+        if request.workflow_scope.is_some() {
             map.insert(
                 "workflow_run_parent_session".to_string(),
                 resolved_workflow_parent.map_or(Value::Null, Value::String),
             );
-            map.insert("workflow_filter_applied".to_string(), Value::Bool(true));
         }
     }
     Ok(tool_json_with_md(

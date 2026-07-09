@@ -61,6 +61,11 @@ pub(super) fn def_message_search() -> ToolDefinition {
                     "type": "string",
                     "description": "Optional registered project root path or alias to search instead of the active project."
                 },
+                "project_scope": {
+                    "type": "string",
+                    "description": "Set to all_registered to search transcript messages across every registered project's session store. Cannot be combined with project_id, project_path, project_root, or project_selector.",
+                    "enum": ["all_registered"]
+                },
                 "branch": git_scope::branch_schema("Optional git branch filter: only messages from sessions active on this branch (via the session-git correlation index)."),
                 "worktree": git_scope::worktree_schema("Optional git worktree root path filter: only messages from sessions active in this worktree (via the session-git correlation index)."),
                 "commit": git_scope::commit_schema("Optional commit sha filter (full or >=6-char hex prefix): only messages from sessions attributed to this commit (via the session-git correlation index)."),

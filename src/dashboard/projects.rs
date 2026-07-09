@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
@@ -13,6 +13,9 @@ use tokio::sync::RwLock;
 use super::{DashboardState, build_selected_project_state, config_error};
 use crate::errors::Result;
 use crate::global_db::{GlobalDb, ProjectRegistryContext};
+use crate::project_registry::{
+    PublicCodeProject, PublicProjectRegistryContext, build_project_registry_view,
+};
 use crate::tracedecay::TraceDecay;
 
 #[derive(Clone)]
@@ -122,9 +125,17 @@ pub(crate) async fn list(
     let Some(db) = GlobalDb::open().await else {
         return Json(json!({
             "status": "missing_registry",
+            "limit": limit,
+            "truncated": false,
             "projects": [],
             "active_project_id": runtime.active_project_id(),
             "active_project_root": runtime.active_project_root(),
+            "summary": {
+                "project_count": 0,
+                "repo_count": 0,
+                "truncated": false,
+            },
+            "project_tree": [],
         }));
     };
 
@@ -132,25 +143,11 @@ pub(crate) async fn list(
     let truncated = projects.len() > limit;
     projects.truncate(limit);
     let active_project_id = runtime.active_project_id().map(str::to_string);
+    let contexts = db.project_registry_contexts_for_projects(&projects).await;
+    let view = build_project_registry_view(&contexts, runtime.active_project_id(), truncated);
     let rows = projects
-        .into_iter()
-        .map(|project| {
-            let is_active = Some(project.project_id.as_str()) == runtime.active_project_id();
-            let label = Path::new(&project.display_root)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or(project.display_root.as_str())
-                .to_string();
-            json!({
-                "project_id": project.project_id,
-                "label": label,
-                "project_root": project.display_root,
-                "canonical_root": project.canonical_root,
-                "default_branch": project.default_branch,
-                "last_seen_at": project.last_seen_at,
-                "is_active": is_active,
-            })
-        })
+        .iter()
+        .map(|project| PublicCodeProject::from_record(project, runtime.active_project_id()))
         .collect::<Vec<_>>();
 
     Json(json!({
@@ -159,6 +156,8 @@ pub(crate) async fn list(
         "truncated": truncated,
         "active_project_id": active_project_id,
         "active_project_root": runtime.active_project_root(),
+        "summary": view.summary,
+        "project_tree": view.project_tree,
         "projects": rows,
     }))
 }
@@ -195,7 +194,7 @@ pub(crate) async fn context(
         Json(json!({
             "status": "ok",
             "is_active": is_active,
-            "project": context.project,
+            "project": PublicProjectRegistryContext::new(&context, runtime.active_project_id()).project,
             "aliases": context.aliases,
             "stores": context.stores,
         })),

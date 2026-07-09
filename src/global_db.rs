@@ -5,6 +5,7 @@
 //! tokens-saved count. All operations are best-effort: failures are silently
 //! ignored so they never block the main MCP server loop.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -648,6 +649,24 @@ fn repo_identity_aliases(git_common_dir: Option<&Path>) -> Vec<String> {
     aliases
 }
 
+fn git_remote_search_alias(remote: Option<&str>) -> Option<String> {
+    let remote = remote?.trim().trim_end_matches('/');
+    if remote.is_empty() {
+        return None;
+    }
+    let name = remote
+        .rsplit_once('/')
+        .map(|(_, name)| name)
+        .or_else(|| remote.rsplit_once(':').map(|(_, name)| name))
+        .unwrap_or(remote)
+        .trim()
+        .trim_end_matches('/');
+    if name.is_empty() || name.contains('@') || name.contains("://") {
+        return None;
+    }
+    Some(format!("git-remote-name:{}", name.to_ascii_lowercase()))
+}
+
 fn project_identity_aliases(project_root: &Path, git_common_dir: Option<&Path>) -> Vec<String> {
     let mut aliases = Vec::with_capacity(2);
     aliases.push(GlobalDb::canonical_project_key(project_root));
@@ -1288,6 +1307,9 @@ impl GlobalDb {
         for alias in repo_identity_aliases(git_common_dir) {
             self.upsert_project_alias_key(&alias, project_id).await?;
         }
+        if let Some(alias) = git_remote_search_alias(git_remote_url) {
+            self.upsert_project_alias_key(&alias, project_id).await?;
+        }
         self.get_code_project(project_id).await
     }
 
@@ -1632,26 +1654,39 @@ impl GlobalDb {
 
     pub async fn search_code_projects(&self, query: &str, limit: usize) -> Vec<CodeProjectRecord> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let pattern = like_pattern(query);
+        let mut patterns: Vec<String> = query.split_whitespace().map(like_pattern).collect();
+        if patterns.is_empty() {
+            patterns.push(like_pattern(query));
+        }
+        let mut clauses = Vec::with_capacity(patterns.len());
+        for index in 1..=patterns.len() {
+            clauses.push(format!(
+                "(cp.project_id LIKE ?{index} ESCAPE '\\'
+                    OR cp.canonical_root LIKE ?{index} ESCAPE '\\'
+                    OR cp.display_root LIKE ?{index} ESCAPE '\\'
+                    OR COALESCE(cp.git_common_dir, '') LIKE ?{index} ESCAPE '\\'
+                    OR COALESCE(cp.default_branch, '') LIKE ?{index} ESCAPE '\\'
+                    OR COALESCE(pa.alias_path, '') LIKE ?{index} ESCAPE '\\')"
+            ));
+        }
+        let limit_param = patterns.len() + 1;
+        let sql = format!(
+            "SELECT DISTINCT cp.project_id, cp.canonical_root, cp.display_root,
+                    cp.git_common_dir, cp.git_remote_url, cp.default_branch,
+                    cp.created_at, cp.last_seen_at
+             FROM code_projects cp
+             LEFT JOIN project_aliases pa ON pa.project_id = cp.project_id
+             WHERE {}
+             ORDER BY cp.last_seen_at DESC, cp.project_id
+             LIMIT ?{limit_param}",
+            clauses.join(" OR ")
+        );
+        let mut params: Vec<libsql::Value> =
+            patterns.into_iter().map(libsql::Value::Text).collect();
+        params.push(libsql::Value::Integer(limit));
         let Ok(mut rows) = self
             .conn
-            .query(
-                "SELECT DISTINCT cp.project_id, cp.canonical_root, cp.display_root,
-                        cp.git_common_dir, cp.git_remote_url, cp.default_branch,
-                        cp.created_at, cp.last_seen_at
-                 FROM code_projects cp
-                 LEFT JOIN project_aliases pa ON pa.project_id = cp.project_id
-                 WHERE cp.project_id LIKE ?1 ESCAPE '\\'
-                    OR cp.canonical_root LIKE ?1 ESCAPE '\\'
-                    OR cp.display_root LIKE ?1 ESCAPE '\\'
-                    OR COALESCE(cp.git_common_dir, '') LIKE ?1 ESCAPE '\\'
-                    OR COALESCE(cp.git_remote_url, '') LIKE ?1 ESCAPE '\\'
-                    OR COALESCE(cp.default_branch, '') LIKE ?1 ESCAPE '\\'
-                    OR COALESCE(pa.alias_path, '') LIKE ?1 ESCAPE '\\'
-                 ORDER BY cp.last_seen_at DESC, cp.project_id
-                 LIMIT ?2",
-                params![pattern, limit],
-            )
+            .query(&sql, libsql::params_from_iter(params))
             .await
         else {
             return Vec::new();
@@ -1675,6 +1710,159 @@ impl GlobalDb {
             stores: self.list_store_contexts_for_project(project_id).await,
             project,
         })
+    }
+
+    pub async fn project_registry_contexts_for_projects(
+        &self,
+        projects: &[CodeProjectRecord],
+    ) -> Vec<ProjectRegistryContext> {
+        if projects.is_empty() {
+            return Vec::new();
+        }
+        let project_ids = projects
+            .iter()
+            .map(|project| project.project_id.clone())
+            .collect::<Vec<_>>();
+        let mut aliases_by_project = BTreeMap::<String, Vec<ProjectAliasRecord>>::new();
+        let Some(mut rows) = self
+            .query_string_ids(
+                "SELECT alias_path, project_id, last_seen_at
+                 FROM project_aliases
+                 WHERE project_id IN ({})
+                 ORDER BY alias_path",
+                &project_ids,
+            )
+            .await
+        else {
+            return projects
+                .iter()
+                .cloned()
+                .map(|project| ProjectRegistryContext {
+                    project,
+                    aliases: Vec::new(),
+                    stores: Vec::new(),
+                })
+                .collect();
+        };
+        while let Ok(Some(row)) = rows.next().await {
+            let alias = ProjectAliasRecord {
+                alias_path: row.get(0).unwrap_or_default(),
+                project_id: row.get(1).unwrap_or_default(),
+                last_seen_at: row.get(2).unwrap_or_default(),
+            };
+            aliases_by_project
+                .entry(alias.project_id.clone())
+                .or_default()
+                .push(alias);
+        }
+
+        let mut stores = Vec::new();
+        if let Some(mut rows) = self
+            .query_string_ids(
+                "SELECT store_id, project_id, store_kind, storage_mode, store_relpath,
+                        manifest_relpath, created_at, last_verified_at, last_write_at
+                 FROM store_instances
+                 WHERE project_id IN ({})
+                 ORDER BY COALESCE(last_verified_at, created_at) DESC, store_id",
+                &project_ids,
+            )
+            .await
+        {
+            while let Ok(Some(row)) = rows.next().await {
+                if let Some(store) = row_to_store_instance(&row, 0) {
+                    stores.push(store);
+                }
+            }
+        }
+        let store_ids = stores
+            .iter()
+            .map(|store| store.store_id.clone())
+            .collect::<Vec<_>>();
+        let mut graph_scopes_by_store = BTreeMap::<String, Vec<GraphScopeRecord>>::new();
+        let mut artifacts_by_store = BTreeMap::<String, Vec<StoreArtifactRecord>>::new();
+        if !store_ids.is_empty() {
+            if let Some(mut rows) = self
+                .query_string_ids(
+                    "SELECT graph_scope_id, project_id, store_id, branch_name, db_relpath,
+                            parent_scope_id, last_synced_at, writable
+                     FROM graph_scopes
+                     WHERE store_id IN ({})
+                     ORDER BY branch_name, graph_scope_id",
+                    &store_ids,
+                )
+                .await
+            {
+                while let Ok(Some(row)) = rows.next().await {
+                    if let Some(scope) = row_to_graph_scope(&row, 0) {
+                        graph_scopes_by_store
+                            .entry(scope.store_id.clone())
+                            .or_default()
+                            .push(scope);
+                    }
+                }
+            }
+            if let Some(mut rows) = self
+                .query_string_ids(
+                    "SELECT store_id, artifact_kind, relpath, size_bytes, schema_version, updated_at
+                     FROM store_artifacts
+                     WHERE store_id IN ({})
+                     ORDER BY artifact_kind, relpath",
+                    &store_ids,
+                )
+                .await
+            {
+                while let Ok(Some(row)) = rows.next().await {
+                    if let Some(artifact) = row_to_store_artifact(&row, 0) {
+                        artifacts_by_store
+                            .entry(artifact.store_id.clone())
+                            .or_default()
+                            .push(artifact);
+                    }
+                }
+            }
+        }
+        let mut stores_by_project = BTreeMap::<String, Vec<ProjectStoreContext>>::new();
+        for store in stores {
+            stores_by_project
+                .entry(store.project_id.clone())
+                .or_default()
+                .push(ProjectStoreContext {
+                    graph_scopes: graph_scopes_by_store
+                        .remove(&store.store_id)
+                        .unwrap_or_default(),
+                    artifacts: artifacts_by_store
+                        .remove(&store.store_id)
+                        .unwrap_or_default(),
+                    store,
+                });
+        }
+
+        let mut contexts = Vec::with_capacity(projects.len());
+        for project in projects {
+            contexts.push(ProjectRegistryContext {
+                project: project.clone(),
+                aliases: aliases_by_project
+                    .remove(&project.project_id)
+                    .unwrap_or_default(),
+                stores: stores_by_project
+                    .remove(&project.project_id)
+                    .unwrap_or_default(),
+            });
+        }
+        contexts
+    }
+
+    async fn query_string_ids(&self, sql_template: &str, ids: &[String]) -> Option<libsql::Rows> {
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let sql = sql_template.replace("{}", &placeholders);
+        let values = ids
+            .iter()
+            .map(|id| libsql::Value::Text(id.clone()))
+            .collect::<Vec<_>>();
+        self.conn
+            .query(&sql, libsql::params_from_iter(values))
+            .await
+            .ok()
     }
 
     pub async fn project_registry_context_by_alias(

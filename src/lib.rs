@@ -58,6 +58,7 @@ pub mod migrate;
 pub mod monitor;
 mod path_scope;
 mod path_tree;
+pub mod project_registry;
 pub mod redundancy;
 pub mod resolution;
 pub mod runtime_telemetry;

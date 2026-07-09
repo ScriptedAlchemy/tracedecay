@@ -504,6 +504,7 @@ impl PrivateStoreIo {
         let unlock_result = lock_file.unlock();
         append_result?;
         unlock_result?;
+        set_private_file_permissions(&lock_path)?;
         Ok(())
     }
 
@@ -843,8 +844,9 @@ fn set_private_file_permissions(_path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
-    use super::{PrivateStoreIo, append_lock_path};
+    use super::*;
     use serde_json::Value;
     use std::sync::{Arc, Barrier};
 
@@ -889,6 +891,7 @@ mod tests {
         for row in rows {
             serde_json::from_str::<Value>(row).unwrap();
         }
+        assert!(append_lock_path(&path).is_file());
     }
 
     #[test]

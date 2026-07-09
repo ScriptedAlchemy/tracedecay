@@ -882,7 +882,7 @@ fn def_project_list() -> ToolDefinition {
     def(
         "tracedecay_project_list",
         "Project List",
-        "List projects from the profile/global registry without opening or mutating their stores. Results are bounded and include only registry metadata.",
+        "List projects from the profile/global registry without opening or mutating their stores. Results are bounded and include only registry metadata. Output is grouped into a `project_tree` by repository alongside a `summary`, and the calling project is marked with `is_active` when it is registered.",
         json!({
             "type": "object",
             "properties": {
@@ -899,7 +899,7 @@ fn def_project_search() -> ToolDefinition {
     def(
         "tracedecay_project_search",
         "Project Search",
-        "Search registered projects by project id, root path, aliases, remote URL, or default branch. This is read-only and bounded.",
+        "Search registered projects by project id, root path, aliases, or default branch. This is read-only and bounded; output omits credential-bearing remotes. Output is grouped into a `project_tree` by repository alongside a `summary`, and the calling project is marked with `is_active` when it is registered.",
         json!({
             "type": "object",
             "properties": {
