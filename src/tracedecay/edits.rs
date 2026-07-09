@@ -381,7 +381,11 @@ impl TraceDecay {
         })?;
         let lines: Vec<&str> = source.lines().collect();
         let anchor_line = if before {
-            target.start_line as usize
+            // Anchor above the item's leading doc-comment / attribute block so
+            // "before" never splits docs from the item they document. For items
+            // with no leading block, attrs_start_line == start_line and this is
+            // the item line itself. The min() guards against inconsistent rows.
+            target.attrs_start_line.min(target.start_line) as usize
         } else {
             (target.end_line as usize).saturating_add(1)
         };

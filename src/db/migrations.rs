@@ -16,7 +16,7 @@ use crate::memory::store::MemoryStore;
 
 /// The highest migration version defined in this file. Bump this and add a
 /// new entry to `run_migration` whenever the schema changes.
-const LATEST_VERSION: u32 = 16;
+const LATEST_VERSION: u32 = 17;
 
 /// Reads the current schema version from `PRAGMA user_version`.
 async fn get_version(conn: &Connection) -> Result<u32> {
@@ -148,7 +148,12 @@ pub async fn create_schema(conn: &Connection) -> Result<()> {
             unchecked_calls INTEGER NOT NULL DEFAULT 0,
             assertions INTEGER NOT NULL DEFAULT 0,
             updated_at INTEGER NOT NULL,
-            attrs_start_line INTEGER NOT NULL DEFAULT 0,
+            -- Nullable and no default: a real value (including a legitimate 0 for
+            -- an item documented at the very top of a file) is written by every
+            -- extractor, and SQL NULL is reserved as the honest unset marker so
+            -- that a stored 0 is never mistaken for a defaulted/unknown value.
+            -- See row_to_node in db/rows.rs for the read-side contract.
+            attrs_start_line INTEGER,
             parent_id TEXT
         );
 
@@ -370,6 +375,7 @@ async fn run_migration(conn: &Connection, version: u32) -> Result<()> {
         14 => migrate_v14(conn).await,
         15 => migrate_v15(conn).await,
         16 => migrate_v16(conn).await,
+        17 => migrate_v17(conn).await,
         _ => Err(TraceDecayError::Database {
             message: format!("unknown migration version: {version}"),
             operation: "run_migration".to_string(),
@@ -586,6 +592,41 @@ async fn migrate_v16(conn: &Connection) -> Result<()> {
             message: format!("v16: failed to create redundancy_pairs table: {e}"),
             operation: "migrate_v16".to_string(),
         })?;
+    Ok(())
+}
+
+/// v17: semantic marker for the `attrs_start_line` sentinel fix.
+///
+/// The read path used to treat a stored `attrs_start_line = 0` as "unset" and
+/// substitute `start_line`. But 0 is a *legitimate* value: an item whose
+/// doc-comment / attribute block starts at the very top of a file (row 0) —
+/// e.g. `/// doc\nfn foo() {}` extracts as `attrs_start_line=0`, `start_line=1`.
+/// The conflation collapsed that to `attrs_start_line=1` after a DB round-trip,
+/// so symbol-aware editing lost the leading doc block for first-in-file items.
+///
+/// The new scheme: the stored integer (including 0) is trusted verbatim; SQL
+/// NULL is the only "unset" marker, and readers fall back to `start_line` for
+/// NULL alone. Fresh databases now create the column as nullable with no
+/// default (see `create_schema`).
+///
+/// This migration intentionally rewrites no data:
+/// - Rows whose legitimate 0 was already overwritten by the v7 backfill
+///   (`SET attrs_start_line = start_line WHERE attrs_start_line = 0`) are
+///   indistinguishable from correct rows and cannot be recovered here; they
+///   self-heal the next time their file is re-indexed and the true value is
+///   written back.
+/// - After v7, any remaining `attrs_start_line = 0` row necessarily has
+///   `start_line = 0` (file-root nodes), for which 0 is already the correct
+///   real value — mapping it to NULL would read back identically.
+/// - The legacy `NOT NULL DEFAULT 0` column constraint on migrated databases
+///   is left in place: `SQLite` cannot relax a column constraint without
+///   rebuilding the table, and rebuilding `nodes` inside this exclusive
+///   transaction (where `PRAGMA foreign_keys` cannot be toggled) would
+///   cascade-delete every child table. The constraint is harmless — all
+///   writers supply an explicit value, so the DEFAULT can never manufacture a
+///   false 0, and NULL is only ever *read*, never written, on such databases.
+#[allow(clippy::unused_async)] // keeps the migration dispatch uniform
+async fn migrate_v17(_conn: &Connection) -> Result<()> {
     Ok(())
 }
 
@@ -901,6 +942,20 @@ async fn migrate_v6(conn: &Connection) -> Result<()> {
 ///
 /// Existing rows are backfilled with `start_line` so behaviour is preserved
 /// for nodes indexed before this migration.
+///
+/// NOTE (reconciliation): this backfill (`SET attrs_start_line = start_line
+/// WHERE attrs_start_line = 0`) treated a stored `0` as "unset". That conflates
+/// a *legitimate* 0 — an item documented at the very top of a file — with the
+/// column default, and irreversibly overwrites such rows with `start_line`. The
+/// read path in [`crate::db::rows`] no longer makes that mistake: it trusts the
+/// stored integer (including 0) and only falls back to `start_line` for a SQL
+/// NULL / absent column. The fresh schema (`create_schema`) now declares the
+/// column nullable so 0 and "unset" are distinct going forward. Rows whose
+/// legitimate 0 was already destroyed by this historical backfill cannot be
+/// recovered here — they self-heal the next time the file is re-indexed and the
+/// true `attrs_start_line` is written back. The DDL below is intentionally left
+/// as-is (not rewritten) to keep migration history stable for databases that
+/// have already applied it.
 async fn migrate_v7(conn: &Connection) -> Result<()> {
     conn.execute(
         "ALTER TABLE nodes ADD COLUMN attrs_start_line INTEGER NOT NULL DEFAULT 0",

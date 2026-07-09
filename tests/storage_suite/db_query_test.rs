@@ -2796,6 +2796,93 @@ async fn test_attrs_start_line_round_trips_through_db() {
     assert_eq!(fetched.attrs_start_line, 6);
 }
 
+#[tokio::test]
+async fn test_attrs_start_line_zero_survives_round_trip() {
+    // An item documented at the very top of a file has its doc/attr block start
+    // at row 0 while the item itself starts at row 1 — exactly what RustExtractor
+    // emits for "/// doc\nfn foo() {}". A stored 0 is a *legitimate* value and
+    // must survive the DB round-trip strictly below start_line. Regression:
+    // `row_to_node` used to treat a stored 0 as "unset" and substitute
+    // start_line, which orphaned the leading doc/attr block for first-in-file
+    // items.
+    let db = setup_db().await;
+
+    let mut n = sample_node("first_in_file", "documented_fn", "src/lib.rs");
+    n.start_line = 1;
+    n.attrs_start_line = 0;
+    db.insert_node(&n).await.expect("insert failed");
+
+    let by_id = db
+        .get_node_by_id("first_in_file")
+        .await
+        .expect("query failed")
+        .expect("node missing");
+    assert_eq!(by_id.start_line, 1);
+    assert_eq!(
+        by_id.attrs_start_line, 0,
+        "a legitimate attrs_start_line=0 must not be rewritten to start_line"
+    );
+    assert!(
+        by_id.attrs_start_line < by_id.start_line,
+        "leading doc/attr block must remain above the item"
+    );
+
+    // The qualified-name path used by the edit/derive resolvers must agree.
+    let hits = db
+        .get_nodes_by_qualified_name("crate::documented_fn")
+        .await
+        .expect("query failed");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].attrs_start_line, 0);
+    assert!(hits[0].attrs_start_line < hits[0].start_line);
+}
+
+#[tokio::test]
+async fn test_attrs_start_line_null_falls_back_to_start_line() {
+    // A legacy row whose attrs_start_line is SQL NULL (a row predating the
+    // column, or an older writer that never set it) must fall back to start_line
+    // on read. This is now the *only* case the fallback covers, since a stored 0
+    // is trusted verbatim.
+    let dir = TempDir::new().expect("failed to create temp dir");
+    let db_path = dir.path().join("test.db");
+    support::seed_latest_graph_db(&db_path).await;
+
+    // The fresh schema declares attrs_start_line nullable, so a raw connection
+    // can persist an explicit NULL for this row.
+    let raw = libsql::Builder::new_local(&db_path)
+        .build()
+        .await
+        .expect("build raw db");
+    let conn = raw.connect().expect("connect raw");
+    conn.execute(
+        "INSERT INTO nodes (id, kind, name, qualified_name, file_path,
+                            start_line, end_line, start_column, end_column,
+                            updated_at, attrs_start_line)
+         VALUES ('legacy', 'function', 'legacy_fn', 'crate::legacy_fn', 'src/lib.rs',
+                 12, 20, 0, 1, 1000, NULL)",
+        (),
+    )
+    .await
+    .expect("insert legacy row");
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)", ())
+        .await
+        .ok();
+    drop(conn);
+    drop(raw);
+
+    let (db, _migrated) = Database::open(&db_path).await.expect("open db");
+    let fetched = db
+        .get_node_by_id("legacy")
+        .await
+        .expect("query failed")
+        .expect("node missing");
+    assert_eq!(fetched.start_line, 12);
+    assert_eq!(
+        fetched.attrs_start_line, fetched.start_line,
+        "a NULL attrs_start_line must fall back to start_line"
+    );
+}
+
 // -------------------------------------------------------------------------
 // get_test_annotated_node_ids
 // -------------------------------------------------------------------------
