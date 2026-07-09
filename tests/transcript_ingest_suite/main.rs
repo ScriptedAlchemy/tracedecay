@@ -15,6 +15,7 @@ mod claude;
 mod cline_like;
 mod codex;
 mod cursor;
+mod cursor_composer;
 mod hermes;
 mod kiro;
 mod vibe;

@@ -446,6 +446,10 @@ const SLUG_DECODE_PROBE_BUDGET: u32 = 4096;
 /// no-ops for the other, so sweep and hooks never double-ingest.
 pub struct CursorSweepSource {
     cursor_projects_dir: PathBuf,
+    /// Session ids already owned by the richer composer store
+    /// ([`crate::sessions::cursor_composer`]). Transcript files whose stem is
+    /// one of these are skipped so the two Cursor sources never double-ingest.
+    skip_session_ids: std::collections::HashSet<String>,
 }
 
 impl CursorSweepSource {
@@ -460,7 +464,16 @@ impl CursorSweepSource {
     pub fn with_home(home: &Path) -> Self {
         Self {
             cursor_projects_dir: home.join(".cursor").join("projects"),
+            skip_session_ids: std::collections::HashSet::new(),
         }
+    }
+
+    /// Skip transcript files whose stem (the Cursor session id) is owned by the
+    /// composer store, so the composer rows win without duplication.
+    #[must_use]
+    pub fn with_skip_session_ids(mut self, ids: std::collections::HashSet<String>) -> Self {
+        self.skip_session_ids = ids;
+        self
     }
 }
 
@@ -518,6 +531,15 @@ impl TranscriptSource for CursorSweepSource {
                     || path
                         .file_stem()
                         .is_none_or(|stem| !subagent_stems.contains(stem))
+            })
+            .filter(|path| {
+                // Composer-owned sessions are ingested (richer) by the composer
+                // sweep; skip the JSONL copy so neither path double-ingests.
+                self.skip_session_ids.is_empty()
+                    || path
+                        .file_stem()
+                        .and_then(std::ffi::OsStr::to_str)
+                        .is_none_or(|stem| !self.skip_session_ids.contains(stem))
             })
             .collect()
     }
@@ -1176,8 +1198,11 @@ fn message_metadata(
     );
     append_tool_calls_metadata(&mut metadata, message);
     append_tool_event_metadata(&mut metadata, content);
-    // Cursor transcripts carry no token counters today (verified across
-    // 100k+ real lines); this probe is future-proofing for when they do.
+    // These JSONL agent-transcript lines carry no token counters (verified
+    // across 100k+ real lines). Cursor *does* record per-turn token counts, but
+    // only in the composer store (`state.vscdb` bubbles), which the richer
+    // `cursor_composer` sweep reads and maps to `usage`. This probe stays as
+    // future-proofing in case the JSONL format gains counters too.
     append_usage_metadata(&mut metadata, &[record, message]);
     Value::Object(metadata)
 }
