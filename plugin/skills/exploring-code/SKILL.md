@@ -55,7 +55,10 @@ For other git branches without switching checkout — `tracedecay_branch_list` /
 - Search came up empty and a new helper seems needed → run the
   `tracedecay:editing-safely` duplicate probe first.
 - Similarity by functionality/body, not just by name → run
-  `tracedecay_redundancy` before concluding no duplicate exists.
+  `tracedecay_redundancy` before concluding no duplicate exists. Scoped hunt
+  recipe: `path` to the suspect directory, `min_lines: 6`,
+  `similarity_threshold: 0.55` — whole-repo scans at defaults favor precision
+  and can miss real duplicates.
 - "Who calls X / what does X call / what breaks" → hand off to
   `tracedecay:tracing-functions` / `tracedecay:assessing-impact` after resolving
   the symbol; do not grep for call sites.

@@ -1207,12 +1207,12 @@ mod tests {
             .iter()
             .find(|tool| tool.name == "tracedecay_redundancy")
             .expect("tracedecay_redundancy tool definition");
+        // Assert only literal output keys — free prose in the description may
+        // be reworded without breaking the ranking contract.
         for required in [
-            "body-vector cosine",
             "ranking_score",
             "body_vector_cosine",
             "generic_helper_downranked",
-            "grouped duplicate components",
         ] {
             assert!(
                 tool.description.contains(required),

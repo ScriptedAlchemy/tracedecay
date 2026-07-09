@@ -57,6 +57,11 @@ pub struct Fingerprint {
     pub source_hash: String,
 }
 
+/// Full scoring verdict for one candidate pair.
+///
+/// `ranking_score` orders results (composite blended with the discounted
+/// cosine, generic helpers downranked); `severity` is derived from the raw
+/// signals only — the generic-helper downrank never changes severity.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RedundancyMatchScore {
     pub similarity: f64,
@@ -441,6 +446,12 @@ pub fn vector_cosine_similarity(a: &[u32], b: &[u32]) -> f64 {
 
 /// Blend the four signals into a single \[0,1\] similarity score.
 pub fn composite_similarity(a: &Fingerprint, b: &Fingerprint) -> f64 {
+    composite_similarity_with_jaccard(a, b, jaccard_similarity(&a.shingles, &b.shingles))
+}
+
+/// [`composite_similarity`] with the shingle Jaccard already computed, so a
+/// caller scoring a pair pays the merge cost once.
+fn composite_similarity_with_jaccard(a: &Fingerprint, b: &Fingerprint, jaccard: f64) -> f64 {
     let ast = if a.ast_hash == b.ast_hash { 1.0 } else { 0.0 };
     let cfg = if a.cfg_hash == b.cfg_hash { 1.0 } else { 0.0 };
     let call = if a.call_seq_hash == b.call_seq_hash {
@@ -448,25 +459,35 @@ pub fn composite_similarity(a: &Fingerprint, b: &Fingerprint) -> f64 {
     } else {
         0.0
     };
-    let shingle = jaccard_similarity(&a.shingles, &b.shingles);
-    W_AST * ast + W_CFG * cfg + W_CALL_SEQ * call + W_SHINGLE * shingle
+    W_AST * ast + W_CFG * cfg + W_CALL_SEQ * call + W_SHINGLE * jaccard
 }
 
 /// Determine the "kind" of overlap two functions share. Returned alongside
 /// the composite score so callers can filter (e.g. drop `naming` matches).
 pub fn overlap_kind(a: &Fingerprint, b: &Fingerprint) -> &'static str {
+    overlap_kind_with_jaccard(a, b, jaccard_similarity(&a.shingles, &b.shingles))
+}
+
+/// [`overlap_kind`] with the shingle Jaccard already computed, so a caller
+/// scoring a pair pays the merge cost once.
+fn overlap_kind_with_jaccard(a: &Fingerprint, b: &Fingerprint, jaccard: f64) -> &'static str {
     if a.ast_hash == b.ast_hash {
         "ast_isomorphic"
     } else if a.cfg_hash == b.cfg_hash {
         "control_flow"
     } else if a.call_seq_hash == b.call_seq_hash {
         "algorithmic"
-    } else if jaccard_similarity(&a.shingles, &b.shingles) >= 0.5 {
+    } else if jaccard >= 0.5 {
         "token_overlap"
     } else {
         "naming"
     }
 }
+
+/// Minimum score for a non-AST match to be bucketed `likely`. Shared with the
+/// `naming` -> `body_vector` relabel in [`redundancy_match_score`] so a pair
+/// can never carry the `body_vector` kind with a `naming_only` severity.
+pub const LIKELY_SEVERITY_FLOOR: f64 = 0.55;
 
 /// Severity bucket for a `(score, overlap_kind)` pair.
 ///
@@ -478,13 +499,22 @@ pub fn severity_bucket(score: f64, kind: &str) -> &'static str {
         "definite"
     } else if kind == "naming" {
         "naming_only"
-    } else if score >= 0.55 {
+    } else if score >= LIKELY_SEVERITY_FLOOR {
         "likely"
     } else {
         "naming_only"
     }
 }
 
+/// Score a candidate pair, or `None` when it should not be reported.
+///
+/// A pair passes the gate when either the composite similarity or the
+/// body-vector cosine clears `threshold`. A `naming` pair whose cosine clears
+/// both `threshold` and [`LIKELY_SEVERITY_FLOOR`] is reclassified as
+/// `body_vector` (the body evidence, not the name, is what matched); weaker
+/// `naming` pairs stay `naming` and honor `include_naming`. Pairs sharing an
+/// identical non-generic name are retained as `naming_only` leads even below
+/// the gate (see [`same_name_rescue`]).
 pub fn redundancy_match_score(
     a_name: &str,
     a: &Fingerprint,
@@ -493,14 +523,28 @@ pub fn redundancy_match_score(
     threshold: f64,
     include_naming: bool,
 ) -> Option<RedundancyMatchScore> {
-    let similarity = composite_similarity(a, b);
-    let vector_cosine = vector_cosine_similarity(&a.shingles, &b.shingles);
-    if similarity < threshold && vector_cosine < threshold {
+    // Bodies below SHINGLE_N tokens have no shingle evidence at all; their
+    // ast/cfg/call hashes are near-constant (kinds only, no identifiers), so
+    // without token evidence only textually identical bodies are trustworthy.
+    if a.shingles.is_empty() && b.shingles.is_empty() && a.source_hash != b.source_hash {
         return None;
     }
 
-    let mut overlap_kind = overlap_kind(a, b);
-    if overlap_kind == "naming" && vector_cosine >= threshold {
+    let shingle_jaccard = jaccard_similarity(&a.shingles, &b.shingles);
+    let similarity = composite_similarity_with_jaccard(a, b, shingle_jaccard);
+    let vector_cosine = vector_cosine_similarity(&a.shingles, &b.shingles);
+    if similarity < threshold
+        && vector_cosine < threshold
+        && !same_name_rescue(a_name, b_name, vector_cosine, include_naming)
+    {
+        return None;
+    }
+
+    let mut overlap_kind = overlap_kind_with_jaccard(a, b, shingle_jaccard);
+    if overlap_kind == "naming"
+        && vector_cosine >= threshold
+        && vector_cosine >= LIKELY_SEVERITY_FLOOR
+    {
         overlap_kind = "body_vector";
     }
     if !include_naming && overlap_kind == "naming" {
@@ -508,6 +552,9 @@ pub fn redundancy_match_score(
     }
 
     let generic_helper_downranked = generic_helper_pair(a_name, b_name);
+    // The cosine-only signal is trusted slightly less than the composite, so
+    // rank it at a 0.95 discount. ranking_score is a rank key, not a
+    // thresholded quantity — it can legitimately sit below `threshold`.
     let mut ranking_score = similarity.max(vector_cosine * 0.95);
     if generic_helper_downranked {
         ranking_score *= 0.75;
@@ -517,21 +564,69 @@ pub fn redundancy_match_score(
         similarity,
         ranking_score,
         vector_cosine,
-        shingle_jaccard: jaccard_similarity(&a.shingles, &b.shingles),
+        shingle_jaccard,
         overlap_kind,
         severity: severity_bucket(similarity.max(vector_cosine), overlap_kind),
         generic_helper_downranked,
     })
 }
 
+/// Minimum body-vector cosine for the same-name rescue: identical non-generic
+/// names with less shared body than this are treated as coincidence.
+const SAME_NAME_COSINE_FLOOR: f64 = 0.3;
+
+/// Identical non-generic names across two bodies with modest vector overlap
+/// are real duplicate leads even when both score limbs miss the gate
+/// (verified live: `clean_comment` duplicated across extractor modules was
+/// invisible at every practical threshold). Rescued pairs keep their natural
+/// overlap kind — usually `naming` — and therefore surface only with
+/// `include_naming`, making that flag a genuine recall lever.
+fn same_name_rescue(a_name: &str, b_name: &str, vector_cosine: f64, include_naming: bool) -> bool {
+    include_naming
+        && a_name == b_name
+        && !is_generic_helper_name(a_name)
+        && vector_cosine >= SAME_NAME_COSINE_FLOOR
+}
+
 fn generic_helper_pair(a_name: &str, b_name: &str) -> bool {
     a_name == b_name && is_generic_helper_name(a_name)
 }
 
+/// Method names whose bodies are structurally near-identical across unrelated
+/// types (trait impls and ubiquitous idioms), in Rust and the other indexed
+/// languages. Pairs of these are downranked, never dropped, and only the
+/// ranking is affected — severity is intentionally left untouched.
 fn is_generic_helper_name(name: &str) -> bool {
     matches!(
         name,
-        "drop" | "fmt" | "clone" | "default" | "new" | "from" | "into" | "as_ref" | "as_mut"
+        "drop"
+            | "fmt"
+            | "clone"
+            | "default"
+            | "new"
+            | "from"
+            | "into"
+            | "as_ref"
+            | "as_mut"
+            | "eq"
+            | "ne"
+            | "hash"
+            | "cmp"
+            | "partial_cmp"
+            | "deref"
+            | "deref_mut"
+            | "index"
+            | "next"
+            | "len"
+            | "is_empty"
+            | "to_string"
+            | "try_from"
+            | "constructor"
+            | "toString"
+            | "__init__"
+            | "__str__"
+            | "__repr__"
+            | "__eq__"
     )
 }
 
@@ -549,10 +644,195 @@ fn short_hex(bytes: &[u8]) -> String {
     s
 }
 
+/// Round a score to 4 decimal places for stable JSON/markdown output.
+pub fn round4(value: f64) -> f64 {
+    (value * 10000.0).round() / 10000.0
+}
+
 fn short_sha256(s: &str) -> String {
     let mut h = Sha256::new();
     h.update(s.as_bytes());
     short_hex(h.finalize().as_slice())
+}
+
+// ---------------------------------------------------------------------------
+// Pairwise redundancy scan
+// ---------------------------------------------------------------------------
+
+/// One scored redundant pair: the [`RedundancyMatchScore`] verdict plus
+/// borrows of the two graph nodes and their fingerprints. Orientation is
+/// canonicalized by [`redundant_pair`] so the same logical pair always
+/// presents the same `a`/`b` sides regardless of input order.
+pub struct RedundantPair<'a> {
+    pub score: RedundancyMatchScore,
+    pub node_a: &'a crate::types::Node,
+    pub node_b: &'a crate::types::Node,
+    pub fp_a: &'a Fingerprint,
+    pub fp_b: &'a Fingerprint,
+}
+
+/// Scan a set of `(node, fingerprint)` candidates for redundant pairs.
+///
+/// Candidates are sorted by `body_tokens` (ties broken on node id so the
+/// enumeration order never depends on DB row order), then each is compared
+/// only against the following candidates whose token count falls inside its
+/// ±25 % [`body_token_window`] — a linear window over the sorted slice that
+/// keeps the pairwise comparison sub-quadratic. Surviving pairs are ranked by
+/// `ranking_score` (a total order: ties fall through similarity, cosine, then
+/// names and node ids) and truncated to `max_pairs`.
+pub fn find_redundant_pairs<'a>(
+    mut scoped: Vec<(&'a crate::types::Node, &'a Fingerprint)>,
+    threshold: f64,
+    include_naming: bool,
+    max_pairs: usize,
+) -> Vec<RedundantPair<'a>> {
+    // Sort by body_tokens so the size-window check is a linear scan; break
+    // ties on node id so candidate enumeration never depends on DB row order.
+    scoped.sort_by(|(na, fa), (nb, fb)| {
+        fa.body_tokens
+            .cmp(&fb.body_tokens)
+            .then_with(|| na.id.cmp(&nb.id))
+    });
+
+    let mut found = Vec::new();
+    for (i, (node_a, fp_a)) in scoped.iter().enumerate() {
+        let (lo, hi) = body_token_window(fp_a.body_tokens);
+        for (node_b, fp_b) in scoped.iter().skip(i + 1) {
+            if fp_b.body_tokens > hi {
+                break; // sorted, no need to scan further
+            }
+            if fp_b.body_tokens < lo {
+                continue;
+            }
+            if let Some(pair) =
+                redundant_pair(node_a, fp_a, node_b, fp_b, threshold, include_naming)
+            {
+                found.push(pair);
+            }
+        }
+    }
+
+    found.sort_by(|a: &RedundantPair<'_>, b: &RedundantPair<'_>| {
+        b.score
+            .ranking_score
+            .partial_cmp(&a.score.ranking_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                b.score
+                    .similarity
+                    .partial_cmp(&a.score.similarity)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| {
+                b.score
+                    .vector_cosine
+                    .partial_cmp(&a.score.vector_cosine)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.node_a.name.cmp(&b.node_a.name))
+            .then_with(|| a.node_b.name.cmp(&b.node_b.name))
+            .then_with(|| a.node_a.id.cmp(&b.node_a.id))
+            .then_with(|| a.node_b.id.cmp(&b.node_b.id))
+    });
+    found.truncate(max_pairs);
+
+    found
+}
+
+/// The ±25 % `body_tokens` window used to bucket candidates before scoring.
+/// Returns the inclusive `(low, high)` token bounds for a body of the given
+/// size.
+pub fn body_token_window(body_tokens: usize) -> (usize, usize) {
+    (
+        (body_tokens as f64 * 0.75).floor() as usize,
+        (body_tokens as f64 * 1.25).ceil() as usize,
+    )
+}
+
+/// Score one candidate pair, returning a canonically-oriented
+/// [`RedundantPair`] or `None` when [`redundancy_match_score`] rejects it.
+///
+/// Orientation is fixed by `(file_path, start_line, id)` so the same logical
+/// pair always presents the same `a`/`b` sides regardless of input order
+/// (scoring is symmetric).
+pub fn redundant_pair<'a>(
+    node_a: &'a crate::types::Node,
+    fp_a: &'a Fingerprint,
+    node_b: &'a crate::types::Node,
+    fp_b: &'a Fingerprint,
+    threshold: f64,
+    include_naming: bool,
+) -> Option<RedundantPair<'a>> {
+    let score = redundancy_match_score(
+        &node_a.name,
+        fp_a,
+        &node_b.name,
+        fp_b,
+        threshold,
+        include_naming,
+    )?;
+    // Canonicalize orientation so the same logical pair always presents the
+    // same a/b sides regardless of DB row order (scoring is symmetric).
+    let a_key = (&node_a.file_path, node_a.start_line, &node_a.id);
+    let b_key = (&node_b.file_path, node_b.start_line, &node_b.id);
+    let (node_a, fp_a, node_b, fp_b) = if a_key <= b_key {
+        (node_a, fp_a, node_b, fp_b)
+    } else {
+        (node_b, fp_b, node_a, fp_a)
+    };
+    Some(RedundantPair {
+        score,
+        node_a,
+        node_b,
+        fp_a,
+        fp_b,
+    })
+}
+
+/// Connected components over the returned pairs — the shared source of truth
+/// for both the JSON `groups` array and the markdown Groups section, so the
+/// two views cannot drift on membership.
+pub fn connected_node_groups<'a>(
+    pairs: &'a [RedundantPair<'a>],
+) -> Vec<Vec<&'a crate::types::Node>> {
+    let mut groups: Vec<Vec<&'a crate::types::Node>> = Vec::new();
+    for pair in pairs {
+        let mut matching_groups = Vec::new();
+        for (idx, group) in groups.iter().enumerate() {
+            if group
+                .iter()
+                .any(|node| node.id == pair.node_a.id || node.id == pair.node_b.id)
+            {
+                matching_groups.push(idx);
+            }
+        }
+
+        let nodes = [pair.node_a, pair.node_b];
+        if matching_groups.is_empty() {
+            groups.push(Vec::from(nodes));
+            continue;
+        }
+
+        let first = matching_groups[0];
+        for node in nodes {
+            push_unique_node(&mut groups[first], node);
+        }
+        for idx in matching_groups.into_iter().skip(1).rev() {
+            let merged = groups.remove(idx);
+            for node in merged {
+                push_unique_node(&mut groups[first], node);
+            }
+        }
+    }
+
+    groups
+}
+
+fn push_unique_node<'a>(nodes: &mut Vec<&'a crate::types::Node>, node: &'a crate::types::Node) {
+    if nodes.iter().any(|existing| existing.id == node.id) {
+        return;
+    }
+    nodes.push(node);
 }
 
 // ---------------------------------------------------------------------------
@@ -701,6 +981,101 @@ mod tests {
         assert!(generic.ranking_score < regular.ranking_score);
     }
 
+    fn tiny_body_fingerprint(source_hash: &str) -> Fingerprint {
+        Fingerprint {
+            ast_hash: "tiny_ast".into(),
+            cfg_hash: "tiny_cfg".into(),
+            call_seq_hash: "tiny_call".into(),
+            shingles: Vec::new(),
+            body_tokens: 2,
+            source_hash: source_hash.into(),
+        }
+    }
+
+    #[test]
+    fn empty_shingles_with_identical_hashes_require_identical_source() {
+        // Tiny bodies (< SHINGLE_N tokens) hash identically on ast/cfg/call
+        // even when textually different — without token evidence, only a
+        // source_hash match is trustworthy.
+        let a = tiny_body_fingerprint("src_a");
+        let b = tiny_body_fingerprint("src_b");
+        assert!(redundancy_match_score("width", &a, "height", &b, 0.55, true).is_none());
+
+        let twin = tiny_body_fingerprint("src_a");
+        let matched = redundancy_match_score("width", &a, "width_copy", &twin, 0.55, true)
+            .expect("textually identical tiny bodies should match");
+        assert_eq!(matched.overlap_kind, "ast_isomorphic");
+        assert_eq!(matched.severity, "definite");
+    }
+
+    fn shingle_fingerprint(tag: &str, shingles: Vec<u32>) -> Fingerprint {
+        Fingerprint {
+            ast_hash: format!("{tag}_ast"),
+            cfg_hash: format!("{tag}_cfg"),
+            call_seq_hash: format!("{tag}_call"),
+            body_tokens: shingles.len(),
+            source_hash: format!("{tag}_src"),
+            shingles,
+        }
+    }
+
+    #[test]
+    fn sub_floor_cosine_pairs_stay_naming_and_honor_include_naming() {
+        // cosine 9/20 = 0.45 clears a 0.4 threshold but not the 0.55
+        // severity floor: the pair keeps kind "naming" (no body_vector
+        // relabel), gets severity "naming_only", and include_naming filters
+        // it — kind, severity, and filter stay mutually consistent.
+        let a = shingle_fingerprint("na", (1..=20).collect());
+        let b_shingles: Vec<u32> = (1..=9).chain(101..=111).collect();
+        let b = shingle_fingerprint("nb", b_shingles);
+
+        assert!(redundancy_match_score("alpha", &a, "beta", &b, 0.4, false).is_none());
+        let kept = redundancy_match_score("alpha", &a, "beta", &b, 0.4, true)
+            .expect("include_naming=true keeps the pair");
+        assert_eq!(kept.overlap_kind, "naming");
+        assert_eq!(kept.severity, "naming_only");
+    }
+
+    #[test]
+    fn cosine_rescue_relabels_naming_to_body_vector_as_likely() {
+        // cosine 6/10 = 0.6 with jaccard 6/14 < 0.5 and all hashes distinct:
+        // the naming pair is rescued by body-vector evidence, and rescued
+        // pairs are reported even with include_naming=false.
+        let a = shingle_fingerprint("va", (1..=10).collect());
+        let b_shingles: Vec<u32> = (1..=6).chain(101..=104).collect();
+        let b = shingle_fingerprint("vb", b_shingles);
+
+        let rescued = redundancy_match_score("merge_spans", &a, "merge_ranges", &b, 0.55, false)
+            .expect("cosine >= floor rescues the pair");
+        assert_eq!(rescued.overlap_kind, "body_vector");
+        assert_eq!(rescued.severity, "likely");
+        assert!(!rescued.generic_helper_downranked);
+    }
+
+    #[test]
+    fn same_name_non_generic_pairs_survive_the_gate_as_naming_only() {
+        // clean_comment shape: identical helper name duplicated across
+        // extractor modules, cosine 10/sqrt(24*18) ~= 0.48 — below every
+        // practical threshold, invisible without the same-name rescue.
+        let a = shingle_fingerprint("sna", (1..=24).collect());
+        let b_shingles: Vec<u32> = (1..=10).chain(101..=108).collect();
+        let b = shingle_fingerprint("snb", b_shingles);
+
+        let rescued = redundancy_match_score("clean_comment", &a, "clean_comment", &b, 0.55, true)
+            .expect("identical non-generic names with shared body must be retained");
+        assert_eq!(rescued.overlap_kind, "naming");
+        assert_eq!(rescued.severity, "naming_only");
+
+        // Filtered without include_naming; inert for different or generic names.
+        assert!(
+            redundancy_match_score("clean_comment", &a, "clean_comment", &b, 0.55, false).is_none()
+        );
+        assert!(
+            redundancy_match_score("clean_comment", &a, "strip_comment", &b, 0.55, true).is_none()
+        );
+        assert!(redundancy_match_score("new", &a, "new", &b, 0.55, true).is_none());
+    }
+
     #[test]
     fn redundancy_eval_fixture_scores_real_cases() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
@@ -709,15 +1084,16 @@ mod tests {
         .expect("valid redundancy eval fixture");
         let threshold = fixture["threshold"].as_f64().expect("threshold");
         let include_naming = fixture["include_naming"].as_bool().expect("include_naming");
-        let positives = fixture["positive_labels"]
-            .as_array()
-            .expect("positive labels")
-            .iter()
-            .filter_map(serde_json::Value::as_str)
-            .collect::<std::collections::HashSet<_>>();
 
-        let mut scored = Vec::new();
+        let mut scored: Vec<(&str, RedundancyMatchScore)> = Vec::new();
+        let mut rejected: Vec<&str> = Vec::new();
+        let mut positives: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut seen_labels: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
         for case in fixture["cases"].as_array().expect("cases") {
+            let label = case["label"].as_str().expect("label");
+            assert!(seen_labels.insert(label), "duplicate fixture label {label}");
+            let expect = &case["expect"];
             let a = fixture_fingerprint(&case["a"]);
             let b = fixture_fingerprint(&case["b"]);
             let score = redundancy_match_score(
@@ -727,27 +1103,96 @@ mod tests {
                 &b,
                 threshold,
                 include_naming,
-            )
-            .expect("case should match threshold");
-            scored.push((case["label"].as_str().expect("label"), score));
+            );
+            match expect["outcome"].as_str().expect("outcome") {
+                "reject" => {
+                    assert!(
+                        score.is_none(),
+                        "case {label} should be rejected, got {score:?}"
+                    );
+                    rejected.push(label);
+                }
+                "match" => {
+                    let score =
+                        score.unwrap_or_else(|| panic!("case {label} should match threshold"));
+                    assert_eq!(
+                        score.overlap_kind,
+                        expect["overlap_kind"].as_str().expect("overlap_kind"),
+                        "case {label} overlap_kind"
+                    );
+                    assert_eq!(
+                        score.severity,
+                        expect["severity"].as_str().expect("severity"),
+                        "case {label} severity"
+                    );
+                    assert_eq!(
+                        score.generic_helper_downranked,
+                        expect["generic_helper_downranked"]
+                            .as_bool()
+                            .expect("generic_helper_downranked"),
+                        "case {label} generic_helper_downranked"
+                    );
+                    if expect["positive"].as_bool().expect("positive") {
+                        positives.insert(label);
+                    }
+                    scored.push((label, score));
+                }
+                other => panic!("unknown outcome '{other}' for case {label}"),
+            }
         }
+
         scored.sort_by(|(_, a), (_, b)| {
             b.ranking_score
                 .partial_cmp(&a.ranking_score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+        // A ranking tie would make the expected order an accident of sort
+        // stability rather than scoring behavior — keep the fixture tie-free.
+        for window in scored.windows(2) {
+            assert!(
+                window[0].1.ranking_score > window[1].1.ranking_score,
+                "ranking tie between '{}' and '{}' — fixture must stay tie-free",
+                window[0].0,
+                window[1].0
+            );
+        }
 
         let labels = scored.iter().map(|(label, _)| *label).collect::<Vec<_>>();
-        let expected_labels = fixture["expected"]["ranked_labels"]
+        let expected = &fixture["expected"];
+        let expected_labels = expected["ranked_labels"]
             .as_array()
             .expect("ranked labels")
             .iter()
             .filter_map(serde_json::Value::as_str)
             .collect::<Vec<_>>();
         assert_eq!(labels, expected_labels);
-        assert_eq!(
-            precision_at_labels(&labels, &positives, 2),
-            fixture["expected"]["p_at_2"]
+        let expected_rejected = expected["rejected_labels"]
+            .as_array()
+            .expect("rejected labels")
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(rejected, expected_rejected);
+
+        // Metrics are recomputed from the ranking, so a fixture whose
+        // expected.metrics disagree with its own ranked_labels fails loudly.
+        let metrics = &expected["metrics"];
+        for k in 1..=3 {
+            let key = format!("p_at_{k}");
+            let actual = round2(precision_at_k(&labels, &positives, k));
+            let expected_metric = metrics[key.as_str()].as_f64().expect("p_at_k");
+            assert!(
+                (actual - expected_metric).abs() < 1e-9,
+                "{key}: computed {actual}, fixture expects {expected_metric}"
+            );
+        }
+        let actual_ap = round2(average_precision(&labels, &positives));
+        let expected_ap = metrics["average_precision"]
+            .as_f64()
+            .expect("average_precision");
+        assert!(
+            (actual_ap - expected_ap).abs() < 1e-9,
+            "average_precision: computed {actual_ap}, fixture expects {expected_ap}"
         );
     }
 
@@ -766,21 +1211,44 @@ mod tests {
                 .map(|item| item.as_u64().expect("shingle") as u32)
                 .collect(),
             body_tokens: value["body_tokens"].as_u64().expect("body_tokens") as usize,
-            source_hash: "fixture".to_string(),
+            source_hash: value["source_hash"]
+                .as_str()
+                .unwrap_or("fixture")
+                .to_string(),
         }
     }
 
-    fn precision_at_labels(
+    fn round2(value: f64) -> f64 {
+        (value * 100.0).round() / 100.0
+    }
+
+    fn precision_at_k(
         labels: &[&str],
         positives: &std::collections::HashSet<&str>,
         k: usize,
-    ) -> serde_json::Value {
-        let positive_count = labels
+    ) -> f64 {
+        let hits = labels
             .iter()
             .take(k)
             .filter(|label| positives.contains(**label))
             .count();
-        serde_json::json!((positive_count as f64 / k as f64 * 100.0).round() / 100.0)
+        hits as f64 / k as f64
+    }
+
+    fn average_precision(labels: &[&str], positives: &std::collections::HashSet<&str>) -> f64 {
+        let mut hits = 0usize;
+        let mut sum = 0.0;
+        for (idx, label) in labels.iter().enumerate() {
+            if positives.contains(*label) {
+                hits += 1;
+                sum += hits as f64 / (idx + 1) as f64;
+            }
+        }
+        if positives.is_empty() {
+            0.0
+        } else {
+            sum / positives.len() as f64
+        }
     }
 
     #[test]

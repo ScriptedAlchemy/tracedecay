@@ -583,7 +583,7 @@ Test with defaults:
 ```
 tracedecay_redundancy()
 ```
-Expected: Returns `{candidates, scanned, skipped_for_size, pair_count, pairs: [...], ranked_by, scope, thresholds}`. Each pair has `similarity` (0.0-1.0), `severity` (`definite` / `likely` / `naming_only`), `overlap_kind` (`ast_isomorphic` / `control_flow` / `algorithmic` / `token_overlap` / `naming`), `a` / `b` symbol info (`file`, `line`, `name`, `id`), and a `signals` block with `ast_match`, `cfg_match`, `call_seq_match`, `shingle_jaccard`, and `body_tokens`. Pairs are sorted by similarity descending. Default thresholds: `min_lines=8`, `max_pairs=20`, `similarity_threshold=0.6`, `include_naming_only=false`.
+Expected: Returns `{candidates, scanned, skipped_for_size, pair_count, pairs: [...], groups, groups_scope, ranked_by, scope, thresholds}`. Each pair has `similarity` (0.0-1.0), `ranking_score` (rank key: composite blended with discounted body-vector cosine, generic helpers downranked — may sit below the threshold), `severity` (`definite` / `likely` / `naming_only`), `overlap_kind` (`ast_isomorphic` / `control_flow` / `algorithmic` / `token_overlap` / `body_vector` / `naming`), `a` / `b` symbol info (`file`, `line`, `name`, `id`), and a `signals` block with `ast_match`, `cfg_match`, `call_seq_match`, `shingle_jaccard`, `body_vector_cosine`, `generic_helper_downranked`, and `body_tokens`. `groups` lists connected duplicate components over the returned pairs only. Pairs are sorted by `ranking_score` descending (deterministic total order). Default thresholds: `min_lines=8`, `max_pairs=20`, `similarity_threshold=0.6`, `include_naming_only=false`.
 
 Test path scope:
 ```
@@ -595,13 +595,13 @@ Test tightened threshold (only "definite" duplicates):
 ```
 tracedecay_redundancy(similarity_threshold=0.85)
 ```
-Expected: Only AST-isomorphic pairs survive — the AST signal alone contributes 0.40 to the composite score, so anything ≥ 0.85 with `severity: "definite"` is a strong consolidation candidate.
+Expected: Pairs survive when either the composite similarity or the body-vector cosine reaches 0.85. AST-isomorphic composite matches come back with `severity: "definite"` (strong consolidation candidates); high-cosine matches without an AST match come back as `severity: "likely"` with a non-`ast_isomorphic` overlap kind.
 
 Test surface naming-only candidates:
 ```
 tracedecay_redundancy(include_naming_only=true, similarity_threshold=0.1)
 ```
-Expected: Long-tail matches where only names look similar but bodies diverge. Most are false positives — useful for naming-convention audits, not for refactoring.
+Expected: Long-tail matches. At very low thresholds most former `naming` pairs are relabeled `body_vector` (cosine ≥ 0.55 rescues them) and are returned even without this flag; `include_naming_only` controls only pairs that stay `overlap_kind: "naming"` (cosine below 0.55). Most are false positives — useful for naming-convention audits, not for refactoring.
 
 Test minimum function size:
 ```

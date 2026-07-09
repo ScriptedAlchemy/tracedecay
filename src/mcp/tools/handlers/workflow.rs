@@ -15,6 +15,7 @@ use tokio::time::timeout;
 
 use crate::diagnose::{Severity, parse_cargo_output};
 use crate::errors::{Result, TraceDecayError};
+use crate::redundancy::{Fingerprint, body_token_window, redundancy_match_score, round4};
 use crate::tracedecay::{TraceDecay, is_test_file};
 use crate::types::Node;
 
@@ -26,6 +27,19 @@ use super::support::unique_file_paths;
 /// cap — libtest filters are passed as positional args so very long lists
 /// can blow past OS argv limits on some platforms.
 const MAX_TESTS_HARD_CAP: usize = 500;
+
+/// Cap on cached fingerprint rows the near-duplicate lookup pulls per
+/// diagnostic. A single diagnose call can resolve many diagnostics, so we
+/// bound the candidate window query — a huge fingerprint cache must not be
+/// able to blow up a diagnose call.
+const MAX_NEAR_DUP_CANDIDATES: usize = 200;
+
+/// Similarity threshold for near-duplicate cross-referencing in `diagnose`.
+/// Mirrors the `tracedecay_redundancy` tool default.
+const NEAR_DUP_THRESHOLD: f64 = 0.6;
+
+/// Maximum near-duplicate matches attached per diagnostic.
+const NEAR_DUP_MAX: usize = 3;
 
 #[derive(Debug, Clone)]
 struct TestTarget {
@@ -142,11 +156,34 @@ pub(super) async fn handle_diagnose(cg: &TraceDecay, args: Value) -> Result<Tool
 
     let mut items: Vec<Value> = Vec::with_capacity(diagnostics.len());
     let mut touched: HashSet<String> = HashSet::new();
+    // Several diagnostics commonly share one enclosing function, so memoize the
+    // near-duplicate lookup per node id across the loop — each node's cache read
+    // (or fallback scan) then runs at most once per diagnose call.
+    let mut near_dup_cache: HashMap<String, Vec<Value>> = HashMap::new();
 
     for d in &diagnostics {
         touched.insert(d.file.clone());
 
         let node = cg.node_at_location(&d.file, d.line).await?;
+        // Cross-reference the redundancy index: if the enclosing node has a
+        // cached fingerprint, surface near-duplicate functions so a
+        // diagnostic points at code it may share logic with. Purely reads the
+        // cache — never parses/warms files inside diagnose.
+        let near_duplicates = match &node {
+            Some(n) => {
+                if !near_dup_cache.contains_key(&n.id) {
+                    let dupes = near_duplicates_for_node(cg, n).await?;
+                    near_dup_cache.insert(n.id.clone(), dupes);
+                }
+                near_dup_cache.get(&n.id).cloned().unwrap_or_default()
+            }
+            None => Vec::new(),
+        };
+        for dupe in &near_duplicates {
+            if let Some(file) = dupe.get("file").and_then(Value::as_str) {
+                touched.insert(file.to_string());
+            }
+        }
         let callers_json = if include_callers {
             match &node {
                 Some(n) => {
@@ -189,6 +226,7 @@ pub(super) async fn handle_diagnose(cg: &TraceDecay, args: Value) -> Result<Tool
                 "end_line": n.end_line,
             })),
             "callers": callers_json,
+            "near_duplicates": near_duplicates,
         }));
     }
 
@@ -210,6 +248,170 @@ pub(super) async fn handle_diagnose(cg: &TraceDecay, args: Value) -> Result<Tool
         }),
         touched.into_iter().collect(),
     ))
+}
+
+/// Look up cached near-duplicate matches for a diagnostic's enclosing
+/// `node`, ranked and capped at [`NEAR_DUP_MAX`].
+///
+/// Consults the `redundancy_pairs` cache first (a cheap indexed lookup that
+/// returns only pairs still fresh against the current fingerprints); if a
+/// prior `tracedecay_redundancy` run left fresh pairs for this node they are
+/// served directly. Otherwise falls back to the live token-window scan: reads
+/// the fingerprint cache, pulls candidates from the ±25 % `body_tokens` window
+/// (see [`body_token_window`]) capped at [`MAX_NEAR_DUP_CANDIDATES`], scores
+/// with [`redundancy_match_score`] at [`NEAR_DUP_THRESHOLD`], and excludes the
+/// node itself. Either path reads only cached data — no files are parsed or
+/// warmed inside diagnose.
+async fn near_duplicates_for_node(cg: &TraceDecay, node: &Node) -> Result<Vec<Value>> {
+    // Fast path: fresh cached duplicate pairs from a prior redundancy run.
+    let cached_pairs = cg.db().fresh_redundancy_pairs_for_node(&node.id).await?;
+    if !cached_pairs.is_empty() {
+        return near_duplicates_from_cached_pairs(cg, node, cached_pairs).await;
+    }
+
+    let Some(stored) = cg.db().get_fingerprint(&node.id).await? else {
+        return Ok(Vec::new());
+    };
+    let self_fp: Fingerprint = stored.into();
+    let (lo, hi) = body_token_window(self_fp.body_tokens);
+    let lo = u32::try_from(lo).unwrap_or(u32::MAX);
+    let hi = u32::try_from(hi).unwrap_or(u32::MAX);
+    let candidates = cg
+        .db()
+        .fingerprints_in_token_window(lo, hi, MAX_NEAR_DUP_CANDIDATES)
+        .await?;
+
+    let cand_ids: Vec<String> = candidates
+        .iter()
+        .filter(|row| row.node_id != node.id)
+        .map(|row| row.node_id.clone())
+        .collect();
+    if cand_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let cand_nodes = cg.db().get_nodes_by_ids(&cand_ids).await?;
+    let nodes_by_id: HashMap<&str, &Node> = cand_nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+
+    let mut matches: Vec<NearDupCandidate<'_>> = Vec::new();
+    for row in &candidates {
+        if row.node_id == node.id {
+            continue;
+        }
+        let Some(cand_node) = nodes_by_id.get(row.node_id.as_str()) else {
+            continue;
+        };
+        let cand_fp: Fingerprint = row.clone().into();
+        if let Some(score) = redundancy_match_score(
+            &node.name,
+            &self_fp,
+            &cand_node.name,
+            &cand_fp,
+            NEAR_DUP_THRESHOLD,
+            false,
+        ) {
+            matches.push(NearDupCandidate {
+                ranking_score: score.ranking_score,
+                similarity: score.similarity,
+                vector_cosine: score.vector_cosine,
+                severity: score.severity,
+                overlap_kind: score.overlap_kind,
+                node: cand_node,
+            });
+        }
+    }
+
+    Ok(rank_and_emit(matches))
+}
+
+/// Resolve fresh cached duplicate pairs into the diagnose near-duplicate JSON
+/// shape, ranked and capped at [`NEAR_DUP_MAX`].
+///
+/// The pairs are already freshness-validated by the reader; this only resolves
+/// each partner node's metadata and feeds them through [`rank_and_emit`], the
+/// same rank-and-render path the live scan uses, so the fast path and the
+/// fallback produce identically ordered and shaped output.
+async fn near_duplicates_from_cached_pairs(
+    cg: &TraceDecay,
+    node: &Node,
+    pairs: Vec<crate::db::RedundancyPairRow>,
+) -> Result<Vec<Value>> {
+    let partner_ids: Vec<String> = pairs
+        .iter()
+        .map(|p| p.partner_of(&node.id).to_string())
+        .collect();
+    let partner_nodes = cg.db().get_nodes_by_ids(&partner_ids).await?;
+    let nodes_by_id: HashMap<&str, &Node> =
+        partner_nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+
+    let mut matches: Vec<NearDupCandidate<'_>> = Vec::new();
+    for pair in &pairs {
+        if let Some(partner) = nodes_by_id.get(pair.partner_of(&node.id)) {
+            matches.push(NearDupCandidate {
+                ranking_score: pair.ranking_score,
+                similarity: pair.similarity,
+                vector_cosine: pair.vector_cosine,
+                severity: &pair.severity,
+                overlap_kind: &pair.overlap_kind,
+                node: partner,
+            });
+        }
+    }
+
+    Ok(rank_and_emit(matches))
+}
+
+/// One near-duplicate candidate, unified across the cached-pair fast path and
+/// the live token-window scan so both rank and emit through one code path. The
+/// cached `RedundancyPairRow` and the live `RedundancyMatchScore` both carry
+/// every field below.
+struct NearDupCandidate<'a> {
+    ranking_score: f64,
+    similarity: f64,
+    vector_cosine: f64,
+    severity: &'a str,
+    overlap_kind: &'a str,
+    node: &'a Node,
+}
+
+/// Rank unified near-duplicate candidates by the full canonical key
+/// (`ranking_score` desc, `similarity` desc, `vector_cosine` desc, then name,
+/// then id — the same total order [`find_redundant_pairs`] applies), cap at
+/// [`NEAR_DUP_MAX`], and render the diagnose JSON shape. Shared so the cached
+/// fast path and the live scan produce identically ordered, identically shaped
+/// output.
+fn rank_and_emit(mut candidates: Vec<NearDupCandidate<'_>>) -> Vec<Value> {
+    candidates.sort_by(|a, b| {
+        b.ranking_score
+            .partial_cmp(&a.ranking_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                b.similarity
+                    .partial_cmp(&a.similarity)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| {
+                b.vector_cosine
+                    .partial_cmp(&a.vector_cosine)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.node.name.cmp(&b.node.name))
+            .then_with(|| a.node.id.cmp(&b.node.id))
+    });
+    candidates
+        .into_iter()
+        .take(NEAR_DUP_MAX)
+        .map(|c| {
+            json!({
+                "name": c.node.name,
+                "file": c.node.file_path,
+                "line": c.node.start_line,
+                "id": c.node.id,
+                "ranking_score": round4(c.ranking_score),
+                "severity": c.severity,
+                "overlap_kind": c.overlap_kind,
+            })
+        })
+        .collect()
 }
 
 fn severity_string(s: Severity) -> &'static str {

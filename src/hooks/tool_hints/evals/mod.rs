@@ -277,7 +277,9 @@ fn default_families(
         }
         Some(HintCategory::BuildDiagnostics) => families.push(ScenarioFamily::BuildDiagnostics),
         Some(HintCategory::MemoryStore) => families.push(ScenarioFamily::MemoryStore),
-        None => {}
+        // The edit-redundancy nudge is an edit-tool surface; it rides the
+        // AdapterShape family already added for tool_name/file_path inputs.
+        Some(HintCategory::EditRedundancy) | None => {}
     }
 
     families
@@ -565,6 +567,38 @@ fn dynamic_action_context_cases() -> Vec<HintEval> {
                 tool_name: Some("Edit".to_string()),
                 file_path: Some("src/hooks/steering.rs".to_string()),
                 prompt: Some("tighten this string".to_string()),
+                ..ToolHintInput::default()
+            },
+            None,
+            &[],
+        ),
+        input_eval(
+            "new-function-write-nudges-redundancy",
+            ToolHintInput {
+                tool_name: Some("Write".to_string()),
+                file_path: Some("src/hooks/steering.rs".to_string()),
+                edit_text: Some(
+                    "fn summarize_hits(hits: &[Hit]) -> Summary {\n    \
+                     let mut total = 0;\n    \
+                     for hit in hits {\n        \
+                     if hit.active {\n            \
+                     total += hit.count;\n        \
+                     }\n    \
+                     }\n    \
+                     Summary { total }\n}\n"
+                        .to_string(),
+                ),
+                ..ToolHintInput::default()
+            },
+            Some(HintCategory::EditRedundancy),
+            &["tracedecay_redundancy", "tracedecay_similar"],
+        ),
+        input_eval(
+            "small-edit-does-not-nudge-redundancy",
+            ToolHintInput {
+                tool_name: Some("Edit".to_string()),
+                file_path: Some("src/hooks/steering.rs".to_string()),
+                edit_text: Some("fn one_liner() -> u8 { 1 }".to_string()),
                 ..ToolHintInput::default()
             },
             None,
@@ -893,6 +927,7 @@ fn scenario_coverage_reaches_high_value_target() {
         HintCategory::BuildDiagnostics,
         HintCategory::ReviewChanges,
         HintCategory::MemoryStore,
+        HintCategory::EditRedundancy,
     ]
     .into_iter()
     .collect();

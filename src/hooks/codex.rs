@@ -558,6 +558,7 @@ fn codex_prompt_hint(event_json: &str) -> Option<ToolHint> {
         prompt: prompt_like_text(&parsed),
         subagent_type: None,
         file_path: None,
+        edit_text: None,
         hints_enabled: true,
     })?;
     let root = codex_project_root_from_event(event_json);

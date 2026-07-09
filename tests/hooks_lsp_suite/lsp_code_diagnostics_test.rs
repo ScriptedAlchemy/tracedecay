@@ -898,6 +898,85 @@ fn broker_clears_language_diagnostics_when_disabled() {
     assert_eq!(snapshot.summary.total_errors, 0);
 }
 
+#[tokio::test]
+async fn broker_resolve_enclosing_nodes_attributes_diagnostic_to_smallest_span() {
+    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
+        "/tmp/tracedecay-lsp-test",
+        vec![fake_adapter("rust", "rs", "rust-analyzer", Vec::new())],
+    );
+    // Diagnostic inside a known function (1-based line 5 -> 0-based line 4).
+    broker.cache_diagnostic(lsp::broker::CodeDiagnostic {
+        language: "rust".to_string(),
+        source: "rust-analyzer".to_string(),
+        file: "src/lib.rs".to_string(),
+        line_start: 5,
+        line_end: 5,
+        character_start: Some(4),
+        character_end: Some(8),
+        severity: lsp::broker::DiagnosticSeverity::Error,
+        code: Some("E0308".to_string()),
+        message: "mismatched types".to_string(),
+        enclosing_node: None,
+        updated_at: 1,
+    });
+    // Diagnostic on a line no indexed span covers stays unattributed.
+    broker.cache_diagnostic(lsp::broker::CodeDiagnostic {
+        language: "rust".to_string(),
+        source: "rust-analyzer".to_string(),
+        file: "src/lib.rs".to_string(),
+        line_start: 40,
+        line_end: 40,
+        character_start: None,
+        character_end: None,
+        severity: lsp::broker::DiagnosticSeverity::Warning,
+        code: None,
+        message: "unused variable".to_string(),
+        enclosing_node: None,
+        updated_at: 1,
+    });
+
+    broker
+        .resolve_enclosing_nodes(|file| async move {
+            assert_eq!(file, "src/lib.rs");
+            vec![
+                // Outer impl block spanning the whole region.
+                lsp::broker::NodeSpan {
+                    start_line: 0,
+                    end_line: 20,
+                    qualified_name: "crate::Widget".to_string(),
+                },
+                // Inner method: the smallest span covering line 4.
+                lsp::broker::NodeSpan {
+                    start_line: 3,
+                    end_line: 9,
+                    qualified_name: "crate::Widget::render".to_string(),
+                },
+            ]
+        })
+        .await;
+
+    let snapshot = broker.snapshot();
+    let attributed = snapshot
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.line_start == 5)
+        .expect("diagnostic at line 5 should be present");
+    assert_eq!(
+        attributed.enclosing_node.as_deref(),
+        Some("crate::Widget::render"),
+        "diagnostic should attribute to the smallest enclosing indexed node"
+    );
+    let unattributed = snapshot
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.line_start == 40)
+        .expect("diagnostic at line 40 should be present");
+    assert_eq!(
+        unattributed.enclosing_node, None,
+        "diagnostic outside every indexed span stays unattributed"
+    );
+}
+
 fn adapter<'a>(
     adapters: &'a [lsp::adapters::LspAdapterDefinition],
     language: &str,

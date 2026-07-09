@@ -29,6 +29,32 @@ pub struct CodeDiagnostic {
     pub updated_at: i64,
 }
 
+/// Minimal indexed-symbol span used to attribute a diagnostic to the smallest
+/// enclosing code-graph node. Line numbers are 0-based, matching
+/// [`crate::types::Node`]; they are compared against a diagnostic's 1-based line
+/// inside [`enclosing_node_for_line`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeSpan {
+    pub start_line: u32,
+    pub end_line: u32,
+    pub qualified_name: String,
+}
+
+/// Returns the qualified name of the smallest span that encloses `line_1based`,
+/// or `None` when no span covers it. Shared by the LSP broker and the
+/// `tracedecay_diagnostics` handler so both attribute diagnostics identically.
+pub fn enclosing_node_for_line(spans: &[NodeSpan], line_1based: u32) -> Option<String> {
+    if line_1based == 0 {
+        return None;
+    }
+    let node_line = line_1based - 1;
+    spans
+        .iter()
+        .filter(|span| span.start_line <= node_line && node_line <= span.end_line)
+        .min_by_key(|span| span.end_line.saturating_sub(span.start_line))
+        .map(|span| span.qualified_name.clone())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticSeverity {
@@ -476,6 +502,31 @@ impl DiagnosticBroker {
 
     pub fn cache_diagnostic(&mut self, diagnostic: CodeDiagnostic) {
         self.diagnostics.push(diagnostic);
+    }
+
+    /// Fills `enclosing_node` for cached diagnostics that don't yet have it,
+    /// calling `fetch_spans` once per file to load its indexed symbols.
+    /// Diagnostics whose file has no covering span leave `enclosing_node` as
+    /// `None`. The broker holds no code-graph handle of its own, so callers
+    /// inject the lookup (the dashboard backs it with its graph connection).
+    pub async fn resolve_enclosing_nodes<F, Fut>(&mut self, mut fetch_spans: F)
+    where
+        F: FnMut(String) -> Fut,
+        Fut: std::future::Future<Output = Vec<NodeSpan>>,
+    {
+        let mut spans_by_file: BTreeMap<String, Vec<NodeSpan>> = BTreeMap::new();
+        for diagnostic in &mut self.diagnostics {
+            if diagnostic.enclosing_node.is_some() {
+                continue;
+            }
+            if !spans_by_file.contains_key(&diagnostic.file) {
+                let fetched = fetch_spans(diagnostic.file.clone()).await;
+                spans_by_file.insert(diagnostic.file.clone(), fetched);
+            }
+            if let Some(spans) = spans_by_file.get(&diagnostic.file) {
+                diagnostic.enclosing_node = enclosing_node_for_line(spans, diagnostic.line_start);
+            }
+        }
     }
 
     pub fn record_backfill_progress(

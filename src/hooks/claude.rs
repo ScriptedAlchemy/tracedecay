@@ -7,7 +7,8 @@ use serde_json::Value;
 use super::codex::{codex_additional_context_json, codex_project_root_from_parsed_event};
 use super::post_tool_use::{
     CLAUDE_POST_TOOL_USE_SHELL_TOOLS, CLAUDE_POST_TOOL_USE_SPEC, is_claude_edit_tool,
-    is_claude_hint_tool, notify_post_tool_use, tool_input_command_str, tool_input_file_path_str,
+    is_claude_hint_tool, notify_post_tool_use, tool_input_command_str, tool_input_edit_text,
+    tool_input_file_path_str,
 };
 use super::steering::{
     append_context_recovery_hint, append_tracedecay_bootstrap_context,
@@ -87,6 +88,7 @@ pub fn evaluate_hook_decision(tool_input: &str) -> String {
             .and_then(Value::as_str)
             .map(str::to_string),
         file_path: None,
+        edit_text: None,
         hints_enabled: true,
     });
     let block_reason = research_block_reason(hint);
@@ -316,16 +318,24 @@ fn claude_post_tool_use_hint_context(event_json: &str) -> Option<String> {
 fn decide_post_tool_use_hint(parsed: &Value) -> Option<ToolHint> {
     let tool_name = parsed.get("tool_name").and_then(Value::as_str)?;
     let file_path = tool_input_file_path_str(parsed);
-    // Candidates: the native hint tools (Grep/Glob/Read), Bash, and the
-    // edit/write tools *only* when they target a harness-memory file (so the
-    // memory_store hint can route durable facts to tracedecay_fact_store).
-    // Every other edit/write drives daemon sync only and gets no hint.
+    // Candidates: the native hint tools (Grep/Glob/Read), Bash, edit/write tools
+    // targeting a harness-memory file (so the memory_store hint can route
+    // durable facts to tracedecay_fact_store), and edit/write tools that add a
+    // new function-sized body (so the edit_redundancy hint can nudge a
+    // duplicate-logic probe). `edit_text` is read only for edit tools and only
+    // to feed those two edit branches; every other edit/write drives daemon sync
+    // only and gets no hint.
     let is_shell = CLAUDE_POST_TOOL_USE_SHELL_TOOLS
         .iter()
         .any(|tool| tool.eq_ignore_ascii_case(tool_name));
-    let is_memory_edit =
-        is_claude_edit_tool(tool_name) && file_path.as_deref().is_some_and(is_harness_memory_path);
-    if !is_claude_hint_tool(tool_name) && !is_shell && !is_memory_edit {
+    let is_edit = is_claude_edit_tool(tool_name);
+    let is_memory_edit = is_edit && file_path.as_deref().is_some_and(is_harness_memory_path);
+    // Only pay the string scan for non-memory edits (memory edits route to their
+    // own branch and never carry a code body worth probing).
+    let edit_text = (is_edit && !is_memory_edit)
+        .then(|| tool_input_edit_text(parsed))
+        .flatten();
+    if !is_claude_hint_tool(tool_name) && !is_shell && !is_memory_edit && edit_text.is_none() {
         return None;
     }
     decide_hint(&ToolHintInput {
@@ -336,6 +346,7 @@ fn decide_post_tool_use_hint(parsed: &Value) -> Option<ToolHint> {
         prompt: None,
         subagent_type: None,
         file_path,
+        edit_text,
         hints_enabled: true,
     })
 }
@@ -471,6 +482,47 @@ mod tests {
                 "{tool} on a source file drives daemon sync only and must not emit a hint"
             );
         }
+    }
+
+    #[test]
+    fn write_adding_a_function_body_decides_an_edit_redundancy_hint() {
+        // A Write whose content is a new function-sized Rust body nudges toward
+        // the duplicate-logic probe.
+        let content = "fn summarize(items: &[Item]) -> u64 {\n    let mut total = 0;\n    for item in items {\n        if item.active {\n            total += item.count;\n        }\n    }\n    total\n}\n";
+        let event = post_event(
+            "Write",
+            &serde_json::json!({ "file_path": "src/widgets.rs", "content": content }),
+        );
+        let hint = decide_post_tool_use_hint(&event)
+            .expect("a new function-sized Write must produce an edit-redundancy hint");
+        let context = format_tool_hint(&hint);
+        assert!(
+            context.contains("tracedecay_redundancy"),
+            "edit-redundancy hint must point at tracedecay_redundancy: {context}"
+        );
+
+        // A MultiEdit whose joined new_strings form a function body also nudges.
+        let multi = post_event(
+            "MultiEdit",
+            &serde_json::json!({
+                "file_path": "src/widgets.rs",
+                "edits": [ { "old_string": "", "new_string": content } ],
+            }),
+        );
+        assert!(
+            decide_post_tool_use_hint(&multi).is_some(),
+            "a MultiEdit adding a function body must produce a hint"
+        );
+
+        // A small, non-function edit stays silent.
+        let tiny = post_event(
+            "Edit",
+            &serde_json::json!({ "file_path": "src/widgets.rs", "new_string": "let x = 1;" }),
+        );
+        assert!(
+            decide_post_tool_use_hint(&tiny).is_none(),
+            "a small non-function edit must not produce a hint"
+        );
     }
 
     #[test]
