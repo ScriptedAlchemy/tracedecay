@@ -715,6 +715,9 @@ export interface FactProposalRecord {
   apply_outcome?: unknown;
   created_at: number;
   updated_at: number;
+  duplicate_count?: number;
+  last_duplicate_run_id?: string | null;
+  folded_contents?: string[];
 }
 
 export interface FactProposalListResponse {

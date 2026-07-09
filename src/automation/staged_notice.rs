@@ -212,6 +212,7 @@ mod tests {
             updated_at: 1,
             duplicate_count: 0,
             last_duplicate_run_id: None,
+            folded_contents: Vec::new(),
         }
     }
 
