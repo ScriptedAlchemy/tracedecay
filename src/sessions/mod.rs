@@ -12,6 +12,7 @@ pub mod codex;
 pub mod codex_app_server;
 pub mod cursor;
 pub mod cursor_agent;
+pub mod cursor_composer;
 pub mod git_correlation;
 pub mod hermes;
 pub mod kiro;
@@ -73,10 +74,38 @@ pub async fn ingest_global_sources_for_provider(
     }
     let stats = ingest_sources(db, project_root, &sources).await;
     let stats = if provider.is_none() || provider == Some(SessionProvider::Cursor) {
-        // Cursor has live hook ingestion, but transcripts written before a
-        // project was indexed (or while hooks were absent) need this catch-up
-        // path; shared parse offsets make hook-ingested files no-ops.
+        // Cursor's richer composer store (state.vscdb + per-session chat
+        // store.db) is authoritative: ingest it first, capturing the set of
+        // composer-owned session ids. Then run the JSONL sweep skipping those
+        // ids so the two Cursor sources never double-ingest the ~94% of
+        // sessions that appear in both. The JSONL sweep still has live hook
+        // ingestion and shared parse offsets, so it catches up any session the
+        // composer store does not own (e.g. cursor-agent CLI transcripts).
+        let (composer_stats, owned) =
+            if let Some(source) = cursor_composer::CursorComposerSource::new() {
+                let outcome = source
+                    .ingest(
+                        db,
+                        project_root,
+                        cursor_composer::DEFAULT_COMPOSER_ENVELOPE_CAP,
+                    )
+                    .await;
+                (
+                    TranscriptIngestStats {
+                        sessions_upserted: outcome.sessions_upserted,
+                        messages_upserted: outcome.messages_upserted,
+                    },
+                    outcome.owned_session_ids,
+                )
+            } else {
+                (
+                    TranscriptIngestStats::default(),
+                    std::collections::HashSet::new(),
+                )
+            };
+        let stats = stats.merge(composer_stats);
         if let Some(source) = cursor::CursorSweepSource::new() {
+            let source = source.with_skip_session_ids(owned);
             stats.merge(ingest_source(db, &source, project_root, None).await)
         } else {
             stats
