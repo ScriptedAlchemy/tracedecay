@@ -405,16 +405,33 @@ fn derive_usage(provider: &str, record: &Value) -> Option<Value> {
 // Structured-row backfill replays stored Claude/Codex transcripts through the
 // current parser and inserts message ids missing from legacy stores.
 
+/// Base name of the per-provider structured-backfill marker rows in
+/// `session_schema_migrations`. Each provider gets its own row keyed
+/// `structured_rows_backfill:<provider>` (see [`structured_marker_name`]); the
+/// bare name is the retired global marker migrated away in
+/// [`migrate_legacy_global_marker`].
 const STRUCTURED_MARKER_NAME: &str = "structured_rows_backfill";
-// v3: Claude assistant `thinking` blocks now emit a separate `kind="reasoning"`
-// row (previously they lived only inside the serialized assistant-message blob),
-// so re-sweep already-ingested Claude transcripts to add the missing rows.
-const STRUCTURED_MARKER_VERSION: i64 = 3;
-/// Base name of the sweep's path watermark. The live key is namespaced by the
-/// marker version (see [`structured_cursor_key`]) so bumping
-/// [`STRUCTURED_MARKER_VERSION`] naturally starts the re-sweep from a fresh
-/// (never-written) cursor instead of resuming past the last file the prior
-/// version already covered.
+/// Per-provider structured-backfill target versions. Bumping one provider's
+/// entry re-sweeps ONLY that provider's transcripts (its marker falls behind
+/// its target and its version-namespaced cursor starts fresh); every other
+/// provider stays untouched. This replaces the former single global
+/// `STRUCTURED_MARKER_VERSION`, where any single-provider parser addition reset
+/// the one shared cursor and re-parsed every provider's history.
+///
+/// Version history / in-flight-bump translation:
+/// * `claude = 3` — v3 emits a separate `kind="reasoning"` row for Claude
+///   assistant `thinking` blocks (previously nested in the assistant blob).
+///   This carries the merged global v3 bump from #372.
+/// * `codex = 2` — Codex is unchanged from the global v2 baseline. #382 (open
+///   at time of writing) will join the new Codex CLI `custom_tool_call` exec
+///   shape into `tool_call` rows; when it merges, translate its global bump to
+///   `codex = 4` here so only Codex transcripts re-sweep.
+const STRUCTURED_BACKFILL_VERSIONS: &[(&str, i64)] = &[("claude", 3), ("codex", 2)];
+/// Base name of the sweep's path watermark. The live key is namespaced by both
+/// provider and target version (see [`structured_cursor_key`]) so bumping a
+/// provider's entry in [`STRUCTURED_BACKFILL_VERSIONS`] naturally starts that
+/// provider's re-sweep from a fresh (never-written) cursor instead of resuming
+/// past the last file the prior version already covered.
 const STRUCTURED_CURSOR_KEY_PREFIX: &str = "structured_backfill_cursor";
 const STRUCTURED_BACKFILL_BATCH: usize = 32;
 /// Transcripts larger than this are skipped (with a logged warning and a cursor
@@ -422,14 +439,28 @@ const STRUCTURED_BACKFILL_BATCH: usize = 32;
 /// watermark would balloon the diff, so we cap file size instead — pathological
 /// multi-hundred-MB JSONL transcripts are the only ones affected.
 const STRUCTURED_BACKFILL_MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
-const STRUCTURED_PROVIDERS: [&str; 2] = ["claude", "codex"];
 
-/// Version-namespaced watermark key. Because the version is part of the key, a
-/// bump to [`STRUCTURED_MARKER_VERSION`] yields a key that has never been
-/// written, so [`read_backfill_cursor`] returns the empty string and the sweep
-/// re-parses the whole history from the start.
-fn structured_cursor_key() -> String {
-    format!("{STRUCTURED_CURSOR_KEY_PREFIX}:v{STRUCTURED_MARKER_VERSION}")
+/// Per-provider marker row name in `session_schema_migrations`.
+fn structured_marker_name(provider: &str) -> String {
+    format!("{STRUCTURED_MARKER_NAME}:{provider}")
+}
+
+/// Provider-scoped, version-namespaced watermark key. Because both the provider
+/// and its target version are part of the key, bumping a provider's entry in
+/// [`STRUCTURED_BACKFILL_VERSIONS`] yields a key that has never been written, so
+/// [`read_backfill_cursor`] returns the empty string and only *that* provider's
+/// sweep re-parses its whole history from the start.
+fn structured_cursor_key(provider: &str, version: i64) -> String {
+    format!("{STRUCTURED_CURSOR_KEY_PREFIX}:{provider}:v{version}")
+}
+
+/// Target version for one provider, or 0 when the provider is not tracked.
+fn structured_backfill_target_version(provider: &str) -> i64 {
+    STRUCTURED_BACKFILL_VERSIONS
+        .iter()
+        .find(|(name, _)| *name == provider)
+        .map(|(_, version)| *version)
+        .unwrap_or(0)
 }
 
 #[derive(Default, Clone, Copy)]
@@ -486,7 +517,10 @@ pub fn try_acquire_structured_backfill_lock(db_path: &Path) -> Option<std::fs::F
 /// legacy stores.
 pub(crate) async fn backfill_structured_rows(db: &GlobalDb) -> Option<StructuredBackfillStats> {
     let conn = db.conn();
-    if marker_version(conn, STRUCTURED_MARKER_NAME).await >= STRUCTURED_MARKER_VERSION {
+    // Cheap pre-check before the lock: skip entirely when every provider is
+    // already at (or past) its target version and no legacy global marker
+    // remains to migrate.
+    if !structured_backfill_pending(conn).await {
         return Some(StructuredBackfillStats::default());
     }
     // Claim the store cross-process before doing any parse or watermark work.
@@ -497,15 +531,126 @@ pub(crate) async fn backfill_structured_rows(db: &GlobalDb) -> Option<Structured
         return Some(StructuredBackfillStats::default());
     };
     ensure_backfill_meta_table(conn).await?;
-    let cursor_key = structured_cursor_key();
-    let cursor = read_backfill_cursor(conn, &cursor_key).await;
-    let candidates = load_structured_candidates(conn, &cursor, STRUCTURED_BACKFILL_BATCH).await?;
-    if candidates.is_empty() {
-        mark_structured_backfill_complete(conn).await?;
-        return Some(StructuredBackfillStats::default());
+    // One-time migration from the single global marker to per-provider markers,
+    // so a store that already completed the global sweep does not re-sweep.
+    migrate_legacy_global_marker(conn).await?;
+
+    // Sweep each provider independently against its own marker + cursor. A
+    // provider already at its target version is skipped without touching its
+    // watermark or re-parsing, so bumping one provider never disturbs another.
+    let mut stats = StructuredBackfillStats::default();
+    for &(provider, target_version) in STRUCTURED_BACKFILL_VERSIONS {
+        sweep_provider(db, conn, provider, target_version, &mut stats).await?;
     }
 
-    let mut stats = StructuredBackfillStats::default();
+    if stats.inserted > 0 {
+        eprintln!(
+            "Backfilled {} structured transcript row(s) across {} file(s).",
+            stats.inserted, stats.files_scanned
+        );
+    }
+    Some(stats)
+}
+
+/// Whether any structured-backfill work is outstanding: a leftover global
+/// marker still needs migrating, or some provider is behind its target version.
+async fn structured_backfill_pending(conn: &Connection) -> bool {
+    if legacy_global_marker_version(conn).await.is_some() {
+        return true;
+    }
+    for &(provider, target_version) in STRUCTURED_BACKFILL_VERSIONS {
+        if marker_version(conn, &structured_marker_name(provider)).await < target_version {
+            return true;
+        }
+    }
+    false
+}
+
+/// Reads the retired global marker's version if its row still exists, else
+/// `None`. Distinct from [`marker_version`] (which maps a missing row to 0) so
+/// the migration seeds only when a genuine legacy marker is present.
+async fn legacy_global_marker_version(conn: &Connection) -> Option<i64> {
+    let Ok(mut rows) = conn
+        .query(
+            "SELECT version FROM session_schema_migrations WHERE name = ?1",
+            params![STRUCTURED_MARKER_NAME],
+        )
+        .await
+    else {
+        return None;
+    };
+    match rows.next().await {
+        Ok(Some(row)) => row.get::<i64>(0).ok(),
+        _ => None,
+    }
+}
+
+/// One-time migration from the single global `structured_rows_backfill` marker
+/// to per-provider markers. When a store carries the legacy global marker at
+/// version N (it already finished the global sweep up to N, which covered every
+/// provider), seed every provider's marker to N so no provider spuriously
+/// re-sweeps, then retire the global marker and its global/un-versioned cursor
+/// rows. Providers whose target now exceeds N still re-sweep on their own.
+async fn migrate_legacy_global_marker(conn: &Connection) -> Option<()> {
+    let Some(legacy_version) = legacy_global_marker_version(conn).await else {
+        return Some(());
+    };
+    // `ON CONFLICT DO NOTHING` preserves any per-provider progress a prior run
+    // already recorded (the migration only ever seeds a first baseline).
+    for &(provider, _) in STRUCTURED_BACKFILL_VERSIONS {
+        conn.execute(
+            "INSERT INTO session_schema_migrations(name, version)
+             VALUES (?1, ?2)
+             ON CONFLICT(name) DO NOTHING",
+            params![structured_marker_name(provider), legacy_version],
+        )
+        .await
+        .ok()?;
+    }
+    conn.execute(
+        "DELETE FROM session_schema_migrations WHERE name = ?1",
+        params![STRUCTURED_MARKER_NAME],
+    )
+    .await
+    .ok()?;
+    // Retire legacy cursor rows: the bare un-versioned key and the old
+    // global-versioned `…:v{N}` keys. Per-provider cursors (`…:<provider>:v{N}`)
+    // do not exist yet at first migration, and the `:v%` pattern would not match
+    // them anyway (their segment after the prefix is a provider name, not `v…`).
+    conn.execute(
+        "DELETE FROM session_backfill_meta WHERE key = ?1 OR key LIKE ?2",
+        params![
+            STRUCTURED_CURSOR_KEY_PREFIX,
+            format!("{STRUCTURED_CURSOR_KEY_PREFIX}:v%")
+        ],
+    )
+    .await
+    .ok()?;
+    Some(())
+}
+
+/// Sweeps one provider's next bounded transcript batch, advancing that
+/// provider's own version-namespaced cursor and marking it complete when it
+/// drains. A provider already at its target version returns immediately.
+async fn sweep_provider(
+    db: &GlobalDb,
+    conn: &Connection,
+    provider: &str,
+    target_version: i64,
+    stats: &mut StructuredBackfillStats,
+) -> Option<()> {
+    if marker_version(conn, &structured_marker_name(provider)).await >= target_version {
+        return Some(());
+    }
+    let cursor_key = structured_cursor_key(provider, target_version);
+    let cursor = read_backfill_cursor(conn, &cursor_key).await;
+    let candidates =
+        load_structured_candidates(conn, provider, &cursor, STRUCTURED_BACKFILL_BATCH).await?;
+    if candidates.is_empty() {
+        mark_structured_backfill_complete(conn, provider, target_version).await?;
+        return Some(());
+    }
+
     for candidate in &candidates {
         // Bound memory cheaply: an oversized transcript would be materialized
         // whole by the full-file parse below, so skip it (and advance past it)
@@ -578,13 +723,7 @@ pub(crate) async fn backfill_structured_rows(db: &GlobalDb) -> Option<Structured
         write_backfill_cursor(conn, &cursor_key, &candidate.source_path).await?;
     }
 
-    if stats.inserted > 0 {
-        eprintln!(
-            "Backfilled {} structured transcript row(s) across {} file(s).",
-            stats.inserted, stats.files_scanned
-        );
-    }
-    Some(stats)
+    Some(())
 }
 
 fn parse_structured_messages(
@@ -617,23 +756,21 @@ fn provider_source(provider: &str) -> Option<Box<dyn TranscriptSource>> {
 
 async fn load_structured_candidates(
     conn: &Connection,
+    provider: &str,
     after_path: &str,
     limit: usize,
 ) -> Option<Vec<StructuredCandidate>> {
-    let providers = STRUCTURED_PROVIDERS
-        .map(|provider| format!("'{provider}'"))
-        .join(", ");
-    let sql = format!(
-        "SELECT DISTINCT sm.source_path, sm.provider
+    // `provider` is always an allowlisted entry from `STRUCTURED_BACKFILL_VERSIONS`
+    // and is passed as a bound parameter, so no interpolation/injection concern.
+    let sql = "SELECT DISTINCT sm.source_path, sm.provider
          FROM session_messages sm
-         WHERE sm.provider IN ({providers})
+         WHERE sm.provider = ?1
            AND sm.source_path IS NOT NULL
-           AND sm.source_path > ?1
+           AND sm.source_path > ?2
          ORDER BY sm.source_path
-         LIMIT ?2"
-    );
+         LIMIT ?3";
     let mut rows = conn
-        .query(&sql, params![after_path, limit as i64])
+        .query(sql, params![provider, after_path, limit as i64])
         .await
         .ok()?;
     let mut out = Vec::new();
@@ -745,43 +882,45 @@ async fn write_backfill_cursor(conn: &Connection, key: &str, value: &str) -> Opt
     Some(())
 }
 
-/// Test-only accessor: writes the versioned structured-backfill watermark for
-/// `db` exactly as the sweep does, so tests can assert the compare-and-set
+/// Test-only accessor: writes the Codex structured-backfill watermark for `db`
+/// exactly as the sweep does, so tests can assert the compare-and-set
 /// monotonicity guard rejects backwards moves.
 #[doc(hidden)]
 pub async fn write_structured_backfill_cursor_for_test(db: &GlobalDb, value: &str) -> Option<()> {
     let conn = db.conn();
     ensure_backfill_meta_table(conn).await?;
-    write_backfill_cursor(conn, &structured_cursor_key(), value).await
+    let key = structured_cursor_key("codex", structured_backfill_target_version("codex"));
+    write_backfill_cursor(conn, &key, value).await
 }
 
-/// Test-only accessor: reads the versioned structured-backfill watermark for
-/// `db`.
+/// Test-only accessor: reads the Codex structured-backfill watermark for `db`.
 #[doc(hidden)]
 pub async fn read_structured_backfill_cursor_for_test(db: &GlobalDb) -> String {
-    read_backfill_cursor(db.conn(), &structured_cursor_key()).await
+    let key = structured_cursor_key("codex", structured_backfill_target_version("codex"));
+    read_backfill_cursor(db.conn(), &key).await
 }
 
-async fn mark_structured_backfill_complete(conn: &Connection) -> Option<()> {
+/// Marks one provider's sweep complete at `target_version` and drops that
+/// provider's watermark rows (this version's key and any stale prior-version
+/// per-provider keys). Other providers' in-flight cursors are left intact.
+async fn mark_structured_backfill_complete(
+    conn: &Connection,
+    provider: &str,
+    target_version: i64,
+) -> Option<()> {
     conn.execute(
         "INSERT INTO session_schema_migrations(name, version)
          VALUES (?1, ?2)
          ON CONFLICT(name) DO UPDATE SET
             version = excluded.version,
             applied_at = unixepoch()",
-        params![STRUCTURED_MARKER_NAME, STRUCTURED_MARKER_VERSION],
+        params![structured_marker_name(provider), target_version],
     )
     .await
     .ok()?;
-    // The sweep is done, so drop every watermark row for it: this version's
-    // key and any stale prior-version (or legacy un-versioned) keys. Keeps the
-    // meta table from accumulating dead cursors across marker-version bumps.
     conn.execute(
-        "DELETE FROM session_backfill_meta WHERE key = ?1 OR key LIKE ?2",
-        params![
-            STRUCTURED_CURSOR_KEY_PREFIX,
-            format!("{STRUCTURED_CURSOR_KEY_PREFIX}:%")
-        ],
+        "DELETE FROM session_backfill_meta WHERE key LIKE ?1",
+        params![format!("{STRUCTURED_CURSOR_KEY_PREFIX}:{provider}:%")],
     )
     .await
     .ok()?;
