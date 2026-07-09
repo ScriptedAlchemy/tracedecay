@@ -156,8 +156,19 @@ pub(crate) async fn patch_user_settings(
     if let Some(timeout) = patch.extraction_timeout_secs {
         config.extraction_timeout_secs = timeout;
     }
-    if !config.save() {
-        return Err(internal_error(&"failed to save user config"));
+    match config.save_with_recovery() {
+        Ok(Some(backup)) => {
+            eprintln!(
+                "[tracedecay] note: corrupt config.toml backed up to {} before regenerating",
+                backup.display()
+            );
+        }
+        Ok(None) => {}
+        Err(err) => {
+            return Err(internal_error(&format!(
+                "failed to save user config: {err}"
+            )));
+        }
     }
 
     let mut payload = settings_payload(&state).await?;

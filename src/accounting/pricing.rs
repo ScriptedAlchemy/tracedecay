@@ -289,7 +289,9 @@ pub fn refresh_if_stale() {
 
     if refresh_pricing() {
         config.last_pricing_fetch_at = now;
-        config.save();
+        if let Err(err) = config.save() {
+            eprintln!("warning: could not save tracedecay config: {err}");
+        }
     }
 }
 
