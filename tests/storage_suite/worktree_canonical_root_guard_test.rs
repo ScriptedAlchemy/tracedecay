@@ -26,6 +26,17 @@ fn canonical_temp_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+fn git_cli_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let text = path.to_string_lossy();
+        if let Some(stripped) = text.strip_prefix(r"\\?\") {
+            return PathBuf::from(stripped);
+        }
+    }
+    path.to_path_buf()
+}
+
 fn git(project: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(["-c", "core.hooksPath=.git/no-hooks"])
@@ -87,7 +98,7 @@ fn build_fixture() -> Fixture {
             "add",
             "-b",
             "feature/worktree-guard",
-            worktree.to_str().unwrap(),
+            git_cli_path(&worktree).to_str().unwrap(),
             "HEAD",
         ],
     );
