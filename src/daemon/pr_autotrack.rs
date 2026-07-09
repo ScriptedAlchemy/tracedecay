@@ -76,6 +76,13 @@ pub struct PrDiscovery {
     pub open: Vec<DiscoveredPr>,
     /// PR numbers skipped because their head lives on a fork.
     pub skipped_forks: Vec<u64>,
+    /// True when discovery may be *incomplete* — e.g. `gh pr list` returned
+    /// exactly its page limit, so PRs beyond it were not seen. Reconciliation
+    /// suppresses removals against a partial discovery so a still-open PR that
+    /// merely fell outside the listing window is never mistaken for closed and
+    /// untracked. A failed discovery command is a different case: it never
+    /// produces a `PrDiscovery` at all (see [`discover_open_prs`]).
+    pub partial: bool,
 }
 
 /// A currently-managed PR branch, persisted in the state sidecar.
@@ -180,9 +187,16 @@ struct GhPr {
 /// Parses `gh pr list` JSON into a discovery result. Open same-repo PRs go to
 /// `open`; open cross-repository PRs are recorded as skipped forks; non-open PRs
 /// are ignored.
-fn parse_gh_pr_list(json: &str) -> serde_json::Result<PrDiscovery> {
+///
+/// `limit` is the `--limit` passed to `gh`: if the result count reaches it the
+/// listing was truncated (there may be more open PRs), so the discovery is
+/// flagged `partial` and reconciliation will not untrack anything this pass.
+fn parse_gh_pr_list(json: &str, limit: usize) -> serde_json::Result<PrDiscovery> {
     let prs: Vec<GhPr> = serde_json::from_str(json)?;
-    let mut discovery = PrDiscovery::default();
+    let mut discovery = PrDiscovery {
+        partial: limit > 0 && prs.len() >= limit,
+        ..Default::default()
+    };
     for pr in prs {
         if !pr.state.eq_ignore_ascii_case("open") {
             continue;
@@ -269,12 +283,22 @@ fn map_pull_heads_to_branches(
 }
 
 fn run_git(repo_root: &Path, args: &[&str]) -> Option<std::process::Output> {
-    std::process::Command::new(crate::git::git_program())
-        .args(args)
-        .current_dir(repo_root)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
+    let mut command = std::process::Command::new(crate::git::git_program());
+    command.args(args).current_dir(repo_root);
+    disable_git_credential_prompt(&mut command);
+    command.output().ok().filter(|o| o.status.success())
+}
+
+/// Forbids interactive credential prompts on a spawned git/gh subprocess. The
+/// daemon's single poll loop awaits each project sequentially, so one git
+/// process blocking on `/dev/tty` for a password (uncached HTTPS credential,
+/// passphrase-protected SSH key with no agent) would freeze PR-autotrack for
+/// *every* registered project. Failing fast instead keeps the loop live; the
+/// failure is then surfaced as a discovery error, never as "zero open PRs".
+fn disable_git_credential_prompt(command: &mut std::process::Command) {
+    command
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "echo");
 }
 
 fn origin_is_github(repo_root: &Path) -> bool {
@@ -283,11 +307,16 @@ fn origin_is_github(repo_root: &Path) -> bool {
         .is_some_and(|url| url.contains("github.com"))
 }
 
+/// Upper bound on PRs fetched in one `gh pr list` call. Reaching it means the
+/// listing was truncated, which flags the discovery `partial` (removals are then
+/// suppressed) rather than silently dropping the tail as if those PRs closed.
+const GH_PR_LIST_LIMIT: usize = 1000;
+
 fn gh_available() -> bool {
-    std::process::Command::new("gh")
-        .arg("--version")
-        .output()
-        .is_ok_and(|o| o.status.success())
+    let mut command = std::process::Command::new("gh");
+    command.arg("--version");
+    disable_git_credential_prompt(&mut command);
+    command.output().is_ok_and(|o| o.status.success())
 }
 
 /// Discovers open PR head branches on the repo's `origin` remote.
@@ -295,45 +324,55 @@ fn gh_available() -> bool {
 /// Prefers `gh pr list` when `gh` is on PATH and `origin` is GitHub; otherwise
 /// falls back to `git ls-remote` and SHA-matching. Same-repo PRs are returned in
 /// `open`; fork PRs are recorded in `skipped_forks`.
-pub fn discover_open_prs(repo_root: &Path) -> PrDiscovery {
+///
+/// Returns `Err` when the underlying discovery command *fails* (auth failure,
+/// network outage, expired credentials). A failed command is never collapsed
+/// into an empty `PrDiscovery`: the caller must skip reconciliation entirely, so
+/// a transient `gh`/`git` failure can never masquerade as "every PR closed" and
+/// mass-untrack the managed set. An empty `Ok` result means the remote genuinely
+/// has no open PRs.
+pub fn discover_open_prs(repo_root: &Path) -> Result<PrDiscovery, String> {
     if origin_is_github(repo_root) && gh_available() {
         if let Some(discovery) = discover_via_gh(repo_root) {
-            return discovery;
+            return Ok(discovery);
         }
+        // `gh` failed (rate limit, auth, transient). Fall through to ls-remote,
+        // which propagates its own failure as `Err` rather than empty.
     }
     discover_via_ls_remote(repo_root)
 }
 
 fn discover_via_gh(repo_root: &Path) -> Option<PrDiscovery> {
-    let output = std::process::Command::new("gh")
+    let limit = GH_PR_LIST_LIMIT.to_string();
+    let mut command = std::process::Command::new("gh");
+    command
         .args([
             "pr",
             "list",
             "--state",
             "open",
             "--limit",
-            "200",
+            &limit,
             "--json",
             "number,headRefName,headRefOid,state,isCrossRepository",
         ])
-        .current_dir(repo_root)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())?;
+        .current_dir(repo_root);
+    disable_git_credential_prompt(&mut command);
+    let output = command.output().ok().filter(|o| o.status.success())?;
     let json = String::from_utf8(output.stdout).ok()?;
-    parse_gh_pr_list(&json).ok()
+    parse_gh_pr_list(&json, GH_PR_LIST_LIMIT).ok()
 }
 
-fn discover_via_ls_remote(repo_root: &Path) -> PrDiscovery {
-    let pull_heads = run_git(repo_root, &["ls-remote", "origin", "refs/pull/*/head"])
+fn discover_via_ls_remote(repo_root: &Path) -> Result<PrDiscovery, String> {
+    let pull_out = run_git(repo_root, &["ls-remote", "origin", "refs/pull/*/head"])
         .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|out| parse_ls_remote_pull_heads(&out))
-        .unwrap_or_default();
-    let head_shas = run_git(repo_root, &["ls-remote", "--heads", "origin"])
+        .ok_or_else(|| "git ls-remote of PR head refs failed".to_string())?;
+    let heads_out = run_git(repo_root, &["ls-remote", "--heads", "origin"])
         .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|out| parse_ls_remote_heads(&out))
-        .unwrap_or_default();
-    map_pull_heads_to_branches(&pull_heads, &head_shas)
+        .ok_or_else(|| "git ls-remote of head refs failed".to_string())?;
+    let pull_heads = parse_ls_remote_pull_heads(&pull_out);
+    let head_shas = parse_ls_remote_heads(&heads_out);
+    Ok(map_pull_heads_to_branches(&pull_heads, &head_shas))
 }
 
 // ---------------------------------------------------------------------------
@@ -351,6 +390,9 @@ pub struct ReconcileReport {
     pub skipped_forks: Vec<u64>,
     /// True when the per-cycle new-track cap held some additions back.
     pub capped: bool,
+    /// True when removals were skipped because the discovery was `partial`
+    /// (possibly truncated) — no managed PR is untracked on an incomplete view.
+    pub removals_suppressed: bool,
     /// Tracking or persistence failures surfaced to callers.
     pub failures: Vec<(String, String)>,
 }
@@ -381,27 +423,52 @@ pub async fn reconcile_project(
         .collect();
 
     // Removals first (cheap, unblocks disk) — managed entries no longer open.
-    let stale: Vec<String> = state
-        .managed
-        .keys()
-        .filter(|label| !desired.contains_key(*label))
-        .cloned()
-        .collect();
-    for label in stale {
-        if let Some(managed) = state.managed.get(&label).cloned() {
-            untrack_pr(repo_root, data_root, &label, &managed).await;
-            state.managed.remove(&label);
-            state_dirty = true;
-            report.untracked.push(label.clone());
-            log_daemon_event(
-                "pr_autotrack",
-                &[
-                    ("project", repo_root.display().to_string()),
-                    ("action", "untracked".to_string()),
-                    ("branch", label),
-                    ("pr", managed.pr.to_string()),
-                ],
-            );
+    // Suppress them entirely when the discovery is `partial`: an incomplete
+    // listing must never be read as "these PRs closed", or a truncated `gh`
+    // page (or gh↔ls-remote flapping) would churn-untrack still-open PRs.
+    if discovery.partial {
+        report.removals_suppressed = true;
+        log_daemon_event(
+            "pr_autotrack",
+            &[
+                ("project", repo_root.display().to_string()),
+                ("action", "poll".to_string()),
+                ("outcome", "partial".to_string()),
+                (
+                    "reason",
+                    "removals suppressed: discovery incomplete".to_string(),
+                ),
+            ],
+        );
+    } else {
+        // Sweep leaked checkouts before removals: a `pr-worktrees/pr-<N>` dir
+        // whose PR is neither open nor managed is an orphan left by a daemon
+        // crash between `worktree add` and `save_state`. Remove it so stale
+        // worktrees don't accumulate on disk across restarts.
+        sweep_orphan_pr_worktrees(repo_root, data_root, &desired, &state);
+
+        let stale: Vec<String> = state
+            .managed
+            .keys()
+            .filter(|label| !desired.contains_key(*label))
+            .cloned()
+            .collect();
+        for label in stale {
+            if let Some(managed) = state.managed.get(&label).cloned() {
+                untrack_pr(repo_root, data_root, &label, &managed).await;
+                state.managed.remove(&label);
+                state_dirty = true;
+                report.untracked.push(label.clone());
+                log_daemon_event(
+                    "pr_autotrack",
+                    &[
+                        ("project", repo_root.display().to_string()),
+                        ("action", "untracked".to_string()),
+                        ("branch", label),
+                        ("pr", managed.pr.to_string()),
+                    ],
+                );
+            }
         }
     }
 
@@ -416,8 +483,12 @@ pub async fn reconcile_project(
         }
         let is_new = current.is_none();
         if is_new && added >= cap {
+            // The cap bounds only *new* tracks. `continue` (not `break`) so a
+            // later entry that is already managed but has a changed head_sha
+            // still gets its refresh — otherwise a burst of new PRs would starve
+            // head updates for existing managed PRs, serving stale graphs.
             report.capped = true;
-            break;
+            continue;
         }
         if let Some(managed) = current {
             // A changed remote head invalidates the entire branch graph. Drop
@@ -623,24 +694,28 @@ fn prepare_pr_worktree(
     if fetched_head.as_deref() != Some(expected_head) {
         return Err("PR head changed during reconciliation".to_string());
     }
-    let branch_ref = format!("refs/heads/{label}");
-    if run_git(repo_root, &["show-ref", "--verify", "--quiet", &branch_ref]).is_some() {
-        return Err("internal PR worktree branch already exists".to_string());
-    }
 
     if let Some(parent) = worktree.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    // Clear any stale worktree registration/dir so `worktree add` is idempotent.
+    // Clear any stale worktree registration/dir so `worktree add` is idempotent
+    // and frees the synthetic branch for reset.
     remove_worktree(repo_root, worktree);
 
+    // Adopt (reset) rather than fail if the synthetic branch survived an
+    // interrupted prior cycle (daemon death between `worktree add` and
+    // `save_state`). The `tracedecay/autotrack/pr/<N>` label namespace is
+    // collision-proof by construction, so a leftover branch at a stale SHA is
+    // unambiguously ours. `-B` force-creates-or-resets it to the freshly
+    // fetched head; a plain `-b` would wedge the PR forever with
+    // "branch already exists" once the head advanced past the orphan.
     let wt_str = worktree.to_string_lossy();
     let add = run_git(
         repo_root,
         &[
             "worktree",
             "add",
-            "-b",
+            "-B",
             label,
             "--force",
             &wt_str,
@@ -684,6 +759,52 @@ async fn untrack_pr(repo_root: &Path, data_root: &Path, label: &str, managed: &M
         &managed.head_sha,
         !is_legacy,
     );
+}
+
+/// Removes leaked PR worktrees from interrupted prior cycles.
+///
+/// Scans `pr-worktrees/` for `pr-<N>` checkouts whose PR is neither open
+/// (`desired`) nor currently managed. Such a dir is an orphan left when the
+/// daemon died between `git worktree add` and `save_state`: no state entry
+/// claims it and the PR is not open, so it would otherwise sit on disk forever.
+/// Its synthetic branch and fetch ref are cleaned up alongside the checkout.
+/// Only called for a *complete* discovery (never when `partial`), so an open PR
+/// that merely fell outside a truncated listing is never swept.
+fn sweep_orphan_pr_worktrees(
+    repo_root: &Path,
+    data_root: &Path,
+    desired: &BTreeMap<String, &DiscoveredPr>,
+    state: &PrAutotrackState,
+) {
+    let worktrees_dir = data_root.join("pr-worktrees");
+    let Ok(entries) = std::fs::read_dir(&worktrees_dir) else {
+        return;
+    };
+    let managed_prs: std::collections::BTreeSet<u64> =
+        state.managed.values().map(|m| m.pr).collect();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(number) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix("pr-"))
+            .and_then(|n| n.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        if managed_prs.contains(&number) || desired.contains_key(&pr_label(number)) {
+            continue;
+        }
+        cleanup_pr_worktree(repo_root, data_root, number, "", true);
+        log_daemon_event(
+            "pr_autotrack",
+            &[
+                ("project", repo_root.display().to_string()),
+                ("action", "swept".to_string()),
+                ("pr", number.to_string()),
+                ("reason", "orphan worktree".to_string()),
+            ],
+        );
+    }
 }
 
 fn cleanup_pr_worktree(
@@ -775,16 +896,21 @@ async fn tick(global_db_path: Option<&Path>, last_poll: &mut HashMap<PathBuf, In
             continue;
         }
         let cfg = crate::config::load_sync_config(&root);
-        if !cfg.auto_track_pr_branches {
-            continue;
-        }
         let interval = Duration::from_secs(cfg.effective_auto_track_pr_poll_secs());
         let due = last_poll.get(&root).is_none_or(|t| t.elapsed() >= interval);
         if !due {
             continue;
         }
         last_poll.insert(root.clone(), Instant::now());
-        poll_project(root, cfg).await;
+        if cfg.auto_track_pr_branches {
+            poll_project(root, cfg).await;
+        } else {
+            // Feature disabled: if it left managed PR state behind (it was on,
+            // then turned off), tear that state down once instead of stranding
+            // worktrees/refs/branches/stores forever. Gated on the poll cadence
+            // (via last_poll above) so a disabled project isn't probed each tick.
+            teardown_disabled_project(&root).await;
+        }
     }
 }
 
@@ -798,11 +924,27 @@ async fn poll_project(repo_root: PathBuf, _cfg: SyncConfig) {
     let data_root = layout.data_root;
 
     let repo_for_discovery = repo_root.clone();
-    let Ok(discovery) =
-        tokio::task::spawn_blocking(move || discover_open_prs(&repo_for_discovery)).await
-    else {
-        return;
-    };
+    let discovery =
+        match tokio::task::spawn_blocking(move || discover_open_prs(&repo_for_discovery)).await {
+            Ok(Ok(discovery)) => discovery,
+            Ok(Err(reason)) => {
+                // Discovery command failed (auth/network/credentials). Skip the
+                // whole reconcile cycle — never reconcile against a discovery
+                // produced by a failed command, or a transient failure would
+                // untrack every managed PR as if the repo had zero open PRs.
+                log_daemon_event(
+                    "pr_autotrack",
+                    &[
+                        ("project", repo_root.display().to_string()),
+                        ("action", "poll".to_string()),
+                        ("outcome", "error".to_string()),
+                        ("reason", reason),
+                    ],
+                );
+                return;
+            }
+            Err(_) => return, // join error (task panicked/cancelled)
+        };
 
     let report =
         reconcile_project(&repo_root, &data_root, &discovery, MAX_NEW_TRACKS_PER_CYCLE).await;
@@ -816,6 +958,44 @@ async fn poll_project(repo_root: PathBuf, _cfg: SyncConfig) {
             ("new_tracked", report.tracked.len().to_string()),
             ("untracked", report.untracked.len().to_string()),
             ("skipped_forks", report.skipped_forks.len().to_string()),
+        ],
+    );
+}
+
+/// Tears down all managed PR state for a project whose `auto_track_pr_branches`
+/// is now disabled.
+///
+/// When the feature is turned off after it has tracked PRs, every managed
+/// worktree, `refs/tracedecay/pr/*` ref, synthetic `pr/<N>` branch and
+/// per-branch store would otherwise be stranded forever (surfacing stale graphs
+/// in `branch_list` and consuming disk). This runs one removals-only reconcile
+/// (empty desired set) to clean the managed set down to empty. Cheap and inert
+/// once nothing is managed, so it is safe to call every poll cadence.
+pub async fn teardown_disabled_project(repo_root: &Path) {
+    let opts = TraceDecayOpenOptions::default();
+    let Some(layout) = TraceDecay::initialized_store_layout_with_options(repo_root, &opts).await
+    else {
+        return; // not indexed — no managed state to tear down
+    };
+    let data_root = layout.data_root;
+    if load_state(&data_root).managed.is_empty() {
+        return; // nothing stranded — the common case, kept cheap
+    }
+    // Empty (complete, non-partial) discovery → every managed entry is stale →
+    // untracked and cleaned up.
+    let report = reconcile_project(
+        repo_root,
+        &data_root,
+        &PrDiscovery::default(),
+        MAX_NEW_TRACKS_PER_CYCLE,
+    )
+    .await;
+    log_daemon_event(
+        "pr_autotrack",
+        &[
+            ("project", repo_root.display().to_string()),
+            ("action", "teardown".to_string()),
+            ("untracked", report.untracked.len().to_string()),
         ],
     );
 }

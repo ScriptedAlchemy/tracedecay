@@ -545,6 +545,24 @@ fn try_acquire_branch_add_lock(tracedecay_dir: &Path) -> crate::errors::Result<s
     Ok(file)
 }
 
+/// Blocking-with-timeout variant of [`try_acquire_branch_add_lock`] for
+/// synchronous callers. Retries a briefly-contended lock (a concurrent branch
+/// add is only holding it for the duration of a DB clone) before giving up.
+/// Returns `None` on timeout or a non-contention error, so the caller can skip
+/// its mutation this round rather than proceed unsynchronized.
+fn acquire_branch_add_lock_blocking(tracedecay_dir: &Path) -> Option<std::fs::File> {
+    for _ in 0..20 {
+        match try_acquire_branch_add_lock(tracedecay_dir) {
+            Ok(lock) => return Some(lock),
+            Err(crate::errors::TraceDecayError::SyncLock { .. }) => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
 fn remove_branch_db_files(db_path: &Path) {
     let _ = std::fs::remove_file(db_path);
     let mut sidecar = db_path.to_path_buf();
@@ -575,6 +593,17 @@ fn clone_or_copy_db(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// used by `tracedecay branch remove` and the PR-autotrack lifecycle so both
 /// clean up identically.
 pub fn remove_tracked_branch_store(tracedecay_dir: &Path, branch: &str) -> bool {
+    // Serialize on the same branch-add lock every other `branch-meta.json`
+    // mutator holds (prepare_branch_tracking_in_layout, gc_dead_branch_stores).
+    // Without it, this unlocked load→remove→save races a concurrent
+    // `branch add`: depending on write order it either silently drops the
+    // user's just-added branch or resurrects a removed entry pointing at a
+    // deleted DB. On sustained contention, skip removal (returning false); the
+    // caller retries next cycle — nothing is lost. Callers never hold this lock
+    // when calling in (branch add / GC acquire-then-release), so no deadlock.
+    let Some(_lock) = acquire_branch_add_lock_blocking(tracedecay_dir) else {
+        return false;
+    };
     let Some(mut meta) = crate::branch_meta::load_branch_meta(tracedecay_dir) else {
         return false;
     };
