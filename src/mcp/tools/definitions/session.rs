@@ -7,13 +7,17 @@ pub(super) fn def_message_search() -> ToolDefinition {
     def(
         "tracedecay_message_search",
         "Message Search",
-        "Search ingested transcript messages across all supported providers by default. Searches catch up the selected provider scope unless catch_up is false; pass provider only when intentionally scoping results to one provider.",
+        "Search ingested transcript messages across all supported providers by default. Searches catch up the selected provider scope unless catch_up is false; pass provider only when intentionally scoping results to one provider. Set goals=true to instead list each session's latest Codex thread goal (objective + current status) — a quick 'what was this session working on / is it still active' view; goals mode makes query optional.",
         json!({
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Full-text query to search in ingested transcript messages."
+                    "description": "Full-text query to search in ingested transcript messages. Required unless goals=true."
+                },
+                "goals": {
+                    "type": "boolean",
+                    "description": "When true, list each session's latest Codex goal (kind='goal') — objective as text plus lifecycle status (e.g. active/paused) from metadata — newest first, instead of running a full-text search. query becomes optional; limit and project_key still apply. Scoped to the selected project store."
                 },
                 "provider": {
                     "type": "string",
@@ -72,7 +76,7 @@ pub(super) fn def_message_search() -> ToolDefinition {
                 "workflow_run": workflow_run_scope_schema(),
                 "workflow_agent": workflow_agent_scope_schema()
             },
-            "required": ["query"]
+            "required": []
         }),
     )
 }

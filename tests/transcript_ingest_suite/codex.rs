@@ -1856,3 +1856,162 @@ async fn codex_subagent_rollout_uses_parent_link_from_session_meta() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].session.session_id, "codex-child");
 }
+
+/// Writes a Codex rollout carrying a `thread_goal_updated` lifecycle: an
+/// initial `active` goal, an identical follow-up (only token/time drift — must
+/// be deduped), then a `paused` transition (a distinct state — must keep its
+/// own row).
+fn write_codex_rollout_with_goal_events(
+    home: &std::path::Path,
+    project: &std::path::Path,
+    session: &str,
+) -> std::path::PathBuf {
+    let dir = home.join(".codex/sessions/2026/01/02");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("rollout-2026-01-02T00-00-00-{session}.jsonl"));
+    let goal = |status: &str, tokens: i64, secs: i64, updated: i64| {
+        serde_json::json!({
+            "type": "thread_goal_updated",
+            "threadId": session,
+            "goal": {
+                "threadId": session,
+                "objective": "phlogiston pipeline overhaul and reconciliation",
+                "status": status,
+                "tokensUsed": tokens,
+                "timeUsedSeconds": secs,
+                "createdAt": 1_783_500_000i64,
+                "updatedAt": updated
+            }
+        })
+    };
+    write_jsonl(
+        &path,
+        &[
+            serde_json::json!({
+                "timestamp": "2026-01-02T00:00:00.000Z",
+                "type": "session_meta",
+                "payload": {"id": session, "cwd": project.to_string_lossy(), "model": "gpt-5.5"}
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-02T00:00:01.000Z",
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "start the overhaul"}
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-02T00:00:02.000Z",
+                "type": "event_msg",
+                "payload": goal("active", 0, 0, 1_783_500_000)
+            }),
+            // Same (objective, status) — only token/time drift. Deduped.
+            serde_json::json!({
+                "timestamp": "2026-01-02T00:00:03.000Z",
+                "type": "event_msg",
+                "payload": goal("active", 5000, 42, 1_783_500_042)
+            }),
+            // Status transition -> new goal row.
+            serde_json::json!({
+                "timestamp": "2026-01-02T00:00:04.000Z",
+                "type": "event_msg",
+                "payload": goal("paused", 5000, 42, 1_783_500_100)
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-02T00:00:05.000Z",
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "message": "paused for review"}
+            }),
+        ],
+    );
+    path
+}
+
+#[tokio::test]
+async fn codex_thread_goal_events_ingested_as_goal_rows_with_dedupe() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    write_codex_rollout_with_goal_events(&home, &project, "codex-goal-events");
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = CodexSource::with_home(&home);
+    let stats = ingest_source(&db, &source, &project, None).await;
+    // user_message + agent_message + two goal rows (active, paused). The
+    // drift-only `active` repeat is deduped away.
+    assert_eq!(stats.messages_upserted, 4);
+
+    // Both distinct goal states are searchable by their shared objective text.
+    let hits = db
+        .search_session_messages(
+            "codex",
+            Some(project.to_string_lossy().as_ref()),
+            "phlogiston overhaul",
+            10,
+        )
+        .await;
+    let goal_hits: Vec<_> = hits
+        .iter()
+        .filter(|hit| hit.message.kind.as_deref() == Some("goal"))
+        .collect();
+    assert_eq!(
+        goal_hits.len(),
+        2,
+        "active + paused transitions kept, drift deduped"
+    );
+    let mut statuses: Vec<String> = goal_hits
+        .iter()
+        .filter_map(|hit| {
+            let meta: serde_json::Value =
+                serde_json::from_str(hit.message.metadata_json.as_deref().unwrap()).ok()?;
+            meta.get("status")
+                .and_then(|s| s.as_str())
+                .map(str::to_string)
+        })
+        .collect();
+    statuses.sort();
+    assert_eq!(statuses, vec!["active".to_string(), "paused".to_string()]);
+    for hit in &goal_hits {
+        assert_eq!(hit.message.role, "system");
+        assert_eq!(
+            hit.message.text,
+            "phlogiston pipeline overhaul and reconciliation"
+        );
+        let meta: serde_json::Value =
+            serde_json::from_str(hit.message.metadata_json.as_deref().unwrap()).unwrap();
+        assert_eq!(meta["source"], "codex_thread_goal");
+        assert_eq!(meta["source_event"], "thread_goal_updated");
+        assert_eq!(meta["thread_id"], "codex-goal-events");
+    }
+}
+
+#[tokio::test]
+async fn recent_session_goals_surfaces_latest_status_per_session() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    write_codex_rollout_with_goal_events(&home, &project, "codex-goal-events");
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = CodexSource::with_home(&home);
+    ingest_source(&db, &source, &project, None).await;
+
+    let goals = db
+        .recent_session_goals(Some(project.to_string_lossy().as_ref()), 10)
+        .await;
+    // One row per session: the latest lifecycle state (paused).
+    assert_eq!(goals.len(), 1);
+    let goal = &goals[0];
+    assert_eq!(goal.session.session_id, "codex-goal-events");
+    assert_eq!(goal.message.kind.as_deref(), Some("goal"));
+    assert_eq!(
+        goal.message.text,
+        "phlogiston pipeline overhaul and reconciliation"
+    );
+    let meta: serde_json::Value =
+        serde_json::from_str(goal.message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(meta["status"], "paused");
+    assert_eq!(meta["updated_at"], 1_783_500_100i64);
+
+    // Re-ingest must be idempotent (upsert keyed by message_id): still one goal.
+    ingest_source(&db, &source, &project, None).await;
+    let goals_again = db
+        .recent_session_goals(Some(project.to_string_lossy().as_ref()), 10)
+        .await;
+    assert_eq!(goals_again.len(), 1);
+}
