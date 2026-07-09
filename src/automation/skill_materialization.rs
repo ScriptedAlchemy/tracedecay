@@ -719,8 +719,7 @@ fn read_materialization_manifest(dir: &Path, skill_id: &str) -> Result<ManifestS
 }
 
 fn hash_bytes(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
+    super::artifact_refs::sha256_bytes(bytes)
 }
 
 fn current_artifact_hash(path: &Path) -> Result<Option<String>> {
@@ -1055,21 +1054,27 @@ fn reconcile_owned_package(
     installation_id: &str,
     artifacts: &BTreeMap<String, Vec<u8>>,
 ) -> Result<MaterializeAction> {
+    // Hash every manifest-tracked file exactly once; the forked gate, the
+    // clean check, and the removal candidates below all read from this map
+    // instead of re-reading and re-hashing the same files per loop.
+    let mut states: BTreeMap<&String, ArtifactState> = BTreeMap::new();
+    for (relative, expected_hash) in &manifest.files {
+        states.insert(relative, artifact_state(dir, relative, expected_hash)?);
+    }
     for relative in artifacts.keys() {
-        if let Some(expected_hash) = manifest.files.get(relative) {
-            if artifact_state(dir, relative, expected_hash)? == ArtifactState::Forked {
-                return Ok(MaterializeAction::SkippedForked);
+        match states.get(relative) {
+            Some(ArtifactState::Forked) => return Ok(MaterializeAction::SkippedForked),
+            Some(_) => {}
+            None => {
+                if path_exists_without_following_links(&artifact_path(dir, relative)?)? {
+                    return Ok(MaterializeAction::SkippedForeign);
+                }
             }
-        } else if path_exists_without_following_links(&artifact_path(dir, relative)?)? {
-            return Ok(MaterializeAction::SkippedForeign);
         }
     }
 
     let exact_files = manifest.files.keys().eq(artifacts.keys());
-    let mut all_clean = true;
-    for (relative, expected_hash) in &manifest.files {
-        all_clean &= artifact_state(dir, relative, expected_hash)? == ArtifactState::Clean;
-    }
+    let all_clean = states.values().all(|state| *state == ArtifactState::Clean);
     if manifest.package_hash == package_hash
         && exact_files
         && all_clean
@@ -1080,8 +1085,7 @@ fn reconcile_owned_package(
 
     let mut remove_files = BTreeMap::new();
     for (relative, expected_hash) in &manifest.files {
-        if !artifacts.contains_key(relative)
-            && artifact_state(dir, relative, expected_hash)? == ArtifactState::Clean
+        if !artifacts.contains_key(relative) && states.get(relative) == Some(&ArtifactState::Clean)
         {
             remove_files.insert(relative.clone(), expected_hash.clone());
         }
