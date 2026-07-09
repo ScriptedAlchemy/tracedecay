@@ -18,6 +18,7 @@ pub(crate) mod annotations;
 pub(crate) mod basic_common;
 pub(crate) mod common;
 pub mod complexity;
+pub(crate) mod source_mask;
 pub(crate) mod traversal;
 pub mod ts_provider;
 

@@ -44,348 +44,13 @@ fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
-/// Lexer state for [`mask_rust_noise`].
-#[derive(Clone, Copy)]
-enum MaskState {
-    Normal,
-    LineComment,
-    /// Nested `/* … */` comment; carries the nesting depth.
-    BlockComment(u32),
-    /// Regular or byte string `"…"` / `b"…"`. The flag is true only for a
-    /// direct format literal whose implicit `{name}` captures are real uses.
-    Str(bool),
-    /// Raw string `r"…"` / `r#"…"#`; carries the `#` count.
-    RawStr(u32, bool),
-    /// Char or byte-char literal `'x'` / `b'x'`.
-    Char,
-}
-
-#[derive(Clone, Copy)]
-struct DelimiterContext {
-    closing: u8,
-    format_arg_min: Option<usize>,
-    top_level_commas: usize,
-    format_literal_seen: bool,
-}
-
-/// Returns a copy of `source` with the *contents* of comments and string,
-/// byte-string, raw-string, and char literals replaced by spaces, preserving
-/// newlines and byte length so line indexing stays valid.
-///
-/// The unused-import scan is text-based (the Rust resolver drops `Uses` edges
-/// for std/foreign-crate imports, so a graph-only check misses them). A bare
-/// substring search would treat an import merely *named in a comment* — e.g.
-/// the audit fixture's own `// Planted unused import: BTreeMap …` — as a real
-/// reference and never flag it, which is exactly why the tool returned empty
-/// results on small crates. Masking removes that whole class of false
-/// negatives; tracking string state keeps a `//` or `"` inside a string
-/// literal from being mistaken for a comment (which would blank real code and
-/// cause false positives).
-fn mask_rust_noise(source: &str) -> String {
-    let bytes = source.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut state = MaskState::Normal;
-    let mut delimiters: Vec<DelimiterContext> = Vec::new();
-    // Whether the previously emitted byte was an identifier byte — used to tell
-    // a raw/byte-string prefix (`r"`, `b"`, `br"`) from an identifier that
-    // merely ends in `r`/`b` (e.g. `for`, `sub`).
-    let mut prev_ident = false;
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let b = bytes[i];
-        match state {
-            MaskState::Normal => {
-                if b == b'/' && bytes.get(i + 1) == Some(&b'/') {
-                    out.push(b' ');
-                    out.push(b' ');
-                    state = MaskState::LineComment;
-                    prev_ident = false;
-                    i += 2;
-                } else if b == b'/' && bytes.get(i + 1) == Some(&b'*') {
-                    out.push(b' ');
-                    out.push(b' ');
-                    state = MaskState::BlockComment(1);
-                    prev_ident = false;
-                    i += 2;
-                } else if !prev_ident
-                    && (b == b'r' || b == b'b')
-                    && let Some(consumed) =
-                        try_open_raw_or_byte_string(bytes, i, &mut out, &mut state, &mut delimiters)
-                {
-                    prev_ident = false;
-                    i += consumed;
-                } else if b == b'"' {
-                    out.push(b' ');
-                    state = MaskState::Str(take_format_literal_context(&mut delimiters));
-                    prev_ident = false;
-                    i += 1;
-                } else if b == b'\'' && is_char_literal_start(bytes, i) {
-                    out.push(b' ');
-                    state = MaskState::Char;
-                    prev_ident = false;
-                    i += 1;
-                } else {
-                    match b {
-                        b'(' | b'[' | b'{' => delimiters.push(DelimiterContext {
-                            closing: match b {
-                                b'(' => b')',
-                                b'[' => b']',
-                                _ => b'}',
-                            },
-                            format_arg_min: format_macro_argument_index(&out),
-                            top_level_commas: 0,
-                            format_literal_seen: false,
-                        }),
-                        b',' => {
-                            if let Some(context) = delimiters.last_mut() {
-                                context.top_level_commas += 1;
-                            }
-                        }
-                        b')' | b']' | b'}'
-                            if delimiters
-                                .last()
-                                .is_some_and(|context| context.closing == b) =>
-                        {
-                            delimiters.pop();
-                        }
-                        _ => {}
-                    }
-                    out.push(b);
-                    prev_ident = is_ident_byte(b);
-                    i += 1;
-                }
-            }
-            MaskState::LineComment => {
-                if b == b'\n' {
-                    out.push(b'\n');
-                    state = MaskState::Normal;
-                } else {
-                    out.push(b' ');
-                }
-                i += 1;
-            }
-            MaskState::BlockComment(depth) => {
-                if b == b'/' && bytes.get(i + 1) == Some(&b'*') {
-                    out.push(b' ');
-                    out.push(b' ');
-                    state = MaskState::BlockComment(depth + 1);
-                    i += 2;
-                } else if b == b'*' && bytes.get(i + 1) == Some(&b'/') {
-                    out.push(b' ');
-                    out.push(b' ');
-                    state = if depth <= 1 {
-                        MaskState::Normal
-                    } else {
-                        MaskState::BlockComment(depth - 1)
-                    };
-                    i += 2;
-                } else {
-                    out.push(if b == b'\n' { b'\n' } else { b' ' });
-                    i += 1;
-                }
-            }
-            MaskState::Str(preserve_captures) => {
-                if b == b'\\' && i + 1 < bytes.len() {
-                    out.push(b' ');
-                    out.push(if bytes[i + 1] == b'\n' { b'\n' } else { b' ' });
-                    i += 2;
-                } else if preserve_captures && b == b'{' && bytes.get(i + 1) == Some(&b'{') {
-                    // `{{` is an escaped literal brace, not a capture opener.
-                    out.push(b' ');
-                    out.push(b' ');
-                    i += 2;
-                } else if preserve_captures
-                    && b == b'{'
-                    && let Some(end) = format_capture_identifier_end(bytes, i + 1)
-                {
-                    out.push(b' ');
-                    out.extend_from_slice(&bytes[i + 1..end]);
-                    i = end;
-                } else if b == b'"' {
-                    out.push(b' ');
-                    state = MaskState::Normal;
-                    i += 1;
-                } else {
-                    out.push(if b == b'\n' { b'\n' } else { b' ' });
-                    i += 1;
-                }
-            }
-            MaskState::RawStr(hashes, preserve_captures) => {
-                if b == b'"' && raw_string_closes(bytes, i, hashes) {
-                    let closing = hashes as usize + 1; // the `"` plus its `#`s
-                    out.resize(out.len() + closing, b' ');
-                    state = MaskState::Normal;
-                    i += closing;
-                } else if preserve_captures && b == b'{' && bytes.get(i + 1) == Some(&b'{') {
-                    out.push(b' ');
-                    out.push(b' ');
-                    i += 2;
-                } else if preserve_captures
-                    && b == b'{'
-                    && let Some(end) = format_capture_identifier_end(bytes, i + 1)
-                {
-                    out.push(b' ');
-                    out.extend_from_slice(&bytes[i + 1..end]);
-                    i = end;
-                } else {
-                    out.push(if b == b'\n' { b'\n' } else { b' ' });
-                    i += 1;
-                }
-            }
-            MaskState::Char => {
-                if b == b'\\' && i + 1 < bytes.len() {
-                    out.push(b' ');
-                    out.push(if bytes[i + 1] == b'\n' { b'\n' } else { b' ' });
-                    i += 2;
-                } else if b == b'\'' {
-                    out.push(b' ');
-                    state = MaskState::Normal;
-                    i += 1;
-                } else {
-                    out.push(if b == b'\n' { b'\n' } else { b' ' });
-                    i += 1;
-                }
-            }
-        }
-    }
-    // Every replacement is an ASCII space and every original byte is copied
-    // whole, so the result is always valid UTF-8; fall back defensively.
-    String::from_utf8(out).unwrap_or_else(|_| source.to_string())
-}
-
-/// If a raw or byte string opens at `i` (`r"`, `r#"…`, `b"`, `br"`, `br#"…`),
-/// blanks its opening delimiter into `out`, sets `state`, and returns the byte
-/// count consumed. Returns `None` otherwise.
-fn try_open_raw_or_byte_string(
-    bytes: &[u8],
-    i: usize,
-    out: &mut Vec<u8>,
-    state: &mut MaskState,
-    delimiters: &mut [DelimiterContext],
-) -> Option<usize> {
-    let mut p = i;
-    let byte_prefixed = bytes.get(p) == Some(&b'b');
-    if byte_prefixed {
-        p += 1;
-    }
-    let raw = bytes.get(p) == Some(&b'r');
-    if raw {
-        p += 1;
-        let mut hashes = 0u32;
-        while bytes.get(p) == Some(&b'#') {
-            hashes += 1;
-            p += 1;
-        }
-        if bytes.get(p) == Some(&b'"') {
-            let consumed = p + 1 - i;
-            out.resize(out.len() + consumed, b' ');
-            *state = MaskState::RawStr(
-                hashes,
-                !byte_prefixed && take_format_literal_context(delimiters),
-            );
-            return Some(consumed);
-        }
-        return None;
-    }
-    // Non-raw byte string `b"…"` (regular escaping).
-    if p == i + 1 && bytes.get(p) == Some(&b'"') {
-        out.push(b' ');
-        out.push(b' ');
-        *state = MaskState::Str(false);
-        return Some(2);
-    }
-    None
-}
-
-/// Return the minimum top-level comma count before the format literal for a
-/// standard formatting macro whose opening delimiter follows `prefix`.
-fn format_macro_argument_index(prefix: &[u8]) -> Option<usize> {
-    let mut i = prefix.len();
-    while i > 0 && prefix[i - 1].is_ascii_whitespace() {
-        i -= 1;
-    }
-    if i == 0 || prefix[i - 1] != b'!' {
-        return None;
-    }
-    i -= 1;
-    let name_end = i;
-    while i > 0 && (is_ident_byte(prefix[i - 1]) || prefix[i - 1] == b':') {
-        i -= 1;
-    }
-    let Ok(path) = std::str::from_utf8(&prefix[i..name_end]) else {
-        return None;
-    };
-    match path.rsplit("::").next().unwrap_or(path) {
-        "format" | "format_args" | "format_args_nl" | "print" | "println" | "eprint"
-        | "eprintln" | "panic" | "todo" | "unimplemented" | "unreachable" => Some(0),
-        "assert" | "debug_assert" | "write" | "writeln" => Some(1),
-        "assert_eq" | "assert_ne" | "debug_assert_eq" | "debug_assert_ne" => Some(2),
-        _ => None,
-    }
-}
-
-/// Mark and accept the first string at the format-argument position of the
-/// innermost active formatting macro. Later value arguments remain masked.
-fn take_format_literal_context(delimiters: &mut [DelimiterContext]) -> bool {
-    let Some(context) = delimiters.last_mut() else {
-        return false;
-    };
-    let Some(minimum) = context.format_arg_min else {
-        return false;
-    };
-    if context.format_literal_seen || context.top_level_commas < minimum {
-        return false;
-    }
-    context.format_literal_seen = true;
-    true
-}
-
-/// Return the end of an implicit `{identifier}` capture starting at `start`.
-/// A following `:` also counts (`{identifier:?}`); escaped `{{...}}` is handled
-/// by the caller before reaching this helper.
-fn format_capture_identifier_end(bytes: &[u8], start: usize) -> Option<usize> {
-    let first = *bytes.get(start)?;
-    if !(first.is_ascii_alphabetic() || first == b'_') {
-        return None;
-    }
-    let mut end = start + 1;
-    while bytes.get(end).is_some_and(|byte| is_ident_byte(*byte)) {
-        end += 1;
-    }
-    matches!(bytes.get(end), Some(b'}' | b':')).then_some(end)
-}
-
-/// True if the `'` at `quote` opens a char/byte-char literal rather than a
-/// lifetime or loop label. Handles `'a'`, `'\n'`, `'\''`, `'"'`, and multibyte
-/// content chars; bare `'a` (lifetime) returns false.
-fn is_char_literal_start(bytes: &[u8], quote: usize) -> bool {
-    let n = bytes.len();
-    let j = quote + 1;
-    if j >= n {
-        return false;
-    }
-    if bytes[j] == b'\\' {
-        // Escaped literal: a closing quote follows within a short window.
-        let end = (quote + 12).min(n);
-        return bytes[j + 1..end].contains(&b'\'');
-    }
-    // One content char (possibly multibyte) then a closing quote.
-    let mut k = j + 1;
-    while k < n && (bytes[k] & 0xC0) == 0x80 {
-        k += 1;
-    }
-    bytes.get(k) == Some(&b'\'')
-}
-
-/// True if the `"` at `i` closes a raw string opened with `hashes` `#`s, i.e.
-/// it is followed by exactly that many `#`s.
-fn raw_string_closes(bytes: &[u8], i: usize, hashes: u32) -> bool {
-    for h in 0..hashes as usize {
-        if bytes.get(i + 1 + h) != Some(&b'#') {
-            return false;
-        }
-    }
-    true
+/// True when `path` names a Rust source file (case-insensitive `.rs`). Gates
+/// tree-sitter masking, which parses with the Rust grammar and would
+/// mis-tokenise other languages.
+fn path_is_rust(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
 }
 
 /// Returns the identifiers a `use` statement brings into scope, parsing
@@ -799,7 +464,7 @@ pub(super) async fn handle_unused_imports(
                 let abs = project_root.join(&use_node.file_path);
                 std::fs::read_to_string(&abs)
                     .ok()
-                    .map(|src| mask_rust_noise(&src))
+                    .map(|src| crate::extraction::source_mask::masked_rust_source(&src))
             })
             .clone();
         let Some(source) = source else {
@@ -1299,9 +964,21 @@ fn cached_lines<'a>(
 ) -> Option<&'a Vec<String>> {
     if !cache.contains_key(file_path) {
         let abs = cg.project_root().join(file_path);
-        let lines = std::fs::read_to_string(abs)
-            .ok()
-            .map(|content| content.lines().map(str::to_string).collect());
+        // Blank comments and string/char literals for Rust files so a
+        // `name(` that appears only inside a comment or string is not mistaken
+        // for a real self-call. Non-Rust files are scanned raw (the Rust
+        // grammar would mis-tokenise them).
+        let lines = std::fs::read_to_string(abs).ok().map(|content| {
+            let scanned = if path_is_rust(file_path) {
+                crate::extraction::source_mask::masked_rust_source_with(
+                    &content,
+                    crate::extraction::source_mask::MaskOptions::CODE_SCAN,
+                )
+            } else {
+                content
+            };
+            scanned.lines().map(str::to_string).collect()
+        });
         cache.insert(file_path.to_string(), lines);
     }
     cache.get(file_path).and_then(Option::as_ref)
@@ -1806,12 +1483,25 @@ pub(super) async fn handle_unsafe_patterns(
         let Ok(source) = crate::sync::read_source_file(&abs_path) else {
             continue;
         };
+        // Blank comments and string/char literals for Rust files so an
+        // `unsafe`/`unwrap`/`panic!` mentioned inside a comment or string is not
+        // reported as a real risk site. Detection runs on the masked copy;
+        // the original line is kept for the emitted snippet. Non-Rust files are
+        // scanned raw (the Rust grammar would mis-tokenise them).
+        let masked = if path_is_rust(&file.path) {
+            crate::extraction::source_mask::masked_rust_source_with(
+                &source,
+                crate::extraction::source_mask::MaskOptions::CODE_SCAN,
+            )
+        } else {
+            source.clone()
+        };
         let nodes = cg.get_nodes_by_file(&file.path).await?;
 
-        for (idx, line) in source.lines().enumerate() {
+        for (idx, (line, masked_line)) in source.lines().zip(masked.lines()).enumerate() {
             let line_no = (idx as u32) + 1;
             for kind in &kinds {
-                if line_matches_unsafe_kind(line, kind) {
+                if line_matches_unsafe_kind(masked_line, kind) {
                     let enclosing = nodes
                         .iter()
                         .filter(|n| n.start_line <= line_no && line_no <= n.end_line)
@@ -2941,115 +2631,5 @@ mod unsafe_pattern_detection_tests {
         // A substring of a longer identifier must not trip the word-boundary check.
         assert!(!contains_unsafe_block_start("let unsafely = 1;"));
         assert!(!contains_unsafe_block_start("let make_unsafe_thing = 2;"));
-    }
-}
-
-#[cfg(test)]
-mod mask_rust_noise_tests {
-    use super::{has_identifier_match, mask_rust_noise};
-
-    /// Helper: does `identifier` appear as a real token anywhere in the masked
-    /// source? This mirrors the unused-import scan.
-    fn referenced(source: &str, identifier: &str) -> bool {
-        mask_rust_noise(source)
-            .lines()
-            .any(|line| has_identifier_match(line, identifier))
-    }
-
-    #[test]
-    fn line_comment_mention_is_masked() {
-        // The exact false-negative from the audit fixture: the import is named
-        // only in the comment above it.
-        let src = "// Planted unused import: BTreeMap is referenced nowhere.\nuse std::collections::BTreeMap;\npub fn f() {}\n";
-        // Line 2 is the use statement itself; the scan skips it by line index,
-        // so masking the comment must leave zero references.
-        assert!(!referenced("// BTreeMap\npub fn f() {}", "BTreeMap"));
-        // Sanity: raw (unmasked) text would wrongly see the comment mention.
-        assert!(src.contains("BTreeMap"));
-    }
-
-    #[test]
-    fn block_and_doc_comments_are_masked() {
-        assert!(!referenced("/* uses HashMap here */\nfn f() {}", "HashMap"));
-        assert!(!referenced(
-            "/// doc mentions HashMap\nfn f() {}",
-            "HashMap"
-        ));
-        assert!(!referenced(
-            "/* outer /* nested HashMap */ still comment */\nfn f() {}",
-            "HashMap"
-        ));
-    }
-
-    #[test]
-    fn string_and_char_literals_are_masked() {
-        assert!(!referenced(r#"let s = "HashMap in a string";"#, "HashMap"));
-        assert!(!referenced(r#"let s = "{HashMap}";"#, "HashMap"));
-        assert!(!referenced(r#"println!("{{HashMap}}");"#, "HashMap"));
-        assert!(referenced(r#"println!("{HashMap}");"#, "HashMap"));
-        // A `//` inside a string must NOT start a comment and swallow real code.
-        assert!(referenced(
-            "let url = \"http://x\"; let m = HashMap::new();",
-            "HashMap"
-        ));
-        // Char literal containing a quote must not desync the lexer.
-        assert!(referenced(
-            "let q = '\"'; let m = HashMap::new();",
-            "HashMap"
-        ));
-    }
-
-    #[test]
-    fn implicit_captures_survive_supported_format_macro_positions() {
-        for source in [
-            r#"panic!("{HashMap}");"#,
-            r#"assert!(ready, "{HashMap}");"#,
-            r#"assert_eq!(left, right, "{HashMap}");"#,
-            r#"debug_assert_ne!(left, right, "{HashMap}");"#,
-            r#"write!(&mut output, "{HashMap}");"#,
-            r#"writeln!(&mut output, "{HashMap}");"#,
-            r##"write!(&mut output, r#"{HashMap}"#);"##,
-            r#"todo!("{HashMap}");"#,
-            r#"unimplemented!("{HashMap}");"#,
-            r#"unreachable!("{HashMap}");"#,
-            r#"std::println! /* comment */ ("{HashMap}");"#,
-        ] {
-            assert!(referenced(source, "HashMap"), "source: {source}");
-        }
-
-        for source in [
-            r#"assert_eq!("{HashMap}", "other");"#,
-            r#"assert!(message.contains("{HashMap}"));"#,
-            r#"format!("{value}", "{HashMap}");"#,
-        ] {
-            assert!(!referenced(source, "HashMap"), "source: {source}");
-        }
-    }
-
-    #[test]
-    fn raw_strings_are_masked_without_desync() {
-        assert!(!referenced(
-            r##"let s = r#"HashMap "quoted" //"#;"##,
-            "HashMap"
-        ));
-        // Real usage after a raw string on the next line survives.
-        assert!(referenced(
-            "let s = r\"raw //\";\nlet m = HashMap::new();",
-            "HashMap"
-        ));
-        assert!(referenced(r##"println!(r#"{HashMap}"#);"##, "HashMap"));
-    }
-
-    #[test]
-    fn real_usage_survives_masking() {
-        assert!(referenced(
-            "use std::collections::HashMap;\nfn f() -> HashMap<u32, u32> { HashMap::new() }",
-            "HashMap"
-        ));
-        // `r`/`b` starting an identifier must not be read as a raw/byte string.
-        assert!(referenced(
-            "for radius in bounds { let _ = radius; }",
-            "radius"
-        ));
     }
 }
