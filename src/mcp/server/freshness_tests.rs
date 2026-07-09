@@ -142,6 +142,37 @@ async fn startup_catch_up_spawned_once_per_server() {
     );
 }
 
+// ---- ledger settle is bounded when a recorder task wedges ---------
+
+// A dedicated multi-thread runtime keeps the timer driver off the same worker
+// that runs the server's startup catch-up sync, so the bound is honored
+// promptly regardless of machine load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ledger_writes_settled_is_bounded_when_a_write_wedges() {
+    let (cg, _dir, _pin) = init_indexed_repo().await;
+    let server = McpServer::new(cg, None).await;
+
+    // Inject a never-completing observed ledger write via the same accounting
+    // the production path uses. Without a bound, awaiting settlement would hang
+    // forever (the defect this guards against).
+    server.spawn_wedged_ledger_write_for_test();
+
+    // Wrap in an outer wall-clock guard: if the bound were ever ignored the
+    // call would hang, so an elapsed outer timeout is itself the failure
+    // signal (a plain assertion could never fire on a hung await).
+    let bounded = tokio::time::timeout(
+        Duration::from_secs(30),
+        server.ledger_writes_settled_within(Duration::from_millis(150)),
+    )
+    .await
+    .expect("bounded settle must return, never hang on a wedged write");
+
+    assert!(
+        !bounded,
+        "a wedged ledger write must be reported as un-settled"
+    );
+}
+
 // ---- D4: sync-on-read never blocks + single-flight (tests a, d) ---
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -22,6 +22,17 @@ pub(super) struct McpToolAnalyticsEvent<'a> {
     /// observed yet (e.g. a daemon-proxied first call). Bounded to the
     /// negotiated name only — never the full `clientInfo` payload.
     pub(super) client_name: Option<&'a str>,
+    /// Stable per-process MCP server instance id (a random hex token minted
+    /// once at server start). Recorded in `metadata.mcp_instance_id` on every
+    /// event so calls from one server lifetime can be grouped even when
+    /// `session_id` is absent — which is the common case: the MCP transport
+    /// negotiates only `clientInfo` (host name), never a session/conversation
+    /// id, so `session_id` is populated only when the client happens to thread
+    /// `session_id`/`sessionId` through the tool arguments (rare — ~97.6% of
+    /// historical events had a NULL `session_id`). This is an honest grouping
+    /// key, NOT a real session id, so it stays in metadata rather than
+    /// masquerading in the `session_id` column.
+    pub(super) mcp_instance_id: Option<&'a str>,
     /// Bounded, sanitized (no argument bodies) reason for a `outcome ==
     /// "error"` call, e.g. a structural edit-tool failure message or a
     /// dispatch error's `Display` text. `None` falls back to a generic
@@ -60,6 +71,7 @@ pub(super) fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> Anal
         "duration_us": input.duration_us,
         "duration_ms": input.duration_us.map(|us| us / 1000),
         "client_name": input.client_name,
+        "mcp_instance_id": input.mcp_instance_id,
     });
     if input.outcome == "error" {
         metadata["failure_reason"] = json!(
@@ -268,6 +280,7 @@ mod tests {
             arguments: &arguments,
             internal_analytics: None,
             client_name: None,
+            mcp_instance_id: None,
             failure_reason: Some("old_str not found in src/main.rs"),
         });
         let metadata: serde_json::Value =
@@ -296,6 +309,7 @@ mod tests {
             arguments: &arguments,
             internal_analytics: None,
             client_name: None,
+            mcp_instance_id: None,
             failure_reason: None,
         });
         let metadata: serde_json::Value =
@@ -321,6 +335,7 @@ mod tests {
             arguments: &arguments,
             internal_analytics: None,
             client_name: None,
+            mcp_instance_id: None,
             failure_reason: Some("should be ignored on success"),
         });
         let metadata: serde_json::Value =
@@ -346,6 +361,7 @@ mod tests {
             arguments: &arguments,
             internal_analytics: None,
             client_name: Some("claude-code"),
+            mcp_instance_id: Some("mcp-instance-test"),
             failure_reason: None,
         });
 
@@ -379,6 +395,7 @@ mod tests {
             arguments: &arguments,
             internal_analytics: None,
             client_name: None,
+            mcp_instance_id: None,
             failure_reason: None,
         });
 
@@ -408,6 +425,7 @@ mod tests {
             arguments: &arguments,
             internal_analytics: None,
             client_name: Some("codex"),
+            mcp_instance_id: Some("mcp-instance-test"),
             failure_reason: None,
         });
 
@@ -417,5 +435,41 @@ mod tests {
 
         assert!(metadata.get("action").is_none());
         assert_eq!(metadata["client_name"], "codex");
+        assert_eq!(metadata["mcp_instance_id"], "mcp-instance-test");
+    }
+
+    #[test]
+    fn mcp_tool_analytics_event_records_instance_id_when_session_absent() {
+        // The common case: no client-supplied session_id, so the honest
+        // grouping key is the per-process mcp_instance_id in metadata while
+        // the session_id column stays NULL.
+        let request_id = json!(9);
+        let arguments = json!({});
+        let event = mcp_tool_analytics_event(McpToolAnalyticsEvent {
+            project_root: Path::new("/repo"),
+            session_id: None,
+            tool_name: "tracedecay_search",
+            outcome: "success",
+            raw_file_tokens: 0,
+            response_tokens: 0,
+            net_saved_tokens: 0,
+            duration_us: None,
+            timestamp: 12345,
+            request_id: &request_id,
+            arguments: &arguments,
+            internal_analytics: None,
+            client_name: Some("claude-code"),
+            mcp_instance_id: Some("mcp-abc123"),
+            failure_reason: None,
+        });
+
+        assert!(
+            event.session_id.is_none(),
+            "instance id must not masquerade as a real session id"
+        );
+        let metadata: serde_json::Value =
+            serde_json::from_str(event.metadata_json.as_deref().unwrap_or("{}"))
+                .expect("metadata should parse");
+        assert_eq!(metadata["mcp_instance_id"], "mcp-abc123");
     }
 }
