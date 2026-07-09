@@ -2075,6 +2075,41 @@ async fn test_grep_path_glob_filters_files() {
 }
 
 #[tokio::test]
+async fn test_ast_grep_search_respects_scope_prefix() {
+    let (cg, _dir) = setup_project().await;
+    let root = cg.project_root().to_path_buf();
+    fs::write(
+        root.join("src/outside_scope.rs"),
+        "fn outside() { scope_probe(1); }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("tests/inside_scope.rs"),
+        "fn inside() { scope_probe(2); }\n",
+    )
+    .unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_ast_grep_search",
+        json!({"pattern": "scope_probe($A)", "format": "json"}),
+        None,
+        Some("tests"),
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&result.value);
+    let files: Vec<&str> = payload["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hit| hit["file"].as_str().unwrap())
+        .collect();
+
+    assert_eq!(files, vec!["tests/inside_scope.rs"], "{payload}");
+}
+
+#[tokio::test]
 async fn test_grep_enforces_max_results_cap() {
     let (cg, _dir) = setup_project().await;
     let root = cg.project_root().to_path_buf();

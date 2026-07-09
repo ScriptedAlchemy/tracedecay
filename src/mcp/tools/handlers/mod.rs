@@ -287,7 +287,9 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
     match tool_name {
         "tracedecay_search" => graph::handle_search(cg, args, selected_scope_prefix).await,
         "tracedecay_grep" => grep::handle_grep(cg, args, selected_scope_prefix).await,
-        "tracedecay_ast_grep_search" => ast_grep_search::handle_ast_grep_search(cg, args).await,
+        "tracedecay_ast_grep_search" => {
+            ast_grep_search::handle_ast_grep_search(cg, args, selected_scope_prefix).await
+        }
         "tracedecay_retrieve" => handle_retrieve(cg, &args),
         "tracedecay_context" => graph::handle_context(cg, args, selected_scope_prefix).await,
         "tracedecay_callers" => graph::handle_callers(cg, args).await,

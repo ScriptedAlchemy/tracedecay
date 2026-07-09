@@ -7,9 +7,12 @@
 //! symbol, exactly like `tracedecay_grep`, so the natural follow-up is
 //! `tracedecay_body`.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use serde_json::{Value, json};
 
-use crate::ast_grep_search::{AstGrepSearchMatch, search_tree};
+use crate::ast_grep_search::{AstGrepSearchMatch, search_tree_scoped_with_cancel};
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
@@ -22,21 +25,34 @@ const MAX_RESULTS_CAP: usize = 200;
 /// Default `max_results` when the caller omits it.
 const DEFAULT_MAX_RESULTS: usize = 50;
 
+struct CancelSearchOnDrop(Arc<AtomicBool>);
+
+impl Drop for CancelSearchOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
 async fn search_tree_off_thread(
     project_root: std::path::PathBuf,
     pattern: String,
     lang: Option<String>,
     path_glob: Option<String>,
     max_results: usize,
+    scope_prefix: Option<String>,
 ) -> Result<crate::ast_grep_search::AstGrepSearchResult> {
     let query = pattern.clone();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancel_on_drop = CancelSearchOnDrop(cancelled.clone());
     let result = tokio::task::spawn_blocking(move || {
-        search_tree(
+        search_tree_scoped_with_cancel(
             &project_root,
             &pattern,
             lang.as_deref(),
             path_glob.as_deref(),
             max_results,
+            scope_prefix.as_deref(),
+            || cancelled.load(Ordering::Acquire),
         )
     })
     .await
@@ -44,13 +60,18 @@ async fn search_tree_off_thread(
         message: format!("structural search worker failed: {err}"),
         query,
     })?;
+    drop(cancel_on_drop);
     result.map_err(|err| TraceDecayError::Config {
         message: err.to_string(),
     })
 }
 
 /// Handles `tracedecay_ast_grep_search` tool calls.
-pub(super) async fn handle_ast_grep_search(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_ast_grep_search(
+    cg: &TraceDecay,
+    args: Value,
+    scope_prefix: Option<&str>,
+) -> Result<ToolResult> {
     let pattern =
         args.get("pattern")
             .and_then(Value::as_str)
@@ -80,6 +101,7 @@ pub(super) async fn handle_ast_grep_search(cg: &TraceDecay, args: Value) -> Resu
         lang.map(str::to_owned),
         path_glob.map(str::to_owned),
         max_results,
+        scope_prefix.map(str::to_owned),
     )
     .await?;
 
@@ -198,6 +220,15 @@ fn render_md(hits: &[EnrichedHit], truncated: bool, files_scanned: usize) -> Str
 mod tests {
     use super::*;
 
+    #[test]
+    fn cancellation_guard_signals_worker_on_drop() {
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let _guard = CancelSearchOnDrop(cancelled.clone());
+        }
+        assert!(cancelled.load(std::sync::atomic::Ordering::Acquire));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn blocking_search_wrapper_finds_match() {
         let temp = tempfile::tempdir().expect("temp project");
@@ -210,6 +241,7 @@ mod tests {
             Some("rust".to_string()),
             None,
             10,
+            None,
         )
         .await
         .expect("structural search");

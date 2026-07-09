@@ -245,6 +245,40 @@ pub fn search_tree(
     path_glob: Option<&str>,
     max_results: usize,
 ) -> Result<AstGrepSearchResult, AstGrepSearchError> {
+    search_tree_scoped(project_root, pattern, lang, path_glob, max_results, None)
+}
+
+pub(crate) fn search_tree_scoped(
+    project_root: &Path,
+    pattern: &str,
+    lang: Option<&str>,
+    path_glob: Option<&str>,
+    max_results: usize,
+    scope_prefix: Option<&str>,
+) -> Result<AstGrepSearchResult, AstGrepSearchError> {
+    search_tree_scoped_with_cancel(
+        project_root,
+        pattern,
+        lang,
+        path_glob,
+        max_results,
+        scope_prefix,
+        || false,
+    )
+}
+
+pub(crate) fn search_tree_scoped_with_cancel<F>(
+    project_root: &Path,
+    pattern: &str,
+    lang: Option<&str>,
+    path_glob: Option<&str>,
+    max_results: usize,
+    scope_prefix: Option<&str>,
+    is_cancelled: F,
+) -> Result<AstGrepSearchResult, AstGrepSearchError>
+where
+    F: Fn() -> bool,
+{
     if pattern.trim().is_empty() {
         return Err(AstGrepSearchError::EmptyPattern);
     }
@@ -287,25 +321,24 @@ pub fn search_tree(
     let mut result = AstGrepSearchResult::default();
 
     for entry in builder.build() {
+        if is_cancelled() {
+            return Ok(result);
+        }
         let Ok(entry) = entry else { continue };
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
         }
         let path = entry.path();
-        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
-            continue;
-        };
 
-        // Resolve the language key: explicit override, else per-extension.
+        // An explicit language applies to every caller-selected file, including
+        // extensionless names such as Dockerfile. Without one, infer by suffix.
         let key = match lang {
-            Some(explicit) => {
-                // Skip files that are not this language.
-                if lang_key_for_ext(ext) != Some(explicit) {
-                    continue;
-                }
-                explicit
-            }
-            None => match lang_key_for_ext(ext) {
+            Some(explicit) => explicit,
+            None => match path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .and_then(lang_key_for_ext)
+            {
                 Some(k) => k,
                 None => continue,
             },
@@ -315,6 +348,9 @@ pub fn search_tree(
             continue;
         };
         let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if !crate::path_scope::path_matches_scope(&rel_str, scope_prefix) {
+            continue;
+        }
 
         let Ok(bytes) = std::fs::read(path) else {
             continue;
@@ -345,6 +381,9 @@ pub fn search_tree(
         };
         let ast = AstGrep::doc(doc);
         for node in ast.root().find_all(compiled) {
+            if is_cancelled() {
+                return Ok(result);
+            }
             let start = node.start_pos();
             let line0 = start.line();
             let line_text = source_lines
@@ -447,7 +486,7 @@ mod tests {
         write(
             dir.path(),
             "util.js",
-            "// reserve_stock is called elsewhere\n",
+            "// reserve_stock is called elsewhere\nconst note = 'reserve_stock(a, b, c)';\n",
         );
 
         let res = search_tree(dir.path(), "reserve_stock($$$)", None, None, 50).unwrap();
@@ -460,13 +499,53 @@ mod tests {
     }
 
     #[test]
-    fn explicit_lang_filters_other_files() {
+    fn cancelled_search_stops_before_scanning() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "calls.rs", "fn f() { target(1); }\n");
+
+        let res = search_tree_scoped_with_cancel(
+            dir.path(),
+            "target($A)",
+            Some("rust"),
+            None,
+            50,
+            None,
+            || true,
+        )
+        .unwrap();
+
+        assert_eq!(res.files_scanned, 0);
+        assert!(res.matches.is_empty());
+    }
+
+    #[test]
+    fn explicit_lang_overrides_extension_inference_for_selected_files() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "a.rs", "fn f() { g(1); }\n");
         write(dir.path(), "b.py", "g(1)\n");
-        let res = search_tree(dir.path(), "g($A)", Some("rust"), None, 50).unwrap();
-        assert!(res.matches.iter().all(|m| m.file == "a.rs"));
+        let res = search_tree(dir.path(), "g($A)", Some("rust"), Some("b.py"), 50).unwrap();
         assert_eq!(res.matches.len(), 1);
+        assert_eq!(res.matches[0].file, "b.py");
+        assert_eq!(res.matches[0].lang, "rust");
+    }
+
+    #[test]
+    fn explicit_lang_scans_extensionless_caller_selected_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "Dockerfile", "FROM alpine\nRUN echo ready\n");
+
+        let res = search_tree(
+            dir.path(),
+            "RUN echo ready",
+            Some("dockerfile"),
+            Some("Dockerfile"),
+            50,
+        )
+        .unwrap();
+
+        assert_eq!(res.files_scanned, 1);
+        assert_eq!(res.matches.len(), 1, "matches: {:?}", res.matches);
+        assert_eq!(res.matches[0].file, "Dockerfile");
     }
 
     #[test]
