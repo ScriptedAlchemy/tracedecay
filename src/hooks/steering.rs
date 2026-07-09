@@ -128,21 +128,16 @@ pub fn build_codex_session_context_for_workspace(
                 );
             }
             s.push_str(
-                "Before running cargo check/tsc/clippy in the shell, or when shell output shows \
-                 compile errors, use tracedecay diagnostics instead of eyeballing raw output: \
-                 paste captured output into tracedecay_diagnose, or run tracedecay_diagnostics \
-                 for fresh structured errors mapped to the enclosing symbols and callers.\n",
+                "Before `cargo check`/tsc/clippy or after compile errors, use \
+                 tracedecay_diagnostics for fresh errors or pass captured output to \
+                 tracedecay_diagnose; both map errors to symbols and callers.\n",
             );
             s.push_str(
-                "Managed TraceDecay specialists: tracedecay-code-explorer (code \
-                 exploration), tracedecay-code-health-auditor (code health), \
-                 tracedecay-session-historian (session history), \
-                 tracedecay-runtime-storage-doctor (runtime/storage diagnosis), \
-                 tracedecay-cross-host-integration-auditor (host parity), \
-                 tracedecay-change-risk-reviewer (change review), \
-                 tracedecay-usage-intelligence-analyst (adoption analysis), and \
-                 tracedecay-automation-auditor (automation cycles). Delegate matching \
-                 read-only research; the parent retains mutations and release authority.\n",
+                "Specialists: tracedecay-code-explorer, tracedecay-code-health-auditor, \
+                 tracedecay-session-historian, tracedecay-runtime-storage-doctor, \
+                 tracedecay-cross-host-integration-auditor, tracedecay-change-risk-reviewer, \
+                 tracedecay-usage-intelligence-analyst, tracedecay-automation-auditor. \
+                 Delegate matching read-only research; the parent owns changes and releases.\n",
             );
             s.push_str(crate::agents::CLI_FALLBACK_PROMPT_RULES);
             s.push('\n');
