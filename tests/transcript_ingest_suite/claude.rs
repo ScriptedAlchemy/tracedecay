@@ -193,6 +193,111 @@ async fn claude_transcript_populates_searchable_messages() {
     );
 }
 
+/// Writes a transcript whose assistant turn carries a `thinking` block followed
+/// by visible text, plus a `redacted_thinking` block that must never surface as
+/// plaintext.
+fn write_claude_transcript_with_thinking(
+    home: &std::path::Path,
+    project: &std::path::Path,
+    session: &str,
+) -> std::path::PathBuf {
+    let dir = home.join(".claude/projects/-thinking-slug");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{session}.jsonl"));
+    let cwd = project.to_string_lossy();
+    let contents = format!(
+        "{}\n{}\n",
+        serde_json::json!({
+            "type": "user",
+            "cwd": cwd,
+            "sessionId": session,
+            "uuid": "tu1",
+            "timestamp": "2026-01-01T00:00:00.000Z",
+            "message": {"role": "user", "content": "Trace the ingestion path"}
+        }),
+        serde_json::json!({
+            "type": "assistant",
+            "cwd": cwd,
+            "sessionId": session,
+            "uuid": "tu2",
+            "timestamp": "2026-01-01T00:00:05.000Z",
+            "message": {
+                "id": "msg_thinking_1",
+                "role": "assistant",
+                "model": "claude-opus-4-8",
+                "content": [
+                    {"type": "thinking", "thinking": "Reasoning breadcrumb about the parser."},
+                    {"type": "redacted_thinking", "data": "ENCRYPTED_SHOULD_NEVER_INDEX"},
+                    {"type": "text", "text": "Traced it."}
+                ]
+            }
+        }),
+    );
+    std::fs::write(&path, contents).unwrap();
+    path
+}
+
+#[tokio::test]
+async fn claude_thinking_blocks_ingest_as_a_linked_reasoning_row() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    init_git_repo(&project);
+    write_claude_transcript_with_thinking(&home, &project, "claude-thinking");
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = ClaudeSource::with_home(&home);
+
+    // user message + assistant message + the reasoning row = 3 rows.
+    let stats = ingest_source(&db, &source, &project, None).await;
+    assert_eq!(stats.messages_upserted, 3);
+
+    let results = db
+        .search_session_messages(
+            "claude",
+            Some(project.to_string_lossy().as_ref()),
+            "reasoning breadcrumb",
+            10,
+        )
+        .await;
+    let reasoning = results
+        .iter()
+        .find(|hit| hit.message.kind.as_deref() == Some("reasoning"))
+        .expect("thinking should surface as a reasoning row");
+    assert_eq!(reasoning.message.message_id, "msg_thinking_1:thinking");
+    assert_eq!(reasoning.message.role, "assistant");
+    assert_eq!(reasoning.message.model.as_deref(), Some("claude-opus-4-8"));
+    assert_eq!(
+        reasoning.message.text,
+        "Reasoning breadcrumb about the parser."
+    );
+    // The encrypted block never contributes plaintext to the reasoning row.
+    assert!(!reasoning.message.text.contains("ENCRYPTED"));
+    let metadata: serde_json::Value =
+        serde_json::from_str(reasoning.message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["source"], "claude_thinking");
+    assert_eq!(metadata["parent_message_id"], "msg_thinking_1");
+    assert_eq!(metadata["thinking_blocks"], 1);
+    assert_eq!(metadata["redacted_thinking_blocks"], 1);
+
+    // The owning assistant message row is stored separately and still carries
+    // the whole content array (thinking blocks included) as its lossless blob.
+    let message = results
+        .iter()
+        .find(|hit| hit.message.kind.as_deref() == Some("message"))
+        .expect("assistant message row should coexist with its reasoning row");
+    assert_eq!(message.message.message_id, "msg_thinking_1");
+    let raw = db
+        .lcm_load_raw_message("claude", "msg_thinking_1")
+        .await
+        .expect("assistant message content should be in raw LCM storage");
+    assert!(raw.content.contains("redacted_thinking"));
+
+    // Re-ingesting the unchanged transcript is a no-op: the reasoning row's
+    // stable `:thinking` id keeps the insert idempotent.
+    let second = ingest_source(&db, &source, &project, None).await;
+    assert_eq!(second.messages_upserted, 0);
+}
+
 #[tokio::test]
 async fn claude_transcript_ingest_is_incremental() {
     let tmp = TempDir::new().unwrap();

@@ -213,6 +213,87 @@ fn write_claude_transcript_with_pr_link(
     path
 }
 
+fn write_claude_transcript_with_thinking(
+    home: &std::path::Path,
+    project: &std::path::Path,
+    session: &str,
+) -> std::path::PathBuf {
+    let dir = home.join(".claude/projects/-thinking-slug");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{session}.jsonl"));
+    let cwd = project.to_string_lossy();
+    let contents = format!(
+        "{}\n{}\n",
+        serde_json::json!({
+            "type": "user",
+            "cwd": cwd,
+            "sessionId": session,
+            "uuid": "tu1",
+            "timestamp": "2026-01-01T00:00:00.000Z",
+            "message": {"role": "user", "content": "Fix the parser"}
+        }),
+        serde_json::json!({
+            "type": "assistant",
+            "cwd": cwd,
+            "sessionId": session,
+            "uuid": "tu2",
+            "timestamp": "2026-01-01T00:00:05.000Z",
+            "message": {
+                "id": "msg_thinking_1",
+                "role": "assistant",
+                "model": "claude-opus-4-8",
+                "content": [
+                    {"type": "thinking", "thinking": "Let me trace the ingestion path first."},
+                    {"type": "text", "text": "Fixed the parser."}
+                ]
+            }
+        }),
+    );
+    std::fs::write(&path, contents).unwrap();
+    path
+}
+
+#[tokio::test]
+async fn structured_backfill_inserts_claude_reasoning_rows_once() {
+    tracedecay::global_db::set_background_structured_backfill_enabled(false);
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = init_project(&tmp);
+    write_claude_transcript_with_thinking(&home, &project, "claude-thinking");
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = ClaudeSource::with_home(&home);
+    ingest_source(&db, &source, &project, None).await;
+    // Live ingest already emits the reasoning row; drive one sweep so the
+    // backfill meta table exists (see the note in the goal test).
+    db.run_structured_backfill().await;
+    assert_eq!(count_kind(&project, "claude", "reasoning").await, 1);
+    // The user + assistant conversational rows (both kind "message") coexist
+    // with the reasoning row.
+    assert_eq!(count_kind(&project, "claude", "message").await, 2);
+    drop(db);
+
+    // Simulate a legacy store written before reasoning rows existed: drop them
+    // and reset the marker so the version-bumped sweep re-enters from the start.
+    simulate_old_parser_store(&project, "claude", "reasoning").await;
+    assert_eq!(count_kind(&project, "claude", "reasoning").await, 0);
+    // Dropping reasoning rows leaves the conversational message rows untouched.
+    assert_eq!(count_kind(&project, "claude", "message").await, 2);
+
+    let db = open_project_session_db(&project).await.unwrap();
+    db.run_structured_backfill().await;
+    assert_eq!(count_kind(&project, "claude", "reasoning").await, 1);
+    // The reasoning backfill is additive: it did not duplicate the message rows.
+    assert_eq!(count_kind(&project, "claude", "message").await, 2);
+    drop(db);
+
+    // Idempotent: a second sweep inserts nothing more.
+    let db = open_project_session_db(&project).await.unwrap();
+    db.run_structured_backfill().await;
+    assert_eq!(count_kind(&project, "claude", "reasoning").await, 1);
+    drop(db);
+    assert_eq!(structured_marker_version(&project).await, Some(3));
+}
+
 #[tokio::test]
 async fn structured_backfill_inserts_codex_goal_rows_once() {
     // `open_at` schedules the sweep on a detached background task; drive it
@@ -253,7 +334,7 @@ async fn structured_backfill_inserts_codex_goal_rows_once() {
     db.run_structured_backfill().await;
     assert_eq!(count_kind(&project, "codex", "goal").await, 1);
     drop(db);
-    assert_eq!(structured_marker_version(&project).await, Some(2));
+    assert_eq!(structured_marker_version(&project).await, Some(3));
 }
 
 #[tokio::test]
@@ -313,7 +394,7 @@ async fn structured_backfill_inserts_claude_marker_rows_once() {
     db.run_structured_backfill().await;
     assert_eq!(count_kind(&project, "claude", "pr_link").await, 1);
     drop(db);
-    assert_eq!(structured_marker_version(&project).await, Some(2));
+    assert_eq!(structured_marker_version(&project).await, Some(3));
 }
 
 /// Regression for the stale-cursor-vs-version-bump defect: the sweep's path
@@ -335,7 +416,7 @@ async fn structured_backfill_version_bump_reparses_from_start() {
     ingest_source(&db, &source, &project, None).await;
     db.run_structured_backfill().await; // parses the file, advances the cursor
     db.run_structured_backfill().await; // no candidates: marks complete, clears cursors
-    assert_eq!(structured_marker_version(&project).await, Some(2));
+    assert_eq!(structured_marker_version(&project).await, Some(3));
     drop(db);
 
     // Drop the structured rows and reset the marker so the sweep re-enters
