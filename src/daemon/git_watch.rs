@@ -346,7 +346,8 @@ async fn supervise_project(inner: Arc<GitWatcherInner>, state: Arc<WatchState>) 
     loop {
         let inner_c = Arc::clone(&inner);
         let state_c = Arc::clone(&state);
-        let result = tokio::spawn(async move { project_task(inner_c, state_c).await }).await;
+        let result =
+            tokio::spawn(async move { Box::pin(project_task(inner_c, state_c)).await }).await;
         match result {
             Ok(()) => return, // clean exit (watcher gave up gracefully)
             Err(join_err) if join_err.is_cancelled() => return,
@@ -420,7 +421,7 @@ async fn project_task(inner: Arc<GitWatcherInner>, state: Arc<WatchState>) {
     state.health.set_degraded(false);
     state.health.beat();
 
-    debounce_loop(&inner, &state, &common_dir).await;
+    Box::pin(debounce_loop(&inner, &state, &common_dir)).await;
     // Keep the watcher alive for the whole loop.
     drop(watcher);
 }
