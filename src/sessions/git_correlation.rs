@@ -407,9 +407,9 @@ pub struct SessionGitCorrelationHit {
     pub first_ts: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_ts: Option<i64>,
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "crate::serde_util::is_default")]
     pub event_count: i64,
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "crate::serde_util::is_default")]
     pub span_count: i64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<String>,
@@ -427,11 +427,6 @@ pub struct SessionGitCorrelationHit {
     pub confidence: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence_message_id: Option<String>,
-}
-
-#[allow(clippy::trivially_copy_pass_by_ref)] // serde skip_serializing_if signature
-fn is_zero(value: &i64) -> bool {
-    *value == 0
 }
 
 /// Lexically normalizes a worktree path for stable equality: trims

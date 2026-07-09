@@ -60,7 +60,7 @@ pub struct FactProposalRecord {
     pub created_at: i64,
     pub updated_at: i64,
     /// Later near-duplicate proposals folded into this record.
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "crate::serde_util::is_default")]
     pub duplicate_count: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_duplicate_run_id: Option<String>,
@@ -71,12 +71,6 @@ pub struct FactProposalRecord {
 
 const MAX_FOLDED_CONTENTS: usize = 10;
 const FOLDED_CONTENT_MAX_CHARS: usize = 500;
-
-// serde's `skip_serializing_if` requires the `fn(&T) -> bool` shape.
-#[allow(clippy::trivially_copy_pass_by_ref)]
-fn is_zero(count: &u32) -> bool {
-    *count == 0
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FactProposalStore {

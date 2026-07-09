@@ -9,7 +9,6 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::automation::config::AutomationConfig;
@@ -408,23 +407,15 @@ impl UserConfig {
         }
 
         // Serialize concurrent writers on a dedicated sidecar lock handle; never
-        // lock the target handle (mirrors `src/storage.rs::append_line_once`).
+        // lock the target handle (see the sidecar-lock module note in
+        // `src/storage.rs`).
         let lock_path = append_lock_path(&path);
-        let lock_file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&lock_path)
-            .map_err(|source| ConfigSaveError::Lock {
-                path: lock_path.clone(),
-                source,
-            })?;
-        lock_file
-            .lock_exclusive()
-            .map_err(|source| ConfigSaveError::Lock {
-                path: lock_path.clone(),
-                source,
+        let lock_file =
+            crate::storage::acquire_sidecar_lock_blocking(&lock_path).map_err(|source| {
+                ConfigSaveError::Lock {
+                    path: lock_path.clone(),
+                    source,
+                }
             })?;
 
         let result = Self::write_locked(&path, &contents, recover);

@@ -11,8 +11,6 @@
 
 use std::path::{Path, PathBuf};
 
-use fs2::FileExt;
-
 // ── Layout constants ────────────────────────────────────────────────
 const HEADER_SIZE: usize = 32;
 const ENTRY_SIZE: usize = 128;
@@ -113,15 +111,9 @@ fn write_entry_inner(
     delta: u64,
     before: u64,
 ) -> std::io::Result<()> {
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(mmap_path)?;
-
-    // Exclusive lock for concurrent writer safety.
-    file.lock_exclusive()?;
+    // Exclusive lock for concurrent writer safety, taken on the shared sidecar
+    // lock helper (see the sidecar-lock module note in `src/storage.rs`).
+    let file = crate::storage::acquire_sidecar_lock_blocking(mmap_path)?;
 
     let len = file.metadata()?.len() as usize;
     if len < FILE_SIZE {
@@ -279,19 +271,13 @@ pub fn run() -> std::io::Result<()> {
     })?;
     std::fs::create_dir_all(&dir)?;
 
-    // Single-instance lock.
+    // Single-instance lock, held for the lifetime of `run` (shared sidecar
+    // helper; see the sidecar-lock module note in `src/storage.rs`).
     let lock_path = dir.join(LOCK_FILENAME);
-    let lock_file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)?;
-
-    if lock_file.try_lock_exclusive().is_err() {
+    let Some(lock_file) = crate::storage::try_acquire_sidecar_lock(&lock_path)? else {
         eprintln!("Monitor already running.");
         return Ok(());
-    }
+    };
 
     // Ensure mmap file exists.
     let mmap_path = dir.join(MMAP_FILENAME);

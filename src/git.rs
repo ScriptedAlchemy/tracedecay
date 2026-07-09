@@ -13,6 +13,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 use std::sync::OnceLock;
 
 /// The literal used when resolution fails, preserving today's behavior (the OS
@@ -102,6 +103,30 @@ fn probe_dir(dir: &Path, name: &str) -> Option<PathBuf> {
 fn probe_dir(dir: &Path, name: &str) -> Option<PathBuf> {
     let candidate = dir.join(name);
     candidate.is_file().then_some(candidate)
+}
+
+/// Runs `git <args>` in `repo_root` with the resolved [`git_program`], returning
+/// the command [`Output`] on a zero exit status, or `None` on spawn failure or a
+/// non-zero exit. Use this when the raw, untrimmed stdout matters (multi-line
+/// output such as `git reflog` or `git log`).
+pub(crate) fn git_output(repo_root: &Path, args: &[&str]) -> Option<Output> {
+    let output = Command::new(git_program())
+        .args(args)
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+    output.status.success().then_some(output)
+}
+
+/// Runs `git <args>` in `repo_root` and returns the trimmed stdout as a
+/// `String`, or `None` on spawn failure, non-zero exit, non-UTF-8 output, or
+/// empty (after trimming) output. Convenience wrapper over [`git_output`] for
+/// the common single-value reads (`rev-parse`, `config --get`, ...).
+pub(crate) fn git_capture(repo_root: &Path, args: &[&str]) -> Option<String> {
+    let output = git_output(repo_root, args)?;
+    let text = String::from_utf8(output.stdout).ok()?;
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 #[cfg(test)]

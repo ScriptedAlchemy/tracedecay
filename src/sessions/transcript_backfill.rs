@@ -466,20 +466,10 @@ fn structured_backfill_lock_path(db_path: &Path) -> PathBuf {
 /// guards use, so a crashed holder never leaves a stale lock behind.
 #[doc(hidden)]
 pub fn try_acquire_structured_backfill_lock(db_path: &Path) -> Option<std::fs::File> {
-    use fs2::FileExt;
-
     let lock_path = structured_backfill_lock_path(db_path);
-    if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent).ok()?;
-    }
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)
-        .ok()?;
-    file.try_lock_exclusive().ok()?;
-    Some(file)
+    crate::storage::try_acquire_sidecar_lock(&lock_path)
+        .ok()
+        .flatten()
 }
 
 /// Re-parses the next bounded transcript batch and inserts rows missing from

@@ -1,10 +1,7 @@
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use super::backend::{AgentTaskFailureClass, AgentTaskKind};
 use super::config_error;
@@ -187,7 +184,7 @@ pub async fn write_run_artifact(
         schema_version: 1,
         kind: kind.as_str().to_string(),
         path: artifact_relative_path(run_id, kind),
-        sha256: format!("sha256:{}", hex::encode(Sha256::digest(&bytes))),
+        sha256: super::artifact_refs::sha256_bytes(&bytes),
         summary,
         created_at: created_at.to_string(),
     })
@@ -205,7 +202,7 @@ pub async fn read_run_artifact_payload(
             path.display()
         ))
     })?;
-    let actual_hash = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
+    let actual_hash = super::artifact_refs::sha256_bytes(&bytes);
     if actual_hash != artifact.sha256 {
         return Err(config_error(format!(
             "automation run artifact '{}' hash mismatch",
@@ -269,37 +266,11 @@ fn append_jsonl_line_locked(path: &Path, line: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    crate::storage::retry_transient_file_op(|| append_jsonl_line_once(path, line))
-}
-
-fn append_jsonl_line_once(path: &Path, line: &str) -> std::io::Result<()> {
-    // Serialize on a dedicated read+write `<path>.lock` sidecar handle rather
-    // than on the append-only data handle. Locking an append-only handle fails
-    // on Windows `LockFileEx` with `ERROR_ACCESS_DENIED` (os error 5) because
-    // Rust opens such handles without `FILE_READ_DATA`/`FILE_WRITE_DATA`, which
-    // `LockFileEx` requires.
-    let lock_path = crate::storage::append_lock_path(path);
-    let lock_file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)?;
-    lock_file.lock_exclusive()?;
-
-    let write_result = append_jsonl_line_data(path, line);
-    let unlock_result = lock_file.unlock();
-    write_result?;
-    unlock_result
-}
-
-fn append_jsonl_line_data(path: &Path, line: &str) -> std::io::Result<()> {
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
-    file.write_all(format!("{line}\n").as_bytes())?;
-    file.flush()
+    // Serializes on the shared read+write `<path>.lock` sidecar handle; see the
+    // sidecar-lock module note in `src/storage.rs` for the Windows rationale.
+    crate::storage::retry_transient_file_op(|| {
+        crate::storage::append_line_locked(path, line, false)
+    })
 }
 
 /// Loads up to `limit` of the newest ledger records, deduplicated by

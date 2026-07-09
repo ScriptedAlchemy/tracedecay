@@ -154,7 +154,7 @@ pub struct WorkflowRun {
     pub result_summary: Option<String>,
     /// Number of agents recorded for the run (`agentCount`), for a cheap
     /// list-view count without joining `workflow_agents`.
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "crate::serde_util::is_default")]
     pub agent_count: i64,
 }
 
@@ -185,17 +185,12 @@ pub struct WorkflowAgent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// Total tokens (input+output, summed from transcript `usage`), when known.
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "crate::serde_util::is_default")]
     pub tokens: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_ts: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ended_ts: Option<i64>,
-}
-
-#[allow(clippy::trivially_copy_pass_by_ref)] // serde skip_serializing_if signature
-fn is_zero(value: &i64) -> bool {
-    *value == 0
 }
 
 fn matches_token(value: &str, tokens: &[&str]) -> bool {
