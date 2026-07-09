@@ -1,0 +1,42 @@
+{
+  "id": "analysis_unsafe_panic_audit",
+  "category": "unsafe_audit",
+  "pack": "pack_analysis",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Are there any risky unwrap/panic/unsafe spots in this crate I should know about before shipping?",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_unsafe_patterns",
+      "tracedecay_context"
+    ],
+    "acceptable": [
+      "tracedecay_grep",
+      "tracedecay_search"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [
+    "raw_total_len",
+    "unsafe"
+  ],
+  "max_tool_calls": 5,
+  "notes": "ACTIVE. The tool bug is fixed: `tracedecay_unsafe_patterns` previously returned an empty 'No diagnostics' response because its Markdown renderer (src/mcp/tools/render.rs) only understood the compiler-`diagnostics` payload shape and silently dropped the `matches` shape this tool emits. With the dedicated `risky_patterns_md` renderer it now surfaces findings. Live-verified against the built fixture (fresh `tracedecay tool unsafe_patterns`): the sole finding across the crate is the needless `unsafe { }` block at fixture/src/audit.rs:28, enclosing symbol `raw_total_len`, kind `unsafe_block` (there are no unwrap/panic/todo-macro sites; the planted TODO is a `//` comment, not `todo!(`). ground_truth fragments are the enclosing symbol name and the `unsafe` nature that any correct answer must report."
+}
