@@ -2987,6 +2987,125 @@ fn test_local_install_cursor_allows_legacy_free_symlinked_cursor_dir() {
     );
 }
 
+/// Shared body of the per-agent symlink-containment tests. A `--local` install
+/// must never follow a symlinked project-local parent (or file) that escapes
+/// the project root: the guard has to fire *before* any bytes are written, so
+/// the outside directory stays byte-for-byte untouched and the command fails
+/// with a symlink-refusal error.
+#[cfg(unix)]
+fn assert_local_install_rejects_symlinked_target(
+    agent: &str,
+    link_relative: &str,
+    link_is_dir: bool,
+) {
+    use std::os::unix::fs::symlink;
+
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let sentinel = outside.path().join("keep.txt");
+    std::fs::write(&sentinel, "untouched\n").unwrap();
+
+    let link = project.path().join(link_relative);
+    if let Some(parent) = link.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    let target = if link_is_dir {
+        outside.path().to_path_buf()
+    } else {
+        sentinel.clone()
+    };
+    symlink(&target, &link).unwrap();
+
+    let output = run_local_install(agent, project.path(), home.path());
+    assert!(
+        !output.status.success(),
+        "{agent} local install must reject a symlinked project-local target ({link_relative})"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("symlink"),
+        "{agent} error should explain the symlink refusal, got:\n{stderr}"
+    );
+    // Nothing was written through the symlink into the outside directory.
+    assert_eq!(
+        std::fs::read_to_string(&sentinel).unwrap(),
+        "untouched\n",
+        "{agent} must not write through the symlink"
+    );
+    let outside_entries = std::fs::read_dir(outside.path()).unwrap().count();
+    assert_eq!(
+        outside_entries, 1,
+        "{agent} must not create files behind the symlinked target"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_local_install_claude_rejects_symlinked_claude_dir() {
+    assert_local_install_rejects_symlinked_target("claude", ".claude", true);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_local_install_copilot_rejects_symlinked_vscode_dir() {
+    assert_local_install_rejects_symlinked_target("copilot", ".vscode", true);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_local_install_gemini_rejects_symlinked_gemini_dir() {
+    assert_local_install_rejects_symlinked_target("gemini", ".gemini", true);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_local_install_hermes_rejects_symlinked_hermes_dir() {
+    assert_local_install_rejects_symlinked_target("hermes", ".hermes", true);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_local_install_kilo_rejects_symlinked_config_file() {
+    assert_local_install_rejects_symlinked_target("kilo", "kilo.json", false);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_local_install_kimi_rejects_symlinked_kimi_dir() {
+    assert_local_install_rejects_symlinked_target("kimi", ".kimi-code", true);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_local_install_kiro_rejects_symlinked_kiro_dir() {
+    assert_local_install_rejects_symlinked_target("kiro", ".kiro", true);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_local_install_opencode_rejects_symlinked_config_file() {
+    assert_local_install_rejects_symlinked_target("opencode", "opencode.json", false);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_local_install_roo_code_rejects_symlinked_roo_dir() {
+    assert_local_install_rejects_symlinked_target("roo-code", ".roo", true);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_local_install_vibe_rejects_symlinked_vibe_dir() {
+    assert_local_install_rejects_symlinked_target("vibe", ".vibe", true);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_local_install_zed_rejects_symlinked_zed_dir() {
+    assert_local_install_rejects_symlinked_target("zed", ".zed", true);
+}
+
 /// Shared body of the per-agent `test_local_install_*_writes_project_paths`
 /// tests. Split into one test per agent (instead of a single loop) so the
 /// eleven CLI install spawns run in parallel; each spawn costs noticeable

@@ -418,7 +418,7 @@ async fn codex_response_item_tool_events_are_cataloged_compactly() {
         .search_session_messages(
             "codex",
             Some(project.to_string_lossy().as_ref()),
-            "exec_command MEMORY.md",
+            "exec_command",
             10,
         )
         .await;
@@ -469,7 +469,7 @@ async fn codex_response_item_tool_events_are_cataloged_compactly() {
         .search_session_messages(
             "codex",
             Some(project.to_string_lossy().as_ref()),
-            "zxqvunicorntoken",
+            "web_search",
             10,
         )
         .await;
@@ -477,10 +477,13 @@ async fn codex_response_item_tool_events_are_cataloged_compactly() {
     let web_search = &web_search_results[0].message;
     assert_eq!(web_search.kind.as_deref(), Some("tool_event"));
     assert_eq!(web_search.tool_names.as_deref(), Some("web_search"));
+    assert!(!web_search.text.contains("zxqvunicorntoken"));
+    assert!(web_search.text.contains("arguments_bytes:"));
     assert!(
         web_search
-            .text
-            .contains("zxqvunicorntoken rust async runtime")
+            .source_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with(rollout_name))
     );
     // web_search_call is a later JSONL line than the exec_command call, so its
     // byte offset into the rollout is strictly greater.

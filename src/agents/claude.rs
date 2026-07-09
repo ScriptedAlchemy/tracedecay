@@ -99,6 +99,9 @@ impl AgentIntegration for ClaudeIntegration {
 
         let claude_dir = project_path.join(".claude");
         let claude_md_path = claude_dir.join("CLAUDE.md");
+        // The only genuinely project-local write is `.claude/CLAUDE.md`; refuse
+        // to follow a symlinked `.claude` that would escape the project root.
+        super::ensure_project_local_safe_path(project_path, &claude_md_path)?;
         ensure_claude_dir(&claude_dir)?;
         install_claude_md_rules(&claude_md_path)?;
         super::install_managed_skill_prompt_index(

@@ -596,13 +596,14 @@ impl PrivateStoreIo {
 }
 
 fn reject_symlink_components(path: &Path, subject: &str) -> io::Result<()> {
+    let is_absolute = path.is_absolute();
     let mut current = PathBuf::new();
-    let mut has_normal_component = false;
+    let mut normal_components = 0usize;
     for component in path.components() {
         match component {
             Component::Normal(_) => {
                 current.push(component.as_os_str());
-                has_normal_component = true;
+                normal_components += 1;
             }
             Component::RootDir | Component::Prefix(_) => {
                 current.push(component.as_os_str());
@@ -611,7 +612,7 @@ fn reject_symlink_components(path: &Path, subject: &str) -> io::Result<()> {
                 return Err(invalid_input(format!("{subject} path must be normalized")));
             }
         }
-        if !has_normal_component {
+        if normal_components == 0 || (is_absolute && normal_components == 1) {
             continue;
         }
         match fs::symlink_metadata(&current) {
@@ -892,6 +893,42 @@ mod tests {
             serde_json::from_str::<Value>(row).unwrap();
         }
         assert!(append_lock_path(&path).is_file());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn symlink_guard_skips_leading_system_alias_but_rejects_managed_tail() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+
+        // A normal store path below a possibly symlinked system temp root
+        // (macOS /var -> /private/var) must be tolerated.
+        let real = root.join("real");
+        std::fs::create_dir_all(real.join("store")).unwrap();
+        PrivateStoreIo::append_line(&real.join("store").join("f.jsonl"), "{\"n\":1}")
+            .expect("normal store path must not be rejected");
+
+        // A symlinked directory is caught when the write path ensures it:
+        // the directory is then the checked final component.
+        let parent_link = root.join("plink");
+        symlink(real.join("store"), &parent_link).unwrap();
+        let err = PrivateStoreIo::create_dir_all(&parent_link).unwrap_err();
+        assert!(
+            err.to_string().contains("must not contain symlinks"),
+            "{err}"
+        );
+
+        // A symlinked final component is rejected.
+        let target = real.join("store").join("h.jsonl");
+        std::fs::write(&target, "").unwrap();
+        let file_link = real.join("store").join("h-link.jsonl");
+        symlink(&target, &file_link).unwrap();
+        let err = PrivateStoreIo::append_line(&file_link, "{}").unwrap_err();
+        assert!(
+            err.to_string().contains("must not contain symlinks"),
+            "{err}"
+        );
     }
 
     #[test]

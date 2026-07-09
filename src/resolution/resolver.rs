@@ -341,9 +341,39 @@ impl<'a> ReferenceResolver<'a> {
         let total = refs.len();
 
         // Partition into resolvable (name exists in graph) and hopeless.
-        let (candidates, hopeless): (Vec<_>, Vec<_>) = refs
-            .iter()
-            .partition(|uref| self.is_known_name(&uref.reference_name));
+        //
+        // A ref is admitted when either the full reference name is known, OR
+        // the simple name (the segment after the last `::`) is known. Rust
+        // qualified names are file-path prefixed (`src/foo.rs::bar`), so a
+        // reference like `module::fn`, `Self::method`, `crate::path::fn`, or
+        // `Type::assoc_fn` never appears verbatim in `known_names` — without
+        // the simple-name admission these are bucketed hopeless and never
+        // reach `resolve_one`, whose Strategy-2 fallback (strip to simple
+        // name via `rsplit("::")`) would resolve them. `resolve_one` still
+        // enforces the blocklist and confidence floor, so this only re-admits
+        // genuine candidates.
+        let (candidates, hopeless): (Vec<_>, Vec<_>) = refs.iter().partition(|uref| {
+            let raw = uref.reference_name.as_str();
+            // Simple-name admission is restricted to local-looking paths: the
+            // leading segment must be a crate-relative keyword or itself a
+            // known local name (module, type). Without this, an external call
+            // like `serde_json::to_string(...)` in a project that also defines
+            // a local `to_string` would be admitted by simple name alone and
+            // Strategy-2 could fabricate a bogus local call edge (the
+            // external-crate blocklist only covers `Uses` refs).
+            let local_qualified_simple = || {
+                let mut segments = raw.split("::");
+                let first = segments.next().unwrap_or_default();
+                let local_prefix = matches!(first, "crate" | "Self" | "self" | "super")
+                    || self.is_known_name(first);
+                local_prefix
+                    && raw
+                        .rsplit("::")
+                        .next()
+                        .is_some_and(|simple| self.is_known_name(simple))
+            };
+            self.is_known_name(raw) || (raw.contains("::") && local_qualified_simple())
+        });
 
         let results: Vec<_> = candidates
             .par_iter()

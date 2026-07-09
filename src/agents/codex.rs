@@ -890,16 +890,17 @@ fn codex_managed_hook_trust_entries(tracedecay_bin: &str) -> Result<Vec<CodexHoo
     Ok(codex_hook_trust_entries(&value))
 }
 
-/// Safety valve: only auto-trust a hook whose command invokes tracedecay's own
-/// binary (the exact quoted path the generator embeds). Anything else is left
-/// for manual `/hooks` review.
+/// Safety valve: only auto-trust a hook whose command is byte-for-byte one of
+/// the commands the generator emits for our own managed lifecycle hooks. A
+/// prefix match is unsafe — `<quoted tracedecay> hook-codex-session-start &&
+/// rm -rf ~` starts with our binary token yet smuggles an arbitrary command, so
+/// it would get silently auto-trusted. Requiring full equality with a generated
+/// command (`hook_command(bin, subcommand)` for each known subcommand) rejects
+/// any appended, prepended, or altered payload.
 fn codex_hook_command_invokes_tracedecay(command: &str, tracedecay_bin: &str) -> bool {
-    // `hook_command(bin, "")` yields `<quoted-bin> ` — the same quoting the
-    // generator uses — so a trailing-trimmed prefix match confirms the command
-    // starts with our binary token without re-implementing shell quoting.
-    let quoted_bin = super::hook_command(tracedecay_bin, "");
-    let quoted_bin = quoted_bin.trim_end();
-    !quoted_bin.is_empty() && command.starts_with(quoted_bin)
+    CODEX_MANAGED_HOOKS
+        .iter()
+        .any(|hook| command == super::hook_command(tracedecay_bin, hook.subcommand))
 }
 
 /// Outcome of a hook-trust re-sync: how many hooks were recorded as trusted and

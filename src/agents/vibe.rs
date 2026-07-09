@@ -84,11 +84,16 @@ impl AgentIntegration for VibeIntegration {
 
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
         let vibe_dir = project_path.join(".vibe");
+        let config_path = vibe_dir.join("config.toml");
+        let prompt_path = vibe_dir.join("prompts/cli.md");
+        super::ensure_project_local_safe_paths(
+            project_path,
+            [config_path.as_path(), prompt_path.as_path()],
+        )?;
         std::fs::create_dir_all(&vibe_dir).ok();
         std::fs::create_dir_all(vibe_dir.join("prompts")).ok();
 
-        install_mcp_server(&vibe_dir.join("config.toml"), &ctx.tracedecay_bin)?;
-        let prompt_path = vibe_dir.join("prompts/cli.md");
+        install_mcp_server(&config_path, &ctx.tracedecay_bin)?;
         install_prompt_rules(&prompt_path)?;
         super::install_managed_skill_prompt_index(
             &ctx.home,

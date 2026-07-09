@@ -12,6 +12,12 @@ use crate::errors::{Result, TraceDecayError};
 
 const RUN_LEDGER_FILENAME: &str = "automation_runs.jsonl";
 const RUN_ARTIFACTS_DIR: &str = "automation_artifacts";
+/// Trailing bytes read from the ledger on the first tail pass. Sized to hold
+/// several hundred JSONL records so the common scheduler read (`limit == 200`)
+/// is satisfied by one bounded read even as the append-only ledger grows into
+/// tens of thousands of lines. The window doubles on demand when a pass has
+/// not yet gathered `limit` distinct records.
+const RUN_LEDGER_TAIL_CHUNK_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -296,13 +302,46 @@ fn append_jsonl_line_data(path: &Path, line: &str) -> std::io::Result<()> {
     file.flush()
 }
 
+/// Loads up to `limit` of the newest ledger records, deduplicated by
+/// `run_id` (keeping the latest lifecycle row for each run), newest first.
+///
+/// The ledger is append-only and grows without bound, so this reads only the
+/// tail of the file rather than the whole thing: a bounded window is read
+/// backwards from the end and doubled on demand until it yields `limit`
+/// distinct records or reaches the start of the file. The per-tick scheduler
+/// gate calls this every few seconds, so the cost is kept proportional to
+/// `limit` instead of the ledger length.
 pub async fn load_run_records(
     dashboard_root: &Path,
     limit: usize,
 ) -> Result<Vec<AutomationRunLedgerRecord>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
     let path = run_ledger_path(dashboard_root);
-    let contents = match tokio::fs::read_to_string(&path).await {
-        Ok(contents) => contents,
+    let read_path = path.clone();
+    tokio::task::spawn_blocking(move || read_run_records_tail(&read_path, limit))
+        .await
+        .map_err(|e| config_error(format!("failed to join automation run ledger read: {e}")))?
+}
+
+/// Reads the tail of the ledger and parses the newest `limit` distinct
+/// records. Only complete lines are parsed: when the read window does not
+/// begin at the start of the file, the (possibly truncated) leading line is
+/// dropped so a chunk boundary never masquerades as a malformed row.
+fn read_run_records_tail(path: &Path, limit: usize) -> Result<Vec<AutomationRunLedgerRecord>> {
+    read_run_records_tail_with_window(path, limit, RUN_LEDGER_TAIL_CHUNK_BYTES)
+}
+
+fn read_run_records_tail_with_window(
+    path: &Path,
+    limit: usize,
+    initial_window: u64,
+) -> Result<Vec<AutomationRunLedgerRecord>> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => {
             return Err(config_error(format!(
@@ -311,10 +350,68 @@ pub async fn load_run_records(
             )));
         }
     };
+    let file_len = file
+        .metadata()
+        .map_err(|e| {
+            config_error(format!(
+                "failed to inspect automation run ledger '{}': {e}",
+                path.display()
+            ))
+        })?
+        .len();
+    if file_len == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut requested = initial_window.max(1);
+    loop {
+        let window = requested.min(file_len);
+        let start = file_len - window;
+        let reached_start = start == 0;
+        file.seek(SeekFrom::Start(start)).map_err(|e| {
+            config_error(format!(
+                "failed to seek automation run ledger '{}': {e}",
+                path.display()
+            ))
+        })?;
+        let mut buf = vec![0u8; window as usize];
+        file.read_exact(&mut buf).map_err(|e| {
+            config_error(format!(
+                "failed to read automation run ledger '{}': {e}",
+                path.display()
+            ))
+        })?;
+
+        // Drop a partial leading line unless the window covers the whole file,
+        // so we never parse a byte-truncated JSON row as malformed.
+        let slice: &[u8] = if reached_start {
+            &buf
+        } else {
+            match buf.iter().position(|&byte| byte == b'\n') {
+                Some(newline) => &buf[newline + 1..],
+                // No line boundary inside the window: grow and retry.
+                None => &[],
+            }
+        };
+        let text = String::from_utf8_lossy(slice);
+        let records = parse_run_records_newest_first(&text, limit, path);
+        if records.len() >= limit || reached_start {
+            return Ok(records);
+        }
+        requested = requested.saturating_mul(2);
+    }
+}
+
+/// Parses `text` (a suffix of the ledger containing only complete lines) into
+/// up to `limit` distinct records, newest first, deduplicated by `run_id`.
+fn parse_run_records_newest_first(
+    text: &str,
+    limit: usize,
+    path: &Path,
+) -> Vec<AutomationRunLedgerRecord> {
     let mut records = Vec::new();
     let mut seen_run_ids = std::collections::BTreeSet::new();
-    let lines = contents.lines().collect::<Vec<_>>();
-    for (index, line) in lines.iter().enumerate().rev() {
+    for line in text.lines().rev() {
         if records.len() >= limit {
             break;
         }
@@ -332,14 +429,13 @@ pub async fn load_run_records(
             Err(err) => {
                 tracing::warn!(
                     automation_run_ledger = %path.display(),
-                    line_number = index + 1,
                     error = %err,
                     "skipping malformed automation run ledger jsonl row"
                 );
             }
         }
     }
-    Ok(records)
+    records
 }
 
 fn artifact_relative_path(run_id: &str, kind: AutomationRunArtifactKind) -> String {
@@ -394,5 +490,107 @@ fn validate_run_id_component(run_id: &str) -> Result<()> {
         Err(config_error(format!(
             "automation run_id '{run_id}' is not safe for artifact paths"
         )))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    /// A minimal valid ledger line for `run_id`, ordered by `completed_at`.
+    fn ledger_line(run_id: &str, completed_at: i64) -> String {
+        format!(
+            "{{\"schema_version\":2,\"run_id\":\"{run_id}\",\"trigger\":\"scheduler\",\
+             \"task\":\"memory_curator\",\"backend\":\"codex_app_server\",\"status\":\"succeeded\",\
+             \"accepted_count\":0,\"rejected_count\":0,\"started_at\":\"{completed_at}\",\
+             \"completed_at\":\"{completed_at}\"}}"
+        )
+    }
+
+    fn write_ledger(lines: &[String]) -> (tempfile::TempDir, PathBuf) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join(RUN_LEDGER_FILENAME);
+        let mut body = lines.join("\n");
+        body.push('\n');
+        std::fs::write(&path, body).unwrap();
+        (temp, path)
+    }
+
+    #[test]
+    fn tail_read_returns_newest_limit_in_order() {
+        let lines: Vec<String> = (0..10)
+            .map(|i| ledger_line(&format!("run-{i}"), 1000 + i))
+            .collect();
+        let (_temp, path) = write_ledger(&lines);
+
+        let records = read_run_records_tail_with_window(&path, 3, 64).unwrap();
+        let ids: Vec<&str> = records.iter().map(|r| r.run_id.as_str()).collect();
+        assert_eq!(ids, ["run-9", "run-8", "run-7"]);
+    }
+
+    #[test]
+    fn tail_read_grows_window_until_limit_satisfied() {
+        // Many records, a deliberately tiny initial window that holds far
+        // fewer than the requested limit: the grow loop must widen until the
+        // limit is met without ever mis-parsing a chunk-boundary line.
+        let lines: Vec<String> = (0..50)
+            .map(|i| ledger_line(&format!("run-{i:03}"), 2000 + i))
+            .collect();
+        let (_temp, path) = write_ledger(&lines);
+
+        let records = read_run_records_tail_with_window(&path, 40, 32).unwrap();
+        assert_eq!(records.len(), 40);
+        assert_eq!(records[0].run_id, "run-049");
+        assert_eq!(records[39].run_id, "run-010");
+    }
+
+    #[test]
+    fn tail_read_dedups_by_run_id_keeping_newest_and_grows_for_distinct_count() {
+        // Each run has two lifecycle rows sharing a run_id; dedup keeps the
+        // newest, so satisfying `limit` distinct runs forces the window to
+        // grow past `limit` raw lines.
+        let mut lines = Vec::new();
+        for i in 0..20 {
+            lines.push(ledger_line(&format!("run-{i:02}"), 3000 + i * 2));
+            lines.push(ledger_line(&format!("run-{i:02}"), 3000 + i * 2 + 1));
+        }
+        let (_temp, path) = write_ledger(&lines);
+
+        let records = read_run_records_tail_with_window(&path, 5, 40).unwrap();
+        let ids: Vec<&str> = records.iter().map(|r| r.run_id.as_str()).collect();
+        assert_eq!(ids, ["run-19", "run-18", "run-17", "run-16", "run-15"]);
+    }
+
+    #[test]
+    fn tail_read_skips_malformed_lines_without_truncation_false_positives() {
+        let lines = vec![
+            ledger_line("older", 100),
+            "not json".to_string(),
+            ledger_line("newest", 200),
+        ];
+        let (_temp, path) = write_ledger(&lines);
+
+        let records = read_run_records_tail_with_window(&path, 1, 8).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].run_id, "newest");
+    }
+
+    #[test]
+    fn tail_read_handles_missing_and_empty_ledger() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let missing = temp.path().join(RUN_LEDGER_FILENAME);
+        assert!(
+            read_run_records_tail_with_window(&missing, 10, 64)
+                .unwrap()
+                .is_empty()
+        );
+
+        std::fs::write(&missing, b"").unwrap();
+        assert!(
+            read_run_records_tail_with_window(&missing, 10, 64)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

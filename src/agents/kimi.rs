@@ -59,10 +59,14 @@ impl AgentIntegration for KimiIntegration {
     }
 
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        let kimi_dir = project_path.join(".kimi-code");
-        std::fs::create_dir_all(&kimi_dir).ok();
-        install_mcp_server(&kimi_dir.join("mcp.json"), &ctx.tracedecay_bin)?;
+        let mcp_path = project_path.join(".kimi-code/mcp.json");
         let agents_md = project_path.join("AGENTS.md");
+        super::ensure_project_local_safe_paths(
+            project_path,
+            [mcp_path.as_path(), agents_md.as_path()],
+        )?;
+        std::fs::create_dir_all(project_path.join(".kimi-code")).ok();
+        install_mcp_server(&mcp_path, &ctx.tracedecay_bin)?;
         install_prompt_rules(&agents_md)?;
         super::install_managed_skill_prompt_index(
             &ctx.home,

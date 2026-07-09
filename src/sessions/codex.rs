@@ -57,7 +57,7 @@ use crate::accounting::parser::parse_timestamp;
 use crate::sessions::SessionMessageRecord;
 use crate::sessions::shared::{
     StoredCursor, append_tool_calls_metadata, content_storage_text_and_tools,
-    path_belongs_to_project, preview_truncated, title_from_messages,
+    path_belongs_to_project, title_from_messages,
 };
 use crate::sessions::source::{
     ParsedTranscript, SessionDraft, TranscriptSource, collect_files_with_ext, stream_new_jsonl,
@@ -67,9 +67,12 @@ use context::CodexContextState;
 const PROVIDER: &str = "codex";
 /// `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` → date dirs add depth.
 const MAX_SCAN_DEPTH: u8 = 6;
-/// Response-item tool call/output/reasoning previews are truncated to this
-/// many bytes so large tool outputs are searchable without duplicating the
-/// full body (Codex already stores that in the rollout itself).
+/// Threshold above which a tool call's arguments / a tool output is flagged as
+/// truncated in metadata. Raw tool-call arguments and tool outputs are never
+/// embedded in the FTS-searchable message text (they can carry secrets); only
+/// byte counts and this truncation flag are recorded. The lossless body already
+/// lives in the Codex rollout itself, recoverable via `source_path`/
+/// `source_offset`.
 const TOOL_EVENT_PREVIEW_BYTES: usize = 2000;
 
 /// Session metadata read from a rollout's leading `session_meta` line.
@@ -634,18 +637,25 @@ fn response_item_tool_call_text(
     if let Some(call_id) = payload.get("call_id").and_then(Value::as_str) {
         parts.push(format!("call_id: {call_id}"));
     }
-    if let Some(arguments) = payload
+    // Never embed raw arguments in the FTS-searchable text — they can carry
+    // secrets (tokens, credentials, private paths). Record only the byte count;
+    // the lossless arguments remain in the rollout at `source_offset`.
+    if let Some(arguments_bytes) = response_item_arguments_bytes(payload) {
+        parts.push(format!("arguments_bytes: {arguments_bytes}"));
+    }
+    parts.join("\n")
+}
+
+/// Byte length of a tool call's arguments payload (`arguments`/`input`/`action`,
+/// whichever is present) after compact serialization. Returns `None` when the
+/// item carries no argument payload.
+fn response_item_arguments_bytes(payload: &Value) -> Option<usize> {
+    payload
         .get("arguments")
         .or_else(|| payload.get("input"))
         .or_else(|| payload.get("action"))
         .map(compact_response_item_value)
-    {
-        parts.push(format!(
-            "arguments: {}",
-            preview_truncated(&arguments, TOOL_EVENT_PREVIEW_BYTES)
-        ));
-    }
-    parts.join("\n")
+        .map(|arguments| arguments.len())
 }
 
 fn response_item_tool_output_text(payload: &Value, output: Option<&str>) -> Option<String> {
@@ -655,9 +665,11 @@ fn response_item_tool_output_text(payload: &Value, output: Option<&str>) -> Opti
         .unwrap_or("unknown");
     let output = output?;
     let output_bytes = output.len();
-    let preview = preview_truncated(output, TOOL_EVENT_PREVIEW_BYTES);
+    // Record only the byte count — the raw tool output can carry secrets and
+    // must not land in the FTS-searchable text. The full body stays in the
+    // rollout, recoverable via `source_path`/`source_offset`.
     Some(format!(
-        "Codex tool output: {call_id}\noutput_bytes: {output_bytes}\npreview: {preview}"
+        "Codex tool output: {call_id}\noutput_bytes: {output_bytes}"
     ))
 }
 
@@ -696,6 +708,17 @@ fn response_item_tool_metadata(
     }
     if let Some(tool_name) = tool_name {
         metadata.insert("tool_name".to_string(), Value::String(tool_name));
+    }
+    // Byte counts + truncation flags only — never the raw argument/output bytes.
+    if let Some(arguments_bytes) = response_item_arguments_bytes(payload) {
+        metadata.insert(
+            "arguments_bytes".to_string(),
+            Value::from(arguments_bytes as i64),
+        );
+        metadata.insert(
+            "arguments_truncated".to_string(),
+            Value::Bool(arguments_bytes > TOOL_EVENT_PREVIEW_BYTES),
+        );
     }
     if let Some(output) = output {
         metadata.insert("output_bytes".to_string(), Value::from(output.len() as i64));

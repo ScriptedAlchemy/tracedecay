@@ -88,8 +88,13 @@ impl AgentIntegration for CopilotIntegration {
     }
 
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        install_workspace_mcp_server(&project_path.join(".vscode/mcp.json"), &ctx.tracedecay_bin)?;
+        let mcp_path = project_path.join(".vscode/mcp.json");
         let instructions = project_path.join(".github/copilot-instructions.md");
+        super::ensure_project_local_safe_paths(
+            project_path,
+            [mcp_path.as_path(), instructions.as_path()],
+        )?;
+        install_workspace_mcp_server(&mcp_path, &ctx.tracedecay_bin)?;
         install_prompt_rules(&instructions)?;
         super::install_managed_skill_prompt_index(
             &ctx.home,

@@ -327,7 +327,8 @@ mod tests {
     }
 
     fn comparable_path(path: &Path) -> String {
-        let text = path.to_string_lossy();
+        let normalized = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let text = normalized.to_string_lossy();
         text.strip_prefix(r"\\?\")
             .unwrap_or(&text)
             .replace('\\', "/")

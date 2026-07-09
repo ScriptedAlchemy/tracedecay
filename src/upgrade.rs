@@ -596,8 +596,17 @@ fn replace_for_scoop(new_exe: &Path, new_version: &str) -> Result<Option<PathBuf
 
 #[cfg(windows)]
 fn update_scoop_metadata(new_version: &str) {
-    let Ok(exe) = std::env::current_exe() else {
-        return;
+    use std::os::windows::process::CommandExt;
+
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(err) => {
+            eprintln!(
+                "  \x1b[33mwarning:\x1b[0m could not resolve current exe for Scoop metadata \
+                 update ({err}); `scoop status` may show a stale version"
+            );
+            return;
+        }
     };
     let canonical = exe.canonicalize().unwrap_or(exe);
 
@@ -617,37 +626,92 @@ fn update_scoop_metadata(new_version: &str) {
     }
 
     let new_version_dir = app_dir.join(new_version);
-    if std::fs::create_dir_all(&new_version_dir).is_err() {
+    if let Err(err) = std::fs::create_dir_all(&new_version_dir) {
+        eprintln!(
+            "  \x1b[33mwarning:\x1b[0m could not create Scoop version directory {} ({err}); \
+             `scoop status` may show a stale version",
+            new_version_dir.display()
+        );
         return;
     }
 
-    // Copy files from old version directory to new.
-    if let Ok(entries) = std::fs::read_dir(&version_dir) {
-        for entry in entries.flatten() {
-            if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-                continue;
+    // Copy files from old version directory to new. Track failures so a
+    // partially-populated version directory never gets relinked as `current`.
+    let mut incomplete = false;
+    match std::fs::read_dir(&version_dir) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                    continue;
+                }
+                let name = entry.file_name();
+                if name.to_string_lossy().contains("__self_delete__") {
+                    continue;
+                }
+                if let Err(err) = std::fs::copy(entry.path(), new_version_dir.join(&name)) {
+                    eprintln!(
+                        "  \x1b[33mwarning:\x1b[0m could not copy {} into Scoop version \
+                         directory ({err})",
+                        entry.path().display()
+                    );
+                    incomplete = true;
+                }
             }
-            let name = entry.file_name();
-            if name.to_string_lossy().contains("__self_delete__") {
-                continue;
-            }
-            let _ = std::fs::copy(entry.path(), new_version_dir.join(&name));
+        }
+        Err(err) => {
+            eprintln!(
+                "  \x1b[33mwarning:\x1b[0m could not read Scoop version directory {} ({err}); \
+                 `scoop status` may show a stale version",
+                version_dir.display()
+            );
+            incomplete = true;
         }
     }
 
     // Patch manifest.json version.
     let manifest = new_version_dir.join("manifest.json");
     if manifest.exists() {
-        if let Ok(text) = std::fs::read_to_string(&manifest) {
-            let _ = std::fs::write(&manifest, text.replace(&old_version, new_version));
+        match std::fs::read_to_string(&manifest) {
+            Ok(text) => {
+                if let Err(err) = std::fs::write(&manifest, text.replace(&old_version, new_version))
+                {
+                    eprintln!(
+                        "  \x1b[33mwarning:\x1b[0m could not patch Scoop manifest {} ({err})",
+                        manifest.display()
+                    );
+                    incomplete = true;
+                }
+            }
+            Err(err) => {
+                eprintln!(
+                    "  \x1b[33mwarning:\x1b[0m could not read Scoop manifest {} ({err})",
+                    manifest.display()
+                );
+                incomplete = true;
+            }
         }
+    }
+
+    if incomplete {
+        eprintln!(
+            "  \x1b[33mwarning:\x1b[0m Scoop version directory {} is incomplete; leaving \
+             `current` pointed at {old_version} — run `scoop reset tracedecay` after fixing",
+            new_version_dir.display()
+        );
+        return;
     }
 
     // Update the `current` directory junction.
     let current = app_dir.join("current");
-    let _ = std::fs::remove_dir(&current);
-    use std::os::windows::process::CommandExt;
-    let _ = std::process::Command::new("cmd")
+    if let Err(err) = std::fs::remove_dir(&current) {
+        eprintln!(
+            "  \x1b[33mwarning:\x1b[0m could not remove Scoop `current` junction {} ({err}); \
+             `scoop status` may show a stale version",
+            current.display()
+        );
+        return;
+    }
+    match std::process::Command::new("cmd")
         .args([
             "/c",
             "mklink",
@@ -656,7 +720,22 @@ fn update_scoop_metadata(new_version: &str) {
             &new_version_dir.to_string_lossy(),
         ])
         .creation_flags(0x08000000) // CREATE_NO_WINDOW
-        .status();
+        .status()
+    {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            eprintln!(
+                "  \x1b[33mwarning:\x1b[0m Scoop `current` junction relink exited with {status}; \
+                 run `scoop reset tracedecay` if `scoop status` looks stale"
+            );
+        }
+        Err(err) => {
+            eprintln!(
+                "  \x1b[33mwarning:\x1b[0m could not relink Scoop `current` junction ({err}); \
+                 run `scoop reset tracedecay` if `scoop status` looks stale"
+            );
+        }
+    }
 }
 
 /// Walk the canonical path to find the Scoop version directory.

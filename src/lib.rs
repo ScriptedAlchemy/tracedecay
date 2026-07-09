@@ -61,6 +61,7 @@ mod path_tree;
 pub mod project_registry;
 pub mod redundancy;
 pub mod resolution;
+pub mod retention;
 pub mod runtime_telemetry;
 pub mod serve;
 pub mod sessions;

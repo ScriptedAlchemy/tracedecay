@@ -42,11 +42,15 @@ pub(super) fn install(ctx: &InstallContext) -> Result<InstallOutcome> {
 
 pub(super) fn install_local(ctx: &InstallContext, project_path: &Path) -> Result<InstallOutcome> {
     let profile = super::normalize_profile(ctx.profile.as_deref())?;
-    let plugin_dir = match profile.as_deref() {
-        Some(profile) => {
-            super::hermes_profile_dir(&ctx.home, Some(profile)).join("plugins/tracedecay")
-        }
-        None => project_path.join(".hermes/plugins/tracedecay"),
+    let plugin_dir = if let Some(profile) = profile.as_deref() {
+        super::hermes_profile_dir(&ctx.home, Some(profile)).join("plugins/tracedecay")
+    } else {
+        // A profile-less `--local` install writes a real plugin bundle into the
+        // project; refuse to follow a symlinked `.hermes` (or any parent) that
+        // would escape the project root.
+        let dir = project_path.join(".hermes/plugins/tracedecay");
+        crate::agents::ensure_project_local_safe_path(project_path, &dir)?;
+        dir
     };
 
     super::install_plugin(
