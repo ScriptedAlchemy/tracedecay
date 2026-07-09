@@ -31,17 +31,18 @@ pub async fn run_doctor(agent_filter: Option<&str>) {
 
     eprintln!("\n\x1b[1mCurrent project\x1b[0m");
     let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    match resolve_current_project_store(&project_path, &TraceDecayOpenOptions::default()).await {
+    let open_options = TraceDecayOpenOptions::default();
+    match resolve_current_project_store(&project_path, &open_options).await {
         CurrentProjectStore::Resolved(layout) => {
             dc.pass(&describe_resolved_store(&layout));
-            check_database(&mut dc, &project_path).await;
+            check_database(&mut dc, &project_path, open_options.clone()).await;
         }
         CurrentProjectStore::LegacyRepoLocal => {
             dc.pass(&format!(
                 "Index found: {}/ (legacy repo-local store)",
                 crate::config::get_tracedecay_dir(&project_path).display()
             ));
-            check_database(&mut dc, &project_path).await;
+            check_database(&mut dc, &project_path, open_options).await;
         }
         CurrentProjectStore::Uninitialized => {
             dc.warn(&format!(
@@ -186,15 +187,19 @@ fn describe_resolved_store(layout: &StoreLayout) -> String {
     )
 }
 
-/// Check database health: report size and run VACUUM to reclaim space.
+/// Check database health without mutating a store that may be owned by the daemon.
 ///
 /// The DB path is taken from the opened instance so the size measured is the
-/// same file (possibly a branch-specific DB) that VACUUM actually compacts.
-async fn check_database(dc: &mut DoctorCounters, project_path: &Path) {
-    let ts = match TraceDecay::open(project_path).await {
+/// same file that the active branch reader serves.
+async fn check_database(
+    dc: &mut DoctorCounters,
+    project_path: &Path,
+    open_options: TraceDecayOpenOptions,
+) {
+    let ts = match TraceDecay::open_read_only_with_options(project_path, open_options).await {
         Ok(ts) => ts,
         Err(e) => {
-            dc.fail(&format!("Could not open database: {e}"));
+            dc.fail(&format!("Could not open database read-only: {e}"));
             return;
         }
     };
@@ -203,25 +208,14 @@ async fn check_database(dc: &mut DoctorCounters, project_path: &Path) {
 
     dc.pass(&format!("DB size: {}", format_bytes(size_before)));
 
-    eprintln!("    Compacting database (VACUUM)…");
-    match ts.optimize().await {
-        Ok(()) => {
-            let size_after = std::fs::metadata(&db_path).map_or(size_before, |m| m.len());
-            if size_before > size_after {
-                let reclaimed = size_before - size_after;
-                dc.pass(&format!(
-                    "Compacted: {} → {} (reclaimed {})",
-                    format_bytes(size_before),
-                    format_bytes(size_after),
-                    format_bytes(reclaimed),
-                ));
-            } else {
-                dc.pass("Database already compact");
-            }
-        }
-        Err(e) => {
-            dc.warn(&format!("VACUUM failed: {e}"));
-        }
+    match ts.quick_check().await {
+        Ok(true) => dc.pass("DB integrity: ok"),
+        Ok(false) => dc.fail(
+            "Database integrity check failed; stop the daemon and preserve the store before repair",
+        ),
+        Err(e) => dc.warn(&format!(
+            "Could not complete read-only integrity check: {e}"
+        )),
     }
 }
 

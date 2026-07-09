@@ -12,8 +12,10 @@ use crate::common::{
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tracedecay::db::Database;
 use tracedecay::storage::{
-    EnrollmentMarker, StorageMode, default_profile_project_id, write_enrollment_marker,
+    EnrollmentMarker, StorageMode, default_profile_project_id, profile_sharded_data_root,
+    write_enrollment_marker,
 };
 
 /// Bound for waits that depend on spawning and running the real `tracedecay`
@@ -859,6 +861,61 @@ fn daemon_reuses_project_engine_across_tool_clients() {
     assert!(
         second_tool_calls >= 2,
         "second status call should reuse daemon engine and see accumulated tool calls, got {second_tool_calls}"
+    );
+}
+
+#[test]
+fn doctor_keeps_live_daemon_database_healthy_without_compaction() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+
+    let data_root = profile_sharded_data_root(
+        &home_path.join(".tracedecay"),
+        &default_profile_project_id(&project_path),
+    );
+    let db_path = data_root.join(tracedecay::config::db_filename(&data_root));
+    common::create_runtime().block_on(async {
+        let (db, _) = Database::open(&db_path).await.expect("open graph database");
+        db.conn()
+            .execute_batch(
+                "CREATE TABLE doctor_daemon_probe (payload BLOB);\
+                 WITH RECURSIVE count(x) AS (\
+                     VALUES(1) UNION ALL SELECT x + 1 FROM count WHERE x < 128\
+                 )\
+                 INSERT INTO doctor_daemon_probe SELECT zeroblob(8192) FROM count;\
+                 DELETE FROM doctor_daemon_probe;",
+            )
+            .await
+            .expect("seed reclaimable pages");
+        db.checkpoint().await.expect("checkpoint fixture");
+    });
+
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+    let first_tool_calls = tool_status_server_tool_calls(&home_path, &project_path);
+    let output = tracedecay_command_with_home(&home_path)
+        .arg("doctor")
+        .current_dir(&project_path)
+        .output()
+        .expect("doctor should run");
+    assert!(
+        output.status.success(),
+        "doctor failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Compacting database") && !stderr.contains("VACUUM"),
+        "doctor must stay read-only while daemon owns the database:\n{stderr}"
+    );
+
+    let second_tool_calls = tool_status_server_tool_calls(&home_path, &project_path);
+    assert!(
+        second_tool_calls > first_tool_calls,
+        "daemon project engine must remain usable after doctor"
     );
 }
 
