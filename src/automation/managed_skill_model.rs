@@ -538,8 +538,17 @@ impl ManagedSkill {
         hasher.update(b"\0");
         hasher.update(self.body_markdown.as_bytes());
         for file in &self.support_files {
+            let key = file
+                .path
+                .components()
+                .filter_map(|component| match component {
+                    std::path::Component::Normal(part) => Some(part.to_string_lossy()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("/");
             hasher.update(b"\0file:");
-            hasher.update(file.path.to_string_lossy().as_bytes());
+            hasher.update(key.as_bytes());
             hasher.update(b"\0");
             hasher.update(&file.bytes);
         }
