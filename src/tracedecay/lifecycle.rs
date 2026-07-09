@@ -954,7 +954,7 @@ fn delete_db_files(db_path: &std::path::Path) {
     let _ = std::fs::remove_file(&wal);
 }
 
-/// Build an actionable error without replacing any member of the SQLite
+/// Build an actionable error without replacing any member of the `SQLite`
 /// recovery set.
 fn recovery_required_error(
     db_path: &std::path::Path,

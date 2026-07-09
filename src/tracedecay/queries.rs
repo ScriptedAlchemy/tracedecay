@@ -606,7 +606,7 @@ impl TraceDecay {
         self.db.close();
     }
 
-    /// Run SQLite's non-mutating quick integrity check on the active database.
+    /// Run `SQLite`'s non-mutating quick integrity check on the active database.
     pub(crate) async fn quick_check(&self) -> Result<bool> {
         self.db.quick_check().await
     }
