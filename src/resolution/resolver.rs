@@ -354,11 +354,25 @@ impl<'a> ReferenceResolver<'a> {
         // genuine candidates.
         let (candidates, hopeless): (Vec<_>, Vec<_>) = refs.iter().partition(|uref| {
             let raw = uref.reference_name.as_str();
-            self.is_known_name(raw)
-                || raw
-                    .rsplit("::")
-                    .next()
-                    .is_some_and(|simple| self.is_known_name(simple))
+            // Simple-name admission is restricted to local-looking paths: the
+            // leading segment must be a crate-relative keyword or itself a
+            // known local name (module, type). Without this, an external call
+            // like `serde_json::to_string(...)` in a project that also defines
+            // a local `to_string` would be admitted by simple name alone and
+            // Strategy-2 could fabricate a bogus local call edge (the
+            // external-crate blocklist only covers `Uses` refs).
+            let local_qualified_simple = || {
+                let mut segments = raw.split("::");
+                let first = segments.next().unwrap_or_default();
+                let local_prefix = matches!(first, "crate" | "Self" | "self" | "super")
+                    || self.is_known_name(first);
+                local_prefix
+                    && raw
+                        .rsplit("::")
+                        .next()
+                        .is_some_and(|simple| self.is_known_name(simple))
+            };
+            self.is_known_name(raw) || (raw.contains("::") && local_qualified_simple())
         });
 
         let results: Vec<_> = candidates

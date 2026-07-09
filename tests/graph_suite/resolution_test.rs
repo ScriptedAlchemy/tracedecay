@@ -567,3 +567,89 @@ async fn test_resolve_all_empty_input() {
     assert!(result.resolved.is_empty());
     assert!(result.unresolved.is_empty());
 }
+
+/// Review-fix guard: an external qualified call (`serde_json::to_string`)
+/// must NOT be admitted by simple name just because the project defines a
+/// local `to_string` — the leading segment is neither a crate-relative
+/// keyword nor a known local name, so the ref stays hopeless and no bogus
+/// local call edge is fabricated.
+#[tokio::test]
+async fn test_prefilter_rejects_external_crate_qualified_calls() {
+    let fixture = resolution_fixture().await;
+    let nodes = vec![function_node(
+        "src/render.rs",
+        "to_string",
+        "src/render.rs::to_string",
+        3,
+        7,
+        "fn to_string() -> String",
+        Visibility::Pub,
+    )];
+    let resolver = ReferenceResolver::from_nodes(&fixture.db, &nodes);
+
+    let caller = generate_node_id("src/main.rs", &NodeKind::Function, "main", 1);
+    let refs = vec![
+        UnresolvedRef {
+            from_node_id: caller.clone(),
+            reference_name: "serde_json::to_string".to_string(),
+            reference_kind: EdgeKind::Calls,
+            line: 3,
+            column: 4,
+            file_path: "src/main.rs".to_string(),
+        },
+        UnresolvedRef {
+            from_node_id: caller,
+            reference_name: "tokio::spawn".to_string(),
+            reference_kind: EdgeKind::Calls,
+            line: 4,
+            column: 4,
+            file_path: "src/main.rs".to_string(),
+        },
+    ];
+
+    let result = resolver.resolve_all(&refs);
+    assert_eq!(result.total, 2);
+    assert_eq!(
+        result.resolved_count, 0,
+        "external qualified calls must not bind to same-named local items; \
+         resolved = {:?}",
+        result.resolved
+    );
+    assert_eq!(result.unresolved.len(), 2);
+}
+
+/// Plain `module::fn` calls (no `crate::` prefix) stay admitted when the
+/// module itself is a known node, which the Rust extractor emits for `mod`
+/// items — so the external-crate rejection above cannot regress them.
+#[tokio::test]
+async fn test_prefilter_admits_known_module_qualified_calls() {
+    let fixture = resolution_fixture().await;
+    let mut nodes = prefilter_nodes();
+    nodes.push(Node {
+        id: generate_node_id("src/handlers.rs", &NodeKind::Module, "handlers", 1),
+        kind: NodeKind::Module,
+        name: "handlers".to_string(),
+        qualified_name: "src/handlers.rs::handlers".to_string(),
+        file_path: "src/handlers.rs".to_string(),
+        ..nodes[0].clone()
+    });
+    let resolver = ReferenceResolver::from_nodes(&fixture.db, &nodes);
+
+    let caller = generate_node_id("src/dispatch.rs", &NodeKind::Function, "dispatch", 1);
+    let refs = vec![UnresolvedRef {
+        from_node_id: caller,
+        reference_name: "handlers::handle_ping".to_string(),
+        reference_kind: EdgeKind::Calls,
+        line: 3,
+        column: 4,
+        file_path: "src/dispatch.rs".to_string(),
+    }];
+
+    let result = resolver.resolve_all(&refs);
+    assert_eq!(
+        result.resolved_count, 1,
+        "module-qualified call must resolve when the module is a known node; \
+         unresolved = {:?}",
+        result.unresolved
+    );
+}

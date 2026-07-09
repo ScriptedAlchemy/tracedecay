@@ -89,7 +89,11 @@ pub enum RetentionTable {
 
 impl RetentionTable {
     /// The three tables that live in the global database.
-    pub const GLOBAL_TABLES: [RetentionTable; 2] = [Self::AnalyticsEvents, Self::SessionMessages];
+    pub const GLOBAL_TABLES: [RetentionTable; 3] = [
+        Self::AnalyticsEvents,
+        Self::SessionMessages,
+        Self::LcmRawMessages,
+    ];
 
     pub fn table_name(self) -> &'static str {
         match self {
@@ -401,7 +405,7 @@ mod tests {
             prune_global_tables(&conn, &config_days(Some(180)), RetentionMode::Apply, now)
                 .await
                 .unwrap();
-        assert_eq!(reports.len(), 2);
+        assert_eq!(reports.len(), 3);
         let analytics = reports
             .iter()
             .find(|r| r.table == "analytics_events")
@@ -413,5 +417,14 @@ mod tests {
             .unwrap();
         assert_eq!(sessions.rows, 0, "session retention is disabled by default");
         assert_eq!(sessions.window_days, None);
+        // Review-fix guard: lcm_raw_messages participates in every global
+        // pass — an operator-set lcm_raw_messages_days must never be
+        // silently ignored. Disabled by default (lossless).
+        let lcm = reports
+            .iter()
+            .find(|r| r.table == "lcm_raw_messages")
+            .expect("lcm_raw_messages must be reported in global passes");
+        assert_eq!(lcm.rows, 0, "lcm retention is disabled by default");
+        assert_eq!(lcm.window_days, None);
     }
 }
