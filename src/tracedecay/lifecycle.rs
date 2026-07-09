@@ -29,7 +29,8 @@ impl TraceDecay {
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
     ) -> Result<Self> {
-        let store_layout = Self::resolve_store_layout_for_local_path(project_root, &open_options)?;
+        let store_layout =
+            Self::resolve_store_layout_for_project(project_root, &open_options).await?;
         let config = TraceDecayConfig {
             root_dir: project_root.to_string_lossy().to_string(),
             ..TraceDecayConfig::default()
@@ -149,31 +150,129 @@ impl TraceDecay {
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
     ) -> Result<StoreLayout> {
+        Self::resolve_store_layout_with_identity_migration(project_root, open_options, true).await
+    }
+
+    async fn resolve_store_layout_for_project_read_only(
+        project_root: &Path,
+        open_options: &TraceDecayOpenOptions,
+    ) -> Result<StoreLayout> {
+        Self::resolve_store_layout_with_identity_migration(project_root, open_options, false).await
+    }
+
+    async fn resolve_store_layout_with_identity_migration(
+        project_root: &Path,
+        open_options: &TraceDecayOpenOptions,
+        allow_repair: bool,
+    ) -> Result<StoreLayout> {
         let profile_root = open_options.resolved_profile_root()?;
-        if let Some(layout) = storage::resolve_persisted_layout(project_root, &profile_root)? {
-            return Ok(layout);
+        if storage::read_enrollment_marker(project_root)?.is_some() {
+            return storage::resolve_persisted_layout(project_root, &profile_root)?.ok_or_else(
+                || TraceDecayError::Config {
+                    message: "enrollment marker did not resolve a profile store".to_string(),
+                },
+            );
         }
 
+        let mut selected = storage::resolve_persisted_layout(project_root, &profile_root)?;
         let git_common_dir = (!crate::worktree::is_detached_linked_worktree(project_root))
             .then(|| crate::worktree::git_common_dir(project_root))
             .flatten();
-        if let Some(global_db) = open_options.open_global_db().await {
+        if selected.is_none()
+            && let Some(global_db) = open_options.open_global_db().await
+        {
             if let Some(resolution) = global_db
                 .resolve_project_store_by_identity(project_root, git_common_dir.as_deref())
                 .await
             {
-                return storage::profile_sharded_layout(
+                selected = Some(storage::profile_sharded_layout(
                     project_root,
                     &profile_root,
                     &storage::EnrollmentMarker {
                         project_id: resolution.project.project_id,
                         storage_mode: storage::StorageMode::ProfileSharded,
                     },
-                );
+                )?);
             }
         }
 
-        storage::default_profile_sharded_layout(project_root, &profile_root)
+        let selected_id = selected
+            .as_ref()
+            .and_then(|layout| layout.identity.project_id.as_deref());
+        let candidates =
+            storage::matching_legacy_profile_layouts(project_root, &profile_root, selected_id)?;
+        Self::choose_identity_layout(project_root, selected, candidates, allow_repair)
+            .await?
+            .map_or_else(
+                || storage::default_profile_sharded_layout(project_root, &profile_root),
+                Ok,
+            )
+    }
+
+    async fn choose_identity_layout(
+        project_root: &Path,
+        selected: Option<StoreLayout>,
+        candidates: Vec<StoreLayout>,
+        allow_repair: bool,
+    ) -> Result<Option<StoreLayout>> {
+        if candidates.len() > 1 {
+            let mut details = Vec::new();
+            for candidate in &candidates {
+                details.push(store_identity_inventory(candidate).await.to_string());
+            }
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "ambiguous legacy profile stores for '{}': {}; no files changed",
+                    project_root.display(),
+                    details.join("; ")
+                ),
+            });
+        }
+        let Some(candidate) = candidates.into_iter().next() else {
+            return Ok(selected);
+        };
+        let Some(selected) = selected else {
+            return Ok(Some(candidate));
+        };
+
+        let selected_inventory = store_identity_inventory(&selected).await;
+        let candidate_inventory = store_identity_inventory(&candidate).await;
+        if selected_inventory.is_pristine() && candidate_inventory.is_healthy() {
+            if !allow_repair {
+                return Err(identity_cutover_conflict(
+                    project_root,
+                    &selected_inventory,
+                    &candidate_inventory,
+                    "safe empty-store repair is available during a writable open",
+                ));
+            }
+            let candidate_id = candidate.identity.project_id.as_deref().ok_or_else(|| {
+                TraceDecayError::Config {
+                    message: "legacy candidate has no project id".to_string(),
+                }
+            })?;
+            storage::write_repository_identity_marker(project_root, candidate_id)?;
+            storage::retire_identity_cutover_manifest(&selected)?;
+            return Ok(Some(candidate));
+        }
+        if candidate_inventory.is_pristine() && selected_inventory.is_healthy() {
+            if allow_repair {
+                let selected_id = selected.identity.project_id.as_deref().ok_or_else(|| {
+                    TraceDecayError::Config {
+                        message: "selected store has no project id".to_string(),
+                    }
+                })?;
+                storage::write_repository_identity_marker(project_root, selected_id)?;
+                storage::retire_identity_cutover_manifest(&candidate)?;
+            }
+            return Ok(Some(selected));
+        }
+        Err(identity_cutover_conflict(
+            project_root,
+            &selected_inventory,
+            &candidate_inventory,
+            "run an explicit backup-and-consolidate migration before changing the marker",
+        ))
     }
 
     /// Opens an existing `TraceDecay` project at the given root.
@@ -301,7 +400,7 @@ impl TraceDecay {
         open_options: TraceDecayOpenOptions,
     ) -> Result<Self> {
         let store_layout =
-            Self::resolve_store_layout_for_project(project_root, &open_options).await?;
+            Self::resolve_store_layout_for_project_read_only(project_root, &open_options).await?;
         let config = load_config_from_path(project_root, &store_layout.config_path)?;
         let active_branch = branch::current_branch(project_root);
 
@@ -838,39 +937,168 @@ impl TraceDecay {
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
     ) -> Result<StoreLayout> {
-        let profile_root = open_options.resolved_profile_root()?;
-        if let Some(layout) = storage::resolve_persisted_layout(project_root, &profile_root)? {
-            return Ok(layout);
-        }
+        Self::resolve_store_layout_with_identity_migration(project_root, open_options, false).await
+    }
+}
 
-        let git_common_dir = (!crate::worktree::is_detached_linked_worktree(project_root))
-            .then(|| crate::worktree::git_common_dir(project_root))
-            .flatten();
-        if let Some(global_db) = open_options.open_global_db().await {
-            if let Some(resolution) = global_db
-                .resolve_project_store_by_identity(project_root, git_common_dir.as_deref())
-                .await
-            {
-                return storage::profile_sharded_layout(
-                    project_root,
-                    &profile_root,
-                    &storage::EnrollmentMarker {
-                        project_id: resolution.project.project_id,
-                        storage_mode: storage::StorageMode::ProfileSharded,
-                    },
-                );
-            }
-        }
+#[derive(Debug)]
+struct StoreIdentityInventory {
+    project_id: String,
+    data_root: PathBuf,
+    graph_health: &'static str,
+    nodes: u64,
+    files: u64,
+    facts: u64,
+    sessions: u64,
+    messages: u64,
+    lcm_rows: u64,
+    branches: usize,
+    automation_files: u64,
+    payload_files: u64,
+    response_files: u64,
+}
 
-        storage::default_profile_sharded_layout(project_root, &profile_root)
+impl StoreIdentityInventory {
+    fn is_healthy(&self) -> bool {
+        self.graph_health == "healthy"
     }
 
-    fn resolve_store_layout_for_local_path(
-        project_root: &Path,
-        open_options: &TraceDecayOpenOptions,
-    ) -> Result<StoreLayout> {
-        let profile_root = open_options.resolved_profile_root()?;
-        storage::resolve_layout(project_root, &profile_root)
+    fn is_pristine(&self) -> bool {
+        self.is_healthy()
+            && self.nodes == 0
+            && self.files == 0
+            && self.facts == 0
+            && self.sessions == 0
+            && self.messages == 0
+            && self.lcm_rows == 0
+            && self.branches <= 1
+            && self.automation_files == 0
+            && self.payload_files == 0
+            && self.response_files == 0
+    }
+}
+
+impl std::fmt::Display for StoreIdentityInventory {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "project_id={} path='{}' graph_health={} nodes={} files={} facts={} sessions={} messages={} lcm={} branches={} automation_files={} payload_files={} response_files={}",
+            self.project_id,
+            self.data_root.display(),
+            self.graph_health,
+            self.nodes,
+            self.files,
+            self.facts,
+            self.sessions,
+            self.messages,
+            self.lcm_rows,
+            self.branches,
+            self.automation_files,
+            self.payload_files,
+            self.response_files,
+        )
+    }
+}
+
+async fn store_identity_inventory(layout: &StoreLayout) -> StoreIdentityInventory {
+    let (graph_health, nodes, files, facts) =
+        match Database::open_read_only(&layout.graph_db_path).await {
+            Ok((db, _)) => {
+                if let Ok(stats) = db.get_stats().await {
+                    let facts = count_rows(db.conn(), "memory_facts").await;
+                    db.close();
+                    ("healthy", stats.node_count, stats.file_count, facts)
+                } else {
+                    db.close();
+                    ("corrupt", 0, 0, 0)
+                }
+            }
+            Err(_) if layout.graph_db_path.exists() => ("corrupt", 0, 0, 0),
+            Err(_) => ("missing", 0, 0, 0),
+        };
+
+    let (sessions, messages, lcm_rows) = if let Some(db) =
+        crate::global_db::GlobalDb::open_read_only_at(&layout.sessions_db_path).await
+    {
+        let conn = db.dashboard_connection();
+        let counts = (
+            count_rows(&conn, "sessions").await,
+            count_rows(&conn, "session_messages").await,
+            count_rows(&conn, "lcm_raw_messages").await
+                + count_rows(&conn, "lcm_summary_nodes").await,
+        );
+        db.close();
+        counts
+    } else {
+        (0, 0, 0)
+    };
+
+    StoreIdentityInventory {
+        project_id: layout
+            .identity
+            .project_id
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string()),
+        data_root: layout.data_root.clone(),
+        graph_health,
+        nodes,
+        files,
+        facts,
+        sessions,
+        messages,
+        lcm_rows,
+        branches: branch_meta::load_branch_meta(&layout.data_root)
+            .map_or(0, |meta| meta.branches.len()),
+        automation_files: count_tree_files(&layout.dashboard_root),
+        payload_files: count_tree_files(&layout.lcm_payload_root),
+        response_files: count_tree_files(&layout.response_handle_root),
+    }
+}
+
+async fn count_rows(connection: &libsql::Connection, table: &str) -> u64 {
+    let Ok(mut rows) = connection
+        .query(&format!("SELECT COUNT(*) FROM {table}"), ())
+        .await
+    else {
+        return 0;
+    };
+    rows.next()
+        .await
+        .ok()
+        .flatten()
+        .and_then(|row| row.get::<i64>(0).ok())
+        .and_then(|count| u64::try_from(count).ok())
+        .unwrap_or(0)
+}
+
+fn count_tree_files(root: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .map(|path| match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() => 1,
+            Ok(metadata) if metadata.is_dir() => count_tree_files(&path),
+            _ => 0,
+        })
+        .sum()
+}
+
+fn identity_cutover_conflict(
+    project_root: &Path,
+    selected: &StoreIdentityInventory,
+    legacy: &StoreIdentityInventory,
+    action: &str,
+) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!(
+            "identity cutover conflict for '{}': selected [{}]; legacy [{}]; {action}; both shards were preserved and no files changed",
+            project_root.display(),
+            selected,
+            legacy
+        ),
     }
 }
 
