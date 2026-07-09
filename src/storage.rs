@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
@@ -425,9 +426,9 @@ pub(crate) fn resolve_persisted_layout(
 }
 
 /// Finds pre-repository-identity profile stores that were keyed by an older
-/// path-derived project id but still name this exact local checkout in their
-/// manifest. Remote URLs are deliberately not considered: two clones of one
-/// remote are different local identities.
+/// path-derived project id but still name this exact local checkout, or one of
+/// its linked worktrees, in their manifest. Remote URLs are deliberately not
+/// considered: two clones of one remote are different local identities.
 pub(crate) fn matching_legacy_profile_layouts(
     project_root: &Path,
     profile_root: &Path,
@@ -445,11 +446,27 @@ pub(crate) fn matching_legacy_profile_layouts(
     manifest_paths.sort();
 
     let mut layouts = Vec::new();
+    let project_git_common_dir = crate::worktree::git_common_dir(project_root);
+    let mut legacy_git_common_dirs = HashMap::<PathBuf, Option<PathBuf>>::new();
     for manifest_path in manifest_paths {
         let Ok(manifest) = read_store_manifest(&manifest_path) else {
             continue;
         };
-        if !same_local_path(&manifest.project_root, project_root) {
+        let same_checkout = same_local_path(&manifest.project_root, project_root)
+            || project_git_common_dir.as_deref().is_some_and(|current| {
+                legacy_git_common_dirs
+                    .entry(manifest.project_root.clone())
+                    .or_insert_with(|| {
+                        manifest
+                            .project_root
+                            .is_dir()
+                            .then(|| crate::worktree::git_common_dir(&manifest.project_root))
+                            .flatten()
+                    })
+                    .as_deref()
+                    .is_some_and(|legacy| same_local_path(legacy, current))
+            });
+        if !same_checkout {
             continue;
         }
         let project_id = manifest
