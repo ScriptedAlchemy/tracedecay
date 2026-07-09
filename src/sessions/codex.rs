@@ -46,6 +46,7 @@
 //! byte-offset machinery and scoped to the current project by `session_meta.cwd`.
 
 mod context;
+mod events;
 
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -147,6 +148,7 @@ impl TranscriptSource for CodexSource {
         // `thread_goal_updated` fires on every token/time tick, so only an
         // objective- or status-change opens a new `goal` row.
         let mut last_goal_key: Option<(String, Option<String>)> = None;
+        let mut structured = events::CodexStructuredState::new();
         let replayed_from_start =
             prev.position > 0 && new.lines.first().is_some_and(|line| line.offset == 0);
         let mut context_state = if prev.position > 0 && !replayed_from_start {
@@ -155,10 +157,30 @@ impl TranscriptSource for CodexSource {
             CodexContextState::from_meta(&meta)
         };
         for line in &new.lines {
+            // Non-consuming: harvest session-level policy/effort/rate-limit
+            // summary before the line is routed to its owning handler below.
+            structured.observe_summary(&line.value);
             if turn_usage.observe(&line.value) {
                 continue;
             }
             if context_state.observe_context_record(&line.value, path, &meta) {
+                continue;
+            }
+            if let Some(rows) = structured.event_from_line(
+                &line.value,
+                &meta,
+                context_state.model.as_deref(),
+                path,
+                line.offset,
+            ) {
+                for mut message in rows {
+                    context::annotate_message(
+                        &mut message,
+                        context_state.cwd.as_deref(),
+                        context_state.git.as_ref(),
+                    );
+                    messages.push(message);
+                }
                 continue;
             }
             if let Some(event) = codex_goal_event_from_line(&line.value) {
@@ -269,6 +291,16 @@ impl TranscriptSource for CodexSource {
         // The final turn's trailing token_count(s) arrive after its
         // agent_message; flush them onto it.
         flush_turn_usage(&mut messages, &mut turn_usage);
+        // Emit any `exec_command` calls whose paired output never arrived in
+        // this pass so the tool call is not silently dropped.
+        for mut message in structured.flush_pending(&meta, path) {
+            context::annotate_message(
+                &mut message,
+                context_state.cwd.as_deref(),
+                context_state.git.as_ref(),
+            );
+            messages.push(message);
+        }
 
         let project = project_root.to_string_lossy().to_string();
         let draft = SessionDraft {
@@ -276,7 +308,7 @@ impl TranscriptSource for CodexSource {
             project_key: project.clone(),
             project_path: project,
             title: title_from_messages(&messages),
-            metadata_json: context::session_metadata_json(&meta),
+            metadata_json: context::session_metadata_json(&meta, Some(&structured.summary)),
             parent_session_id: meta.parent_session_id.clone(),
             is_subagent: meta.is_subagent,
             agent_id: meta.agent_id.clone(),

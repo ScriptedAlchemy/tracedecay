@@ -410,7 +410,9 @@ async fn codex_response_item_tool_events_are_cataloged_compactly() {
     let source = CodexSource::with_home(&home);
 
     let stats = ingest_source(&db, &source, &project, None).await;
-    assert_eq!(stats.messages_upserted, 6);
+    // user_message + one joined exec_command tool_call (call+output collapse into
+    // a single row) + custom_tool_call + tool_search_call + web_search_call.
+    assert_eq!(stats.messages_upserted, 5);
 
     let results = db
         .search_session_messages(
@@ -423,44 +425,46 @@ async fn codex_response_item_tool_events_are_cataloged_compactly() {
     assert_eq!(results.len(), 1);
     let call = &results[0].message;
     assert_eq!(call.role, "tool");
-    assert_eq!(call.kind.as_deref(), Some("tool_event"));
-    assert!(call.text.contains("Codex tool call: exec_command"));
-    assert!(call.text.contains("rg -n MEMORY.md"));
+    // exec_command is now the structured `tool_call` kind, with the command as
+    // the searchable text and the output body reduced to parsed fields.
+    assert_eq!(call.kind.as_deref(), Some("tool_call"));
+    assert_eq!(call.text, "rg -n MEMORY.md ~/.codex/memories");
+    assert_eq!(call.tool_names.as_deref(), Some("exec_command"));
 
     let metadata: serde_json::Value =
         serde_json::from_str(call.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(metadata["source"], "codex_response_item");
-    assert_eq!(metadata["response_item_type"], "function_call");
-    assert_eq!(metadata["tool_name"], "exec_command");
+    assert_eq!(metadata["source"], "codex_exec_command");
+    assert_eq!(metadata["source_event"], "exec_command");
+    assert_eq!(metadata["tool"], "exec_command");
     assert_eq!(metadata["call_id"], "call-tool-1");
+    assert_eq!(metadata["cmd"], "rg -n MEMORY.md ~/.codex/memories");
+    assert_eq!(metadata["workdir"], "/home/zack/projects/tracedecay");
+    // The output carried no "Process exited with code" marker, so exit code and
+    // success stay null rather than being guessed.
+    assert_eq!(metadata["exit_code"], serde_json::Value::Null);
+    assert_eq!(metadata["success"], serde_json::Value::Null);
+    // The full output body (and its failure line) is never stored — only the
+    // parsed fields — so heavy tool output does not bloat the index.
+    assert!(!call.text.contains("error: exact failure line"));
+    assert!(
+        !call
+            .metadata_json
+            .as_deref()
+            .unwrap()
+            .contains("error: exact failure line")
+    );
 
-    // The capped preview stays reversible: the row points back at the exact
-    // rollout JSONL line so full fidelity is recoverable from the source.
+    // The row stays reversible: it points back at the exact call line.
     let rollout_name = "rollout-2026-01-01T00-00-18-codex-response-item-tools.jsonl";
     assert!(
         call.source_path
             .as_deref()
             .is_some_and(|path| path.ends_with(rollout_name))
     );
-    let call_offset = call
-        .source_offset
-        .expect("tool_event carries source_offset");
+    let call_offset = call.source_offset.expect("tool_call carries source_offset");
 
-    let output_results = db
-        .search_session_messages(
-            "codex",
-            Some(project.to_string_lossy().as_ref()),
-            "output_bytes",
-            10,
-        )
-        .await;
-    assert_eq!(output_results.len(), 1);
-    let output = &output_results[0].message;
-    assert!(output.text.contains("Codex tool output: call-tool-1"));
-    assert!(output.text.contains("output_bytes: 2427"));
-    assert!(!output.text.contains("error: exact failure line"));
-    assert!(output.text.len() < 2200);
-
+    // web_search_call remains a generic tool_event (only event_msg
+    // web_search_end is promoted to the `web_search` kind).
     let web_search_results = db
         .search_session_messages(
             "codex",
@@ -477,12 +481,6 @@ async fn codex_response_item_tool_events_are_cataloged_compactly() {
         web_search
             .text
             .contains("zxqvunicorntoken rust async runtime")
-    );
-    assert!(
-        web_search
-            .source_path
-            .as_deref()
-            .is_some_and(|path| path.ends_with(rollout_name))
     );
     // web_search_call is a later JSONL line than the exec_command call, so its
     // byte offset into the rollout is strictly greater.
@@ -2014,4 +2012,234 @@ async fn recent_session_goals_surfaces_latest_status_per_session() {
         .recent_session_goals(Some(project.to_string_lossy().as_ref()), 10)
         .await;
     assert_eq!(goals_again.len(), 1);
+}
+
+/// A rollout carrying the full spread of structured Codex telemetry: a turn
+/// boundary pair, a joined `exec_command` tool call, a plan update, a patch
+/// application, an MCP tool call, a web search, sub-agent activity, and an
+/// encrypted inter-agent routing edge — plus a `turn_context` and a
+/// `token_count` with rate limits feeding the session summary.
+fn write_codex_rollout_with_structured_events(
+    home: &std::path::Path,
+    project: &std::path::Path,
+    session: &str,
+) -> std::path::PathBuf {
+    let dir = home.join(".codex/sessions/2026/01/03");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("rollout-2026-01-03T00-00-00-{session}.jsonl"));
+    let workdir = project.to_string_lossy().to_string();
+    write_jsonl(
+        &path,
+        &[
+            serde_json::json!({
+                "timestamp": "2026-01-03T00:00:00.000Z",
+                "type": "session_meta",
+                "payload": {"id": session, "cwd": workdir, "model_provider": "openai"}
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-03T00:00:00.500Z",
+                "type": "turn_context",
+                "payload": {
+                    "turn_id": "turn-1", "cwd": workdir, "model": "gpt-5.5",
+                    "approval_policy": "never",
+                    "sandbox_policy": {"type": "danger-full-access"},
+                    "effort": "high"
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-03T00:00:01.000Z",
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "quarkonium telemetry sweep"}
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-03T00:00:01.100Z",
+                "type": "event_msg",
+                "payload": {"type": "task_started", "turn_id": "turn-1", "started_at": 1_782_000_000i64, "model_context_window": 258400}
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-03T00:00:02.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call", "name": "exec_command",
+                    "arguments": "{\"cmd\":\"cargo nextest run quarkonium\",\"workdir\":\"/w\"}",
+                    "call_id": "call-exec-1",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"}
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-03T00:00:02.100Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output", "call_id": "call-exec-1",
+                    "output": "Wall time: 2.5000 seconds\nProcess exited with code 0\nOutput:\ntest result: ok\n"
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-03T00:00:03.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call", "name": "update_plan", "call_id": "call-plan-1",
+                    "arguments": "{\"plan\":[{\"step\":\"sweep telemetry\",\"status\":\"in_progress\"},{\"step\":\"ship\",\"status\":\"pending\"}]}"
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-03T00:00:04.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "patch_apply_end", "call_id": "call-patch-1", "turn_id": "turn-1", "success": true,
+                    "stdout": "Success. Updated the following files:\nM src/quarkonium.rs\n",
+                    "changes": {"src/quarkonium.rs": {"type": "update", "unified_diff": "@@ -1,2 +1,2 @@\n-a\n+b\n"}}
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-03T00:00:05.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "mcp_tool_call_end", "call_id": "call-mcp-1", "plugin_id": "tracedecay@personal",
+                    "invocation": {"server": "tracedecay", "tool": "tracedecay_context", "arguments": {"task": "quarkonium"}},
+                    "duration": {"secs": 1, "nanos": 500000000},
+                    "result": {"Ok": {"content": []}}
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-03T00:00:06.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "web_search_end", "call_id": "call-ws-1", "query": "quarkonium decay width",
+                    "action": {"type": "search", "queries": ["quarkonium decay width", "bottomonium spectrum"]}
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-03T00:00:07.000Z",
+                "type": "event_msg",
+                "payload": {"type": "sub_agent_activity", "event_id": "e1", "agent_thread_id": "thread-sub-1", "agent_path": "/root/telemetry_worker", "kind": "started"}
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-03T00:00:08.000Z",
+                "type": "inter_agent_communication",
+                "payload": {"author": "/root/telemetry_worker", "recipient": "/root", "content": "", "encrypted_content": "gAAAAquarksecret", "trigger_turn": false}
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-03T00:00:09.000Z",
+                "type": "event_msg",
+                "payload": {"type": "task_complete", "turn_id": "turn-1", "duration_ms": 8000, "time_to_first_token_ms": 900, "last_agent_message": "quarkonium sweep complete"}
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-03T00:00:09.500Z",
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "message": "The quarkonium telemetry sweep is complete."}
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-03T00:00:10.000Z",
+                "type": "event_msg",
+                "payload": {"type": "token_count", "info": {
+                    "model_context_window": 258400,
+                    "last_token_usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120},
+                    "rate_limits": {"primary": {"used_percent": 11.0, "resets_at": 1_780_375_431i64}, "secondary": {"used_percent": 30.0, "resets_at": 1_780_848_095i64}, "plan_type": "pro"}
+                }}
+            }),
+        ],
+    );
+    path
+}
+
+/// Search this project's Codex messages, then keep only rows of the requested
+/// kind (row text is not always unique to one kind, so filter after the query).
+async fn search_session_kind(
+    db: &tracedecay::global_db::GlobalDb,
+    scope: &str,
+    query: &str,
+    kind: &str,
+) -> Vec<tracedecay::sessions::SessionMessageRecord> {
+    db.search_session_messages("codex", Some(scope), query, 50)
+        .await
+        .into_iter()
+        .map(|hit| hit.message)
+        .filter(|message| message.kind.as_deref() == Some(kind))
+        .collect()
+}
+
+#[tokio::test]
+async fn codex_structured_events_produce_full_row_mix() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    write_codex_rollout_with_structured_events(&home, &project, "codex-structured");
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = CodexSource::with_home(&home);
+    let stats = ingest_source(&db, &source, &project, None).await;
+    // user + task_started + exec tool_call(joined) + plan + file_edit + mcp
+    // tool_call + web_search + sub_agent_activity + inter_agent(edge) +
+    // task_complete + agent_message.
+    assert_eq!(stats.messages_upserted, 11);
+
+    let scope = project.to_string_lossy().to_string();
+    let meta_of = |m: &tracedecay::sessions::SessionMessageRecord| -> serde_json::Value {
+        serde_json::from_str(m.metadata_json.as_deref().unwrap()).unwrap()
+    };
+    let search_kind =
+        |query: &'static str, kind: &'static str| search_session_kind(&db, &scope, query, kind);
+
+    // exec_command joined tool_call: exit code / wall time / success parsed.
+    let execs = search_kind("cargo nextest quarkonium", "tool_call").await;
+    assert_eq!(execs.len(), 1);
+    let exec_md = meta_of(&execs[0]);
+    assert_eq!(execs[0].tool_names.as_deref(), Some("exec_command"));
+    assert_eq!(exec_md["exit_code"], 0);
+    assert_eq!(exec_md["wall_time_s"], 2.5);
+    assert_eq!(exec_md["success"], true);
+    assert_eq!(exec_md["cmd"], "cargo nextest run quarkonium");
+
+    // MCP tool call makes TraceDecay's own adoption visible in Codex sessions.
+    let mcp = search_kind("tracedecay context", "tool_call").await;
+    let mcp: Vec<_> = mcp
+        .into_iter()
+        .filter(|m| m.tool_names.as_deref() == Some("tracedecay:tracedecay_context"))
+        .collect();
+    assert_eq!(mcp.len(), 1);
+    let mcp_md = meta_of(&mcp[0]);
+    assert_eq!(mcp_md["server"], "tracedecay");
+    assert_eq!(mcp_md["ok"], true);
+    assert_eq!(mcp_md["duration_ms"], 1500);
+
+    // Plan, file_edit, web_search, turn boundaries, sub-agent activity present.
+    assert_eq!(search_kind("sweep telemetry ship", "plan").await.len(), 1);
+    let file_edit = search_kind("quarkonium.rs Updated", "file_edit").await;
+    assert_eq!(file_edit.len(), 1);
+    assert_eq!(meta_of(&file_edit[0])["files"][0]["change_type"], "update");
+    assert_eq!(search_kind("decay width", "web_search").await.len(), 1);
+    // task_started + task_complete both render "Codex turn …".
+    assert_eq!(search_kind("Codex turn", "turn_boundary").await.len(), 2);
+
+    // sub_agent_activity + inter_agent routing edge both map to subagent_activity.
+    let subagent = search_kind("telemetry_worker", "subagent_activity").await;
+    assert_eq!(subagent.len(), 2);
+    // The encrypted inter-agent ciphertext is never stored anywhere.
+    assert!(subagent.iter().all(|m| {
+        !m.metadata_json
+            .as_deref()
+            .unwrap()
+            .contains("gAAAAquarksecret")
+    }));
+    let edge = subagent
+        .iter()
+        .find(|m| meta_of(m)["source_event"] == "inter_agent_communication")
+        .expect("inter-agent edge row exists");
+    assert_eq!(meta_of(edge)["encrypted"], true);
+
+    // Session summary carries policy/effort posture, distinct models, the model
+    // context window, and the latest rate-limit snapshot.
+    let session = db.get_session("codex", "codex-structured").await.unwrap();
+    let sm: serde_json::Value =
+        serde_json::from_str(session.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(sm["codex_approval_policy"], "never");
+    assert_eq!(sm["codex_sandbox_policy"], "danger-full-access");
+    assert_eq!(sm["codex_effort"], "high");
+    assert_eq!(sm["codex_model_context_window"], 258_400);
+    assert_eq!(sm["codex_rate_limits"]["primary"]["used_percent"], 11.0);
+    assert_eq!(sm["codex_rate_limits"]["plan_type"], "pro");
+
+    // Re-ingest is idempotent: every structured row is keyed by message_id.
+    let again = ingest_source(&db, &source, &project, None).await;
+    assert_eq!(again.messages_upserted, 0);
 }
