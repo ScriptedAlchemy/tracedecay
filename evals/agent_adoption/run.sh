@@ -11,10 +11,10 @@
 # performs a dry run (sets up fixtures, prints the exact commands, grades nothing
 # live) so you can inspect the harness for free.
 #
-# Store isolation: the tracedecay graph + seeded facts live in a throwaway
-# TRACEDECAY_DATA_DIR under the work dir. HOME is left untouched, so the agents'
-# own auth (Claude OAuth, Codex ~/.codex) keeps working while the tracedecay MCP
-# server the agents spawn inherits TRACEDECAY_DATA_DIR and sees the fixture store.
+# Store and host isolation: the graph, host HOME/config, and candidate plugin
+# install all live under the throwaway work dir. Authentication is copied from
+# the real profile with read-only permissions; the real profile is never loaded
+# or mutated by an eval agent.
 #
 # Usage:
 #   evals/agent_adoption/run.sh                       # dry run (safe, free)
@@ -33,6 +33,7 @@
 #   TRACEDECAY_BIN       tracedecay binary (default: resolve from PATH)
 #   EVAL_OUT            directory to also copy scoreboard.json + report.md into
 set -euo pipefail
+umask 077
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
@@ -60,11 +61,36 @@ done
 # instead of varying with whatever global memory the operator happens to run.
 STEER_TEXT="This repository is indexed for semantic code intelligence; prefer the available code-graph tools over raw file search when answering code questions."
 
-TD="${TRACEDECAY_BIN:-$(command -v tracedecay || true)}"
+live=0
+if [[ "${TRACEDECAY_AGENT_EVALS:-}" == "1" ]]; then live=1; fi
+
+# Live runs default to the candidate branch binary. TRACEDECAY_BIN remains an
+# explicit override for release-binary comparisons; dry runs reuse a built
+# candidate when present and otherwise fall back to PATH.
+if [[ -n "${TRACEDECAY_BIN:-}" ]]; then
+  TD="$TRACEDECAY_BIN"
+elif [[ "$live" == "1" ]]; then
+  echo "building candidate tracedecay binary..."
+  if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
+    eval_target="$CARGO_TARGET_DIR"
+  elif [[ -d /fast/cargo-target && -w /fast/cargo-target ]]; then
+    eval_target="/fast/cargo-target/tracedecay-agent-adoption-evals"
+  else
+    eval_target="$repo_root/target"
+  fi
+  ( cd "$repo_root" && CARGO_TARGET_DIR="$eval_target" cargo build --quiet --bin tracedecay )
+  TD="$eval_target/debug/tracedecay"
+elif [[ -x "$repo_root/target/debug/tracedecay" ]]; then
+  TD="$repo_root/target/debug/tracedecay"
+else
+  TD="$(command -v tracedecay || true)"
+fi
 if [[ -z "$TD" || ! -x "$TD" ]]; then
   echo "error: tracedecay binary not found; set TRACEDECAY_BIN" >&2
   exit 2
 fi
+TD="$(cd "$(dirname "$TD")" && pwd)/$(basename "$TD")"
+EVAL_PATH="$(dirname "$TD"):$PATH"
 
 # Neutrality lint (USER DOCTRINE): fail fast — before building fixtures or
 # spending a single token — if any scenario prompt names tracedecay/MCP/a
@@ -86,15 +112,59 @@ if ! python3 "$here/grade.py" --check-hints; then
   exit 3
 fi
 
-live=0
-if [[ "${TRACEDECAY_AGENT_EVALS:-}" == "1" ]]; then live=1; fi
-
 # ---- work dir + hermetic tracedecay store ---------------------------------- #
 work="$(mktemp -d "${TMPDIR:-/tmp}/agent-evals.XXXXXX")"
 run_dir="$work/run"
 mkdir -p "$run_dir"
 export TRACEDECAY_DATA_DIR="$work/.tracedecay"
 export TRACEDECAY_ENABLE_GLOBAL_DB=0
+
+REAL_HOME="${HOME:?HOME must be set}"
+REAL_CODEX_HOME="${CODEX_HOME:-$REAL_HOME/.codex}"
+REAL_CLAUDE_CONFIG="${CLAUDE_CONFIG_DIR:-$REAL_HOME/.claude}"
+CODEX_EVAL_HOME="$work/host-homes/codex"
+CODEX_EVAL_CONFIG="$CODEX_EVAL_HOME/.codex"
+CLAUDE_EVAL_HOME="$work/host-homes/claude"
+CLAUDE_EVAL_CONFIG="$CLAUDE_EVAL_HOME/.claude"
+mkdir -p "$CODEX_EVAL_CONFIG" "$CLAUDE_EVAL_CONFIG"
+
+copy_auth_readonly() {
+  local src="$1" dest="$2"
+  [[ -f "$src" ]] || return 0
+  cp "$src" "$dest"
+  chmod 400 "$dest"
+}
+
+scrub_auth_copies() {
+  rm -f "$CODEX_EVAL_CONFIG/auth.json" \
+    "$CLAUDE_EVAL_CONFIG/.credentials.json" \
+    "$CLAUDE_EVAL_CONFIG/credentials.json"
+}
+trap scrub_auth_copies EXIT
+trap 'exit 130' INT TERM HUP
+
+prepare_host_profiles() {
+  # Candidate assets install only into the throwaway Codex profile. Auth is
+  # copied afterward so install/update code cannot touch the real credential.
+  if [[ " $HOSTS " == *" codex "* ]]; then
+    HOME="$CODEX_EVAL_HOME" CODEX_HOME="$CODEX_EVAL_CONFIG" PATH="$EVAL_PATH" \
+      "$TD" install --agent codex >"$work/codex-install.log" 2>&1
+    HOME="$CODEX_EVAL_HOME" CODEX_HOME="$CODEX_EVAL_CONFIG" PATH="$EVAL_PATH" \
+      codex plugin add tracedecay@personal --json \
+      >>"$work/codex-install.log" 2>&1
+    copy_auth_readonly "$REAL_CODEX_HOME/auth.json" "$CODEX_EVAL_CONFIG/auth.json"
+  fi
+  if [[ " $HOSTS " == *" claude "* ]]; then
+    copy_auth_readonly "$REAL_CLAUDE_CONFIG/.credentials.json" \
+      "$CLAUDE_EVAL_CONFIG/.credentials.json"
+    copy_auth_readonly "$REAL_CLAUDE_CONFIG/credentials.json" \
+      "$CLAUDE_EVAL_CONFIG/credentials.json"
+  fi
+}
+
+if [[ "$live" == "1" ]]; then
+  prepare_host_profiles
+fi
 echo "work dir:     $work"
 echo "run dir:      $run_dir"
 echo "tracedecay:   $TD ($("$TD" --version 2>/dev/null | head -1))"
@@ -185,7 +255,7 @@ JSON
 # fixed --mcp-config + --strict-mcp-config.
 #
 # Condition -> channels:
-#   full      hooks ON  | skills ON  | steering=ambient   (production parity; global install)
+#   full      hooks ON  | skills ON  | steering=plugin    (candidate plugin, hermetic profile)
 #   no-hints  hooks OFF | skills ON  | steering=fixed     (isolates skill/description efficacy)
 #   no-skills hooks ON  | skills OFF | steering=fixed     (isolates hint/description efficacy)
 #   bare      hooks OFF | skills OFF | steering=none       (pure MCP-description/unprompted)
@@ -225,10 +295,9 @@ CLAUDE_EXTRA=()
 claude_extra_for() {
   CLAUDE_EXTRA=()
   local cond="$1" fdir="$2"
-  [[ "$cond" == "full" ]] && return 0     # production parity: unchanged invocation
   if [[ "$have_plugin" != "1" ]]; then
-    echo "warn: no repo plugin dir; cannot ablate '$cond' hermetically — running as full" >&2
-    return 0
+    echo "error: candidate plugin dir missing; cannot run '$cond' hermetically" >&2
+    return 2
   fi
   provision_variant "$cond"
   local selected_mcp="$mcp_cfg"
@@ -265,18 +334,21 @@ PY
 run_claude() {
   # Uses the global CLAUDE_EXTRA array set by claude_extra_for.
   local prompt="$1" fixture="$2" out="$3" err="$4" model="$5"
-  ( cd "$fixture" && timeout "$SCENARIO_TIMEOUT" claude -p "$prompt" \
+  local allowed="Read,Glob,Grep,Task,Agent,Skill,mcp__tracedecay__*,mcp__plugin_tracedecay_graph__*,Bash(tracedecay tool *),Bash($TD tool *)"
+  ( cd "$fixture" && HOME="$CLAUDE_EVAL_HOME" CLAUDE_CONFIG_DIR="$CLAUDE_EVAL_CONFIG" PATH="$EVAL_PATH" \
+      timeout "$SCENARIO_TIMEOUT" claude -p "$prompt" \
       --output-format stream-json --verbose \
       --model "$model" \
-      --dangerously-skip-permissions \
-      "${CLAUDE_EXTRA[@]}" ) >"$out" 2>"$err"
+      --permission-mode dontAsk --allowedTools "$allowed" \
+      --no-session-persistence \
+      "${CLAUDE_EXTRA[@]}" ) </dev/null >"$out" 2>"$err"
 }
 run_codex() {
   local prompt="$1" fixture="$2" out="$3" err="$4" model="$5"
-  timeout "$SCENARIO_TIMEOUT" codex exec "$prompt" --json \
-    -C "$fixture" --skip-git-repo-check \
-    --dangerously-bypass-approvals-and-sandbox \
-    -m "$model" >"$out" 2>"$err"
+  HOME="$CODEX_EVAL_HOME" CODEX_HOME="$CODEX_EVAL_CONFIG" PATH="$EVAL_PATH" \
+    timeout "$SCENARIO_TIMEOUT" codex -a never -s workspace-write exec "$prompt" --json \
+      -C "$fixture" --add-dir "$work" --skip-git-repo-check --ephemeral --ignore-rules \
+      -m "$model" </dev/null >"$out" 2>"$err"
 }
 
 # Transcript/meta basename includes model identity; ablations append condition.

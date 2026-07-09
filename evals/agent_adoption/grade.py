@@ -200,7 +200,7 @@ class ToolCall:
 
 
 _TRACEDECAY_CLI = re.compile(
-    r"(?:^|[\s;&|])(?:\S*/)?tracedecay\s+(?:tool\s+)?([a-zA-Z0-9_-]+)"
+    r"(?:^|[\s;&|'\"])(?:\S*/)?tracedecay\s+(?:tool\s+)?([a-zA-Z0-9_-]+)"
 )
 
 
@@ -247,7 +247,7 @@ def _string_leaves(obj: Any) -> list[str]:
 def canon_name(name: Optional[str]) -> str:
     """Collapse host-specific tool names to a canonical form.
 
-    mcp__plugin_tracedecay_tracedecay__tracedecay_context -> tracedecay_context
+    mcp__plugin_tracedecay_graph__tracedecay_context -> tracedecay_context
     tracedecay__tracedecay_search                         -> tracedecay_search
     Bash / Grep / Glob / Read                             -> unchanged
     """
@@ -272,6 +272,10 @@ def _detect_format(lines: list[str]) -> str:
             continue
         if isinstance(obj, dict):
             if "msg" in obj and isinstance(obj["msg"], dict):
+                return "codex"
+            if str(obj.get("type") or "").startswith(
+                ("thread.", "turn.", "item.")
+            ):
                 return "codex"
             if obj.get("type") in {"assistant", "user", "result", "system"}:
                 return "claude"
@@ -339,6 +343,7 @@ def parse_codex(lines: list[str], host: str) -> Transcript:
     timeline: list[dict] = []
     final_text = ""
     seq = 0
+    seen_item_ids: set[str] = set()
     for ln in lines:
         ln = ln.strip()
         if not ln:
@@ -347,12 +352,26 @@ def parse_codex(lines: list[str], host: str) -> Transcript:
             obj = json.loads(ln)
         except json.JSONDecodeError:
             continue
-        msg = obj.get("msg") if isinstance(obj.get("msg"), dict) else obj
-        t = msg.get("type") or obj.get("type") or ""
+        outer_type = str(obj.get("type") or "")
+        item_envelope = outer_type in ("item.started", "item.completed") and isinstance(
+            obj.get("item"), dict
+        )
+        if item_envelope:
+            msg = obj["item"]
+        else:
+            msg = obj.get("msg") if isinstance(obj.get("msg"), dict) else obj
+        t = msg.get("type") or outer_type
+        item_id = str(msg.get("id") or "") if item_envelope else ""
 
         def _add_tool(tc: ToolCall):
+            nonlocal seq
+            if item_id:
+                if item_id in seen_item_ids:
+                    return
+                seen_item_ids.add(item_id)
             tools.append(tc)
             timeline.append({"kind": "tool", "call": tc})
+            seq += 1
 
         if t in ("mcp_tool_call_begin", "mcp_tool_call", "tool_call"):
             inv = msg.get("invocation") or msg
@@ -366,11 +385,9 @@ def parse_codex(lines: list[str], host: str) -> Transcript:
                 except json.JSONDecodeError:
                     args = {"_raw": args}
             _add_tool(tool_call(seq, raw or "", args))
-            seq += 1
         elif t in ("exec_command_begin", "exec_command", "command_execution"):
             cmd = msg.get("command") or msg.get("cmd") or ""
             _add_tool(tool_call(seq, "Bash", {"command": cmd}))
-            seq += 1
         elif t in ("function_call",):
             raw = msg.get("name") or ""
             args = msg.get("arguments") or {}
@@ -380,7 +397,21 @@ def parse_codex(lines: list[str], host: str) -> Transcript:
                 except json.JSONDecodeError:
                     args = {"_raw": args}
             _add_tool(tool_call(seq, raw, args))
-            seq += 1
+        elif t == "collab_tool_call":
+            raw = msg.get("tool") or msg.get("name") or ""
+            args = msg.get("arguments") or msg.get("input")
+            if not isinstance(args, dict):
+                args = {
+                    key: msg[key]
+                    for key in (
+                        "prompt",
+                        "sender_thread_id",
+                        "receiver_thread_ids",
+                        "agents_states",
+                    )
+                    if key in msg
+                }
+            _add_tool(tool_call(seq, raw, args))
         elif t in ("agent_message", "agent_message_final", "assistant_message"):
             txt = msg.get("message") or msg.get("text") or msg.get("content")
             if isinstance(txt, str) and txt.strip():
@@ -396,7 +427,6 @@ def parse_codex(lines: list[str], host: str) -> Transcript:
                     except json.JSONDecodeError:
                         args = {"_raw": args}
                 _add_tool(tool_call(seq, raw, args))
-                seq += 1
             else:
                 # Non-tool event (session meta, injected hook context, reasoning).
                 # Capture its text for hint-signature attribution.
@@ -609,6 +639,10 @@ def score_scenario(scn: dict, tr: Transcript, seeded_facts: dict, run_meta: dict
     # weighted score
     total_w = sum(WEIGHTS[k] for k in subs)
     score = sum(subs[k] * WEIGHTS[k] for k in subs) / total_w if total_w else 0.0
+    # Specialist packs measure routing. Generic efficiency or a plausible final
+    # answer cannot compensate for failing to invoke the expected specialist.
+    if expected_agent:
+        score = subs["agent_selected"]
 
     # discovery-channel attribution (condition from per-scenario meta)
     condition = run_meta.get("channel_condition", "full")
@@ -925,10 +959,25 @@ def main() -> int:
                     "condition": condition,
                     "exit_code": exit_code,
                     "timed_out": bool(per_meta.get("timed_out")),
+                    "reason": "timed_out" if per_meta.get("timed_out") else "launch_failed",
                 }
             )
             continue
         tr = load_transcript(os.path.join(run_dir, fn), host)
+        if not tr.tools and not tr.final_text.strip():
+            invalid_runs.append(
+                {
+                    "id": scn_id,
+                    "host": host,
+                    "model": per_meta.get("model"),
+                    "condition": condition,
+                    "exit_code": exit_code,
+                    "timed_out": False,
+                    "reason": "unparseable_empty",
+                    "parse_note": tr.parse_note,
+                }
+            )
+            continue
         results.append(score_scenario(scn, tr, seeded_facts, per_meta))
 
     scoreboard = {

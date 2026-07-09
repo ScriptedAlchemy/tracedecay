@@ -50,7 +50,7 @@ def claude_result(text: str) -> str:
     return json.dumps({"type": "result", "result": text})
 
 
-TD = "mcp__plugin_tracedecay_tracedecay__tracedecay_context"
+TD = "mcp__plugin_tracedecay_graph__tracedecay_context"
 HINT_TEXT = ("tracedecay hint: For codebase search, route by what you're matching: "
              "literal/regex text -> tracedecay_grep; symbol name -> tracedecay_search.")
 
@@ -148,6 +148,135 @@ def test_normalize():
     check("normalize: is_tracedecay", tr.tools[0].is_tracedecay and not tr.tools[1].is_tracedecay)
 
 
+def test_codex_0144_item_envelopes():
+    lines = [
+        json.dumps({
+            "type": "item.started",
+            "item": {
+                "id": "item_1",
+                "type": "command_execution",
+                "command": "/bin/bash -lc pwd",
+                "aggregated_output": "",
+                "exit_code": None,
+                "status": "in_progress",
+            },
+        }),
+        json.dumps({
+            "type": "item.completed",
+            "item": {
+                "id": "item_1",
+                "type": "command_execution",
+                "command": "/bin/bash -lc pwd",
+                "aggregated_output": "/tmp/fixture\n",
+                "exit_code": 0,
+                "status": "completed",
+            },
+        }),
+        json.dumps({
+            "type": "item.started",
+            "item": {
+                "id": "item_2",
+                "type": "mcp_tool_call",
+                "server": "graph",
+                "tool": "tracedecay_storage_status",
+                "arguments": {"format": "json"},
+                "status": "in_progress",
+            },
+        }),
+        json.dumps({
+            "type": "item.completed",
+            "item": {
+                "id": "item_2",
+                "type": "mcp_tool_call",
+                "server": "graph",
+                "tool": "tracedecay_storage_status",
+                "arguments": {"format": "json"},
+                "result": {"content": []},
+                "error": None,
+                "status": "completed",
+            },
+        }),
+        json.dumps({
+            "type": "item.started",
+            "item": {
+                "id": "item_3",
+                "type": "collab_tool_call",
+                "tool": "spawn_agent",
+                "sender_thread_id": "root",
+                "receiver_thread_ids": [],
+                "prompt": "Use the runtime-storage-doctor specialist.",
+                "agents_states": {},
+                "status": "in_progress",
+            },
+        }),
+        json.dumps({
+            "type": "item.completed",
+            "item": {
+                "id": "item_3",
+                "type": "collab_tool_call",
+                "tool": "spawn_agent",
+                "sender_thread_id": "root",
+                "receiver_thread_ids": ["child"],
+                "prompt": "Use the runtime-storage-doctor specialist.",
+                "agents_states": {"child": "completed"},
+                "status": "completed",
+            },
+        }),
+        json.dumps({
+            "type": "item.completed",
+            "item": {
+                "id": "item_4",
+                "type": "agent_message",
+                "text": "Succeeded.",
+            },
+        }),
+    ]
+    tr = grade.load_transcript_lines(lines, "codex")
+    check(
+        "codex 0.144: lifecycle deduped",
+        len(tr.tools) == 3,
+        str([t.canon for t in tr.tools]),
+    )
+    check(
+        "codex 0.144: command parsed",
+        len(tr.tools) > 0
+        and tr.tools[0].canon == "Bash"
+        and tr.tools[0].command == "/bin/bash -lc pwd",
+    )
+    check(
+        "codex 0.144: MCP parsed",
+        len(tr.tools) > 1
+        and tr.tools[1].canon == "tracedecay_storage_status"
+        and tr.tools[1].input == {"format": "json"},
+    )
+    check(
+        "codex 0.144: collab parsed",
+        len(tr.tools) > 2 and tr.tools[2].canon == "spawn_agent",
+    )
+    check(
+        "codex 0.144: specialist recovered",
+        grade.invoked_agents(tr) == ["runtime-storage-doctor"],
+    )
+    check("codex 0.144: final answer parsed", tr.final_text == "Succeeded.")
+    cli = grade.load_transcript_lines(
+        [json.dumps({
+            "type": "item.completed",
+            "item": {
+                "id": "item_cli",
+                "type": "command_execution",
+                "command": "/bin/bash -lc 'tracedecay tool storage_status --json'",
+                "status": "completed",
+            },
+        })],
+        "codex",
+    )
+    check(
+        "codex 0.144: wrapped CLI identity parsed",
+        cli.tools[0].canon == "tracedecay_storage_status",
+        cli.tools[0].canon,
+    )
+
+
 def test_specialist_agents():
     claude = transcript([
         claude_tool("Task", {"subagent_type": "runtime-storage-doctor"}),
@@ -199,6 +328,17 @@ def test_specialist_agents():
         scored["score"] == 1.0,
         str(scored["subscores"]),
     )
+    missing = grade.score_scenario(
+        scenario,
+        transcript([claude_result("diagnosed without delegation")]),
+        {},
+        {"channel_condition": "full"},
+    )
+    check(
+        "agents: specialist routing is required",
+        missing["score"] == 0.0,
+        str(missing["subscores"]),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -240,6 +380,13 @@ def test_end_to_end():
             f.write(claude_result("Not logged in") + "\n")
         with open(os.path.join(rdir, failed + ".meta.json"), "w") as f:
             json.dump({"exit_code": 1, "model": "sonnet"}, f)
+        # Exit 0 with no parseable tools or answer is also invalid measurement,
+        # not evidence that the agent chose nothing.
+        empty = "explore_reserve_stock__claude__opus"
+        with open(os.path.join(rdir, empty + ".stdout.jsonl"), "w") as f:
+            f.write(json.dumps({"type": "turn.completed", "usage": {}}) + "\n")
+        with open(os.path.join(rdir, empty + ".meta.json"), "w") as f:
+            json.dump({"exit_code": 0, "model": "opus"}, f)
 
         rc = subprocess.run(
             [sys.executable, os.path.join(HERE, "grade.py"), "--run-dir", rdir, "--scenarios", sdir],
@@ -251,8 +398,10 @@ def test_end_to_end():
         check("e2e: both conditions graded", set(by_cond) == {"full", "bare"})
         check(
             "e2e: failed launches excluded",
-            len(sb["results"]) == 2 and len(sb["meta"].get("invalid_runs", [])) == 1,
+            len(sb["results"]) == 2 and len(sb["meta"].get("invalid_runs", [])) == 2,
         )
+        invalid_reasons = {r.get("reason") for r in sb["meta"].get("invalid_runs", [])}
+        check("e2e: empty success marked unparseable", "unparseable_empty" in invalid_reasons)
         check("e2e: full channel steering",
               by_cond.get("full", {}).get("channel") == grade.CH_STEERING)
         check("e2e: bare channel unprompted",
@@ -321,6 +470,62 @@ def test_cli_only_harness():
         in source,
     )
     check("model matrix: Codex argv is explicit", '-m "$model"' in source)
+    check("model matrix: Sol excluded", "gpt-5.6-sol" not in source.lower())
+    check(
+        "runner: current Claude plugin MCP namespace only",
+        "mcp__plugin_tracedecay_graph__*" in source
+        and "mcp__plugin_tracedecay_tracedecay__*" not in source,
+    )
+    check("runner: agent stdin isolated", '</dev/null' in source)
+    check(
+        "runner: dangerous bypasses removed",
+        "--dangerously-bypass-approvals-and-sandbox" not in source
+        and "--dangerously-skip-permissions" not in source,
+    )
+    check(
+        "runner: Codex sandbox and approvals bounded",
+        "-s workspace-write" in source
+        and "-a never" in source
+        and '--add-dir "$work"' in source,
+    )
+    check(
+        "runner: Codex uses throwaway profile",
+        'CODEX_HOME="$CODEX_EVAL_CONFIG"' in source
+        and '"$TD" install --agent codex' in source
+        and "codex plugin add tracedecay@personal" in source,
+    )
+    check(
+        "runner: live default builds candidate binary",
+        "cargo build --quiet --bin tracedecay" in source
+        and 'TD="$eval_target/debug/tracedecay"' in source
+        and "/fast/cargo-target/tracedecay-agent-adoption-evals" in source,
+    )
+    check(
+        "runner: bare CLI resolves to candidate",
+        'EVAL_PATH="$(dirname "$TD"):$PATH"' in source
+        and 'PATH="$EVAL_PATH"' in source
+        and "Bash(tracedecay tool *)" in source,
+    )
+    check(
+        "runner: auth copies are read-only",
+        "copy_auth_readonly" in source
+        and "chmod 400" in source
+        and "umask 077" in source,
+    )
+    check(
+        "runner: temporary auth copies scrubbed",
+        "scrub_auth_copies" in source and "trap scrub_auth_copies EXIT" in source,
+    )
+    check(
+        "runner: Claude noninteractive permissions bounded",
+        "--permission-mode dontAsk" in source and "--allowedTools" in source,
+    )
+    check(
+        "runner: full Claude uses candidate plugin",
+        'provision_variant "$cond"' in source
+        and '--plugin-dir "$work/plugins/$cond"' in source
+        and '[[ "$cond" == "full" ]] && return 0' not in source,
+    )
     check(
         "model matrix: transcript basename parsed",
         grade.parse_transcript_base(
@@ -339,6 +544,7 @@ def main() -> int:
     test_lint()
     test_channels()
     test_normalize()
+    test_codex_0144_item_envelopes()
     test_specialist_agents()
     test_end_to_end()
     test_hint_signature_drift()
