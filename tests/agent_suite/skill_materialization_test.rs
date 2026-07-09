@@ -535,7 +535,7 @@ async fn fork_protection_leaves_user_edited_file_and_doctor_flags_it() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
 
     // Doctor flags the fork.
-    let drift = doctor_scope(&scope, std::slice::from_ref(&skill));
+    let drift = doctor_scope(&scope, std::slice::from_ref(&skill), INSTALL);
     assert!(
         drift.iter().any(
             |d| matches!(d, SkillDrift::Forked { skill_id, .. } if skill_id == "code-slop-cleanup")
@@ -584,7 +584,7 @@ async fn foreign_file_is_never_touched_and_doctor_reports_conflict() {
         RemoveAction::SkippedForeign
     );
 
-    let drift = doctor_scope(&scope, std::slice::from_ref(&skill));
+    let drift = doctor_scope(&scope, std::slice::from_ref(&skill), INSTALL);
     assert!(
         drift
             .iter()
@@ -624,7 +624,7 @@ async fn doctor_reports_missing_and_orphan_drift() {
     .await
     .unwrap();
     materialize_skill(&scope, &skill, INSTALL).unwrap();
-    let orphan_drift = doctor_scope(&scope, &[]);
+    let orphan_drift = doctor_scope(&scope, &[], INSTALL);
     assert!(
         orphan_drift.iter().any(
             |d| matches!(d, SkillDrift::Orphan { skill_id, .. } if skill_id == "code-slop-cleanup")
@@ -731,7 +731,7 @@ async fn lost_manifest_pristine_file_is_rederived_not_forked() {
     assert!(manifest.is_file(), "manifest should be re-derived");
 
     // Doctor must NOT report the pristine file as a user fork.
-    let drift = doctor_scope(&scope, std::slice::from_ref(&skill));
+    let drift = doctor_scope(&scope, std::slice::from_ref(&skill), INSTALL);
     assert!(
         !drift.iter().any(|d| matches!(d, SkillDrift::Forked { .. })),
         "pristine file wrongly flagged as forked: {drift:?}"
@@ -838,6 +838,128 @@ async fn project_scope_protects_another_installations_committed_package() {
     );
 }
 
+/// #4b A committed project package another installation authored (provenance
+/// clean, just a different `materialized_by`) must be reported as
+/// `ForeignOrphan`, never `Orphan` — doctor must not prescribe an `update`
+/// remove that the remove path refuses to perform. Predicate agreement is
+/// checked against `remove_materialized_skill`.
+#[tokio::test]
+async fn doctor_reports_foreign_installation_package_as_foreign_orphan() {
+    let (_temp, root) = canonical_tempdir();
+    let project = root.join("project");
+    let profile_root = root.join("profile");
+    install_fake_hosts(&project);
+
+    activate_skill(&profile_root, "code-slop-cleanup").await;
+    let skill = load_skill(&profile_root, "code-slop-cleanup").await;
+
+    // Installation B authored (and "committed") the package into the checkout.
+    let scope = MaterializationScope::project(MaterializationHost::Claude, project);
+    materialize_skill(&scope, &skill, INSTALL_B).unwrap();
+
+    // Installation A runs doctor with the skill inactive: foreign orphan, not
+    // a plain orphan (which would nag to run `tracedecay update`).
+    let drift = doctor_scope(&scope, &[], INSTALL);
+    assert_eq!(
+        drift
+            .iter()
+            .filter(|d| matches!(
+                d,
+                SkillDrift::ForeignOrphan { skill_id, .. } if skill_id == "code-slop-cleanup"
+            ))
+            .count(),
+        1,
+        "expected exactly one ForeignOrphan, got {drift:?}"
+    );
+    assert!(
+        !drift.iter().any(|d| matches!(d, SkillDrift::Orphan { .. })),
+        "foreign package must never be a plain Orphan: {drift:?}"
+    );
+
+    // Predicate agreement: the remove path also refuses this package.
+    assert_eq!(
+        remove_materialized_skill(&scope, "code-slop-cleanup", INSTALL).unwrap(),
+        RemoveAction::SkippedForeign
+    );
+}
+
+/// #4c A legacy manifest with no `materialized_by` field (pre-provenance shape),
+/// or no manifest at all, has an unknown author; doctor must treat it as a
+/// `ForeignOrphan` because the remove path also refuses to delete it.
+#[tokio::test]
+async fn doctor_reports_legacy_manifestless_author_as_foreign_orphan() {
+    let (_temp, root) = canonical_tempdir();
+    let project = root.join("project");
+    let profile_root = root.join("profile");
+    install_fake_hosts(&project);
+
+    activate_skill(&profile_root, "code-slop-cleanup").await;
+    let skill = load_skill(&profile_root, "code-slop-cleanup").await;
+
+    let scope = MaterializationScope::project(MaterializationHost::Claude, project);
+    materialize_skill(&scope, &skill, INSTALL).unwrap();
+    let dir = scope.skills_dir().join("code-slop-cleanup");
+    let manifest = dir.join(".tracedecay-materialization.json");
+
+    // Legacy shape: strip `materialized_by` but keep the manifest otherwise
+    // valid (serde default makes the field optional).
+    let mut json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
+    json.as_object_mut().unwrap().remove("materialized_by");
+    std::fs::write(&manifest, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+
+    let drift = doctor_scope(&scope, &[], INSTALL);
+    assert!(
+        drift.iter().any(|d| matches!(
+            d,
+            SkillDrift::ForeignOrphan { skill_id, .. } if skill_id == "code-slop-cleanup"
+        )),
+        "legacy manifest-less author must be ForeignOrphan, got {drift:?}"
+    );
+
+    // Removing the manifest entirely (lost sidecar) is also unknown-author.
+    std::fs::remove_file(&manifest).unwrap();
+    let drift = doctor_scope(&scope, &[], INSTALL);
+    assert!(
+        drift.iter().any(|d| matches!(
+            d,
+            SkillDrift::ForeignOrphan { skill_id, .. } if skill_id == "code-slop-cleanup"
+        )),
+        "missing manifest must be ForeignOrphan, got {drift:?}"
+    );
+}
+
+/// #4d A package this installation authored, now inactive, remains a plain
+/// `Orphan` — `tracedecay update` correctly removes self-authored packages.
+#[tokio::test]
+async fn doctor_reports_own_inactive_skill_as_plain_orphan() {
+    let (_temp, root) = canonical_tempdir();
+    let project = root.join("project");
+    let profile_root = root.join("profile");
+    install_fake_hosts(&project);
+
+    activate_skill(&profile_root, "code-slop-cleanup").await;
+    let skill = load_skill(&profile_root, "code-slop-cleanup").await;
+
+    let scope = MaterializationScope::project(MaterializationHost::Claude, project);
+    materialize_skill(&scope, &skill, INSTALL).unwrap();
+
+    let drift = doctor_scope(&scope, &[], INSTALL);
+    assert!(
+        drift.iter().any(|d| matches!(
+            d,
+            SkillDrift::Orphan { skill_id, .. } if skill_id == "code-slop-cleanup"
+        )),
+        "self-authored inactive package must stay a plain Orphan, got {drift:?}"
+    );
+    assert!(
+        !drift
+            .iter()
+            .any(|d| matches!(d, SkillDrift::ForeignOrphan { .. })),
+        "self-authored package must never be ForeignOrphan: {drift:?}"
+    );
+}
+
 /// #5 Concurrent transactions on the same package must serialize and never wedge
 /// it as forked or leave a half-applied manifest.
 #[tokio::test]
@@ -868,7 +990,7 @@ async fn concurrent_materialize_does_not_wedge_forked() {
     // Final state is a clean, unchanged, fork-free package.
     let final_pass = materialize_skill(&scope, &skill, INSTALL).unwrap();
     assert_eq!(final_pass.action, MaterializeAction::Unchanged);
-    let drift = doctor_scope(&scope, std::slice::from_ref(&skill));
+    let drift = doctor_scope(&scope, std::slice::from_ref(&skill), INSTALL);
     assert!(
         drift.is_empty(),
         "unexpected drift after concurrency: {drift:?}"
@@ -934,7 +1056,7 @@ async fn doctor_reports_other_drift_when_one_package_errors() {
     symlink(&external, dir.join("references")).unwrap();
 
     // good-skill is active but not materialized -> Missing; broken errors.
-    let drift = doctor_scope(&scope, &[good, broken]);
+    let drift = doctor_scope(&scope, &[good, broken], INSTALL);
     assert!(
         drift
             .iter()
@@ -1023,7 +1145,7 @@ async fn colliding_host_slugs_are_disambiguated_and_warned() {
     assert_eq!(managed.len(), 2, "both colliding skills must materialize");
 
     // Doctor warns about the collision for both.
-    let drift = doctor_scope(&scope, &[a, b]);
+    let drift = doctor_scope(&scope, &[a, b], INSTALL);
     let warnings = drift
         .iter()
         .filter(|d| matches!(d, SkillDrift::Warning { .. }))

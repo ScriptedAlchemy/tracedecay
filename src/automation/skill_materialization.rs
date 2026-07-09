@@ -255,6 +255,11 @@ pub enum SkillDrift {
     /// A managed file exists for a skill that is no longer active; a reconcile
     /// would remove it.
     Orphan { skill_id: String, path: PathBuf },
+    /// A managed file for a no-longer-active skill that this installation did
+    /// not author (committed by another installation, or a legacy manifest with
+    /// no recorded author). `tracedecay update` will refuse to remove it, so
+    /// doctor must not prescribe update.
+    ForeignOrphan { skill_id: String, path: PathBuf },
     /// A non-fatal problem: a per-skill check failed, or two active skill ids
     /// collide on the same host slug. Reported so one bad package never hides
     /// drift for the rest of the scope.
@@ -272,6 +277,7 @@ impl SkillDrift {
             Self::Forked { .. } => "forked",
             Self::Conflict { .. } => "conflict",
             Self::Orphan { .. } => "orphan",
+            Self::ForeignOrphan { .. } => "foreign-orphan",
             Self::Warning { .. } => "warning",
         }
     }
@@ -282,6 +288,7 @@ impl SkillDrift {
             | Self::Forked { path, .. }
             | Self::Conflict { path, .. }
             | Self::Orphan { path, .. }
+            | Self::ForeignOrphan { path, .. }
             | Self::Warning { path, .. } => path,
         }
     }
@@ -292,6 +299,7 @@ impl SkillDrift {
             | Self::Forked { skill_id, .. }
             | Self::Conflict { skill_id, .. }
             | Self::Orphan { skill_id, .. }
+            | Self::ForeignOrphan { skill_id, .. }
             | Self::Warning { skill_id, .. } => skill_id,
         }
     }
@@ -1317,10 +1325,22 @@ fn may_remove_owned(
     manifest: &MaterializationManifest,
     installation_id: &str,
 ) -> bool {
+    !package_is_foreign_to_installation(scope, Some(manifest), installation_id)
+}
+
+/// Single source of truth for foreign-installation protection: a project-scope
+/// package is foreign unless its manifest records this installation as author.
+/// `None` covers missing/unparseable manifests and legacy manifests without
+/// `materialized_by`. Global (home) packages are never foreign.
+fn package_is_foreign_to_installation(
+    scope: &MaterializationScope,
+    manifest: Option<&MaterializationManifest>,
+    installation_id: &str,
+) -> bool {
     match scope.kind {
-        MaterializationScopeKind::Global => true,
+        MaterializationScopeKind::Global => false,
         MaterializationScopeKind::Project => {
-            manifest.materialized_by.as_deref() == Some(installation_id)
+            manifest.and_then(|m| m.materialized_by.as_deref()) != Some(installation_id)
         }
     }
 }
@@ -1505,6 +1525,7 @@ pub fn reconcile_scope(
 pub fn doctor_scope(
     scope: &MaterializationScope,
     active_skills: &[ManagedSkill],
+    installation_id: &str,
 ) -> Vec<SkillDrift> {
     let mut drift = Vec::new();
     let mut active_slugs = std::collections::BTreeSet::new();
@@ -1563,10 +1584,20 @@ pub fn doctor_scope(
                 if active_slugs.contains(&slug) {
                     continue;
                 }
-                drift.push(SkillDrift::Orphan {
-                    skill_id,
-                    path: scope.skill_md(&slug),
-                });
+                let dir = scope.skill_dir(&slug);
+                // Only an `Owned` manifest carries a trusted author. Missing,
+                // foreign, or unreadable manifests all mean the author is
+                // unknown — update cannot verify authorship, so treat as `None`.
+                let manifest = match read_materialization_manifest(&dir, &skill_id) {
+                    Ok(ManifestState::Owned(m)) => Some(m),
+                    Ok(ManifestState::Missing | ManifestState::Foreign) | Err(_) => None,
+                };
+                let path = scope.skill_md(&slug);
+                if package_is_foreign_to_installation(scope, manifest.as_ref(), installation_id) {
+                    drift.push(SkillDrift::ForeignOrphan { skill_id, path });
+                } else {
+                    drift.push(SkillDrift::Orphan { skill_id, path });
+                }
             }
         }
         Err(err) => drift.push(SkillDrift::Warning {
@@ -1750,10 +1781,11 @@ pub fn doctor_detected_scopes(
     project_root: &Path,
 ) -> Result<Vec<(MaterializationScope, Vec<SkillDrift>)>> {
     let skills = load_active_managed_skills(profile_root)?;
+    let installation = installation_id(profile_root);
     let mut out = Vec::new();
     for scope in detect_scopes(home, project_root) {
         let scope_skills = skills_for_scope(&skills, &scope);
-        let drift = doctor_scope(&scope, &scope_skills);
+        let drift = doctor_scope(&scope, &scope_skills, &installation);
         out.push((scope.clone(), drift));
     }
     Ok(out)
