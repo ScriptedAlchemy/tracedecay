@@ -29,14 +29,20 @@ pub struct HermesPendingSkillWrite {
     pub payload: Option<Value>,
 }
 
+/// Loads all pending Hermes skill-write records from `<hermes_home>/pending/skills`.
+///
+/// Returns the parsed records alongside a count of files that were skipped
+/// because they failed to parse as JSON. Each skipped file also prints a
+/// warning to stderr, so a corrupt write-approval record surfaces instead of
+/// silently vanishing from the review queue.
 pub(crate) fn load_pending_skill_writes(
     hermes_home: &Path,
     include_payloads: bool,
-) -> Result<Vec<HermesPendingSkillWrite>> {
+) -> Result<(Vec<HermesPendingSkillWrite>, usize)> {
     let pending_dir = hermes_home.join("pending").join("skills");
     let entries = match fs::read_dir(&pending_dir) {
         Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), 0)),
         Err(e) => {
             return Err(config_error(format!(
                 "failed to read Hermes pending skills '{}': {e}",
@@ -45,6 +51,7 @@ pub(crate) fn load_pending_skill_writes(
         }
     };
     let mut pending = Vec::new();
+    let mut corrupt_count = 0usize;
     for entry in entries {
         let entry = entry.map_err(|e| {
             config_error(format!(
@@ -64,7 +71,14 @@ pub(crate) fn load_pending_skill_writes(
         })?;
         let value: Value = match serde_json::from_str(&contents) {
             Ok(value) => value,
-            Err(_) => continue,
+            Err(e) => {
+                eprintln!(
+                    "warning: skipping corrupt Hermes pending skill write '{}': {e}",
+                    path.display()
+                );
+                corrupt_count += 1;
+                continue;
+            }
         };
         let payload = value.get("payload").cloned();
         let name = payload
@@ -108,7 +122,7 @@ pub(crate) fn load_pending_skill_writes(
         pending_created_at_cmp(left.created_at.as_ref(), right.created_at.as_ref())
             .then_with(|| left.id.cmp(&right.id))
     });
-    Ok(pending)
+    Ok((pending, corrupt_count))
 }
 
 pub(crate) fn pending_skill_ids_by_name(
@@ -176,10 +190,31 @@ fn created_at_sort_key(value: Option<&Value>) -> Option<CreatedAtSortKey> {
 #[cfg(test)]
 mod tests {
     use std::cmp::Ordering;
+    use std::fs;
 
     use serde_json::json;
 
-    use super::pending_created_at_cmp;
+    use super::{load_pending_skill_writes, pending_created_at_cmp};
+
+    #[test]
+    fn load_pending_skill_writes_skips_and_counts_corrupt_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let pending_dir = dir.path().join("pending").join("skills");
+        fs::create_dir_all(&pending_dir).unwrap();
+
+        fs::write(
+            pending_dir.join("good.json"),
+            json!({"id": "good-1", "payload": {"name": "my-skill"}}).to_string(),
+        )
+        .unwrap();
+        fs::write(pending_dir.join("corrupt.json"), "{not valid json").unwrap();
+
+        let (pending, corrupt_count) = load_pending_skill_writes(dir.path(), false).unwrap();
+
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, "good-1");
+        assert_eq!(corrupt_count, 1);
+    }
 
     #[test]
     fn pending_created_at_sort_orders_numbers_strings_and_missing_values() {

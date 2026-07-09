@@ -1007,6 +1007,21 @@ pub(crate) fn ensure_project_local_safe_path(project_root: &Path, path: &Path) -
     Ok(())
 }
 
+/// Guard every project-local write target up front: reject any path that
+/// escapes `project_root` or reaches through a symlinked parent before the
+/// installer creates directories or writes files. Mirrors the per-path
+/// [`ensure_project_local_safe_path`] contract for adapters that touch several
+/// project-local paths in one `install_local`.
+pub(crate) fn ensure_project_local_safe_paths<'a, I>(project_root: &Path, paths: I) -> Result<()>
+where
+    I: IntoIterator<Item = &'a Path>,
+{
+    for path in paths {
+        ensure_project_local_safe_path(project_root, path)?;
+    }
+    Ok(())
+}
+
 /// Returns the user's home directory, cross-platform.
 pub fn home_dir() -> Option<PathBuf> {
     std::env::var("HOME")

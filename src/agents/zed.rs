@@ -55,10 +55,9 @@ impl AgentIntegration for ZedIntegration {
     }
 
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        install_context_server(
-            &project_path.join(".zed/settings.json"),
-            &ctx.tracedecay_bin,
-        )
+        let settings = project_path.join(".zed/settings.json");
+        super::ensure_project_local_safe_path(project_path, &settings)?;
+        install_context_server(&settings, &ctx.tracedecay_bin)
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {

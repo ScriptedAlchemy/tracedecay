@@ -34,6 +34,10 @@ pub struct HermesSkillBridgeSnapshot {
     pub skills_dir: PathBuf,
     pub skill_count: usize,
     pub pending_skill_count: usize,
+    /// Number of files under `pending/skills/` that failed to parse as JSON
+    /// and were skipped. Non-zero means the review queue below is missing
+    /// entries — see stderr for which files.
+    pub pending_skill_corrupt_count: usize,
     pub usage_record_count: usize,
     pub archive_count: usize,
     pub skills: Vec<HermesSkillSummary>,
@@ -152,7 +156,8 @@ pub fn load_hermes_skill_bridge(
 
     let skills_dir = hermes_home.join("skills");
     let usage_records = load_usage_records(&skills_dir)?;
-    let pending_skills = load_pending_skill_writes(hermes_home, options.include_pending_payloads)?;
+    let (pending_skills, pending_skill_corrupt_count) =
+        load_pending_skill_writes(hermes_home, options.include_pending_payloads)?;
     let pending_by_skill = pending_skill_ids_by_name(&pending_skills);
     let skill_ownership = load_skill_ownership_projection(hermes_home, &usage_records)?;
     let skills = load_skill_summaries(
@@ -218,6 +223,7 @@ pub fn load_hermes_skill_bridge(
         skills_dir,
         skill_count: skills.len(),
         pending_skill_count: pending_skills.len(),
+        pending_skill_corrupt_count,
         usage_record_count: usage_records.len(),
         archive_count,
         skills,

@@ -195,13 +195,21 @@ impl AgentIntegration for KiroIntegration {
 
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
         let mcp_path = workspace_mcp_config_path(project_path);
-        install_mcp_server(&mcp_path, &ctx.tracedecay_bin)?;
-
         let steering = project_path.join(".kiro/steering/tracedecay.md");
-        install_steering_rules(&steering)?;
-
         let agent_path = project_path.join(".kiro/agents/tracedecay.json");
         let skill_index_path = project_path.join(".kiro/steering/tracedecay-managed-skills.md");
+        super::ensure_project_local_safe_paths(
+            project_path,
+            [
+                mcp_path.as_path(),
+                steering.as_path(),
+                agent_path.as_path(),
+                skill_index_path.as_path(),
+            ],
+        )?;
+
+        install_mcp_server(&mcp_path, &ctx.tracedecay_bin)?;
+        install_steering_rules(&steering)?;
         install_managed_agent(
             &agent_path,
             &ctx.tracedecay_bin,

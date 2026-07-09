@@ -326,10 +326,14 @@ pub fn job_is_schedulable(job: &AutomationJob) -> bool {
 }
 
 /// True when any persisted job needs the scheduler loop running.
-pub async fn jobs_configured_for_scheduler(dashboard_root: &Path) -> bool {
-    load_jobs(dashboard_root)
-        .await
-        .is_ok_and(|jobs| jobs.iter().any(job_is_schedulable))
+///
+/// A load/parse failure (e.g. a corrupt `automation_jobs.json`) is surfaced
+/// as an error rather than collapsed to `false`: reporting "no work" for a
+/// corrupt file would silently and permanently disable the scheduler loop.
+/// The caller retries next tick so a transiently bad file recovers.
+pub async fn jobs_configured_for_scheduler(dashboard_root: &Path) -> Result<bool> {
+    let jobs = load_jobs(dashboard_root).await?;
+    Ok(jobs.iter().any(job_is_schedulable))
 }
 
 /// Scheduler due-decision for one job, mirroring the fixed-task
@@ -912,4 +916,66 @@ fn job_error<T>(message: &str) -> Result<T> {
     Err(TraceDecayError::Config {
         message: message.to_string(),
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod scheduler_config_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn corrupt_jobs_file_surfaces_error_instead_of_no_work() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path();
+        tokio::fs::write(jobs_path(root), b"{ this is not valid json")
+            .await
+            .unwrap();
+
+        // A corrupt jobs file must be an error, not a silent `false` that would
+        // permanently disable the scheduler loop with reason=not_configured.
+        let err = jobs_configured_for_scheduler(root)
+            .await
+            .expect_err("corrupt jobs file must surface an error");
+        assert!(
+            err.to_string().contains("failed to parse automation jobs"),
+            "error should carry the parse cause: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_jobs_file_reports_no_work_without_error() {
+        let temp = tempfile::TempDir::new().unwrap();
+        assert!(!jobs_configured_for_scheduler(temp.path()).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn valid_schedulable_job_reports_work_and_recovers_after_corruption() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path();
+        let job = json!({
+            "schema_version": JOBS_SCHEMA_VERSION,
+            "jobs": [{
+                "id": "nightly",
+                "name": "Nightly summary",
+                "enabled": true,
+                "schedule": "hourly",
+                "prompt": "summarize",
+                "delivery": { "mode": "file" }
+            }]
+        });
+        tokio::fs::write(jobs_path(root), serde_json::to_vec(&job).unwrap())
+            .await
+            .unwrap();
+        assert!(jobs_configured_for_scheduler(root).await.unwrap());
+
+        // Corruption surfaces as an error; restoring a valid file recovers.
+        tokio::fs::write(jobs_path(root), b"nonsense")
+            .await
+            .unwrap();
+        assert!(jobs_configured_for_scheduler(root).await.is_err());
+        tokio::fs::write(jobs_path(root), serde_json::to_vec(&job).unwrap())
+            .await
+            .unwrap();
+        assert!(jobs_configured_for_scheduler(root).await.unwrap());
+    }
 }

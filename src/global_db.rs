@@ -2329,6 +2329,40 @@ impl GlobalDb {
         total
     }
 
+    /// Applies the configured retention windows to the global-database
+    /// telemetry tables (`analytics_events`, `session_messages`), deleting
+    /// rows older than each table's window. Session data is only touched when
+    /// the operator has set an explicit window for it.
+    pub async fn prune_global_retention(
+        &self,
+        config: &crate::retention::RetentionConfig,
+        now_secs: i64,
+    ) -> crate::errors::Result<Vec<crate::retention::RetentionTableReport>> {
+        crate::retention::prune_global_tables(
+            &self.conn,
+            config,
+            crate::retention::RetentionMode::Apply,
+            now_secs,
+        )
+        .await
+    }
+
+    /// Dry-run counterpart of [`Self::prune_global_retention`]: reports how
+    /// many rows each window *would* remove without deleting anything.
+    pub async fn global_retention_report(
+        &self,
+        config: &crate::retention::RetentionConfig,
+        now_secs: i64,
+    ) -> crate::errors::Result<Vec<crate::retention::RetentionTableReport>> {
+        crate::retention::prune_global_tables(
+            &self.conn,
+            config,
+            crate::retention::RetentionMode::DryRun,
+            now_secs,
+        )
+        .await
+    }
+
     /// Returns all tracked project paths.
     pub async fn list_project_paths(&self) -> Vec<String> {
         let Ok(mut rows) = self.conn.query("SELECT path FROM projects", ()).await else {

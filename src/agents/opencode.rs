@@ -56,8 +56,13 @@ impl AgentIntegration for OpenCodeIntegration {
     }
 
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        install_mcp_server(&project_path.join("opencode.json"), &ctx.tracedecay_bin)?;
+        let mcp_path = project_path.join("opencode.json");
         let agents_md = project_path.join("AGENTS.md");
+        super::ensure_project_local_safe_paths(
+            project_path,
+            [mcp_path.as_path(), agents_md.as_path()],
+        )?;
+        install_mcp_server(&mcp_path, &ctx.tracedecay_bin)?;
         install_prompt_rules(&agents_md)?;
         super::install_managed_skill_prompt_index(
             &ctx.home,

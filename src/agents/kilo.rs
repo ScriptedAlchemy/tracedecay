@@ -53,7 +53,9 @@ impl AgentIntegration for KiloIntegration {
     }
 
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        install_mcp_server(&project_path.join("kilo.json"), &ctx.tracedecay_bin)
+        let mcp_path = project_path.join("kilo.json");
+        super::ensure_project_local_safe_path(project_path, &mcp_path)?;
+        install_mcp_server(&mcp_path, &ctx.tracedecay_bin)
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {

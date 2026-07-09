@@ -322,6 +322,231 @@ async fn test_multiple_candidates_best_match_scoring() {
     );
 }
 
+/// Nodes exercising the `::`-prefilter fix: qualified names are file-path
+/// prefixed, so references that carry a `crate::`/`Self::`/longer module
+/// prefix never appear verbatim in `known_names`. Before the fix these were
+/// bucketed hopeless by `resolve_all`'s prefilter and never reached
+/// `resolve_one`'s simple-name fallback.
+fn prefilter_nodes() -> Vec<Node> {
+    vec![
+        // Top-level pub handler in a `handlers` module. Only `handle_ping`
+        // and (the full qn) are in known_names — NOT `handlers::handle_ping`
+        // nor `crate::handlers::handle_ping`.
+        function_node(
+            "src/handlers.rs",
+            "handle_ping",
+            "src/handlers.rs::handle_ping",
+            10,
+            15,
+            "pub fn handle_ping()",
+            Visibility::Pub,
+        ),
+        // A method: qn suffix index has `Service::process` and `process`,
+        // but never `Self::process`.
+        function_node(
+            "src/service.rs",
+            "process",
+            "src/service.rs::Service::process",
+            20,
+            30,
+            "fn process(&self)",
+            Visibility::Pub,
+        ),
+        // An associated function reached via a longer path.
+        function_node(
+            "src/config.rs",
+            "load",
+            "src/config.rs::Config::load",
+            5,
+            9,
+            "fn load() -> Config",
+            Visibility::Pub,
+        ),
+    ]
+}
+
+/// Before/after guard for the `::`-prefilter fix. Each of these references
+/// carries a prefix (`crate::`, `Self::`, or a longer module path) that is
+/// absent from `known_names`, so on the pre-fix resolver they were partitioned
+/// hopeless and never resolved. After admitting refs whose simple name is
+/// known, each produces a call edge.
+#[tokio::test]
+async fn test_prefilter_admits_prefixed_module_calls() {
+    let fixture = resolution_fixture().await;
+    let nodes = prefilter_nodes();
+    let resolver = ReferenceResolver::from_nodes(&fixture.db, &nodes);
+
+    let caller = generate_node_id("src/dispatch.rs", &NodeKind::Function, "dispatch", 1);
+    let refs = vec![
+        // crate::module::fn
+        UnresolvedRef {
+            from_node_id: caller.clone(),
+            reference_name: "crate::handlers::handle_ping".to_string(),
+            reference_kind: EdgeKind::Calls,
+            line: 3,
+            column: 4,
+            file_path: "src/dispatch.rs".to_string(),
+        },
+        // Self::method
+        UnresolvedRef {
+            from_node_id: caller.clone(),
+            reference_name: "Self::process".to_string(),
+            reference_kind: EdgeKind::Calls,
+            line: 4,
+            column: 4,
+            file_path: "src/dispatch.rs".to_string(),
+        },
+        // crate::module::Type::assoc_fn
+        UnresolvedRef {
+            from_node_id: caller.clone(),
+            reference_name: "crate::config::Config::load".to_string(),
+            reference_kind: EdgeKind::Calls,
+            line: 5,
+            column: 4,
+            file_path: "src/dispatch.rs".to_string(),
+        },
+    ];
+
+    let result = resolver.resolve_all(&refs);
+    assert_eq!(result.total, 3);
+    assert_eq!(
+        result.resolved_count,
+        3,
+        "all three prefixed refs should resolve via the simple-name fallback; \
+         unresolved = {:?}",
+        result
+            .unresolved
+            .iter()
+            .map(|u| u.reference_name.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(result.unresolved.is_empty());
+
+    // Each resolved to the intended target.
+    let target_for = |name: &str| {
+        result
+            .resolved
+            .iter()
+            .find(|r| r.original.reference_name == name)
+            .map(|r| r.target_node_id.clone())
+    };
+    assert_eq!(
+        target_for("crate::handlers::handle_ping"),
+        Some(generate_node_id(
+            "src/handlers.rs",
+            &NodeKind::Function,
+            "handle_ping",
+            10
+        ))
+    );
+    assert_eq!(
+        target_for("Self::process"),
+        Some(generate_node_id(
+            "src/service.rs",
+            &NodeKind::Function,
+            "process",
+            20
+        ))
+    );
+    assert_eq!(
+        target_for("crate::config::Config::load"),
+        Some(generate_node_id(
+            "src/config.rs",
+            &NodeKind::Function,
+            "load",
+            5
+        ))
+    );
+}
+
+/// Regression for dispatch-table dead-code false positives: a handler invoked
+/// only through a `match` arm calling `crate::handlers::handle_ping` must gain
+/// at least one caller edge once the prefilter admits the prefixed ref.
+#[tokio::test]
+async fn test_dispatch_handler_gains_caller_edge() {
+    let fixture = resolution_fixture().await;
+    let nodes = prefilter_nodes();
+    let resolver = ReferenceResolver::from_nodes(&fixture.db, &nodes);
+
+    let handler_id = generate_node_id("src/handlers.rs", &NodeKind::Function, "handle_ping", 10);
+    let dispatch_ref = UnresolvedRef {
+        from_node_id: generate_node_id("src/dispatch.rs", &NodeKind::Function, "dispatch", 1),
+        reference_name: "crate::handlers::handle_ping".to_string(),
+        reference_kind: EdgeKind::Calls,
+        line: 42,
+        column: 8,
+        file_path: "src/dispatch.rs".to_string(),
+    };
+
+    let result = resolver.resolve_all(&[dispatch_ref]);
+    let edges = resolver.create_edges(&result.resolved);
+    let callers = edges
+        .iter()
+        .filter(|e| e.target == handler_id && e.kind == EdgeKind::Calls)
+        .count();
+    assert!(
+        callers >= 1,
+        "dispatch handler should have >=1 caller after the prefilter fix"
+    );
+}
+
+/// Collision hygiene: two same-named functions in different modules with a
+/// prefixed qualified call. Strategy-2 resolves via the simple name and does
+/// NOT use the qualified module path to disambiguate — it falls to
+/// `find_best_match` heuristic scoring (confidence 0.7). We assert it resolves
+/// to one of the real candidates (never fabricates a target) and document that
+/// module-path disambiguation is a deliberate follow-up, not part of this fix.
+#[tokio::test]
+async fn test_prefilter_collision_resolves_without_fabricating() {
+    let render_a = function_node(
+        "src/a.rs",
+        "render",
+        "src/a.rs::feature_a::render",
+        10,
+        20,
+        "pub fn render()",
+        Visibility::Pub,
+    );
+    let render_b = function_node(
+        "src/b.rs",
+        "render",
+        "src/b.rs::feature_b::render",
+        30,
+        40,
+        "pub fn render()",
+        Visibility::Pub,
+    );
+    let nodes = vec![render_a.clone(), render_b.clone()];
+    let fixture = resolution_fixture().await;
+    let resolver = ReferenceResolver::from_nodes(&fixture.db, &nodes);
+
+    // Neutral caller file so neither candidate wins on same-file proximity.
+    let uref = UnresolvedRef {
+        from_node_id: generate_node_id("src/dispatch.rs", &NodeKind::Function, "dispatch", 1),
+        reference_name: "crate::feature_a::render".to_string(),
+        reference_kind: EdgeKind::Calls,
+        line: 3,
+        column: 4,
+        file_path: "src/dispatch.rs".to_string(),
+    };
+
+    let result = resolver.resolve_one(&uref);
+    let resolved = result.expect("collision ref still resolves via simple name");
+    assert!(
+        resolved.target_node_id == render_a.id || resolved.target_node_id == render_b.id,
+        "must resolve to one of the real candidates, got {}",
+        resolved.target_node_id
+    );
+    assert!(
+        (resolved.confidence - 0.7).abs() < f64::EPSILON,
+        "multi-candidate simple-name match uses find_best_match confidence 0.7, got {}",
+        resolved.confidence
+    );
+    // NOTE: current Strategy-2 does not consult the `feature_a` module path
+    // segment; it tie-breaks by heuristic score (here: first candidate).
+    // Qualified module-path disambiguation is a documented follow-up.
+}
+
 #[tokio::test]
 async fn test_create_edges_empty_input() {
     let fixture = resolution_fixture().await;

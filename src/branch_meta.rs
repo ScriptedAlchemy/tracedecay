@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::storage::BRANCH_META_FILENAME;
+use crate::storage::{BRANCH_META_FILENAME, PrivateStoreIo};
 
 /// Metadata for a single tracked branch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,10 +146,15 @@ pub fn load_branch_meta(data_dir: &Path) -> Option<BranchMeta> {
 }
 
 /// Saves branch metadata to `branch-meta.json` in the project data dir.
+///
+/// Writes via a sibling temp file and renames it into place (the same
+/// atomic-write helper used for `store-manifest.json`), so a concurrent
+/// reader never observes a torn or truncated file.
 pub fn save_branch_meta(data_dir: &Path, meta: &BranchMeta) -> std::io::Result<()> {
     let path = data_dir.join(BRANCH_META_FILENAME);
     let json = serde_json::to_string_pretty(meta).map_err(std::io::Error::other)?;
-    std::fs::write(path, json)
+    let temp_path = path.with_extension("json.tmp");
+    PrivateStoreIo::write_file_atomically(&path, &temp_path, json.as_bytes())
 }
 
 /// Advances the `last_synced_at` timestamp for `branch` in the project's

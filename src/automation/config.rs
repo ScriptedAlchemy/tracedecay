@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::errors::{Result, TraceDecayError};
+use crate::retention::RetentionConfig;
 
 const PROJECT_CONFIG_FILENAME: &str = "automation_config.json";
 pub const DEFAULT_SCHEDULER_TICK_SECS: u64 = 60;
@@ -100,6 +101,11 @@ pub struct AutomationConfig {
     /// opts in.
     #[serde(default)]
     pub allow_job_commands: bool,
+    /// Scheduled retention windows for the largest append-only telemetry
+    /// tables. Analytics keeps 180 days by default; the lossless session
+    /// tables are never pruned unless the operator sets an explicit window.
+    #[serde(default)]
+    pub retention: RetentionConfig,
     #[serde(default)]
     pub tasks: AutomationTaskSet,
 }
@@ -117,6 +123,7 @@ impl Default for AutomationConfig {
             export_memory_digest: true,
             combine_due_tasks: true,
             allow_job_commands: false,
+            retention: RetentionConfig::default(),
             tasks: AutomationTaskSet::default(),
         }
     }

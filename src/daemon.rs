@@ -1614,6 +1614,10 @@ async fn run_automation_scheduler_loop(project_path: PathBuf, handshake: DaemonH
                 break;
             }
             Err(e) => {
+                // A transient failure (e.g. a momentarily corrupt jobs file or
+                // a project that cannot be opened this instant) must not
+                // permanently kill the scheduler loop. Surface the cause and
+                // retry on the next tick instead of exiting for good.
                 log_daemon_event(
                     "scheduler_project_open",
                     &[
@@ -1622,7 +1626,11 @@ async fn run_automation_scheduler_loop(project_path: PathBuf, handshake: DaemonH
                         ("error", e.to_string()),
                     ],
                 );
-                break;
+                tokio::time::sleep(Duration::from_secs(
+                    crate::automation::config::DEFAULT_SCHEDULER_TICK_SECS,
+                ))
+                .await;
+                continue;
             }
         }
         log_daemon_event(
@@ -1669,7 +1677,7 @@ async fn automation_scheduler_has_work_for_project(
     ))
     .await?;
     let config = effective_automation_config_for_project(&cg, &handshake.client_identity).await?;
-    Ok(automation_scheduler_has_work(&cg, &config).await)
+    automation_scheduler_has_work(&cg, &config).await
 }
 
 #[cfg(unix)]
@@ -1713,6 +1721,83 @@ async fn automation_scheduler_tick_secs_for_project(
     }
 }
 
+/// Minimum wall-clock interval between global-database retention passes,
+/// shared across every project's scheduler loop so retention runs at most
+/// this often no matter how many projects are active.
+#[cfg(unix)]
+const RETENTION_MIN_INTERVAL_SECS: u64 = 6 * 60 * 60;
+
+#[cfg(unix)]
+static LAST_GLOBAL_RETENTION: std::sync::Mutex<Option<std::time::Instant>> =
+    std::sync::Mutex::new(None);
+
+/// Returns whether a retention pass is due, recording `now` as the last run
+/// when it is. The gate is process-global so N project loops do not each run
+/// their own retention every tick.
+#[cfg(unix)]
+fn global_retention_pass_due(now: std::time::Instant) -> bool {
+    let mut guard = match LAST_GLOBAL_RETENTION.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let due = guard.is_none_or(|last| {
+        now.duration_since(last) >= Duration::from_secs(RETENTION_MIN_INTERVAL_SECS)
+    });
+    if due {
+        *guard = Some(now);
+    }
+    due
+}
+
+/// Applies the configured retention windows to the global telemetry tables,
+/// at most once per [`RETENTION_MIN_INTERVAL_SECS`]. Best-effort: retention is
+/// housekeeping, so failures are logged and never abort a scheduler tick.
+#[cfg(unix)]
+async fn maybe_run_global_retention(
+    project_path: &Path,
+    config: &crate::automation::config::AutomationConfig,
+) {
+    if !global_retention_pass_due(std::time::Instant::now()) {
+        return;
+    }
+    let Some(db) = crate::global_db::GlobalDb::open().await else {
+        return;
+    };
+    let now_secs = crate::tracedecay::current_timestamp();
+    match db.prune_global_retention(&config.retention, now_secs).await {
+        Ok(reports) => {
+            for report in reports {
+                if report.applied && report.rows > 0 {
+                    log_daemon_event(
+                        "retention_prune",
+                        &[
+                            ("project", project_path.display().to_string()),
+                            ("table", report.table.to_string()),
+                            ("rows", report.rows.to_string()),
+                            (
+                                "window_days",
+                                report
+                                    .window_days
+                                    .map_or_else(|| "unlimited".to_string(), |d| d.to_string()),
+                            ),
+                        ],
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            log_daemon_event(
+                "retention_prune",
+                &[
+                    ("project", project_path.display().to_string()),
+                    ("outcome", "error".to_string()),
+                    ("error", e.to_string()),
+                ],
+            );
+        }
+    }
+}
+
 #[cfg(unix)]
 async fn run_automation_scheduler_tick(
     project_path: &Path,
@@ -1747,7 +1832,7 @@ async fn run_automation_scheduler_tick(
         return Ok(());
     }
     let config = effective_automation_config_for_project(&cg, &handshake.client_identity).await?;
-    if !automation_scheduler_has_work(&cg, &config).await {
+    if !automation_scheduler_has_work(&cg, &config).await? {
         log_daemon_event(
             "scheduler_tick",
             &[
@@ -1758,6 +1843,7 @@ async fn run_automation_scheduler_tick(
         );
         return Ok(());
     }
+    maybe_run_global_retention(project_path, &config).await;
     let backend = CodexAppServerBackend::from_automation_config(&config);
     let mut first_error: Option<TraceDecayError> = None;
     let mut any_succeeded = false;
@@ -1916,10 +2002,10 @@ fn user_config_for_client(
     client_identity: &DaemonClientIdentity,
 ) -> crate::user_config::UserConfig {
     let path = client_identity.profile_root.join("config.toml");
-    let Ok(contents) = std::fs::read_to_string(path) else {
+    let Ok(contents) = std::fs::read_to_string(&path) else {
         return crate::user_config::UserConfig::default();
     };
-    toml::from_str(&contents).unwrap_or_default()
+    crate::user_config::parse_or_warn_default(&path, &contents)
 }
 
 #[cfg(unix)]
@@ -1957,17 +2043,17 @@ fn automation_scheduler_configured(config: &crate::automation::config::Automatio
 async fn automation_scheduler_has_work(
     cg: &crate::tracedecay::TraceDecay,
     config: &crate::automation::config::AutomationConfig,
-) -> bool {
+) -> Result<bool> {
     use crate::automation::config::{AutomationBackend, AutomationHostMode};
 
     if automation_scheduler_configured(config) {
-        return true;
+        return Ok(true);
     }
     if !config.enabled
         || config.host_mode == AutomationHostMode::DelegatedHost
         || config.backend != AutomationBackend::CodexAppServer
     {
-        return false;
+        return Ok(false);
     }
     crate::automation::jobs::jobs_configured_for_scheduler(&cg.store_layout().dashboard_root).await
 }

@@ -3,10 +3,11 @@
 //! All fields have defaults so a missing file or missing fields are handled
 //! gracefully. Unknown fields are preserved for forward compatibility.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -299,9 +300,47 @@ fn parse_error_line(contents: &str, err: &toml::de::Error) -> Option<usize> {
     Some(contents[..end].bytes().filter(|&b| b == b'\n').count() + 1)
 }
 
+/// Paths for which a corrupt-config warning has already been printed this
+/// process, so a hot loader (dashboard handlers, the daemon's per-request
+/// config read) doesn't spam stderr once per call.
+fn warned_corrupt_config_paths() -> &'static Mutex<HashSet<PathBuf>> {
+    static WARNED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    WARNED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Parses `contents` (read from `path`) as `T`, returning the default and
+/// printing a one-time-per-path warning if the TOML is corrupt.
+///
+/// Shared by [`UserConfig::load`] and the daemon's per-client config loader
+/// (`user_config_for_client` in `src/daemon.rs`) so both silently-defaulting
+/// readers agree on what "corrupt" means and on not spamming stderr.
+pub(crate) fn parse_or_warn_default<T>(path: &Path, contents: &str) -> T
+where
+    T: Default + serde::de::DeserializeOwned,
+{
+    match toml::from_str(contents) {
+        Ok(value) => value,
+        Err(err) => {
+            let warned = warned_corrupt_config_paths();
+            let mut seen = warned
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if seen.insert(path.to_path_buf()) {
+                eprintln!(
+                    "warning: could not parse config '{}' ({err}); using defaults",
+                    path.display()
+                );
+            }
+            T::default()
+        }
+    }
+}
+
 impl UserConfig {
     /// Loads the user-level config file.
-    /// Returns defaults if the file is missing or unreadable.
+    /// Returns defaults if the file is missing or unreadable. A present but
+    /// unparseable file prints a one-time warning to stderr (see
+    /// [`parse_or_warn_default`]) instead of silently defaulting.
     pub fn load() -> Self {
         let Some(path) = config_path() else {
             return Self::default();
@@ -309,7 +348,7 @@ impl UserConfig {
         let Ok(contents) = std::fs::read_to_string(&path) else {
             return Self::default();
         };
-        toml::from_str(&contents).unwrap_or_default()
+        parse_or_warn_default(&path, &contents)
     }
 
     /// Saves the user-level config file atomically.
