@@ -894,7 +894,9 @@ mod tests {
     #[test]
     fn append_line_uses_a_reusable_sidecar_lock_file() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ledger.jsonl");
+        // Canonicalize: on macOS the tempdir lives under /var -> /private/var,
+        // which the symlink guard would otherwise reject.
+        let path = dir.path().canonicalize().unwrap().join("ledger.jsonl");
         let lock_path = append_lock_path(&path);
         assert_eq!(lock_path.file_name().unwrap(), "ledger.jsonl.lock");
 
@@ -914,7 +916,9 @@ mod tests {
     #[test]
     fn append_line_leaves_data_file_writable() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("perms.jsonl");
+        // Canonicalize: on macOS the tempdir lives under /var -> /private/var,
+        // which the symlink guard would otherwise reject.
+        let path = dir.path().canonicalize().unwrap().join("perms.jsonl");
 
         PrivateStoreIo::append_line(&path, "{\"a\":1}").unwrap();
         PrivateStoreIo::append_line(&path, "{\"a\":2}").unwrap();
