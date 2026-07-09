@@ -10,10 +10,18 @@
 //! reuses the **same** append-only byte-offset machinery to also populate the
 //! provider-neutral `session_messages` table. Files are scoped to the current
 //! project by their recorded `cwd`, so a project only ingests its own sessions.
+//!
+//! Beyond `user`/`assistant` conversational turns, a handful of structured
+//! record types carry high-signal telemetry that we surface as marker rows or
+//! metadata (so `message_search`, git correlation, and LCM can find them):
+//! `pr-link` records, `system` compaction boundaries, and model-fallback
+//! records become dedicated marker rows; assistant attribution fields and
+//! `toolUseResult` edited-file facts ride on the owning message row. See the
+//! gate in [`message_from_line`] for the record types we deliberately drop.
 
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::accounting::parser::parse_timestamp;
 use crate::sessions::SessionMessageRecord;
@@ -28,6 +36,18 @@ use crate::sessions::source::{
 };
 
 const PROVIDER: &str = "claude";
+
+/// Shared cross-source telemetry-row `kind` vocabulary. Cursor/Codex adapters
+/// tag their structured marker rows with the same strings so `message_search`
+/// and LCM can filter marker rows uniformly regardless of which agent produced
+/// the transcript.
+const KIND_PR_LINK: &str = "pr_link";
+const KIND_COMPACT_BOUNDARY: &str = "compact_boundary";
+const KIND_MODEL_FALLBACK: &str = "model_fallback";
+
+/// Cap on the capped preview text carried on a marker row.
+const MARKER_PREVIEW_BYTES: usize = 2000;
+
 const CLAUDE_SESSION_LOCATION_KEYS: TranscriptLocationMetadataKeys =
     TranscriptLocationMetadataKeys::new(
         "claude_session_cwd",
@@ -41,7 +61,9 @@ const CLAUDE_MESSAGE_LOCATION_KEYS: TranscriptLocationMetadataKeys =
         "claude_message_location_provenance",
     );
 /// `~/.claude/projects/<slug>/<…>.jsonl` is at most a few levels deep.
-const MAX_SCAN_DEPTH: u8 = 6;
+/// Workflow-nested subagents add `subagents/workflows/wf_<id>/` (three more
+/// components) so the scan must reach deeper than a top-level session.
+const MAX_SCAN_DEPTH: u8 = 9;
 /// `cwd` should appear on an early line; scan a few in case the first is a
 /// `summary`/meta line without one.
 pub(crate) const CWD_PROBE_LINES: usize = 8;
@@ -108,31 +130,51 @@ impl TranscriptSource for ClaudeSource {
             |info| info.session_id.clone(),
         );
 
+        // Session-level facts folded across every new line (PR links seen in the
+        // session, the set of files edited) so the draft can carry a compact
+        // summary alongside the per-row marker rows / metadata.
+        let mut accumulator = SessionAccumulator::default();
         let mut messages = Vec::new();
         for line in &new.lines {
-            let line_cwd = record_cwd(&line.value).or_else(|| session_cwd.clone());
+            let record = &line.value;
+            let line_cwd = record_cwd(record).or_else(|| session_cwd.clone());
             if !line_cwd
                 .as_deref()
                 .is_some_and(|cwd| path_belongs_to_project(cwd, project_root))
             {
                 continue;
             }
-            if let Some(message) = message_from_line(
-                &line.value,
+            // Conversational turns and system hook signals first; structured
+            // marker rows (pr-link/compaction/model-fallback) only when neither
+            // matched. Split into separate statements so the `&mut accumulator`
+            // borrows never overlap.
+            let mut message = message_from_line(
+                record,
                 &session_id,
                 path,
                 line.offset,
                 session_cwd.as_deref(),
+                &mut accumulator,
             )
             .or_else(|| {
                 system_hook_message_from_line(
-                    &line.value,
+                    record,
                     &session_id,
                     path,
                     line.offset,
                     session_cwd.as_deref(),
                 )
-            }) {
+            });
+            if message.is_none() {
+                message = structured_marker_from_line(
+                    record,
+                    &session_id,
+                    path,
+                    line.offset,
+                    &mut accumulator,
+                );
+            }
+            if let Some(message) = message {
                 messages.push(message);
             }
         }
@@ -149,11 +191,21 @@ impl TranscriptSource for ClaudeSource {
             project_key: project.clone(),
             project_path: project,
             title: title_from_messages(&messages),
-            metadata_json: serde_json::to_string(&session_metadata(session_cwd.as_deref())).ok(),
+            metadata_json: serde_json::to_string(&session_metadata(
+                session_cwd.as_deref(),
+                subagent.as_ref(),
+                &accumulator,
+            ))
+            .ok(),
             parent_session_id: subagent.as_ref().map(|info| info.parent_session_id.clone()),
             is_subagent: subagent.is_some(),
             agent_id: subagent.as_ref().map(|info| info.agent_id.clone()),
-            parent_tool_use_id: None,
+            // `parent_tool_use_id` comes from the sibling agent-<id>.meta.json
+            // (the tool_use that spawned this subagent); absent for standalone
+            // sessions and subagents whose meta file is missing.
+            parent_tool_use_id: subagent
+                .as_ref()
+                .and_then(|info| info.parent_tool_use_id.clone()),
         };
 
         Some(ParsedTranscript {
@@ -164,30 +216,168 @@ impl TranscriptSource for ClaudeSource {
     }
 }
 
+/// Identity + spawn provenance for a subagent transcript, assembled from the
+/// on-disk layout and the sibling `agent-<id>.meta.json`.
 struct ClaudeSubagentInfo {
     session_id: String,
     parent_session_id: String,
     agent_id: String,
     parent_transcript_path: PathBuf,
+    /// `agentType` from the sibling meta.json (e.g. "Explore", "general").
+    agent_type: Option<String>,
+    /// `description` from the sibling meta.json (the spawn prompt summary).
+    description: Option<String>,
+    /// `toolUseId` from the sibling meta.json: the parent `tool_use` that
+    /// spawned this subagent. Maps to the `parent_tool_use_id` session column.
+    parent_tool_use_id: Option<String>,
+    /// `spawnDepth` from the sibling meta.json (0 for a top-level subagent).
+    spawn_depth: Option<i64>,
+    /// The `wf_<id>` run id when this subagent lives under
+    /// `subagents/workflows/wf_<id>/`; `None` for a directly-spawned subagent.
+    workflow_run_id: Option<String>,
 }
 
+/// Facts folded from `agent-<id>.meta.json` (all optional / fail-open).
+#[derive(Default)]
+struct ClaudeSubagentMeta {
+    agent_type: Option<String>,
+    description: Option<String>,
+    parent_tool_use_id: Option<String>,
+    spawn_depth: Option<i64>,
+}
+
+/// Detect whether `path` is a subagent transcript and, if so, resolve its
+/// identity, parent linkage, optional workflow-run id, and meta.json facts.
+///
+/// A subagent transcript lives somewhere under a `subagents/` directory owned by
+/// its parent session:
+///
+/// * directly spawned: `…/<parent>/subagents/agent-<id>.jsonl`
+/// * workflow-nested:   `…/<parent>/subagents/workflows/wf_<run>/agent-<id>.jsonl`
+///
+/// The parent is always the directory immediately above `subagents/`, so we walk
+/// ancestors for a `subagents` component instead of demanding it be the file's
+/// immediate parent. That immediate-parent assumption was a bug: workflow-nested
+/// subagents failed it and were ingested as orphan standalone sessions.
 fn claude_subagent_identity(path: &Path) -> Option<ClaudeSubagentInfo> {
-    if path.parent()?.file_name().and_then(|name| name.to_str()) != Some("subagents") {
-        return None;
-    }
-    let parent_dir = path.parent()?.parent()?;
-    let parent_session_id = parent_dir.file_name()?.to_str()?.to_string();
     let session_id = path.file_stem()?.to_str()?.to_string();
+
+    // Find the `subagents/` ancestor. `ancestors()` yields `path` first, so the
+    // file itself can never match the directory name.
+    let subagents_dir = path
+        .ancestors()
+        .find(|anc| anc.file_name().and_then(|name| name.to_str()) == Some("subagents"))?;
+    let parent_session_dir = subagents_dir.parent()?;
+    let parent_session_id = parent_session_dir.file_name()?.to_str()?.to_string();
+
+    // Capture the workflow run id (`wf_<run>`) when the subagent is nested under
+    // `subagents/workflows/wf_<run>/`.
+    let workflow_run_id = path
+        .ancestors()
+        .filter_map(|anc| anc.file_name().and_then(|name| name.to_str()))
+        .find(|name| name.starts_with("wf_"))
+        .map(str::to_string);
+
     let agent_id = session_id
         .strip_prefix("agent-")
         .unwrap_or(&session_id)
         .to_string();
+    // The parent transcript is the `<parent>.jsonl` sibling of the `<parent>`
+    // directory that owns `subagents/`.
+    let parent_transcript_path = parent_session_dir.parent().map_or_else(
+        || PathBuf::from(format!("{parent_session_id}.jsonl")),
+        |grandparent| grandparent.join(format!("{parent_session_id}.jsonl")),
+    );
+
+    let meta = read_subagent_meta(path, &session_id);
+
     Some(ClaudeSubagentInfo {
         session_id,
-        parent_session_id: parent_session_id.clone(),
+        parent_session_id,
         agent_id,
-        parent_transcript_path: parent_dir.with_file_name(format!("{parent_session_id}.jsonl")),
+        parent_transcript_path,
+        agent_type: meta.agent_type,
+        description: meta.description,
+        parent_tool_use_id: meta.parent_tool_use_id,
+        spawn_depth: meta.spawn_depth,
+        workflow_run_id,
     })
+}
+
+/// Read the sibling `agent-<id>.meta.json` next to a subagent transcript. Fail
+/// open: a missing or malformed file yields empty facts rather than an error.
+fn read_subagent_meta(transcript_path: &Path, session_id: &str) -> ClaudeSubagentMeta {
+    let meta_path = transcript_path.with_file_name(format!("{session_id}.meta.json"));
+    let Ok(text) = std::fs::read_to_string(&meta_path) else {
+        return ClaudeSubagentMeta::default();
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return ClaudeSubagentMeta::default();
+    };
+    let string_field = |key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+    };
+    ClaudeSubagentMeta {
+        agent_type: string_field("agentType"),
+        description: string_field("description"),
+        parent_tool_use_id: string_field("toolUseId"),
+        spawn_depth: value.get("spawnDepth").and_then(Value::as_i64),
+    }
+}
+
+/// Session-level facts folded across a transcript's new lines.
+#[derive(Default)]
+struct SessionAccumulator {
+    /// Distinct PR links seen (`{pr_number, pr_url, pr_repository}`), deduped by
+    /// url+number so an append that re-reads a boundary line stays idempotent.
+    pr_links: Vec<Value>,
+    /// Distinct files edited (`{path, change_type, hunks}`), deduped by path.
+    edited_files: Vec<Value>,
+}
+
+impl SessionAccumulator {
+    fn push_pr_link(&mut self, link: Value) {
+        let key = (
+            link.get("pr_url")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            link.get("pr_number").cloned(),
+        );
+        let exists = self.pr_links.iter().any(|existing| {
+            (
+                existing
+                    .get("pr_url")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                existing.get("pr_number").cloned(),
+            ) == key
+        });
+        if !exists {
+            self.pr_links.push(link);
+        }
+    }
+
+    fn push_edited_file(&mut self, path: &str, change_type: &str, hunks: usize) {
+        if self
+            .edited_files
+            .iter()
+            .any(|existing| existing.get("path").and_then(Value::as_str) == Some(path))
+        {
+            return;
+        }
+        let mut entry = Map::new();
+        entry.insert("path".to_string(), Value::String(path.to_string()));
+        entry.insert(
+            "change_type".to_string(),
+            Value::String(change_type.to_string()),
+        );
+        entry.insert("hunks".to_string(), Value::from(hunks as i64));
+        self.edited_files.push(Value::Object(entry));
+    }
 }
 
 /// Reads the session `cwd` from an early line of a Claude transcript.
@@ -213,12 +403,26 @@ pub(crate) fn transcript_cwd(path: &Path) -> Option<PathBuf> {
 
 /// Map one Claude transcript line to a provider-neutral message, or `None` for
 /// lines that carry no conversational text (tool-result-only, meta lines, …).
+///
+/// Gate: only `user`/`assistant` records become conversational rows here. Other
+/// record types fall through to [`system_hook_message_from_line`] and
+/// [`structured_marker_from_line`]. Two record families are deliberately dropped
+/// with no row at all, because they are pure bloat/redundancy:
+///
+/// * **hook attachments** — records that inject a hook's `hookAdditionalContext`
+///   / attachment payload into the transcript. The signal we care about (hook
+///   errors / prevented continuation) is already captured as a compact
+///   `hook_event` row; the attachment body just duplicates content that lives on
+///   the owning turn.
+/// * **queue-operation records** — queued/removed user-turn bookkeeping. These
+///   are ephemeral UI state; the actual user turn is ingested when it is sent.
 fn message_from_line(
     record: &Value,
     session_id: &str,
     path: &Path,
     offset: i64,
     session_cwd: Option<&Path>,
+    accumulator: &mut SessionAccumulator,
 ) -> Option<SessionMessageRecord> {
     let kind = record.get("type").and_then(Value::as_str)?;
     if kind != "user" && kind != "assistant" {
@@ -277,6 +481,7 @@ fn message_from_line(
             message,
             content,
             session_cwd,
+            accumulator,
         ))
         .ok(),
     })
@@ -339,7 +544,7 @@ fn system_hook_message_from_line(
         lines.push(format!("hook_errors: {joined}"));
     }
     let joined = lines.join("\n");
-    let text = preview_truncated(&joined, 2000);
+    let text = preview_truncated(&joined, MARKER_PREVIEW_BYTES);
 
     let message_id = record
         .get("uuid")
@@ -352,7 +557,7 @@ fn system_hook_message_from_line(
         .and_then(parse_timestamp)
         .map(|secs| secs as i64);
 
-    let mut metadata = serde_json::Map::new();
+    let mut metadata = Map::new();
     metadata.insert(
         "source".to_string(),
         Value::String("claude_system_record".to_string()),
@@ -392,8 +597,301 @@ fn system_hook_message_from_line(
     })
 }
 
-fn session_metadata(session_cwd: Option<&Path>) -> Value {
-    let mut metadata = serde_json::Map::new();
+/// Map a structured, non-conversational Claude record to a marker row:
+/// `pr-link` records, `system` compaction boundaries, and model-fallback
+/// records. Returns `None` for every other record type (leaving the cursor to
+/// advance without emitting a row).
+fn structured_marker_from_line(
+    record: &Value,
+    session_id: &str,
+    path: &Path,
+    offset: i64,
+    accumulator: &mut SessionAccumulator,
+) -> Option<SessionMessageRecord> {
+    match record.get("type").and_then(Value::as_str)? {
+        "pr-link" => pr_link_row(record, session_id, path, offset, accumulator),
+        "system" => compact_boundary_row(record, session_id, path, offset)
+            .or_else(|| model_fallback_row(record, session_id, path, offset)),
+        _ => None,
+    }
+}
+
+/// Common ISO-8601 timestamp read for a top-level record.
+fn record_timestamp(record: &Value) -> Option<i64> {
+    record
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(parse_timestamp)
+        .map(|secs| secs as i64)
+}
+
+/// Build a marker row for a `type=="pr-link"` record and fold the PR into the
+/// session accumulator. Emits both so the git-correlation join has a per-turn
+/// anchor (`message_search`) *and* a session-level `pr_links[]` summary.
+fn pr_link_row(
+    record: &Value,
+    session_id: &str,
+    path: &Path,
+    offset: i64,
+    accumulator: &mut SessionAccumulator,
+) -> Option<SessionMessageRecord> {
+    let pr_number = record.get("prNumber").filter(|value| !value.is_null());
+    let pr_url = record
+        .get("prUrl")
+        .and_then(Value::as_str)
+        .filter(|url| !url.is_empty());
+    let pr_repository = record
+        .get("prRepository")
+        .and_then(Value::as_str)
+        .filter(|repo| !repo.is_empty());
+    // A pr-link with no identifying fields is noise; drop it.
+    if pr_number.is_none() && pr_url.is_none() && pr_repository.is_none() {
+        return None;
+    }
+
+    let number_display = pr_number.map(render_scalar).unwrap_or_default();
+    let mut text = String::from("Claude PR link:");
+    if let Some(repo) = pr_repository {
+        text.push(' ');
+        text.push_str(repo);
+    }
+    if !number_display.is_empty() {
+        text.push_str(" #");
+        text.push_str(&number_display);
+    }
+    if let Some(url) = pr_url {
+        text.push(' ');
+        text.push_str(url);
+    }
+
+    let mut link = Map::new();
+    if let Some(number) = pr_number {
+        link.insert("pr_number".to_string(), number.clone());
+    }
+    if let Some(url) = pr_url {
+        link.insert("pr_url".to_string(), Value::String(url.to_string()));
+    }
+    if let Some(repo) = pr_repository {
+        link.insert("pr_repository".to_string(), Value::String(repo.to_string()));
+    }
+    accumulator.push_pr_link(Value::Object(link.clone()));
+
+    let mut metadata = Map::new();
+    metadata.insert(
+        "source".to_string(),
+        Value::String("claude_pr_link".to_string()),
+    );
+    for (key, value) in &link {
+        metadata.insert(key.clone(), value.clone());
+    }
+
+    let message_id = marker_message_id(record, session_id, KIND_PR_LINK, offset);
+    Some(SessionMessageRecord {
+        provider: PROVIDER.to_string(),
+        message_id,
+        session_id: session_id.to_string(),
+        // Telemetry, not conversation: role "tool" keeps it out of LCM anchors.
+        role: "tool".to_string(),
+        timestamp: record_timestamp(record),
+        ordinal: offset,
+        text: preview_truncated(&text, MARKER_PREVIEW_BYTES),
+        kind: Some(KIND_PR_LINK.to_string()),
+        model: None,
+        tool_names: None,
+        source_path: Some(path.to_string_lossy().to_string()),
+        source_offset: Some(offset),
+        metadata_json: serde_json::to_string(&Value::Object(metadata)).ok(),
+    })
+}
+
+/// Build a `compact_boundary` marker row from a `system` record that carries
+/// `compactMetadata` (a context-compaction boundary). LCM uses this to tell a
+/// post-compaction summary apart from an original turn.
+fn compact_boundary_row(
+    record: &Value,
+    session_id: &str,
+    path: &Path,
+    offset: i64,
+) -> Option<SessionMessageRecord> {
+    let subtype = record.get("subtype").and_then(Value::as_str);
+    let compact_metadata = record
+        .get("compactMetadata")
+        .filter(|value| value.is_object());
+    if subtype != Some("compact_boundary") && compact_metadata.is_none() {
+        return None;
+    }
+
+    let trigger = compact_metadata
+        .and_then(|meta| meta.get("trigger"))
+        .and_then(Value::as_str)
+        .or_else(|| record.get("trigger").and_then(Value::as_str));
+    let pre_tokens = compact_metadata
+        .and_then(|meta| meta.get("preTokens"))
+        .and_then(Value::as_i64)
+        .or_else(|| record.get("preTokens").and_then(Value::as_i64));
+    let logical_parent_uuid = record
+        .get("logicalParentUuid")
+        .and_then(Value::as_str)
+        .filter(|uuid| !uuid.is_empty());
+
+    let mut text = String::from("Claude compaction boundary");
+    if let Some(trigger) = trigger {
+        text.push_str(&format!(" (trigger: {trigger})"));
+    }
+    if let Some(pre_tokens) = pre_tokens {
+        text.push_str(&format!(", pre_tokens: {pre_tokens}"));
+    }
+
+    let mut metadata = Map::new();
+    metadata.insert(
+        "source".to_string(),
+        Value::String("claude_compact_boundary".to_string()),
+    );
+    if let Some(trigger) = trigger {
+        metadata.insert("trigger".to_string(), Value::String(trigger.to_string()));
+    }
+    if let Some(pre_tokens) = pre_tokens {
+        metadata.insert("pre_tokens".to_string(), Value::from(pre_tokens));
+    }
+    if let Some(logical_parent_uuid) = logical_parent_uuid {
+        metadata.insert(
+            "logical_parent_uuid".to_string(),
+            Value::String(logical_parent_uuid.to_string()),
+        );
+    }
+
+    let message_id = marker_message_id(record, session_id, KIND_COMPACT_BOUNDARY, offset);
+    Some(SessionMessageRecord {
+        provider: PROVIDER.to_string(),
+        message_id,
+        session_id: session_id.to_string(),
+        // A compaction boundary is a genuine structural event LCM anchors on.
+        role: "system".to_string(),
+        timestamp: record_timestamp(record),
+        ordinal: offset,
+        text: preview_truncated(&text, MARKER_PREVIEW_BYTES),
+        kind: Some(KIND_COMPACT_BOUNDARY.to_string()),
+        model: None,
+        tool_names: None,
+        source_path: Some(path.to_string_lossy().to_string()),
+        source_offset: Some(offset),
+        metadata_json: serde_json::to_string(&Value::Object(metadata)).ok(),
+    })
+}
+
+/// Build a `model_fallback` marker row from a `system` model-refusal-fallback
+/// record (Claude routed a refused request to a fallback model).
+fn model_fallback_row(
+    record: &Value,
+    session_id: &str,
+    path: &Path,
+    offset: i64,
+) -> Option<SessionMessageRecord> {
+    let subtype = record.get("subtype").and_then(Value::as_str);
+    let original_model = record
+        .get("originalModel")
+        .and_then(Value::as_str)
+        .filter(|model| !model.is_empty());
+    let fallback_model = record
+        .get("fallbackModel")
+        .and_then(Value::as_str)
+        .filter(|model| !model.is_empty());
+    if subtype != Some("model_refusal_fallback")
+        && original_model.is_none()
+        && fallback_model.is_none()
+    {
+        return None;
+    }
+
+    let trigger = record.get("trigger").and_then(Value::as_str);
+    let refusal_category = record
+        .get("apiRefusalCategory")
+        .and_then(Value::as_str)
+        .filter(|category| !category.is_empty());
+
+    let mut text = String::from("Claude model fallback");
+    if let (Some(original), Some(fallback)) = (original_model, fallback_model) {
+        text.push_str(&format!(": {original} -> {fallback}"));
+    } else if let Some(fallback) = fallback_model {
+        text.push_str(&format!(" -> {fallback}"));
+    }
+    if let Some(category) = refusal_category {
+        text.push_str(&format!(" ({category})"));
+    }
+
+    let mut metadata = Map::new();
+    metadata.insert(
+        "source".to_string(),
+        Value::String("claude_model_fallback".to_string()),
+    );
+    if let Some(original) = original_model {
+        metadata.insert(
+            "original_model".to_string(),
+            Value::String(original.to_string()),
+        );
+    }
+    if let Some(fallback) = fallback_model {
+        metadata.insert(
+            "fallback_model".to_string(),
+            Value::String(fallback.to_string()),
+        );
+    }
+    if let Some(trigger) = trigger {
+        metadata.insert("trigger".to_string(), Value::String(trigger.to_string()));
+    }
+    if let Some(category) = refusal_category {
+        metadata.insert(
+            "api_refusal_category".to_string(),
+            Value::String(category.to_string()),
+        );
+    }
+
+    let message_id = marker_message_id(record, session_id, KIND_MODEL_FALLBACK, offset);
+    Some(SessionMessageRecord {
+        provider: PROVIDER.to_string(),
+        message_id,
+        session_id: session_id.to_string(),
+        role: "tool".to_string(),
+        timestamp: record_timestamp(record),
+        ordinal: offset,
+        text: preview_truncated(&text, MARKER_PREVIEW_BYTES),
+        kind: Some(KIND_MODEL_FALLBACK.to_string()),
+        model: fallback_model.map(str::to_string),
+        tool_names: None,
+        source_path: Some(path.to_string_lossy().to_string()),
+        source_offset: Some(offset),
+        metadata_json: serde_json::to_string(&Value::Object(metadata)).ok(),
+    })
+}
+
+/// Stable, unique message id for a marker row: prefer the record `uuid`, else
+/// synthesize one keyed by kind+offset so it stays stable across re-ingest and
+/// never collides with a conversational row's `{session}:{offset}` id.
+fn marker_message_id(record: &Value, session_id: &str, kind: &str, offset: i64) -> String {
+    record
+        .get("uuid")
+        .and_then(Value::as_str)
+        .filter(|uuid| !uuid.is_empty())
+        .map_or_else(
+            || format!("{session_id}:{kind}:{offset}"),
+            |uuid| format!("{kind}:{uuid}"),
+        )
+}
+
+/// Render a JSON scalar (number/string/bool) as plain text for a marker preview.
+fn render_scalar(value: &Value) -> String {
+    value
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| value.to_string())
+}
+
+fn session_metadata(
+    session_cwd: Option<&Path>,
+    subagent: Option<&ClaudeSubagentInfo>,
+    accumulator: &SessionAccumulator,
+) -> Value {
+    let mut metadata = Map::new();
     metadata.insert(
         "source".to_string(),
         Value::String("claude_transcript".to_string()),
@@ -403,6 +901,46 @@ fn session_metadata(session_cwd: Option<&Path>) -> Value {
         CLAUDE_SESSION_LOCATION_KEYS,
         TranscriptLocation::new(session_cwd, "transcript_session"),
     );
+
+    // Subagent spawn provenance (from the sibling agent-<id>.meta.json and the
+    // on-disk layout). `parent_tool_use_id` rides the dedicated session column;
+    // these richer facts have no column, so they land in metadata.
+    if let Some(subagent) = subagent {
+        if let Some(agent_type) = &subagent.agent_type {
+            metadata.insert("agent_type".to_string(), Value::String(agent_type.clone()));
+        }
+        if let Some(description) = &subagent.description {
+            metadata.insert(
+                "agent_description".to_string(),
+                Value::String(description.clone()),
+            );
+        }
+        if let Some(spawn_depth) = subagent.spawn_depth {
+            metadata.insert("spawn_depth".to_string(), Value::from(spawn_depth));
+        }
+        if let Some(workflow_run_id) = &subagent.workflow_run_id {
+            metadata.insert(
+                "workflow_run_id".to_string(),
+                Value::String(workflow_run_id.clone()),
+            );
+        }
+    }
+
+    // Session-level rollups: only emitted when the session actually produced
+    // them, so plain sessions keep byte-for-byte identical metadata.
+    if !accumulator.pr_links.is_empty() {
+        metadata.insert(
+            "pr_links".to_string(),
+            Value::Array(accumulator.pr_links.clone()),
+        );
+    }
+    if !accumulator.edited_files.is_empty() {
+        metadata.insert(
+            "edited_files".to_string(),
+            Value::Array(accumulator.edited_files.clone()),
+        );
+    }
+
     Value::Object(metadata)
 }
 
@@ -412,8 +950,9 @@ fn message_metadata(
     message: &Value,
     content: &Value,
     session_cwd: Option<&Path>,
+    accumulator: &mut SessionAccumulator,
 ) -> Value {
-    let mut metadata = serde_json::Map::new();
+    let mut metadata = Map::new();
     metadata.insert(
         "source".to_string(),
         Value::String("claude_transcript".to_string()),
@@ -435,7 +974,91 @@ fn message_metadata(
     // Anthropic-style per-message counters: `message.usage.{input_tokens,
     // output_tokens, cache_creation_input_tokens, cache_read_input_tokens}`.
     append_usage_metadata(&mut metadata, &[message]);
+    // Per-turn adoption ground truth: which MCP server/tool/skill produced this
+    // assistant turn. Top-level on the assistant record, copied verbatim.
+    if kind == "assistant" {
+        append_attribution_metadata(&mut metadata, record);
+    }
+    // Edit/Write tool results carry a top-level `toolUseResult` with the edited
+    // file path + structured patch. Record the file + hunk stats (never the
+    // patch bodies) and fold the file into the session summary.
+    if kind == "user" {
+        append_edited_file_metadata(&mut metadata, record, accumulator);
+    }
     Value::Object(metadata)
+}
+
+/// Copy Claude's top-level attribution fields onto an assistant row's metadata.
+fn append_attribution_metadata(metadata: &mut Map<String, Value>, record: &Value) {
+    for (source_key, dest_key) in [
+        ("attributionMcpServer", "attribution_mcp_server"),
+        ("attributionMcpTool", "attribution_mcp_tool"),
+        ("attributionSkill", "attribution_skill"),
+        ("promptSource", "prompt_source"),
+    ] {
+        if let Some(value) = record
+            .get(source_key)
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+        {
+            metadata.insert(dest_key.to_string(), Value::String(value.to_string()));
+        }
+    }
+    // `origin` only when it is a cheap scalar string; skip nested objects.
+    if let Some(origin) = record
+        .get("origin")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+    {
+        metadata.insert("origin".to_string(), Value::String(origin.to_string()));
+    }
+}
+
+/// Record edited-file facts from a user `tool_result` record's top-level
+/// `toolUseResult` (Edit/Write payloads), and fold the file into the session
+/// accumulator. Stores only the path, change type, and hunk count — never the
+/// patch bodies.
+fn append_edited_file_metadata(
+    metadata: &mut Map<String, Value>,
+    record: &Value,
+    accumulator: &mut SessionAccumulator,
+) {
+    let Some(tool_use_result) = record
+        .get("toolUseResult")
+        .filter(|value| value.is_object())
+    else {
+        return;
+    };
+    let Some(file_path) = tool_use_result
+        .get("filePath")
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty())
+    else {
+        return;
+    };
+    // Write results carry an explicit `type` ("create"/"update"); Edit results
+    // do not, so an absent type means an in-place edit.
+    let change_type = tool_use_result
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|kind| !kind.is_empty())
+        .unwrap_or("edit")
+        .to_string();
+    let hunks = tool_use_result
+        .get("structuredPatch")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+
+    let mut edited = Map::new();
+    edited.insert("path".to_string(), Value::String(file_path.to_string()));
+    edited.insert(
+        "change_type".to_string(),
+        Value::String(change_type.clone()),
+    );
+    edited.insert("hunks".to_string(), Value::from(hunks as i64));
+    metadata.insert("edited_file".to_string(), Value::Object(edited));
+
+    accumulator.push_edited_file(file_path, &change_type, hunks);
 }
 
 fn record_cwd(record: &Value) -> Option<PathBuf> {
