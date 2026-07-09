@@ -26,8 +26,9 @@ Announce: "Using tracedecay:reviewing-changes for <diff/PR>."
 4. Quality scan of just the changed files → `tracedecay_simplify_scan`.
 5. Duplicate-body risk or repeated helper logic in touched code →
    `tracedecay_redundancy` scoped to the changed directory/file set. Treat
-   `definite` as consolidation evidence; verify `likely`; ignore
-   `naming_only` unless another signal supports it.
+   `definite` as consolidation evidence; verify `likely` — especially pairs
+   whose `overlap_kind` is `body_vector` (vector-only signal); `naming_only`
+   appears only with `include_naming_only: true` and needs another signal.
 6. Risk: `tracedecay_test_risk` on changed paths; `tracedecay_unsafe_patterns`
    on changed files (`exclude_tests: true` for production-only — unwrap/panic
    in tests is normal, and an `unsafe { }` block is an attention site, not

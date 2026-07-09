@@ -12,7 +12,7 @@ use super::DashboardState;
 use super::util::{JsonError, http_detail};
 use crate::diagnostics::lsp::activity::{active_languages_for_files, documents_for_adapter};
 use crate::diagnostics::lsp::adapters::LspAdapterDefinition;
-use crate::diagnostics::lsp::broker::{DiagnosticsSnapshot, EngineState};
+use crate::diagnostics::lsp::broker::{DiagnosticsSnapshot, EngineState, NodeSpan};
 use crate::diagnostics::lsp::settings::{IdleBackfillMode, save_settings};
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
@@ -175,6 +175,13 @@ async fn refresh_one_reconciled(
                 {
                     let mut broker = state_for_refresh.code_diagnostics.write().await;
                     let _ = broker.finish_refresh(completed);
+                    let graph_conn = state_for_refresh.graph_conn.clone();
+                    broker
+                        .resolve_enclosing_nodes(move |file| {
+                            let graph_conn = graph_conn.clone();
+                            async move { node_spans_for_file(&graph_conn, &file).await }
+                        })
+                        .await;
                     let snapshot = broker.snapshot();
                     let files_with_diagnostics =
                         files_with_diagnostics(&snapshot, &language_for_refresh);
@@ -296,6 +303,36 @@ async fn reconcile_project_language_activity(
         .await
         .update_project_languages(active_languages);
     Ok(())
+}
+
+/// Loads the indexed symbol spans for a file so a diagnostic can be attributed
+/// to its smallest enclosing node. Returns an empty vec (leaving the diagnostic
+/// unattributed) when the file isn't indexed or the query fails — the enclosing
+/// node is a best-effort annotation, never a hard dependency of a refresh.
+async fn node_spans_for_file(conn: &libsql::Connection, file: &str) -> Vec<NodeSpan> {
+    let mut spans = Vec::new();
+    let Ok(mut rows) = conn
+        .query(
+            "SELECT start_line, end_line, qualified_name FROM nodes WHERE file_path = ?1",
+            libsql::params![file],
+        )
+        .await
+    else {
+        return spans;
+    };
+    while let Ok(Some(row)) = rows.next().await {
+        let (Ok(start_line), Ok(end_line), Ok(qualified_name)) =
+            (row.get::<i64>(0), row.get::<i64>(1), row.get::<String>(2))
+        else {
+            continue;
+        };
+        spans.push(NodeSpan {
+            start_line: start_line.max(0) as u32,
+            end_line: end_line.max(0) as u32,
+            qualified_name,
+        });
+    }
+    spans
 }
 
 async fn indexed_files(conn: &libsql::Connection) -> crate::errors::Result<Vec<String>> {

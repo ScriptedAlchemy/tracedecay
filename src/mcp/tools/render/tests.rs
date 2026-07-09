@@ -347,7 +347,16 @@ fn diagnostics_md_renders_bullets_not_tables() {
             "file": "src/lib.rs",
             "line_start": 42,
             "driver": "cargo",
-            "enclosing": "crate::demo"
+            "enclosing": "crate::demo",
+            "near_duplicates": [{
+                "name": "compute_b",
+                "file": "src/other.rs",
+                "line": 7,
+                "id": "function:abc",
+                "ranking_score": 0.85,
+                "severity": "definite",
+                "overlap_kind": "ast_isomorphic"
+            }]
         }]
     });
 
@@ -360,6 +369,10 @@ fn diagnostics_md_renders_bullets_not_tables() {
         "got: {out}"
     );
     assert!(out.contains("  **Message:** cannot find value\n    second line"));
+    assert!(
+        out.contains("  **Near-duplicates:** compute_b (src/other.rs:7) [ast_isomorphic]"),
+        "got: {out}"
+    );
     assert!(!out.contains("| file |"), "got: {out}");
     assert!(!out.contains("| --- |"), "got: {out}");
 }

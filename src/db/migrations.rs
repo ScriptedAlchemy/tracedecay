@@ -16,7 +16,7 @@ use crate::memory::store::MemoryStore;
 
 /// The highest migration version defined in this file. Bump this and add a
 /// new entry to `run_migration` whenever the schema changes.
-const LATEST_VERSION: u32 = 15;
+const LATEST_VERSION: u32 = 16;
 
 /// Reads the current schema version from `PRAGMA user_version`.
 async fn get_version(conn: &Connection) -> Result<u32> {
@@ -273,6 +273,13 @@ pub async fn create_schema(conn: &Connection) -> Result<()> {
         operation: "create_schema".to_string(),
     })?;
 
+    conn.execute_batch(REDUNDANCY_PAIRS_SCHEMA)
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("failed to create redundancy_pairs schema: {e}"),
+            operation: "create_schema".to_string(),
+        })?;
+
     create_holographic_memory_schema(conn, "create_schema").await?;
     set_version(conn, LATEST_VERSION).await?;
     Ok(())
@@ -362,6 +369,7 @@ async fn run_migration(conn: &Connection, version: u32) -> Result<()> {
         13 => migrate_v13(conn).await,
         14 => migrate_v14(conn).await,
         15 => migrate_v15(conn).await,
+        16 => migrate_v16(conn).await,
         _ => Err(TraceDecayError::Database {
             message: format!("unknown migration version: {version}"),
             operation: "run_migration".to_string(),
@@ -558,6 +566,50 @@ async fn migrate_v15(conn: &Connection) -> Result<()> {
     backfill_holographic_memory_vectors_and_banks(conn).await?;
     Ok(())
 }
+
+/// v16: `redundancy_pairs` — a freshness-validated cache of the duplicate pairs
+/// computed by `tracedecay_redundancy`.
+///
+/// Lets other surfaces (diagnose near-duplicate enrichment, the dashboard,
+/// future tools) read the last-known duplicates by an indexed lookup instead
+/// of re-running the token-window scan. Rows are keyed on the canonical
+/// `(node_a_id, node_b_id)` orientation the scan already emits (a < b by
+/// `(file_path, start_line, id)`), and carry the `source_hash` of each side so
+/// a reader can join against `node_fingerprints` and discard any row whose
+/// stored hash no longer matches the current cached fingerprint. `ON DELETE
+/// CASCADE` reclaims rows when either node is deleted, so orphan cleanup is
+/// automatic and no explicit sweep is needed. Idempotent via `IF NOT EXISTS`.
+async fn migrate_v16(conn: &Connection) -> Result<()> {
+    conn.execute_batch(REDUNDANCY_PAIRS_SCHEMA)
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("v16: failed to create redundancy_pairs table: {e}"),
+            operation: "migrate_v16".to_string(),
+        })?;
+    Ok(())
+}
+
+/// Freshness-validated cache of `tracedecay_redundancy` duplicate pairs. Shared
+/// verbatim by the fresh-schema path (`create_schema`) and the v16 migration so
+/// the two cannot drift. See [`migrate_v16`] for the column contract.
+const REDUNDANCY_PAIRS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS redundancy_pairs (
+        node_a_id TEXT NOT NULL,
+        node_b_id TEXT NOT NULL,
+        source_hash_a TEXT NOT NULL,
+        source_hash_b TEXT NOT NULL,
+        ranking_score REAL NOT NULL,
+        similarity REAL NOT NULL,
+        vector_cosine REAL NOT NULL,
+        overlap_kind TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        generic_helper_downranked INTEGER NOT NULL,
+        computed_at INTEGER NOT NULL,
+        PRIMARY KEY (node_a_id, node_b_id),
+        FOREIGN KEY (node_a_id) REFERENCES nodes(id) ON DELETE CASCADE,
+        FOREIGN KEY (node_b_id) REFERENCES nodes(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_redundancy_pairs_node_b ON redundancy_pairs(node_b_id);";
 
 /// Append-only audit log of memory mutations (add/update/remove/feedback and
 /// curation applies). `detail_json` never carries fact content beyond what

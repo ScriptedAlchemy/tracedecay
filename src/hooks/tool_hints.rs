@@ -46,6 +46,7 @@ pub enum HintCategory {
     BuildDiagnostics,
     ReviewChanges,
     MemoryStore,
+    EditRedundancy,
 }
 
 impl HintCategory {
@@ -247,6 +248,15 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         context: "tracedecay_fact_store persists a trust-ranked project/user fact that survives across sessions and is recalled by tracedecay_context and tracedecay_recall; a memory markdown edit is only visible to the current harness. Keep secrets and unnecessary PII out of stored facts.",
         nonblocking: false,
     },
+    HintCategorySpec {
+        category: HintCategory::EditRedundancy,
+        key: "edit_redundancy",
+        label: "new-function edit",
+        skill: "editing-safely",
+        message: "You just added a new function-sized block; before moving on, confirm it does not duplicate logic that already exists.",
+        context: "tracedecay_redundancy surfaces near-duplicate function bodies and tracedecay_similar finds structurally similar code; if a match exists, reuse or refactor the existing helper instead of keeping a second copy.",
+        nonblocking: true,
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,6 +268,11 @@ pub struct ToolHintInput {
     pub prompt: Option<String>,
     pub subagent_type: Option<String>,
     pub file_path: Option<String>,
+    /// Text an edit tool adds (Write `content`, Edit `new_string`, the joined
+    /// `MultiEdit` `new_string`s). Used only to detect a newly added
+    /// function-sized body for the [`HintCategory::EditRedundancy`] nudge; other
+    /// surfaces leave it `None`.
+    pub edit_text: Option<String>,
     pub hints_enabled: bool,
 }
 
@@ -271,6 +286,7 @@ impl Default for ToolHintInput {
             prompt: None,
             subagent_type: None,
             file_path: None,
+            edit_text: None,
             hints_enabled: true,
         }
     }
@@ -683,6 +699,10 @@ const CLASSIFICATION_RULES: &[ClassificationRule] = &[
         matches: |facts| is_memory_store_edit(facts.input),
     },
     ClassificationRule {
+        category: HintCategory::EditRedundancy,
+        matches: |facts| is_redundancy_candidate_edit(facts.input),
+    },
+    ClassificationRule {
         category: HintCategory::FileLookup,
         matches: |facts| {
             facts
@@ -752,10 +772,10 @@ use classifiers::{
     asks_for_session_recall, asks_for_symbol_lookup, asks_for_text_search,
     asks_for_type_orientation, combined_text, is_build_diagnostics_command, is_diff_review_command,
     is_explore_subagent, is_file_lookup_command, is_memory_store_edit,
-    is_project_discovery_command, is_semantic_search_tool, is_shell_file_read_command,
-    is_shell_search_command, is_shell_text_search_command, is_single_file_read,
-    is_subagent_context_handoff, is_tracedecay_tool_descriptor_read, looks_like_pasted_diagnostic,
-    matches_normalized,
+    is_project_discovery_command, is_redundancy_candidate_edit, is_semantic_search_tool,
+    is_shell_file_read_command, is_shell_search_command, is_shell_text_search_command,
+    is_single_file_read, is_subagent_context_handoff, is_tracedecay_tool_descriptor_read,
+    looks_like_pasted_diagnostic, matches_normalized,
 };
 
 #[cfg(test)]

@@ -133,6 +133,34 @@ pub(super) fn tool_input_command_str(parsed: &Value) -> Option<String> {
     (!command.is_empty()).then(|| command.to_string())
 }
 
+/// The text an edit tool adds, if any: `Write`'s `content`, `Edit`'s
+/// `new_string`, the joined `MultiEdit` `edits[].new_string`s, or
+/// `NotebookEdit`'s `new_source`. Used only by the Claude hint surface to detect
+/// a newly added function body; it never drives daemon sync. O(len): reads or
+/// concatenates existing JSON string fields without parsing code.
+pub(super) fn tool_input_edit_text(parsed: &Value) -> Option<String> {
+    let ti = parsed.get("tool_input")?;
+    for key in ["content", "new_string", "new_source"] {
+        if let Some(text) = ti.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            return Some(text.to_string());
+        }
+    }
+    // MultiEdit: join each replacement's new text so a body split across edits
+    // still reaches the line/keyword heuristic.
+    let joined = ti
+        .get("edits")
+        .and_then(Value::as_array)
+        .map(|edits| {
+            edits
+                .iter()
+                .filter_map(|edit| edit.get("new_string").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .filter(|joined| !joined.is_empty())?;
+    Some(joined)
+}
+
 /// The `tool_input.file_path` string, if any (Grep/Glob/Read/Edit targets).
 /// Empty when absent.
 pub(super) fn tool_input_file_path_str(parsed: &Value) -> Option<String> {

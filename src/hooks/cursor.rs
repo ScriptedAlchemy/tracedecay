@@ -160,6 +160,7 @@ fn cursor_prompt_hint(event_json: &str) -> Option<ToolHint> {
         prompt: prompt_like_text(&parsed),
         subagent_type: None,
         file_path: None,
+        edit_text: None,
         hints_enabled: true,
     })?;
     let root = cursor_project_root_candidate_from_parsed_event(&parsed);
@@ -798,6 +799,9 @@ fn cursor_tool_hint_input(parsed: &Value) -> ToolHintInput {
         subagent_type: text_field(parsed, &["subagent_type", "subagentType", "agent_type"]),
         file_path: text_field(tool_input, CURSOR_FILE_PATH_FIELDS)
             .or_else(|| text_field(parsed, CURSOR_FILE_PATH_FIELDS)),
+        // Cursor's prompt/pre-tool surface does not carry edit bodies; the
+        // edit-redundancy nudge is a Claude post-tool-use surface only.
+        edit_text: None,
         hints_enabled: true,
     }
 }
