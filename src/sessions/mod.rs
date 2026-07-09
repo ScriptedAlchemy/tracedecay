@@ -21,7 +21,10 @@ pub(crate) mod message_noise;
 pub mod providers;
 pub mod shared;
 pub mod source;
-pub(crate) mod transcript_backfill;
+// `pub` (not `pub(crate)`) only so integration tests can reach the three
+// `#[doc(hidden)]` process-safety test helpers; every other item stays
+// `pub(crate)`.
+pub mod transcript_backfill;
 pub mod vibe;
 pub mod workflow_index;
 pub mod workflow_ingest;

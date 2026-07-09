@@ -440,6 +440,45 @@ struct StructuredCandidate {
     source_path: String,
 }
 
+/// Sibling `<store>.structured-backfill.lock` used to serialize the sweep
+/// across processes. The in-process in-flight guard in
+/// [`GlobalDb::spawn_structured_backfill`] only excludes stacked opens within
+/// one process; production runs many short-lived hook processes, so without a
+/// filesystem lock two of them could sweep the same store at once and race the
+/// watermark backwards.
+fn structured_backfill_lock_path(db_path: &Path) -> PathBuf {
+    let mut lock_name = db_path
+        .file_name()
+        .map(std::ffi::OsStr::to_os_string)
+        .unwrap_or_else(|| std::ffi::OsString::from("session"));
+    lock_name.push(".structured-backfill.lock");
+    db_path.with_file_name(lock_name)
+}
+
+/// Tries to claim the exclusive cross-process sweep lock for `db_path`. Returns
+/// the held lock file on success (drop releases it; the OS also releases it if
+/// the process dies), or `None` when another process/task already holds it — in
+/// which case the caller simply skips its sweep. Uses an advisory `flock`
+/// (`fs2`), the same primitive the branch-add and monitor single-instance
+/// guards use, so a crashed holder never leaves a stale lock behind.
+#[doc(hidden)]
+pub fn try_acquire_structured_backfill_lock(db_path: &Path) -> Option<std::fs::File> {
+    use fs2::FileExt;
+
+    let lock_path = structured_backfill_lock_path(db_path);
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent).ok()?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .ok()?;
+    file.try_lock_exclusive().ok()?;
+    Some(file)
+}
+
 /// Re-parses the next bounded transcript batch and inserts rows missing from
 /// legacy stores.
 pub(crate) async fn backfill_structured_rows(db: &GlobalDb) -> Option<StructuredBackfillStats> {
@@ -447,6 +486,13 @@ pub(crate) async fn backfill_structured_rows(db: &GlobalDb) -> Option<Structured
     if marker_version(conn, STRUCTURED_MARKER_NAME).await >= STRUCTURED_MARKER_VERSION {
         return Some(StructuredBackfillStats::default());
     }
+    // Claim the store cross-process before doing any parse or watermark work.
+    // A process that loses the race skips its sweep entirely rather than
+    // duplicating the whole-file re-parse and interleaving watermark writes
+    // with the winner. Held for the whole batch; released on drop / on exit.
+    let Some(_sweep_lock) = try_acquire_structured_backfill_lock(db.db_path()) else {
+        return Some(StructuredBackfillStats::default());
+    };
     ensure_backfill_meta_table(conn).await?;
     let cursor_key = structured_cursor_key();
     let cursor = read_backfill_cursor(conn, &cursor_key).await;
@@ -679,14 +725,38 @@ async fn read_backfill_cursor(conn: &Connection, key: &str) -> String {
 }
 
 async fn write_backfill_cursor(conn: &Connection, key: &str, value: &str) -> Option<()> {
+    // Compare-and-set: only ever move the watermark forward. Candidates are
+    // selected with `source_path > cursor` and ordered ascending, so a greater
+    // stored value means more files covered. The `WHERE excluded.value > …`
+    // guard makes a slower concurrent sweep writing an earlier path a no-op
+    // instead of regressing the cursor and re-queuing already-covered files.
+    // Binary (default) TEXT collation matches the candidate query's ordering.
     conn.execute(
         "INSERT INTO session_backfill_meta(key, value) VALUES (?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = unixepoch()",
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = unixepoch()
+            WHERE excluded.value > session_backfill_meta.value",
         params![key, value],
     )
     .await
     .ok()?;
     Some(())
+}
+
+/// Test-only accessor: writes the versioned structured-backfill watermark for
+/// `db` exactly as the sweep does, so tests can assert the compare-and-set
+/// monotonicity guard rejects backwards moves.
+#[doc(hidden)]
+pub async fn write_structured_backfill_cursor_for_test(db: &GlobalDb, value: &str) -> Option<()> {
+    let conn = db.conn();
+    ensure_backfill_meta_table(conn).await?;
+    write_backfill_cursor(conn, &structured_cursor_key(), value).await
+}
+
+/// Test-only accessor: reads the versioned structured-backfill watermark for
+/// `db`.
+#[doc(hidden)]
+pub async fn read_structured_backfill_cursor_for_test(db: &GlobalDb) -> String {
+    read_backfill_cursor(db.conn(), &structured_cursor_key()).await
 }
 
 async fn mark_structured_backfill_complete(conn: &Connection) -> Option<()> {

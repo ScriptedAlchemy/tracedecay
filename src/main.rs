@@ -538,10 +538,16 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                 // host does not retry.
                 return Ok(());
             }
+            // The MCP server is long-lived, so it may run the detached
+            // structured-row backfill sweep; one-shot CLI/hook processes never
+            // do (they would drop the sweep mid-parse on exit).
+            tracedecay::global_db::mark_process_long_lived_for_structured_backfill();
             serve::run_serve(path, timings).await?;
         }
         Commands::Daemon { action } => match action {
             DaemonAction::Run { socket } => {
+                // Long-lived host: allowed to run the structured-row sweep.
+                tracedecay::global_db::mark_process_long_lived_for_structured_backfill();
                 let socket_path = tracedecay::daemon::socket_path_or_default(socket)?;
                 tracedecay::daemon::run_foreground(socket_path).await?;
             }
