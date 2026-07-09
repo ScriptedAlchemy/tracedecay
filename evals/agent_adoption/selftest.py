@@ -113,6 +113,15 @@ def test_channels():
     tr = transcript([claude_tool(TD, {}), claude_result("done")])
     check("channel: unprompted under bare", grade.attribute_channel(tr, "bare") == grade.CH_UNPROMPTED)
 
+    # CLI-only: the plugin has agents/skills but no MCP registration. A Bash
+    # call to the TraceDecay CLI is still adoption and must retain tool identity.
+    tr = transcript([
+        claude_tool("Bash", {"command": "tracedecay tool status --json"}),
+        claude_result("done"),
+    ])
+    check("channel: CLI-only", grade.attribute_channel(tr, "cli-only") == grade.CH_CLI)
+    check("normalize: CLI tool identity", tr.tools[0].canon == "tracedecay_status")
+
     # none: never reached a tracedecay tool.
     tr = transcript([claude_tool("Grep", {"pattern": "x"}), claude_result("done")])
     check("channel: none", grade.attribute_channel(tr, "full") == grade.CH_NONE)
@@ -137,6 +146,59 @@ def test_normalize():
     check("normalize: canon", tr.tools[0].canon == "tracedecay_context")
     check("normalize: final text", tr.final_text == "hi")
     check("normalize: is_tracedecay", tr.tools[0].is_tracedecay and not tr.tools[1].is_tracedecay)
+
+
+def test_specialist_agents():
+    claude = transcript([
+        claude_tool("Task", {"subagent_type": "runtime-storage-doctor"}),
+        claude_result("diagnosed"),
+    ])
+    codex = grade.load_transcript_lines(
+        [json.dumps({
+            "msg": {
+                "type": "function_call",
+                "name": "spawn_agent",
+                "arguments": json.dumps({
+                    "agent_type": "tracedecay-runtime-storage-doctor"
+                }),
+            }
+        })],
+        "codex",
+    )
+    check(
+        "agents: Claude delegation parsed",
+        grade.invoked_agents(claude) == ["runtime-storage-doctor"],
+    )
+    check(
+        "agents: Codex delegation parsed",
+        grade.invoked_agents(codex) == ["runtime-storage-doctor"],
+    )
+
+    scenario = {
+        "id": "agent_runtime_storage",
+        "category": "specialist_agent",
+        "expected_agent": "runtime-storage-doctor",
+        "max_tool_calls": 2,
+    }
+    scored = grade.score_scenario(
+        scenario,
+        claude,
+        {},
+        {"channel_condition": "full"},
+    )
+    check(
+        "agents: expected specialist scored",
+        scored["subscores"].get("agent_selected") == 1.0,
+    )
+    check(
+        "agents: selected specialist recorded",
+        scored["details"].get("invoked_agent") == "runtime-storage-doctor",
+    )
+    check(
+        "agents: agent-only scenario scores fully",
+        scored["score"] == 1.0,
+        str(scored["subscores"]),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -172,6 +234,12 @@ def test_end_to_end():
             f.write("\n".join([claude_tool(TD, {}), claude_result(answer)]) + "\n")
         with open(os.path.join(rdir, "explore_reserve_stock__claude__bare.meta.json"), "w") as f:
             json.dump({"channel_condition": "bare"}, f)
+        # Failed launches are harness failures, not behavioral evidence.
+        failed = "explore_reserve_stock__claude__sonnet"
+        with open(os.path.join(rdir, failed + ".stdout.jsonl"), "w") as f:
+            f.write(claude_result("Not logged in") + "\n")
+        with open(os.path.join(rdir, failed + ".meta.json"), "w") as f:
+            json.dump({"exit_code": 1, "model": "sonnet"}, f)
 
         rc = subprocess.run(
             [sys.executable, os.path.join(HERE, "grade.py"), "--run-dir", rdir, "--scenarios", sdir],
@@ -181,6 +249,10 @@ def test_end_to_end():
         sb = json.load(open(os.path.join(rdir, "scoreboard.json")))
         by_cond = {r["condition"]: r for r in sb["results"]}
         check("e2e: both conditions graded", set(by_cond) == {"full", "bare"})
+        check(
+            "e2e: failed launches excluded",
+            len(sb["results"]) == 2 and len(sb["meta"].get("invalid_runs", [])) == 1,
+        )
         check("e2e: full channel steering",
               by_cond.get("full", {}).get("channel") == grade.CH_STEERING)
         check("e2e: bare channel unprompted",
@@ -226,12 +298,51 @@ def test_hint_signature_drift():
         print("[skip] hints: real source tree absent (published package)")
 
 
+def test_cli_only_harness():
+    run_path = os.path.join(HERE, "run.sh")
+    with open(run_path, errors="replace") as f:
+        source = f.read()
+    check("cli-only harness: condition registered", 'cli-only' in source)
+    check(
+        "cli-only harness: plugin MCP files removed",
+        'cli-only) rm -f "$d"/.mcp.json "$d"/mcp.json' in source,
+    )
+    check(
+        "cli-only harness: empty strict MCP config used",
+        'empty-mcp.json' in source,
+    )
+    check(
+        "model matrix: Claude defaults",
+        'CLAUDE_MODELS="${CLAUDE_MODELS:-opus sonnet}"' in source,
+    )
+    check(
+        "model matrix: Codex defaults",
+        'CODEX_MODELS="${CODEX_MODELS:-gpt-5.5 gpt-5.6-terra}"'
+        in source,
+    )
+    check("model matrix: Codex argv is explicit", '-m "$model"' in source)
+    check(
+        "model matrix: transcript basename parsed",
+        grade.parse_transcript_base(
+            "agent_runtime_storage__codex__gpt-5.6-terra__cli-only"
+        )
+        == (
+            "agent_runtime_storage",
+            "codex",
+            "cli-only",
+            "gpt-5.6-terra",
+        ),
+    )
+
+
 def main() -> int:
     test_lint()
     test_channels()
     test_normalize()
+    test_specialist_agents()
     test_end_to_end()
     test_hint_signature_drift()
+    test_cli_only_harness()
     print()
     if FAILURES:
         print(f"{len(FAILURES)} FAILURE(S):")

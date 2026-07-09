@@ -1,0 +1,12 @@
+{
+  "id": "agent_change_risk",
+  "category": "specialist_agent",
+  "pack": "pack_specialist_agents",
+  "hosts": ["claude", "codex"],
+  "fixture": "git-history",
+  "status": "active",
+  "prompt": "Review this branch for concrete merge risks and tell me which tests actually cover the affected code.",
+  "expected_agent": "change-risk-reviewer",
+  "max_tool_calls": 10,
+  "notes": "Neutral routing eval for intent, semantic diff, impact, and affected-test evidence."
+}

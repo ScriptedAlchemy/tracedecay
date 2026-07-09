@@ -1,0 +1,12 @@
+{
+  "id": "agent_runtime_storage",
+  "category": "specialist_agent",
+  "pack": "pack_specialist_agents",
+  "hosts": ["claude", "codex"],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "The project database started returning disk I/O errors after a health check. Diagnose the cause without changing anything.",
+  "expected_agent": "runtime-storage-doctor",
+  "max_tool_calls": 8,
+  "notes": "Neutral routing eval for the read-only runtime and storage evidence pipeline."
+}

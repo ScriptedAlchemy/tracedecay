@@ -27,8 +27,8 @@
 #   HOSTS                space-separated: "claude", "codex", or "claude codex" (default: claude)
 #   SCENARIOS            space-separated scenario ids to run (default: all active)
 #   EVAL_INCLUDE_DEFERRED=1   also run scenarios with status="deferred"
-#   CLAUDE_MODEL         model alias for claude --model (default: haiku, cheapest for smoke)
-#   CODEX_MODEL          model for codex -m (default: unset -> codex config default)
+#   CLAUDE_MODELS        space-separated Claude matrix (default: opus sonnet)
+#   CODEX_MODELS         space-separated Codex matrix (default: gpt-5.5 gpt-5.6-terra)
 #   SCENARIO_TIMEOUT     per scenario wall-clock seconds (default: 240)
 #   TRACEDECAY_BIN       tracedecay binary (default: resolve from PATH)
 #   EVAL_OUT            directory to also copy scoreboard.json + report.md into
@@ -38,14 +38,15 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
 
 HOSTS="${HOSTS:-claude}"
-CLAUDE_MODEL="${CLAUDE_MODEL:-haiku}"
+CLAUDE_MODELS="${CLAUDE_MODELS:-opus sonnet}"
+CODEX_MODELS="${CODEX_MODELS:-gpt-5.5 gpt-5.6-terra}"
 SCENARIO_TIMEOUT="${SCENARIO_TIMEOUT:-240}"
 
 # Ablation matrix. Default is "full" only (all discovery channels on) to keep
 # cost bounded — each extra condition multiplies the number of live agent runs.
-# Opt in with e.g. CHANNELS="full no-hints no-skills bare". See the README.
+# Opt in with e.g. CHANNELS="full no-hints no-skills bare cli-only". See the README.
 CHANNELS="${CHANNELS:-full}"
-KNOWN_CONDITIONS="full no-hints no-skills bare"
+KNOWN_CONDITIONS="full no-hints no-skills bare cli-only"
 for c in $CHANNELS; do
   case " $KNOWN_CONDITIONS " in
     *" $c "*) : ;;
@@ -169,7 +170,7 @@ git_sha="$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || echo unknow
 cat > "$run_dir/meta.json" <<JSON
 {
   "git_sha": "$git_sha",
-  "hosts": {"claude": {"model": "$CLAUDE_MODEL"}, "codex": {"model": "${CODEX_MODEL:-default}"}},
+  "hosts": {"claude": {"models": "$CLAUDE_MODELS"}, "codex": {"models": "$CODEX_MODELS"}},
   "scenario_timeout_s": $SCENARIO_TIMEOUT,
   "work_dir": "$work"
 }
@@ -188,8 +189,11 @@ JSON
 #   no-hints  hooks OFF | skills ON  | steering=fixed     (isolates skill/description efficacy)
 #   no-skills hooks ON  | skills OFF | steering=fixed     (isolates hint/description efficacy)
 #   bare      hooks OFF | skills OFF | steering=none       (pure MCP-description/unprompted)
+#   cli-only  hooks OFF | skills ON  | MCP OFF              (supported shell fallback)
 plugin_src="$repo_root/plugin"
 mcp_cfg="$work/mcp-tracedecay.json"
+empty_mcp_cfg="$work/empty-mcp.json"
+printf '%s\n' '{"mcpServers":{}}' > "$empty_mcp_cfg"
 have_plugin=0
 if [[ -d "$plugin_src/.claude-plugin" ]]; then
   have_plugin=1
@@ -212,6 +216,7 @@ provision_variant() {
     no-hints) rm -f "$d"/hooks/*.json ;;   # skills + mcp, no hooks
     no-skills) rm -rf "$d/skills" ;;       # hooks + mcp, no skills
     bare) rm -f "$d"/hooks/*.json; rm -rf "$d/skills" ;;
+    cli-only) rm -f "$d"/.mcp.json "$d"/mcp.json "$d"/hooks/*.json ;;
   esac
 }
 
@@ -226,9 +231,11 @@ claude_extra_for() {
     return 0
   fi
   provision_variant "$cond"
+  local selected_mcp="$mcp_cfg"
+  [[ "$cond" == "cli-only" ]] && selected_mcp="$empty_mcp_cfg"
   # Drop ambient user config (global plugin + user CLAUDE.md); pin MCP explicitly.
   CLAUDE_EXTRA=(--setting-sources project,local
-                --strict-mcp-config --mcp-config "$mcp_cfg"
+                --strict-mcp-config --mcp-config "$selected_mcp"
                 --add-dir "$fdir"
                 --plugin-dir "$work/plugins/$cond")
   # Hold steering constant for the single-channel ablations; bare gets none.
@@ -257,25 +264,28 @@ PY
 # ---- run each scenario x host x condition ---------------------------------- #
 run_claude() {
   # Uses the global CLAUDE_EXTRA array set by claude_extra_for.
-  local prompt="$1" fixture="$2" out="$3" err="$4"
+  local prompt="$1" fixture="$2" out="$3" err="$4" model="$5"
   ( cd "$fixture" && timeout "$SCENARIO_TIMEOUT" claude -p "$prompt" \
       --output-format stream-json --verbose \
-      --model "$CLAUDE_MODEL" \
+      --model "$model" \
       --dangerously-skip-permissions \
       "${CLAUDE_EXTRA[@]}" ) >"$out" 2>"$err"
 }
 run_codex() {
-  local prompt="$1" fixture="$2" out="$3" err="$4"
+  local prompt="$1" fixture="$2" out="$3" err="$4" model="$5"
   timeout "$SCENARIO_TIMEOUT" codex exec "$prompt" --json \
     -C "$fixture" --skip-git-repo-check \
     --dangerously-bypass-approvals-and-sandbox \
-    ${CODEX_MODEL:+-m "$CODEX_MODEL"} >"$out" 2>"$err"
+    -m "$model" >"$out" 2>"$err"
 }
 
-# Transcript/meta basename for a run: full keeps the legacy <id>__<host> shape;
-# ablations append __<condition>.
+# Transcript/meta basename includes model identity; ablations append condition.
 out_base_for() {
-  if [[ "$1" == "full" ]]; then echo "$2__$3"; else echo "$2__$3__$1"; fi
+  if [[ "$1" == "full" ]]; then
+    echo "$2__$3__$4"
+  else
+    echo "$2__$3__$4__$1"
+  fi
 }
 
 for cond in $CHANNELS; do
@@ -289,31 +299,38 @@ while IFS=$'\t' read -r sid host fixture prompt; do
     continue
   fi
   fdir="$(fixture_dir_for "$fixture")"
-  base="$(out_base_for "$cond" "$sid" "$host")"
+  if [[ "$host" == "claude" ]]; then
+    models="$CLAUDE_MODELS"
+  else
+    models="$CODEX_MODELS"
+  fi
+  for model in $models; do
+  base="$(out_base_for "$cond" "$sid" "$host" "$model")"
   out="$run_dir/${base}.stdout.jsonl"
   err="$run_dir/${base}.stderr.log"
   if [[ "$live" != "1" ]]; then
-    echo "DRY  $sid [$host/$cond] fixture=$fixture"
+    echo "DRY  $sid [$host/$model/$cond] fixture=$fixture"
     if [[ "$host" == "claude" ]]; then claude_extra_for "$cond" "$fdir"; fi
-    echo "     cwd=$fdir extra=[${CLAUDE_EXTRA[*]:-}] prompt=\"$prompt\"" >"$err"
+    echo "     cwd=$fdir model=$model extra=[${CLAUDE_EXTRA[*]:-}] prompt=\"$prompt\"" >"$err"
     : >"$out"
     continue
   fi
-  echo "RUN  $sid [$host/$cond] ..."
+  echo "RUN  $sid [$host/$model/$cond] ..."
   start=$(date +%s)
   rc=0
   if [[ "$host" == "claude" ]]; then
     claude_extra_for "$cond" "$fdir"
-    run_claude "$prompt" "$fdir" "$out" "$err" || rc=$?
+    run_claude "$prompt" "$fdir" "$out" "$err" "$model" || rc=$?
   else
-    run_codex "$prompt" "$fdir" "$out" "$err" || rc=$?
+    run_codex "$prompt" "$fdir" "$out" "$err" "$model" || rc=$?
   fi
   end=$(date +%s)
   timed_out=false; [[ $rc -eq 124 ]] && timed_out=true
   cat > "$run_dir/${base}.meta.json" <<JSON
-{"scenario_id":"$sid","host":"$host","fixture":"$fixture","channel_condition":"$cond","exit_code":$rc,"duration_s":$((end-start)),"timed_out":$timed_out}
+{"scenario_id":"$sid","host":"$host","model":"$model","fixture":"$fixture","channel_condition":"$cond","exit_code":$rc,"duration_s":$((end-start)),"timed_out":$timed_out}
 JSON
   echo "     rc=$rc dur=$((end-start))s bytes=$(wc -c <"$out")"
+  done
 done < "$work/selected.tsv"
 done
 

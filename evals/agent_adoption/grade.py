@@ -36,13 +36,14 @@ WEIGHTS = {
     "outcome": 0.25,
     "efficiency": 0.10,
     "feedback": 0.30,  # only for scenarios with grade_feedback=true
+    "agent_selected": 0.30,  # only for scenarios with expected_agent
 }
 
 # --------------------------------------------------------------------------- #
 # Discovery-channel attribution
 # --------------------------------------------------------------------------- #
 # Ablation conditions (see run.sh CHANNELS). "full" = every discovery channel on.
-CONDITIONS = ("full", "no-hints", "no-skills", "bare")
+CONDITIONS = ("full", "no-hints", "no-skills", "bare", "cli-only")
 KNOWN_HOSTS = ("claude", "codex")
 
 # Distinctive fragments of the hook-injected tool hints. These MIRROR the
@@ -82,7 +83,8 @@ CH_HINT = "hint-driven"                 # a tool-hint preceded the first tracede
 CH_SKILL = "skill-driven"               # a tracedecay:* skill invocation preceded it
 CH_STEERING = "steering-or-description" # only CLAUDE.md/tool-descriptions could have driven it
 CH_UNPROMPTED = "unprompted"            # bare condition: no hints/skills/steering, still adopted
-CHANNELS = (CH_HINT, CH_SKILL, CH_STEERING, CH_UNPROMPTED, CH_NONE)
+CH_CLI = "cli-only"                     # plugin guidance drove supported CLI fallback
+CHANNELS = (CH_HINT, CH_SKILL, CH_STEERING, CH_UNPROMPTED, CH_CLI, CH_NONE)
 
 # The HINT_SIGNATURES above are hand-mirrored fragments of the hook messages in
 # src/hooks/tool_hints.rs. That mirror is load-bearing: if the source wording
@@ -197,6 +199,21 @@ class ToolCall:
         return str(c) if c is not None else ""
 
 
+_TRACEDECAY_CLI = re.compile(
+    r"(?:^|[\s;&|])(?:\S*/)?tracedecay\s+(?:tool\s+)?([a-zA-Z0-9_-]+)"
+)
+
+
+def tool_call(seq: int, raw_name: str, inp: dict) -> ToolCall:
+    """Build one normalized call, preserving TraceDecay CLI tool identity."""
+    call = ToolCall(seq, raw_name, canon_name(raw_name), inp)
+    if call.canon == "Bash":
+        match = _TRACEDECAY_CLI.search(call.command)
+        if match:
+            call.canon = "tracedecay_" + match.group(1).replace("-", "_")
+    return call
+
+
 @dataclass
 class Transcript:
     tools: list[ToolCall]
@@ -284,7 +301,7 @@ def parse_claude(lines: list[str], host: str) -> Transcript:
                     continue
                 if item.get("type") == "tool_use":
                     raw = item.get("name") or ""
-                    tc = ToolCall(seq, raw, canon_name(raw), item.get("input") or {})
+                    tc = tool_call(seq, raw, item.get("input") or {})
                     tools.append(tc)
                     timeline.append({"kind": "tool", "call": tc})
                     seq += 1
@@ -348,11 +365,11 @@ def parse_codex(lines: list[str], host: str) -> Transcript:
                     args = json.loads(args)
                 except json.JSONDecodeError:
                     args = {"_raw": args}
-            _add_tool(ToolCall(seq, raw or "", canon_name(raw), args))
+            _add_tool(tool_call(seq, raw or "", args))
             seq += 1
         elif t in ("exec_command_begin", "exec_command", "command_execution"):
             cmd = msg.get("command") or msg.get("cmd") or ""
-            _add_tool(ToolCall(seq, "Bash", "Bash", {"command": cmd}))
+            _add_tool(tool_call(seq, "Bash", {"command": cmd}))
             seq += 1
         elif t in ("function_call",):
             raw = msg.get("name") or ""
@@ -362,7 +379,7 @@ def parse_codex(lines: list[str], host: str) -> Transcript:
                     args = json.loads(args)
                 except json.JSONDecodeError:
                     args = {"_raw": args}
-            _add_tool(ToolCall(seq, raw, canon_name(raw), args))
+            _add_tool(tool_call(seq, raw, args))
             seq += 1
         elif t in ("agent_message", "agent_message_final", "assistant_message"):
             txt = msg.get("message") or msg.get("text") or msg.get("content")
@@ -378,7 +395,7 @@ def parse_codex(lines: list[str], host: str) -> Transcript:
                         args = json.loads(args)
                     except json.JSONDecodeError:
                         args = {"_raw": args}
-                _add_tool(ToolCall(seq, raw, canon_name(raw), args))
+                _add_tool(tool_call(seq, raw, args))
                 seq += 1
             else:
                 # Non-tool event (session meta, injected hook context, reasoning).
@@ -415,7 +432,7 @@ def load_transcript(path: str, host: str) -> Transcript:
 def _is_forbidden(tc: ToolCall, forbidden_first: list[str], forbidden_bash: list[str]) -> bool:
     if tc.canon in ("Grep", "Glob") and tc.canon in forbidden_first:
         return True
-    if tc.canon == "Bash":
+    if tc.raw_name == "Bash" or tc.canon == "Bash":
         cmd = tc.command
         return any(p in cmd for p in forbidden_bash)
     return False
@@ -427,6 +444,36 @@ def _is_skill_invocation(tc: ToolCall) -> bool:
         return any("tracedecay" in s.lower() for s in _string_leaves(tc.input))
     # Some hosts surface a skill as a tool whose name carries the skill id.
     return "tracedecay:" in (tc.raw_name or "").lower()
+
+
+AGENT_IDS = (
+    "code-explorer",
+    "code-health-auditor",
+    "session-historian",
+    "runtime-storage-doctor",
+    "cross-host-integration-auditor",
+    "change-risk-reviewer",
+    "usage-intelligence-analyst",
+    "automation-auditor",
+)
+
+
+def invoked_agents(tr: Transcript) -> list[str]:
+    """Return TraceDecay specialist ids invoked through host agent tools."""
+    invoked: list[str] = []
+    for call in tr.tools:
+        tool = (call.raw_name or call.canon).lower()
+        if not (
+            tool in {"task", "agent", "spawn_agent"}
+            or tool.endswith(".spawn_agent")
+            or tool.endswith("__spawn_agent")
+        ):
+            continue
+        leaves = " ".join(_string_leaves(call.input)).lower().replace("_", "-")
+        for agent_id in AGENT_IDS:
+            if agent_id in leaves and agent_id not in invoked:
+                invoked.append(agent_id)
+    return invoked
 
 
 def _has_hint_signature(text: str) -> bool:
@@ -450,6 +497,8 @@ def attribute_channel(tr: Transcript, condition: str) -> str:
             break
     if first_td is None:
         return CH_NONE
+    if condition == "cli-only":
+        return CH_CLI
 
     prior = tr.timeline[:first_td]
     saw_skill = any(
@@ -486,13 +535,14 @@ def score_scenario(scn: dict, tr: Transcript, seeded_facts: dict, run_meta: dict
     details: dict[str, Any] = {}
 
     # 1. first meaningful tool
-    if meaningful:
-        first = meaningful[0].canon
-        subs["first_tool_choice"] = 1.0 if first in required_first else 0.0
-        details["first_tool"] = first
-    else:
-        subs["first_tool_choice"] = 0.0
-        details["first_tool"] = None
+    if required_first:
+        if meaningful:
+            first = meaningful[0].canon
+            subs["first_tool_choice"] = 1.0 if first in required_first else 0.0
+            details["first_tool"] = first
+        else:
+            subs["first_tool_choice"] = 0.0
+            details["first_tool"] = None
 
     # 2. forbidden-before-tracedecay
     td_idx = next((i for i, t in enumerate(meaningful) if t.is_tracedecay), None)
@@ -547,6 +597,15 @@ def score_scenario(scn: dict, tr: Transcript, seeded_facts: dict, run_meta: dict
         details["feedback_called"] = fb_ok
         details["seeded_fact_id"] = want_id
 
+    expected_agent = str(scn.get("expected_agent") or "").removeprefix("tracedecay-")
+    if expected_agent:
+        agents = invoked_agents(tr)
+        selected = expected_agent in agents
+        subs["agent_selected"] = 1.0 if selected else 0.0
+        details["expected_agent"] = expected_agent
+        details["invoked_agent"] = agents[0] if agents else None
+        details["invoked_agents"] = agents
+
     # weighted score
     total_w = sum(WEIGHTS[k] for k in subs)
     score = sum(subs[k] * WEIGHTS[k] for k in subs) / total_w if total_w else 0.0
@@ -561,6 +620,7 @@ def score_scenario(scn: dict, tr: Transcript, seeded_facts: dict, run_meta: dict
         "id": scn["id"],
         "category": scn["category"],
         "host": tr.host,
+        "model": run_meta.get("model"),
         "condition": condition,
         "channel": channel,
         "score": round(score, 4),
@@ -578,7 +638,9 @@ def score_scenario(scn: dict, tr: Transcript, seeded_facts: dict, run_meta: dict
 def aggregate(results: list[dict]) -> dict:
     by_host: dict[str, list[dict]] = {}
     for r in results:
-        by_host.setdefault(r["host"], []).append(r)
+        model = r.get("model")
+        key = f"{r['host']}/{model}" if model else r["host"]
+        by_host.setdefault(key, []).append(r)
     agg = {}
     for host, rs in by_host.items():
         n = len(rs)
@@ -618,6 +680,7 @@ def aggregate(results: list[dict]) -> dict:
             "outcome_mean": rate("outcome"),
             "efficiency_rate": rate("efficiency"),
             "feedback_rate": rate("feedback"),
+            "agent_selected_rate": rate("agent_selected"),
             "forbidden_first_count": sum(
                 1 for r in rs if r["details"].get("forbidden_first_flag")
             ),
@@ -636,18 +699,19 @@ def render_report(scoreboard: dict) -> str:
     lines.append(f"- run: `{meta.get('run_id','?')}`")
     lines.append(f"- git: `{meta.get('git_sha','?')}`")
     lines.append(f"- graded: {len(scoreboard['results'])} transcript(s)")
+    lines.append(f"- invalid launches excluded: {len(meta.get('invalid_runs', []))}")
     lines.append("")
     lines.append("## Per-host aggregate")
     lines.append("")
-    lines.append("| host | n | mean | first-choice | not-forbidden | outcome | efficiency | feedback | forbidden-first # |")
-    lines.append("|------|---|------|--------------|---------------|---------|------------|----------|-------------------|")
+    lines.append("| host/model | n | mean | first-choice | not-forbidden | outcome | efficiency | feedback | agent | forbidden-first # |")
+    lines.append("|------------|---|------|--------------|---------------|---------|------------|----------|-------|-------------------|")
     for host, a in scoreboard["aggregate"].items():
         def fmt(x):
             return "-" if x is None else f"{x:.2f}"
         lines.append(
             f"| {host} | {a['n']} | {a['mean_score']:.2f} | {fmt(a['first_tool_choice_rate'])} | "
             f"{fmt(a['not_forbidden_first_rate'])} | {fmt(a['outcome_mean'])} | {fmt(a['efficiency_rate'])} | "
-            f"{fmt(a['feedback_rate'])} | {a['forbidden_first_count']} |"
+            f"{fmt(a['feedback_rate'])} | {fmt(a['agent_selected_rate'])} | {a['forbidden_first_count']} |"
         )
     lines.append("")
 
@@ -657,8 +721,8 @@ def render_report(scoreboard: dict) -> str:
     lines.append("Which discovery channel drove the first tracedecay call "
                  "(attributed from the transcript before that call).")
     lines.append("")
-    lines.append("| host | adoption | hint-driven | skill-driven | steering/descr | unprompted | none |")
-    lines.append("|------|----------|-------------|--------------|----------------|------------|------|")
+    lines.append("| host/model | adoption | hint-driven | skill-driven | steering/descr | unprompted | cli-only | none |")
+    lines.append("|------------|----------|-------------|--------------|----------------|------------|----------|------|")
     for host, a in scoreboard["aggregate"].items():
         ch = a.get("channels", {})
         def cell(name):
@@ -668,7 +732,7 @@ def render_report(scoreboard: dict) -> str:
             f"| {host} | {a.get('adoption_rate', 0.0):.2f} | "
             f"{cell('hint-driven')} | {cell('skill-driven')} | "
             f"{cell('steering-or-description')} | {cell('unprompted')} | "
-            f"{cell('none')} |"
+            f"{cell('cli-only')} | {cell('none')} |"
         )
     lines.append("")
     lines.append("Cells show `count (mean score)`. `adoption` is the fraction of "
@@ -697,14 +761,14 @@ def render_report(scoreboard: dict) -> str:
 
     lines.append("## Per-scenario")
     lines.append("")
-    lines.append("| scenario | host | cond | score | first tool | channel | forbidden-first | tools/budget | outcome |")
-    lines.append("|----------|------|------|-------|-----------|---------|-----------------|--------------|---------|")
+    lines.append("| scenario | host | model | cond | score | first tool | agent | channel | forbidden-first | tools/budget | outcome |")
+    lines.append("|----------|------|-------|------|-------|------------|-------|---------|-----------------|--------------|---------|")
     for r in sorted(scoreboard["results"], key=lambda x: (x["host"], x.get("condition", "full"), x["id"])):
         d = r["details"]
         oc = r["subscores"].get("outcome")
         lines.append(
-            f"| {r['id']} | {r['host']} | {r.get('condition','full')} | {r['score']:.2f} | "
-            f"`{d.get('first_tool')}` | {r.get('channel','-')} | "
+            f"| {r['id']} | {r['host']} | {r.get('model') or '-'} | {r.get('condition','full')} | {r['score']:.2f} | "
+            f"`{d.get('first_tool')}` | {d.get('invoked_agent') or '-'} | {r.get('channel','-')} | "
             f"{'YES' if d.get('forbidden_first_flag') else 'no'} | "
             f"{d.get('tool_call_count')}/{d.get('budget')} | "
             f"{'-' if oc is None else f'{oc:.2f}'} |"
@@ -712,24 +776,25 @@ def render_report(scoreboard: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def parse_transcript_base(base: str) -> Optional[tuple[str, str, str]]:
-    """Split a transcript basename into (scenario_id, host, condition).
+def parse_transcript_base(base: str) -> Optional[tuple[str, str, str, str]]:
+    """Split a basename into (scenario_id, host, condition, model).
 
-    Accepts both the legacy `<id>__<host>` shape and the ablation
-    `<id>__<host>__<condition>` shape. Scenario ids use single underscores, so
-    the `__` separators are unambiguous. Returns None if no host token is found.
+    Accepts legacy `<id>__<host>[__<condition>]` and matrix
+    `<id>__<host>__<model>[__<condition>]` shapes. Scenario ids use single
+    underscores, so `__` separators are unambiguous.
     """
     parts = base.split("__")
     if len(parts) < 2:
         return None
-    # condition-suffixed form
-    if len(parts) >= 3 and parts[-1] in CONDITIONS and parts[-2] in KNOWN_HOSTS:
-        return "__".join(parts[:-2]), parts[-2], parts[-1]
-    # legacy form: last token is the host
+    condition = "full"
+    if parts[-1] in CONDITIONS:
+        condition = parts.pop()
     if parts[-1] in KNOWN_HOSTS:
-        return "__".join(parts[:-1]), parts[-1], "full"
+        return "__".join(parts[:-1]), parts[-1], condition, ""
+    if len(parts) >= 3 and parts[-2] in KNOWN_HOSTS:
+        return "__".join(parts[:-2]), parts[-2], condition, parts[-1]
     # tolerant fallback: assume 2-part id__host
-    return "__".join(parts[:-1]), parts[-1], "full"
+    return "__".join(parts[:-1]), parts[-1], condition, ""
 
 
 def load_scenarios(scenarios_dir: str) -> dict[str, dict]:
@@ -828,6 +893,7 @@ def main() -> int:
             run_meta_all = json.load(f)
 
     results = []
+    invalid_runs = []
     for fn in sorted(os.listdir(run_dir)):
         if not fn.endswith(".stdout.jsonl"):
             continue
@@ -835,7 +901,7 @@ def main() -> int:
         parsed = parse_transcript_base(base)
         if not parsed:
             continue
-        scn_id, host, condition = parsed
+        scn_id, host, condition, model = parsed
         scn = scenarios.get(scn_id)
         if not scn:
             print(f"warn: no scenario for {scn_id}", file=sys.stderr)
@@ -847,6 +913,21 @@ def main() -> int:
                 per_meta = json.load(f)
         # meta may carry channel_condition; otherwise derive from the filename.
         per_meta.setdefault("channel_condition", condition)
+        if model:
+            per_meta.setdefault("model", model)
+        exit_code = per_meta.get("exit_code")
+        if per_meta.get("timed_out") or (exit_code is not None and exit_code != 0):
+            invalid_runs.append(
+                {
+                    "id": scn_id,
+                    "host": host,
+                    "model": per_meta.get("model"),
+                    "condition": condition,
+                    "exit_code": exit_code,
+                    "timed_out": bool(per_meta.get("timed_out")),
+                }
+            )
+            continue
         tr = load_transcript(os.path.join(run_dir, fn), host)
         results.append(score_scenario(scn, tr, seeded_facts, per_meta))
 
@@ -855,6 +936,7 @@ def main() -> int:
             "run_id": os.path.basename(os.path.normpath(run_dir)),
             "git_sha": run_meta_all.get("git_sha", "?"),
             "hosts": run_meta_all.get("hosts", {}),
+            "invalid_runs": invalid_runs,
         },
         "aggregate": aggregate(results),
         "results": results,
