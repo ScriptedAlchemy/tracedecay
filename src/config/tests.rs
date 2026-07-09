@@ -328,6 +328,62 @@ fn partial_sync_table_fills_missing_fields_with_defaults() {
 }
 
 #[test]
+fn pr_autotrack_defaults_off_and_survives_missing_keys() {
+    // Back-compat: a config predating the PR-autotrack keys must default the
+    // feature OFF and to the 300s poll cadence.
+    let json = r#"{
+        "version": 1,
+        "root_dir": "/tmp/proj",
+        "exclude": [],
+        "max_file_size": 1048576,
+        "extract_docstrings": true,
+        "track_call_sites": true,
+        "sync": { "auto_watch": true }
+    }"#;
+    let parsed: TraceDecayConfig = serde_json::from_str(json).unwrap();
+    assert!(!parsed.sync.auto_track_pr_branches);
+    assert_eq!(parsed.sync.auto_track_pr_poll_secs, 300);
+    assert_eq!(parsed.sync.effective_auto_track_pr_poll_secs(), 300);
+}
+
+#[test]
+fn pr_autotrack_round_trips_and_clamps_poll_floor() {
+    let json = r#"{
+        "version": 1,
+        "root_dir": "/tmp/proj",
+        "exclude": [],
+        "max_file_size": 1048576,
+        "extract_docstrings": true,
+        "track_call_sites": true,
+        "sync": { "auto_track_pr_branches": true, "auto_track_pr_poll_secs": 5 }
+    }"#;
+    let parsed: TraceDecayConfig = serde_json::from_str(json).unwrap();
+    assert!(parsed.sync.auto_track_pr_branches);
+    assert_eq!(parsed.sync.auto_track_pr_poll_secs, 5);
+    // A too-small interval is clamped up to the safety floor.
+    assert_eq!(
+        parsed.sync.effective_auto_track_pr_poll_secs(),
+        super::MIN_AUTO_TRACK_PR_POLL_SECS
+    );
+
+    // Serialize → deserialize preserves the raw values.
+    let round = serde_json::to_string(&parsed).unwrap();
+    let reparsed: TraceDecayConfig = serde_json::from_str(&round).unwrap();
+    assert_eq!(reparsed.sync, parsed.sync);
+}
+
+#[test]
+fn pr_autotrack_env_overrides() {
+    let _lock = lock_user_data_dir_test_env();
+    let _enable = EnvRestore::set("TRACEDECAY_SYNC_AUTO_TRACK_PR_BRANCHES", "true");
+    let _poll = EnvRestore::set("TRACEDECAY_SYNC_AUTO_TRACK_PR_POLL_SECS", "120");
+
+    let overridden = super::SyncConfig::default().with_env_overrides();
+    assert!(overridden.auto_track_pr_branches);
+    assert_eq!(overridden.auto_track_pr_poll_secs, 120);
+}
+
+#[test]
 fn sync_config_env_overrides_bool_and_int() {
     let _lock = lock_user_data_dir_test_env();
     let _watch = EnvRestore::set("TRACEDECAY_SYNC_AUTO_WATCH", "false");

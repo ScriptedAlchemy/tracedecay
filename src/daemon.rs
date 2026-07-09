@@ -38,6 +38,8 @@ const DAEMON_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(45);
 
 #[cfg(unix)]
 mod git_watch;
+#[cfg(unix)]
+pub mod pr_autotrack;
 mod service;
 pub use service::{
     DaemonServiceSpec, daemon_reachable, default_socket_path, install_service,
@@ -1270,6 +1272,10 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
     let git_watcher =
         git_watch::GitWatcher::new(crate::config::SyncConfig::default().with_env_overrides());
     git_watcher.spawn(crate::global_db::global_db_path()).await;
+    // PR-branch auto-tracking runs independently of the metadata watcher: it is
+    // gated per-project on `sync.auto_track_pr_branches` (default off), so this
+    // loop is inert unless a project opts in.
+    pr_autotrack::spawn(crate::global_db::global_db_path());
     let engine = DaemonEngine::default().with_git_watcher(git_watcher);
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 

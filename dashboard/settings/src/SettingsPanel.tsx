@@ -48,7 +48,11 @@ export interface ProjectDraft {
   trackCallSites: boolean;
   gitIgnore: boolean;
   telemetryTimings: boolean;
+  autoTrackPrBranches: boolean;
+  autoTrackPrPollSecs: string;
 }
+
+const MIN_PR_POLL_SECS = 60;
 
 export interface UserDraft {
   uploadEnabled: boolean;
@@ -66,6 +70,8 @@ function projectDraftFrom(settings: SettingsPayload): ProjectDraft {
     trackCallSites: config.track_call_sites,
     gitIgnore: config.git_ignore,
     telemetryTimings: config.telemetry.timings,
+    autoTrackPrBranches: Boolean(config.sync?.auto_track_pr_branches),
+    autoTrackPrPollSecs: String(config.sync?.auto_track_pr_poll_secs ?? 300),
   };
 }
 
@@ -110,6 +116,20 @@ export function projectPatchFrom(
   }
   if (!saved || draft.telemetryTimings !== saved.telemetryTimings) {
     patch.telemetry = { timings: draft.telemetryTimings };
+  }
+
+  const pollSecs = Number(draft.autoTrackPrPollSecs);
+  const prBranchesChanged =
+    !saved || draft.autoTrackPrBranches !== saved.autoTrackPrBranches;
+  const pollSecsChanged = !saved || pollSecs !== Number(saved.autoTrackPrPollSecs);
+  if (prBranchesChanged || pollSecsChanged) {
+    patch.sync = {};
+    if (prBranchesChanged) {
+      patch.sync.auto_track_pr_branches = draft.autoTrackPrBranches;
+    }
+    if (pollSecsChanged) {
+      patch.sync.auto_track_pr_poll_secs = pollSecs;
+    }
   }
 
   return patch;
@@ -384,6 +404,59 @@ export default function SettingsPanel() {
               />
               <span>Capture timing telemetry</span>
             </label>
+
+            <label className="tdst-toggle">
+              <input
+                type="checkbox"
+                checked={projectDraft.autoTrackPrBranches}
+                onChange={(event) =>
+                  updateProject({ autoTrackPrBranches: event.currentTarget.checked })
+                }
+                disabled={projectSaving}
+                aria-label="Auto-track open PR branches"
+              />
+              <span>Auto-track open PR branches</span>
+            </label>
+            <span className="tdst-field-hint">
+              The daemon tracks every open PR branch on the repo&apos;s GitHub <code>origin</code> so{" "}
+              <code>branch_diff</code>/<code>branch_search</code> work against all open PRs. Same-repo
+              PRs only; forks are skipped. Takes effect after a daemon restart.
+            </span>
+
+            <label className="tdst-field tdst-field-inline">
+              <span className="tdst-field-label">PR poll interval (seconds)</span>
+              <input
+                type="number"
+                min={MIN_PR_POLL_SECS}
+                value={projectDraft.autoTrackPrPollSecs}
+                onChange={(event) =>
+                  updateProject({ autoTrackPrPollSecs: event.currentTarget.value })
+                }
+                disabled={projectSaving || !projectDraft.autoTrackPrBranches}
+                aria-label="PR auto-track poll interval"
+              />
+              {projectFieldErrors.auto_track_pr_poll_secs && (
+                <span className="tdst-field-error">
+                  {projectFieldErrors.auto_track_pr_poll_secs}
+                </span>
+              )}
+            </label>
+
+            {settings.project.pr_autotrack &&
+              settings.project.pr_autotrack.tracked.length > 0 && (
+                <div className="tdst-kv">
+                  {settings.project.pr_autotrack.tracked.map((entry) => (
+                    <React.Fragment key={entry.branch}>
+                      <span className="tdst-kv-key">
+                        <code>{entry.branch}</code>
+                      </span>
+                      <span>
+                        PR #{entry.pr} (head <code>{entry.head_branch}</code>)
+                      </span>
+                    </React.Fragment>
+                  ))}
+                </div>
+              )}
 
             <p className="tdst-section-hint">
               Changing these requires a re-sync before the code graph reflects them.

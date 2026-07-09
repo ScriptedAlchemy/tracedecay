@@ -470,6 +470,30 @@ fn status_and_branch_add_commands_dispatch_to_expected_variants() {
 }
 
 #[test]
+fn branch_autotrack_enable_parses_poll_secs_and_path() {
+    use super::BranchAutotrackAction;
+    let cli = Cli::try_parse_from([
+        "tracedecay",
+        "branch",
+        "autotrack",
+        "enable",
+        "--poll-secs",
+        "120",
+        "--path",
+        "/tmp/project",
+    ])
+    .expect("branch autotrack enable should parse");
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Branch {
+            action: BranchAction::Autotrack {
+                action: BranchAutotrackAction::Enable { poll_secs, path }
+            }
+        }) if poll_secs == Some(120) && path.as_deref() == Some("/tmp/project")
+    ));
+}
+
+#[test]
 fn init_and_sync_parse_runtime_skip_and_include_folders() {
     let init = Cli::try_parse_from([
         "tracedecay",

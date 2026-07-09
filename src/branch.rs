@@ -569,6 +569,23 @@ fn clone_or_copy_db(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::copy(src, dst).map(|_| ())
 }
 
+/// Untracks a single non-default branch: removes its metadata entry and deletes
+/// its DB file (plus `-wal`/`-shm` sidecars). Returns `true` when an entry was
+/// removed. The default branch is never removed. This is the shared removal path
+/// used by `tracedecay branch remove` and the PR-autotrack lifecycle so both
+/// clean up identically.
+pub fn remove_tracked_branch_store(tracedecay_dir: &Path, branch: &str) -> bool {
+    let Some(mut meta) = crate::branch_meta::load_branch_meta(tracedecay_dir) else {
+        return false;
+    };
+    let Some(entry) = meta.remove_branch(branch) else {
+        return false;
+    };
+    remove_branch_db_files(&tracedecay_dir.join(&entry.db_file));
+    let _ = crate::branch_meta::save_branch_meta(tracedecay_dir, &meta);
+    true
+}
+
 /// Returns true if `branch` currently exists as a local `refs/heads/*` ref.
 ///
 /// Thin alias over [`local_branch_exists`] under the name the branch-store GC

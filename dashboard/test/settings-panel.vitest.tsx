@@ -20,8 +20,13 @@ function basePayload(): SettingsPayload {
         telemetry: {
           timings: true,
         },
+        sync: {
+          auto_track_pr_branches: false,
+          auto_track_pr_poll_secs: 300,
+        },
       },
       tracedecay_dir_gitignored: true,
+      pr_autotrack: { tracked: [] },
     },
     user: {
       config_path: "/profile/.tracedecay/config.toml",

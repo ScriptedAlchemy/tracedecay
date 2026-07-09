@@ -1,0 +1,189 @@
+use super::*;
+
+// ---- Pure discovery parsers -------------------------------------------------
+
+#[test]
+fn gh_pr_list_splits_open_same_repo_from_forks() {
+    let json = r#"[
+        {"number": 1, "headRefName": "feature-a", "state": "OPEN", "isCrossRepository": false},
+        {"number": 2, "headRefName": "fork-branch", "state": "OPEN", "isCrossRepository": true},
+        {"number": 3, "headRefName": "closed-branch", "state": "CLOSED", "isCrossRepository": false},
+        {"number": 4, "headRefName": "feature-b", "state": "OPEN", "isCrossRepository": false}
+    ]"#;
+    let discovery = parse_gh_pr_list(json).unwrap();
+    assert_eq!(
+        discovery.open,
+        vec![
+            DiscoveredPr {
+                number: 1,
+                head_branch: "feature-a".to_string()
+            },
+            DiscoveredPr {
+                number: 4,
+                head_branch: "feature-b".to_string()
+            },
+        ]
+    );
+    assert_eq!(discovery.skipped_forks, vec![2]);
+}
+
+#[test]
+fn ls_remote_heads_indexes_branch_shas() {
+    let output = "\
+deadbeef00000000000000000000000000000001\trefs/heads/main
+deadbeef00000000000000000000000000000002\trefs/heads/feature-1
+cafebabe00000000000000000000000000000003\trefs/tags/v1
+";
+    let map = parse_ls_remote_heads(output);
+    assert_eq!(map.len(), 2);
+    assert_eq!(
+        map.get("deadbeef00000000000000000000000000000002").unwrap(),
+        "feature-1"
+    );
+    assert!(!map.contains_key("cafebabe00000000000000000000000000000003"));
+}
+
+#[test]
+fn ls_remote_pull_heads_parses_numbers_and_ignores_merge_refs() {
+    let output = "\
+deadbeef00000000000000000000000000000002\trefs/pull/1/head
+feed000000000000000000000000000000000009\trefs/pull/1/merge
+beadfeed00000000000000000000000000000007\trefs/pull/42/head
+";
+    let heads = parse_ls_remote_pull_heads(output);
+    assert_eq!(
+        heads,
+        vec![
+            (1, "deadbeef00000000000000000000000000000002".to_string()),
+            (42, "beadfeed00000000000000000000000000000007".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn map_pull_heads_matches_same_repo_and_skips_forks() {
+    let pull_heads = vec![
+        (1, "sha_feature".to_string()),
+        (2, "sha_fork_only".to_string()),
+    ];
+    let mut head_shas = HashMap::new();
+    head_shas.insert("sha_feature".to_string(), "feature-1".to_string());
+    head_shas.insert("sha_main".to_string(), "main".to_string());
+
+    let discovery = map_pull_heads_to_branches(&pull_heads, &head_shas);
+    assert_eq!(
+        discovery.open,
+        vec![DiscoveredPr {
+            number: 1,
+            head_branch: "feature-1".to_string()
+        }]
+    );
+    assert_eq!(discovery.skipped_forks, vec![2]);
+}
+
+// ---- State persistence ------------------------------------------------------
+
+#[test]
+fn state_round_trips_and_defaults_when_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(load_state(dir.path()).managed.is_empty());
+
+    let mut state = PrAutotrackState::default();
+    state.managed.insert(
+        "pr/7".to_string(),
+        ManagedPr {
+            pr: 7,
+            head_branch: "feature-7".to_string(),
+            worktree: dir.path().join("pr-worktrees/pr-7"),
+            tracking_ref: "refs/tracedecay/pr/7".to_string(),
+        },
+    );
+    save_state(dir.path(), &state).unwrap();
+
+    let reloaded = load_state(dir.path());
+    assert_eq!(reloaded.managed.len(), 1);
+    assert_eq!(reloaded.managed["pr/7"].pr, 7);
+
+    let summary = managed_summary(dir.path());
+    assert_eq!(summary.len(), 1);
+    assert_eq!(summary[0].branch, "pr/7");
+    assert_eq!(summary[0].head_branch, "feature-7");
+}
+
+// ---- Reconcile: removal + idempotency (no index required) -------------------
+
+#[tokio::test]
+async fn reconcile_untracks_closed_pr_and_cleans_store() {
+    use crate::branch_meta::{BranchMeta, load_branch_meta, save_branch_meta};
+
+    let data_root = tempfile::tempdir().unwrap();
+    let repo_root = tempfile::tempdir().unwrap(); // not a git repo; git ops no-op
+
+    // Seed a tracked PR branch store entry + its DB file.
+    let mut meta = BranchMeta::new("main");
+    meta.add_branch("pr/5", "branches/pr_5.db", "main");
+    std::fs::create_dir_all(data_root.path().join("branches")).unwrap();
+    std::fs::write(data_root.path().join("branches/pr_5.db"), b"db").unwrap();
+    save_branch_meta(data_root.path(), &meta).unwrap();
+
+    // Seed autotrack state marking pr/5 as managed.
+    let mut state = PrAutotrackState::default();
+    state.managed.insert(
+        "pr/5".to_string(),
+        ManagedPr {
+            pr: 5,
+            head_branch: "feature-5".to_string(),
+            worktree: data_root.path().join("pr-worktrees/pr-5"),
+            tracking_ref: "refs/tracedecay/pr/5".to_string(),
+        },
+    );
+    save_state(data_root.path(), &state).unwrap();
+
+    // Empty discovery => PR 5 is closed/merged => must be untracked.
+    let report = reconcile_project(
+        repo_root.path(),
+        data_root.path(),
+        &PrDiscovery::default(),
+        10,
+    )
+    .await;
+
+    assert_eq!(report.untracked, vec!["pr/5".to_string()]);
+    assert!(report.tracked.is_empty());
+    assert!(load_state(data_root.path()).managed.is_empty());
+    let reloaded = load_branch_meta(data_root.path()).unwrap();
+    assert!(!reloaded.is_tracked("pr/5"));
+    assert!(!data_root.path().join("branches/pr_5.db").exists());
+}
+
+#[tokio::test]
+async fn reconcile_is_idempotent_for_already_managed_pr() {
+    let data_root = tempfile::tempdir().unwrap();
+    let repo_root = tempfile::tempdir().unwrap();
+
+    let mut state = PrAutotrackState::default();
+    state.managed.insert(
+        "pr/3".to_string(),
+        ManagedPr {
+            pr: 3,
+            head_branch: "feature-3".to_string(),
+            worktree: data_root.path().join("pr-worktrees/pr-3"),
+            tracking_ref: "refs/tracedecay/pr/3".to_string(),
+        },
+    );
+    save_state(data_root.path(), &state).unwrap();
+
+    let discovery = PrDiscovery {
+        open: vec![DiscoveredPr {
+            number: 3,
+            head_branch: "feature-3".to_string(),
+        }],
+        skipped_forks: vec![],
+    };
+    let report = reconcile_project(repo_root.path(), data_root.path(), &discovery, 10).await;
+
+    // Already managed and still open: nothing changes.
+    assert!(report.tracked.is_empty());
+    assert!(report.untracked.is_empty());
+    assert!(load_state(data_root.path()).managed.contains_key("pr/3"));
+}

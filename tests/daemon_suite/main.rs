@@ -17,3 +17,5 @@
 mod common;
 
 mod git_watch_test;
+#[cfg(unix)]
+mod pr_autotrack_test;

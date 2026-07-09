@@ -201,6 +201,16 @@ fn default_sync_orphan_db_gc_days() -> u64 {
 fn default_sync_auto_init() -> bool {
     true
 }
+fn default_sync_auto_track_pr_branches() -> bool {
+    false
+}
+fn default_sync_auto_track_pr_poll_secs() -> u64 {
+    300
+}
+/// Floor for the PR-autotrack poll interval; polls faster than this hammer the
+/// GitHub API / `git ls-remote` needlessly, so any smaller configured value is
+/// clamped up to this.
+pub const MIN_AUTO_TRACK_PR_POLL_SECS: u64 = 60;
 
 fn default_telemetry_timings() -> bool {
     true
@@ -271,6 +281,25 @@ pub struct SyncConfig {
     /// Auto-initialise never-indexed repos on first contact.
     #[serde(default = "default_sync_auto_init")]
     pub auto_init: bool,
+    /// Enable the daemon PR-branch auto-tracking mode: when on, the daemon polls
+    /// the repo's GitHub remote for open PRs and tracks/untracks each PR head
+    /// branch through the normal branch-tracking machinery. Off by default for
+    /// back-compat.
+    #[serde(default = "default_sync_auto_track_pr_branches")]
+    pub auto_track_pr_branches: bool,
+    /// Poll cadence (seconds) for PR-branch auto-tracking discovery. Clamped up
+    /// to [`MIN_AUTO_TRACK_PR_POLL_SECS`] at read time.
+    #[serde(default = "default_sync_auto_track_pr_poll_secs")]
+    pub auto_track_pr_poll_secs: u64,
+}
+
+impl SyncConfig {
+    /// The effective PR-autotrack poll interval, never below the safety floor.
+    #[must_use]
+    pub fn effective_auto_track_pr_poll_secs(&self) -> u64 {
+        self.auto_track_pr_poll_secs
+            .max(MIN_AUTO_TRACK_PR_POLL_SECS)
+    }
 }
 
 impl Default for SyncConfig {
@@ -290,6 +319,8 @@ impl Default for SyncConfig {
             branch_gc_days: default_sync_branch_gc_days(),
             orphan_db_gc_days: default_sync_orphan_db_gc_days(),
             auto_init: default_sync_auto_init(),
+            auto_track_pr_branches: default_sync_auto_track_pr_branches(),
+            auto_track_pr_poll_secs: default_sync_auto_track_pr_poll_secs(),
         }
     }
 }
@@ -363,6 +394,12 @@ impl SyncConfig {
         }
         if let Some(value) = env_bool("SYNC_AUTO_INIT") {
             self.auto_init = value;
+        }
+        if let Some(value) = env_bool("SYNC_AUTO_TRACK_PR_BRANCHES") {
+            self.auto_track_pr_branches = value;
+        }
+        if let Some(value) = env_parse("SYNC_AUTO_TRACK_PR_POLL_SECS") {
+            self.auto_track_pr_poll_secs = value;
         }
         self
     }
