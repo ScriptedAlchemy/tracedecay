@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.40](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.39...v0.0.40) - 2026-07-09
+
+### Added
+
+- compact tool telemetry ingestion across Codex, Claude Code, and Cursor ([#325](https://github.com/ScriptedAlchemy/tracedecay/pull/325))
+
+### Fixed
+
+- *(config)* atomic user-config saves with honest errors and recovery
+- eliminate three CI test flakes at their roots
+
+### Other
+
+- Merge pull request #322 from ScriptedAlchemy/codex/project-discovery-rendering
+- Merge remote-tracking branch 'origin/master' into codex/project-discovery-rendering-fixes
+- Merge pull request #338 from ScriptedAlchemy/codex/automation-resilience
+
 ## [0.0.39](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.38...v0.0.39) - 2026-07-08
 
 ### Fixed

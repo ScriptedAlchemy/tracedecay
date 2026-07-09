@@ -1,0 +1,44 @@
+{
+  "id": "trace_callers_compute_total",
+  "category": "call_tracing",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Who calls compute_total? List every caller.",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_callers",
+      "tracedecay_callers_for",
+      "tracedecay_call_chain",
+      "tracedecay_context",
+      "tracedecay_search"
+    ],
+    "acceptable": [
+      "tracedecay_body",
+      "tracedecay_grep",
+      "Read"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [
+    "place_order"
+  ],
+  "max_tool_calls": 5,
+  "notes": "Grep misses nothing here but call-graph is the intended tool; place_order is the only caller."
+}

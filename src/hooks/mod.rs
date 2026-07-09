@@ -14,6 +14,7 @@ mod codex;
 mod cursor;
 mod cursor_compact;
 mod cursor_shell;
+pub mod hint_outcomes;
 mod kiro;
 pub(crate) mod memory_inject;
 mod post_tool_use;

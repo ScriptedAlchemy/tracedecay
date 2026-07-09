@@ -143,7 +143,7 @@ fn deploy_stamps_version_and_binary_path() {
         serde_json::from_str(&std::fs::read_to_string(deploy_dir.join(".mcp.json")).unwrap())
             .unwrap();
     assert_eq!(
-        mcp["mcpServers"]["tracedecay"]["command"].as_str().unwrap(),
+        mcp["mcpServers"]["graph"]["command"].as_str().unwrap(),
         "/abs/bin/tracedecay"
     );
 }
@@ -321,7 +321,7 @@ fn install_permissions_coerces_non_object_parent() {
         .collect();
     assert!(allow.contains(&"mcp__tracedecay__search"));
     assert!(
-        allow.contains(&"mcp__plugin_tracedecay_tracedecay__search"),
+        allow.contains(&"mcp__plugin_tracedecay_graph__search"),
         "legacy entries must gain their plugin-namespace twin"
     );
     let mut sorted = allow.clone();

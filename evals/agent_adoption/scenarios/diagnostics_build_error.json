@@ -1,0 +1,46 @@
+{
+  "id": "diagnostics_build_error",
+  "category": "diagnostics",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "broken",
+  "status": "active",
+  "prompt": "This crate does not compile. Find the type error and tell me which function is wrong.",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_diagnostics",
+      "tracedecay_diagnose",
+      "tracedecay_context"
+    ],
+    "acceptable": [
+      "tracedecay_body",
+      "tracedecay_search",
+      "Read"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob",
+      "Bash"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack ",
+      "cargo",
+      "rustc"
+    ]
+  },
+  "ground_truth": [
+    "place_order",
+    "reserve_stock"
+  ],
+  "max_tool_calls": 6,
+  "notes": "Planted type error: place_order passes item.sku (String) where reserve_stock expects u32. Expect tracedecay_diagnostics rather than a raw `cargo check`."
+}

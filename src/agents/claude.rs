@@ -784,17 +784,24 @@ fn ensure_claude_dir(claude_dir: &Path) -> Result<()> {
 /// Permission-allowlist prefix for the tracedecay tools exposed through the
 /// Claude **plugin** MCP server. Claude namespaces a plugin server's tools as
 /// `mcp__plugin_<pluginName>_<serverKey>__<tool>`; with plugin name
-/// `tracedecay` and the server key `tracedecay` (see `plugin/.mcp.json`), that
-/// yields `mcp__plugin_tracedecay_tracedecay__<tool>`.
+/// `tracedecay` and the server key `graph` (see `plugin/.mcp.json`), that
+/// yields `mcp__plugin_tracedecay_graph__<tool>`. The server key is `graph`
+/// rather than `tracedecay` so the host UI renders `plugin tracedecay graph`
+/// instead of the redundant `plugin tracedecay tracedecay`.
 ///
 /// The legacy config-managed install wrote `mcp__tracedecay__<tool>` entries,
 /// which do NOT match the plugin namespace, so every plugin tool call prompted
 /// interactively (and hard-failed headless/in subagents). The installer now
 /// also writes the plugin-namespace twins.
-const PLUGIN_TOOL_PERM_PREFIX: &str = "mcp__plugin_tracedecay_tracedecay__";
+const PLUGIN_TOOL_PERM_PREFIX: &str = "mcp__plugin_tracedecay_graph__";
 /// Legacy config-managed permission prefix, kept only to detect and mirror
 /// existing entries into the plugin namespace during migration.
 const LEGACY_TOOL_PERM_PREFIX: &str = "mcp__tracedecay__";
+/// Prior plugin-namespace prefix, from when the plugin MCP server key was also
+/// `tracedecay` (`plugin_tracedecay_tracedecay`). Kept only to detect entries a
+/// pre-rename install wrote and mirror them onto the current `graph` namespace;
+/// like the legacy entries, they are never removed.
+const PRIOR_PLUGIN_TOOL_PERM_PREFIX: &str = "mcp__plugin_tracedecay_tracedecay__";
 
 /// Every managed tracedecay tool's plugin-namespace permission entry.
 fn plugin_tool_perms() -> Vec<String> {
@@ -805,11 +812,21 @@ fn plugin_tool_perms() -> Vec<String> {
 }
 
 /// Map a legacy `mcp__tracedecay__<tool>` permission entry to its
-/// plugin-namespace twin `mcp__plugin_tracedecay_tracedecay__<tool>`. Returns
+/// plugin-namespace twin `mcp__plugin_tracedecay_graph__<tool>`. Returns
 /// `None` for any entry that is not a legacy tracedecay tool permission.
 fn legacy_perm_to_plugin_twin(entry: &str) -> Option<String> {
     entry
         .strip_prefix(LEGACY_TOOL_PERM_PREFIX)
+        .map(|tool| format!("{PLUGIN_TOOL_PERM_PREFIX}{tool}"))
+}
+
+/// Map a prior plugin-namespace `mcp__plugin_tracedecay_tracedecay__<tool>`
+/// entry (written before the server key was renamed to `graph`) to its current
+/// `mcp__plugin_tracedecay_graph__<tool>` twin. Returns `None` for any entry
+/// that is not a prior plugin-namespace tracedecay tool permission.
+fn prior_plugin_perm_to_current_twin(entry: &str) -> Option<String> {
+    entry
+        .strip_prefix(PRIOR_PLUGIN_TOOL_PERM_PREFIX)
         .map(|tool| format!("{PLUGIN_TOOL_PERM_PREFIX}{tool}"))
 }
 
@@ -820,11 +837,14 @@ fn legacy_perm_to_plugin_twin(entry: &str) -> Option<String> {
 /// 1. the caller-supplied `tool_permissions` (the legacy `mcp__tracedecay__*`
 ///    namespace, preserved for backward compatibility);
 /// 2. the plugin-namespace twins for the full managed tool set
-///    (`mcp__plugin_tracedecay_tracedecay__*`) — the entries the plugin MCP
+///    (`mcp__plugin_tracedecay_graph__*`) — the entries the plugin MCP
 ///    server actually matches against; and
 /// 3. a plugin-namespace twin for every legacy `mcp__tracedecay__<tool>` entry
 ///    already present in the user's settings (migration for users whose only
-///    entries are legacy). Legacy entries are never removed.
+///    entries are legacy), and a current `graph` twin for every prior
+///    `mcp__plugin_tracedecay_tracedecay__<tool>` entry (migration for users
+///    installed before the server-key rename). Legacy and prior entries are
+///    never removed.
 fn install_permissions(settings: &mut serde_json::Value, tool_permissions: &[String]) {
     let existing: Vec<String> = settings["permissions"]["allow"]
         .as_array()
@@ -844,6 +864,11 @@ fn install_permissions(settings: &mut serde_json::Value, tool_permissions: &[Str
         .iter()
         .chain(tool_permissions.iter())
         .filter_map(|e| legacy_perm_to_plugin_twin(e))
+        .chain(
+            existing
+                .iter()
+                .filter_map(|e| prior_plugin_perm_to_current_twin(e)),
+        )
         .collect();
     let mut allow: Vec<String> = existing;
     for tool in tool_permissions
@@ -1703,7 +1728,7 @@ fn warn_missing_permissions(settings: &serde_json::Value) {
 
     // Check the plugin namespace — the entries the plugin MCP server matches.
     // A machine mid-upgrade may carry legacy `mcp__tracedecay__*` entries but
-    // lack the `mcp__plugin_tracedecay_tracedecay__*` twins, which is exactly
+    // lack the `mcp__plugin_tracedecay_graph__*` twins, which is exactly
     // what causes per-call prompts, so that is the gap worth warning about.
     let expected = plugin_tool_perms();
     let missing_count = expected

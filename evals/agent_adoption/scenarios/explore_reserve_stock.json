@@ -1,0 +1,48 @@
+{
+  "id": "explore_reserve_stock",
+  "category": "code_exploration",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "How does stock reservation work in this crate?",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_context",
+      "tracedecay_search",
+      "tracedecay_body",
+      "tracedecay_outline",
+      "tracedecay_read",
+      "tracedecay_grep"
+    ],
+    "acceptable": [
+      "tracedecay_callers",
+      "tracedecay_callees",
+      "tracedecay_callers_for",
+      "Read"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [
+    "reserve_stock",
+    "check_availability",
+    "stock"
+  ],
+  "max_tool_calls": 6,
+  "notes": "Expect tracedecay_context/search/body as the opening move, not Grep/Glob/cat."
+}

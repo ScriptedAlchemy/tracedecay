@@ -1,0 +1,42 @@
+{
+  "id": "feedback_currency",
+  "category": "feedback_behavior",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "What currency are order totals stored in, and is multi-currency supported? Base your answer on the project's recorded decisions.",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_fact_store",
+      "tracedecay_context"
+    ],
+    "acceptable": [
+      "tracedecay_memory_status",
+      "tracedecay_search"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [
+    "USD"
+  ],
+  "max_tool_calls": 5,
+  "seeded_fact": "currency_fact_id",
+  "grade_feedback": true,
+  "notes": "A seeded fact directly answers the task. The feedback subscore checks whether the agent calls tracedecay_fact_feedback (action=helpful) on the seeded currency fact after relying on it. Baseline expectation: fail."
+}

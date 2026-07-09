@@ -648,10 +648,31 @@ impl TraceDecay {
         let default_branch = meta.as_ref().map(|meta| meta.default_branch.as_str());
         let git_common_dir = crate::worktree::git_common_dir(&self.project_root);
         let git_remote_url = git_remote_url(&self.project_root);
+
+        // A shared project id can be reached from any linked worktree (see
+        // the git-common-dir alias registered below), so registering
+        // straight from `self.project_root` would let whichever worktree
+        // happens to touch the project last pin its canonical_root /
+        // display_root to a transient worktree path. Redirect registration
+        // to the primary checkout when one is detected and still exists.
+        let primary_root = crate::project_registry::primary_checkout_root(
+            &self.project_root,
+            git_common_dir.as_deref(),
+        );
+        let previous_canonical_root = if primary_root.is_some() {
+            global_db
+                .get_code_project(project_id)
+                .await
+                .map(|record| record.canonical_root)
+        } else {
+            None
+        };
+        let registration_root = primary_root.as_deref().unwrap_or(&self.project_root);
+
         let Some(project) = global_db
             .upsert_code_project(
                 project_id,
-                &self.project_root,
+                registration_root,
                 git_common_dir.as_deref(),
                 git_remote_url.as_deref(),
                 default_branch,
@@ -660,6 +681,27 @@ impl TraceDecay {
         else {
             return;
         };
+
+        if let Some(primary_root) = primary_root.as_deref() {
+            // The registry now points canonical_root/display_root at the
+            // primary checkout; keep this worktree itself resolvable for
+            // future lookups by registering its own path as an alias.
+            let _ = global_db
+                .upsert_project_alias(&self.project_root, &project.project_id)
+                .await;
+
+            let repaired_stale_worktree_root = previous_canonical_root.is_some_and(|previous| {
+                previous != crate::global_db::GlobalDb::canonical_project_key(primary_root)
+            });
+            if repaired_stale_worktree_root {
+                eprintln!(
+                    "warning: repaired tracedecay project '{project_id}' canonical_root — \
+                     it was pinned to a linked worktree ({}); restored to the primary checkout ({})",
+                    self.project_root.display(),
+                    primary_root.display()
+                );
+            }
+        }
 
         let store_id = profile_store_id(&project.project_id);
         let manifest_relpath = self

@@ -1,0 +1,44 @@
+{
+  "id": "dedupe_pricing",
+  "category": "duplicate_hunting",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Is there any duplicated or redundant logic in the pricing module? Point me at it.",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_redundancy",
+      "tracedecay_similar",
+      "tracedecay_context",
+      "tracedecay_search"
+    ],
+    "acceptable": [
+      "tracedecay_body",
+      "tracedecay_outline",
+      "Read"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [
+    "compute_total",
+    "compute_grand_total"
+  ],
+  "max_tool_calls": 6,
+  "notes": "compute_total and compute_grand_total are byte-identical bodies."
+}

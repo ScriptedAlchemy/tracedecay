@@ -8,7 +8,7 @@ use tracedecay::agents::{
 
 /// Prefix for the plugin-namespace tool permission entries the installer writes
 /// so the plugin MCP server's tools are auto-approved.
-const PLUGIN_PERM_PREFIX: &str = "mcp__plugin_tracedecay_tracedecay__";
+const PLUGIN_PERM_PREFIX: &str = "mcp__plugin_tracedecay_graph__";
 
 /// Every managed tool's expected plugin-namespace permission entry.
 fn expected_plugin_tool_perms() -> Vec<String> {
@@ -85,8 +85,8 @@ fn test_install_deploys_plugin_mcp_server() {
     // the resolved absolute binary path), not in ~/.claude.json.
     let plugin_mcp = home.join(".claude/plugins/marketplaces/tracedecay/.mcp.json");
     let mcp = read_json(&plugin_mcp);
-    let ts = &mcp["mcpServers"]["tracedecay"];
-    assert!(ts.is_object(), "mcpServers.tracedecay should be an object");
+    let ts = &mcp["mcpServers"]["graph"];
+    assert!(ts.is_object(), "mcpServers.graph should be an object");
     assert_eq!(
         ts["command"].as_str().unwrap(),
         "/usr/local/bin/tracedecay",
@@ -241,6 +241,51 @@ fn test_install_migrates_legacy_permissions_to_plugin_twins() {
     assert!(
         allow_strs.contains(&plugin_search.as_str()),
         "legacy mcp__tracedecay__search must gain its plugin-namespace twin"
+    );
+    assert!(
+        allow_strs.contains(&"Bash(*)"),
+        "unrelated permission must be preserved"
+    );
+}
+
+/// A machine installed before the plugin MCP server key was renamed from
+/// `tracedecay` to `graph` carries `mcp__plugin_tracedecay_tracedecay__*`
+/// entries. Install must add the current `mcp__plugin_tracedecay_graph__*`
+/// twin (so the renamed plugin server's tools stay auto-approved) while
+/// preserving the prior entry.
+#[test]
+fn test_install_migrates_prior_plugin_permissions_to_graph_twins() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let claude_dir = home.join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "permissions": { "allow": [
+                "mcp__plugin_tracedecay_tracedecay__tracedecay_context",
+                "Bash(*)"
+            ] }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let mut ctx = make_install_ctx(home);
+    ctx.tool_permissions = Vec::new();
+    ClaudeIntegration.install(&ctx).unwrap();
+
+    let settings = read_json(&claude_dir.join("settings.json"));
+    let allow_strs = permission_allowlist(&settings);
+
+    assert!(
+        allow_strs.contains(&"mcp__plugin_tracedecay_tracedecay__tracedecay_context"),
+        "prior plugin-namespace entry must be preserved (not removed)"
+    );
+    let graph_twin = format!("{PLUGIN_PERM_PREFIX}tracedecay_context");
+    assert!(
+        allow_strs.contains(&graph_twin.as_str()),
+        "prior mcp__plugin_tracedecay_tracedecay__* entry must gain its graph twin"
     );
     assert!(
         allow_strs.contains(&"Bash(*)"),

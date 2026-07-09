@@ -701,7 +701,7 @@ fn doctor_check_plugin_mcp(dc: &mut DoctorCounters, mcp_path: &Path) {
         return;
     }
     let settings = load_json_file(mcp_path);
-    let server = &settings["mcpServers"]["tracedecay"];
+    let server = &settings["mcpServers"]["graph"];
     if server["command"]
         .as_str()
         .is_some_and(|command| !command.is_empty())
@@ -1205,7 +1205,7 @@ mod tests {
             .filter_map(|line| {
                 let entry = line.trim().trim_end_matches(',').trim_matches('"');
                 entry
-                    .strip_prefix("tracedecay:")
+                    .strip_prefix("graph:")
                     .filter(|tool| tool.starts_with("tracedecay_"))
                     .map(str::to_string)
             })

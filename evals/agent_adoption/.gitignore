@@ -1,0 +1,9 @@
+# Live run artifacts (contain machine-absolute temp paths) — never commit.
+runs/
+*.stdout.jsonl
+*.stderr.log
+scoreboard.json
+report.md
+# Cargo build output if the fixture is ever checked in-place.
+fixture/target/
+fixture_broken/target/

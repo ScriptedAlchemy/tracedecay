@@ -806,6 +806,12 @@ fn synthetic_prompt_cases() -> Vec<HintEval> {
             &["tracedecay_diff_context", "tracedecay_impact"],
         ),
         prompt_eval(
+            "what-breaks-question",
+            "what breaks if I change the signature of classify_hint?",
+            Some(HintCategory::Impact),
+            &["tracedecay_impact", "tracedecay_affected"],
+        ),
+        prompt_eval(
             "symbol-definition-question",
             "find definition of ToolHintInput",
             Some(HintCategory::SymbolLookup),
@@ -852,6 +858,12 @@ fn synthetic_prompt_cases() -> Vec<HintEval> {
             "is there duplicate logic or a similar helper before I add another classifier?",
             Some(HintCategory::TypeOrientation),
             &["tracedecay_redundancy"],
+        ),
+        prompt_eval(
+            "type-hierarchy-question",
+            "what is the full trait hierarchy for HintCategory, all implementors and extenders?",
+            Some(HintCategory::TypeOrientation),
+            &["tracedecay_type_hierarchy"],
         ),
         prompt_eval(
             "safe-mechanical-edit",

@@ -1632,7 +1632,7 @@ fn def_type_hierarchy() -> ToolDefinition {
     def(
         "tracedecay_type_hierarchy",
         "Type Hierarchy",
-        "Show the full type hierarchy for a trait/interface/class: all implementors and extenders, recursively.",
+        "Use when asked a trait/interface/class type-hierarchy question — trigger before manually grepping `impl X for` / `extends X` chains across files. Returns the full recursive tree of implementors and extenders for a resolved type node.",
         json!({
             "type": "object",
             "properties": {
@@ -2959,7 +2959,7 @@ fn def_lcm_compress() -> ToolDefinition {
     def_rw(
         "tracedecay_lcm_compress",
         "LCM Compress",
-        "Advance the LCM compression lifecycle in the active project or Hermes profile store without invoking an auxiliary LLM.",
+        "Operator/host-lifecycle tool: called by an agent host's own pre-compact or compaction hook, not by a model in response to a user request. Advances the LCM compression lifecycle in the active project or Hermes profile store without invoking an auxiliary LLM.",
         json!({
             "type": "object",
             "properties": {
@@ -3072,7 +3072,7 @@ fn def_lcm_session_boundary() -> ToolDefinition {
     def_rw(
         "tracedecay_lcm_session_boundary",
         "LCM Session Boundary",
-        "Report a compression-boundary session start. When the old session does not match the bound session the boundary skipped carry-over and a short compression cooldown starts for the new session.",
+        "Operator/host-lifecycle tool: called by an agent host's own session-boundary hook to report a compression-boundary session start, not by a model in response to a user request. When the old session does not match the bound session the boundary skipped carry-over and a short compression cooldown starts for the new session.",
         json!({
             "type": "object",
             "properties": {
