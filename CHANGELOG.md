@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.45](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.44...v0.0.45) - 2026-07-09
+
+### Added
+
+- add investigating-unexpected-changes skill + hint
+
+### Fixed
+
+- *(mcp)* anchor PR context at merge base
+- *(skills)* reconcile bundled skill registries
+- narrow force-push hint triggers to possessive confusion forms
+
+### Other
+
+- *(runtime)* keep process identity API minimal ([#398](https://github.com/ScriptedAlchemy/tracedecay/pull/398))
+- *(mcp)* tree-sitter masked source for text scanners ([#391](https://github.com/ScriptedAlchemy/tracedecay/pull/391))
+- Merge pull request #395 from ScriptedAlchemy/codex/post-wave-cleanup
+- *(dashboard)* isolate fixtures from session catch-up ([#394](https://github.com/ScriptedAlchemy/tracedecay/pull/394))
+- *(git-watch)* observe exact debounce drains ([#393](https://github.com/ScriptedAlchemy/tracedecay/pull/393))
+- *(skills)* validate branch context against live Git
+
 ## [0.0.44](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.43...v0.0.44) - 2026-07-09
 
 ### Added
