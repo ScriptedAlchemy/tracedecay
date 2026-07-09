@@ -844,7 +844,7 @@ fn set_private_file_permissions(_path: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{append_lock_path, PrivateStoreIo};
+    use super::{PrivateStoreIo, append_lock_path};
     use serde_json::Value;
     use std::sync::{Arc, Barrier};
 
