@@ -738,7 +738,9 @@ async fn handle_branch_autotrack_action(
             let mut config = load_config_with_identity(&project_path).await?;
             config.sync.auto_track_pr_branches = false;
             save_config_with_identity(&project_path, &config).await?;
-            eprintln!("\x1b[32m✔\x1b[0m PR auto-tracking disabled.");
+            eprintln!(
+                "\x1b[32m✔\x1b[0m PR auto-tracking disabled. The daemon tears down any managed PR worktrees, refs, synthetic branches and stores on its next poll cycle."
+            );
         }
     }
     Ok(())

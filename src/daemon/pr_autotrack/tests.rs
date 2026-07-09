@@ -10,7 +10,11 @@ fn gh_pr_list_splits_open_same_repo_from_forks() {
         {"number": 3, "headRefName": "closed-branch", "headRefOid": "sha-closed", "state": "CLOSED", "isCrossRepository": false},
         {"number": 4, "headRefName": "feature-b", "headRefOid": "sha-b", "state": "OPEN", "isCrossRepository": false}
     ]"#;
-    let discovery = parse_gh_pr_list(json).unwrap();
+    let discovery = parse_gh_pr_list(json, 200).unwrap();
+    assert!(
+        !discovery.partial,
+        "four PRs under a 200 limit are complete"
+    );
     assert_eq!(
         discovery.open,
         vec![
@@ -82,6 +86,23 @@ fn map_pull_heads_matches_same_repo_and_skips_forks() {
         }]
     );
     assert_eq!(discovery.skipped_forks, vec![2]);
+}
+
+#[test]
+fn gh_pr_list_flags_partial_when_result_reaches_limit() {
+    let json = r#"[
+        {"number": 1, "headRefName": "a", "headRefOid": "s1", "state": "OPEN", "isCrossRepository": false},
+        {"number": 2, "headRefName": "b", "headRefOid": "s2", "state": "OPEN", "isCrossRepository": false}
+    ]"#;
+    // Two results at a limit of two: the listing was truncated → partial.
+    let truncated = parse_gh_pr_list(json, 2).unwrap();
+    assert!(
+        truncated.partial,
+        "count == limit must be treated as possibly truncated"
+    );
+    // Same results under a higher limit are complete.
+    let complete = parse_gh_pr_list(json, 5).unwrap();
+    assert!(!complete.partial);
 }
 
 // ---- State persistence ------------------------------------------------------
@@ -197,6 +218,7 @@ async fn reconcile_is_idempotent_for_already_managed_pr() {
             head_sha: "sha-3".to_string(),
         }],
         skipped_forks: vec![],
+        ..Default::default()
     };
     let report = reconcile_project(repo_root.path(), data_root.path(), &discovery, 10).await;
 
@@ -208,4 +230,56 @@ async fn reconcile_is_idempotent_for_already_managed_pr() {
             .managed
             .contains_key("tracedecay/autotrack/pr/3")
     );
+}
+
+#[tokio::test]
+async fn partial_discovery_suppresses_removals() {
+    use crate::branch_meta::{BranchMeta, load_branch_meta, save_branch_meta};
+
+    let data_root = tempfile::tempdir().unwrap();
+    let repo_root = tempfile::tempdir().unwrap();
+
+    // Seed a managed PR branch store + entry, exactly as the untrack test does.
+    let mut meta = BranchMeta::new("main");
+    meta.add_branch("pr/5", "branches/pr_5.db", "main");
+    std::fs::create_dir_all(data_root.path().join("branches")).unwrap();
+    std::fs::write(data_root.path().join("branches/pr_5.db"), b"db").unwrap();
+    save_branch_meta(data_root.path(), &meta).unwrap();
+
+    let mut state = PrAutotrackState::default();
+    state.managed.insert(
+        "pr/5".to_string(),
+        ManagedPr {
+            pr: 5,
+            head_branch: "feature-5".to_string(),
+            head_sha: "sha-5".to_string(),
+            worktree: data_root.path().join("pr-worktrees/pr-5"),
+            tracking_ref: "refs/tracedecay/pr/5".to_string(),
+        },
+    );
+    save_state(data_root.path(), &state).unwrap();
+
+    // Empty BUT partial discovery: PR 5 is absent only because the listing was
+    // truncated, not because it closed — it must NOT be untracked.
+    let discovery = PrDiscovery {
+        partial: true,
+        ..Default::default()
+    };
+    let report = reconcile_project(repo_root.path(), data_root.path(), &discovery, 10).await;
+
+    assert!(
+        report.removals_suppressed,
+        "partial view suppresses removals"
+    );
+    assert!(report.untracked.is_empty(), "no untrack on a partial view");
+    assert!(
+        load_state(data_root.path()).managed.contains_key("pr/5"),
+        "managed entry survives a partial discovery"
+    );
+    assert!(
+        load_branch_meta(data_root.path())
+            .unwrap()
+            .is_tracked("pr/5")
+    );
+    assert!(data_root.path().join("branches/pr_5.db").exists());
 }
