@@ -5,7 +5,7 @@
 //! tokens-saved count. All operations are best-effort: failures are silently
 //! ignored so they never block the main MCP server loop.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -822,6 +822,29 @@ async fn add_session_parent_column_after_missing_check(
     }
 }
 
+/// Process-global switch for the detached structured-row backfill sweep that
+/// [`GlobalDb::open_at`] schedules. On by default; tests flip it off so they can
+/// drive [`GlobalDb::run_structured_backfill`] synchronously against a
+/// deterministic store.
+static BACKGROUND_STRUCTURED_BACKFILL_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+/// Store paths (by db path) that already have a structured-row sweep running in
+/// this process, so concurrent opens don't stack duplicate sweeps.
+fn structured_backfill_in_flight() -> &'static std::sync::Mutex<HashSet<PathBuf>> {
+    static IN_FLIGHT: std::sync::OnceLock<std::sync::Mutex<HashSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    IN_FLIGHT.get_or_init(|| std::sync::Mutex::new(HashSet::new()))
+}
+
+/// Enables or disables the detached background structured-row sweep. Intended
+/// for tests that need the sweep to run only when they explicitly drive it via
+/// [`GlobalDb::run_structured_backfill`].
+#[doc(hidden)]
+pub fn set_background_structured_backfill_enabled(enabled: bool) {
+    BACKGROUND_STRUCTURED_BACKFILL_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
 impl GlobalDb {
     pub fn db_path(&self) -> &Path {
         &self.db_path
@@ -1106,6 +1129,11 @@ impl GlobalDb {
         // Marker-guarded (runs once per store) and fail-open, like the LCM
         // schema migrations above.
         let _ = crate::sessions::transcript_backfill::backfill_transcript_facts(&db.conn).await;
+        // Recover structured rows skipped by legacy transcript parsers. This
+        // runs on every open (per hook event, per CLI/MCP invocation), so it
+        // must not block: schedule it on a detached background task rather than
+        // synchronously reading and re-parsing a batch of multi-MB transcripts.
+        db.spawn_structured_backfill();
 
         Some(db)
     }
@@ -1142,6 +1170,62 @@ impl GlobalDb {
     /// server queries the LCM tables directly).
     pub(crate) fn dashboard_connection(&self) -> Connection {
         self.conn.clone()
+    }
+
+    pub(crate) fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
+    /// Schedules the structured-row backfill sweep on a detached task so the
+    /// hot `open_at` path returns immediately instead of synchronously
+    /// re-reading and re-parsing a batch of multi-MB transcripts.
+    ///
+    /// Concurrency: the sweep opens its own connection, its writes are
+    /// idempotent upserts keyed on `(provider, message_id)`, and its path
+    /// watermark advances per file — so overlapping with live ingest is safe.
+    /// A process-wide in-flight guard (keyed by store path) skips the spawn
+    /// when a sweep for this store is already running, so stacked opens don't
+    /// stack sweeps. A short-lived runtime may drop the task before it
+    /// finishes; that is fine — the marker/watermark simply let a later open
+    /// resume where it left off.
+    fn spawn_structured_backfill(&self) {
+        if !BACKGROUND_STRUCTURED_BACKFILL_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        let db_path = self.db_path.clone();
+        {
+            let mut in_flight = match structured_backfill_in_flight().lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if !in_flight.insert(db_path.clone()) {
+                // A sweep for this store is already in flight in this process.
+                return;
+            }
+        }
+        tokio::spawn(async move {
+            // Re-open an independent handle to the same store (the scheduling
+            // open already ensured its schema) so the sweep never shares the
+            // connection handed back to the caller.
+            if let Some(db) = GlobalDb::open_at_assuming_schema(&db_path).await {
+                let _ = crate::sessions::transcript_backfill::backfill_structured_rows(&db).await;
+            }
+            let mut in_flight = match structured_backfill_in_flight().lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            in_flight.remove(&db_path);
+        });
+    }
+
+    /// Runs the structured-row backfill sweep synchronously to completion for
+    /// the current bounded batch, returning the number of rows inserted.
+    /// `open_at` drives this in the background; callers (and tests) that need a
+    /// deterministic sweep invoke it directly.
+    pub async fn run_structured_backfill(&self) -> Option<u64> {
+        crate::sessions::transcript_backfill::backfill_structured_rows(self)
+            .await
+            .map(|stats| stats.inserted)
     }
 
     /// Transcript-ingest backlog for the session store backing this DB.
@@ -2806,6 +2890,108 @@ impl GlobalDb {
             }
             Err(_) => false,
         }
+    }
+
+    /// Inserts messages whose `(provider, message_id)` key is absent, leaving
+    /// existing rows untouched. Returns inserted row count, or `None` after
+    /// rolling back on any database error.
+    pub(crate) async fn insert_absent_session_messages(
+        &self,
+        messages: &[SessionMessageRecord],
+    ) -> Option<u64> {
+        if messages.is_empty() {
+            return Some(0);
+        }
+        // Do the presence filtering as plain reads *before* taking the write
+        // lock. The old code ran the per-message existence probe inside
+        // `BEGIN IMMEDIATE`, holding the store's single-writer slot for the
+        // whole batch just to discover most rows were already present.
+        let present = self.present_session_message_keys(messages).await?;
+        let absent: Vec<&SessionMessageRecord> = messages
+            .iter()
+            .filter(|message| {
+                !present.contains(&(message.provider.clone(), message.message_id.clone()))
+            })
+            .collect();
+        if absent.is_empty() {
+            return Some(0);
+        }
+
+        if self.conn.execute("BEGIN IMMEDIATE", ()).await.is_err() {
+            return None;
+        }
+        let mut inserted = 0u64;
+        for message in absent {
+            // The presence probe ran outside this transaction, so a concurrent
+            // live ingest could insert this key in the small TOCTOU window.
+            // That is harmless: `upsert_session_message_in_existing_tx` writes
+            // through `ON CONFLICT(provider, message_id) DO UPDATE` upserts, and
+            // the row re-parsed from the *same* transcript is byte-for-byte what
+            // the racing writer stored — the update rewrites identical content
+            // rather than clobbering the row with foreign data.
+            if !self.upsert_session_message_in_existing_tx(message).await {
+                let _ = self.conn.execute("ROLLBACK", ()).await;
+                return None;
+            }
+            inserted += 1;
+        }
+        if self.conn.execute("COMMIT", ()).await.is_ok() {
+            return Some(inserted);
+        }
+        let _ = self.conn.execute("ROLLBACK", ()).await;
+        None
+    }
+
+    /// Collects the `(provider, message_id)` keys from `messages` that already
+    /// exist in `session_messages`, probing in chunks of 500 ids grouped by
+    /// provider. Runs as plain reads *outside* any write transaction so the
+    /// presence filtering never holds the store's single writer slot. `None`
+    /// on a query error, so the caller aborts rather than treating an
+    /// unreadable row as absent.
+    async fn present_session_message_keys(
+        &self,
+        messages: &[SessionMessageRecord],
+    ) -> Option<HashSet<(String, String)>> {
+        const CHUNK: usize = 500;
+        let mut by_provider: HashMap<&str, Vec<&str>> = HashMap::new();
+        for message in messages {
+            by_provider
+                .entry(message.provider.as_str())
+                .or_default()
+                .push(message.message_id.as_str());
+        }
+        let mut present: HashSet<(String, String)> = HashSet::new();
+        for (provider, ids) in by_provider {
+            for chunk in ids.chunks(CHUNK) {
+                let placeholders = vec!["?"; chunk.len()].join(", ");
+                let sql = format!(
+                    "SELECT message_id FROM session_messages
+                     WHERE provider = ? AND message_id IN ({placeholders})"
+                );
+                let mut values: Vec<Value> = Vec::with_capacity(chunk.len() + 1);
+                values.push(Value::Text(provider.to_string()));
+                for id in chunk {
+                    values.push(Value::Text((*id).to_string()));
+                }
+                let mut rows = self
+                    .conn
+                    .query(&sql, libsql::params_from_iter(values))
+                    .await
+                    .ok()?;
+                loop {
+                    match rows.next().await {
+                        Ok(Some(row)) => {
+                            if let Ok(message_id) = row.get::<String>(0) {
+                                present.insert((provider.to_string(), message_id));
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(_) => return None,
+                    }
+                }
+            }
+        }
+        Some(present)
     }
 
     async fn upsert_lcm_summary_for_transcript_summary(

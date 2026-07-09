@@ -1759,7 +1759,7 @@ impl McpServer {
         let parsed: std::result::Result<super::transport::JsonRpcRequest, _> =
             serde_json::from_str(line);
         let response = match parsed {
-            Ok(request) => self.handle_request(&request).await,
+            Ok(request) => Box::pin(self.handle_request(&request)).await,
             Err(e) => Some(super::transport::JsonRpcResponse::error(
                 Value::Null,
                 super::transport::ErrorCode::ParseError,
@@ -1906,12 +1906,12 @@ impl McpServer {
                             )
                             .await;
                     }
-                    self.handle_request_with_timings_and_implicit_project(
+                    Box::pin(self.handle_request_with_timings_and_implicit_project(
                         &request,
                         timings_override.unwrap_or_else(|| self.timings_enabled()),
                         &mut route_cache,
                         connection_route.implicit_project_path(),
-                    )
+                    ))
                     .await
                 }
                 Err(e) => Some(JsonRpcResponse::error(
@@ -2036,8 +2036,12 @@ impl McpServer {
     /// Returns `None` for notifications (requests without an `id`).
     pub(crate) async fn handle_request(&self, request: &JsonRpcRequest) -> Option<JsonRpcResponse> {
         let mut route_cache = self.hook_project_routes.snapshot();
-        self.handle_request_with_timings(request, self.timings_enabled(), &mut route_cache)
-            .await
+        Box::pin(self.handle_request_with_timings(
+            request,
+            self.timings_enabled(),
+            &mut route_cache,
+        ))
+        .await
     }
 
     async fn handle_request_with_timings(
@@ -2046,12 +2050,12 @@ impl McpServer {
         timings_enabled: bool,
         route_cache: &mut HookProjectRouteCache,
     ) -> Option<JsonRpcResponse> {
-        self.handle_request_with_timings_and_implicit_project(
+        Box::pin(self.handle_request_with_timings_and_implicit_project(
             request,
             timings_enabled,
             route_cache,
             None,
-        )
+        ))
         .await
     }
 

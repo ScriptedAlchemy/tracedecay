@@ -25,14 +25,17 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use libsql::{Connection, params};
 use serde_json::Value;
 
+use crate::global_db::GlobalDb;
+use crate::sessions::SessionMessageRecord;
 use crate::sessions::codex::{CodexTurnUsage, merge_usage_counters};
 use crate::sessions::cursor::TimestampCarry;
 use crate::sessions::shared::usage_counters_from;
+use crate::sessions::source::{StoredCursor, TranscriptSource};
 
 const MARKER_NAME: &str = "transcript_facts_backfill";
 const MARKER_VERSION: i64 = 1;
@@ -64,7 +67,7 @@ pub(crate) struct BackfillStats {
 /// number of rows that gained facts, or `None` on database errors (in which
 /// case the marker is not written and a later open retries).
 pub(crate) async fn backfill_transcript_facts(conn: &Connection) -> Option<BackfillStats> {
-    if marker_version(conn).await >= MARKER_VERSION {
+    if marker_version(conn, MARKER_NAME).await >= MARKER_VERSION {
         return Some(BackfillStats::default());
     }
 
@@ -121,11 +124,11 @@ pub(crate) async fn backfill_transcript_facts(conn: &Connection) -> Option<Backf
     Some(stats)
 }
 
-async fn marker_version(conn: &Connection) -> i64 {
+async fn marker_version(conn: &Connection, name: &str) -> i64 {
     let Ok(mut rows) = conn
         .query(
             "SELECT version FROM session_schema_migrations WHERE name = ?1",
-            params![MARKER_NAME],
+            params![name],
         )
         .await
     else {
@@ -397,4 +400,301 @@ fn derive_usage(provider: &str, record: &Value) -> Option<Value> {
             .or_else(|| record.get("message").and_then(usage_counters_from)),
         _ => None,
     }
+}
+
+// Structured-row backfill replays stored Claude/Codex transcripts through the
+// current parser and inserts message ids missing from legacy stores.
+
+const STRUCTURED_MARKER_NAME: &str = "structured_rows_backfill";
+const STRUCTURED_MARKER_VERSION: i64 = 1;
+/// Base name of the sweep's path watermark. The live key is namespaced by the
+/// marker version (see [`structured_cursor_key`]) so bumping
+/// [`STRUCTURED_MARKER_VERSION`] naturally starts the re-sweep from a fresh
+/// (never-written) cursor instead of resuming past the last file the prior
+/// version already covered.
+const STRUCTURED_CURSOR_KEY_PREFIX: &str = "structured_backfill_cursor";
+const STRUCTURED_BACKFILL_BATCH: usize = 32;
+/// Transcripts larger than this are skipped (with a logged warning and a cursor
+/// advance) rather than materialized whole. Threading a byte offset through the
+/// watermark would balloon the diff, so we cap file size instead — pathological
+/// multi-hundred-MB JSONL transcripts are the only ones affected.
+const STRUCTURED_BACKFILL_MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
+const STRUCTURED_PROVIDERS: [&str; 2] = ["claude", "codex"];
+
+/// Version-namespaced watermark key. Because the version is part of the key, a
+/// bump to [`STRUCTURED_MARKER_VERSION`] yields a key that has never been
+/// written, so [`read_backfill_cursor`] returns the empty string and the sweep
+/// re-parses the whole history from the start.
+fn structured_cursor_key() -> String {
+    format!("{STRUCTURED_CURSOR_KEY_PREFIX}:v{STRUCTURED_MARKER_VERSION}")
+}
+
+#[derive(Default, Clone, Copy)]
+pub(crate) struct StructuredBackfillStats {
+    pub(crate) inserted: u64,
+    pub(crate) files_scanned: u64,
+}
+
+struct StructuredCandidate {
+    provider: String,
+    source_path: String,
+}
+
+/// Re-parses the next bounded transcript batch and inserts rows missing from
+/// legacy stores.
+pub(crate) async fn backfill_structured_rows(db: &GlobalDb) -> Option<StructuredBackfillStats> {
+    let conn = db.conn();
+    if marker_version(conn, STRUCTURED_MARKER_NAME).await >= STRUCTURED_MARKER_VERSION {
+        return Some(StructuredBackfillStats::default());
+    }
+    ensure_backfill_meta_table(conn).await?;
+    let cursor_key = structured_cursor_key();
+    let cursor = read_backfill_cursor(conn, &cursor_key).await;
+    let candidates = load_structured_candidates(conn, &cursor, STRUCTURED_BACKFILL_BATCH).await?;
+    if candidates.is_empty() {
+        mark_structured_backfill_complete(conn).await?;
+        return Some(StructuredBackfillStats::default());
+    }
+
+    let mut stats = StructuredBackfillStats::default();
+    for candidate in &candidates {
+        // Bound memory cheaply: an oversized transcript would be materialized
+        // whole by the full-file parse below, so skip it (and advance past it)
+        // rather than risk pinning hundreds of MB per parse.
+        if let Ok(meta) = std::fs::metadata(&candidate.source_path) {
+            if meta.len() > STRUCTURED_BACKFILL_MAX_FILE_BYTES {
+                eprintln!(
+                    "Structured backfill: skipping oversized transcript ({} bytes > {STRUCTURED_BACKFILL_MAX_FILE_BYTES} cap): {}",
+                    meta.len(),
+                    candidate.source_path
+                );
+                stats.files_scanned += 1;
+                write_backfill_cursor(conn, &cursor_key, &candidate.source_path).await?;
+                continue;
+            }
+        }
+
+        let project_paths =
+            load_project_paths_for_source(conn, &candidate.provider, &candidate.source_path)
+                .await?;
+        for project_path in project_paths {
+            let provider = candidate.provider.clone();
+            let source_path = candidate.source_path.clone();
+            let messages = match tokio::task::spawn_blocking(move || {
+                parse_structured_messages(&provider, &source_path, &project_path)
+            })
+            .await
+            {
+                // The parser ran to completion: rows to insert, or a clean
+                // decline (foreign/missing transcript) that yields nothing.
+                Ok(parsed) => parsed.unwrap_or_default(),
+                // The parser panicked on this file — a deterministic per-file
+                // failure. Holding the cursor here would re-poison every future
+                // open and starve all lexically-later files, so log it and fall
+                // through to advance past the file (it self-heals on a future
+                // marker-version bump). Environment errors take a different
+                // path: `insert_absent_session_messages` returns `None` below,
+                // which propagates and holds the cursor for a later retry.
+                Err(join_error) => {
+                    eprintln!(
+                        "Structured backfill: skipping transcript that failed to re-parse ({}): {join_error}",
+                        candidate.source_path
+                    );
+                    break;
+                }
+            };
+            if messages.is_empty() {
+                continue;
+            }
+            let inserted = db.insert_absent_session_messages(&messages).await?;
+            stats.inserted += inserted;
+        }
+        stats.files_scanned += 1;
+        write_backfill_cursor(conn, &cursor_key, &candidate.source_path).await?;
+    }
+
+    if stats.inserted > 0 {
+        eprintln!(
+            "Backfilled {} structured transcript row(s) across {} file(s).",
+            stats.inserted, stats.files_scanned
+        );
+    }
+    Some(stats)
+}
+
+fn parse_structured_messages(
+    provider: &str,
+    source_path: &str,
+    project_path: &str,
+) -> Option<Vec<SessionMessageRecord>> {
+    let source = provider_source(provider)?;
+    let parsed = source.parse_new(
+        Path::new(source_path),
+        StoredCursor::default(),
+        Path::new(project_path),
+        None,
+    )?;
+    Some(parsed.messages)
+}
+
+fn provider_source(provider: &str) -> Option<Box<dyn TranscriptSource>> {
+    let home = crate::sessions::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    match provider {
+        "claude" => Some(Box::new(crate::sessions::claude::ClaudeSource::with_home(
+            &home,
+        ))),
+        "codex" => Some(Box::new(crate::sessions::codex::CodexSource::with_home(
+            &home,
+        ))),
+        _ => None,
+    }
+}
+
+async fn load_structured_candidates(
+    conn: &Connection,
+    after_path: &str,
+    limit: usize,
+) -> Option<Vec<StructuredCandidate>> {
+    let providers = STRUCTURED_PROVIDERS
+        .map(|provider| format!("'{provider}'"))
+        .join(", ");
+    let sql = format!(
+        "SELECT DISTINCT sm.source_path, sm.provider
+         FROM session_messages sm
+         WHERE sm.provider IN ({providers})
+           AND sm.source_path IS NOT NULL
+           AND sm.source_path > ?1
+         ORDER BY sm.source_path
+         LIMIT ?2"
+    );
+    let mut rows = conn
+        .query(&sql, params![after_path, limit as i64])
+        .await
+        .ok()?;
+    let mut out = Vec::new();
+    // Match on `next()` explicitly: a mid-iteration `Err` must abort with `None`
+    // (this function's documented contract), not silently truncate — a partial
+    // list looks like fewer candidates and, once empty, would wrongly mark the
+    // whole sweep complete and advance the watermark past unscanned files.
+    loop {
+        match rows.next().await {
+            Ok(Some(row)) => {
+                let (Ok(source_path), Ok(provider)) = (row.get::<String>(0), row.get::<String>(1))
+                else {
+                    continue;
+                };
+                out.push(StructuredCandidate {
+                    provider,
+                    source_path,
+                });
+            }
+            Ok(None) => break,
+            Err(_) => return None,
+        }
+    }
+    Some(out)
+}
+
+async fn load_project_paths_for_source(
+    conn: &Connection,
+    provider: &str,
+    source_path: &str,
+) -> Option<Vec<String>> {
+    let mut rows = conn
+        .query(
+            "SELECT DISTINCT s.project_path
+             FROM session_messages sm
+             JOIN sessions s
+               ON s.provider = sm.provider AND s.session_id = sm.session_id
+             WHERE sm.provider = ?1
+               AND sm.source_path = ?2
+               AND s.project_path IS NOT NULL
+               AND s.project_path <> ''",
+            params![provider, source_path],
+        )
+        .await
+        .ok()?;
+    let mut out = Vec::new();
+    // As above: a mid-iteration `Err` must abort with `None` rather than drop
+    // project roots silently — a truncated list would parse against fewer cwds
+    // and then advance the watermark past the file forever.
+    loop {
+        match rows.next().await {
+            Ok(Some(row)) => {
+                if let Ok(project_path) = row.get::<String>(0) {
+                    out.push(project_path);
+                }
+            }
+            Ok(None) => break,
+            Err(_) => return None,
+        }
+    }
+    Some(out)
+}
+
+async fn ensure_backfill_meta_table(conn: &Connection) -> Option<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS session_backfill_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+        )",
+        (),
+    )
+    .await
+    .ok()?;
+    Some(())
+}
+
+async fn read_backfill_cursor(conn: &Connection, key: &str) -> String {
+    let Ok(mut rows) = conn
+        .query(
+            "SELECT value FROM session_backfill_meta WHERE key = ?1",
+            params![key],
+        )
+        .await
+    else {
+        return String::new();
+    };
+    match rows.next().await {
+        Ok(Some(row)) => row.get::<String>(0).unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+async fn write_backfill_cursor(conn: &Connection, key: &str, value: &str) -> Option<()> {
+    conn.execute(
+        "INSERT INTO session_backfill_meta(key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = unixepoch()",
+        params![key, value],
+    )
+    .await
+    .ok()?;
+    Some(())
+}
+
+async fn mark_structured_backfill_complete(conn: &Connection) -> Option<()> {
+    conn.execute(
+        "INSERT INTO session_schema_migrations(name, version)
+         VALUES (?1, ?2)
+         ON CONFLICT(name) DO UPDATE SET
+            version = excluded.version,
+            applied_at = unixepoch()",
+        params![STRUCTURED_MARKER_NAME, STRUCTURED_MARKER_VERSION],
+    )
+    .await
+    .ok()?;
+    // The sweep is done, so drop every watermark row for it: this version's
+    // key and any stale prior-version (or legacy un-versioned) keys. Keeps the
+    // meta table from accumulating dead cursors across marker-version bumps.
+    conn.execute(
+        "DELETE FROM session_backfill_meta WHERE key = ?1 OR key LIKE ?2",
+        params![
+            STRUCTURED_CURSOR_KEY_PREFIX,
+            format!("{STRUCTURED_CURSOR_KEY_PREFIX}:%")
+        ],
+    )
+    .await
+    .ok()?;
+    Some(())
 }

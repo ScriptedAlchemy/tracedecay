@@ -30,6 +30,7 @@ mod prompt_rules_parity_test;
 mod shared_skill_contract_test;
 mod skill_lint_claude_test;
 mod skill_lint_cursor_test;
+mod skill_materialization_test;
 mod skill_targets_test;
 mod skill_usage_test;
 mod tool_skill_coverage_test;

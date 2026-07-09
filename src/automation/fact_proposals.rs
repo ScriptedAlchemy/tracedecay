@@ -59,6 +59,23 @@ pub struct FactProposalRecord {
     pub apply_outcome: Option<AddFactOutcome>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Later near-duplicate proposals folded into this record.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub duplicate_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_duplicate_run_id: Option<String>,
+    /// Capped content samples from folded near-duplicate proposals.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folded_contents: Vec<String>,
+}
+
+const MAX_FOLDED_CONTENTS: usize = 10;
+const FOLDED_CONTENT_MAX_CHARS: usize = 500;
+
+// serde's `skip_serializing_if` requires the `fn(&T) -> bool` shape.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero(count: &u32) -> bool {
+    *count == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -167,7 +184,23 @@ pub async fn record_session_fact_proposals(
             .ok_or_else(|| config_error("accepted fact proposal missing add_fact_request"))?;
         let add_fact_request = serde_json::from_value::<AddFactRequest>(add_fact_request)
             .map_err(|e| config_error(format!("invalid accepted fact add_fact_request: {e}")))?;
-        if active_add_fact_request_exists(&store, &add_fact_request) {
+        let incoming_tokens = crate::memory::similarity::content_tokens(&add_fact_request.content);
+        if let Some(existing_idx) = find_exact_pending_proposal(&store, &add_fact_request) {
+            fold_duplicate(&mut store.proposals[existing_idx], run_id, now, None);
+            continue;
+        }
+        if applied_exact_match_exists(&store, &add_fact_request) {
+            continue;
+        }
+        if let Some(existing_idx) =
+            find_similar_pending_proposal(&store, &add_fact_request, &incoming_tokens)
+        {
+            fold_duplicate(
+                &mut store.proposals[existing_idx],
+                run_id,
+                now,
+                Some(&add_fact_request.content),
+            );
             continue;
         }
         let proposal = value.get("proposal").cloned();
@@ -187,6 +220,9 @@ pub async fn record_session_fact_proposals(
             apply_outcome: None,
             created_at: now,
             updated_at: now,
+            duplicate_count: 0,
+            last_duplicate_run_id: None,
+            folded_contents: Vec::new(),
         };
         records.push(record.clone());
         store.proposals.push(record);
@@ -210,6 +246,9 @@ pub async fn record_session_fact_proposals(
             apply_outcome: None,
             created_at: now,
             updated_at: now,
+            duplicate_count: 0,
+            last_duplicate_run_id: None,
+            folded_contents: Vec::new(),
         };
         records.push(record.clone());
         store.proposals.push(record);
@@ -218,10 +257,71 @@ pub async fn record_session_fact_proposals(
     Ok(records)
 }
 
-fn active_add_fact_request_exists(store: &FactProposalStore, request: &AddFactRequest) -> bool {
+const MIN_SIMILARITY_TOKENS: usize = 8;
+
+fn fold_duplicate(
+    target: &mut FactProposalRecord,
+    run_id: &str,
+    now: i64,
+    discarded_content: Option<&str>,
+) {
+    target.duplicate_count = target.duplicate_count.saturating_add(1);
+    target.last_duplicate_run_id = Some(run_id.to_string());
+    target.updated_at = now;
+    if let Some(content) = discarded_content {
+        if target.folded_contents.len() < MAX_FOLDED_CONTENTS {
+            let truncated: String = content.chars().take(FOLDED_CONTENT_MAX_CHARS).collect();
+            target.folded_contents.push(truncated);
+        }
+    }
+}
+
+fn find_similar_pending_proposal(
+    store: &FactProposalStore,
+    request: &AddFactRequest,
+    request_tokens: &std::collections::BTreeSet<String>,
+) -> Option<usize> {
+    if request_tokens.len() < MIN_SIMILARITY_TOKENS {
+        return None;
+    }
+    store.proposals.iter().position(|proposal| {
+        if proposal.state != FactProposalState::PendingApproval {
+            return false;
+        }
+        let Some(existing) = proposal.add_fact_request.as_ref() else {
+            return false;
+        };
+        if existing.category != request.category {
+            return false;
+        }
+        let existing_tokens = crate::memory::similarity::content_tokens(&existing.content);
+        if existing_tokens.len() < MIN_SIMILARITY_TOKENS {
+            return false;
+        }
+        let (_, token_overlap, overlap_coefficient) =
+            crate::memory::similarity::lexical_overlap_tokens(&existing_tokens, request_tokens);
+        token_overlap >= 0.45 && overlap_coefficient >= 0.65
+    })
+}
+
+fn find_exact_pending_proposal(
+    store: &FactProposalStore,
+    request: &AddFactRequest,
+) -> Option<usize> {
+    let content = normalize_fact_content(&request.content);
+    store.proposals.iter().position(|proposal| {
+        proposal.state == FactProposalState::PendingApproval
+            && proposal.add_fact_request.as_ref().is_some_and(|existing| {
+                existing.category == request.category
+                    && normalize_fact_content(&existing.content) == content
+            })
+    })
+}
+
+fn applied_exact_match_exists(store: &FactProposalStore, request: &AddFactRequest) -> bool {
     let content = normalize_fact_content(&request.content);
     store.proposals.iter().any(|proposal| {
-        proposal.state != FactProposalState::Rejected
+        proposal.state == FactProposalState::Applied
             && proposal.add_fact_request.as_ref().is_some_and(|existing| {
                 existing.category == request.category
                     && normalize_fact_content(&existing.content) == content

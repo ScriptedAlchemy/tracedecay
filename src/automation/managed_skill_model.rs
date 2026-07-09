@@ -16,6 +16,12 @@ pub const MAX_MANAGED_SUPPORT_FILES: usize = 20;
 pub const MAX_MANAGED_SUPPORT_FILE_BYTES: usize = 64 * 1024;
 pub const MAX_MANAGED_SKILL_BODY_BYTES: usize = 256 * 1024;
 
+/// Provenance marker written into the frontmatter of every host-loadable
+/// skill file that `TraceDecay` automation materializes. The materialization
+/// reconciler owns (updates/removes) only files carrying this exact marker, so
+/// user-authored and repo-local dev skills are never touched.
+pub const MATERIALIZED_SKILL_MANAGED_BY: &str = "tracedecay-automation";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillInstallTarget {
@@ -392,6 +398,62 @@ impl ManagedSkill {
         output.push_str(&self.body_markdown);
         output.push('\n');
         validate_native_skill_markdown(&output)?;
+        Ok(output)
+    }
+
+    /// Kebab-case slug used as the directory name for the host-loadable
+    /// materialized skill (`<skills_dir>/<slug>/SKILL.md`). Derived from the
+    /// managed-skill id the same way the native overlay derives its `name:`.
+    pub fn host_skill_slug(&self) -> String {
+        native_skill_name(&self.metadata.id)
+    }
+
+    /// `sha256` of the skill body markdown. Embedded as the `content-hash`
+    /// provenance field so the reconciler can detect user edits (forks) of a
+    /// materialized file without re-reading the profile store.
+    pub fn materialized_body_hash(&self) -> String {
+        format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(self.body_markdown.as_bytes()))
+        )
+    }
+
+    /// Renders a host-loadable `SKILL.md` with provenance frontmatter marking
+    /// the file as owned by `TraceDecay` automation. Hosts (Claude Code, Codex)
+    /// read `name`/`description`; the extra `managed-by`/`skill-id`/
+    /// `content-hash`/`skill-version` keys are ignored by the host but let the
+    /// reconciler own exactly its own files and detect drift.
+    pub fn render_materialized_skill_markdown(&self) -> Result<String> {
+        // Reuse the native name/description derivation + bounds so the host
+        // frontmatter shape matches the overlay exactly.
+        let name = native_skill_name(&self.metadata.id);
+        let description = managed_skill_description(&self.metadata.summary);
+        {
+            // Validate the host-facing fields via the native validator by
+            // rendering a name/description-only document first.
+            let native_only = format!(
+                "---\nname: {name}\ndescription: {}\n---\n\n{}\n",
+                frontmatter_string(&description),
+                self.body_markdown
+            );
+            validate_native_skill_markdown(&native_only)?;
+        }
+
+        let mut output = String::new();
+        output.push_str("---\n");
+        let _ = writeln!(output, "name: {name}");
+        let _ = writeln!(output, "description: {}", frontmatter_string(&description));
+        let _ = writeln!(output, "managed-by: {MATERIALIZED_SKILL_MANAGED_BY}");
+        let _ = writeln!(
+            output,
+            "skill-id: {}",
+            frontmatter_string(&self.metadata.id)
+        );
+        let _ = writeln!(output, "content-hash: {}", self.materialized_body_hash());
+        let _ = writeln!(output, "skill-version: {}", self.metadata.updated_at);
+        output.push_str("---\n\n");
+        output.push_str(&self.body_markdown);
+        output.push('\n');
         Ok(output)
     }
 

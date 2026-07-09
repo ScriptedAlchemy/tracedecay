@@ -408,7 +408,27 @@ pub(crate) async fn run_post_update_tasks(
             );
         }
     }
+    reconcile_materialized_managed_skills_after_update();
     Ok(())
+}
+
+/// Reconciles already-Active managed skills into every detected host skills
+/// directory on `tracedecay update`, so a skill approved before this binary
+/// shipped (or a body update applied since the last activation) still lands as
+/// a real, host-loadable `SKILL.md`. Fork-protected and best-effort: a failure
+/// here never fails the update.
+fn reconcile_materialized_managed_skills_after_update() {
+    let Ok(profile_root) = tracedecay::storage::default_profile_root() else {
+        return;
+    };
+    let project_root = std::env::current_dir()
+        .ok()
+        .or_else(tracedecay::agents::home_dir)
+        .unwrap_or_else(|| PathBuf::from("."));
+    tracedecay::automation::skill_materialization::reconcile_after_activation(
+        &profile_root,
+        &project_root,
+    );
 }
 
 #[cfg(test)]

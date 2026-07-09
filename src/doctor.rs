@@ -76,12 +76,71 @@ pub async fn run_doctor(agent_filter: Option<&str>) {
         for ag in &agents_to_check {
             ag.healthcheck(&mut dc, &hctx);
         }
+        check_managed_skill_materialization(&mut dc, home, &project_path);
     } else {
         dc.fail("Could not determine home directory");
     }
 
     check_network(&mut dc);
     print_summary(&dc);
+}
+
+/// Reports drift between the active managed-skill set and the host-loadable
+/// `SKILL.md` files `TraceDecay` automation materializes into detected
+/// `.claude`/`.codex` skills directories: missing (active but not on disk),
+/// forked (user-edited a managed file — the reconciler will not clobber it),
+/// conflict (a foreign file blocks the slot), or orphan (a managed file for a
+/// no-longer-active skill). A clean scope passes silently-ish with an info line.
+fn check_managed_skill_materialization(dc: &mut DoctorCounters, home: &Path, project_root: &Path) {
+    use crate::automation::skill_materialization::{SkillDrift, doctor_detected_scopes};
+
+    let Ok(profile_root) = crate::storage::default_profile_root() else {
+        return;
+    };
+    let scopes = match doctor_detected_scopes(&profile_root, home, project_root) {
+        Ok(scopes) => scopes,
+        Err(err) => {
+            dc.warn(&format!(
+                "Managed skill materialization check failed: {err}"
+            ));
+            return;
+        }
+    };
+    if scopes.is_empty() {
+        return;
+    }
+    eprintln!("\n\x1b[1mManaged skill materialization\x1b[0m");
+    for (scope, drift) in scopes {
+        if drift.is_empty() {
+            dc.pass(&format!(
+                "{}: materialized skills in sync",
+                scope.describe()
+            ));
+            continue;
+        }
+        for finding in drift {
+            let path = finding.path().display();
+            let skill_id = finding.skill_id();
+            match finding {
+                SkillDrift::Missing { .. } => dc.warn(&format!(
+                    "{}: '{skill_id}' active but not materialized ({path}); run `tracedecay update`",
+                    scope.describe()
+                )),
+                SkillDrift::Forked { .. } => dc.warn(&format!(
+                    "{}: '{skill_id}' materialized file was user-edited (forked); left untouched ({path})",
+                    scope.describe()
+                )),
+                SkillDrift::Conflict { .. } => dc.warn(&format!(
+                    "{}: '{skill_id}' cannot materialize — a non-managed file occupies {path}",
+                    scope.describe()
+                )),
+                SkillDrift::Orphan { .. } => dc.warn(&format!(
+                    "{}: stale materialized skill '{skill_id}' ({path}); run `tracedecay update` to remove",
+                    scope.describe()
+                )),
+            }
+        }
+    }
 }
 
 /// How the doctor "Current project" check sees the working directory's store.

@@ -42,10 +42,16 @@ pub fn content_tokens(content: &str) -> BTreeSet<String> {
 }
 
 pub fn lexical_overlap(a: &str, b: &str) -> (serde_json::Value, f64, f64) {
-    let a_tokens = content_tokens(a);
-    let b_tokens = content_tokens(b);
-    let shared: Vec<&String> = a_tokens.intersection(&b_tokens).collect();
-    let union = a_tokens.union(&b_tokens).count();
+    lexical_overlap_tokens(&content_tokens(a), &content_tokens(b))
+}
+
+/// Pre-tokenized variant of [`lexical_overlap`].
+pub fn lexical_overlap_tokens(
+    a_tokens: &BTreeSet<String>,
+    b_tokens: &BTreeSet<String>,
+) -> (serde_json::Value, f64, f64) {
+    let shared: Vec<&String> = a_tokens.intersection(b_tokens).collect();
+    let union = a_tokens.union(b_tokens).count();
     let min_size = a_tokens.len().min(b_tokens.len());
     let token_overlap = if union > 0 {
         (shared.len() as f64 / union as f64 * 10_000.0).round() / 10_000.0

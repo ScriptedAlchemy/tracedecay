@@ -429,6 +429,12 @@ fn refresh_managed_skill_exports_for_cli(profile_root: &std::path::Path) {
             );
         }
     }
+    // Materialize active managed skills as real, host-loadable SKILL.md files
+    // into every detected `.claude`/`.codex` skills directory (project + global).
+    tracedecay::automation::skill_materialization::reconcile_after_activation(
+        profile_root,
+        &project_root,
+    );
 }
 
 fn print_managed_skill(skill: &tracedecay::automation::managed_skills::ManagedSkill) {
