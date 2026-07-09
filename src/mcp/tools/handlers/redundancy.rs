@@ -277,16 +277,16 @@ async fn collect_candidates(
 /// collection (a recurring noise source in real scans: dist mirrors, package
 /// twins, and `.worktrees` self-duplicates). Opt back in with
 /// `include_generated_paths: true`.
+///
+/// Delegates to the shared [`crate::config::is_generated_path_segment`]
+/// (segment list plus minified-asset suffix), which folds in this scanner's
+/// former standalone `.min.js` check as the more general `*.min.*` suffix,
+/// and now also picks up `.cache`, `.gradle`, `.next`, `.turbo`, `.venv`,
+/// `coverage`, and `venv` — segments this scanner didn't previously
+/// exclude but the other generated/vendored lists in the codebase already
+/// did.
 fn is_generated_path(path: &str) -> bool {
-    if path.ends_with(".min.js") {
-        return true;
-    }
-    path.split('/').any(|segment| {
-        matches!(
-            segment,
-            "dist" | "build" | "out" | "node_modules" | "vendor" | "target" | ".worktrees"
-        )
-    })
+    crate::config::is_generated_path_segment(path)
 }
 
 // ---------------------------------------------------------------------------
@@ -587,6 +587,29 @@ mod tests {
             "builder/mod.rs",
         ] {
             assert!(!is_generated_path(path), "{path} is real source");
+        }
+    }
+
+    #[test]
+    fn generated_paths_gain_segments_from_the_shared_list() {
+        // These segments weren't in this file's old standalone list but are
+        // part of the shared GENERATED_DIR_SEGMENTS union that scan.rs and
+        // migrate::inventory already recognized — closing this drift is the
+        // point of routing through crate::config::is_generated_path_segment.
+        for path in [
+            "packages/web/coverage/lcov.info",
+            "env/.venv/pyvenv.cfg",
+            "apps/site/.next/server/app.js",
+            "tool/.cache/entry",
+            "repo/.turbo/cache",
+            "android/.gradle/wrapper",
+            "scripts/venv/bin/python",
+            "assets/app.min.css",
+        ] {
+            assert!(
+                is_generated_path(path),
+                "{path} should now count as generated"
+            );
         }
     }
 

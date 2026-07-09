@@ -370,27 +370,65 @@ impl TraceDecay {
         dirs
     }
 
+    /// Informational only: the authoritative skip decision during indexing
+    /// is [`is_excluded_dir`]/[`is_excluded`] against the (possibly
+    /// user-overridden) `config.exclude` patterns. This hint just decides
+    /// which *already-excluded* directories are common enough generated/
+    /// vendored names to be worth surfacing in [`IndexCoverageHint`], so it
+    /// delegates the "is this name generated?" question to the shared
+    /// [`crate::config::is_generated_dir_segment`] list rather than
+    /// hand-maintaining its own copy.
     fn is_skipped_dir_hint(rel_str: &str, name: &str, config: &TraceDecayConfig) -> bool {
-        const HINTABLE_DIRS: &[&str] = &[
-            "node_modules",
-            "vendor",
-            "build",
-            "dist",
-            "out",
-            "coverage",
-            ".cache",
-            ".next",
-            ".turbo",
-            ".gradle",
-            ".venv",
-            "venv",
-            "__pycache__",
-        ];
-
         if is_included_dir(rel_str, config) || is_included(rel_str, config) {
             return false;
         }
 
-        HINTABLE_DIRS.contains(&name) && is_excluded_dir(rel_str, config)
+        crate::config::is_generated_dir_segment(name) && is_excluded_dir(rel_str, config)
+    }
+}
+
+#[cfg(test)]
+mod skipped_dir_hint_tests {
+    use super::TraceDecay;
+    use crate::config::TraceDecayConfig;
+
+    #[test]
+    fn hints_on_excluded_generated_dirs() {
+        let config = TraceDecayConfig::default();
+        assert!(TraceDecay::is_skipped_dir_hint(
+            "node_modules",
+            "node_modules",
+            &config
+        ));
+        assert!(TraceDecay::is_skipped_dir_hint("dist", "dist", &config));
+    }
+
+    #[test]
+    fn gains_segments_previously_absent_from_its_own_hintable_list() {
+        // "target" and ".worktrees" weren't in scan.rs's old hand-maintained
+        // HINTABLE_DIRS but are part of the shared GENERATED_DIR_SEGMENTS
+        // union other call sites already recognized.
+        let config = TraceDecayConfig::default();
+        assert!(TraceDecay::is_skipped_dir_hint("target", "target", &config));
+        assert!(TraceDecay::is_skipped_dir_hint(
+            ".worktrees",
+            ".worktrees",
+            &config
+        ));
+    }
+
+    #[test]
+    fn does_not_hint_on_real_source_dirs() {
+        let config = TraceDecayConfig::default();
+        assert!(!TraceDecay::is_skipped_dir_hint("src", "src", &config));
+    }
+
+    #[test]
+    fn explicit_include_overrides_the_hint() {
+        let config = TraceDecayConfig {
+            include: vec!["dist/**".to_string()],
+            ..TraceDecayConfig::default()
+        };
+        assert!(!TraceDecay::is_skipped_dir_hint("dist", "dist", &config));
     }
 }

@@ -20,37 +20,96 @@ pub const USER_DATA_DIR_ENV: &str = "TRACEDECAY_DATA_DIR";
 /// Project graph database filename inside a `.tracedecay/` data dir.
 pub const DB_FILENAME: &str = "tracedecay.db";
 
-const DEFAULT_EXCLUDE_PATTERNS: &[&str] = &[
-    "target/**",
-    ".git/**",
-    ".tracedecay/**",
-    "**/node_modules/**",
-    "vendor/**",
-    "**/vendor/**",
-    "**/*.min.*",
-    "bin/**",
-    "build/**",
-    "**/build/**",
-    "dist/**",
-    "**/dist/**",
-    "out/**",
-    "**/out/**",
-    "coverage/**",
-    "**/coverage/**",
-    ".cache/**",
-    "**/.cache/**",
-    ".next/**",
-    "**/.next/**",
-    ".turbo/**",
-    "**/.turbo/**",
-    ".gradle/**",
-    "**/.gradle/**",
-    ".venv/**",
-    "**/.venv/**",
-    "venv/**",
-    "**/venv/**",
-    "**/__pycache__/**",
+/// Directory-name segments treated as generated or vendored content:
+/// build output, package-manager caches, and vendored dependencies.
+///
+/// This is the single source of truth for "what counts as generated" and is
+/// shared by four call sites that used to hand-maintain independent lists
+/// which had drifted out of sync with each other:
+///
+/// - [`is_excluded`] / [`default_exclude_patterns`] below (config-driven,
+///   glob-pattern based — this list seeds the *default* patterns, but a
+///   project's `config.exclude` can still be overridden by the user).
+/// - `tracedecay::scan::TraceDecay::is_skipped_dir_hint` (an informational
+///   hint only; the authoritative gate there is still [`is_excluded_dir`]).
+/// - `migrate::inventory::should_prune_dir` (authoritative directory prune
+///   during migration inventory scans).
+/// - `mcp::tools::handlers::redundancy::is_generated_path` (candidate
+///   filtering for the duplicate-code scanner).
+///
+/// Each call site may still layer its own local additions on top where
+/// something is specific to that tool's purpose (see call-site comments);
+/// this list only covers the shared "generated/vendored" core.
+pub const GENERATED_DIR_SEGMENTS: &[&str] = &[
+    ".cache",
+    ".gradle",
+    ".next",
+    ".turbo",
+    ".venv",
+    ".worktrees",
+    "__pycache__",
+    "build",
+    "coverage",
+    "dist",
+    "node_modules",
+    "out",
+    "target",
+    "vendor",
+    "venv",
 ];
+
+/// Returns `true` if `segment` (a single path component, e.g. a directory
+/// name) is one of the shared [`GENERATED_DIR_SEGMENTS`].
+pub fn is_generated_dir_segment(segment: &str) -> bool {
+    GENERATED_DIR_SEGMENTS.contains(&segment)
+}
+
+/// Returns `true` if any component of `path` is a generated/vendored
+/// directory segment, or `path` itself carries a minified-asset suffix
+/// (`app.min.js`, `app.min.css`, ...) — mirrors the `**/*.min.*` default
+/// exclude pattern built by [`default_exclude_patterns`].
+///
+/// Path-level (not just directory-level) so callers can filter a flat list
+/// of file paths in one pass, e.g. the redundancy scanner's candidate list.
+pub fn is_generated_path_segment(path: &str) -> bool {
+    has_minified_suffix(path) || path.split('/').any(is_generated_dir_segment)
+}
+
+/// `true` for paths like `app.min.js` / `app.min.css.map` — a `.min.`
+/// component followed by at least one more character.
+fn has_minified_suffix(path: &str) -> bool {
+    path.rfind(".min.").is_some_and(|idx| idx + 5 < path.len())
+}
+
+/// Default glob-pattern exclude list for [`TraceDecayConfig::default`].
+///
+/// Built from [`GENERATED_DIR_SEGMENTS`] (both the `segment/**` root form
+/// and the `**/segment/**` nested form, since a generated directory can
+/// appear at the project root or anywhere below it) plus site-local
+/// additions that intentionally are *not* part of the shared segment set:
+///
+/// - `.git/**`, `.tracedecay/**` — VCS and `TraceDecay`'s own metadata dirs;
+///   these are tool/repo bookkeeping, not generated *code*, so they stay
+///   local to the config's default patterns rather than joining
+///   [`GENERATED_DIR_SEGMENTS`] (which the migrate/scan/redundancy call
+///   sites also consult for non-config-driven decisions).
+/// - `bin/**` — historically excluded here by default, but not treated as
+///   "generated" elsewhere: a `bin/` directory can hold real source in some
+///   project layouts, so it isn't added to the shared segment list.
+/// - `**/*.min.*` — mirrors [`is_generated_path_segment`]'s suffix check.
+fn default_exclude_patterns() -> Vec<String> {
+    let mut patterns: Vec<String> = vec![
+        ".git/**".to_string(),
+        ".tracedecay/**".to_string(),
+        "bin/**".to_string(),
+        "**/*.min.*".to_string(),
+    ];
+    for segment in GENERATED_DIR_SEGMENTS {
+        patterns.push(format!("{segment}/**"));
+        patterns.push(format!("**/{segment}/**"));
+    }
+    patterns
+}
 
 /// Configuration for a `TraceDecay` project.
 ///
@@ -323,10 +382,7 @@ impl Default for TraceDecayConfig {
         Self {
             version: 1,
             root_dir: String::new(),
-            exclude: DEFAULT_EXCLUDE_PATTERNS
-                .iter()
-                .map(|pattern| (*pattern).to_string())
-                .collect(),
+            exclude: default_exclude_patterns(),
             include: Vec::new(),
             max_file_size: 1_048_576,
             extract_docstrings: true,
