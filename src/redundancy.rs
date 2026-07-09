@@ -57,6 +57,17 @@ pub struct Fingerprint {
     pub source_hash: String,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct RedundancyMatchScore {
+    pub similarity: f64,
+    pub ranking_score: f64,
+    pub vector_cosine: f64,
+    pub shingle_jaccard: f64,
+    pub overlap_kind: &'static str,
+    pub severity: &'static str,
+    pub generic_helper_downranked: bool,
+}
+
 impl Fingerprint {
     /// Render the shingles vector as a comma-separated lowercase hex
     /// string (suitable for storage in a TEXT column).
@@ -397,6 +408,33 @@ pub fn jaccard_similarity(a: &[u32], b: &[u32]) -> f64 {
     inter as f64 / union as f64
 }
 
+/// Cosine similarity over sorted/dedup'd shingle vectors.
+///
+/// This is the cheap vector-style body similarity signal used by the
+/// redundancy tool for candidate discovery and ranking. Unlike Jaccard, it is
+/// less harsh when two larger bodies share a strong core but differ in a few
+/// surrounding shingles.
+pub fn vector_cosine_similarity(a: &[u32], b: &[u32]) -> f64 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let mut i = 0usize;
+    let mut j = 0usize;
+    let mut dot = 0usize;
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Equal => {
+                dot += 1;
+                i += 1;
+                j += 1;
+            }
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+        }
+    }
+    dot as f64 / ((a.len() as f64).sqrt() * (b.len() as f64).sqrt())
+}
+
 // ---------------------------------------------------------------------------
 // Composite similarity + severity
 // ---------------------------------------------------------------------------
@@ -445,6 +483,56 @@ pub fn severity_bucket(score: f64, kind: &str) -> &'static str {
     } else {
         "naming_only"
     }
+}
+
+pub fn redundancy_match_score(
+    a_name: &str,
+    a: &Fingerprint,
+    b_name: &str,
+    b: &Fingerprint,
+    threshold: f64,
+    include_naming: bool,
+) -> Option<RedundancyMatchScore> {
+    let similarity = composite_similarity(a, b);
+    let vector_cosine = vector_cosine_similarity(&a.shingles, &b.shingles);
+    if similarity < threshold && vector_cosine < threshold {
+        return None;
+    }
+
+    let mut overlap_kind = overlap_kind(a, b);
+    if overlap_kind == "naming" && vector_cosine >= threshold {
+        overlap_kind = "body_vector";
+    }
+    if !include_naming && overlap_kind == "naming" {
+        return None;
+    }
+
+    let generic_helper_downranked = generic_helper_pair(a_name, b_name);
+    let mut ranking_score = similarity.max(vector_cosine * 0.95);
+    if generic_helper_downranked {
+        ranking_score *= 0.75;
+    }
+
+    Some(RedundancyMatchScore {
+        similarity,
+        ranking_score,
+        vector_cosine,
+        shingle_jaccard: jaccard_similarity(&a.shingles, &b.shingles),
+        overlap_kind,
+        severity: severity_bucket(similarity.max(vector_cosine), overlap_kind),
+        generic_helper_downranked,
+    })
+}
+
+fn generic_helper_pair(a_name: &str, b_name: &str) -> bool {
+    a_name == b_name && is_generic_helper_name(a_name)
+}
+
+fn is_generic_helper_name(name: &str) -> bool {
+    matches!(
+        name,
+        "drop" | "fmt" | "clone" | "default" | "new" | "from" | "into" | "as_ref" | "as_mut"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -562,6 +650,137 @@ mod tests {
         let j = jaccard_similarity(&a.shingles, &b.shingles);
         // Some token overlap (e.g. `let`), but should be very low.
         assert!(j < 0.4, "expected low Jaccard, got {j}");
+    }
+
+    #[test]
+    fn vector_cosine_rewards_shared_body_core() {
+        let a = vec![1, 2, 3, 4, 5, 6];
+        let b = vec![1, 2, 3, 4, 5, 99];
+        let j = jaccard_similarity(&a, &b);
+        let cosine = vector_cosine_similarity(&a, &b);
+        assert!(cosine > j, "cosine={cosine}, jaccard={j}");
+        assert!((vector_cosine_similarity(&a, &a) - 1.0).abs() < 1e-9);
+        assert!(vector_cosine_similarity(&[], &[]).abs() < 1e-9);
+    }
+
+    #[test]
+    fn redundancy_match_score_rejects_empty_body_vectors() {
+        let a = Fingerprint {
+            ast_hash: "ast_a".into(),
+            cfg_hash: "cfg_a".into(),
+            call_seq_hash: "call_a".into(),
+            shingles: Vec::new(),
+            body_tokens: 1,
+            source_hash: "src_a".into(),
+        };
+        let b = Fingerprint {
+            ast_hash: "ast_b".into(),
+            cfg_hash: "cfg_b".into(),
+            call_seq_hash: "call_b".into(),
+            shingles: Vec::new(),
+            body_tokens: 1,
+            source_hash: "src_b".into(),
+        };
+
+        assert!(redundancy_match_score("a", &a, "b", &b, 0.55, true).is_none());
+    }
+
+    #[test]
+    fn redundancy_match_score_downranks_generic_helpers() {
+        let fp = Fingerprint {
+            ast_hash: "ast".into(),
+            cfg_hash: "cfg".into(),
+            call_seq_hash: "call".into(),
+            shingles: vec![1, 2, 3, 4, 5],
+            body_tokens: 5,
+            source_hash: "src".into(),
+        };
+        let regular = redundancy_match_score("compute", &fp, "compute", &fp, 0.55, true).unwrap();
+        let generic = redundancy_match_score("drop", &fp, "drop", &fp, 0.55, true).unwrap();
+        assert!(generic.generic_helper_downranked);
+        assert!(generic.ranking_score < regular.ranking_score);
+    }
+
+    #[test]
+    fn redundancy_eval_fixture_scores_real_cases() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/redundancy_eval_labeled.json"
+        ))
+        .expect("valid redundancy eval fixture");
+        let threshold = fixture["threshold"].as_f64().expect("threshold");
+        let include_naming = fixture["include_naming"].as_bool().expect("include_naming");
+        let positives = fixture["positive_labels"]
+            .as_array()
+            .expect("positive labels")
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<std::collections::HashSet<_>>();
+
+        let mut scored = Vec::new();
+        for case in fixture["cases"].as_array().expect("cases") {
+            let a = fixture_fingerprint(&case["a"]);
+            let b = fixture_fingerprint(&case["b"]);
+            let score = redundancy_match_score(
+                case["a_name"].as_str().expect("a_name"),
+                &a,
+                case["b_name"].as_str().expect("b_name"),
+                &b,
+                threshold,
+                include_naming,
+            )
+            .expect("case should match threshold");
+            scored.push((case["label"].as_str().expect("label"), score));
+        }
+        scored.sort_by(|(_, a), (_, b)| {
+            b.ranking_score
+                .partial_cmp(&a.ranking_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let labels = scored.iter().map(|(label, _)| *label).collect::<Vec<_>>();
+        let expected_labels = fixture["expected"]["ranked_labels"]
+            .as_array()
+            .expect("ranked labels")
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(labels, expected_labels);
+        assert_eq!(
+            precision_at_labels(&labels, &positives, 2),
+            fixture["expected"]["p_at_2"]
+        );
+    }
+
+    fn fixture_fingerprint(value: &serde_json::Value) -> Fingerprint {
+        Fingerprint {
+            ast_hash: value["ast_hash"].as_str().expect("ast_hash").to_string(),
+            cfg_hash: value["cfg_hash"].as_str().expect("cfg_hash").to_string(),
+            call_seq_hash: value["call_seq_hash"]
+                .as_str()
+                .expect("call_seq_hash")
+                .to_string(),
+            shingles: value["shingles"]
+                .as_array()
+                .expect("shingles")
+                .iter()
+                .map(|item| item.as_u64().expect("shingle") as u32)
+                .collect(),
+            body_tokens: value["body_tokens"].as_u64().expect("body_tokens") as usize,
+            source_hash: "fixture".to_string(),
+        }
+    }
+
+    fn precision_at_labels(
+        labels: &[&str],
+        positives: &std::collections::HashSet<&str>,
+        k: usize,
+    ) -> serde_json::Value {
+        let positive_count = labels
+            .iter()
+            .take(k)
+            .filter(|label| positives.contains(**label))
+            .count();
+        serde_json::json!((positive_count as f64 / k as f64 * 100.0).round() / 100.0)
     }
 
     #[test]

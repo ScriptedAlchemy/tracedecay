@@ -5986,6 +5986,14 @@ pub fn unrelated(x: i32) -> i32 {
 
     let pairs = parsed["pairs"].as_array().expect("pairs array");
     let top = &pairs[0];
+    assert!(
+        top["ranking_score"].as_f64().unwrap_or(0.0) > 0.0,
+        "top pair should expose ranking_score; full output: {text}"
+    );
+    assert!(
+        top["signals"]["body_vector_cosine"].as_f64().is_some(),
+        "top pair should expose body_vector_cosine; full output: {text}"
+    );
     let kind = top["overlap_kind"].as_str().unwrap_or("");
     assert_eq!(
         kind, "ast_isomorphic",
@@ -6003,6 +6011,13 @@ pub fn unrelated(x: i32) -> i32 {
     assert!(
         names.contains(&"compute_a") && names.contains(&"compute_b"),
         "expected compute_a/compute_b in pair, got {names:?}"
+    );
+    let groups = parsed["groups"].as_array().expect("groups array");
+    assert!(
+        groups
+            .iter()
+            .any(|group| group["size"].as_u64().unwrap_or(0) >= 2),
+        "expected at least one duplicate group, got: {text}"
     );
 
     // Calling again should be a cache hit (no panic, same result).

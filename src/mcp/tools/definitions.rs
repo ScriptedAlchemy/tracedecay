@@ -1898,7 +1898,7 @@ fn def_redundancy() -> ToolDefinition {
     def(
         "tracedecay_redundancy",
         "Redundancy Hunt",
-        "Find functionally duplicated function/method bodies via AST isomorphism, control-flow match, call-sequence match, and token-shingle Jaccard similarity. Each pair is bucketed as 'definite' (AST-identical), 'likely' (CFG or algorithmic match), or 'naming_only' (low confidence). Use when consolidating helpers or auditing code health. Computed lazily and cached per (node, body source hash) — first call on a fresh index can be slow on large repos.",
+        "Find functionally duplicated function/method bodies via AST isomorphism, control-flow match, call-sequence match, token-shingle Jaccard similarity, and body-vector cosine similarity. Results include similarity, ranking_score, grouped duplicate components, and signal details such as body_vector_cosine and generic_helper_downranked. Each pair is bucketed as 'definite' (AST-identical), 'likely' (CFG, algorithmic, token, or body-vector match), or 'naming_only' (low confidence). Use when consolidating helpers or auditing code health. Computed lazily and cached per (node, body source hash) — first call on a fresh index can be slow on large repos.",
         json!({
             "type": "object",
             "properties": {
