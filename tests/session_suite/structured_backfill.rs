@@ -465,50 +465,55 @@ async fn structured_backfill_version_bump_reparses_from_start() {
     // (exactly what bumping codex's entry in `STRUCTURED_BACKFILL_VERSIONS`
     // does). Then plant a stale, *un-versioned* watermark parked at the last
     // transcript path.
-    let conn = raw_conn(&project).await;
-    conn.execute(
-        "DELETE FROM lcm_raw_messages
-         WHERE provider = 'codex'
-           AND message_id IN (
-               SELECT message_id FROM session_messages
-               WHERE provider = 'codex' AND kind = 'goal')",
-        (),
-    )
-    .await
-    .unwrap();
-    conn.execute(
-        "DELETE FROM session_messages WHERE provider = 'codex' AND kind = 'goal'",
-        (),
-    )
-    .await
-    .unwrap();
-    conn.execute(
-        "DELETE FROM session_schema_migrations WHERE name LIKE 'structured_rows_backfill%'",
-        (),
-    )
-    .await
-    .unwrap();
-    let mut rows = conn
-        .query(
-            "SELECT MAX(source_path) FROM session_messages WHERE provider = 'codex'",
+    // Scope the raw connection so it is dropped before the final GlobalDb open.
+    // Holding it across `run_structured_backfill` contends on Windows (busy_timeout
+    // 5s) and can abort the insert with `BEGIN IMMEDIATE` failure.
+    {
+        let conn = raw_conn(&project).await;
+        conn.execute(
+            "DELETE FROM lcm_raw_messages
+             WHERE provider = 'codex'
+               AND message_id IN (
+                   SELECT message_id FROM session_messages
+                   WHERE provider = 'codex' AND kind = 'goal')",
             (),
         )
         .await
         .unwrap();
-    let last_path = rows
-        .next()
+        conn.execute(
+            "DELETE FROM session_messages WHERE provider = 'codex' AND kind = 'goal'",
+            (),
+        )
         .await
-        .unwrap()
-        .unwrap()
-        .get::<String>(0)
         .unwrap();
-    conn.execute(
-        "INSERT INTO session_backfill_meta(key, value) VALUES ('structured_backfill_cursor', ?1)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        libsql::params![last_path],
-    )
-    .await
-    .unwrap();
+        conn.execute(
+            "DELETE FROM session_schema_migrations WHERE name LIKE 'structured_rows_backfill%'",
+            (),
+        )
+        .await
+        .unwrap();
+        let mut rows = conn
+            .query(
+                "SELECT MAX(source_path) FROM session_messages WHERE provider = 'codex'",
+                (),
+            )
+            .await
+            .unwrap();
+        let last_path = rows
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap();
+        conn.execute(
+            "INSERT INTO session_backfill_meta(key, value) VALUES ('structured_backfill_cursor', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            libsql::params![last_path],
+        )
+        .await
+        .unwrap();
+    }
     assert_eq!(count_kind(&project, "codex", "goal").await, 0);
 
     // The version-namespaced cursor key has never been written, so the sweep
@@ -669,10 +674,11 @@ async fn structured_backfill_migrates_legacy_global_marker() {
         None
     );
 
-    // First run migrates: seed every provider to N=3, retire the global marker
-    // and legacy cursors. Claude is already current; Codex alone re-sweeps to
-    // its v4 custom-exec target.
+    // The bounded sweep first migrates: seed every provider to N=3 and retire
+    // the global marker/cursors. Claude is already current; Codex alone parses
+    // at its v4 custom-exec target, then the empty follow-up batch marks v4.
     let db = open_project_session_db(&project).await.unwrap();
+    db.run_structured_backfill().await;
     db.run_structured_backfill().await;
     drop(db);
 
