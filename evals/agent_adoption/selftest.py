@@ -67,6 +67,11 @@ def test_lint():
     check("lint: names tracedecay", "tracedecay" in grade.lint_prompt("Use tracedecay_context"))
     check("lint: names MCP", "MCP" in grade.lint_prompt("Run the MCP tool"))
     check("lint: names skill", "exploring-code" in grade.lint_prompt("use exploring-code"))
+    check(
+        "lint: names discovery skill",
+        "discovering-tracedecay"
+        in grade.lint_prompt("use discovering-tracedecay"),
+    )
     check("lint: names tool base", "fact_store" in grade.lint_prompt("call fact_store now"))
     scns = {"a": {"prompt": "neutral one"}, "b": {"prompt": "use tracedecay_grep"}}
     probs = grade.lint_scenarios(scns)

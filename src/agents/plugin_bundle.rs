@@ -5,7 +5,7 @@
 //! agent format.
 //!
 //! Layout of `plugin/`:
-//! - `plugin/skills/*/SKILL.md` — the 13 shared model-invocable skills. All
+//! - `plugin/skills/*/SKILL.md` — the 14 shared model-invocable skills. All
 //!   three hosts deploy the full set; the workflow dispatcher skills were
 //!   removed (their behavior lives in the native slash commands below), so no
 //!   host filters the skill set today. The `cursor_skill_files` filter is kept
@@ -306,6 +306,14 @@ mod tests {
         }
     }
 
+    fn embedded_skill(relative: &str) -> &'static str {
+        GENERATED_SKILL_FILES
+            .iter()
+            .find(|file| file.relative == relative)
+            .map(|file| file.contents)
+            .unwrap_or_else(|| panic!("shared skill should be embedded: {relative}"))
+    }
+
     #[test]
     fn each_host_deploys_unique_relative_paths() {
         assert_unique_relatives(&claude_files(), "claude");
@@ -343,6 +351,44 @@ mod tests {
         assert_eq!(cursor_files().len(), cursor_skills + 4 + 2 + 3 + 13);
         // Codex: skills + 4 manifest (dot + mcp + hooks + README).
         assert_eq!(codex_files().len(), all_skills + 4);
+    }
+
+    #[test]
+    fn capability_discovery_skill_is_shared_and_cli_native() {
+        let relative = "skills/discovering-tracedecay/SKILL.md";
+        let source = embedded_skill(relative);
+
+        assert!(source.contains("`tracedecay tool`"));
+        assert!(source.contains("`tracedecay tool <name> --help`"));
+        assert!(source.contains("`tracedecay --help`"));
+        assert!(
+            !source.contains("tool describe"),
+            "the CLI has no `tool describe` subcommand"
+        );
+
+        for (host, files) in [
+            ("claude", claude_files()),
+            ("cursor", cursor_files()),
+            ("codex", codex_files()),
+        ] {
+            let deployed = files
+                .iter()
+                .find(|(path, _)| *path == relative)
+                .map(|(_, contents)| *contents)
+                .unwrap_or_else(|| panic!("{host} is missing {relative}"));
+            assert_eq!(
+                deployed, source,
+                "{host} must ship the shared source verbatim"
+            );
+        }
+    }
+
+    #[test]
+    fn using_cli_skill_supports_intentional_mcp_absence() {
+        let source = embedded_skill("skills/using-the-cli/SKILL.md");
+
+        assert!(source.contains("MCP is optional"));
+        assert!(source.contains("intentionally unavailable"));
     }
 
     /// Every embedded skill file maps to an on-disk source under `plugin/`.

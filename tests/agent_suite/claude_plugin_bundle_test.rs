@@ -29,7 +29,7 @@ fn bundle_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin")
 }
 
-/// The 13 model-invocable skills the bundle ships (also the codex skill set),
+/// The 14 model-invocable skills the bundle ships (also the Codex skill set),
 /// kept in sync across every skill-bundling surface. The `tracedecay-*`
 /// workflow dispatcher skills were removed (their behavior lives in the native
 /// slash commands), the memory write/read skills were folded into
@@ -39,6 +39,7 @@ const EXPECTED_SKILLS: &[&str] = &[
     "assessing-impact",
     "code-health",
     "diagnosing-analytics",
+    "discovering-tracedecay",
     "editing-safely",
     "exploring-code",
     "fixing-build-and-type-errors",

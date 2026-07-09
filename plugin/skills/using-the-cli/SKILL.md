@@ -1,11 +1,14 @@
 ---
 name: using-the-cli
-description: 'Use when a tracedecay MCP call fails, times out, or the server is disconnected or unconfigured — every MCP tool is also a shell command, `tracedecay tool` plus the tool name. Switch to the CLI instead of querying .tracedecay databases directly or abandoning tracedecay.'
+description: 'Use when MCP is intentionally absent or unavailable, a host or subagent has shell access without MCP, or a tracedecay MCP call fails, times out, or disconnects.'
 ---
 
 # Using the tracedecay CLI
 
-The `tracedecay` binary exposes every MCP tool as a shell command. MCP and CLI hit the same project store and return the same payloads, so an MCP transport failure (timeout, disconnect, missing server config) loses nothing: run the same tool with the same arguments via `tracedecay tool <name>` and keep following whatever `tracedecay:*` skill you were in.
+MCP is optional. The `tracedecay` binary exposes every MCP tool as a first-class
+shell command with the same project store, arguments, and payloads. Use the CLI
+directly when MCP is intentionally unavailable, or switch to it after a
+transport failure, and keep following whatever `tracedecay:*` skill you were in.
 
 ## The one rule for arguments
 
@@ -71,13 +74,16 @@ identically over MCP (`tracedecay_retrieve`) and the CLI
   with `tracedecay_lcm_expand`; `tracedecay:managing-session-context` drives the
   LCM store and past-session retrieval.
 
-## When to switch
+## When to use the CLI
 
+- MCP is intentionally unavailable or omitted from the host integration.
 - An MCP call returns a client or transport error, times out, or the server drops mid-session.
 - The tracedecay MCP server is not configured in this host but `tracedecay` is on `PATH`.
 - A subagent or hook context has shell access but no MCP access.
 
-After falling back, diagnose the MCP side with `tracedecay doctor` and `tracedecay tool runtime`, and tell the user the session is running on the CLI fallback (and why) instead of silently downgrading.
+For a transport failure, diagnose the MCP side with `tracedecay doctor` and
+`tracedecay tool runtime`. When CLI-only operation is intentional, do not treat
+the missing MCP transport as an error.
 
 ## Corrective errors are the feedback loop
 

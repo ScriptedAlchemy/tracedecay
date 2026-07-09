@@ -133,7 +133,7 @@ _SKILL_IDS = (
     "exploring-code", "tracing-functions", "assessing-impact", "reviewing-changes",
     "project-memory", "editing-safely", "fixing-build-and-type-errors",
     "managing-session-context", "using-tracedecay", "using-the-cli", "code-health",
-    "diagnosing-analytics", "inspecting-managed-skills",
+    "diagnosing-analytics", "discovering-tracedecay", "inspecting-managed-skills",
 )
 # Substrings/regexes that must never appear in a scenario prompt (case-insensitive).
 _BANNED_PROMPT_PATTERNS = [
