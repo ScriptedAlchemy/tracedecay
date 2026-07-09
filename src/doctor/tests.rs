@@ -39,6 +39,69 @@ fn format_bytes_fractional_kb() {
 }
 
 #[tokio::test]
+async fn database_check_is_read_only_while_a_writer_is_live()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::TempDir::new()?;
+    let profile_root = dir.path().join("profile");
+    let project_root = dir.path().join("repo");
+    std::fs::create_dir_all(&project_root)?;
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(profile_root),
+        global_db_path: Some(dir.path().join("global.db")),
+    };
+    let ts = TraceDecay::init_with_options(&project_root, open_options.clone()).await?;
+    let db_path = ts.db_path();
+    drop(ts);
+
+    let (writer, _) = crate::db::Database::open(&db_path).await?;
+    writer
+        .conn()
+        .execute_batch(
+            "CREATE TABLE doctor_probe (payload BLOB);\
+             WITH RECURSIVE count(x) AS (\
+                 VALUES(1) UNION ALL SELECT x + 1 FROM count WHERE x < 256\
+             )\
+             INSERT INTO doctor_probe SELECT zeroblob(8192) FROM count;\
+             DELETE FROM doctor_probe;",
+        )
+        .await?;
+    writer.checkpoint().await?;
+
+    let freelist_before: i64 = {
+        let mut rows = writer.conn().query("PRAGMA freelist_count", ()).await?;
+        rows.next().await?.expect("freelist row").get(0)?
+    };
+    assert!(
+        freelist_before > 0,
+        "fixture must contain reclaimable pages"
+    );
+
+    let mut counters = DoctorCounters::new();
+    check_database(&mut counters, &project_root, open_options).await;
+
+    let freelist_after: i64 = {
+        let mut rows = writer.conn().query("PRAGMA freelist_count", ()).await?;
+        rows.next().await?.expect("freelist row").get(0)?
+    };
+    assert_eq!(
+        freelist_after, freelist_before,
+        "doctor must not run VACUUM or otherwise compact a live database"
+    );
+    writer
+        .conn()
+        .execute(
+            "INSERT INTO doctor_probe(payload) VALUES (zeroblob(64))",
+            (),
+        )
+        .await?;
+    assert!(
+        writer.quick_check().await?,
+        "live writer must remain healthy"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn current_project_store_resolves_profile_shard_via_registry_alias()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::TempDir::new()?;

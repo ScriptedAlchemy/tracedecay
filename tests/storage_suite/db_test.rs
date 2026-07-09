@@ -410,12 +410,6 @@ async fn test_get_node_not_found() {
 }
 
 #[tokio::test]
-async fn test_optimize() {
-    let (db, _dir) = setup_db().await;
-    db.optimize().await.expect("optimize should not fail");
-}
-
-#[tokio::test]
 async fn test_database_size() {
     let (db, _dir) = setup_db().await;
     let size = db.size().await.expect("size should not fail");

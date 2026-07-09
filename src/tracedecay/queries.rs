@@ -606,9 +606,9 @@ impl TraceDecay {
         self.db.close();
     }
 
-    /// Runs VACUUM and ANALYZE to reclaim disk space and update planner stats.
-    pub async fn optimize(&self) -> Result<()> {
-        self.db.optimize().await
+    /// Run `SQLite`'s non-mutating quick integrity check on the active database.
+    pub(crate) async fn quick_check(&self) -> Result<bool> {
+        self.db.quick_check().await
     }
 
     /// Returns a reference to the current configuration.

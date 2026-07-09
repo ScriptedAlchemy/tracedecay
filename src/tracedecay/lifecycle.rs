@@ -239,35 +239,15 @@ impl TraceDecay {
             );
         }
 
-        // Try to open; if the database is completely unreadable, delete and
-        // re-initialize rather than failing permanently.
+        // Ordinary opens never replace database files. A daemon or another MCP
+        // process may still hold the current DB/WAL/SHM inodes, and deleting
+        // them here would split readers and writers across different stores.
         let open_result = Database::open(&db_path).await;
         let (db, migrated) = match open_result {
             Ok(pair) => pair,
-            Err(ref e) if Database::is_corruption_error(e) || crashed => {
-                print_corruption_warning();
-                delete_db_files(&db_path);
-                clear_dirty_sentinel_at(&store_layout.dirty_path);
-                let (db, _) = Database::initialize(&db_path).await?;
-                let ts = Self {
-                    db,
-                    config,
-                    project_root: project_root.to_path_buf(),
-                    store_layout: store_layout.clone(),
-                    open_options: open_options.clone(),
-                    registry: LanguageRegistry::new(),
-                    active_branch: active_branch.clone(),
-                    serving_branch: serving_branch.clone(),
-                    fallback_warning: fallback_warning.clone(),
-                    read_only: false,
-                };
-                ts.index_all_with_progress(|c, t, f| {
-                    eprintln!("[tracedecay] re-indexing [{c}/{t}] {f}");
-                })
-                .await?;
-                eprintln!("[tracedecay] re-index complete.");
-                ts.register_project_store_in_global_registry().await;
-                return Ok(ts);
+            Err(e) if Database::is_corruption_error(&e) || crashed => {
+                print_corruption_warning(&db_path);
+                return Err(recovery_required_error(&db_path, &e));
             }
             Err(e) => return Err(e),
         };
@@ -275,35 +255,20 @@ impl TraceDecay {
         // If the sentinel was set but the database opened successfully, run a
         // quick integrity check.
         if crashed {
-            let intact = db.quick_check().await.unwrap_or(false);
-            if !intact {
-                print_corruption_warning();
-                drop(db);
-                delete_db_files(&db_path);
-                clear_dirty_sentinel_at(&store_layout.dirty_path);
-                let (new_db, _) = Database::initialize(&db_path).await?;
-                let ts = Self {
-                    db: new_db,
-                    config,
-                    project_root: project_root.to_path_buf(),
-                    store_layout: store_layout.clone(),
-                    open_options: open_options.clone(),
-                    registry: LanguageRegistry::new(),
-                    active_branch: active_branch.clone(),
-                    serving_branch: serving_branch.clone(),
-                    fallback_warning: fallback_warning.clone(),
-                    read_only: false,
-                };
-                ts.index_all_with_progress(|c, t, f| {
-                    eprintln!("[tracedecay] re-indexing [{c}/{t}] {f}");
-                })
-                .await?;
-                eprintln!("[tracedecay] re-index complete.");
-                ts.register_project_store_in_global_registry().await;
-                return Ok(ts);
+            match db.quick_check().await {
+                Ok(true) => clear_dirty_sentinel_at(&store_layout.dirty_path),
+                Ok(false) => {
+                    print_corruption_warning(&db_path);
+                    return Err(recovery_required_error(
+                        &db_path,
+                        "SQLite quick_check did not return ok",
+                    ));
+                }
+                Err(e) => {
+                    print_corruption_warning(&db_path);
+                    return Err(recovery_required_error(&db_path, &e));
+                }
             }
-            // DB is fine — clean up the stale sentinel.
-            clear_dirty_sentinel_at(&store_layout.dirty_path);
         }
 
         let ts = Self {
@@ -989,13 +954,28 @@ fn delete_db_files(db_path: &std::path::Path) {
     let _ = std::fs::remove_file(&wal);
 }
 
-/// Prints a user-facing warning about database corruption with a request to
-/// report the issue.
-fn print_corruption_warning() {
+/// Build an actionable error without replacing any member of the `SQLite`
+/// recovery set.
+fn recovery_required_error(
+    db_path: &std::path::Path,
+    detail: impl std::fmt::Display,
+) -> TraceDecayError {
+    TraceDecayError::Database {
+        message: format!(
+            "database recovery required at '{}'; DB/WAL/SHM and dirty sentinel were preserved: {detail}",
+            db_path.display()
+        ),
+        operation: "open_recovery_required".to_string(),
+    }
+}
+
+fn print_corruption_warning(db_path: &std::path::Path) {
     let version = env!("CARGO_PKG_VERSION");
-    eprintln!("[tracedecay] \x1b[33m⚠ database corruption detected — rebuilding index\x1b[0m");
+    eprintln!("[tracedecay] \x1b[33m⚠ database recovery required — store preserved\x1b[0m");
     eprintln!("[tracedecay]");
-    eprintln!("[tracedecay] This was likely caused by a crash or kill during indexing.");
+    eprintln!("[tracedecay] Store: {}", db_path.display());
+    eprintln!("[tracedecay] Stop TraceDecay daemon/MCP processes before explicit repair.");
+    eprintln!("[tracedecay] Preserve the DB, WAL, SHM, and dirty sentinel as one recovery set.");
     eprintln!("[tracedecay] Please report this at:");
     eprintln!("[tracedecay]   https://github.com/ScriptedAlchemy/tracedecay/issues");
     eprintln!(

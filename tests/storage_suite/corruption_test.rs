@@ -14,6 +14,7 @@ use crate::support;
 use std::io::{Seek, Write};
 use tempfile::TempDir;
 use tracedecay::db::Database;
+use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay::types::*;
 
 /// Helper: create a temp database and return (Database, TempDir, db_path).
@@ -332,6 +333,43 @@ fn dirty_sentinel_survives_drop() {
 }
 
 // ─── Full crash→detect→repair cycle ──────────────────────────────────────
+
+#[tokio::test]
+async fn open_preserves_corrupt_store_and_dirty_sentinel_for_offline_repair()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let project_root = dir.path().join("repo");
+    std::fs::create_dir_all(&project_root)?;
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(dir.path().join("profile")),
+        global_db_path: Some(dir.path().join("global.db")),
+    };
+
+    let ts = TraceDecay::init_with_options(&project_root, open_options.clone()).await?;
+    let layout = ts.store_layout().clone();
+    ts.close();
+
+    let mut corrupted = std::fs::read(&layout.graph_db_path)?;
+    corrupted[..16].copy_from_slice(b"not-a-sqlite-db!");
+    std::fs::write(&layout.graph_db_path, &corrupted)?;
+    std::fs::write(&layout.dirty_path, "pid=99999\nversion=test")?;
+
+    let result = TraceDecay::open_with_options(&project_root, open_options).await;
+    assert!(
+        result.is_err(),
+        "ordinary open must not silently replace a damaged store"
+    );
+    assert_eq!(
+        std::fs::read(&layout.graph_db_path)?,
+        corrupted,
+        "damaged database must remain available for explicit offline recovery"
+    );
+    assert!(
+        layout.dirty_path.exists(),
+        "dirty sentinel must remain until recovery succeeds"
+    );
+    Ok(())
+}
 
 #[tokio::test]
 async fn corrupt_db_detected_and_repaired_on_reopen() {

@@ -74,7 +74,7 @@ identically over MCP (`tracedecay_retrieve`) and the CLI
   with `tracedecay_lcm_expand`; `tracedecay:managing-session-context` drives the
   LCM store and past-session retrieval.
 
-## When to use the CLI
+## CLI fallback conditions
 
 - MCP is intentionally unavailable or omitted from the host integration.
 - An MCP call returns a client or transport error, times out, or the server drops mid-session.

@@ -223,17 +223,6 @@ impl Database {
     }
 
     /// Runs VACUUM and ANALYZE to reclaim space and update query planner statistics.
-    pub async fn optimize(&self) -> Result<()> {
-        self.conn
-            .execute_batch("VACUUM; ANALYZE;")
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to optimize database: {e}"),
-                operation: "optimize".to_string(),
-            })?;
-        Ok(())
-    }
-
     /// Returns the on-disk size of the database file in bytes.
     pub async fn size(&self) -> Result<u64> {
         let mut rows = self
