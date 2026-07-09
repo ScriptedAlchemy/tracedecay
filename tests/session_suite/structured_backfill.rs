@@ -53,8 +53,10 @@ async fn simulate_old_parser_store(project: &std::path::Path, provider: &str, ki
     )
     .await
     .unwrap();
+    // Reset both the retired global marker (older stores) and the per-provider
+    // markers so the version-bumped sweep re-enters from the start.
     conn.execute(
-        "DELETE FROM session_schema_migrations WHERE name = 'structured_rows_backfill'",
+        "DELETE FROM session_schema_migrations WHERE name LIKE 'structured_rows_backfill%'",
         (),
     )
     .await
@@ -107,12 +109,40 @@ async fn load_row_by_role(
     )
 }
 
-async fn structured_marker_version(project: &std::path::Path) -> Option<i64> {
+/// Reads a provider's per-provider structured-backfill marker version, or the
+/// retired global marker when `provider` is `None`.
+async fn structured_marker_version(
+    project: &std::path::Path,
+    provider: Option<&str>,
+) -> Option<i64> {
+    let name = match provider {
+        Some(provider) => format!("structured_rows_backfill:{provider}"),
+        None => "structured_rows_backfill".to_string(),
+    };
     let conn = raw_conn(project).await;
     let mut rows = conn
         .query(
-            "SELECT version FROM session_schema_migrations WHERE name = 'structured_rows_backfill'",
-            (),
+            "SELECT version FROM session_schema_migrations WHERE name = ?1",
+            libsql::params![name],
+        )
+        .await
+        .unwrap();
+    rows.next().await.unwrap().and_then(|row| row.get(0).ok())
+}
+
+/// Reads a provider's version-namespaced structured-backfill cursor value, or
+/// the empty string when no such row exists.
+async fn structured_cursor_value(
+    project: &std::path::Path,
+    provider: &str,
+    version: i64,
+) -> Option<String> {
+    let key = format!("structured_backfill_cursor:{provider}:v{version}");
+    let conn = raw_conn(project).await;
+    let mut rows = conn
+        .query(
+            "SELECT value FROM session_backfill_meta WHERE key = ?1",
+            libsql::params![key],
         )
         .await
         .unwrap();
@@ -291,7 +321,10 @@ async fn structured_backfill_inserts_claude_reasoning_rows_once() {
     db.run_structured_backfill().await;
     assert_eq!(count_kind(&project, "claude", "reasoning").await, 1);
     drop(db);
-    assert_eq!(structured_marker_version(&project).await, Some(3));
+    assert_eq!(
+        structured_marker_version(&project, Some("claude")).await,
+        Some(3)
+    );
 }
 
 #[tokio::test]
@@ -334,7 +367,10 @@ async fn structured_backfill_inserts_codex_goal_rows_once() {
     db.run_structured_backfill().await;
     assert_eq!(count_kind(&project, "codex", "goal").await, 1);
     drop(db);
-    assert_eq!(structured_marker_version(&project).await, Some(3));
+    assert_eq!(
+        structured_marker_version(&project, Some("codex")).await,
+        Some(2)
+    );
 }
 
 #[tokio::test]
@@ -394,7 +430,10 @@ async fn structured_backfill_inserts_claude_marker_rows_once() {
     db.run_structured_backfill().await;
     assert_eq!(count_kind(&project, "claude", "pr_link").await, 1);
     drop(db);
-    assert_eq!(structured_marker_version(&project).await, Some(3));
+    assert_eq!(
+        structured_marker_version(&project, Some("claude")).await,
+        Some(3)
+    );
 }
 
 /// Regression for the stale-cursor-vs-version-bump defect: the sweep's path
@@ -416,12 +455,16 @@ async fn structured_backfill_version_bump_reparses_from_start() {
     ingest_source(&db, &source, &project, None).await;
     db.run_structured_backfill().await; // parses the file, advances the cursor
     db.run_structured_backfill().await; // no candidates: marks complete, clears cursors
-    assert_eq!(structured_marker_version(&project).await, Some(3));
+    assert_eq!(
+        structured_marker_version(&project, Some("codex")).await,
+        Some(2)
+    );
     drop(db);
 
     // Drop the structured rows and reset the marker so the sweep re-enters
-    // (exactly what a `STRUCTURED_MARKER_VERSION` bump does). Then plant a
-    // stale, *un-versioned* watermark parked at the last transcript path.
+    // (exactly what bumping codex's entry in `STRUCTURED_BACKFILL_VERSIONS`
+    // does). Then plant a stale, *un-versioned* watermark parked at the last
+    // transcript path.
     let conn = raw_conn(&project).await;
     conn.execute(
         "DELETE FROM lcm_raw_messages
@@ -440,7 +483,7 @@ async fn structured_backfill_version_bump_reparses_from_start() {
     .await
     .unwrap();
     conn.execute(
-        "DELETE FROM session_schema_migrations WHERE name = 'structured_rows_backfill'",
+        "DELETE FROM session_schema_migrations WHERE name LIKE 'structured_rows_backfill%'",
         (),
     )
     .await
@@ -480,6 +523,189 @@ async fn structured_backfill_version_bump_reparses_from_start() {
         1,
         "a stale un-versioned cursor must not block a fresh version-bumped sweep"
     );
+}
+
+/// Per-provider isolation: bumping one provider's version (modeled by resetting
+/// only claude's marker on a store where codex is already at its target) must
+/// re-sweep ONLY claude. Codex's marker, cursor, and rows stay untouched — the
+/// former global-cursor design would have re-parsed every provider's history.
+#[tokio::test]
+async fn structured_backfill_provider_bump_isolates_other_providers() {
+    tracedecay::global_db::set_background_structured_backfill_enabled(false);
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = init_project(&tmp);
+    write_claude_transcript_with_thinking(&home, &project, "claude-isolate");
+    write_codex_rollout_with_goal(&home, &project, "codex-isolate");
+
+    // Ingest both providers and drive the sweep to completion: claude reaches
+    // v3, codex reaches v2, and both version-namespaced cursors are cleared.
+    let db = open_project_session_db(&project).await.unwrap();
+    ingest_source(&db, &ClaudeSource::with_home(&home), &project, None).await;
+    ingest_source(&db, &CodexSource::with_home(&home), &project, None).await;
+    db.run_structured_backfill().await; // parses both, advances both cursors
+    db.run_structured_backfill().await; // no candidates: marks both complete
+    assert_eq!(
+        structured_marker_version(&project, Some("claude")).await,
+        Some(3)
+    );
+    assert_eq!(
+        structured_marker_version(&project, Some("codex")).await,
+        Some(2)
+    );
+    // Codex's cursor was cleared on completion; capture that baseline.
+    assert_eq!(structured_cursor_value(&project, "codex", 2).await, None);
+    let codex_goal_before = load_only_goal_row(&project).await;
+    drop(db);
+
+    // Model a claude-only version bump: reset ONLY claude's marker and drop its
+    // reasoning rows. Codex's marker (v2) and goal row are left fully intact.
+    let conn = raw_conn(&project).await;
+    conn.execute(
+        "DELETE FROM lcm_raw_messages
+         WHERE provider = 'claude'
+           AND message_id IN (
+               SELECT message_id FROM session_messages
+               WHERE provider = 'claude' AND kind = 'reasoning')",
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "DELETE FROM session_messages WHERE provider = 'claude' AND kind = 'reasoning'",
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "DELETE FROM session_schema_migrations WHERE name = 'structured_rows_backfill:claude'",
+        (),
+    )
+    .await
+    .unwrap();
+    assert_eq!(count_kind(&project, "claude", "reasoning").await, 0);
+
+    // Re-sweep to completion. Claude re-enters (its marker fell behind v3);
+    // codex is skipped outright (marker v2 >= target v2).
+    let db = open_project_session_db(&project).await.unwrap();
+    db.run_structured_backfill().await;
+    db.run_structured_backfill().await;
+    drop(db);
+
+    // Claude re-swept: the reasoning row is back.
+    assert_eq!(count_kind(&project, "claude", "reasoning").await, 1);
+    assert_eq!(
+        structured_marker_version(&project, Some("claude")).await,
+        Some(3)
+    );
+    // Codex was never touched: its marker, cleared cursor, and goal row are all
+    // exactly as they were — no re-parse occurred (a re-parse would have written
+    // codex's cursor row).
+    assert_eq!(
+        structured_marker_version(&project, Some("codex")).await,
+        Some(2)
+    );
+    assert_eq!(structured_cursor_value(&project, "codex", 2).await, None);
+    assert_eq!(count_kind(&project, "codex", "goal").await, 1);
+    assert_eq!(load_only_goal_row(&project).await, codex_goal_before);
+}
+
+/// Migration: a store carrying the retired global `structured_rows_backfill`
+/// marker at version N seeds every provider's marker to N, retires the global
+/// marker and its legacy cursor rows, and triggers no spurious re-sweep.
+#[tokio::test]
+async fn structured_backfill_migrates_legacy_global_marker() {
+    tracedecay::global_db::set_background_structured_backfill_enabled(false);
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = init_project(&tmp);
+    write_codex_rollout_with_goal(&home, &project, "codex-migrate");
+
+    let db = open_project_session_db(&project).await.unwrap();
+    ingest_source(&db, &CodexSource::with_home(&home), &project, None).await;
+    // Ensure the meta table exists (production creates it via the sweep).
+    db.run_structured_backfill().await;
+    drop(db);
+
+    // Rewrite the store into the legacy shape: a single global marker at v3
+    // (a store that already finished the global sweep), no per-provider markers,
+    // plus stale legacy cursor rows (un-versioned and global-versioned).
+    let conn = raw_conn(&project).await;
+    conn.execute(
+        "DELETE FROM session_schema_migrations WHERE name LIKE 'structured_rows_backfill%'",
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO session_schema_migrations(name, version) VALUES ('structured_rows_backfill', 3)",
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "DELETE FROM session_backfill_meta WHERE key LIKE 'structured_backfill_cursor%'",
+        (),
+    )
+    .await
+    .unwrap();
+    for key in [
+        "structured_backfill_cursor",
+        "structured_backfill_cursor:v3",
+    ] {
+        conn.execute(
+            "INSERT INTO session_backfill_meta(key, value) VALUES (?1, 'legacy/path.jsonl')",
+            libsql::params![key],
+        )
+        .await
+        .unwrap();
+    }
+    // Sanity: the legacy global marker is present, per-provider markers are not.
+    assert_eq!(structured_marker_version(&project, None).await, Some(3));
+    assert_eq!(
+        structured_marker_version(&project, Some("claude")).await,
+        None
+    );
+    assert_eq!(
+        structured_marker_version(&project, Some("codex")).await,
+        None
+    );
+
+    // First run migrates: seed every provider to N=3, retire the global marker
+    // and legacy cursors. No provider re-sweeps (both seeded >= their targets).
+    let db = open_project_session_db(&project).await.unwrap();
+    db.run_structured_backfill().await;
+    drop(db);
+
+    assert_eq!(
+        structured_marker_version(&project, Some("claude")).await,
+        Some(3),
+        "claude marker seeded to the legacy global version"
+    );
+    assert_eq!(
+        structured_marker_version(&project, Some("codex")).await,
+        Some(3),
+        "codex marker seeded to the legacy global version"
+    );
+    assert_eq!(
+        structured_marker_version(&project, None).await,
+        None,
+        "the retired global marker row is gone"
+    );
+
+    // The legacy cursor rows were cleaned; no spurious full re-sweep occurred.
+    let conn = raw_conn(&project).await;
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM session_backfill_meta WHERE key LIKE 'structured_backfill_cursor%'",
+            (),
+        )
+        .await
+        .unwrap();
+    let leftover_cursors: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+    assert_eq!(
+        leftover_cursors, 0,
+        "legacy cursor rows are retired on migration"
+    );
+    assert_eq!(count_kind(&project, "codex", "goal").await, 1);
 }
 
 // --- Process-safety coverage (adversarial-review findings on #357) ---
