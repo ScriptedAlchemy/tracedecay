@@ -60,6 +60,14 @@ enum MaskState {
     Char,
 }
 
+#[derive(Clone, Copy)]
+struct DelimiterContext {
+    closing: u8,
+    format_arg_min: Option<usize>,
+    top_level_commas: usize,
+    format_literal_seen: bool,
+}
+
 /// Returns a copy of `source` with the *contents* of comments and string,
 /// byte-string, raw-string, and char literals replaced by spaces, preserving
 /// newlines and byte length so line indexing stays valid.
@@ -77,6 +85,7 @@ fn mask_rust_noise(source: &str) -> String {
     let bytes = source.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut state = MaskState::Normal;
+    let mut delimiters: Vec<DelimiterContext> = Vec::new();
     // Whether the previously emitted byte was an identifier byte — used to tell
     // a raw/byte-string prefix (`r"`, `b"`, `br"`) from an identifier that
     // merely ends in `r`/`b` (e.g. `for`, `sub`).
@@ -101,13 +110,13 @@ fn mask_rust_noise(source: &str) -> String {
                 } else if !prev_ident
                     && (b == b'r' || b == b'b')
                     && let Some(consumed) =
-                        try_open_raw_or_byte_string(bytes, i, &mut out, &mut state)
+                        try_open_raw_or_byte_string(bytes, i, &mut out, &mut state, &mut delimiters)
                 {
                     prev_ident = false;
                     i += consumed;
                 } else if b == b'"' {
                     out.push(b' ');
-                    state = MaskState::Str(is_direct_format_literal_start(bytes, i));
+                    state = MaskState::Str(take_format_literal_context(&mut delimiters));
                     prev_ident = false;
                     i += 1;
                 } else if b == b'\'' && is_char_literal_start(bytes, i) {
@@ -116,6 +125,31 @@ fn mask_rust_noise(source: &str) -> String {
                     prev_ident = false;
                     i += 1;
                 } else {
+                    match b {
+                        b'(' | b'[' | b'{' => delimiters.push(DelimiterContext {
+                            closing: match b {
+                                b'(' => b')',
+                                b'[' => b']',
+                                _ => b'}',
+                            },
+                            format_arg_min: format_macro_argument_index(&out),
+                            top_level_commas: 0,
+                            format_literal_seen: false,
+                        }),
+                        b',' => {
+                            if let Some(context) = delimiters.last_mut() {
+                                context.top_level_commas += 1;
+                            }
+                        }
+                        b')' | b']' | b'}'
+                            if delimiters
+                                .last()
+                                .is_some_and(|context| context.closing == b) =>
+                        {
+                            delimiters.pop();
+                        }
+                        _ => {}
+                    }
                     out.push(b);
                     prev_ident = is_ident_byte(b);
                     i += 1;
@@ -227,6 +261,7 @@ fn try_open_raw_or_byte_string(
     i: usize,
     out: &mut Vec<u8>,
     state: &mut MaskState,
+    delimiters: &mut [DelimiterContext],
 ) -> Option<usize> {
     let mut p = i;
     let byte_prefixed = bytes.get(p) == Some(&b'b');
@@ -246,7 +281,7 @@ fn try_open_raw_or_byte_string(
             out.resize(out.len() + consumed, b' ');
             *state = MaskState::RawStr(
                 hashes,
-                !byte_prefixed && is_direct_format_literal_start(bytes, i),
+                !byte_prefixed && take_format_literal_context(delimiters),
             );
             return Some(consumed);
         }
@@ -262,36 +297,47 @@ fn try_open_raw_or_byte_string(
     None
 }
 
-/// True when a string or raw-string prefix starts the first argument of one of
-/// Rust's standard formatting macros. Only these literals receive the narrow
-/// `{identifier}` exception to normal string masking.
-fn is_direct_format_literal_start(bytes: &[u8], literal_start: usize) -> bool {
-    let mut i = literal_start;
-    while i > 0 && bytes[i - 1].is_ascii_whitespace() {
+/// Return the minimum top-level comma count before the format literal for a
+/// standard formatting macro whose opening delimiter follows `prefix`.
+fn format_macro_argument_index(prefix: &[u8]) -> Option<usize> {
+    let mut i = prefix.len();
+    while i > 0 && prefix[i - 1].is_ascii_whitespace() {
         i -= 1;
     }
-    if i == 0 || !matches!(bytes[i - 1], b'(' | b'[' | b'{') {
-        return false;
-    }
-    i -= 1;
-    while i > 0 && bytes[i - 1].is_ascii_whitespace() {
-        i -= 1;
-    }
-    if i == 0 || bytes[i - 1] != b'!' {
-        return false;
+    if i == 0 || prefix[i - 1] != b'!' {
+        return None;
     }
     i -= 1;
     let name_end = i;
-    while i > 0 && (is_ident_byte(bytes[i - 1]) || bytes[i - 1] == b':') {
+    while i > 0 && (is_ident_byte(prefix[i - 1]) || prefix[i - 1] == b':') {
         i -= 1;
     }
-    let Ok(path) = std::str::from_utf8(&bytes[i..name_end]) else {
+    let Ok(path) = std::str::from_utf8(&prefix[i..name_end]) else {
+        return None;
+    };
+    match path.rsplit("::").next().unwrap_or(path) {
+        "format" | "format_args" | "format_args_nl" | "print" | "println" | "eprint"
+        | "eprintln" | "panic" | "todo" | "unimplemented" | "unreachable" => Some(0),
+        "assert" | "debug_assert" | "write" | "writeln" => Some(1),
+        "assert_eq" | "assert_ne" | "debug_assert_eq" | "debug_assert_ne" => Some(2),
+        _ => None,
+    }
+}
+
+/// Mark and accept the first string at the format-argument position of the
+/// innermost active formatting macro. Later value arguments remain masked.
+fn take_format_literal_context(delimiters: &mut [DelimiterContext]) -> bool {
+    let Some(context) = delimiters.last_mut() else {
         return false;
     };
-    matches!(
-        path.rsplit("::").next().unwrap_or(path),
-        "format" | "format_args" | "format_args_nl" | "print" | "println" | "eprint" | "eprintln"
-    )
+    let Some(minimum) = context.format_arg_min else {
+        return false;
+    };
+    if context.format_literal_seen || context.top_level_commas < minimum {
+        return false;
+    }
+    context.format_literal_seen = true;
+    true
 }
 
 /// Return the end of an implicit `{identifier}` capture starting at `start`.
@@ -2951,6 +2997,33 @@ mod mask_rust_noise_tests {
             "let q = '\"'; let m = HashMap::new();",
             "HashMap"
         ));
+    }
+
+    #[test]
+    fn implicit_captures_survive_supported_format_macro_positions() {
+        for source in [
+            r#"panic!("{HashMap}");"#,
+            r#"assert!(ready, "{HashMap}");"#,
+            r#"assert_eq!(left, right, "{HashMap}");"#,
+            r#"debug_assert_ne!(left, right, "{HashMap}");"#,
+            r#"write!(&mut output, "{HashMap}");"#,
+            r#"writeln!(&mut output, "{HashMap}");"#,
+            r##"write!(&mut output, r#"{HashMap}"#);"##,
+            r#"todo!("{HashMap}");"#,
+            r#"unimplemented!("{HashMap}");"#,
+            r#"unreachable!("{HashMap}");"#,
+            r#"std::println! /* comment */ ("{HashMap}");"#,
+        ] {
+            assert!(referenced(source, "HashMap"), "source: {source}");
+        }
+
+        for source in [
+            r#"assert_eq!("{HashMap}", "other");"#,
+            r#"assert!(message.contains("{HashMap}"));"#,
+            r#"format!("{value}", "{HashMap}");"#,
+        ] {
+            assert!(!referenced(source, "HashMap"), "source: {source}");
+        }
     }
 
     #[test]
