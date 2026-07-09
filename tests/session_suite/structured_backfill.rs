@@ -59,12 +59,12 @@ async fn simulate_old_parser_store(project: &std::path::Path, provider: &str, ki
     )
     .await
     .unwrap();
-    conn.execute(
-        "DELETE FROM session_backfill_meta WHERE key LIKE 'structured_backfill_cursor%'",
-        (),
-    )
-    .await
-    .unwrap();
+    let _ = conn
+        .execute(
+            "DELETE FROM session_backfill_meta WHERE key LIKE 'structured_backfill_cursor%'",
+            (),
+        )
+        .await;
 }
 
 async fn load_only_goal_row(project: &std::path::Path) -> (String, Option<String>, Option<String>) {
@@ -225,6 +225,10 @@ async fn structured_backfill_inserts_codex_goal_rows_once() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
     ingest_source(&db, &source, &project, None).await;
+    // Drive one sweep so the backfill meta table exists (production creates it
+    // via the detached sweep `open_at` schedules); the goal row from live
+    // ingest is already present, so this inserts nothing.
+    db.run_structured_backfill().await;
     assert_eq!(count_kind(&project, "codex", "goal").await, 1);
     drop(db);
 
@@ -262,6 +266,8 @@ async fn structured_backfill_preserves_existing_rows() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
     ingest_source(&db, &source, &project, None).await;
+    // Create the backfill meta table up front (see the note in the goal test).
+    db.run_structured_backfill().await;
 
     let before = db.get_session("codex", "codex-preserve").await.unwrap();
     drop(db);
@@ -287,6 +293,8 @@ async fn structured_backfill_inserts_claude_marker_rows_once() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
     ingest_source(&db, &source, &project, None).await;
+    // Create the backfill meta table up front (see the note in the goal test).
+    db.run_structured_backfill().await;
     assert_eq!(count_kind(&project, "claude", "pr_link").await, 1);
     let assistant_before = load_row_by_role(&project, "claude", "assistant").await;
     drop(db);
