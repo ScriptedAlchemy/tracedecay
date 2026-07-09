@@ -45,6 +45,19 @@ fn git(project: &Path, args: &[&str]) {
         // developer's global hooks (or an installed tracedecay hook) cannot
         // perturb the "unhooked git operation" scenarios under test.
         .args(["-c", "core.hooksPath=.git/no-hooks"])
+        // Disable git's background auto-maintenance. By default every `git
+        // commit` forks a detached `git maintenance run --auto` (gc / pack-refs
+        // / incremental-repack). In a tight commit burst (e.g. the 50-commit
+        // rebase test) that detached process can still be mutating `.git/objects`
+        // or refs when the NEXT `git add`/`git commit` runs, so under load the
+        // foreground command intermittently fails (e.g. "unable to write file
+        // .git/objects/...: No such file or directory" or a ref/index lock
+        // error), tripping the assertion below. Suppressing the fork removes the
+        // only concurrent writer and makes the git setup deterministic, without
+        // changing what any test proves.
+        .args(["-c", "gc.auto=0"])
+        .args(["-c", "gc.autoDetach=false"])
+        .args(["-c", "maintenance.auto=false"])
         .args(args)
         .current_dir(project)
         .output()
