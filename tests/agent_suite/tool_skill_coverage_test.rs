@@ -2,6 +2,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -36,14 +37,33 @@ fn every_mcp_tool_is_listed_by_the_cli_discovery_command() {
         String::from_utf8_lossy(&output.stderr)
     );
     let listing = String::from_utf8_lossy(&output.stdout);
-    for def in get_tool_definitions() {
-        let short = short_name(&def.name);
-        assert!(
-            listing.contains(short),
-            "`tracedecay tool` listing is missing `{short}` — the CLI discovery \
-             surface must cover every MCP tool"
-        );
-    }
+    let definitions = get_tool_definitions();
+    assert!(
+        listing.starts_with(&format!(
+            "Available tools ({}; TraceDecay {})",
+            definitions.len(),
+            env!("CARGO_PKG_VERSION")
+        )),
+        "the CLI catalog must expose its exact count and version so agents can detect a stale MCP"
+    );
+    let expected = definitions
+        .iter()
+        .map(|definition| short_name(&definition.name).to_string())
+        .collect::<BTreeSet<_>>();
+    let listed = listing
+        .lines()
+        .filter_map(|line| line.strip_prefix("  "))
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|name| {
+            name.chars()
+                .all(|character| character.is_ascii_lowercase() || character == '_')
+        })
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        listed, expected,
+        "the local CLI and MCP must expose the exact same generated tool catalog"
+    );
 }
 
 #[test]

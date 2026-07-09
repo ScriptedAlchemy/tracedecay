@@ -155,8 +155,29 @@ fn mechanical_edit_prompts_get_atomic_edit_ladder() {
     .unwrap();
 
     assert_eq!(hint.category.as_key(), "atomic_edit");
+    assert!(hint.context.contains("tracedecay_str_replace"));
     assert!(hint.context.contains("tracedecay_multi_str_replace"));
+    assert!(hint.context.contains("tracedecay_insert_at"));
+    assert!(hint.context.contains("tracedecay_insert_at_symbol"));
     assert!(hint.context.contains("tracedecay_ast_grep_rewrite"));
+}
+
+#[test]
+fn every_hint_route_names_a_registered_agent_tool() {
+    let registered = crate::mcp::tools::get_tool_definitions()
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect::<std::collections::HashSet<_>>();
+
+    for spec in CATEGORY_SPECS {
+        for tool in spec.expected_tools {
+            assert!(
+                registered.contains(*tool),
+                "hint category {} routes agents to unregistered tool {tool}",
+                spec.key
+            );
+        }
+    }
 }
 
 #[test]
@@ -655,7 +676,7 @@ fn shell_input(command: &str) -> ToolHintInput {
 }
 
 #[test]
-fn build_commands_get_a_diagnostics_hint() {
+fn successful_or_running_build_commands_do_not_get_a_diagnostics_hint() {
     for command in [
         "cargo check",
         "cargo build --release",
@@ -667,23 +688,42 @@ fn build_commands_get_a_diagnostics_hint() {
         "pyright src/",
         "/usr/bin/tsc",
     ] {
-        let hint = decide_hint(&shell_input(command)).unwrap_or_else(|| {
-            panic!("{command} must produce a build-diagnostics hint");
-        });
-        assert_eq!(hint.category, HintCategory::BuildDiagnostics, "{command}");
         assert!(
-            hint.context.contains("tracedecay_diagnostics"),
-            "{command} hint must point at tracedecay_diagnostics"
-        );
-        assert!(
-            hint.context.contains("tracedecay_diagnose"),
-            "{command} hint must point at tracedecay_diagnose"
+            decide_hint(&shell_input(command)).is_none(),
+            "{command} has no failure signal and must stay silent"
         );
     }
 }
 
 #[test]
-fn non_build_shell_commands_do_not_get_a_diagnostics_hint() {
+fn build_failure_prompt_gets_a_diagnostics_hint() {
+    let hint = decide_hint(&ToolHintInput {
+        prompt: Some("cargo check failed with error[E0308]: mismatched types".to_string()),
+        ..ToolHintInput::default()
+    })
+    .expect("an explicit compiler failure must produce a diagnostics hint");
+
+    assert_eq!(hint.category, HintCategory::BuildDiagnostics);
+    assert!(hint.context.contains("tracedecay_diagnostics"));
+    assert!(hint.context.contains("tracedecay_diagnose"));
+}
+
+#[test]
+fn tracedecay_tool_invocations_do_not_recommend_the_same_tool_family() {
+    for command in [
+        "tracedecay tool diagnostics",
+        "tracedecay tool grep --pattern needle",
+        "tracedecay tool read --file src/lib.rs",
+    ] {
+        assert!(
+            decide_hint(&shell_input(command)).is_none(),
+            "{command} already selected TraceDecay and must stay silent"
+        );
+    }
+}
+
+#[test]
+fn non_build_shell_commands_keep_their_own_classification() {
     // A recursive grep is still a search hint, not a build-diagnostics one.
     assert_eq!(
         decide_hint(&shell_input("grep -r foo src/"))
@@ -691,15 +731,9 @@ fn non_build_shell_commands_do_not_get_a_diagnostics_hint() {
             .category,
         HintCategory::Search
     );
-    // Non-build cargo subcommands and unrelated programs are not classified.
-    assert!(!is_build_diagnostics_command("cargo run"));
-    assert!(!is_build_diagnostics_command("cargo fmt"));
-    assert!(!is_build_diagnostics_command("npm install"));
-    // A build word inside a quoted arg is data, not the program.
-    assert!(!is_build_diagnostics_command(
-        "grep \"cargo check\" log.txt"
-    ));
-    assert!(!is_build_diagnostics_command(""));
+    for command in ["cargo run", "cargo fmt", "npm install", ""] {
+        assert!(decide_hint(&shell_input(command)).is_none(), "{command}");
+    }
 }
 
 fn edit_input(tool_name: &str, file_path: &str) -> ToolHintInput {

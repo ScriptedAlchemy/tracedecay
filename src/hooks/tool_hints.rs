@@ -248,9 +248,12 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         label: "atomic edit",
         skill: "editing-safely",
         message: "For safe mechanical edits, use TraceDecay's anchored edit tools.",
-        context: "Use tracedecay_multi_str_replace for all-or-nothing anchored replacements, tracedecay_ast_grep_rewrite for structural rewrites, and tracedecay_replace_symbol when replacing one resolved symbol.",
+        context: "Use tracedecay_str_replace for one exact swap, tracedecay_multi_str_replace for an all-or-nothing batch, tracedecay_insert_at or tracedecay_insert_at_symbol for anchored insertion, tracedecay_replace_symbol for one resolved symbol, and tracedecay_ast_grep_rewrite for structural rewrites.",
         expected_tools: &[
+            "tracedecay_str_replace",
             "tracedecay_multi_str_replace",
+            "tracedecay_insert_at",
+            "tracedecay_insert_at_symbol",
             "tracedecay_ast_grep_rewrite",
             "tracedecay_replace_symbol",
         ],
@@ -795,10 +798,6 @@ const CLASSIFICATION_RULES: &[ClassificationRule] = &[
         matches: |facts| asks_for_text_search(&facts.text),
     },
     ClassificationRule {
-        category: HintCategory::BuildDiagnostics,
-        matches: |facts| facts.command.is_some_and(is_build_diagnostics_command),
-    },
-    ClassificationRule {
         category: HintCategory::MemoryStore,
         matches: |facts| is_memory_store_edit(facts.input),
     },
@@ -874,12 +873,12 @@ use classifiers::{
     asks_for_atomic_edit, asks_for_broad_read, asks_for_build_diagnostics, asks_for_call_graph,
     asks_for_file_lookup, asks_for_impact, asks_for_project_context, asks_for_review_changes,
     asks_for_session_recall, asks_for_symbol_lookup, asks_for_text_search,
-    asks_for_type_orientation, combined_text, is_build_diagnostics_command, is_diff_review_command,
-    is_explore_subagent, is_file_lookup_command, is_memory_store_edit,
-    is_project_discovery_command, is_redundancy_candidate_edit, is_semantic_search_tool,
-    is_shell_file_read_command, is_shell_search_command, is_shell_text_search_command,
-    is_single_file_read, is_subagent_context_handoff, is_tracedecay_tool_descriptor_read,
-    looks_like_pasted_diagnostic, matches_normalized, signals_unexpected_change,
+    asks_for_type_orientation, combined_text, is_diff_review_command, is_explore_subagent,
+    is_file_lookup_command, is_memory_store_edit, is_project_discovery_command,
+    is_redundancy_candidate_edit, is_semantic_search_tool, is_shell_file_read_command,
+    is_shell_search_command, is_shell_text_search_command, is_single_file_read,
+    is_subagent_context_handoff, is_tracedecay_tool_descriptor_read, looks_like_pasted_diagnostic,
+    matches_normalized, signals_unexpected_change,
 };
 
 #[cfg(test)]

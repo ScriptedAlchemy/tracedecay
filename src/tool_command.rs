@@ -352,7 +352,11 @@ fn print_tool_list(defs: &[ToolDefinition]) {
         groups.entry(group).or_default().push(def);
     }
 
-    println!("Available tools — run `tracedecay tool <name> --help` for parameters, then");
+    println!(
+        "Available tools ({}; TraceDecay {}) — run `tracedecay tool <name> --help` for parameters, then",
+        defs.len(),
+        env!("CARGO_PKG_VERSION")
+    );
     println!("invoke with `tracedecay tool <name> --args '<json>'` (the same JSON arguments");
     println!("object as the MCP tool; `--args -` reads a heredoc from stdin) or, for quick");
     println!("scalar calls, `--key value` flags.\n");

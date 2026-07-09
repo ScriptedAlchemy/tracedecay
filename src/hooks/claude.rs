@@ -460,15 +460,12 @@ mod tests {
     }
 
     #[test]
-    fn build_bash_command_decides_a_diagnostics_hint() {
+    fn build_bash_command_without_failure_signal_stays_silent() {
         for command in ["cargo check", "cargo clippy", "tsc --noEmit", "pyright"] {
             let event = post_event("Bash", &serde_json::json!({ "command": command }));
-            let hint = decide_post_tool_use_hint(&event)
-                .unwrap_or_else(|| panic!("{command} must produce a build-diagnostics hint"));
-            let context = format_tool_hint(&hint);
             assert!(
-                context.contains("tracedecay_diagnostics"),
-                "{command} hint must point at tracedecay_diagnostics: {context}"
+                decide_post_tool_use_hint(&event).is_none(),
+                "{command} has no failure signal and must stay silent"
             );
         }
     }

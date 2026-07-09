@@ -249,6 +249,7 @@ trusted_hash = "sha256:compact"
 #[test]
 fn sync_codex_hook_trust_records_entries_and_preserves_unrelated_config() {
     let home = tempfile::tempdir().expect("tempdir");
+    install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
     let codex_dir = home.path().join(".codex");
     std::fs::create_dir_all(&codex_dir).unwrap();
     let config_path = codex_dir.join("config.toml");
@@ -304,6 +305,7 @@ trusted_hash = "sha256:foreign"
 #[test]
 fn sync_codex_hook_trust_prunes_stale_and_preserves_foreign_entries() {
     let home = tempfile::tempdir().expect("tempdir");
+    install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
     let codex_dir = home.path().join(".codex");
     std::fs::create_dir_all(&codex_dir).unwrap();
     let config_path = codex_dir.join("config.toml");
@@ -340,6 +342,120 @@ trusted_hash = "sha256:foreign"
         state.contains_key("tracedecay@personal:hooks/hooks.json:session_start:0:0"),
         "current managed events should be recorded"
     );
+}
+
+#[test]
+fn sync_codex_hook_trust_uses_preserved_marketplace_identity() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let marketplace_path = codex_personal_marketplace_path(home.path());
+    std::fs::create_dir_all(marketplace_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &marketplace_path,
+        r#"{
+  "name": "my-marketplace",
+  "interface": { "displayName": "My Marketplace" },
+  "plugins": []
+}"#,
+    )
+    .unwrap();
+    install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
+    std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+
+    let outcome = sync_codex_hook_trust(home.path(), TEST_BIN).unwrap();
+    assert_eq!(outcome.trusted, CODEX_MANAGED_HOOKS.len());
+
+    let config = load_toml_file(&codex_config_path(home.path())).unwrap();
+    let state = config["hooks"]["state"].as_table().unwrap();
+    assert!(
+        state
+            .keys()
+            .all(|key| key.starts_with("tracedecay@my-marketplace:hooks/hooks.json:"))
+    );
+    assert!(
+        state
+            .keys()
+            .all(|key| !key.starts_with("tracedecay@personal:hooks/hooks.json:"))
+    );
+}
+
+#[test]
+fn sync_codex_hook_trust_hashes_the_installed_hook_payload() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let plugin_dir = install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
+    let hooks_path = plugin_dir.join("hooks/hooks.json");
+    let mut hooks = load_json_file_strict(&hooks_path).unwrap();
+    hooks["hooks"]["SessionStart"][0]["hooks"][0]["timeout"] = json!(9);
+    safe_write_json_file(&hooks_path, &hooks, None).unwrap();
+    let changed_entries = codex_hook_trust_entries(&hooks);
+    std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+
+    sync_codex_hook_trust(home.path(), TEST_BIN).unwrap();
+
+    let config = load_toml_file(&codex_config_path(home.path())).unwrap();
+    assert_eq!(
+        codex_plugin_hook_trust_state(&config, &changed_entries),
+        CodexHookTrustState::Trusted,
+        "trust must cover the exact hook payload installed for Codex"
+    );
+}
+
+#[test]
+fn sync_codex_hook_trust_reads_a_custom_marketplace_cache() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let marketplace_path = codex_personal_marketplace_path(home.path());
+    std::fs::create_dir_all(marketplace_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &marketplace_path,
+        r#"{
+  "name": "my-marketplace",
+  "interface": { "displayName": "My Marketplace" },
+  "plugins": [{"name": "tracedecay"}]
+}"#,
+    )
+    .unwrap();
+    let plugin_dir = home.path().join(format!(
+        ".codex/plugins/cache/my-marketplace/tracedecay/{}",
+        env!("CARGO_PKG_VERSION")
+    ));
+    install_codex_plugin_bundle(&plugin_dir, TEST_BIN, InstallScope::Global, home.path()).unwrap();
+    let hooks_path = plugin_dir.join("hooks/hooks.json");
+    let mut hooks = load_json_file_strict(&hooks_path).unwrap();
+    hooks["hooks"]["SessionStart"][0]["hooks"][0]["timeout"] = json!(9);
+    safe_write_json_file(&hooks_path, &hooks, None).unwrap();
+    let changed_entries = codex_hook_trust_entries_for_marketplace(&hooks, "my-marketplace");
+    std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+
+    sync_codex_hook_trust(home.path(), TEST_BIN).unwrap();
+
+    let config = load_toml_file(&codex_config_path(home.path())).unwrap();
+    assert_eq!(
+        codex_plugin_hook_trust_state(&config, &changed_entries),
+        CodexHookTrustState::Trusted
+    );
+}
+
+#[test]
+fn sync_codex_hook_trust_rejects_tampered_installed_command() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let plugin_dir = install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
+    let hooks_path = plugin_dir.join("hooks/hooks.json");
+    let mut hooks = load_json_file_strict(&hooks_path).unwrap();
+    let command = hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"] =
+        json!(format!("{command} && /tmp/untrusted-payload"));
+    safe_write_json_file(&hooks_path, &hooks, None).unwrap();
+    std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+
+    let outcome = sync_codex_hook_trust(home.path(), TEST_BIN).unwrap();
+
+    assert_eq!(outcome.trusted, CODEX_MANAGED_HOOKS.len() - 1);
+    assert_eq!(outcome.skipped, vec!["session_start".to_string()]);
+    let config = load_toml_file(&codex_config_path(home.path())).unwrap();
+    let state = config["hooks"]["state"].as_table().unwrap();
+    assert!(!state.keys().any(|key| key.ends_with(":session_start:0:0")));
 }
 
 #[test]
