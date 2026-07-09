@@ -23,8 +23,8 @@ use serde_json::{Value, json};
 
 use super::artifacts::{sha256_json, write_improvement_artifacts};
 use super::backend::{
-    AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
-    classify_agent_task_error_message,
+    AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse, BackendRetryPolicy,
+    classify_agent_task_error_message, run_agent_task_with_retry,
 };
 use super::config::{AutomationBackend, AutomationConfig, AutomationHostMode};
 use super::job_webhook;
@@ -538,7 +538,8 @@ pub async fn run_user_job_with_backend(
     let request = request.with_strict_json(false);
     let input_hash = Some(request.input_hash.clone());
 
-    let response = match backend.run_task(&request) {
+    let retry_policy = BackendRetryPolicy::from_timeout_secs(config.timeout_secs);
+    let response = match run_agent_task_with_retry(backend, &request, &retry_policy).await {
         Ok(response) => response,
         Err(err) => {
             let record = ctx.append_failed(input_hash, err.to_string(), None).await?;

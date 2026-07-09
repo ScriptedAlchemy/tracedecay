@@ -1044,6 +1044,7 @@ async fn memory_curator_runner_records_noop_fallback_when_backend_run_task_fails
         enabled: true,
         backend: AutomationBackend::CodexAppServer,
         host_mode: AutomationHostMode::Standalone,
+        timeout_secs: 1,
         tasks: AutomationTaskSet {
             memory_curator: AutomationTaskConfig {
                 enabled: true,
@@ -1069,6 +1070,9 @@ async fn memory_curator_runner_records_noop_fallback_when_backend_run_task_fails
     .await
     .unwrap();
 
+    // The backend failure is transient, but this test pins the noop-fallback
+    // record, not retry semantics (covered by backend.rs retry tests) —
+    // timeout_secs: 1 short-circuits the backoff so the test stays fast.
     assert_eq!(backend.calls(), 1);
     assert_noop_fallback_record(
         &run.ledger_record,

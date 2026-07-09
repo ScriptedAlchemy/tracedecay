@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(target_os = "linux")]
 use std::thread;
 use std::time::Duration;
@@ -10,10 +11,12 @@ use tempfile::TempDir;
 
 use tracedecay::automation::backend::{
     AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
-    CodexAppServerBackend, agent_task_failure_disposition, backend_availability,
-    classify_agent_task_error_message, extract_json_object_prefix,
+    BackendRetryPolicy, CodexAppServerBackend, agent_task_failure_disposition,
+    backend_availability, classify_agent_task_error_message, extract_json_object_prefix,
+    run_agent_task_with_retry,
 };
 use tracedecay::automation::config::{AutomationBackend, AutomationConfig};
+use tracedecay::errors::TraceDecayError;
 use tracedecay::sessions::codex_app_server::{
     CodexAppServerSummaryConfig, run_prompt_with_codex_app_server,
 };
@@ -792,4 +795,147 @@ fn windows_python_launcher_prefers_setup_python_and_preserves_exit_status() {
     assert!(launcher.contains("%pythonLocation%\\python.exe"));
     assert!(launcher.contains("exit /b %ERRORLEVEL%"));
     assert!(!launcher.contains("if not errorlevel 1 exit /b 0"));
+}
+
+/// Backend fake whose first `fail_until` invocations fail with a fixed error
+/// message, then every later invocation succeeds. Counts total invocations so
+/// tests can assert exactly how many attempts the retry helper made.
+struct FlakyBackend {
+    calls: AtomicUsize,
+    fail_until: usize,
+    fail_message: &'static str,
+}
+
+impl FlakyBackend {
+    fn new(fail_until: usize, fail_message: &'static str) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            fail_until,
+            fail_message,
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl AgentTaskBackend for FlakyBackend {
+    fn run_task(
+        &self,
+        request: &AgentTaskRequest,
+    ) -> tracedecay::errors::Result<AgentTaskResponse> {
+        let attempt = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if attempt <= self.fail_until {
+            return Err(TraceDecayError::Config {
+                message: self.fail_message.to_string(),
+            });
+        }
+        Ok(AgentTaskResponse {
+            run_id: request.run_id.clone(),
+            task: request.task,
+            output_text: "recovered".to_string(),
+            output_json: None,
+            model: Some("test-model".to_string()),
+            input_tokens: None,
+            output_tokens: None,
+        })
+    }
+}
+
+fn retry_test_request() -> AgentTaskRequest {
+    AgentTaskRequest::new(
+        "run_retry".to_string(),
+        AgentTaskKind::MemoryCurator,
+        r#"{"ops":[]}"#.to_string(),
+        None,
+        json!({}),
+    )
+}
+
+/// Zero-backoff policy with a generous budget so retry logic can be exercised
+/// deterministically without real sleeps.
+fn instant_retry_policy(max_attempts: u32) -> BackendRetryPolicy {
+    BackendRetryPolicy::new(
+        max_attempts,
+        vec![Duration::ZERO, Duration::ZERO],
+        Duration::from_secs(120),
+    )
+}
+
+#[tokio::test]
+async fn retry_recovers_transient_backend_failure_on_second_attempt() {
+    let backend = FlakyBackend::new(1, "timed out waiting for codex app-server response");
+    let request = retry_test_request();
+
+    let response = run_agent_task_with_retry(&backend, &request, &instant_retry_policy(3))
+        .await
+        .expect("transient failure should be retried into a success");
+
+    assert_eq!(backend.calls(), 2, "should succeed on the second attempt");
+    assert_eq!(response.run_id, "run_retry");
+    assert_eq!(response.output_text, "recovered");
+}
+
+#[tokio::test]
+async fn retry_stops_after_exhausting_bounded_attempts() {
+    // Always-transient failure with a generous budget: the helper should make
+    // the first attempt plus two retries (3 total) then propagate the error.
+    let backend = FlakyBackend::new(usize::MAX, "closed stdout before completing");
+    let request = retry_test_request();
+
+    let err = run_agent_task_with_retry(&backend, &request, &instant_retry_policy(3))
+        .await
+        .expect_err("exhausted retries should propagate the final error");
+
+    assert_eq!(backend.calls(), 3, "first attempt plus two bounded retries");
+    assert!(
+        err.to_string().contains("closed stdout before completing"),
+        "final error should propagate unchanged: {err}"
+    );
+}
+
+#[tokio::test]
+async fn retry_does_not_retry_non_transient_backend_failure() {
+    let backend = FlakyBackend::new(
+        usize::MAX,
+        "model refused the request because policy rejected the prompt",
+    );
+    let request = retry_test_request();
+
+    let err = run_agent_task_with_retry(&backend, &request, &instant_retry_policy(3))
+        .await
+        .expect_err("permanent failure should not be retried");
+
+    assert_eq!(
+        classify_agent_task_error_message(&err.to_string()),
+        AgentTaskFailureClass::Permanent
+    );
+    assert_eq!(backend.calls(), 1, "non-transient failure must fail fast");
+}
+
+#[tokio::test]
+async fn retry_respects_job_timeout_budget() {
+    // Transient failure, but the configured backoff (10s) would exceed the tiny
+    // 1s budget, so no retry may be attempted.
+    let backend = FlakyBackend::new(
+        usize::MAX,
+        "timed out waiting for codex app-server response",
+    );
+    let request = retry_test_request();
+    let policy = BackendRetryPolicy::new(3, vec![Duration::from_secs(10)], Duration::from_secs(1));
+
+    let err = run_agent_task_with_retry(&backend, &request, &policy)
+        .await
+        .expect_err("budget-exhausted retry should propagate the failure");
+
+    assert_eq!(
+        backend.calls(),
+        1,
+        "retry must not exceed the overall job timeout budget"
+    );
+    assert!(
+        err.to_string()
+            .contains("timed out waiting for codex app-server")
+    );
 }
