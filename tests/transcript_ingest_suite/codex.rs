@@ -326,6 +326,20 @@ fn write_codex_rollout_with_response_item_tools(
                     "status": "completed"
                 }
             }),
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:18.600Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "web_search_call",
+                    "call_id": "call-tool-4",
+                    "action": {
+                        "type": "search",
+                        "query": "zxqvunicorntoken rust async runtime",
+                        "queries": ["zxqvunicorntoken rust async runtime"]
+                    },
+                    "status": "completed"
+                }
+            }),
         ],
     );
     path
@@ -396,7 +410,7 @@ async fn codex_response_item_tool_events_are_cataloged_compactly() {
     let source = CodexSource::with_home(&home);
 
     let stats = ingest_source(&db, &source, &project, None).await;
-    assert_eq!(stats.messages_upserted, 5);
+    assert_eq!(stats.messages_upserted, 6);
 
     let results = db
         .search_session_messages(
@@ -420,6 +434,18 @@ async fn codex_response_item_tool_events_are_cataloged_compactly() {
     assert_eq!(metadata["tool_name"], "exec_command");
     assert_eq!(metadata["call_id"], "call-tool-1");
 
+    // The capped preview stays reversible: the row points back at the exact
+    // rollout JSONL line so full fidelity is recoverable from the source.
+    let rollout_name = "rollout-2026-01-01T00-00-18-codex-response-item-tools.jsonl";
+    assert!(
+        call.source_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with(rollout_name))
+    );
+    let call_offset = call
+        .source_offset
+        .expect("tool_event carries source_offset");
+
     let output_results = db
         .search_session_messages(
             "codex",
@@ -434,6 +460,36 @@ async fn codex_response_item_tool_events_are_cataloged_compactly() {
     assert!(output.text.contains("output_bytes: 2427"));
     assert!(!output.text.contains("error: exact failure line"));
     assert!(output.text.len() < 2200);
+
+    let web_search_results = db
+        .search_session_messages(
+            "codex",
+            Some(project.to_string_lossy().as_ref()),
+            "zxqvunicorntoken",
+            10,
+        )
+        .await;
+    assert_eq!(web_search_results.len(), 1);
+    let web_search = &web_search_results[0].message;
+    assert_eq!(web_search.kind.as_deref(), Some("tool_event"));
+    assert_eq!(web_search.tool_names.as_deref(), Some("web_search"));
+    assert!(
+        web_search
+            .text
+            .contains("zxqvunicorntoken rust async runtime")
+    );
+    assert!(
+        web_search
+            .source_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with(rollout_name))
+    );
+    // web_search_call is a later JSONL line than the exec_command call, so its
+    // byte offset into the rollout is strictly greater.
+    let web_search_offset = web_search
+        .source_offset
+        .expect("web_search row carries source_offset");
+    assert!(web_search_offset > call_offset);
 }
 
 #[tokio::test]

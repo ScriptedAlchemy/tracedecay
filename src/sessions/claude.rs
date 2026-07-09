@@ -20,7 +20,8 @@ use crate::sessions::SessionMessageRecord;
 use crate::sessions::shared::{
     StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,
     append_tool_calls_metadata, append_tool_event_metadata, append_usage_metadata,
-    content_storage_text_and_tools, path_belongs_to_project, title_from_messages,
+    content_storage_text_and_tools, path_belongs_to_project, preview_truncated,
+    title_from_messages,
 };
 use crate::sessions::source::{
     ParsedTranscript, SessionDraft, TranscriptSource, collect_files_with_ext, stream_new_jsonl,
@@ -338,12 +339,7 @@ fn system_hook_message_from_line(
         lines.push(format!("hook_errors: {joined}"));
     }
     let joined = lines.join("\n");
-    let prefix = crate::text::utf8_prefix_at_or_before(&joined, 2000);
-    let text = if prefix.len() == joined.len() {
-        prefix.to_string()
-    } else {
-        format!("{prefix}…")
-    };
+    let text = preview_truncated(&joined, 2000);
 
     let message_id = record
         .get("uuid")
@@ -382,7 +378,8 @@ fn system_hook_message_from_line(
         provider: PROVIDER.to_string(),
         message_id,
         session_id: session_id.to_string(),
-        role: "system".to_string(),
+        // role "tool" keeps transient hook telemetry out of LCM policy anchors, which pin role system/developer.
+        role: "tool".to_string(),
         timestamp,
         ordinal: offset,
         text,

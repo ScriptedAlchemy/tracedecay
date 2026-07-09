@@ -526,7 +526,7 @@ async fn claude_system_hook_errors_become_searchable_hook_events() {
     let results = db.search_session_messages("claude", None, "boom", 10).await;
     assert_eq!(results.len(), 1);
     let hit = &results[0];
-    assert_eq!(hit.message.role, "system");
+    assert_eq!(hit.message.role, "tool");
     assert_eq!(hit.message.kind.as_deref(), Some("hook_event"));
     assert!(
         hit.message
@@ -538,6 +538,16 @@ async fn claude_system_hook_errors_become_searchable_hook_events() {
         serde_json::from_str(hit.message.metadata_json.as_deref().unwrap()).unwrap();
     assert_eq!(metadata["source"], "claude_system_record");
     assert!(metadata.get("hook_count").is_some());
+
+    // The capped hook preview stays reversible: the row points back at the exact
+    // transcript JSONL line so full fidelity is recoverable from the source.
+    assert!(
+        hit.message
+            .source_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("claude-hook-sess.jsonl"))
+    );
+    assert!(hit.message.source_offset.is_some());
 
     let routine = db
         .search_session_messages("claude", None, "routine-marker-command", 10)

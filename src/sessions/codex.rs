@@ -47,21 +47,20 @@ use crate::accounting::parser::parse_timestamp;
 use crate::sessions::SessionMessageRecord;
 use crate::sessions::shared::{
     StoredCursor, append_tool_calls_metadata, content_storage_text_and_tools,
-    path_belongs_to_project, title_from_messages,
+    path_belongs_to_project, preview_truncated, title_from_messages,
 };
 use crate::sessions::source::{
     ParsedTranscript, SessionDraft, TranscriptSource, collect_files_with_ext, stream_new_jsonl,
 };
-use crate::text::utf8_prefix_at_or_before;
 use context::CodexContextState;
 
 const PROVIDER: &str = "codex";
 /// `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` → date dirs add depth.
 const MAX_SCAN_DEPTH: u8 = 6;
 /// Response-item tool call/output/reasoning previews are truncated to this
-/// many chars so large tool outputs are searchable without duplicating the
+/// many bytes so large tool outputs are searchable without duplicating the
 /// full body (Codex already stores that in the rollout itself).
-const TOOL_EVENT_PREVIEW_CHARS: usize = 2000;
+const TOOL_EVENT_PREVIEW_BYTES: usize = 2000;
 
 /// Session metadata read from a rollout's leading `session_meta` line.
 struct CodexMeta {
@@ -483,6 +482,8 @@ fn response_item_tool_event_from_line(
     }
     let payload = record.get("payload")?;
     let response_item_type = payload.get("type").and_then(Value::as_str)?;
+    // Serialize the output payload once and share it with both helpers below.
+    let output = payload.get("output").map(compact_response_item_value);
     let (role, text, metadata) = match response_item_type {
         "function_call" | "custom_tool_call" | "tool_search_call" | "web_search_call" => {
             let tool_name = response_item_tool_name(payload, response_item_type);
@@ -491,15 +492,20 @@ fn response_item_tool_event_from_line(
             (
                 "tool",
                 text,
-                response_item_tool_metadata(response_item_type, payload, tool_name),
+                response_item_tool_metadata(
+                    response_item_type,
+                    payload,
+                    tool_name,
+                    output.as_deref(),
+                ),
             )
         }
         "function_call_output" | "custom_tool_call_output" => {
-            let text = response_item_tool_output_text(payload)?;
+            let text = response_item_tool_output_text(payload, output.as_deref())?;
             (
                 "tool",
                 text,
-                response_item_tool_metadata(response_item_type, payload, None),
+                response_item_tool_metadata(response_item_type, payload, None, output.as_deref()),
             )
         }
         "reasoning" => {
@@ -507,7 +513,7 @@ fn response_item_tool_event_from_line(
             (
                 "assistant",
                 text,
-                response_item_tool_metadata(response_item_type, payload, None),
+                response_item_tool_metadata(response_item_type, payload, None, output.as_deref()),
             )
         }
         _ => return None,
@@ -564,21 +570,25 @@ fn response_item_tool_call_text(
     if let Some(arguments) = payload
         .get("arguments")
         .or_else(|| payload.get("input"))
+        .or_else(|| payload.get("action"))
         .map(compact_response_item_value)
     {
-        parts.push(format!("arguments: {}", preview_text(&arguments)));
+        parts.push(format!(
+            "arguments: {}",
+            preview_truncated(&arguments, TOOL_EVENT_PREVIEW_BYTES)
+        ));
     }
     parts.join("\n")
 }
 
-fn response_item_tool_output_text(payload: &Value) -> Option<String> {
+fn response_item_tool_output_text(payload: &Value, output: Option<&str>) -> Option<String> {
     let call_id = payload
         .get("call_id")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
-    let output = payload.get("output").map(compact_response_item_value)?;
+    let output = output?;
     let output_bytes = output.len();
-    let preview = preview_text(&output);
+    let preview = preview_truncated(output, TOOL_EVENT_PREVIEW_BYTES);
     Some(format!(
         "Codex tool output: {call_id}\noutput_bytes: {output_bytes}\npreview: {preview}"
     ))
@@ -597,19 +607,11 @@ fn compact_response_item_value(value: &Value) -> String {
         .unwrap_or_else(|| serde_json::to_string(value).unwrap_or_else(|_| value.to_string()))
 }
 
-fn preview_text(text: &str) -> String {
-    let prefix = utf8_prefix_at_or_before(text, TOOL_EVENT_PREVIEW_CHARS);
-    if prefix.len() == text.len() {
-        prefix.to_string()
-    } else {
-        format!("{prefix}…")
-    }
-}
-
 fn response_item_tool_metadata(
     response_item_type: &str,
     payload: &Value,
     tool_name: Option<String>,
+    output: Option<&str>,
 ) -> Value {
     let mut metadata = serde_json::Map::new();
     metadata.insert(
@@ -628,11 +630,11 @@ fn response_item_tool_metadata(
     if let Some(tool_name) = tool_name {
         metadata.insert("tool_name".to_string(), Value::String(tool_name));
     }
-    if let Some(output) = payload.get("output").map(compact_response_item_value) {
+    if let Some(output) = output {
         metadata.insert("output_bytes".to_string(), Value::from(output.len() as i64));
         metadata.insert(
             "output_truncated".to_string(),
-            Value::Bool(output.len() > TOOL_EVENT_PREVIEW_CHARS),
+            Value::Bool(output.len() > TOOL_EVENT_PREVIEW_BYTES),
         );
     }
     Value::Object(metadata)

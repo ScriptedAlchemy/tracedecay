@@ -4,6 +4,7 @@
 //! file-backed [`crate::sessions::source`] drivers and the Hermes `SQLite` sweep
 //! both depend on them so they do not need to import from each other.
 
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -214,6 +215,18 @@ pub(crate) fn one_line_truncated(text: &str, max: usize) -> String {
     format!("{truncated}…")
 }
 
+/// Clip `text` to at most `max_bytes` on a UTF-8 boundary, appending a single
+/// `…` only when truncation occurred. Unlike [`one_line_truncated`] this keeps
+/// internal newlines, so multi-line derived-row previews retain their structure.
+pub(crate) fn preview_truncated(text: &str, max_bytes: usize) -> String {
+    let prefix = crate::text::utf8_prefix_at_or_before(text, max_bytes);
+    if prefix.len() == text.len() {
+        prefix.to_string()
+    } else {
+        format!("{prefix}…")
+    }
+}
+
 /// Collapse whitespace and clip to a short preview suitable for a session title.
 pub(crate) fn preview_title(text: &str) -> String {
     const MAX_TITLE_CHARS: usize = 80;
@@ -262,9 +275,33 @@ pub(crate) fn append_tool_calls_metadata(
 
 /// Byte length of `serde_json::to_string(value)`, or 0 when `value` is absent.
 fn json_byte_len(value: Option<&Value>) -> u64 {
-    value
-        .and_then(|value| serde_json::to_string(value).ok())
-        .map_or(0, |text| text.len() as u64)
+    let Some(value) = value else {
+        return 0;
+    };
+    let mut sink = ByteCountSink::default();
+    if serde_json::to_writer(&mut sink, value).is_ok() {
+        sink.count
+    } else {
+        0
+    }
+}
+
+/// `io::Write` sink that counts bytes without retaining them, so JSON byte
+/// lengths can be measured without allocating an intermediate `String`.
+#[derive(Default)]
+struct ByteCountSink {
+    count: u64,
+}
+
+impl io::Write for ByteCountSink {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.count += buf.len() as u64;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Records bounded per-call tool metadata (byte counts and identifiers only,
