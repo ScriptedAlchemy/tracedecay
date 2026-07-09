@@ -2,6 +2,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
+/// `serde` `skip_serializing_if` predicate: skip a `bool` field when it is
+/// `false`. Keeps default-off flags (e.g. `dry_run`) out of tool output unless
+/// they are actually set.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// Kinds of nodes in the code graph.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NodeKind {
@@ -637,42 +645,80 @@ pub struct ResolvedRef {
 }
 
 /// Result of a single string replacement edit.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EditResult {
     pub success: bool,
     pub file_path: String,
     pub matched_str: String,
     pub new_str: String,
+    /// For `replace_symbol`: the exact source span that was replaced, including
+    /// any leading doc-comment / attribute block that belongs to the item. Lets
+    /// callers see precisely what was swapped out (and recover its docs/attrs if
+    /// the replacement dropped them). `None` for plain string replacements.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaced_span: Option<String>,
+    /// True when this was a dry run: validation, spans, and the resulting
+    /// content were all computed, but nothing was written to disk.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
+    /// Bounded preview diff of the would-be change. Populated only on a
+    /// successful dry run; `None` for real edits and for failures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
     pub message: String,
 }
 
 /// Result of a multi-string replacement edit.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MultiEditResult {
     pub success: bool,
     pub file_path: String,
     pub applied_count: usize,
+    /// True when this was a dry run: replacements were validated and the
+    /// resulting content computed, but nothing was written to disk.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
+    /// Bounded preview diff of the would-be change. Populated only on a
+    /// successful dry run; `None` for real edits and for failures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
     pub message: String,
 }
 
 /// Result of an insert-at operation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct InsertResult {
     pub success: bool,
     pub file_path: String,
     pub anchor_line: u32,
     pub content: String,
     pub before: bool,
+    /// True when this was a dry run: the insertion point was resolved and the
+    /// resulting content computed, but nothing was written to disk.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
+    /// Bounded preview diff of the would-be change. Populated only on a
+    /// successful dry run; `None` for real edits and for failures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
     pub message: String,
 }
 
 /// Result of an ast-grep rewrite operation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AstGrepResult {
     pub success: bool,
     pub file_path: String,
     pub pattern: String,
     pub rewrite: String,
+    /// True when this was a dry run: the rewrite was resolved (via the built-in
+    /// literal fallback or an ast-grep preview run) but nothing was written.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
+    /// Bounded preview of the would-be change. Populated only on a successful
+    /// dry run; `None` for real edits and for failures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
     pub message: String,
 }
 

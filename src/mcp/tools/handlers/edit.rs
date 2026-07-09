@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
+use crate::types::{AstGrepResult, EditResult, InsertResult, MultiEditResult};
 
 use super::super::ToolResult;
 use super::super::render;
@@ -29,35 +30,190 @@ fn required_array<'a>(args: &'a Value, name: &str) -> Result<&'a [Value]> {
         .ok_or_else(|| missing_required_param(name))
 }
 
-fn text_tool_result<T: Serialize>(
+/// Common shape shared by every edit-tool result payload: a handler-known
+/// `success` flag plus a human-readable `message` describing the outcome
+/// (e.g. "`old_str` not found in file" / "`old_str` matches 3 times"). Lets
+/// [`text_tool_result`] attach a structural semantic-error marker (and its
+/// reason) to the [`ToolResult`] instead of the dispatcher having to guess
+/// outcome from rendered — possibly markdown, not JSON — response text.
+trait EditOutcome {
+    fn success(&self) -> bool;
+    fn message(&self) -> &str;
+    fn file_path(&self) -> &str;
+}
+
+impl EditOutcome for EditResult {
+    fn success(&self) -> bool {
+        self.success
+    }
+    fn message(&self) -> &str {
+        &self.message
+    }
+    fn file_path(&self) -> &str {
+        &self.file_path
+    }
+}
+
+impl EditOutcome for MultiEditResult {
+    fn success(&self) -> bool {
+        self.success
+    }
+    fn message(&self) -> &str {
+        &self.message
+    }
+    fn file_path(&self) -> &str {
+        &self.file_path
+    }
+}
+
+impl EditOutcome for InsertResult {
+    fn success(&self) -> bool {
+        self.success
+    }
+    fn message(&self) -> &str {
+        &self.message
+    }
+    fn file_path(&self) -> &str {
+        &self.file_path
+    }
+}
+
+impl EditOutcome for AstGrepResult {
+    fn success(&self) -> bool {
+        self.success
+    }
+    fn message(&self) -> &str {
+        &self.message
+    }
+    fn file_path(&self) -> &str {
+        &self.file_path
+    }
+}
+
+/// Reads the shared `dry_run` edit flag (default `false`): when set, an edit
+/// primitive validates and computes the resulting content but writes nothing,
+/// returning a preview diff instead.
+fn dry_run_arg(args: &Value) -> bool {
+    args.get("dry_run")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Reads the shared `verify` edit flag (default `false`): when set, a real
+/// (non-dry-run) successful edit re-runs file-scoped diagnostics and attaches a
+/// compact verdict to the result. Off by default to keep edits fast; compound
+/// refactor tools are expected to default it on.
+fn verify_arg(args: &Value) -> bool {
+    args.get("verify").and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// Files considered "touched" for downstream bookkeeping. A dry run writes
+/// nothing and a failure changes nothing, so only a real successful edit
+/// reports its file.
+fn edit_touched_files(result: &impl EditOutcome, dry_run: bool) -> Vec<String> {
+    if result.success() && !dry_run {
+        vec![result.file_path().to_string()]
+    } else {
+        vec![]
+    }
+}
+
+/// Post-edit verification loop. Runs file-scoped diagnostics over the edited
+/// file and returns a compact verdict (`clean` / `errors` with the first few
+/// error messages). Returns `None` if diagnostics could not run — verification
+/// is best-effort and never fails an edit that already applied.
+async fn run_edit_verification(cg: &TraceDecay, file_path: &str) -> Option<Value> {
+    let scope = crate::diagnostics::Scope::File {
+        path: file_path.to_string(),
+    };
+    let diagnostics = crate::diagnostics::run_all(cg.project_root(), &scope)
+        .await
+        .ok()?;
+
+    let mut error_count = 0usize;
+    let mut warning_count = 0usize;
+    let mut first_errors: Vec<Value> = Vec::new();
+    for diag in &diagnostics {
+        if diag.file != file_path {
+            continue;
+        }
+        match diag.level.as_str() {
+            "error" => {
+                error_count += 1;
+                if first_errors.len() < 3 {
+                    first_errors.push(json!({
+                        "line": diag.line_start,
+                        "code": diag.code,
+                        "message": diag.message,
+                    }));
+                }
+            }
+            "warning" => warning_count += 1,
+            _ => {}
+        }
+    }
+
+    Some(json!({
+        "verdict": if error_count == 0 { "clean" } else { "errors" },
+        "error_count": error_count,
+        "warning_count": warning_count,
+        "first_errors": first_errors,
+    }))
+}
+
+async fn text_tool_result<T: Serialize + EditOutcome>(
     cg: &TraceDecay,
     args: &Value,
     result: &T,
     touched_files: Vec<String>,
+    dry_run: bool,
+    verify: bool,
 ) -> ToolResult {
-    let value = serde_json::to_value(result).unwrap_or_default();
+    let success = result.success();
+    let mut value = serde_json::to_value(result).unwrap_or_default();
+
+    // Verification only makes sense for a real (written) successful edit: a dry
+    // run changed nothing on disk, and a failure left the file as-is.
+    if verify && !dry_run && success {
+        if let Some(verdict) = run_edit_verification(cg, result.file_path()).await {
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("verification".to_string(), verdict);
+            }
+        }
+    }
+
     let text = render::finalize(Some(cg.project_root()), args, &value, || {
         render::generic_md(&value)
     });
-    ToolResult::new(
+    let tool_result = ToolResult::new(
         json!({ "content": [{ "type": "text", "text": text }] }),
         touched_files,
     )
+    .with_semantic_error(!success);
+    if success {
+        tool_result
+    } else {
+        tool_result.with_failure_message(result.message())
+    }
 }
 
 pub(super) async fn handle_str_replace(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let path = required_str(&args, "path")?;
     let old_str = required_str(&args, "old_str")?;
     let new_str = required_str(&args, "new_str")?;
+    let dry_run = dry_run_arg(&args);
+    let verify = verify_arg(&args);
 
-    let result = cg.str_replace(path, old_str, new_str).await?;
-    let touched_files = vec![result.file_path.clone()];
-    Ok(text_tool_result(cg, &args, &result, touched_files))
+    let result = cg.str_replace(path, old_str, new_str, dry_run).await?;
+    let touched_files = edit_touched_files(&result, dry_run);
+    Ok(text_tool_result(cg, &args, &result, touched_files, dry_run, verify).await)
 }
 
 pub(super) async fn handle_multi_str_replace(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let path = required_str(&args, "path")?;
     let replacements = required_array(&args, "replacements")?;
+    let dry_run = dry_run_arg(&args);
+    let verify = verify_arg(&args);
 
     let parsed_replacements: Vec<(&str, &str)> = replacements
         .iter()
@@ -78,63 +234,63 @@ pub(super) async fn handle_multi_str_replace(cg: &TraceDecay, args: Value) -> Re
         });
     }
 
-    let result = cg.multi_str_replace(path, &parsed_replacements).await?;
-    let touched_files = vec![result.file_path.clone()];
-    Ok(text_tool_result(cg, &args, &result, touched_files))
+    let result = cg
+        .multi_str_replace(path, &parsed_replacements, dry_run)
+        .await?;
+    let touched_files = edit_touched_files(&result, dry_run);
+    Ok(text_tool_result(cg, &args, &result, touched_files, dry_run, verify).await)
 }
 
 pub(super) async fn handle_insert_at(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let path = required_str(&args, "path")?;
     let anchor = required_str(&args, "anchor")?;
     let content = required_str(&args, "content")?;
+    let dry_run = dry_run_arg(&args);
+    let verify = verify_arg(&args);
 
     let before = args.get("before").and_then(Value::as_bool).unwrap_or(false);
 
-    let result = cg.insert_at(path, anchor, content, before).await?;
-    let touched_files = vec![result.file_path.clone()];
-    Ok(text_tool_result(cg, &args, &result, touched_files))
+    let result = cg.insert_at(path, anchor, content, before, dry_run).await?;
+    let touched_files = edit_touched_files(&result, dry_run);
+    Ok(text_tool_result(cg, &args, &result, touched_files, dry_run, verify).await)
 }
 
 pub(super) async fn handle_replace_symbol(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let symbol = required_str(&args, "symbol")?;
     let new_source = required_str(&args, "new_source")?;
+    let dry_run = dry_run_arg(&args);
+    let verify = verify_arg(&args);
 
-    let result = cg.replace_symbol(symbol, new_source).await?;
-    let touched_files = if result.success {
-        vec![result.file_path.clone()]
-    } else {
-        vec![]
-    };
-    Ok(text_tool_result(cg, &args, &result, touched_files))
+    let result = cg.replace_symbol(symbol, new_source, dry_run).await?;
+    let touched_files = edit_touched_files(&result, dry_run);
+    Ok(text_tool_result(cg, &args, &result, touched_files, dry_run, verify).await)
 }
 
 pub(super) async fn handle_insert_at_symbol(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let symbol = required_str(&args, "symbol")?;
     let content = required_str(&args, "content")?;
+    let dry_run = dry_run_arg(&args);
+    let verify = verify_arg(&args);
     let position = args
         .get("position")
         .and_then(|v| v.as_str())
         .unwrap_or("after");
 
-    let result = cg.insert_at_symbol(symbol, content, position).await?;
-    let touched_files = if result.success {
-        vec![result.file_path.clone()]
-    } else {
-        vec![]
-    };
-    Ok(text_tool_result(cg, &args, &result, touched_files))
+    let result = cg
+        .insert_at_symbol(symbol, content, position, dry_run)
+        .await?;
+    let touched_files = edit_touched_files(&result, dry_run);
+    Ok(text_tool_result(cg, &args, &result, touched_files, dry_run, verify).await)
 }
 
 pub(super) async fn handle_ast_grep_rewrite(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let path = required_str(&args, "path")?;
     let pattern = required_str(&args, "pattern")?;
     let rewrite = required_str(&args, "rewrite")?;
+    let dry_run = dry_run_arg(&args);
+    let verify = verify_arg(&args);
 
-    let result = cg.ast_grep_rewrite(path, pattern, rewrite).await?;
-    let touched_files = if result.success {
-        vec![result.file_path.clone()]
-    } else {
-        vec![]
-    };
-    Ok(text_tool_result(cg, &args, &result, touched_files))
+    let result = cg.ast_grep_rewrite(path, pattern, rewrite, dry_run).await?;
+    let touched_files = edit_touched_files(&result, dry_run);
+    Ok(text_tool_result(cg, &args, &result, touched_files, dry_run, verify).await)
 }

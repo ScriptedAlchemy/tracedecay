@@ -676,10 +676,20 @@ async fn str_replace_reindex_resolves_new_cross_file_call() {
             "src/caller.rs",
             "pub fn caller() {}\n",
             "pub fn caller() { target(); }\n",
+            false,
         )
         .await
         .unwrap();
     assert!(edit.success, "edit should succeed: {edit:?}");
+    // A real (non-dry-run) edit writes and carries no preview diff.
+    assert!(
+        !edit.dry_run,
+        "real edit should not be flagged dry_run: {edit:?}"
+    );
+    assert!(
+        edit.diff.is_none(),
+        "real edit should not return a diff: {edit:?}"
+    );
 
     let nodes = cg.get_all_nodes().await.unwrap();
     let caller = nodes
@@ -698,6 +708,234 @@ async fn str_replace_reindex_resolves_new_cross_file_call() {
         }),
         "direct edit reindex should resolve the new caller -> target edge; edges={edges:?}"
     );
+}
+
+#[tokio::test]
+async fn str_replace_dry_run_writes_nothing_but_returns_diff() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    let original = "pub fn caller() {}\n";
+    fs::write(project.join("src/caller.rs"), original).unwrap();
+
+    let cg = TraceDecay::init(project).await.unwrap();
+    cg.sync().await.unwrap();
+
+    let edit = cg
+        .str_replace(
+            "src/caller.rs",
+            "pub fn caller() {}\n",
+            "pub fn caller() { target(); }\n",
+            true, // dry_run
+        )
+        .await
+        .unwrap();
+
+    assert!(edit.success, "dry run should still validate: {edit:?}");
+    assert!(
+        edit.dry_run,
+        "result should be flagged as a dry run: {edit:?}"
+    );
+    let diff = edit
+        .diff
+        .as_deref()
+        .expect("dry run should return a preview diff");
+    assert!(
+        diff.contains("+pub fn caller() { target(); }"),
+        "diff should show the would-be addition: {diff}"
+    );
+
+    // Nothing may be written to disk on a dry run.
+    let on_disk = fs::read_to_string(project.join("src/caller.rs")).unwrap();
+    assert_eq!(on_disk, original, "dry run must not modify the file");
+
+    // And the graph must not have picked up the (never-written) call edge.
+    let nodes = cg.get_all_nodes().await.unwrap();
+    let caller = nodes
+        .iter()
+        .find(|node| node.name == "caller" && node.file_path == "src/caller.rs")
+        .unwrap();
+    let edges = cg.get_all_edges().await.unwrap();
+    assert!(
+        !edges
+            .iter()
+            .any(|edge| edge.kind == EdgeKind::Calls && edge.source == caller.id),
+        "dry run must not reindex a new call edge; edges={edges:?}"
+    );
+}
+
+/// `rename_preview` with a `new_name` must list the declaration site and every
+/// resolved call site for a fixture symbol, read-only. Uses a same-file caller
+/// so the Calls edge resolves deterministically.
+#[tokio::test]
+async fn rename_preview_lists_declaration_and_call_sites() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub fn greet() -> u32 { 1 }\npub fn caller() -> u32 { greet() }\n",
+    )
+    .unwrap();
+
+    let cg = TraceDecay::init(project).await.unwrap();
+    cg.sync().await.unwrap();
+
+    let nodes = cg.get_all_nodes().await.unwrap();
+    let greet = nodes
+        .iter()
+        .find(|node| node.name == "greet" && node.file_path == "src/lib.rs")
+        .expect("greet node should exist");
+
+    let result = tracedecay::mcp::handle_tool_call(
+        &cg,
+        "tracedecay_rename_preview",
+        serde_json::json!({
+            "node_id": greet.id,
+            "new_name": "salute",
+            "format": "json",
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = result.value["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default();
+
+    // Declaration site with its current-text snippet.
+    assert!(
+        text.contains("greet"),
+        "preview should name the symbol: {text}"
+    );
+    assert!(
+        text.contains("pub fn greet"),
+        "preview should show the declaration snippet: {text}"
+    );
+    // Proposed name is echoed, read-only marker present.
+    assert!(
+        text.contains("salute"),
+        "preview should echo new_name: {text}"
+    );
+    assert!(
+        text.contains("read_only"),
+        "preview should flag itself read-only: {text}"
+    );
+    // The resolved call site from `caller`.
+    assert!(
+        text.contains("reference_count"),
+        "preview should report a reference count: {text}"
+    );
+    assert!(
+        text.contains("caller"),
+        "preview should list the calling symbol as a reference site: {text}"
+    );
+}
+
+/// Exercises the post-edit verification loop end-to-end through the MCP
+/// dispatcher: a real edit that plants a type error, with `verify: true`, must
+/// re-run file-scoped diagnostics and surface the planted error; the same edit
+/// tool without `verify` must not attach a verification verdict. Compiles a
+/// tiny throwaway crate, so it shells out to `cargo check` (into an isolated
+/// diagnostics target dir) and is intentionally on the slower side.
+#[tokio::test]
+async fn edit_verify_flag_surfaces_planted_compiler_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"verify_fixture\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn answer() -> u32 { 1 }\n").unwrap();
+
+    let cg = TraceDecay::init(project).await.unwrap();
+    cg.sync().await.unwrap();
+
+    // Default path (no `verify`): output must NOT carry a verification verdict.
+    let clean = tracedecay::mcp::handle_tool_call(
+        &cg,
+        "tracedecay_str_replace",
+        serde_json::json!({
+            "path": "src/lib.rs",
+            "old_str": "pub fn answer() -> u32 { 1 }",
+            "new_str": "pub fn answer() -> u32 { 2 }",
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let clean_text = clean.value["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_lowercase();
+    assert!(
+        !clean_text.contains("verif"),
+        "edit without verify should not run verification: {clean_text}"
+    );
+
+    // verify=true on an edit that introduces `-> u32 { "no" }` (E0308) must
+    // surface the planted error in a verification verdict.
+    let broken = tracedecay::mcp::handle_tool_call(
+        &cg,
+        "tracedecay_str_replace",
+        serde_json::json!({
+            "path": "src/lib.rs",
+            "old_str": "pub fn answer() -> u32 { 2 }",
+            "new_str": "pub fn answer() -> u32 { \"no\" }",
+            "verify": true,
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let broken_text = broken.value["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_lowercase();
+    assert!(
+        broken_text.contains("verif"),
+        "verify=true should attach a verification verdict: {broken_text}"
+    );
+    assert!(
+        broken_text.contains("mismatched types") || broken_text.contains("error"),
+        "verification should surface the planted compiler error: {broken_text}"
+    );
+}
+
+#[tokio::test]
+async fn replace_symbol_dry_run_previews_without_writing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    let original = "pub fn greet() -> u32 { 1 }\n";
+    fs::write(project.join("src/lib.rs"), original).unwrap();
+
+    let cg = TraceDecay::init(project).await.unwrap();
+    cg.sync().await.unwrap();
+
+    let edit = cg
+        .replace_symbol("greet", "pub fn greet() -> u32 { 2 }", true)
+        .await
+        .unwrap();
+
+    assert!(edit.success, "dry run should validate: {edit:?}");
+    assert!(edit.dry_run, "result should be flagged dry_run: {edit:?}");
+    assert!(
+        edit.diff.is_some(),
+        "symbol replace dry run should return a diff: {edit:?}"
+    );
+    // replaced_span is still computed so callers can review the old text.
+    assert!(
+        edit.replaced_span.is_some(),
+        "dry run should still report the span it would replace: {edit:?}"
+    );
+    let on_disk = fs::read_to_string(project.join("src/lib.rs")).unwrap();
+    assert_eq!(on_disk, original, "dry run must not modify the file");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -840,7 +1078,7 @@ async fn replace_symbol_preserves_first_in_file_doc_comment() {
     let (dir, cg) = setup_first_in_file_doc().await;
 
     let result = cg
-        .replace_symbol("src/lib.rs::foo", "fn foo() { let _x = 1; }")
+        .replace_symbol("src/lib.rs::foo", "fn foo() { let _x = 1; }", false)
         .await
         .unwrap();
     assert!(result.success, "replace failed: {}", result.message);
@@ -864,6 +1102,7 @@ async fn insert_before_first_in_file_documented_fn_goes_above_doc_block() {
             "src/lib.rs::foo",
             "// SPDX-License-Identifier: MIT",
             "before",
+            false,
         )
         .await
         .unwrap();

@@ -5459,6 +5459,201 @@ async fn test_multi_str_replace_unicode_preview_does_not_panic() {
 }
 
 #[tokio::test]
+async fn test_multi_str_replace_earlier_insertion_collision_lands_correctly() {
+    // Regression: match counts were validated against the ORIGINAL source but
+    // replacements were then applied sequentially against progressively-edited
+    // text. When an earlier replacement introduced a duplicate of a later
+    // `old_str`, `replacen` clobbered the freshly-inserted copy instead of the
+    // caller's intended original site. Resolving all ranges up-front against
+    // the original and splicing once makes each replacement land where the
+    // caller meant.
+    let dir = test_temp_dir();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+
+    fs::write(
+        project.join("src/main.rs"),
+        "fn keep() {}\nfn target() {}\n",
+    )
+    .unwrap();
+
+    let (cg, _env) = init_test_project(project).await;
+    cg.index_all().await.unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_multi_str_replace",
+        json!({
+            "path": "src/main.rs",
+            "replacements": [
+                ["fn keep() {}", "fn keep() {}\nfn target() {}"],
+                ["fn target() {}", "fn target_renamed() {}"]
+            ]
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let text = extract_text(&result.value);
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(parsed["success"], true);
+    assert_eq!(parsed["applied_count"], 2);
+
+    // The inserted `fn target() {}` (from the first replacement) is preserved,
+    // and the ORIGINAL second-line `fn target()` is the one that gets renamed.
+    let content = fs::read_to_string(project.join("src/main.rs")).unwrap();
+    assert_eq!(
+        content,
+        "fn keep() {}\nfn target() {}\nfn target_renamed() {}\n"
+    );
+}
+
+#[tokio::test]
+async fn test_multi_str_replace_overlapping_ranges_error() {
+    // Two replacements whose matched ranges overlap cannot both be applied
+    // coherently; the edit must be refused rather than silently dropping one.
+    let dir = test_temp_dir();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+
+    let original = "abcdef\n";
+    fs::write(project.join("src/main.rs"), original).unwrap();
+
+    let (cg, _env) = init_test_project(project).await;
+    cg.index_all().await.unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_multi_str_replace",
+        json!({
+            "path": "src/main.rs",
+            "replacements": [
+                ["abcd", "WXYZ"],
+                ["cdef", "QRST"]
+            ]
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let text = extract_text(&result.value);
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(parsed["success"], false);
+    assert!(
+        parsed["message"]
+            .as_str()
+            .unwrap()
+            .contains("overlapping ranges")
+    );
+
+    // The file must be untouched when the edit is refused.
+    let content = fs::read_to_string(project.join("src/main.rs")).unwrap();
+    assert_eq!(content, original);
+}
+
+#[tokio::test]
+async fn test_replace_symbol_documented_fn_keeps_single_doc_comment() {
+    // The replaced span must cover the leading doc-comment block, so replacing
+    // a documented fn with new_source that carries its own doc yields exactly
+    // one doc comment — not the old one orphaned above the new one.
+    let dir = test_temp_dir();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+
+    // A leading item keeps `foo` off row 0 so its extracted attrs_start_line is
+    // non-zero and survives the DB round-trip (a stored 0 is treated as a
+    // pre-v7 sentinel and falls back to start_line).
+    fs::write(
+        project.join("src/main.rs"),
+        "pub const N: u32 = 0;\n/// Doc for foo.\nfn foo() {\n    let _ = 1;\n}\n",
+    )
+    .unwrap();
+
+    let (cg, _env) = init_test_project(project).await;
+    cg.index_all().await.unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_replace_symbol",
+        json!({
+            "symbol": "foo",
+            "new_source": "/// Doc for foo.\nfn foo() {\n    let _ = 2;\n}"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let text = extract_text(&result.value);
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(parsed["success"], true);
+    // The returned replaced_span carries the old doc comment so the caller can
+    // recover it if needed.
+    assert!(
+        parsed["replaced_span"]
+            .as_str()
+            .unwrap()
+            .contains("/// Doc for foo.")
+    );
+
+    let content = fs::read_to_string(project.join("src/main.rs")).unwrap();
+    assert_eq!(content.matches("/// Doc for foo.").count(), 1);
+    assert!(content.contains("let _ = 2;"));
+    assert!(!content.contains("let _ = 1;"));
+}
+
+#[tokio::test]
+async fn test_insert_at_symbol_before_lands_above_attribute() {
+    // `position=before` must insert above the item's leading doc/attribute
+    // block, not between the docs and the item.
+    let dir = test_temp_dir();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+
+    // A leading item keeps `foo` off row 0 so its extracted attrs_start_line is
+    // non-zero and survives the DB round-trip.
+    fs::write(
+        project.join("src/main.rs"),
+        "pub const N: u32 = 0;\n/// Doc for foo.\nfn foo() {}\n",
+    )
+    .unwrap();
+
+    let (cg, _env) = init_test_project(project).await;
+    cg.index_all().await.unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_insert_at_symbol",
+        json!({
+            "symbol": "foo",
+            "content": "// INSERTED",
+            "position": "before"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let text = extract_text(&result.value);
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(parsed["success"], true);
+
+    let content = fs::read_to_string(project.join("src/main.rs")).unwrap();
+    let inserted_at = content.find("// INSERTED").unwrap();
+    let doc_at = content.find("/// Doc for foo.").unwrap();
+    assert!(
+        inserted_at < doc_at,
+        "inserted content should land above the doc comment, got: {content:?}"
+    );
+}
+
+#[tokio::test]
 async fn test_str_replace_unsupported_file_type_succeeds() {
     // Regression: editing unsupported types (e.g. .css) previously wrote the
     // file then returned a reindex error, silently mutating the file.

@@ -2465,7 +2465,13 @@ async fn failed_tool_call_writes_mcp_runtime_analytics_event() {
     assert_eq!(metadata["tokens_saved"], 0);
     assert_eq!(metadata["transport"], "mcp");
     assert_eq!(metadata["tool_kind"], "mcp_tool");
-    assert_eq!(metadata["failure_reason"], "tool_dispatch_error");
+    let failure_reason = metadata["failure_reason"]
+        .as_str()
+        .expect("failure_reason should be a string");
+    assert!(
+        failure_reason.contains("unknown tool") && failure_reason.contains("not_a_real_tool"),
+        "failure_reason should carry the real dispatch error, not a generic marker, got: {failure_reason}"
+    );
 }
 
 #[tokio::test]
@@ -2556,6 +2562,61 @@ async fn semantic_tool_failure_writes_error_mcp_runtime_analytics_event() {
 
     assert_eq!(event.session_id.as_deref(), Some("mcp-session-9004"));
     assert_eq!(event.outcome.as_deref(), Some("error"));
+}
+
+#[tokio::test]
+// Intentional: serializes env-mutating savings tests; #[tokio::test]
+// defaults to a current-thread runtime, so no executor thread blocks.
+#[allow(clippy::await_holding_lock)]
+async fn structural_edit_failure_writes_real_failure_reason_to_analytics() {
+    let _env_guard = SAVINGS_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tmp_global = persistent_temp_dir();
+    let _env = isolated_savings_env(&tmp_global.join("global.db"));
+
+    let (server, _proj_tmp) = setup_server().await;
+    let server_handle = server.clone();
+    let db_path = locked_global_db_path();
+
+    // An anchor mismatch (str_replace's `old_str` not present in the file) is
+    // a structural failure the handler already knows about via
+    // `EditResult::success == false` — the resulting analytics event should
+    // carry that exact message, not a generic "tool_dispatch_error" marker.
+    let resp = call_tool(
+        server,
+        9005,
+        "tracedecay_str_replace",
+        json!({
+            "path": "src/main.rs",
+            "old_str": "fn missing() {}",
+            "new_str": "fn replaced() {}",
+            "_meta": { "sessionId": "mcp-session-9005" }
+        }),
+    )
+    .await;
+
+    assert!(resp["error"].is_null(), "semantic failures are MCP results");
+    assert_eq!(resp["result"]["isError"], true);
+
+    server_handle.ledger_writes_settled().await;
+    let event = expect_mcp_runtime_event(
+        &db_path,
+        "tracedecay_str_replace",
+        "mcp-session-9005",
+        "durable structural-failure MCP runtime analytics event",
+    )
+    .await;
+    let metadata = analytics_metadata(&event);
+
+    assert_eq!(event.outcome.as_deref(), Some("error"));
+    let failure_reason = metadata["failure_reason"]
+        .as_str()
+        .expect("failure_reason should be a string");
+    assert!(
+        failure_reason.contains("old_str not found"),
+        "failure_reason should carry the anchor-mismatch message, got: {failure_reason}"
+    );
 }
 
 /// Regression test for the empty-ledger bug: the savings ledger must record

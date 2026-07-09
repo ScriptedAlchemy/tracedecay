@@ -1310,14 +1310,26 @@ fn def_similar() -> ToolDefinition {
 fn def_rename_preview() -> ToolDefinition {
     def(
         "tracedecay_rename_preview",
-        "References",
-        "Show all references to a symbol -- all edges where the node appears as source or target.",
+        "Rename Preview",
+        "READ-ONLY preview of what a rename would touch. Given a symbol node and \
+         an optional `new_name`, returns the declaration site plus every graph \
+         reference site (from call/use/etc. edges), each with its current-text \
+         line snippet, and a per-file count of literal textual occurrences of \
+         the name that are NOT graph references ('text-only matches — review \
+         manually'). It does NOT edit anything and does NOT rewrite occurrences \
+         — a true rename tool is a later addition. Graph call-edge coverage \
+         improves as the resolver does; text-only counts catch what the graph \
+         misses (comments, strings, dynamic dispatch, unresolved refs).",
         json!({
             "type": "object",
             "properties": {
                 "node_id": {
                     "type": "string",
-                    "description": "The unique node ID to find references for"
+                    "description": "The unique node ID of the symbol to preview renaming"
+                },
+                "new_name": {
+                    "type": "string",
+                    "description": "Proposed new name. Optional — only used to label the preview; no text is rewritten."
                 }
             },
             "required": ["node_id"]
@@ -1737,6 +1749,14 @@ fn def_str_replace() -> ToolDefinition {
                 "new_str": {
                     "type": "string",
                     "description": "Replacement string"
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "If true, validate and compute the edit but write nothing; the response includes a bounded preview diff of the would-be change (default: false)."
+                },
+                "verify": {
+                    "type": "boolean",
+                    "description": "If true, re-run file-scoped diagnostics after a real edit and include a compact verdict (clean / N new errors) in the response. Ignored for dry runs. Default: false to keep edits fast."
                 }
             },
             "required": ["path", "old_str", "new_str"]
@@ -1769,6 +1789,14 @@ fn def_multi_str_replace() -> ToolDefinition {
                         "minItems": 2,
                         "maxItems": 2
                     }
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "If true, validate and compute all replacements but write nothing; the response includes a bounded preview diff of the would-be change (default: false)."
+                },
+                "verify": {
+                    "type": "boolean",
+                    "description": "If true, re-run file-scoped diagnostics after a real edit and include a compact verdict (clean / N new errors) in the response. Ignored for dry runs. Default: false to keep edits fast."
                 }
             },
             "required": ["path", "replacements"]
@@ -1803,6 +1831,14 @@ fn def_insert_at() -> ToolDefinition {
                 "before": {
                     "type": "boolean",
                     "description": "If true, insert before the anchor line; if false, insert after (default: false)"
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "If true, resolve the anchor and compute the insertion but write nothing; the response includes a bounded preview diff of the would-be change (default: false)."
+                },
+                "verify": {
+                    "type": "boolean",
+                    "description": "If true, re-run file-scoped diagnostics after a real edit and include a compact verdict (clean / N new errors) in the response. Ignored for dry runs. Default: false to keep edits fast."
                 }
             },
             "required": ["path", "anchor", "content"]
@@ -3164,6 +3200,14 @@ fn def_ast_grep_rewrite() -> ToolDefinition {
                 "rewrite": {
                     "type": "string",
                     "description": "ast-grep rewrite rule"
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "If true, preview the rewrite without applying it: ast-grep runs without --update-all (or the built-in literal fallback computes a diff) and the response returns the would-be change, writing nothing (default: false)."
+                },
+                "verify": {
+                    "type": "boolean",
+                    "description": "If true, re-run file-scoped diagnostics after a real rewrite and include a compact verdict (clean / N new errors) in the response. Ignored for dry runs. Default: false to keep edits fast."
                 }
             },
             "required": ["path", "pattern", "rewrite"]
@@ -3627,8 +3671,14 @@ fn def_replace_symbol() -> ToolDefinition {
         "Replace the full source of a named symbol (function, method, struct, \
          enum, etc.) with new source text. Resolves the symbol via exact \
          qualified-name match; on ambiguity, callable kinds win, and if \
-         still ambiguous the edit is refused. Preserves the surrounding \
-         file untouched and reindexes the file after writing.",
+         still ambiguous the edit is refused. The replaced span covers the \
+         item's LEADING doc-comment / attribute block (e.g. `///` docs, `#[...]` \
+         attributes) as well as its body, so `new_source` must itself include \
+         any docs/attributes you want to keep — otherwise they are dropped. \
+         The result's `replaced_span` returns the exact text that was swapped \
+         out (docs/attrs included) so you can recover them; a `message` note \
+         flags when the old span had docs/attrs the replacement appears to omit. \
+         Preserves the surrounding file untouched and reindexes after writing.",
         json!({
             "type": "object",
             "properties": {
@@ -3638,7 +3688,15 @@ fn def_replace_symbol() -> ToolDefinition {
                 },
                 "new_source": {
                     "type": "string",
-                    "description": "Full replacement source — must include the symbol's own declaration line."
+                    "description": "Full replacement source — must include the symbol's own declaration line, plus any leading doc-comments/attributes to preserve (the replaced span includes the old ones)."
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "If true, resolve the symbol span and compute the replacement but write nothing; the response includes a bounded preview diff and the replaced_span (default: false)."
+                },
+                "verify": {
+                    "type": "boolean",
+                    "description": "If true, re-run file-scoped diagnostics after a real edit and include a compact verdict (clean / N new errors) in the response. Ignored for dry runs. Default: false to keep edits fast."
                 }
             },
             "required": ["symbol", "new_source"]
@@ -3698,6 +3756,14 @@ fn def_insert_at_symbol() -> ToolDefinition {
                     "type": "string",
                     "enum": ["before", "after"],
                     "description": "Where to insert relative to the symbol's range. Default: after."
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "If true, resolve the insertion point and compute the change but write nothing; the response includes a bounded preview diff of the would-be change (default: false)."
+                },
+                "verify": {
+                    "type": "boolean",
+                    "description": "If true, re-run file-scoped diagnostics after a real edit and include a compact verdict (clean / N new errors) in the response. Ignored for dry runs. Default: false to keep edits fast."
                 }
             },
             "required": ["symbol", "content"]

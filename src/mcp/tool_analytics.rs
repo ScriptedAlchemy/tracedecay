@@ -22,6 +22,30 @@ pub(super) struct McpToolAnalyticsEvent<'a> {
     /// observed yet (e.g. a daemon-proxied first call). Bounded to the
     /// negotiated name only — never the full `clientInfo` payload.
     pub(super) client_name: Option<&'a str>,
+    /// Bounded, sanitized (no argument bodies) reason for a `outcome ==
+    /// "error"` call, e.g. a structural edit-tool failure message or a
+    /// dispatch error's `Display` text. `None` falls back to a generic
+    /// marker so pre-existing callers that have not been migrated to supply
+    /// a real reason keep working.
+    pub(super) failure_reason: Option<&'a str>,
+}
+
+/// Failure reasons are capped well below the metadata column's practical
+/// size so a pathological message can't bloat the analytics event; this
+/// intentionally excludes tool `arguments`, which may carry user file
+/// contents.
+const FAILURE_REASON_MAX_CHARS: usize = 160;
+
+/// Collapse whitespace and cap a failure reason to
+/// [`FAILURE_REASON_MAX_CHARS`] characters (never argument bodies — callers
+/// must derive `reason` from response/error text only).
+pub(super) fn bounded_failure_reason(reason: &str) -> String {
+    let collapsed: String = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= FAILURE_REASON_MAX_CHARS {
+        collapsed
+    } else {
+        collapsed.chars().take(FAILURE_REASON_MAX_CHARS).collect()
+    }
 }
 
 pub(super) fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> AnalyticsEventInsert {
@@ -38,7 +62,12 @@ pub(super) fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> Anal
         "client_name": input.client_name,
     });
     if input.outcome == "error" {
-        metadata["failure_reason"] = json!("tool_dispatch_error");
+        metadata["failure_reason"] = json!(
+            input
+                .failure_reason
+                .map(bounded_failure_reason)
+                .unwrap_or_else(|| "tool_dispatch_error".to_string())
+        );
     }
     if crate::analytics::is_skill_view_tool(input.tool_name) {
         metadata["arguments"] = input.arguments.clone();
@@ -59,6 +88,7 @@ pub(super) fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> Anal
             metadata["action"] = json!(action);
         }
     }
+
     append_tool_response_analytics(
         input.tool_name,
         input.arguments,
@@ -164,7 +194,10 @@ mod tests {
     use crate::daemon::HookRouteMetadata;
     use crate::mcp::hook_events::{HookAgent, HookEvent, HookEventKind};
 
-    use super::{McpToolAnalyticsEvent, hook_route_analytics_event, mcp_tool_analytics_event};
+    use super::{
+        FAILURE_REASON_MAX_CHARS, McpToolAnalyticsEvent, bounded_failure_reason,
+        hook_route_analytics_event, mcp_tool_analytics_event,
+    };
 
     #[test]
     fn hook_route_analytics_event_preserves_correlation_fields() {
@@ -207,6 +240,95 @@ mod tests {
     }
 
     #[test]
+    fn bounded_failure_reason_collapses_whitespace_and_truncates() {
+        assert_eq!(
+            bounded_failure_reason("old_str  not\nfound"),
+            "old_str not found"
+        );
+        let long = "x".repeat(FAILURE_REASON_MAX_CHARS + 50);
+        let bounded = bounded_failure_reason(&long);
+        assert_eq!(bounded.chars().count(), FAILURE_REASON_MAX_CHARS);
+    }
+
+    #[test]
+    fn mcp_tool_analytics_event_uses_real_failure_reason_when_provided() {
+        let request_id = json!(1);
+        let arguments = json!({});
+        let event = mcp_tool_analytics_event(McpToolAnalyticsEvent {
+            project_root: Path::new("/repo"),
+            session_id: None,
+            tool_name: "tracedecay_str_replace",
+            outcome: "error",
+            raw_file_tokens: 0,
+            response_tokens: 0,
+            net_saved_tokens: 0,
+            duration_us: None,
+            timestamp: 0,
+            request_id: &request_id,
+            arguments: &arguments,
+            internal_analytics: None,
+            client_name: None,
+            failure_reason: Some("old_str not found in src/main.rs"),
+        });
+        let metadata: serde_json::Value =
+            serde_json::from_str(event.metadata_json.as_deref().unwrap_or("{}")).unwrap();
+        assert_eq!(
+            metadata["failure_reason"],
+            "old_str not found in src/main.rs"
+        );
+    }
+
+    #[test]
+    fn mcp_tool_analytics_event_falls_back_to_generic_reason_when_none_provided() {
+        let request_id = json!(1);
+        let arguments = json!({});
+        let event = mcp_tool_analytics_event(McpToolAnalyticsEvent {
+            project_root: Path::new("/repo"),
+            session_id: None,
+            tool_name: "tracedecay_not_a_real_tool",
+            outcome: "error",
+            raw_file_tokens: 0,
+            response_tokens: 0,
+            net_saved_tokens: 0,
+            duration_us: None,
+            timestamp: 0,
+            request_id: &request_id,
+            arguments: &arguments,
+            internal_analytics: None,
+            client_name: None,
+            failure_reason: None,
+        });
+        let metadata: serde_json::Value =
+            serde_json::from_str(event.metadata_json.as_deref().unwrap_or("{}")).unwrap();
+        assert_eq!(metadata["failure_reason"], "tool_dispatch_error");
+    }
+
+    #[test]
+    fn mcp_tool_analytics_event_omits_failure_reason_on_success() {
+        let request_id = json!(1);
+        let arguments = json!({});
+        let event = mcp_tool_analytics_event(McpToolAnalyticsEvent {
+            project_root: Path::new("/repo"),
+            session_id: None,
+            tool_name: "tracedecay_str_replace",
+            outcome: "success",
+            raw_file_tokens: 0,
+            response_tokens: 0,
+            net_saved_tokens: 0,
+            duration_us: None,
+            timestamp: 0,
+            request_id: &request_id,
+            arguments: &arguments,
+            internal_analytics: None,
+            client_name: None,
+            failure_reason: Some("should be ignored on success"),
+        });
+        let metadata: serde_json::Value =
+            serde_json::from_str(event.metadata_json.as_deref().unwrap_or("{}")).unwrap();
+        assert!(metadata.get("failure_reason").is_none());
+    }
+
+    #[test]
     fn mcp_tool_analytics_event_records_action_and_client_for_fact_store() {
         let request_id = json!(1);
         let arguments = json!({"action": "add", "content": "secret fact body"});
@@ -224,6 +346,7 @@ mod tests {
             arguments: &arguments,
             internal_analytics: None,
             client_name: Some("claude-code"),
+            failure_reason: None,
         });
 
         let metadata: serde_json::Value =
@@ -256,6 +379,7 @@ mod tests {
             arguments: &arguments,
             internal_analytics: None,
             client_name: None,
+            failure_reason: None,
         });
 
         let metadata: serde_json::Value =
@@ -284,6 +408,7 @@ mod tests {
             arguments: &arguments,
             internal_analytics: None,
             client_name: Some("codex"),
+            failure_reason: None,
         });
 
         let metadata: serde_json::Value =
