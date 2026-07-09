@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use serde_json::Value;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 use tempfile::TempDir;
@@ -19,8 +20,8 @@ use tracedecay::storage::{
     ActiveProjectContext, EnrollmentMarker, GraphScopeId, PrivateStoreIo, ProjectPath,
     STORE_MANIFEST_FILENAME, StorageMode, StoreArtifactPath, default_profile_project_id,
     default_profile_sharded_layout, profile_sharded_layout, read_enrollment_marker,
-    read_store_manifest, resolve_layout, resolve_lcm_payload_root, resolve_project_session_db_path,
-    resolve_response_handle_root, write_store_manifest,
+    read_repository_identity_marker, read_store_manifest, resolve_layout, resolve_lcm_payload_root,
+    resolve_project_session_db_path, resolve_response_handle_root, write_store_manifest,
 };
 use tracedecay::tracedecay::TraceDecay;
 
@@ -171,6 +172,31 @@ fn invalid_enrollment_marker_is_not_treated_as_initialized() {
     assert_eq!(discover_project_root(root), None);
     assert!(!TraceDecay::is_initialized(root));
     assert!(read_enrollment_marker(root).is_err());
+}
+
+#[test]
+fn repository_identity_marker_rejects_unknown_schema() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn marker_test() {}\n").unwrap();
+    init_repo_with_commit(&project);
+    let marker_path = tracedecay::worktree::git_common_dir(&project)
+        .unwrap()
+        .join("tracedecay-project.json");
+    fs::write(
+        marker_path,
+        r#"{"schema_version":99,"project_id":"proj_future"}"#,
+    )
+    .unwrap();
+
+    let error = read_repository_identity_marker(&project).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported repository identity schema_version=99"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
@@ -694,8 +720,10 @@ async fn trace_decay_init_registers_default_profile_shard_globally() {
     let dir = TempDir::new().unwrap();
     let project = dir.path().join("repo");
     let home = test_home(&dir);
-    fs::create_dir_all(&project).unwrap();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn registered() {}\n").unwrap();
     let _home_guard = HomeGuard::set(&home);
+    init_repo_with_commit(&project);
     let project_id = default_profile_project_id(&project);
 
     TraceDecay::init(&project).await.unwrap();
@@ -703,6 +731,19 @@ async fn trace_decay_init_registers_default_profile_shard_globally() {
     let resolution = db.resolve_project_store_by_alias(&project).await.unwrap();
 
     assert_eq!(resolution.project.project_id, project_id);
+    let identity_path = tracedecay::worktree::git_common_dir(&project)
+        .unwrap()
+        .join("tracedecay-project.json");
+    let identity: Value = serde_json::from_slice(&fs::read(&identity_path).unwrap()).unwrap();
+    assert_eq!(identity["schema_version"], 1);
+    assert_eq!(identity["project_id"], project_id);
+
+    fs::remove_file(&identity_path).unwrap();
+    TraceDecay::open(&project).await.unwrap();
+    assert!(
+        identity_path.is_file(),
+        "opening a legacy registered checkout must migrate it to durable repository identity"
+    );
 }
 
 #[tokio::test]
@@ -810,6 +851,27 @@ async fn same_remote_clone_is_not_considered_initialized_without_local_identity(
         !TraceDecay::has_initialized_store(&clone).await,
         "a separate clone with the same origin is not a linked worktree and must not borrow the initialized store"
     );
+    assert_eq!(
+        resolved_project_session_db_path(&clone).await.unwrap(),
+        project_session_db_path(&clone),
+        "session storage must not use a same-remote clone as repository identity"
+    );
+
+    let original_identity = tracedecay::worktree::git_common_dir(&project)
+        .unwrap()
+        .join("tracedecay-project.json");
+    let copied_identity = tracedecay::worktree::git_common_dir(&clone)
+        .unwrap()
+        .join("tracedecay-project.json");
+    fs::copy(original_identity, copied_identity).unwrap();
+    let error = match TraceDecay::open(&clone).await {
+        Ok(_) => panic!("a copied repository marker must not bind a second live clone"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("repository identity conflict"),
+        "unexpected copied-marker error: {error}"
+    );
 }
 
 #[tokio::test]
@@ -846,6 +908,7 @@ async fn renamed_checkout_session_db_follows_registered_store() {
     // Move the whole checkout on disk; both its canonical root and git common
     // dir change, so registry identity resolution can no longer match by path.
     fs::rename(&original, &renamed).unwrap();
+    git(&renamed, &["remote", "remove", "origin"]);
 
     let resolved = resolved_project_session_db_path(&renamed)
         .await
@@ -855,6 +918,62 @@ async fn renamed_checkout_session_db_follows_registered_store() {
         normalize_test_path(&resolved),
         normalize_test_path(&project_session_db_path(&renamed)),
         "renamed checkout must not fork a fresh default-path session DB",
+    );
+
+    #[cfg(unix)]
+    {
+        let alias = dir.path().join("repo-alias");
+        symlink(&renamed, &alias).unwrap();
+        let via_alias = resolved_project_session_db_path(&alias)
+            .await
+            .expect("symlink alias should retain repository identity");
+        assert_path_eq(via_alias, registered_session_db);
+    }
+}
+
+#[tokio::test]
+async fn parent_index_excludes_nested_linked_worktree_sources() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    let nested_worktree = project.join(".worktrees/feature");
+    let home = test_home(&dir);
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn parent_only() {}\n").unwrap();
+    let _home_guard = HomeGuard::set(&home);
+    init_repo_with_commit(&project);
+
+    git(
+        &project,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/nested-index",
+            nested_worktree.to_str().unwrap(),
+        ],
+    );
+    fs::write(
+        nested_worktree.join("src/lib.rs"),
+        "pub fn parent_only() {}\npub fn nested_worktree_only() {}\n",
+    )
+    .unwrap();
+
+    let mut parent = TraceDecay::init(&project).await.unwrap();
+    parent.add_include_folders(&[".worktrees".to_string()]);
+    parent.index_all().await.unwrap();
+
+    assert!(
+        !parent.search("parent_only", 10).await.unwrap().is_empty(),
+        "the parent checkout must remain indexed"
+    );
+    assert!(
+        parent
+            .search("nested_worktree_only", 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a nested linked worktree must be a separate project view, not duplicate parent source"
     );
 }
 
@@ -904,7 +1023,7 @@ async fn same_remote_clone_session_db_does_not_borrow_registered_store() {
 }
 
 #[tokio::test]
-async fn ambiguous_remote_session_db_falls_back_to_default_path() {
+async fn same_remote_repositories_keep_distinct_persistent_identities() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let remote = dir.path().join("remote.git");
@@ -931,17 +1050,25 @@ async fn ambiguous_remote_session_db_falls_back_to_default_path() {
         &["clone", remote.to_str().unwrap(), two.to_str().unwrap()],
     );
 
-    // Two registered checkouts share the same remote, so remote-based fallback
-    // is ambiguous and must be declined even after one checkout is renamed.
-    TraceDecay::init(&one).await.unwrap();
+    let one_session_db = TraceDecay::init(&one)
+        .await
+        .unwrap()
+        .store_layout()
+        .sessions_db_path
+        .clone();
     TraceDecay::init(&two).await.unwrap();
 
     fs::rename(&one, &renamed_one).unwrap();
 
     let resolved = resolved_project_session_db_path(&renamed_one)
         .await
-        .expect("ambiguous-remote checkout should still resolve a default path");
-    assert_path_eq(&resolved, project_session_db_path(&renamed_one));
+        .expect("moved checkout should resolve its persistent repository identity");
+    assert_path_eq(&resolved, one_session_db);
+    assert_ne!(
+        normalize_test_path(&resolved),
+        normalize_test_path(&project_session_db_path(&renamed_one)),
+        "remote ambiguity must not fork the moved repository into a new path-hash store"
+    );
 }
 
 #[tokio::test]

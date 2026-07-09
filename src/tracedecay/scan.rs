@@ -65,6 +65,10 @@ fn include_may_match_descendant(dir_path: &str, config: &TraceDecayConfig) -> bo
     false
 }
 
+fn is_nested_repository_root(path: &Path, depth: usize, is_dir: bool) -> bool {
+    depth > 0 && is_dir && path.join(".git").exists()
+}
+
 impl TraceDecay {
     /// Appends runtime skip-folder patterns to the exclude list.
     ///
@@ -119,6 +123,13 @@ impl TraceDecay {
                     .follow_links(true)
                     .max_depth(2)
                     .into_iter()
+                    .filter_entry(|entry| {
+                        !is_nested_repository_root(
+                            entry.path(),
+                            entry.depth(),
+                            entry.file_type().is_dir(),
+                        )
+                    })
                     .filter_map(std::result::Result::ok)
                     .any(|e| {
                         e.file_type().is_file()
@@ -154,6 +165,9 @@ impl TraceDecay {
             .filter_entry(|e| {
                 if e.depth() == 0 {
                     return true;
+                }
+                if is_nested_repository_root(e.path(), e.depth(), e.file_type().is_dir()) {
+                    return false;
                 }
                 let name = e.file_name().to_string_lossy();
                 if name.starts_with('.') || name == "target" {
@@ -213,6 +227,15 @@ impl TraceDecay {
             .git_global(true)
             .git_exclude(true)
             .add_custom_ignore_filename(".gitignore")
+            .filter_entry(|entry| {
+                !is_nested_repository_root(
+                    entry.path(),
+                    entry.depth(),
+                    entry
+                        .file_type()
+                        .is_some_and(|file_type| file_type.is_dir()),
+                )
+            })
             .build();
 
         for entry in walker {
@@ -272,6 +295,9 @@ impl TraceDecay {
             .filter_entry(|entry| {
                 if entry.depth() == 0 || !entry.file_type().is_dir() {
                     return true;
+                }
+                if is_nested_repository_root(entry.path(), entry.depth(), true) {
+                    return false;
                 }
                 let Ok(rel) = entry.path().strip_prefix(&self.project_root) else {
                     return true;

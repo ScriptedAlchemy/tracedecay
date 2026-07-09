@@ -14,10 +14,12 @@ pub const ENROLLMENT_FILENAME: &str = "enrollment.json";
 pub const STORE_MANIFEST_FILENAME: &str = "store_manifest.json";
 pub const SESSIONS_DB_FILENAME: &str = "sessions.db";
 pub const BRANCH_META_FILENAME: &str = "branch-meta.json";
+pub const REPOSITORY_IDENTITY_FILENAME: &str = "tracedecay-project.json";
 /// Filename prefix for corrupt `branch-meta.json` files renamed out of the
 /// way by the post-update health pass (`branch-meta.json.corrupt-<timestamp>`).
 pub const BRANCH_META_QUARANTINE_PREFIX: &str = "branch-meta.json.corrupt-";
 pub const STORE_MANIFEST_SCHEMA_VERSION: u32 = 1;
+pub const REPOSITORY_IDENTITY_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -37,6 +39,13 @@ pub enum StoreKind {
 pub struct EnrollmentMarker {
     pub project_id: String,
     pub storage_mode: StorageMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryIdentityMarker {
+    pub schema_version: u32,
+    pub project_id: String,
+    pub git_common_dir: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,6 +189,141 @@ pub fn remove_enrollment_marker(project_root: &Path, project_id: &str) -> Result
     Ok(true)
 }
 
+pub fn repository_identity_path(project_root: &Path) -> Option<PathBuf> {
+    if crate::worktree::is_detached_linked_worktree(project_root) {
+        return None;
+    }
+    crate::worktree::git_common_dir(project_root)
+        .map(|common_dir| common_dir.join(REPOSITORY_IDENTITY_FILENAME))
+}
+
+pub fn read_repository_identity_marker(
+    project_root: &Path,
+) -> Result<Option<RepositoryIdentityMarker>> {
+    let Some(path) = repository_identity_path(project_root) else {
+        return Ok(None);
+    };
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(&path).map_err(|e| TraceDecayError::Config {
+        message: format!(
+            "failed to read repository identity marker '{}': {e}",
+            path.display()
+        ),
+    })?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| TraceDecayError::Config {
+            message: format!(
+                "failed to parse repository identity marker '{}': {e}",
+                path.display()
+            ),
+        })?;
+    let schema_version = value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!(
+                "repository identity marker '{}' has no valid schema_version",
+                path.display()
+            ),
+        })?;
+    if schema_version != REPOSITORY_IDENTITY_SCHEMA_VERSION {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "unsupported repository identity schema_version={} in '{}'; expected {}",
+                schema_version,
+                path.display(),
+                REPOSITORY_IDENTITY_SCHEMA_VERSION
+            ),
+        });
+    }
+    let marker: RepositoryIdentityMarker =
+        serde_json::from_value(value).map_err(|e| TraceDecayError::Config {
+            message: format!(
+                "failed to parse repository identity marker '{}': {e}",
+                path.display()
+            ),
+        })?;
+    validate_project_id(&marker.project_id).map_err(|message| TraceDecayError::Config {
+        message: format!(
+            "invalid repository identity marker '{}': {message}",
+            path.display()
+        ),
+    })?;
+    let stored_common_dir = Path::new(&marker.git_common_dir);
+    if !stored_common_dir.is_absolute() {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "invalid repository identity marker '{}': git_common_dir must be absolute",
+                path.display()
+            ),
+        });
+    }
+    let current_common_dir = path.parent().ok_or_else(|| TraceDecayError::Config {
+        message: format!(
+            "repository identity marker '{}' has no parent directory",
+            path.display()
+        ),
+    })?;
+    let stored_key = stored_common_dir
+        .canonicalize()
+        .unwrap_or_else(|_| stored_common_dir.to_path_buf());
+    let current_key = current_common_dir
+        .canonicalize()
+        .unwrap_or_else(|_| current_common_dir.to_path_buf());
+    if stored_key != current_key && stored_common_dir.exists() {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "repository identity conflict: marker '{}' names project '{}' but its original \
+                 git common directory '{}' is still live; this checkout uses '{}'",
+                path.display(),
+                marker.project_id,
+                stored_common_dir.display(),
+                current_common_dir.display()
+            ),
+        });
+    }
+    Ok(Some(marker))
+}
+
+pub fn write_repository_identity_marker(project_root: &Path, project_id: &str) -> Result<bool> {
+    validate_project_id(project_id).map_err(|message| TraceDecayError::Config {
+        message: message.to_string(),
+    })?;
+    let Some(path) = repository_identity_path(project_root) else {
+        return Ok(false);
+    };
+    let git_common_dir = path.parent().ok_or_else(|| TraceDecayError::Config {
+        message: format!(
+            "repository identity marker '{}' has no parent directory",
+            path.display()
+        ),
+    })?;
+    let marker = RepositoryIdentityMarker {
+        schema_version: REPOSITORY_IDENTITY_SCHEMA_VERSION,
+        project_id: project_id.to_string(),
+        git_common_dir: git_common_dir.to_string_lossy().to_string(),
+    };
+    let contents = serde_json::to_vec_pretty(&marker).map_err(|e| TraceDecayError::Config {
+        message: format!(
+            "failed to serialize repository identity marker '{}': {e}",
+            path.display()
+        ),
+    })?;
+    let temp_path = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    PrivateStoreIo::write_file_atomically(&path, &temp_path, &contents).map_err(|e| {
+        TraceDecayError::Config {
+            message: format!(
+                "failed to write repository identity marker '{}': {e}",
+                path.display()
+            ),
+        }
+    })?;
+    Ok(true)
+}
+
 pub fn profile_sharded_data_root(profile_root: &Path, project_id: &str) -> PathBuf {
     profile_root.join("projects").join(project_id)
 }
@@ -241,20 +385,41 @@ pub fn profile_sharded_layout(
 }
 
 pub fn resolve_layout(project_root: &Path, profile_root: &Path) -> Result<StoreLayout> {
-    match read_enrollment_marker(project_root)? {
-        Some(marker) if marker.storage_mode == StorageMode::ProfileSharded => {
-            profile_sharded_layout(project_root, profile_root, &marker)
-        }
-        Some(marker) => Err(TraceDecayError::Config {
-            message: format!(
-                "unsupported storage_mode={:?} in enrollment marker for '{}'; \
-                 run TraceDecay migration to move this project into the user profile store",
-                marker.storage_mode,
-                project_root.display()
-            ),
-        }),
-        None => default_profile_sharded_layout(project_root, profile_root),
+    if let Some(layout) = resolve_persisted_layout(project_root, profile_root)? {
+        return Ok(layout);
     }
+    default_profile_sharded_layout(project_root, profile_root)
+}
+
+pub(crate) fn resolve_persisted_layout(
+    project_root: &Path,
+    profile_root: &Path,
+) -> Result<Option<StoreLayout>> {
+    if let Some(marker) = read_enrollment_marker(project_root)? {
+        if marker.storage_mode != StorageMode::ProfileSharded {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "unsupported storage_mode={:?} in enrollment marker for '{}'; \
+                     run TraceDecay migration to move this project into the user profile store",
+                    marker.storage_mode,
+                    project_root.display()
+                ),
+            });
+        }
+        return profile_sharded_layout(project_root, profile_root, &marker).map(Some);
+    }
+    let Some(marker) = read_repository_identity_marker(project_root)? else {
+        return Ok(None);
+    };
+    profile_sharded_layout(
+        project_root,
+        profile_root,
+        &EnrollmentMarker {
+            project_id: marker.project_id,
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    )
+    .map(Some)
 }
 
 pub fn default_profile_root() -> Result<PathBuf> {

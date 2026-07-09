@@ -2022,6 +2022,11 @@ impl GlobalDb {
         project_root: &Path,
         git_common_dir: Option<&Path>,
     ) -> Option<String> {
+        match crate::storage::read_repository_identity_marker(project_root) {
+            Ok(Some(marker)) => return Some(marker.project_id),
+            Ok(None) => {}
+            Err(_) => return None,
+        }
         for alias in project_identity_aliases(project_root, git_common_dir) {
             if let Some(project_id) = self.project_id_by_alias_key(&alias).await {
                 return Some(project_id);

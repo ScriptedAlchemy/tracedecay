@@ -150,29 +150,18 @@ impl TraceDecay {
         open_options: &TraceDecayOpenOptions,
     ) -> Result<StoreLayout> {
         let profile_root = open_options.resolved_profile_root()?;
-        if storage::read_enrollment_marker(project_root)?.is_some() {
-            return storage::resolve_layout(project_root, &profile_root);
+        if let Some(layout) = storage::resolve_persisted_layout(project_root, &profile_root)? {
+            return Ok(layout);
         }
 
-        let git_common_dir = crate::worktree::git_common_dir(project_root);
-        let git_remote_url = git_remote_url(project_root);
+        let git_common_dir = (!crate::worktree::is_detached_linked_worktree(project_root))
+            .then(|| crate::worktree::git_common_dir(project_root))
+            .flatten();
         if let Some(global_db) = open_options.open_global_db().await {
-            let resolution = match global_db
+            if let Some(resolution) = global_db
                 .resolve_project_store_by_identity(project_root, git_common_dir.as_deref())
                 .await
             {
-                Some(resolution) => Some(resolution),
-                None => match git_remote_url.as_deref() {
-                    Some(remote) => {
-                        global_db
-                            .resolve_unique_project_store_by_git_remote(remote)
-                            .await
-                    }
-                    None => None,
-                },
-            };
-
-            if let Some(resolution) = resolution {
                 return storage::profile_sharded_layout(
                     project_root,
                     &profile_root,
@@ -611,8 +600,13 @@ impl TraceDecay {
 
         let meta = branch_meta::load_branch_meta(&self.store_layout.data_root);
         let default_branch = meta.as_ref().map(|meta| meta.default_branch.as_str());
-        let git_common_dir = crate::worktree::git_common_dir(&self.project_root);
-        let git_remote_url = git_remote_url(&self.project_root);
+        let isolated_detached = crate::worktree::is_detached_linked_worktree(&self.project_root);
+        let git_common_dir = (!isolated_detached)
+            .then(|| crate::worktree::git_common_dir(&self.project_root))
+            .flatten();
+        let git_remote_url = (!isolated_detached)
+            .then(|| git_remote_url(&self.project_root))
+            .flatten();
 
         // A shared project id can be reached from any linked worktree (see
         // the git-common-dir alias registered below), so registering
@@ -620,10 +614,14 @@ impl TraceDecay {
         // happens to touch the project last pin its canonical_root /
         // display_root to a transient worktree path. Redirect registration
         // to the primary checkout when one is detected and still exists.
-        let primary_root = crate::project_registry::primary_checkout_root(
-            &self.project_root,
-            git_common_dir.as_deref(),
-        );
+        let primary_root = (!isolated_detached)
+            .then(|| {
+                crate::project_registry::primary_checkout_root(
+                    &self.project_root,
+                    git_common_dir.as_deref(),
+                )
+            })
+            .flatten();
         let previous_canonical_root = if primary_root.is_some() {
             global_db
                 .get_code_project(project_id)
@@ -646,6 +644,15 @@ impl TraceDecay {
         else {
             return;
         };
+
+        if let Err(error) =
+            storage::write_repository_identity_marker(&self.project_root, &project.project_id)
+        {
+            eprintln!(
+                "warning: could not persist TraceDecay repository identity for '{}': {error}",
+                self.project_root.display()
+            );
+        }
 
         if let Some(primary_root) = primary_root.as_deref() {
             // The registry now points canonical_root/display_root at the
@@ -832,11 +839,13 @@ impl TraceDecay {
         open_options: &TraceDecayOpenOptions,
     ) -> Result<StoreLayout> {
         let profile_root = open_options.resolved_profile_root()?;
-        if storage::read_enrollment_marker(project_root)?.is_some() {
-            return storage::resolve_layout(project_root, &profile_root);
+        if let Some(layout) = storage::resolve_persisted_layout(project_root, &profile_root)? {
+            return Ok(layout);
         }
 
-        let git_common_dir = crate::worktree::git_common_dir(project_root);
+        let git_common_dir = (!crate::worktree::is_detached_linked_worktree(project_root))
+            .then(|| crate::worktree::git_common_dir(project_root))
+            .flatten();
         if let Some(global_db) = open_options.open_global_db().await {
             if let Some(resolution) = global_db
                 .resolve_project_store_by_identity(project_root, git_common_dir.as_deref())
@@ -861,11 +870,7 @@ impl TraceDecay {
         open_options: &TraceDecayOpenOptions,
     ) -> Result<StoreLayout> {
         let profile_root = open_options.resolved_profile_root()?;
-        if storage::read_enrollment_marker(project_root)?.is_some() {
-            return storage::resolve_layout(project_root, &profile_root);
-        }
-
-        storage::default_profile_sharded_layout(project_root, &profile_root)
+        storage::resolve_layout(project_root, &profile_root)
     }
 }
 
@@ -883,7 +888,7 @@ fn profile_store_id(project_id: &str) -> String {
     format!("store:{project_id}:profile_sharded")
 }
 
-pub(crate) fn git_remote_url(project_root: &Path) -> Option<String> {
+fn git_remote_url(project_root: &Path) -> Option<String> {
     // gix reads the same config `git config --get` would (repo-local +
     // global) without a subprocess spawn.
     if let Ok(repo) = gix::discover(project_root) {

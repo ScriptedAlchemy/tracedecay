@@ -79,6 +79,21 @@ pub fn git_common_dir(dir: &Path) -> Option<PathBuf> {
     Some(resolved.canonicalize().unwrap_or(resolved))
 }
 
+pub fn is_detached_linked_worktree(dir: &Path) -> bool {
+    let Ok(repo) = gix::discover(dir) else {
+        return false;
+    };
+    let git_dir = repo
+        .git_dir()
+        .canonicalize()
+        .unwrap_or_else(|_| repo.git_dir().to_path_buf());
+    let common_dir = repo
+        .common_dir()
+        .canonicalize()
+        .unwrap_or_else(|_| repo.common_dir().to_path_buf());
+    git_dir != common_dir && crate::branch::current_branch(dir).is_none()
+}
+
 /// Cheap pre-flight for the `git` subprocess fallbacks in this crate: `git`
 /// can only resolve a repository for `dir` when a `.git` entry exists
 /// somewhere in its ancestor chain or the caller overrides discovery via
