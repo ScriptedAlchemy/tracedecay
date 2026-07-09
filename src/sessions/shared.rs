@@ -260,6 +260,64 @@ pub(crate) fn append_tool_calls_metadata(
     }
 }
 
+/// Byte length of `serde_json::to_string(value)`, or 0 when `value` is absent.
+fn json_byte_len(value: Option<&Value>) -> u64 {
+    value
+        .and_then(|value| serde_json::to_string(value).ok())
+        .map_or(0, |text| text.len() as u64)
+}
+
+/// Records bounded per-call tool metadata (byte counts and identifiers only,
+/// never content) for `tool_use`/`tool_result` blocks found in `content`.
+/// Inserts the `tool_events` key only when at least one entry was collected.
+pub(crate) fn append_tool_event_metadata(
+    map: &mut serde_json::Map<String, Value>,
+    content: &Value,
+) {
+    let Some(items) = content.as_array() else {
+        return;
+    };
+    let mut events = Vec::new();
+    for item in items {
+        let Some(item_type) = item.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+        match item_type {
+            "tool_use" => {
+                let mut event = serde_json::Map::new();
+                event.insert("type".to_string(), Value::String("tool_use".to_string()));
+                if let Some(name) = item.get("name").and_then(Value::as_str) {
+                    event.insert("tool_name".to_string(), Value::String(name.to_string()));
+                }
+                if let Some(id) = item.get("id").and_then(Value::as_str) {
+                    event.insert("call_id".to_string(), Value::String(id.to_string()));
+                }
+                event.insert(
+                    "input_bytes".to_string(),
+                    Value::from(json_byte_len(item.get("input"))),
+                );
+                events.push(Value::Object(event));
+            }
+            "tool_result" => {
+                let mut event = serde_json::Map::new();
+                event.insert("type".to_string(), Value::String("tool_result".to_string()));
+                if let Some(id) = item.get("tool_use_id").and_then(Value::as_str) {
+                    event.insert("call_id".to_string(), Value::String(id.to_string()));
+                }
+                event.insert(
+                    "output_bytes".to_string(),
+                    Value::from(json_byte_len(item.get("content"))),
+                );
+                events.push(Value::Object(event));
+            }
+            _ => {}
+        }
+    }
+    if !events.is_empty() {
+        map.insert("tool_events".to_string(), Value::Array(events));
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct TranscriptLocation<'a> {
     pub(crate) cwd: Option<&'a Path>,

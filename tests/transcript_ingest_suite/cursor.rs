@@ -391,6 +391,51 @@ async fn cursor_transcript_ingest_preserves_structured_content_in_raw_lcm() {
 }
 
 #[tokio::test]
+async fn cursor_tool_use_blocks_populate_tool_event_metadata() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+
+    let transcript = tmp.path().join("cursor-session.jsonl");
+    std::fs::write(
+        &transcript,
+        r#"{"role":"assistant","message":{"content":[{"type":"text","text":"Running a shell command to list files."},{"type":"tool_use","id":"call_1","name":"Shell","input":{"command":"echo hi"}}]}}
+"#,
+    )
+    .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let event = serde_json::json!({
+        "session_id": "cursor-session",
+        "transcript_path": transcript,
+        "workspace_roots": [project]
+    });
+
+    let stats = ingest_cursor_transcript_event(&event.to_string(), &db).await;
+    // No additional rows beyond the single assistant row: tool events are
+    // metadata on the existing row, not separate rows.
+    assert_eq!(stats.messages_upserted, 1);
+
+    let results = db
+        .search_session_messages("cursor", None, "shell command", 10)
+        .await;
+    assert_eq!(results.len(), 1);
+    let assistant = &results[0];
+    assert_eq!(assistant.message.tool_names.as_deref(), Some("Shell"));
+    assert!(assistant.message.text.contains("tool_use"));
+
+    let metadata: serde_json::Value =
+        serde_json::from_str(assistant.message.metadata_json.as_deref().unwrap()).unwrap();
+    let tool_events = metadata["tool_events"]
+        .as_array()
+        .expect("assistant row should carry tool_events metadata");
+    assert_eq!(tool_events.len(), 1);
+    assert_eq!(tool_events[0]["type"], "tool_use");
+    assert_eq!(tool_events[0]["tool_name"], "Shell");
+    assert_eq!(tool_events[0]["call_id"], "call_1");
+    assert!(tool_events[0]["input_bytes"].as_u64().unwrap() > 0);
+}
+
+#[tokio::test]
 async fn cursor_transcript_ingest_is_idempotent() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);

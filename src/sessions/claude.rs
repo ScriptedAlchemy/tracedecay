@@ -19,8 +19,8 @@ use crate::accounting::parser::parse_timestamp;
 use crate::sessions::SessionMessageRecord;
 use crate::sessions::shared::{
     StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,
-    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
-    path_belongs_to_project, title_from_messages,
+    append_tool_calls_metadata, append_tool_event_metadata, append_usage_metadata,
+    content_storage_text_and_tools, path_belongs_to_project, title_from_messages,
 };
 use crate::sessions::source::{
     ParsedTranscript, SessionDraft, TranscriptSource, collect_files_with_ext, stream_new_jsonl,
@@ -122,7 +122,16 @@ impl TranscriptSource for ClaudeSource {
                 path,
                 line.offset,
                 session_cwd.as_deref(),
-            ) {
+            )
+            .or_else(|| {
+                system_hook_message_from_line(
+                    &line.value,
+                    &session_id,
+                    path,
+                    line.offset,
+                    session_cwd.as_deref(),
+                )
+            }) {
                 messages.push(message);
             }
         }
@@ -261,8 +270,128 @@ fn message_from_line(
         tool_names: (!tool_names.is_empty()).then(|| tool_names.join(",")),
         source_path: Some(path.to_string_lossy().to_string()),
         source_offset: Some(offset),
-        metadata_json: serde_json::to_string(&message_metadata(kind, record, message, session_cwd))
-            .ok(),
+        metadata_json: serde_json::to_string(&message_metadata(
+            kind,
+            record,
+            message,
+            content,
+            session_cwd,
+        ))
+        .ok(),
+    })
+}
+
+/// Map a `type=="system"` hook-summary record to a compact, signal-only
+/// `hook_event` row, or `None` for non-system records and routine hook
+/// summaries that carry no error/interruption signal.
+fn system_hook_message_from_line(
+    record: &Value,
+    session_id: &str,
+    path: &Path,
+    offset: i64,
+    _session_cwd: Option<&Path>,
+) -> Option<SessionMessageRecord> {
+    if record.get("type").and_then(Value::as_str) != Some("system") {
+        return None;
+    }
+
+    let hook_errors: Vec<&Value> = record
+        .get("hookErrors")
+        .and_then(Value::as_array)
+        .map(|errors| errors.iter().collect())
+        .unwrap_or_default();
+    let stop_reason = record
+        .get("stopReason")
+        .and_then(Value::as_str)
+        .filter(|reason| !reason.is_empty());
+    let prevented_continuation = record
+        .get("preventedContinuation")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if hook_errors.is_empty() && stop_reason.is_none() && !prevented_continuation {
+        return None;
+    }
+
+    let subtype = record.get("subtype").and_then(Value::as_str).unwrap_or("");
+    let tool_use_id = record.get("toolUseID").and_then(Value::as_str);
+
+    let mut lines = vec![format!("Claude hook event: {subtype}")];
+    if let Some(tool_use_id) = tool_use_id {
+        lines.push(format!("tool_use_id: {tool_use_id}"));
+    }
+    if let Some(stop_reason) = stop_reason {
+        lines.push(format!("stop_reason: {stop_reason}"));
+    }
+    if prevented_continuation {
+        lines.push("prevented_continuation: true".to_string());
+    }
+    if !hook_errors.is_empty() {
+        let joined = hook_errors
+            .iter()
+            .map(|error| {
+                error
+                    .as_str()
+                    .map_or_else(|| error.to_string(), str::to_string)
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        lines.push(format!("hook_errors: {joined}"));
+    }
+    let joined = lines.join("\n");
+    let prefix = crate::text::utf8_prefix_at_or_before(&joined, 2000);
+    let text = if prefix.len() == joined.len() {
+        prefix.to_string()
+    } else {
+        format!("{prefix}…")
+    };
+
+    let message_id = record
+        .get("uuid")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map_or_else(|| format!("{session_id}:{offset}"), ToString::to_string);
+    let timestamp = record
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(parse_timestamp)
+        .map(|secs| secs as i64);
+
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        "source".to_string(),
+        Value::String("claude_system_record".to_string()),
+    );
+    metadata.insert("subtype".to_string(), Value::String(subtype.to_string()));
+    if let Some(tool_use_id) = tool_use_id {
+        metadata.insert(
+            "tool_use_id".to_string(),
+            Value::String(tool_use_id.to_string()),
+        );
+    }
+    if let Some(hook_count) = record.get("hookCount") {
+        metadata.insert("hook_count".to_string(), hook_count.clone());
+    }
+    if let Some(level) = record.get("level").and_then(Value::as_str) {
+        metadata.insert("level".to_string(), Value::String(level.to_string()));
+    }
+    if prevented_continuation {
+        metadata.insert("prevented_continuation".to_string(), Value::Bool(true));
+    }
+
+    Some(SessionMessageRecord {
+        provider: PROVIDER.to_string(),
+        message_id,
+        session_id: session_id.to_string(),
+        role: "system".to_string(),
+        timestamp,
+        ordinal: offset,
+        text,
+        kind: Some("hook_event".to_string()),
+        model: None,
+        tool_names: None,
+        source_path: Some(path.to_string_lossy().to_string()),
+        source_offset: Some(offset),
+        metadata_json: serde_json::to_string(&Value::Object(metadata)).ok(),
     })
 }
 
@@ -284,6 +413,7 @@ fn message_metadata(
     kind: &str,
     record: &Value,
     message: &Value,
+    content: &Value,
     session_cwd: Option<&Path>,
 ) -> Value {
     let mut metadata = serde_json::Map::new();
@@ -304,6 +434,7 @@ fn message_metadata(
         TranscriptLocation::new(location_cwd, location_provenance),
     );
     append_tool_calls_metadata(&mut metadata, message);
+    append_tool_event_metadata(&mut metadata, content);
     // Anthropic-style per-message counters: `message.usage.{input_tokens,
     // output_tokens, cache_creation_input_tokens, cache_read_input_tokens}`.
     append_usage_metadata(&mut metadata, &[message]);

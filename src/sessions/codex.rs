@@ -52,11 +52,16 @@ use crate::sessions::shared::{
 use crate::sessions::source::{
     ParsedTranscript, SessionDraft, TranscriptSource, collect_files_with_ext, stream_new_jsonl,
 };
+use crate::text::utf8_prefix_at_or_before;
 use context::CodexContextState;
 
 const PROVIDER: &str = "codex";
 /// `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` → date dirs add depth.
 const MAX_SCAN_DEPTH: u8 = 6;
+/// Response-item tool call/output/reasoning previews are truncated to this
+/// many chars so large tool outputs are searchable without duplicating the
+/// full body (Codex already stores that in the rollout itself).
+const TOOL_EVENT_PREVIEW_CHARS: usize = 2000;
 
 /// Session metadata read from a rollout's leading `session_meta` line.
 struct CodexMeta {
@@ -145,6 +150,21 @@ impl TranscriptSource for CodexSource {
                 continue;
             }
             if let Some(mut message) = response_item_goal_context_from_line(
+                &line.value,
+                &meta,
+                context_state.model.as_deref(),
+                path,
+                line.offset,
+            ) {
+                context::annotate_message(
+                    &mut message,
+                    context_state.cwd.as_deref(),
+                    context_state.git.as_ref(),
+                );
+                messages.push(message);
+                continue;
+            }
+            if let Some(mut message) = response_item_tool_event_from_line(
                 &line.value,
                 &meta,
                 context_state.model.as_deref(),
@@ -449,6 +469,173 @@ fn response_item_goal_context_from_line(
         &goal_context,
         &metadata,
     ))
+}
+
+fn response_item_tool_event_from_line(
+    record: &Value,
+    meta: &CodexMeta,
+    model: Option<&str>,
+    path: &Path,
+    offset: i64,
+) -> Option<SessionMessageRecord> {
+    if record.get("type").and_then(Value::as_str) != Some("response_item") {
+        return None;
+    }
+    let payload = record.get("payload")?;
+    let response_item_type = payload.get("type").and_then(Value::as_str)?;
+    let (role, text, metadata) = match response_item_type {
+        "function_call" | "custom_tool_call" | "tool_search_call" | "web_search_call" => {
+            let tool_name = response_item_tool_name(payload, response_item_type);
+            let text =
+                response_item_tool_call_text(response_item_type, tool_name.as_deref(), payload);
+            (
+                "tool",
+                text,
+                response_item_tool_metadata(response_item_type, payload, tool_name),
+            )
+        }
+        "function_call_output" | "custom_tool_call_output" => {
+            let text = response_item_tool_output_text(payload)?;
+            (
+                "tool",
+                text,
+                response_item_tool_metadata(response_item_type, payload, None),
+            )
+        }
+        "reasoning" => {
+            let text = response_item_reasoning_summary_text(payload)?;
+            (
+                "assistant",
+                text,
+                response_item_tool_metadata(response_item_type, payload, None),
+            )
+        }
+        _ => return None,
+    };
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some(SessionMessageRecord {
+        provider: PROVIDER.to_string(),
+        message_id: format!("{}:{offset}", meta.session_id),
+        session_id: meta.session_id.clone(),
+        role: role.to_string(),
+        timestamp: timestamp_from_record(record),
+        ordinal: offset,
+        text,
+        kind: Some(if response_item_type == "reasoning" {
+            "reasoning".to_string()
+        } else {
+            "tool_event".to_string()
+        }),
+        model: model.map(str::to_string),
+        tool_names: response_item_tool_name(payload, response_item_type),
+        source_path: Some(path.to_string_lossy().to_string()),
+        source_offset: Some(offset),
+        metadata_json: serde_json::to_string(&metadata).ok(),
+    })
+}
+
+fn response_item_tool_name(payload: &Value, response_item_type: &str) -> Option<String> {
+    payload
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| match response_item_type {
+            "tool_search_call" => Some("tool_search".to_string()),
+            "web_search_call" => Some("web_search".to_string()),
+            _ => None,
+        })
+}
+
+fn response_item_tool_call_text(
+    response_item_type: &str,
+    tool_name: Option<&str>,
+    payload: &Value,
+) -> String {
+    let label = tool_name.unwrap_or(response_item_type);
+    let mut parts = vec![format!("Codex tool call: {label}")];
+    if let Some(namespace) = payload.get("namespace").and_then(Value::as_str) {
+        parts.push(format!("namespace: {namespace}"));
+    }
+    if let Some(call_id) = payload.get("call_id").and_then(Value::as_str) {
+        parts.push(format!("call_id: {call_id}"));
+    }
+    if let Some(arguments) = payload
+        .get("arguments")
+        .or_else(|| payload.get("input"))
+        .map(compact_response_item_value)
+    {
+        parts.push(format!("arguments: {}", preview_text(&arguments)));
+    }
+    parts.join("\n")
+}
+
+fn response_item_tool_output_text(payload: &Value) -> Option<String> {
+    let call_id = payload
+        .get("call_id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let output = payload.get("output").map(compact_response_item_value)?;
+    let output_bytes = output.len();
+    let preview = preview_text(&output);
+    Some(format!(
+        "Codex tool output: {call_id}\noutput_bytes: {output_bytes}\npreview: {preview}"
+    ))
+}
+
+fn response_item_reasoning_summary_text(payload: &Value) -> Option<String> {
+    let summary = payload.get("summary")?;
+    let text = collect_response_item_text(summary);
+    (!text.trim().is_empty()).then(|| format!("Codex reasoning summary:\n{text}"))
+}
+
+fn compact_response_item_value(value: &Value) -> String {
+    value
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| serde_json::to_string(value).unwrap_or_else(|_| value.to_string()))
+}
+
+fn preview_text(text: &str) -> String {
+    let prefix = utf8_prefix_at_or_before(text, TOOL_EVENT_PREVIEW_CHARS);
+    if prefix.len() == text.len() {
+        prefix.to_string()
+    } else {
+        format!("{prefix}…")
+    }
+}
+
+fn response_item_tool_metadata(
+    response_item_type: &str,
+    payload: &Value,
+    tool_name: Option<String>,
+) -> Value {
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        "source".to_string(),
+        Value::String("codex_response_item".to_string()),
+    );
+    metadata.insert(
+        "response_item_type".to_string(),
+        Value::String(response_item_type.to_string()),
+    );
+    for key in ["call_id", "id", "status", "namespace"] {
+        if let Some(value) = payload.get(key) {
+            metadata.insert(key.to_string(), value.clone());
+        }
+    }
+    if let Some(tool_name) = tool_name {
+        metadata.insert("tool_name".to_string(), Value::String(tool_name));
+    }
+    if let Some(output) = payload.get("output").map(compact_response_item_value) {
+        metadata.insert("output_bytes".to_string(), Value::from(output.len() as i64));
+        metadata.insert(
+            "output_truncated".to_string(),
+            Value::Bool(output.len() > TOOL_EVENT_PREVIEW_CHARS),
+        );
+    }
+    Value::Object(metadata)
 }
 
 fn goal_context_message(

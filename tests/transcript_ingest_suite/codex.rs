@@ -262,6 +262,75 @@ fn write_codex_rollout_with_compaction(
     path
 }
 
+fn write_codex_rollout_with_response_item_tools(
+    home: &std::path::Path,
+    project: &std::path::Path,
+    session: &str,
+) -> std::path::PathBuf {
+    let dir = home.join(".codex/sessions/2026/01/01");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("rollout-2026-01-01T00-00-18-{session}.jsonl"));
+    let long_output = format!("{}{}", "A".repeat(2400), "\nerror: exact failure line\n");
+    write_jsonl(
+        &path,
+        &[
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:18.000Z",
+                "type": "session_meta",
+                "payload": {"id": session, "cwd": project.to_string_lossy(), "model": "gpt-5.5"}
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:18.100Z",
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "Inspect response item telemetry"}
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:18.200Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "arguments": "{\"cmd\":\"rg -n MEMORY.md ~/.codex/memories\",\"workdir\":\"/home/zack/projects/tracedecay\"}",
+                    "call_id": "call-tool-1",
+                    "status": "completed"
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:18.300Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-tool-1",
+                    "output": long_output,
+                    "status": "completed"
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:18.400Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "apply_patch",
+                    "input": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch\n",
+                    "call_id": "call-tool-2",
+                    "status": "completed"
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:18.500Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "tool_search_call",
+                    "call_id": "call-tool-3",
+                    "arguments": {"query": "tracedecay context", "limit": 8},
+                    "status": "completed"
+                }
+            }),
+        ],
+    );
+    path
+}
+
 #[tokio::test]
 async fn codex_goal_response_item_is_cataloged_as_context() {
     let tmp = TempDir::new().unwrap();
@@ -315,6 +384,144 @@ async fn codex_regular_response_item_goal_words_are_not_cataloged() {
         )
         .await;
     assert!(results.is_empty());
+}
+
+#[tokio::test]
+async fn codex_response_item_tool_events_are_cataloged_compactly() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    write_codex_rollout_with_response_item_tools(&home, &project, "codex-response-item-tools");
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = CodexSource::with_home(&home);
+
+    let stats = ingest_source(&db, &source, &project, None).await;
+    assert_eq!(stats.messages_upserted, 5);
+
+    let results = db
+        .search_session_messages(
+            "codex",
+            Some(project.to_string_lossy().as_ref()),
+            "exec_command MEMORY.md",
+            10,
+        )
+        .await;
+    assert_eq!(results.len(), 1);
+    let call = &results[0].message;
+    assert_eq!(call.role, "tool");
+    assert_eq!(call.kind.as_deref(), Some("tool_event"));
+    assert!(call.text.contains("Codex tool call: exec_command"));
+    assert!(call.text.contains("rg -n MEMORY.md"));
+
+    let metadata: serde_json::Value =
+        serde_json::from_str(call.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["source"], "codex_response_item");
+    assert_eq!(metadata["response_item_type"], "function_call");
+    assert_eq!(metadata["tool_name"], "exec_command");
+    assert_eq!(metadata["call_id"], "call-tool-1");
+
+    let output_results = db
+        .search_session_messages(
+            "codex",
+            Some(project.to_string_lossy().as_ref()),
+            "output_bytes",
+            10,
+        )
+        .await;
+    assert_eq!(output_results.len(), 1);
+    let output = &output_results[0].message;
+    assert!(output.text.contains("Codex tool output: call-tool-1"));
+    assert!(output.text.contains("output_bytes: 2427"));
+    assert!(!output.text.contains("error: exact failure line"));
+    assert!(output.text.len() < 2200);
+}
+
+#[tokio::test]
+async fn codex_response_item_skips_developer_messages_and_keeps_reasoning_summaries() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let session = "codex-response-item-reasoning";
+    let dir = home.join(".codex/sessions/2026/01/01");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("rollout-2026-01-01T00-00-19-{session}.jsonl"));
+    write_jsonl(
+        &path,
+        &[
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:19.000Z",
+                "type": "session_meta",
+                "payload": {"id": session, "cwd": project.to_string_lossy(), "model": "gpt-5.5"}
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:19.100Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": "SECRET_DEVELOPER_CONTEXT_SHOULD_NOT_INDEX"}]
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:19.200Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "reasoning",
+                    "summary": [],
+                    "encrypted_content": "ENCRYPTED_REASONING_SHOULD_NOT_INDEX"
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:19.300Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": "Reasoned that compact tool telemetry is useful."}],
+                    "encrypted_content": "ENCRYPTED_REASONING_SHOULD_NOT_INDEX"
+                }
+            }),
+        ],
+    );
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = CodexSource::with_home(&home);
+
+    let stats = ingest_source(&db, &source, &project, None).await;
+    assert_eq!(stats.messages_upserted, 1);
+
+    let developer_results = db
+        .search_session_messages(
+            "codex",
+            Some(project.to_string_lossy().as_ref()),
+            "SECRET_DEVELOPER_CONTEXT_SHOULD_NOT_INDEX",
+            10,
+        )
+        .await;
+    assert!(developer_results.is_empty());
+
+    let encrypted_results = db
+        .search_session_messages(
+            "codex",
+            Some(project.to_string_lossy().as_ref()),
+            "ENCRYPTED_REASONING_SHOULD_NOT_INDEX",
+            10,
+        )
+        .await;
+    assert!(encrypted_results.is_empty());
+
+    let reasoning_results = db
+        .search_session_messages(
+            "codex",
+            Some(project.to_string_lossy().as_ref()),
+            "compact tool telemetry",
+            10,
+        )
+        .await;
+    assert_eq!(reasoning_results.len(), 1);
+    assert_eq!(reasoning_results[0].message.role, "assistant");
+    assert_eq!(
+        reasoning_results[0].message.kind.as_deref(),
+        Some("reasoning")
+    );
 }
 
 #[tokio::test]
@@ -386,6 +593,16 @@ async fn codex_rollout_populates_user_and_agent_messages_only() {
     let user_metadata: serde_json::Value =
         serde_json::from_str(user.message.metadata_json.as_deref().unwrap()).unwrap();
     assert!(user_metadata.get("usage").is_none());
+
+    let duplicate_results = db
+        .search_session_messages(
+            "codex",
+            Some(project.to_string_lossy().as_ref()),
+            "duplicate",
+            10,
+        )
+        .await;
+    assert!(duplicate_results.is_empty());
 }
 
 #[tokio::test]

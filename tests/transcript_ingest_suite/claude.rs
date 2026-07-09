@@ -354,6 +354,200 @@ async fn claude_missing_projects_dir_is_silent_noop() {
     assert_eq!(stats.messages_upserted, 0);
 }
 
+/// Writes a Claude Code transcript with an assistant `tool_use` line and a
+/// paired user `tool_result` line, both with recorded `cwd` matching `project`.
+fn write_claude_tool_event_transcript(
+    home: &std::path::Path,
+    project: &std::path::Path,
+    session: &str,
+) -> std::path::PathBuf {
+    let dir = home.join(".claude/projects/-some-slug");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{session}.jsonl"));
+    let cwd = project.to_string_lossy();
+    let contents = format!(
+        "{}\n{}\n",
+        serde_json::json!({
+            "type": "assistant",
+            "cwd": cwd,
+            "sessionId": session,
+            "uuid": "tool-a1",
+            "timestamp": "2026-01-01T00:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Running a shell command to list files."},
+                    {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "ls"}}
+                ]
+            }
+        }),
+        serde_json::json!({
+            "type": "user",
+            "cwd": cwd,
+            "sessionId": session,
+            "uuid": "tool-a2",
+            "timestamp": "2026-01-01T00:00:01.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_1", "content": "file listing output"}
+                ]
+            }
+        }),
+    );
+    std::fs::write(&path, contents).unwrap();
+    path
+}
+
+#[tokio::test]
+async fn claude_tool_use_and_results_populate_tool_event_metadata() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    write_claude_tool_event_transcript(&home, &project, "claude-tool-sess");
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = ClaudeSource::with_home(&home);
+
+    let stats = ingest_source(&db, &source, &project, None).await;
+    // No new rows beyond the normal two message rows: tool events are metadata
+    // on the existing assistant/user rows, not separate rows.
+    assert_eq!(stats.messages_upserted, 2);
+    assert_eq!(stats.sessions_upserted, 1);
+
+    let results = db
+        .search_session_messages("claude", None, "shell command", 10)
+        .await;
+    assert_eq!(results.len(), 1);
+    let assistant = &results[0];
+    assert_eq!(assistant.message.kind.as_deref(), Some("message"));
+    assert_eq!(assistant.message.tool_names.as_deref(), Some("Bash"));
+    assert!(assistant.message.text.contains("tool_use"));
+    let assistant_metadata: serde_json::Value =
+        serde_json::from_str(assistant.message.metadata_json.as_deref().unwrap()).unwrap();
+    let tool_events = assistant_metadata["tool_events"]
+        .as_array()
+        .expect("assistant row should carry tool_events metadata");
+    assert_eq!(tool_events.len(), 1);
+    assert_eq!(tool_events[0]["type"], "tool_use");
+    assert_eq!(tool_events[0]["tool_name"], "Bash");
+    assert_eq!(tool_events[0]["call_id"], "toolu_1");
+    assert!(tool_events[0]["input_bytes"].as_u64().unwrap() > 0);
+
+    let user_results = db
+        .search_session_messages("claude", None, "listing output", 10)
+        .await;
+    assert_eq!(user_results.len(), 1);
+    let user = &user_results[0];
+    assert_eq!(user.message.kind.as_deref(), Some("message"));
+    let user_metadata: serde_json::Value =
+        serde_json::from_str(user.message.metadata_json.as_deref().unwrap()).unwrap();
+    let user_tool_events = user_metadata["tool_events"]
+        .as_array()
+        .expect("user row should carry tool_events metadata");
+    assert_eq!(user_tool_events.len(), 1);
+    assert_eq!(user_tool_events[0]["type"], "tool_result");
+    assert_eq!(user_tool_events[0]["call_id"], "toolu_1");
+    assert!(user_tool_events[0]["output_bytes"].as_u64().unwrap() > 0);
+}
+
+/// Writes a Claude Code transcript with a `type=="system"` hook record that
+/// carries `hookErrors`, a routine `type=="system"` record with no signal, and
+/// one normal user message.
+fn write_claude_system_hook_transcript(
+    home: &std::path::Path,
+    project: &std::path::Path,
+    session: &str,
+) -> std::path::PathBuf {
+    let dir = home.join(".claude/projects/-some-slug");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{session}.jsonl"));
+    let cwd = project.to_string_lossy();
+    let contents = format!(
+        "{}\n{}\n{}\n",
+        serde_json::json!({
+            "type": "system",
+            "cwd": cwd,
+            "sessionId": session,
+            "subtype": "stop_hook_summary",
+            "uuid": "hook-1",
+            "timestamp": "2026-01-01T00:00:00.000Z",
+            "toolUseID": "tu-1",
+            "hookCount": 2,
+            "hookInfos": [{"command": "lint.sh", "durationMs": 12}],
+            "hookErrors": ["hook boom failed"],
+            "hookAdditionalContext": [],
+            "preventedContinuation": false,
+            "stopReason": "",
+            "level": "error"
+        }),
+        serde_json::json!({
+            "type": "system",
+            "cwd": cwd,
+            "sessionId": session,
+            "subtype": "stop_hook_summary",
+            "uuid": "hook-2",
+            "timestamp": "2026-01-01T00:00:01.000Z",
+            "toolUseID": "tu-2",
+            "hookCount": 1,
+            "hookInfos": [{"command": "routine-marker-command"}],
+            "hookErrors": [],
+            "hookAdditionalContext": [],
+            "preventedContinuation": false,
+            "stopReason": "",
+            "level": "info"
+        }),
+        serde_json::json!({
+            "type": "user",
+            "cwd": cwd,
+            "sessionId": session,
+            "uuid": "hook-3",
+            "timestamp": "2026-01-01T00:00:02.000Z",
+            "message": {"role": "user", "content": "Continue the billing investigation"}
+        }),
+    );
+    std::fs::write(&path, contents).unwrap();
+    path
+}
+
+#[tokio::test]
+async fn claude_system_hook_errors_become_searchable_hook_events() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    write_claude_system_hook_transcript(&home, &project, "claude-hook-sess");
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = ClaudeSource::with_home(&home);
+
+    let stats = ingest_source(&db, &source, &project, None).await;
+    // The routine system record produces no row; only the user message and
+    // one hook-event row are ingested.
+    assert_eq!(stats.messages_upserted, 2);
+
+    let results = db.search_session_messages("claude", None, "boom", 10).await;
+    assert_eq!(results.len(), 1);
+    let hit = &results[0];
+    assert_eq!(hit.message.role, "system");
+    assert_eq!(hit.message.kind.as_deref(), Some("hook_event"));
+    assert!(
+        hit.message
+            .text
+            .contains("Claude hook event: stop_hook_summary")
+    );
+    assert!(hit.message.text.contains("tool_use_id: tu-1"));
+    let metadata: serde_json::Value =
+        serde_json::from_str(hit.message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["source"], "claude_system_record");
+    assert!(metadata.get("hook_count").is_some());
+
+    let routine = db
+        .search_session_messages("claude", None, "routine-marker-command", 10)
+        .await;
+    assert!(
+        routine.is_empty(),
+        "routine system record without signal must not produce a row"
+    );
+}
+
 #[tokio::test]
 async fn claude_subagent_layout_uses_parent_link_and_parent_cwd_fallback() {
     let tmp = TempDir::new().unwrap();

@@ -6,8 +6,8 @@ use crate::global_db::GlobalDb;
 use crate::sessions::SessionMessageRecord;
 use crate::sessions::shared::{
     StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,
-    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools, paths_equal,
-    title_from_messages,
+    append_tool_calls_metadata, append_tool_event_metadata, append_usage_metadata,
+    content_storage_text_and_tools, paths_equal, title_from_messages,
 };
 use crate::sessions::source::{
     ParsedTranscript, SessionDraft, TranscriptSource, collect_files_with_ext, ingest_source,
@@ -860,6 +860,7 @@ fn event_message(
         metadata_json: serde_json::to_string(&message_metadata(
             record,
             message,
+            content,
             context.event_cwd,
             context.event_location_provenance,
         ))
@@ -1155,6 +1156,7 @@ fn session_metadata(event: &Value, event_cwd: Option<&Path>, location_provenance
 fn message_metadata(
     record: &Value,
     message: &Value,
+    content: &Value,
     event_cwd: Option<&Path>,
     location_provenance: &str,
 ) -> Value {
@@ -1173,6 +1175,7 @@ fn message_metadata(
         TranscriptLocation::new(event_cwd, location_provenance),
     );
     append_tool_calls_metadata(&mut metadata, message);
+    append_tool_event_metadata(&mut metadata, content);
     // Cursor transcripts carry no token counters today (verified across
     // 100k+ real lines); this probe is future-proofing for when they do.
     append_usage_metadata(&mut metadata, &[record, message]);
