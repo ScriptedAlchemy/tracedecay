@@ -262,6 +262,107 @@ pub(in crate::hooks) fn is_harness_memory_path(path: &str) -> bool {
         .any(|segment| segment.eq_ignore_ascii_case(".claude"))
 }
 
+/// Minimum number of added lines for an edit to count as a "meaningful" new
+/// body worth a redundancy nudge. Matches the redundancy tool's default
+/// `min_lines`, so a one-line rename or a tiny tweak never trips the hint.
+const REDUNDANCY_EDIT_MIN_LINES: usize = 8;
+
+/// True when a Write/Edit/MultiEdit event adds a new function-shaped body of
+/// meaningful size — the case where the model may be re-implementing logic that
+/// already exists. Conservative by design (prefers missing a hint over
+/// spamming), and `O(len(edit_text))`: pure string scanning over the added text
+/// already in hand, with no AST parsing and no file I/O.
+pub(super) fn is_redundancy_candidate_edit(input: &ToolHintInput) -> bool {
+    let is_edit_tool = input.tool_name.as_deref().is_some_and(|name| {
+        matches_normalized(name, &["write", "edit", "multiedit", "notebookedit"])
+    });
+    if !is_edit_tool {
+        return false;
+    }
+    let (Some(path), Some(text)) = (input.file_path.as_deref(), input.edit_text.as_deref()) else {
+        return false;
+    };
+    added_text_adds_function_body(path, text)
+}
+
+/// Core heuristic for [`is_redundancy_candidate_edit`]: does `text` (the text an
+/// edit adds) look like it introduces a new function/method body of at least
+/// [`REDUNDANCY_EDIT_MIN_LINES`] lines for `path`'s language? String scanning
+/// only.
+fn added_text_adds_function_body(path: &str, text: &str) -> bool {
+    // A small edit is never a duplicate-logic risk worth interrupting for.
+    // Stop after MIN_LINES lines instead of counting the whole (possibly huge)
+    // Write payload: if there is no MIN_LINES-th line, the edit is too small.
+    if text.lines().nth(REDUNDANCY_EDIT_MIN_LINES - 1).is_none() {
+        return false;
+    }
+    let Some(ext) = source_extension(path) else {
+        return false;
+    };
+    text_contains_function_definition(&ext, text)
+}
+
+/// Lowercased file extension for `path`, if it has one.
+fn source_extension(path: &str) -> Option<String> {
+    std::path::Path::new(path)
+        .extension()
+        .map(|ext| ext.to_ascii_lowercase().to_string_lossy().into_owned())
+}
+
+/// Whether `text` contains a function-definition shape for the language family
+/// keyed by `ext`. Clear-keyword languages match on a definition keyword; the
+/// C-family/Java match on a conservative brace-signature shape. Unknown
+/// extensions never match, so a data/markdown edit is silent.
+fn text_contains_function_definition(ext: &str, text: &str) -> bool {
+    match ext {
+        "rs" => text.contains("fn "),
+        "py" | "pyi" | "rb" => text.contains("def "),
+        "go" | "swift" => text.contains("func "),
+        "kt" | "kts" => text.contains("fun "),
+        "php" => text.contains("function "),
+        "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" => {
+            text.contains("function ") || text.contains("=> {")
+        }
+        "java" | "cs" | "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh" => {
+            contains_brace_method_signature(text)
+        }
+        _ => false,
+    }
+}
+
+/// Conservative detector for a brace-language method signature line: a line that
+/// opens a block (`{`) after a parameter list `(...)` whose leading token is not
+/// a control-flow keyword (so `if (...) {`, `for (...) {`, etc. are excluded)
+/// and whose name sits directly before the `(`. Deliberately misses more than
+/// it matches to avoid false positives.
+fn contains_brace_method_signature(text: &str) -> bool {
+    text.lines().any(|line| {
+        let trimmed = line.trim();
+        if !trimmed.ends_with('{') || !trimmed.contains(')') {
+            return false;
+        }
+        let Some(open) = trimmed.find('(') else {
+            return false;
+        };
+        let before = trimmed[..open].trim_end();
+        // The name must sit immediately before `(` (a signature, not a bare
+        // block), and the first token must not be a control-flow keyword.
+        let ends_in_name = before
+            .chars()
+            .last()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+        let first_token = before
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .find(|token| !token.is_empty())
+            .unwrap_or_default();
+        let is_control = matches!(
+            first_token,
+            "if" | "for" | "while" | "switch" | "catch" | "do" | "else" | "return" | "using"
+        );
+        ends_in_name && !is_control && !first_token.is_empty()
+    })
+}
+
 pub(super) fn is_project_discovery_command(command: &str) -> bool {
     shell_invocations(command).into_iter().any(|invocation| {
         matches!(
@@ -748,4 +849,179 @@ pub(super) fn matches_normalized(value: &str, expected: &[&str]) -> bool {
         .collect::<String>()
         .to_ascii_lowercase();
     expected.iter().any(|candidate| normalized == *candidate)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn edit(tool: &str, path: &str, text: &str) -> ToolHintInput {
+        ToolHintInput {
+            tool_name: Some(tool.to_string()),
+            file_path: Some(path.to_string()),
+            edit_text: Some(text.to_string()),
+            ..ToolHintInput::default()
+        }
+    }
+
+    fn rust_fn_body() -> String {
+        // A new function-sized Rust body (>= REDUNDANCY_EDIT_MIN_LINES lines).
+        [
+            "fn compute_widget_total(items: &[Item]) -> u64 {",
+            "    let mut total = 0;",
+            "    for item in items {",
+            "        if item.active {",
+            "            total += item.count;",
+            "        }",
+            "    }",
+            "    total",
+            "}",
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn new_rust_function_body_is_a_redundancy_candidate() {
+        assert!(is_redundancy_candidate_edit(&edit(
+            "Write",
+            "src/widgets.rs",
+            &rust_fn_body(),
+        )));
+        // Edit and MultiEdit tools qualify too.
+        assert!(is_redundancy_candidate_edit(&edit(
+            "Edit",
+            "src/widgets.rs",
+            &rust_fn_body(),
+        )));
+        assert!(is_redundancy_candidate_edit(&edit(
+            "MultiEdit",
+            "src/widgets.rs",
+            &rust_fn_body(),
+        )));
+    }
+
+    #[test]
+    fn short_or_non_function_edits_are_not_candidates() {
+        // Under the line threshold, even with a `fn`.
+        assert!(!is_redundancy_candidate_edit(&edit(
+            "Write",
+            "src/widgets.rs",
+            "fn tiny() -> u8 { 1 }",
+        )));
+        // Long enough, but no function definition shape (a data/const block).
+        let data = (0..12)
+            .map(|i| format!("    const VALUE_{i}: u32 = {i};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!is_redundancy_candidate_edit(&edit(
+            "Write",
+            "src/widgets.rs",
+            &data,
+        )));
+    }
+
+    #[test]
+    fn requires_edit_tool_path_and_text() {
+        let body = rust_fn_body();
+        // Non-edit tool.
+        assert!(!is_redundancy_candidate_edit(&edit(
+            "Read",
+            "src/widgets.rs",
+            &body
+        )));
+        // Missing file_path.
+        assert!(!is_redundancy_candidate_edit(&ToolHintInput {
+            tool_name: Some("Write".to_string()),
+            edit_text: Some(body.clone()),
+            ..ToolHintInput::default()
+        }));
+        // Missing edit_text.
+        assert!(!is_redundancy_candidate_edit(&ToolHintInput {
+            tool_name: Some("Write".to_string()),
+            file_path: Some("src/widgets.rs".to_string()),
+            ..ToolHintInput::default()
+        }));
+    }
+
+    #[test]
+    fn language_keywords_are_recognized() {
+        let cases = [
+            (
+                "mod.py",
+                "def build_report(rows):\n    total = 0\n    for r in rows:\n        if r.ok:\n            total += r.n\n        else:\n            total -= 1\n    return total\n",
+            ),
+            (
+                "server.go",
+                "func Handle(w Writer, r Request) {\n    a := 1\n    b := 2\n    c := a + b\n    d := c * 2\n    e := d - 1\n    f := e + 3\n    _ = f\n}\n",
+            ),
+            (
+                "app.ts",
+                "export function render(state: State) {\n    const a = 1;\n    const b = 2;\n    const c = a + b;\n    const d = c * 2;\n    const e = d - 1;\n    const f = e + 3;\n    return f;\n}\n",
+            ),
+            (
+                "view.jsx",
+                "const handler = (event) => {\n    const a = 1;\n    const b = 2;\n    const c = a + b;\n    const d = c * 2;\n    const e = d - 1;\n    const f = e + 3;\n    return f;\n};\n",
+            ),
+        ];
+        for (path, body) in cases {
+            assert!(
+                is_redundancy_candidate_edit(&edit("Write", path, body)),
+                "{path} body should be recognized as a new function"
+            );
+        }
+    }
+
+    #[test]
+    fn brace_method_signature_excludes_control_flow() {
+        // A Java method signature qualifies.
+        let method = [
+            "public int total(List<Item> items) {",
+            "    int total = 0;",
+            "    for (Item i : items) {",
+            "        if (i.active) {",
+            "            total += i.count;",
+            "        }",
+            "    }",
+            "    return total;",
+            "}",
+        ]
+        .join("\n");
+        assert!(is_redundancy_candidate_edit(&edit(
+            "Write",
+            "Totals.java",
+            &method
+        )));
+        // A block of only control-flow (no signature) does not qualify.
+        let control_only = [
+            "if (ready) {",
+            "    step();",
+            "} else if (waiting) {",
+            "    wait();",
+            "}",
+            "while (running) {",
+            "    tick();",
+            "}",
+            "for (int i = 0; i < 3; i++) {",
+            "    poll();",
+            "}",
+        ]
+        .join("\n");
+        assert!(!is_redundancy_candidate_edit(&edit(
+            "Write",
+            "Totals.java",
+            &control_only,
+        )));
+    }
+
+    #[test]
+    fn unknown_extension_never_matches() {
+        let body = rust_fn_body();
+        assert!(!is_redundancy_candidate_edit(&edit(
+            "Write", "notes.md", &body
+        )));
+        // No extension at all.
+        assert!(!is_redundancy_candidate_edit(&edit(
+            "Write", "Makefile", &body
+        )));
+    }
 }

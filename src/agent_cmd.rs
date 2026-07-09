@@ -347,7 +347,11 @@ pub(crate) async fn handle_install_command(
             user_cfg.installed_agents.push(id);
             installed_names.push(name);
         }
-        user_cfg.save();
+        user_cfg
+            .save()
+            .map_err(|err| tracedecay::errors::TraceDecayError::Config {
+                message: format!("failed to save user config: {err}"),
+            })?;
     } else {
         let (to_install, to_uninstall) =
             tracedecay::agents::pick_integrations_interactive(&home, &user_cfg.installed_agents)?;
@@ -383,7 +387,11 @@ pub(crate) async fn handle_install_command(
                 user_cfg.installed_agents.push(id.clone());
             }
         }
-        user_cfg.save();
+        user_cfg
+            .save()
+            .map_err(|err| tracedecay::errors::TraceDecayError::Config {
+                message: format!("failed to save user config: {err}"),
+            })?;
     }
 
     eprintln!();
@@ -399,7 +407,11 @@ pub(crate) async fn handle_install_command(
     }
 
     user_cfg.last_installed_version = env!("CARGO_PKG_VERSION").to_string();
-    user_cfg.save();
+    user_cfg
+        .save()
+        .map_err(|err| tracedecay::errors::TraceDecayError::Config {
+            message: format!("failed to save user config: {err}"),
+        })?;
 
     tracedecay::agents::offer_git_post_commit_hook(&tracedecay_bin);
     Ok(())
@@ -440,7 +452,11 @@ pub(crate) async fn handle_reinstall_command() -> tracedecay::errors::Result<()>
         }
         eprintln!("\x1b[32m✔\x1b[0m All agents reinstalled");
         user_cfg.last_installed_version = env!("CARGO_PKG_VERSION").to_string();
-        user_cfg.save();
+        user_cfg
+            .save()
+            .map_err(|err| tracedecay::errors::TraceDecayError::Config {
+                message: format!("failed to save user config: {err}"),
+            })?;
     }
     Ok(())
 }
@@ -523,7 +539,11 @@ pub(crate) async fn handle_uninstall_command(
             ag.uninstall(&ctx)?;
         }
         user_cfg.installed_agents.retain(|a| a != &id);
-        user_cfg.save();
+        user_cfg
+            .save()
+            .map_err(|err| tracedecay::errors::TraceDecayError::Config {
+                message: format!("failed to save user config: {err}"),
+            })?;
     } else {
         for id in user_cfg.installed_agents.clone() {
             if let Ok(ag) = tracedecay::agents::get_integration(&id) {
@@ -539,7 +559,11 @@ pub(crate) async fn handle_uninstall_command(
             }
         }
         user_cfg.installed_agents.clear();
-        user_cfg.save();
+        user_cfg
+            .save()
+            .map_err(|err| tracedecay::errors::TraceDecayError::Config {
+                message: format!("failed to save user config: {err}"),
+            })?;
         eprintln!("All agent integrations removed.");
     }
     Ok(())

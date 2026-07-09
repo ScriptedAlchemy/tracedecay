@@ -610,6 +610,28 @@ fn render_diagnostic_record(md: &mut Md, diagnostic: &Value) {
             md.line(&format!("  **Callers:** {}", callers.join(", ")));
         }
     }
+    if let Some(dupes) = diagnostic.get("near_duplicates").and_then(Value::as_array) {
+        let dupes = dupes
+            .iter()
+            .filter_map(|dupe| {
+                let name = dupe.get("name").and_then(Value::as_str)?;
+                let file = dupe.get("file").and_then(Value::as_str).unwrap_or("");
+                let line = dupe.get("line").and_then(Value::as_u64).unwrap_or(0);
+                let kind = dupe
+                    .get("overlap_kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                Some(if file.is_empty() {
+                    format!("{name} [{kind}]")
+                } else {
+                    format!("{name} ({file}:{line}) [{kind}]")
+                })
+            })
+            .collect::<Vec<_>>();
+        if !dupes.is_empty() {
+            md.line(&format!("  **Near-duplicates:** {}", dupes.join(", ")));
+        }
+    }
 }
 
 fn diagnostic_location(diagnostic: &Value) -> String {

@@ -435,3 +435,64 @@ fn claude_bundle_agents_are_byte_identical_to_the_source_of_truth() {
         required_scalar(&raw, "description", &bundle_path);
     }
 }
+
+/// The tracedecay MCP server registers as `tracedecay` when configured
+/// directly (e.g. project `.mcp.json`) but as `plugin_tracedecay_tracedecay`
+/// when installed via the Claude Code plugin marketplace. An agent allowlist
+/// naming only one of the two silently strips every tracedecay tool from the
+/// subagent under the other install mode, so each grant and each denied tool
+/// must be declared under BOTH namespaces, and ToolSearch must be granted so
+/// deferred tracedecay tool schemas can be loaded inside the subagent.
+#[test]
+fn claude_agents_grant_tracedecay_tools_under_both_mcp_namespaces() {
+    const DIRECT_NS: &str = "mcp__tracedecay";
+    const PLUGIN_NS: &str = "mcp__plugin_tracedecay_tracedecay";
+
+    let source_agents = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/agents/claude_agents");
+    for agent in EXPECTED_AGENTS {
+        let path = source_agents.join(agent);
+        let raw = fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+
+        let tools = required_scalar(&raw, "tools", &path);
+        let tool_entries: Vec<&str> = tools.split(',').map(str::trim).collect();
+        for required in ["ToolSearch", DIRECT_NS, PLUGIN_NS] {
+            assert!(
+                tool_entries.contains(&required),
+                "{} tools allowlist must grant {required}; got: {tools}",
+                path.display()
+            );
+        }
+
+        let disallowed = required_scalar(&raw, "disallowedTools", &path);
+        let direct_prefix = format!("{DIRECT_NS}__");
+        let plugin_prefix = format!("{PLUGIN_NS}__");
+        let mut direct: Vec<&str> = Vec::new();
+        let mut plugin: Vec<&str> = Vec::new();
+        for entry in disallowed.split(',').map(str::trim) {
+            if let Some(tool) = entry.strip_prefix(&plugin_prefix) {
+                plugin.push(tool);
+            } else if let Some(tool) = entry.strip_prefix(&direct_prefix) {
+                direct.push(tool);
+            } else {
+                panic!(
+                    "{} disallowedTools entry '{entry}' is not under either tracedecay namespace",
+                    path.display()
+                );
+            }
+        }
+        direct.sort_unstable();
+        plugin.sort_unstable();
+        assert!(
+            !direct.is_empty(),
+            "{} must deny mutating tracedecay tools",
+            path.display()
+        );
+        assert_eq!(
+            direct,
+            plugin,
+            "{} must deny the same tracedecay tools under both MCP namespaces",
+            path.display()
+        );
+    }
+}

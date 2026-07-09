@@ -1266,7 +1266,9 @@ pub fn migrate_installed_agents(home: &Path, config: &mut crate::user_config::Us
         return;
     }
     config.installed_agents.extend(additions);
-    config.save();
+    if let Err(err) = config.save() {
+        eprintln!("warning: could not save tracedecay config: {err}");
+    }
 }
 
 #[cfg(test)]

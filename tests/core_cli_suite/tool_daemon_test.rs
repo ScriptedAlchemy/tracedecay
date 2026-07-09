@@ -290,6 +290,23 @@ fn spawn_hook_event_daemon(socket_path: PathBuf) -> mpsc::Receiver<Value> {
                 Err(e) => panic!("accept fake daemon client: {e}"),
             }
         };
+        // The listener above is intentionally nonblocking so the accept loop
+        // can poll against a deadline. The accepted stream must be switched
+        // back to blocking (matching spawn_sentinel_daemon_with_notification)
+        // before reading: on some platforms an accepted Unix socket can carry
+        // over the listener's nonblocking flag, which would otherwise make
+        // read_line() return a transient WouldBlock-shaped I/O error instead
+        // of blocking until the CLI child has written its handshake line.
+        stream
+            .set_nonblocking(false)
+            .expect("set accepted stream blocking");
+        // Best-effort: fire-and-forget hook CLIs (the cursor notifications)
+        // connect, write, and exit before this line runs, and on macOS
+        // setsockopt(SO_RCVTIMEO) fails with EINVAL once the peer has hung
+        // up — while the written bytes remain buffered and readable. The
+        // timeout is only defense-in-depth (nextest's per-test timeout is
+        // the real backstop), so a failure here must not panic the helper.
+        let _ = stream.set_read_timeout(Some(CLI_ROUNDTRIP_TIMEOUT));
         let mut reader = BufReader::new(stream);
         let mut handshake = String::new();
         reader

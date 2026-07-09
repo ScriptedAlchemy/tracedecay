@@ -65,59 +65,153 @@ fn native_memories_injection_detection_covers_config_shapes() {
     assert!(!codex_native_memories_injection_enabled(&parse("")));
 }
 
+/// A stable binary path for hashing tests. The real trust hash depends only on
+/// the rendered command string, so any fixed path yields deterministic hashes.
+const TEST_BIN: &str = "/usr/local/bin/tracedecay";
+
+/// Render the personal-bundle hooks and derive their trust records with `bin`.
+fn managed_entries(bin: &str) -> Vec<CodexHookTrustEntry> {
+    codex_managed_hook_trust_entries(bin).expect("managed hook trust entries render")
+}
+
+/// Build a `config.toml` value whose `[hooks.state]` records exactly the given
+/// trust entries (each as `trusted_hash = <entry.hash>`).
+fn config_from_entries(entries: &[CodexHookTrustEntry]) -> toml::Value {
+    let mut state = toml::value::Table::new();
+    for entry in entries {
+        let mut record = toml::value::Table::new();
+        record.insert(
+            "trusted_hash".to_string(),
+            toml::Value::String(entry.hash.clone()),
+        );
+        state.insert(entry.trust_key.clone(), toml::Value::Table(record));
+    }
+    let mut hooks = toml::value::Table::new();
+    hooks.insert("state".to_string(), toml::Value::Table(state));
+    let mut root = toml::value::Table::new();
+    root.insert("hooks".to_string(), toml::Value::Table(hooks));
+    toml::Value::Table(root)
+}
+
+/// The five live-trusted golden hashes verified byte-for-byte against a real
+/// Codex `~/.codex/config.toml` on the reference machine. The hash function must
+/// reproduce each from its raw command-hook identity, or the installer would
+/// record trust Codex rejects.
+#[test]
+fn codex_command_hook_hash_reproduces_live_golden_vectors() {
+    let cmd = |sub: &str| format!("'/home/zack/.local/bin/tracedecay' {sub}");
+    let cases = [
+        (
+            "session_start",
+            None,
+            cmd("hook-codex-session-start"),
+            5u64,
+            "sha256:839cc2cfa576115dfa9e184eb267eb5bd565750c20babcb2d0358c68ec7c5c42",
+        ),
+        (
+            "post_tool_use",
+            Some("Bash|apply_patch"),
+            cmd("hook-codex-post-tool-use"),
+            60,
+            "sha256:9dd11f4b944d2b9b8f14d4f17ca8a52e1550e575d3087177ec42d7c7f8848c97",
+        ),
+        (
+            "user_prompt_submit",
+            None,
+            cmd("hook-codex-user-prompt-submit"),
+            5,
+            "sha256:d482382b39ab1f031943d27359c8626b36ebfff66259468377fffcd7174e9313",
+        ),
+        (
+            "subagent_start",
+            None,
+            cmd("hook-codex-subagent-start"),
+            5,
+            "sha256:4042991d127afeef0452f5b9a3fed48b48596e1b6de114b7e3392764f1c467ab",
+        ),
+        (
+            "post_compact",
+            Some("auto|manual"),
+            cmd("hook-codex-post-compact"),
+            120,
+            "sha256:85ce51c00b972536033286d8d8489dbb396dd1ea97bd2a4f10dbaf7aa39a0764",
+        ),
+    ];
+    for (event, matcher, command, timeout, expected) in cases {
+        assert_eq!(
+            codex_command_hook_hash(event, matcher, &command, timeout, false),
+            expected,
+            "hash mismatch for {event}"
+        );
+    }
+}
+
 #[test]
 fn codex_hook_trust_state_reports_all_trusted_entries() {
-    let config = r#"
-[hooks.state]
-
-[hooks.state."tracedecay@personal:hooks/hooks.json:post_tool_use:0:0"]
-trusted_hash = "sha256:post"
-
-[hooks.state."tracedecay@personal:hooks/hooks.json:session_start:0:0"]
-trusted_hash = "sha256:session"
-
-[hooks.state."tracedecay@personal:hooks/hooks.json:user_prompt_submit:0:0"]
-trusted_hash = "sha256:prompt"
-
-[hooks.state."tracedecay@personal:hooks/hooks.json:subagent_start:0:0"]
-trusted_hash = "sha256:subagent"
-
-[hooks.state."tracedecay@personal:hooks/hooks.json:post_compact:0:0"]
-trusted_hash = "sha256:compact"
-"#;
-    let config = toml::from_str::<toml::Value>(config).unwrap();
+    let entries = managed_entries(TEST_BIN);
+    let config = config_from_entries(&entries);
 
     assert_eq!(
-        codex_plugin_hook_trust_state(&config),
+        codex_plugin_hook_trust_state(&config, &entries),
         CodexHookTrustState::Trusted
     );
 }
 
 #[test]
 fn codex_hook_trust_state_reports_missing_entries() {
-    let config = toml::from_str::<toml::Value>(
-        r#"
-[hooks.state]
-
-[hooks.state."tracedecay@personal:hooks/hooks.json:post_tool_use:0:0"]
-trusted_hash = "sha256:post"
-"#,
-    )
-    .unwrap();
+    let entries = managed_entries(TEST_BIN);
+    // Record trust for only the post_tool_use hook; the rest are missing.
+    let present: Vec<CodexHookTrustEntry> = entries
+        .iter()
+        .filter(|entry| entry.event_label == "post_tool_use")
+        .cloned()
+        .collect();
+    let config = config_from_entries(&present);
 
     assert_eq!(
-        codex_plugin_hook_trust_state(&config),
+        codex_plugin_hook_trust_state(&config, &entries),
         CodexHookTrustState::Missing(vec![
-            "session_start".to_string(),
-            "user_prompt_submit".to_string(),
-            "subagent_start".to_string(),
             "post_compact".to_string(),
+            "session_start".to_string(),
+            "subagent_start".to_string(),
+            "user_prompt_submit".to_string(),
         ])
     );
 }
 
 #[test]
+fn codex_hook_trust_state_flags_modified_when_hash_drifts() {
+    let entries = managed_entries(TEST_BIN);
+    // Simulate a bundle change: bump one hook's timeout so its content hash
+    // drifts from what was previously trusted.
+    let raw = codex_embedded_plugin_files()
+        .into_iter()
+        .find_map(|(relative, contents)| (relative == "hooks/hooks.json").then_some(contents))
+        .unwrap();
+    let rendered = codex_plugin_hooks(raw, TEST_BIN).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+    value["hooks"]["SessionStart"][0]["hooks"][0]["timeout"] = json!(9);
+    let changed_entries = codex_hook_trust_entries(&value);
+
+    // config still records the *original* hashes; against the changed bundle,
+    // only session_start drifts.
+    let config = config_from_entries(&entries);
+    assert_eq!(
+        codex_plugin_hook_trust_state(&config, &changed_entries),
+        CodexHookTrustState::Modified(vec!["session_start".to_string()])
+    );
+
+    // Re-syncing to the changed bundle restores Trusted.
+    let resynced = config_from_entries(&changed_entries);
+    assert_eq!(
+        codex_plugin_hook_trust_state(&resynced, &changed_entries),
+        CodexHookTrustState::Trusted
+    );
+}
+
+#[test]
 fn codex_hook_trust_state_ignores_repo_local_plugin_entries() {
+    let entries = managed_entries(TEST_BIN);
     let config = toml::from_str::<toml::Value>(
         r#"
 [hooks.state]
@@ -141,15 +235,132 @@ trusted_hash = "sha256:compact"
     .unwrap();
 
     assert_eq!(
-        codex_plugin_hook_trust_state(&config),
+        codex_plugin_hook_trust_state(&config, &entries),
         CodexHookTrustState::Missing(vec![
-            "session_start".to_string(),
-            "user_prompt_submit".to_string(),
-            "subagent_start".to_string(),
-            "post_tool_use".to_string(),
             "post_compact".to_string(),
+            "post_tool_use".to_string(),
+            "session_start".to_string(),
+            "subagent_start".to_string(),
+            "user_prompt_submit".to_string(),
         ])
     );
+}
+
+#[test]
+fn sync_codex_hook_trust_records_entries_and_preserves_unrelated_config() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let codex_dir = home.path().join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    let config_path = codex_dir.join("config.toml");
+    // Seed unrelated user content plus a foreign plugin's trust entry.
+    std::fs::write(
+        &config_path,
+        r#"model = "o4-mini"
+
+[hooks.state."other@plugin:hooks/hooks.json:session_start:0:0"]
+trusted_hash = "sha256:foreign"
+"#,
+    )
+    .unwrap();
+
+    let outcome = sync_codex_hook_trust(home.path(), TEST_BIN).unwrap();
+    assert_eq!(outcome.trusted, CODEX_MANAGED_HOOKS.len());
+    assert!(outcome.skipped.is_empty());
+
+    let entries = managed_entries(TEST_BIN);
+    let config = load_toml_file(&config_path).unwrap();
+    let state = config["hooks"]["state"].as_table().unwrap();
+    for entry in &entries {
+        assert_eq!(
+            state[&entry.trust_key]["trusted_hash"].as_str().unwrap(),
+            entry.hash,
+            "trust entry for {} not recorded exactly",
+            entry.event_label
+        );
+    }
+    // Unrelated content and the foreign entry survive.
+    assert_eq!(config["model"].as_str().unwrap(), "o4-mini");
+    assert_eq!(
+        state["other@plugin:hooks/hooks.json:session_start:0:0"]["trusted_hash"]
+            .as_str()
+            .unwrap(),
+        "sha256:foreign"
+    );
+    assert_eq!(
+        codex_plugin_hook_trust_state(&config, &entries),
+        CodexHookTrustState::Trusted
+    );
+
+    // Idempotent: a second sync leaves the same records (managed + 1 foreign).
+    let outcome2 = sync_codex_hook_trust(home.path(), TEST_BIN).unwrap();
+    assert_eq!(outcome2.trusted, CODEX_MANAGED_HOOKS.len());
+    let config2 = load_toml_file(&config_path).unwrap();
+    assert_eq!(
+        config2["hooks"]["state"].as_table().unwrap().len(),
+        CODEX_MANAGED_HOOKS.len() + 1
+    );
+}
+
+#[test]
+fn sync_codex_hook_trust_prunes_stale_and_preserves_foreign_entries() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let codex_dir = home.path().join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    let config_path = codex_dir.join("config.toml");
+    // A leftover tracedecay-personal entry for a removed event, plus a foreign
+    // plugin entry that must be preserved.
+    std::fs::write(
+        &config_path,
+        r#"
+[hooks.state."tracedecay@personal:hooks/hooks.json:pre_tool_use:0:0"]
+trusted_hash = "sha256:stale"
+
+[hooks.state."other@plugin:hooks/hooks.json:session_start:0:0"]
+trusted_hash = "sha256:foreign"
+"#,
+    )
+    .unwrap();
+
+    sync_codex_hook_trust(home.path(), TEST_BIN).unwrap();
+
+    let config = load_toml_file(&config_path).unwrap();
+    let state = config["hooks"]["state"].as_table().unwrap();
+    assert!(
+        !state.contains_key("tracedecay@personal:hooks/hooks.json:pre_tool_use:0:0"),
+        "stale tracedecay-personal entry should be pruned"
+    );
+    assert_eq!(
+        state["other@plugin:hooks/hooks.json:session_start:0:0"]["trusted_hash"]
+            .as_str()
+            .unwrap(),
+        "sha256:foreign",
+        "foreign plugin entry must be preserved"
+    );
+    assert!(
+        state.contains_key("tracedecay@personal:hooks/hooks.json:session_start:0:0"),
+        "current managed events should be recorded"
+    );
+}
+
+#[test]
+fn codex_hook_command_invokes_tracedecay_is_a_safety_valve() {
+    // A hook that actually invokes the tracedecay binary is trustable. Build
+    // the command through the same hook_command helper the generator uses so
+    // the assertion holds under each platform's quoting (single quotes on
+    // Unix, different quoting on Windows).
+    assert!(codex_hook_command_invokes_tracedecay(
+        &crate::agents::hook_command(TEST_BIN, "hook-codex-session-start"),
+        TEST_BIN
+    ));
+    // A hook that does not invoke the tracedecay binary is never auto-trusted.
+    assert!(!codex_hook_command_invokes_tracedecay(
+        "/usr/bin/rm -rf /",
+        TEST_BIN
+    ));
+    assert!(!codex_hook_command_invokes_tracedecay(
+        &crate::agents::hook_command("/somewhere/else/tracedecay", "hook-codex-session-start"),
+        TEST_BIN
+    ));
 }
 
 #[test]

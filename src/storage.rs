@@ -473,12 +473,26 @@ impl PrivateStoreIo {
         set_private_file_permissions(path)
     }
 
-    /// Appends one line while holding an advisory file lock so concurrent hook
-    /// processes never interleave partial lines.
+    /// Appends one line while holding an advisory lock on a dedicated sidecar
+    /// lock file so concurrent threads and processes never interleave partial
+    /// lines.
+    ///
+    /// The lock is taken on a separate `<path>.lock` handle opened for
+    /// read+write, never on the append-only data handle. This is deliberate:
+    /// Windows `LockFileEx` requires the handle to carry `FILE_READ_DATA` or
+    /// `FILE_WRITE_DATA`, but Rust opens append-only handles with
+    /// `FILE_GENERIC_WRITE & !FILE_WRITE_DATA` (no read-data, no write-data),
+    /// so locking such a handle fails with `ERROR_ACCESS_DENIED` (os error 5).
+    /// Locking the r/w sidecar sidesteps that and also avoids locking the data
+    /// region being appended.
     pub fn append_line(path: &Path, line: &str) -> io::Result<()> {
         if let Some(parent) = path.parent() {
             Self::create_dir_all(parent)?;
         }
+        retry_transient_file_op(|| Self::append_line_once(path, line))
+    }
+
+    fn append_line_once(path: &Path, line: &str) -> io::Result<()> {
         let lock_path = append_lock_path(path);
         reject_symlink_components(&lock_path, "private store lock file")?;
         let mut lock_options = fs::OpenOptions::new();
@@ -622,13 +636,63 @@ fn path_parent(path: &Path) -> &Path {
     path.parent().unwrap_or_else(|| Path::new(""))
 }
 
-fn append_lock_path(path: &Path) -> PathBuf {
+/// Sibling `<file>.lock` path used to serialize appends without locking the
+/// data file's own handle. Shared with the automation run ledger writer.
+pub(crate) fn append_lock_path(path: &Path) -> PathBuf {
     let mut lock_name = path
         .file_name()
-        .map(|name| name.to_os_string())
+        .map(std::ffi::OsStr::to_os_string)
         .unwrap_or_else(|| OsString::from("append"));
     lock_name.push(".lock");
     path.with_file_name(lock_name)
+}
+
+/// Runs `op`, retrying a bounded number of times on Windows for the transient
+/// file-access error codes that antivirus scanners and delete-pending handle
+/// states briefly produce: `ERROR_ACCESS_DENIED` (5), `ERROR_SHARING_VIOLATION`
+/// (32), and `ERROR_LOCK_VIOLATION` (33). The retries total well under ~250ms
+/// and the final error is always propagated. On non-Windows platforms `op`
+/// runs exactly once.
+pub(crate) fn retry_transient_file_op<F>(mut op: F) -> io::Result<()>
+where
+    F: FnMut() -> io::Result<()>,
+{
+    #[cfg(windows)]
+    {
+        const MAX_ATTEMPTS: u32 = 5;
+        let mut attempt: u32 = 1;
+        loop {
+            match op() {
+                Ok(()) => return Ok(()),
+                Err(err) if attempt < MAX_ATTEMPTS && is_transient_windows_file_error(&err) => {
+                    std::thread::sleep(transient_file_backoff(attempt));
+                    attempt += 1;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        op()
+    }
+}
+
+#[cfg(windows)]
+fn is_transient_windows_file_error(err: &io::Error) -> bool {
+    matches!(err.raw_os_error(), Some(5 | 32 | 33))
+}
+
+#[cfg(windows)]
+fn transient_file_backoff(attempt: u32) -> std::time::Duration {
+    // Base 10, 20, 40, 80 ms (sum 150 ms across the 4 retries) plus a small
+    // jitter derived from the wall clock to de-correlate contending writers.
+    let base = 10u64 << (attempt - 1);
+    let jitter = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::from(d.subsec_nanos()) % u64::from(attempt + 1))
+        .unwrap_or(0);
+    std::time::Duration::from_millis(base + jitter)
 }
 
 fn relative_to_data_root(path: &Path, data_root: &Path) -> PathBuf {
@@ -828,5 +892,60 @@ mod tests {
             serde_json::from_str::<Value>(row).unwrap();
         }
         assert!(append_lock_path(&path).is_file());
+    }
+
+    #[test]
+    fn append_line_uses_a_reusable_sidecar_lock_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // Canonicalize: on macOS the tempdir lives under /var -> /private/var,
+        // which the symlink guard would otherwise reject.
+        let path = dir.path().canonicalize().unwrap().join("ledger.jsonl");
+        let lock_path = append_lock_path(&path);
+        assert_eq!(lock_path.file_name().unwrap(), "ledger.jsonl.lock");
+
+        PrivateStoreIo::append_line(&path, "{\"n\":1}").unwrap();
+        assert!(lock_path.is_file(), "sidecar lock file should be created");
+
+        // A second append reuses the same sidecar and never locks the data
+        // handle, so it must succeed and leave both entries intact.
+        PrivateStoreIo::append_line(&path, "{\"n\":2}").unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents.lines().count(), 2);
+        assert!(lock_path.is_file());
+        // The lock file is metadata only; it must not accumulate ledger bytes.
+        assert_eq!(std::fs::metadata(&lock_path).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn append_line_leaves_data_file_writable() {
+        let dir = tempfile::tempdir().unwrap();
+        // Canonicalize: on macOS the tempdir lives under /var -> /private/var,
+        // which the symlink guard would otherwise reject.
+        let path = dir.path().canonicalize().unwrap().join("perms.jsonl");
+
+        PrivateStoreIo::append_line(&path, "{\"a\":1}").unwrap();
+        PrivateStoreIo::append_line(&path, "{\"a\":2}").unwrap();
+
+        let meta = std::fs::metadata(&path).unwrap();
+        // Guards against any Windows FILE_ATTRIBUTE_READONLY regression and any
+        // Unix mode regression that would strip the owner write bit.
+        assert!(
+            !meta.permissions().readonly(),
+            "appended data file must stay writable"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                meta.permissions().mode() & 0o777,
+                0o600,
+                "private data file must retain owner-only 0o600 permissions"
+            );
+        }
+
+        // The file must still be openable for a further append after the cycle.
+        PrivateStoreIo::append_line(&path, "{\"a\":3}").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 3);
     }
 }

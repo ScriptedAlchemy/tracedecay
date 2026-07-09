@@ -62,7 +62,7 @@ pub(super) const MESSAGE_TOKENS_CTE: &str = "
                CAST(json_extract(metadata_json, '$.usage.cache_creation_input_tokens') AS INTEGER)
            END AS usage_cache_write
     FROM session_messages
-    WHERE kind IS NULL OR kind <> 'summary'";
+    WHERE kind IS NULL OR kind NOT IN ('summary', 'tool_event', 'hook_event', 'reasoning')";
 
 /// Which BPE vocabulary a model id maps to, and whether the resulting count
 /// is exact (the model's real tokenizer) or a labeled approximation.
@@ -619,5 +619,45 @@ mod tests {
             first_backfill, second_backfill,
             "same-length metadata edits must invalidate overlay"
         );
+    }
+
+    #[tokio::test]
+    async fn derived_kinds_are_excluded_from_token_cte() {
+        let db = libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .expect("build in-memory database");
+        let conn = db.connect().expect("connect in-memory database");
+        conn.execute_batch(
+            "CREATE TABLE session_messages (
+                provider TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                timestamp INTEGER,
+                ordinal INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                kind TEXT,
+                model TEXT,
+                metadata_json TEXT,
+                PRIMARY KEY(provider, message_id)
+            );
+            INSERT INTO session_messages
+                (provider, message_id, session_id, role, timestamp, ordinal, text, kind, model, metadata_json)
+            VALUES
+                ('codex', 'm1', 's1', 'assistant', 1, 1, 'kept', NULL, 'gpt-5', NULL),
+                ('codex', 'm2', 's1', 'assistant', 2, 2, 'sum', 'summary', 'gpt-5', NULL),
+                ('codex', 'm3', 's1', 'tool', 3, 3, 'te', 'tool_event', 'gpt-5', NULL),
+                ('codex', 'm4', 's1', 'tool', 4, 4, 'he', 'hook_event', 'gpt-5', NULL),
+                ('codex', 'm5', 's1', 'assistant', 5, 5, 're', 'reasoning', 'gpt-5', NULL);",
+        )
+        .await
+        .expect("seed session_messages");
+
+        let sql = format!("SELECT COUNT(*) FROM ({MESSAGE_TOKENS_CTE})");
+        let mut rows = conn.query(&sql, ()).await.expect("run token CTE count");
+        let row = rows.next().await.expect("read row").expect("one row");
+        let count: i64 = row.get(0).expect("count column");
+        assert_eq!(count, 1, "only the non-derived message must be counted");
     }
 }

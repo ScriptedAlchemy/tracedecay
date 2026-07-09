@@ -293,6 +293,7 @@ fn every_category_has_compact_skill_backed_rendering() {
         HintCategory::BuildDiagnostics,
         HintCategory::ReviewChanges,
         HintCategory::MemoryStore,
+        HintCategory::EditRedundancy,
     ];
 
     for category in categories {

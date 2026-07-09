@@ -19,7 +19,7 @@ This is the durable contract for TraceDecay-owned self-improvement loops. Hermes
 
 Hermes is the reference behavior for self-improvement cadence, but TraceDecay owns its own scheduler in standalone mode. Hermes memory review and skill review are turn/iteration nudges: memory defaults to every 10 user turns when memory is enabled, skill review defaults to every 10 tool-calling iterations, and both run as a whitelisted background review fork after the foreground response. Hermes skill-library curator is separate: it runs after `curator.interval_hours` elapses, defaults to 168 hours, requires the idle gate (`curator.min_idle_hours`, default 2 hours), seeds the first run instead of mutating immediately, snapshots before real runs, and archives rather than deletes.
 
-TraceDecay standalone automation is time-scheduled by the daemon, not by Codex native automations or Hermes cron. The default scheduler tick is 60 seconds. `tracedecay install --agent codex --automation` enables the Codex app-server backend with `require_dashboard_approval=false`, `auto_apply_memory_ops=true`, `auto_enable_skills=false`, and these task cadences:
+TraceDecay standalone automation is time-scheduled by the daemon, not by Codex native automations or Hermes cron. The default scheduler tick is 60 seconds. `tracedecay install --agent codex --automation` enables the Codex app-server backend with autonomous apply (automation applies its output without any human approval; `require_dashboard_approval` is **deprecated** — still parsed from legacy configs for back-compat but ignored for gating), `auto_apply_memory_ops=true`, `auto_enable_skills=false`, and these task cadences:
 
 | Task | Default cadence | Default mutation behavior |
 | --- | --- | --- |

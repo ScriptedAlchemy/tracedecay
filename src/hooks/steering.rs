@@ -131,6 +131,12 @@ pub fn build_codex_session_context_for_workspace(
                  paste captured output into tracedecay_diagnose, or run tracedecay_diagnostics \
                  for fresh structured errors mapped to the enclosing symbols and callers.\n",
             );
+            s.push_str(
+                "Managed subagents installed: tracedecay-code-explorer (scoped code \
+                 exploration), tracedecay-code-health-auditor (health audits), \
+                 tracedecay-session-historian (past-session recall) — prefer them over \
+                 generic subagents for those jobs.\n",
+            );
             s.push_str(crate::agents::CLI_FALLBACK_PROMPT_RULES);
             s.push('\n');
             append_codex_recall_and_registry_guidance(&mut s);
@@ -293,6 +299,38 @@ mod tests {
                 "missing compile-moment cue for {status:?}"
             );
         }
+    }
+
+    #[test]
+    fn codex_session_context_advertises_managed_subagents() {
+        // Codex sessions have no other discovery surface for the managed
+        // tracedecay-* subagents besides this steering line, so it must
+        // survive on both the initialized and unindexed code-workspace
+        // surfaces, and stay off the generic (non-code-workspace) surface.
+        for status in [
+            HookWorkspaceStatus::Initialized,
+            HookWorkspaceStatus::UnindexedProject,
+        ] {
+            let context = build_codex_session_context_for_workspace(status, None);
+            assert!(
+                context.contains("tracedecay-code-explorer"),
+                "missing tracedecay-code-explorer mention for {status:?}"
+            );
+            assert!(
+                context.contains("tracedecay-code-health-auditor"),
+                "missing tracedecay-code-health-auditor mention for {status:?}"
+            );
+            assert!(
+                context.contains("tracedecay-session-historian"),
+                "missing tracedecay-session-historian mention for {status:?}"
+            );
+        }
+
+        let generic = build_codex_session_context_for_workspace(HookWorkspaceStatus::Generic, None);
+        assert!(
+            !generic.contains("tracedecay-code-explorer"),
+            "generic (non-code-workspace) surface should stay compact"
+        );
     }
 
     #[test]

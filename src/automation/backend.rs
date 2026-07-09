@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::sessions::codex_app_server::{
@@ -293,6 +293,110 @@ fn request_input_hash(
 
 pub trait AgentTaskBackend: Send + Sync {
     fn run_task(&self, request: &AgentTaskRequest) -> Result<AgentTaskResponse>;
+}
+
+/// Default cap on total backend attempts for a single task: the first try plus
+/// two bounded retries for transient codex app-server failures.
+pub const AGENT_TASK_MAX_ATTEMPTS: u32 = 3;
+
+/// Backoff before the 2nd and 3rd attempts. Kept short so retries stay inside
+/// the automation job's `timeout_secs` budget.
+pub const AGENT_TASK_RETRY_BACKOFFS: [Duration; 2] =
+    [Duration::from_secs(2), Duration::from_secs(5)];
+
+/// Bounded retry policy for a single backend task invocation.
+///
+/// Only transient app-server failures are retried — the ones the ledger already
+/// classifies as retryable via [`classify_agent_task_error_message`] /
+/// [`AgentTaskFailureClass::is_retryable`] (`Timeout`, `Unavailable`,
+/// `Retryable`). This covers the observed transient shapes:
+/// `"timed out waiting for codex app-server"` (→ `Timeout`) and
+/// `"closed stdout before completing"` (→ `Unavailable`). Permanent and
+/// malformed-output failures fail immediately.
+///
+/// Accumulated backoff never pushes total wall time past `budget` (the job
+/// `timeout_secs`); on the final failure the original error propagates
+/// unchanged so existing fallback/classification behavior is preserved.
+#[derive(Debug, Clone)]
+pub struct BackendRetryPolicy {
+    max_attempts: u32,
+    backoffs: Vec<Duration>,
+    budget: Duration,
+}
+
+impl BackendRetryPolicy {
+    /// Production policy derived from the automation job timeout: up to
+    /// [`AGENT_TASK_MAX_ATTEMPTS`] attempts with [`AGENT_TASK_RETRY_BACKOFFS`]
+    /// backoff, bounded by the job `timeout_secs` budget.
+    #[must_use]
+    pub fn from_timeout_secs(timeout_secs: u64) -> Self {
+        Self {
+            max_attempts: AGENT_TASK_MAX_ATTEMPTS,
+            backoffs: AGENT_TASK_RETRY_BACKOFFS.to_vec(),
+            budget: Duration::from_secs(timeout_secs.max(1)),
+        }
+    }
+
+    /// Explicit policy, primarily for tests that need deterministic (zero)
+    /// backoff and precise budgets. `max_attempts` is clamped to at least 1.
+    #[must_use]
+    pub fn new(max_attempts: u32, backoffs: Vec<Duration>, budget: Duration) -> Self {
+        Self {
+            max_attempts: max_attempts.max(1),
+            backoffs,
+            budget,
+        }
+    }
+
+    /// Backoff to wait before making `next_attempt` (1-based). The pause before
+    /// attempt N uses `backoffs[N - 2]`, saturating on the last configured value.
+    fn backoff_before_attempt(&self, next_attempt: u32) -> Duration {
+        let idx = (next_attempt.saturating_sub(2)) as usize;
+        self.backoffs
+            .get(idx)
+            .or_else(|| self.backoffs.last())
+            .copied()
+            .unwrap_or_default()
+    }
+}
+
+/// Run a backend task with bounded, transient-only retries.
+///
+/// This is the single choke point every automation job funnels through instead
+/// of calling [`AgentTaskBackend::run_task`] directly, so the retry lives in one
+/// place rather than being duplicated per job. See [`BackendRetryPolicy`].
+pub async fn run_agent_task_with_retry(
+    backend: &dyn AgentTaskBackend,
+    request: &AgentTaskRequest,
+    policy: &BackendRetryPolicy,
+) -> Result<AgentTaskResponse> {
+    let start = Instant::now();
+    let max_attempts = policy.max_attempts.max(1);
+    let mut attempt: u32 = 1;
+    loop {
+        match backend.run_task(request) {
+            Ok(response) => return Ok(response),
+            Err(err) => {
+                // Out of attempts: propagate the final error unchanged.
+                if attempt >= max_attempts {
+                    return Err(err);
+                }
+                // Only transient app-server failures are worth retrying.
+                if !classify_agent_task_error_message(&err.to_string()).is_retryable() {
+                    return Err(err);
+                }
+                let backoff = policy.backoff_before_attempt(attempt + 1);
+                // Respect the overall job timeout: never sleep/retry past budget.
+                if start.elapsed().saturating_add(backoff) >= policy.budget {
+                    return Err(err);
+                }
+                if !backoff.is_zero() {
+                    tokio::time::sleep(backoff).await;
+                }
+                attempt += 1;
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

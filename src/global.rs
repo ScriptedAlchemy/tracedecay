@@ -227,7 +227,9 @@ pub(crate) async fn update_global_db(cg: &TraceDecay) {
         if tokens > previous {
             let mut config = tracedecay::user_config::UserConfig::load();
             config.pending_upload += tokens - previous;
-            config.save_if_exists();
+            if let Err(err) = config.save_if_exists() {
+                eprintln!("warning: could not save tracedecay config: {err}");
+            }
         }
     }
 }
@@ -283,7 +285,9 @@ pub(crate) fn check_for_update(
     } else if let Some(v) = tracedecay::cloud::fetch_latest_version() {
         config.cached_latest_version = v.clone();
         config.last_version_check_at = now;
-        config.save_if_exists();
+        if let Err(err) = config.save_if_exists() {
+            eprintln!("warning: could not save tracedecay config: {err}");
+        }
         v
     } else {
         return;
@@ -305,7 +309,9 @@ pub(crate) fn check_for_update(
         );
         if !skip_suppression {
             config.last_version_warning_at = now;
-            config.save_if_exists();
+            if let Err(err) = config.save_if_exists() {
+                eprintln!("warning: could not save tracedecay config: {err}");
+            }
         }
     }
 }

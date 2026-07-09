@@ -967,6 +967,21 @@ impl McpServer {
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
         {
+            // Clear the completion flags *before* spawning. They default to
+            // `true` (so the no-sync path reports "done" immediately), and
+            // `run_startup_catch_up_sync` only flips them to `false` once it
+            // actually starts running. Without this pre-clear there is a
+            // window between the spawn and the task's first instruction where
+            // both flags still read `true`, so a caller that reaches
+            // `wait_for_startup_catch_up` in that window observes "done" and
+            // returns immediately — then the detached catch-up sync runs
+            // concurrently with the caller's own work (e.g. racing it to index
+            // a just-written file). Clearing here closes that window so the
+            // wait blocks until the catch-up sync genuinely completes.
+            server.startup_catch_up_done.store(false, Ordering::Release);
+            server
+                .transcript_ingest_done
+                .store(false, Ordering::Release);
             let s = Arc::clone(&server);
             tokio::spawn(async move {
                 s.run_startup_catch_up_sync().await;
@@ -1579,10 +1594,14 @@ impl McpServer {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs() as i64;
-                config.save();
+                if let Err(err) = config.save() {
+                    eprintln!("[tracedecay] warning: could not save config: {err}");
+                }
                 return true;
             }
-            config.save();
+            if let Err(err) = config.save() {
+                eprintln!("[tracedecay] warning: could not save config: {err}");
+            }
             false
         })
         .await
@@ -1904,7 +1923,9 @@ impl McpServer {
                     config.last_upload_at = now;
                 }
             }
-            config.save();
+            if let Err(err) = config.save() {
+                eprintln!("[tracedecay] warning: could not save config: {err}");
+            }
         }
 
         // Checkpoint WAL to merge it into the main database file

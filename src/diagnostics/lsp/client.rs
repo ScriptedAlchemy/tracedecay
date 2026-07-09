@@ -640,6 +640,9 @@ impl LspDiagnostic {
             },
             code: self.code.and_then(code_to_string),
             message: self.message,
+            // The LSP client has no code-graph handle; the enclosing symbol is
+            // resolved later via `DiagnosticBroker::resolve_enclosing_nodes`,
+            // which has access to the indexed nodes for the file.
             enclosing_node: None,
             updated_at: now_unix(),
         }

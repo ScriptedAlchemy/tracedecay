@@ -182,10 +182,10 @@ curator's conservative invariants.
   similarity-dedup + hygiene planner (`dashboard/memory_curate.rs`), sends the
   bounded `llm_review` clusters to the backend, then **re-validates the
   returned ops against freshly recomputed evidence** before any apply. Apply
-  policy: auto-apply only when `auto_apply_memory_ops=true` **and**
-  `require_dashboard_approval=false`; otherwise ops surface for dashboard
-  review. Destructive-op counts (permanent deletes, merge losers) are
-  reported explicitly.
+  policy: auto-apply when `auto_apply_memory_ops=true` — automation applies
+  without any human approval gate (`require_dashboard_approval` is deprecated
+  and ignored); otherwise ops surface for dashboard review. Destructive-op
+  counts (permanent deletes, merge losers) are reported explicitly.
 - **session_reflector** (`runner.rs:170-420`, `session_reflector.rs`):
   evidence = `lcm_grep` over the LCM session store with a **fixed keyword
   query** (`"remember prefer decision requirement workflow"`, limit 20 hits,

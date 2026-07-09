@@ -20,6 +20,21 @@ pub struct StoredFingerprint {
     pub source_hash: String,
 }
 
+impl From<StoredFingerprint> for crate::redundancy::Fingerprint {
+    /// Rehydrate a stored row into the in-memory scoring shape, dropping the
+    /// `node_id` (which the fingerprint itself does not carry).
+    fn from(stored: StoredFingerprint) -> Self {
+        Self {
+            ast_hash: stored.ast_hash,
+            cfg_hash: stored.cfg_hash,
+            call_seq_hash: stored.call_seq_hash,
+            shingles: stored.shingles,
+            body_tokens: stored.body_tokens as usize,
+            source_hash: stored.source_hash,
+        }
+    }
+}
+
 impl Database {
     /// Upsert a fingerprint for a node. Replaces any existing row.
     pub async fn upsert_fingerprint(
@@ -73,26 +88,42 @@ impl Database {
         }
     }
 
-    /// Fetch every fingerprint row. The caller (the redundancy handler)
-    /// filters by `body_tokens` window before pairwise comparison so the
-    /// full table scan is acceptable.
-    pub async fn get_all_fingerprints(&self) -> Result<Vec<StoredFingerprint>> {
+    /// Fetch cached fingerprint rows whose `body_tokens` fall inside the
+    /// inclusive `[lo, hi]` window, capped at `limit` rows.
+    ///
+    /// The `body_tokens` range is filtered in SQL so a large cache never
+    /// materializes fully in memory — callers pass a bounded `limit` (the
+    /// diagnose near-duplicate lookup caps it) so a huge cache cannot blow up
+    /// the call. Each row carries its `node_id`, so results map back to graph
+    /// nodes; row order is unspecified.
+    pub async fn fingerprints_in_token_window(
+        &self,
+        lo: u32,
+        hi: u32,
+        limit: usize,
+    ) -> Result<Vec<StoredFingerprint>> {
         let mut rows = self
             .conn()
             .query(
                 "SELECT node_id, ast_hash, cfg_hash, call_seq_hash, shingles, body_tokens, source_hash
-                   FROM node_fingerprints",
-                (),
+                   FROM node_fingerprints
+                  WHERE body_tokens >= ?1 AND body_tokens <= ?2
+                  LIMIT ?3",
+                params![
+                    i64::from(lo),
+                    i64::from(hi),
+                    i64::try_from(limit).unwrap_or(i64::MAX),
+                ],
             )
             .await
             .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to query fingerprints: {e}"),
-                operation: "get_all_fingerprints".to_string(),
+                message: format!("failed to query fingerprint window: {e}"),
+                operation: "fingerprints_in_token_window".to_string(),
             })?;
-        let mut out: Vec<StoredFingerprint> = Vec::new();
+        let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
-            message: format!("failed to read fingerprint row: {e}"),
-            operation: "get_all_fingerprints".to_string(),
+            message: format!("failed to read fingerprint window row: {e}"),
+            operation: "fingerprints_in_token_window".to_string(),
         })? {
             out.push(row_to_fingerprint(&row)?);
         }

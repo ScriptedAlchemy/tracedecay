@@ -1115,7 +1115,14 @@ async fn close_project_graph(cg: TraceDecay) -> tracedecay::errors::Result<()> {
 pub(crate) fn handle_upload_counter(enable: bool) {
     let mut config = tracedecay::user_config::UserConfig::load();
     config.upload_enabled = enable;
-    config.save();
+    match config.save_with_recovery() {
+        Ok(Some(backup)) => eprintln!(
+            "note: corrupt config.toml backed up to {} before regenerating",
+            backup.display()
+        ),
+        Ok(None) => {}
+        Err(err) => eprintln!("warning: could not save tracedecay config: {err}"),
+    }
     if enable {
         eprintln!("Worldwide counter upload enabled.");
     } else {
@@ -1202,7 +1209,9 @@ fn maybe_print_parallel_update_notice(version_handle: std::thread::JoinHandle<Op
         let mut config = tracedecay::user_config::UserConfig::load();
         config.cached_latest_version = latest.clone();
         config.last_version_check_at = now;
-        config.save_if_exists();
+        if let Err(err) = config.save_if_exists() {
+            eprintln!("warning: could not save tracedecay config: {err}");
+        }
         if tracedecay::cloud::is_newer_version(current_version, &latest)
             && now - config.last_version_warning_at >= 900
         {
@@ -1211,7 +1220,9 @@ fn maybe_print_parallel_update_notice(version_handle: std::thread::JoinHandle<Op
                 current_version, latest
             );
             config.last_version_warning_at = now;
-            config.save_if_exists();
+            if let Err(err) = config.save_if_exists() {
+                eprintln!("warning: could not save tracedecay config: {err}");
+            }
         }
     }
 }

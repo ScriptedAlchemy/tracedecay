@@ -754,10 +754,19 @@ async fn handle_automation_config_command(
     if scope == AutomationConfigScope::Global {
         let effective = effective_config(&global, Some(&patch))?;
         user_config.automation = effective.clone();
-        if !user_config.save() {
-            return Err(tracedecay::errors::TraceDecayError::Config {
-                message: "failed to save global automation config".to_string(),
-            });
+        match user_config.save_with_recovery() {
+            Ok(Some(backup)) => {
+                eprintln!(
+                    "note: the previous config.toml was corrupt and was backed up to {} before regenerating",
+                    backup.display()
+                );
+            }
+            Ok(None) => {}
+            Err(err) => {
+                return Err(tracedecay::errors::TraceDecayError::Config {
+                    message: format!("failed to save global automation config: {err}"),
+                });
+            }
         }
         return print_automation_config(&user_config.automation, None, &effective, true, false);
     }
@@ -848,6 +857,20 @@ fn print_automation_config(
         && effective.host_mode == tracedecay::automation::config::AutomationHostMode::Standalone;
     let delegated_host =
         effective.host_mode == tracedecay::automation::config::AutomationHostMode::DelegatedHost;
+    // Automation applies its output without any human approval; `require_dashboard_approval`
+    // is deprecated and ignored for gating. The effective apply behavior per category is
+    // governed solely by the `auto_apply_*` switches, so surface it explicitly here so the
+    // config is not self-contradictory to a reader.
+    let memory_ops_policy = if effective.auto_apply_memory_ops {
+        "auto_apply"
+    } else {
+        "propose_only"
+    };
+    let skills_policy = if effective.auto_enable_skills {
+        "auto_enable"
+    } else {
+        "draft_for_approval"
+    };
     let payload = serde_json::json!({
         "global": global,
         "project": project,
@@ -860,6 +883,13 @@ fn print_automation_config(
             "auto_apply_memory_ops": effective.auto_apply_memory_ops,
             "auto_enable_skills": effective.auto_enable_skills,
             "export_memory_digest": effective.export_memory_digest,
+            "effective_apply_policy": {
+                "mode": "autonomous",
+                "human_approval_required": false,
+                "dashboard_approval": "deprecated",
+                "memory_ops": memory_ops_policy,
+                "skills": skills_policy,
+            },
         },
     });
     if json {
@@ -884,6 +914,7 @@ fn print_automation_config(
         println!("timeout_secs: {}", effective.timeout_secs);
         println!("scheduler_tick_secs: {}", effective.scheduler_tick_secs);
         println!("memory_curator: {}", effective.tasks.memory_curator.enabled);
+        println!("effective_apply_policy: autonomous");
         if explain {
             println!(
                 "session_reflector: {}",
@@ -893,6 +924,10 @@ fn print_automation_config(
             println!("auto_apply_memory_ops: {}", effective.auto_apply_memory_ops);
             println!("auto_enable_skills: {}", effective.auto_enable_skills);
             println!("export_memory_digest: {}", effective.export_memory_digest);
+            println!("apply_policy.human_approval_required: false");
+            println!("apply_policy.dashboard_approval: deprecated");
+            println!("apply_policy.memory_ops: {memory_ops_policy}");
+            println!("apply_policy.skills: {skills_policy}");
         }
     }
     Ok(())

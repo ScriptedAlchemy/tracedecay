@@ -24,7 +24,12 @@ Announce: "Using tracedecay:reviewing-changes for <diff/PR>."
 3. Deepen only where needed: `tracedecay_impact` on a high-risk changed
    symbol; `tracedecay_affected` only if step 2's test set is insufficient.
 4. Quality scan of just the changed files → `tracedecay_simplify_scan`.
-5. Risk: `tracedecay_test_risk` on changed paths; `tracedecay_unsafe_patterns`
+5. Duplicate-body risk or repeated helper logic in touched code →
+   `tracedecay_redundancy` scoped to the changed directory/file set. Treat
+   `definite` as consolidation evidence; verify `likely` — especially pairs
+   whose `overlap_kind` is `body_vector` (vector-only signal); `naming_only`
+   appears only with `include_naming_only: true` and needs another signal.
+6. Risk: `tracedecay_test_risk` on changed paths; `tracedecay_unsafe_patterns`
    on changed files (`exclude_tests: true` for production-only — unwrap/panic
    in tests is normal, and an `unsafe { }` block is an attention site, not
    automatically a finding).
@@ -59,7 +64,7 @@ Drafts text only — `git commit` / `gh pr create` stay with the user.
 ## If tools are deferred or MCP fails
 
 - Deferred: one ToolSearch call —
-  `select:tracedecay_diff_context,tracedecay_pr_context,tracedecay_simplify_scan,tracedecay_unsafe_patterns,tracedecay_test_risk`.
+  `select:tracedecay_diff_context,tracedecay_pr_context,tracedecay_simplify_scan,tracedecay_redundancy,tracedecay_unsafe_patterns,tracedecay_test_risk`.
 - MCP error: `tracedecay tool pr_context --base-ref main --head-ref HEAD` etc.
   (see `tracedecay:using-the-cli`). gh being unauthenticated or offline is NOT
   a blocker — pr_context/diff_context never touch the network.

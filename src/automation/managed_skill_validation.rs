@@ -358,3 +358,65 @@ pub(crate) fn validate_managed_skill_update(update: &ManagedSkillUpdate) -> Resu
 fn config_error(message: String) -> TraceDecayError {
     TraceDecayError::Config { message }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::super::managed_skill_model::{
+        ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
+        SkillInstallTarget,
+    };
+    use super::*;
+
+    fn valid_draft() -> ManagedSkillDraft {
+        ManagedSkillDraft {
+            id: "managed-validation-eval".to_string(),
+            title: "Managed Validation Eval".to_string(),
+            summary: "validate generated managed skill packages".to_string(),
+            category: "validation".to_string(),
+            targets: vec![SkillInstallTarget::Codex, SkillInstallTarget::Claude],
+            body_markdown: "# Managed Validation Eval\n\nUse this when validating skills."
+                .to_string(),
+            support_files: Vec::new(),
+            provenance: ManagedSkillProvenance {
+                source: ManagedSkillSource::AutomationRun,
+                actor: "test".to_string(),
+                run_id: Some("run-123".to_string()),
+            },
+        }
+    }
+
+    #[test]
+    fn managed_skill_validation_accepts_valid_draft() {
+        let skill = valid_draft().materialize().unwrap();
+        validate_managed_skill(&skill).unwrap();
+    }
+
+    #[test]
+    fn managed_skill_validation_rejects_hermes_target() {
+        let mut draft = valid_draft();
+        draft.targets = vec![SkillInstallTarget::Hermes];
+        let err = draft.materialize().unwrap_err().to_string();
+        assert!(
+            err.contains("managed skill targets cannot include Hermes"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn managed_skill_validation_rejects_unsafe_support_paths() {
+        let support = ManagedSupportFile {
+            path: PathBuf::from("../escape.md"),
+            bytes: b"nope".to_vec(),
+        };
+        let err = validate_managed_support_files(&[support])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("unsafe support path"),
+            "unexpected error: {err}"
+        );
+    }
+}

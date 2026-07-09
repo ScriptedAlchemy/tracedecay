@@ -1898,7 +1898,7 @@ fn def_redundancy() -> ToolDefinition {
     def(
         "tracedecay_redundancy",
         "Redundancy Hunt",
-        "Find functionally duplicated function/method bodies via AST isomorphism, control-flow match, call-sequence match, and token-shingle Jaccard similarity. Each pair is bucketed as 'definite' (AST-identical), 'likely' (CFG or algorithmic match), or 'naming_only' (low confidence). Use when consolidating helpers or auditing code health. Computed lazily and cached per (node, body source hash) — first call on a fresh index can be slow on large repos.",
+        "Find functionally duplicated function/method bodies via AST isomorphism, control-flow match, call-sequence match, token-shingle Jaccard similarity, and body-vector cosine similarity. Results include similarity, ranking_score (a rank key, not a thresholded quantity), grouped duplicate components (connected components over the returned pairs only), and signal details such as body_vector_cosine and generic_helper_downranked. Each pair is bucketed as 'definite' (AST-identical with score >= 0.8), 'likely' (CFG, algorithmic, token, body-vector, or lower-scoring AST match at score >= 0.55), or 'naming_only' (weaker signals). Use when consolidating helpers or auditing code health. Computed lazily and cached per (node, body source hash) — first call on a fresh index can be slow on large repos.",
         json!({
             "type": "object",
             "properties": {
@@ -1916,11 +1916,15 @@ fn def_redundancy() -> ToolDefinition {
                 },
                 "similarity_threshold": {
                     "type": "number",
-                    "description": "Drop pairs scoring below this composite similarity (default: 0.6, range 0.0-1.0)"
+                    "description": "Drop pairs only when both the composite similarity and the body-vector cosine fall below this value (default: 0.6, range 0.0-1.0). A naming-only pair whose cosine clears this and 0.55 is reclassified as 'body_vector'"
                 },
                 "include_naming_only": {
                     "type": "boolean",
-                    "description": "If true, include 'naming_only' / low-confidence matches in the output (default: false)"
+                    "description": "If true, include pairs whose only signal is name similarity (overlap_kind 'naming'), including identical-non-generic-name pairs rescued below the score gate. Cosine-rescued 'body_vector' pairs are always included regardless of this flag (default: false)"
+                },
+                "include_generated_paths": {
+                    "type": "boolean",
+                    "description": "If true, also scan build outputs, vendored code, and worktree mirrors (dist/, build/, out/, node_modules/, vendor/, target/, .worktrees/, *.min.js). Excluded by default because generated mirrors duplicate real sources byte-for-byte (default: false)"
                 }
             }
         }),
@@ -2014,6 +2018,8 @@ fn def_diagnose() -> ToolDefinition {
          diagnostic to the smallest containing graph node, with callers \
          pre-attached so you can see what the failing code is reachable \
          from. Diagnostics without a `--> file:line:col` span are dropped. \
+         Each mapped node also carries up to 3 `near_duplicates` — cached \
+         functional-duplicate matches from the redundancy index, when present. \
          Pass the full stderr capture; you do not need to pre-filter.",
         json!({
             "type": "object",

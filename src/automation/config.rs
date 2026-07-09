@@ -196,6 +196,12 @@ pub struct AutomationConfigPatch {
         skip_serializing
     )]
     pub temperature: Option<Option<f32>>,
+    /// Deprecated: automation applies its output without any human approval, so
+    /// this flag no longer gates anything. It is still parsed from legacy
+    /// on-disk configs for back-compat (and never re-serialized) but is ignored
+    /// by `apply_patch`/`merge_patch`. The effective, autonomous apply policy is
+    /// surfaced by `tracedecay automation config get`
+    /// (`explanation.effective_apply_policy`).
     #[serde(default, skip_serializing)]
     pub require_dashboard_approval: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

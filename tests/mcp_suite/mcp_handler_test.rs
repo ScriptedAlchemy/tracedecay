@@ -6124,6 +6124,14 @@ pub fn unrelated(x: i32) -> i32 {
 
     let pairs = parsed["pairs"].as_array().expect("pairs array");
     let top = &pairs[0];
+    assert!(
+        top["ranking_score"].as_f64().unwrap_or(0.0) > 0.0,
+        "top pair should expose ranking_score; full output: {text}"
+    );
+    assert!(
+        top["signals"]["body_vector_cosine"].as_f64().is_some(),
+        "top pair should expose body_vector_cosine; full output: {text}"
+    );
     let kind = top["overlap_kind"].as_str().unwrap_or("");
     assert_eq!(
         kind, "ast_isomorphic",
@@ -6142,6 +6150,13 @@ pub fn unrelated(x: i32) -> i32 {
         names.contains(&"compute_a") && names.contains(&"compute_b"),
         "expected compute_a/compute_b in pair, got {names:?}"
     );
+    let groups = parsed["groups"].as_array().expect("groups array");
+    assert!(
+        groups
+            .iter()
+            .any(|group| group["size"].as_u64().unwrap_or(0) >= 2),
+        "expected at least one duplicate group, got: {text}"
+    );
 
     // Calling again should be a cache hit (no panic, same result).
     let result2 = handle_tool_call(
@@ -6155,6 +6170,70 @@ pub fn unrelated(x: i32) -> i32 {
     .unwrap();
     let parsed2: serde_json::Value = serde_json::from_str(extract_text(&result2.value)).unwrap();
     assert_eq!(parsed2["pair_count"], parsed["pair_count"]);
+
+    // The redundancy run persists its ranked pairs into the freshness-validated
+    // `redundancy_pairs` cache so other surfaces can read them without
+    // recomputing. At least the planted compute_a/compute_b pair lands.
+    let cached_count = {
+        let mut rows = cg
+            .db()
+            .conn()
+            .query("SELECT COUNT(*) FROM redundancy_pairs", ())
+            .await
+            .unwrap();
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+    };
+    assert!(
+        cached_count >= 1,
+        "redundancy run should populate the redundancy_pairs cache, got {cached_count}"
+    );
+
+    // Resolve compute_a's node id to exercise the fresh-pairs reader.
+    let compute_a_id = {
+        let mut rows = cg
+            .db()
+            .conn()
+            .query("SELECT id FROM nodes WHERE name = 'compute_a'", ())
+            .await
+            .unwrap();
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap()
+    };
+
+    // The reader serves the planted pair while both source hashes are fresh.
+    let fresh = cg
+        .db()
+        .fresh_redundancy_pairs_for_node(&compute_a_id)
+        .await
+        .unwrap();
+    assert!(
+        !fresh.is_empty(),
+        "fresh-pairs reader should return the planted duplicate for compute_a"
+    );
+
+    // Changing compute_a's cached fingerprint source_hash makes every pair it
+    // participates in stale — the reader's freshness join must drop them.
+    cg.db()
+        .conn()
+        .execute(
+            "UPDATE node_fingerprints SET source_hash = 'stale-hash' WHERE node_id = ?1",
+            libsql::params![compute_a_id.clone()],
+        )
+        .await
+        .unwrap();
+    let stale = cg
+        .db()
+        .fresh_redundancy_pairs_for_node(&compute_a_id)
+        .await
+        .unwrap();
+    assert!(
+        stale.is_empty(),
+        "reader must filter rows whose stored source_hash no longer matches the fingerprint"
+    );
 }
 
 /// Issue #80: `tracedecay_runtime` must surface process + DB telemetry so
@@ -13444,6 +13523,163 @@ async fn diagnose_normalizes_absolute_and_backslash_paths() {
     );
 }
 
+/// `tracedecay_diagnose` cross-references the redundancy index: when the
+/// enclosing node of a diagnostic has a cached fingerprint, near-duplicate
+/// functions surface under `near_duplicates`. Plant two AST-isomorphic
+/// functions, warm the fingerprint cache via `tracedecay_redundancy`, then
+/// diagnose a synthetic error on one and assert the other is reported.
+#[tokio::test]
+async fn diagnose_surfaces_near_duplicates_from_redundancy_cache() {
+    let dir = test_temp_dir();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("src/lib.rs"),
+        r#"
+pub fn compute_a(value: i32) -> i32 {
+    let mut acc = 0;
+    for i in 0..value {
+        if i % 2 == 0 {
+            acc += i;
+        } else {
+            acc -= i;
+        }
+    }
+    acc
+}
+
+pub fn compute_b(input: i32) -> i32 {
+    let mut total = 0;
+    for j in 0..input {
+        if j % 2 == 0 {
+            total += j;
+        } else {
+            total -= j;
+        }
+    }
+    total
+}
+"#,
+    )
+    .unwrap();
+    let (cg, _env) = init_test_project(project).await;
+    cg.index_all().await.unwrap();
+
+    // Warm the fingerprint cache so diagnose has something to read.
+    handle_tool_call(
+        &cg,
+        "tracedecay_redundancy",
+        json!({ "min_lines": 5, "similarity_threshold": 0.5 }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Craft a diagnostic whose span lands inside compute_a.
+    let a_id = find_node_id(&cg, "compute_a").await;
+    let a_node = cg.get_node(&a_id).await.unwrap().expect("compute_a node");
+    let diag_line = a_node.start_line + 1; // 0-based start -> 1-based span line
+    let cargo_output =
+        format!("error[E0001]: synthetic error\n  --> src/lib.rs:{diag_line}:5\n   |\n");
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_diagnose",
+        json!({"cargo_output": cargo_output, "include_callers": false}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let output: Value = serde_json::from_str(text).unwrap();
+
+    let diagnostics = output["diagnostics"].as_array().expect("diagnostics");
+    let diag = diagnostics
+        .iter()
+        .find(|d| d["node"]["name"].as_str() == Some("compute_a"))
+        .unwrap_or_else(|| panic!("diagnostic did not map to compute_a: {output:#}"));
+    let dupes = diag["near_duplicates"]
+        .as_array()
+        .unwrap_or_else(|| panic!("near_duplicates missing: {output:#}"));
+    assert!(
+        dupes
+            .iter()
+            .any(|d| d["name"].as_str() == Some("compute_b")),
+        "expected compute_b in near_duplicates, got: {output:#}"
+    );
+    let top = &dupes[0];
+    assert_eq!(top["name"].as_str(), Some("compute_b"));
+    assert_eq!(top["overlap_kind"].as_str(), Some("ast_isomorphic"));
+    assert_eq!(top["severity"].as_str(), Some("definite"));
+    assert!(top["ranking_score"].as_f64().unwrap_or(0.0) > 0.0);
+}
+
+/// When no fingerprint is cached for the enclosing node, `diagnose` must not
+/// parse or warm files — it silently reports an empty `near_duplicates` list.
+#[tokio::test]
+async fn diagnose_near_duplicates_absent_without_cached_fingerprint() {
+    let dir = test_temp_dir();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("src/lib.rs"),
+        r#"
+pub fn compute_a(value: i32) -> i32 {
+    let mut acc = 0;
+    for i in 0..value {
+        acc += i;
+    }
+    acc
+}
+
+pub fn compute_b(input: i32) -> i32 {
+    let mut total = 0;
+    for j in 0..input {
+        total += j;
+    }
+    total
+}
+"#,
+    )
+    .unwrap();
+    let (cg, _env) = init_test_project(project).await;
+    cg.index_all().await.unwrap();
+    // Deliberately do NOT run tracedecay_redundancy — no fingerprints cached.
+
+    let a_id = find_node_id(&cg, "compute_a").await;
+    let a_node = cg.get_node(&a_id).await.unwrap().expect("compute_a node");
+    let diag_line = a_node.start_line + 1;
+    let cargo_output =
+        format!("error[E0001]: synthetic error\n  --> src/lib.rs:{diag_line}:5\n   |\n");
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_diagnose",
+        json!({"cargo_output": cargo_output, "include_callers": false}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let output: Value = serde_json::from_str(text).unwrap();
+
+    let diagnostics = output["diagnostics"].as_array().expect("diagnostics");
+    let diag = diagnostics
+        .iter()
+        .find(|d| d["node"]["name"].as_str() == Some("compute_a"))
+        .unwrap_or_else(|| panic!("diagnostic did not map to compute_a: {output:#}"));
+    let dupes = diag["near_duplicates"]
+        .as_array()
+        .unwrap_or_else(|| panic!("near_duplicates missing: {output:#}"));
+    assert!(
+        dupes.is_empty(),
+        "expected no near_duplicates without cached fingerprints, got: {output:#}"
+    );
+}
+
 /// Regression: PR8's resolver kind-compatibility filter must apply to
 /// the same-file blocklist branches too. Without it, common names like
 /// `new`/`default`/`clone` can still bind a `Calls` reference to a
@@ -15305,7 +15541,10 @@ async fn message_search_all_registered_skips_project_with_malformed_relpath() {
         "healthy project must still be searched: {parsed}"
     );
     assert!(
-        parsed["searched_project_count"].as_u64().unwrap_or_default() >= 1,
+        parsed["searched_project_count"]
+            .as_u64()
+            .unwrap_or_default()
+            >= 1,
         "the healthy project must still be searched: {parsed}"
     );
     assert!(

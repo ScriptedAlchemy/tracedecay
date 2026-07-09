@@ -926,7 +926,10 @@ async fn skill_writer_runner_records_noop_fallback_when_backend_run_task_fails()
     seed_session_evidence(&cg).await;
     let _global_db = isolate_global_db(&cg);
     let backend = FailingBackend::new(AgentTaskKind::SkillWriter);
-    let config = enabled_skill_writer_config();
+    let config = AutomationConfig {
+        timeout_secs: 1,
+        ..enabled_skill_writer_config()
+    };
 
     let run = run_skill_writer_with_backend(
         &cg,
@@ -937,6 +940,9 @@ async fn skill_writer_runner_records_noop_fallback_when_backend_run_task_fails()
     .await
     .unwrap();
 
+    // The backend failure is transient, but this test pins the noop-fallback
+    // record, not retry semantics (covered by backend.rs retry tests) —
+    // timeout_secs: 1 short-circuits the backoff so the test stays fast.
     assert_eq!(backend.calls(), 1);
     assert_noop_fallback_record(
         &run.ledger_record,

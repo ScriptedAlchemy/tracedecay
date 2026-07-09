@@ -1547,23 +1547,28 @@ fn required_diagnostics_scope_value(args: &Value, scope: &str, name: &str) -> Re
 
 async fn enclosing_diagnostic_node(
     cg: &TraceDecay,
-    nodes_by_file: &mut HashMap<String, Vec<crate::types::Node>>,
+    spans_by_file: &mut HashMap<String, Vec<crate::diagnostics::lsp::broker::NodeSpan>>,
     file: &str,
     line_start: u32,
 ) -> Result<Option<String>> {
-    if !nodes_by_file.contains_key(file) {
-        let fetched = cg.get_nodes_by_file(file).await?;
-        nodes_by_file.insert(file.to_string(), fetched);
+    use crate::diagnostics::lsp::broker::{NodeSpan, enclosing_node_for_line};
+    if !spans_by_file.contains_key(file) {
+        let spans = cg
+            .get_nodes_by_file(file)
+            .await?
+            .into_iter()
+            .map(|n| NodeSpan {
+                start_line: n.start_line,
+                end_line: n.end_line,
+                qualified_name: n.qualified_name,
+            })
+            .collect();
+        spans_by_file.insert(file.to_string(), spans);
     }
 
-    let node_line = line_start.saturating_sub(1);
-    Ok(nodes_by_file.get(file).and_then(|nodes| {
-        nodes
-            .iter()
-            .filter(|n| n.start_line <= node_line && node_line <= n.end_line)
-            .min_by_key(|n| n.end_line.saturating_sub(n.start_line))
-            .map(|n| n.qualified_name.clone())
-    }))
+    Ok(spans_by_file
+        .get(file)
+        .and_then(|spans| enclosing_node_for_line(spans, line_start)))
 }
 
 /// Whether the diagnostics prewarm behaviour is enabled. Off by default: the
@@ -1647,7 +1652,8 @@ pub(super) async fn handle_diagnostics(
     let mut entries: Vec<Value> = Vec::with_capacity(diagnostics.len());
     let mut error_count = 0u64;
     let mut warning_count = 0u64;
-    let mut nodes_by_file: HashMap<String, Vec<crate::types::Node>> = HashMap::new();
+    let mut spans_by_file: HashMap<String, Vec<crate::diagnostics::lsp::broker::NodeSpan>> =
+        HashMap::new();
 
     for diag in &diagnostics {
         match diag.level.as_str() {
@@ -1657,7 +1663,7 @@ pub(super) async fn handle_diagnostics(
         }
 
         let enclosing =
-            enclosing_diagnostic_node(cg, &mut nodes_by_file, &diag.file, diag.line_start).await?;
+            enclosing_diagnostic_node(cg, &mut spans_by_file, &diag.file, diag.line_start).await?;
 
         entries.push(json!({
             "file": diag.file,
