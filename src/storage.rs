@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
@@ -478,13 +479,29 @@ impl PrivateStoreIo {
         if let Some(parent) = path.parent() {
             Self::create_dir_all(parent)?;
         }
-        reject_symlink_components(path, "private store file")?;
-        let mut file = Self::open_private(path, fs::OpenOptions::new().append(true))?;
-        file.lock_exclusive()?;
-        let write_result = file.write_all(format!("{line}\n").as_bytes());
-        let unlock_result = file.unlock();
-        write_result?;
+        let lock_path = append_lock_path(path);
+        reject_symlink_components(&lock_path, "private store lock file")?;
+        let mut lock_options = fs::OpenOptions::new();
+        lock_options.read(true).write(true);
+        let lock_file = Self::open_private(&lock_path, &mut lock_options)?;
+        lock_file.lock_exclusive()?;
+
+        let append_result = Self::append_line_locked(path, line);
+        let unlock_result = lock_file.unlock();
+        append_result?;
         unlock_result?;
+        set_private_file_permissions(&lock_path)?;
+        Ok(())
+    }
+
+    fn append_line_locked(path: &Path, line: &str) -> io::Result<()> {
+        reject_symlink_components(path, "private store file")?;
+        let mut options = fs::OpenOptions::new();
+        options.append(true);
+        let mut file = Self::open_private(path, &mut options)?;
+        file.write_all(format!("{line}\n").as_bytes())?;
+        file.flush()?;
+        drop(file);
         set_private_file_permissions(path)
     }
 
@@ -603,6 +620,15 @@ fn invalid_input(message: impl Into<String>) -> io::Error {
 
 fn path_parent(path: &Path) -> &Path {
     path.parent().unwrap_or_else(|| Path::new(""))
+}
+
+fn append_lock_path(path: &Path) -> PathBuf {
+    let mut lock_name = path
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_else(|| OsString::from("append"));
+    lock_name.push(".lock");
+    path.with_file_name(lock_name)
 }
 
 fn relative_to_data_root(path: &Path, data_root: &Path) -> PathBuf {
@@ -754,8 +780,9 @@ fn set_private_file_permissions(_path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
-    use super::PrivateStoreIo;
+    use super::*;
     use serde_json::Value;
     use std::sync::{Arc, Barrier};
 
@@ -800,5 +827,6 @@ mod tests {
         for row in rows {
             serde_json::from_str::<Value>(row).unwrap();
         }
+        assert!(append_lock_path(&path).is_file());
     }
 }
