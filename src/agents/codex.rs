@@ -15,6 +15,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use crate::errors::{Result, TraceDecayError};
 
@@ -45,7 +46,7 @@ impl AgentIntegration for CodexIntegration {
         eprintln!("  1. cd into your project and run: tracedecay init");
         eprintln!("  2. In Codex, run: codex plugin add tracedecay@personal");
         eprintln!("  3. Start a new Codex session — tracedecay tools are now available");
-        print_hook_trust_guidance();
+        announce_codex_hook_trust(&ctx.home, &ctx.tracedecay_bin);
         Ok(())
     }
 
@@ -145,7 +146,15 @@ impl AgentIntegration for CodexIntegration {
                  install to the personal plugin bundle."
             );
             eprintln!("  In Codex, run: codex plugin add tracedecay@personal");
-            print_hook_trust_guidance();
+        }
+        // Auto-trust the personal bundle's hooks whenever one is present, so a
+        // refresh (which may have changed hook content) re-pins trust without a
+        // manual /hooks approval. Repo-local-only installs ship no hooks and
+        // have no personal trust surface, so this is a no-op for them.
+        if codex_plugin_manifest_path(&ctx.home).exists()
+            || !codex_plugin_cached_install_dirs(&ctx.home).is_empty()
+        {
+            announce_codex_hook_trust(&ctx.home, &ctx.tracedecay_bin);
         }
         Ok(UpdatePluginOutcome::Refreshed(refreshed))
     }
@@ -697,20 +706,310 @@ const CODEX_PERSONAL_PLUGIN_HOOK_TRUST_PREFIX: &str = "tracedecay@personal:hooks
 #[derive(Debug, PartialEq, Eq)]
 enum CodexHookTrustState {
     Trusted,
+    /// Trust entries for these event labels are absent from `config.toml`.
     Missing(Vec<String>),
+    /// Trust entries exist for these event labels but their stored hash no
+    /// longer matches the current `hooks.json` content (e.g. after a bundle
+    /// upgrade changed a command or timeout). Codex silently skips such hooks.
+    Modified(Vec<String>),
 }
 
-/// Codex records hook state under `snake_case` event keys. Derive them from the
-/// managed hook's subcommand (`hook-codex-post-tool-use` -> `post_tool_use`)
-/// so the mapping stays anchored to the single-source-of-truth table instead
-/// of re-implementing Codex's name normalization.
-fn codex_hook_state_event_key(hook: &CodexManagedHook) -> String {
-    hook.subcommand
-        .trim_start_matches("hook-codex-")
-        .replace('-', "_")
+/// A single trust record Codex expects in `~/.codex/config.toml` for one
+/// tracedecay-personal-plugin command hook handler.
+///
+/// The `trust_key` is the fully-qualified `[hooks.state."…"]` table name and
+/// `hash` is the `sha256:<hex>` content hash Codex records as `trusted_hash`.
+/// `command` is retained so the installer's safety valve can confirm the hook
+/// actually invokes the tracedecay binary before recording trust for it.
+#[derive(Debug, Clone)]
+struct CodexHookTrustEntry {
+    event_label: String,
+    trust_key: String,
+    hash: String,
+    command: String,
 }
 
-fn codex_plugin_hook_trust_state(config: &toml::Value) -> CodexHookTrustState {
+/// Convert a Codex `CamelCase` lifecycle event name to the `snake_case` label
+/// Codex uses in trust keys and in the hook hash identity
+/// (`PostToolUse` -> `post_tool_use`). This mirrors Codex's own normalization
+/// so entries computed here match the TUI's `/hooks` approval byte-for-byte.
+fn codex_event_snake_case(event: &str) -> String {
+    let mut out = String::new();
+    for (index, ch) in event.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if index > 0 {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Serialize `value` as compact JSON with object keys sorted recursively —
+/// the canonical form Codex hashes (equivalent to Python's
+/// `json.dumps(sort_keys=True, separators=(",", ":"))`). `serde_json` may be
+/// built with `preserve_order`, so key ordering is enforced here rather than
+/// relying on the serializer's default.
+fn codex_canonical_json(value: &serde_json::Value) -> String {
+    let mut out = String::new();
+    codex_write_canonical_json(value, &mut out);
+    out
+}
+
+fn codex_write_canonical_json(value: &serde_json::Value, out: &mut String) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            out.push('{');
+            for (index, key) in keys.into_iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                out.push_str(&serde_json::to_string(key).unwrap_or_default());
+                out.push(':');
+                codex_write_canonical_json(&map[key], out);
+            }
+            out.push('}');
+        }
+        serde_json::Value::Array(items) => {
+            out.push('[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                codex_write_canonical_json(item, out);
+            }
+            out.push(']');
+        }
+        other => out.push_str(&serde_json::to_string(other).unwrap_or_default()),
+    }
+}
+
+/// Compute Codex's `trusted_hash` for one command-hook handler identity.
+///
+/// This is a direct port of Codex's `command_hook_hash`: build the handler
+/// identity object (`event_name`, optional `matcher`, and a single-element
+/// `hooks` array carrying the `command`/`timeout`/`async` handler), canonicalize
+/// it (recursively key-sorted, compact JSON), sha256 the bytes, and format
+/// `sha256:<lowercase hex>`. `async` and `timeout` are always present after
+/// normalization; `matcher` is omitted entirely when the group has none.
+fn codex_command_hook_hash(
+    event_name: &str,
+    matcher: Option<&str>,
+    command: &str,
+    timeout: u64,
+    is_async: bool,
+) -> String {
+    let handler = json!({
+        "type": "command",
+        "command": command,
+        "timeout": timeout,
+        "async": is_async,
+    });
+    let mut identity = serde_json::Map::new();
+    identity.insert("event_name".to_string(), json!(event_name));
+    if let Some(matcher) = matcher {
+        identity.insert("matcher".to_string(), json!(matcher));
+    }
+    identity.insert("hooks".to_string(), json!([handler]));
+    let canonical = codex_canonical_json(&serde_json::Value::Object(identity));
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.as_bytes());
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+/// Derive the ordered trust records for a rendered Codex `hooks.json` value.
+///
+/// Iterates events -> groups -> handlers exactly as Codex indexes them, so the
+/// group/handler positions in each `trust_key` match what Codex records. The
+/// per-handler `timeout` is normalized the way Codex does (default 600, clamped
+/// to a minimum of 1) and `async` defaults to false, so the hash matches the
+/// TUI's `/hooks` approval regardless of whether those keys are present on disk.
+fn codex_hook_trust_entries(hooks: &serde_json::Value) -> Vec<CodexHookTrustEntry> {
+    let mut entries = Vec::new();
+    let Some(events) = hooks.get("hooks").and_then(|hooks| hooks.as_object()) else {
+        return entries;
+    };
+    for (event_key, groups) in events {
+        let event_label = codex_event_snake_case(event_key);
+        let Some(groups) = groups.as_array() else {
+            continue;
+        };
+        for (group_index, group) in groups.iter().enumerate() {
+            let matcher = group.get("matcher").and_then(|value| value.as_str());
+            let Some(handlers) = group.get("hooks").and_then(|value| value.as_array()) else {
+                continue;
+            };
+            for (handler_index, handler) in handlers.iter().enumerate() {
+                let Some(command) = handler.get("command").and_then(|value| value.as_str()) else {
+                    continue;
+                };
+                let timeout = handler
+                    .get("timeout")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(600)
+                    .max(1);
+                let is_async = handler
+                    .get("async")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let hash =
+                    codex_command_hook_hash(&event_label, matcher, command, timeout, is_async);
+                let trust_key = format!(
+                    "{CODEX_PERSONAL_PLUGIN_HOOK_TRUST_PREFIX}{event_label}:{group_index}:{handler_index}"
+                );
+                entries.push(CodexHookTrustEntry {
+                    event_label: event_label.clone(),
+                    trust_key,
+                    hash,
+                    command: command.to_string(),
+                });
+            }
+        }
+    }
+    entries
+}
+
+/// Render the personal-bundle `hooks.json` and derive its trust records. This
+/// is the single bridge from the hook generator ([`codex_plugin_hooks`]) to the
+/// trust machinery, so the installer, re-sync, and doctor all hash the exact
+/// bytes that ship in the bundle.
+fn codex_managed_hook_trust_entries(tracedecay_bin: &str) -> Result<Vec<CodexHookTrustEntry>> {
+    let seed = codex_embedded_plugin_files()
+        .into_iter()
+        .find_map(|(relative, contents)| (relative == "hooks/hooks.json").then_some(contents))
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "Codex plugin bundle is missing hooks/hooks.json".to_string(),
+        })?;
+    let rendered = codex_plugin_hooks(seed, tracedecay_bin)?;
+    let value: serde_json::Value = serde_json::from_str(&rendered)?;
+    Ok(codex_hook_trust_entries(&value))
+}
+
+/// Safety valve: only auto-trust a hook whose command invokes tracedecay's own
+/// binary (the exact quoted path the generator embeds). Anything else is left
+/// for manual `/hooks` review.
+fn codex_hook_command_invokes_tracedecay(command: &str, tracedecay_bin: &str) -> bool {
+    // `hook_command(bin, "")` yields `<quoted-bin> ` — the same quoting the
+    // generator uses — so a trailing-trimmed prefix match confirms the command
+    // starts with our binary token without re-implementing shell quoting.
+    let quoted_bin = super::hook_command(tracedecay_bin, "");
+    let quoted_bin = quoted_bin.trim_end();
+    !quoted_bin.is_empty() && command.starts_with(quoted_bin)
+}
+
+/// Outcome of a hook-trust re-sync: how many hooks were recorded as trusted and
+/// which (if any) were skipped by the safety valve and still need manual review.
+struct CodexHookTrustSyncOutcome {
+    trusted: usize,
+    skipped: Vec<String>,
+}
+
+/// Record trust for the personal plugin's lifecycle hooks in
+/// `~/.codex/config.toml` so Codex runs them without a manual `/hooks` approval.
+///
+/// Writes only `[hooks.state."tracedecay@personal:hooks/hooks.json:…"]` tables,
+/// pruning stale tracedecay-personal entries (removed events / shifted indices)
+/// while preserving every other plugin's and the user's own config. Hooks whose
+/// command does not invoke the tracedecay binary are skipped (see
+/// [`codex_hook_command_invokes_tracedecay`]). An unreadable/unparseable
+/// `config.toml` surfaces as `Err`, so callers leave it untouched and fall back
+/// to printed guidance.
+fn sync_codex_hook_trust(home: &Path, tracedecay_bin: &str) -> Result<CodexHookTrustSyncOutcome> {
+    let entries = codex_managed_hook_trust_entries(tracedecay_bin)?;
+    let config_path = codex_config_path(home);
+    let mut config = load_toml_file(&config_path)?;
+    let table = config
+        .as_table_mut()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!("{} is not a TOML table", config_path.display()),
+        })?;
+    let hooks = table
+        .entry("hooks")
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+    let hooks = hooks
+        .as_table_mut()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!("[hooks] in {} is not a table", config_path.display()),
+        })?;
+    let state = hooks
+        .entry("state")
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+    let state = state
+        .as_table_mut()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!("[hooks.state] in {} is not a table", config_path.display()),
+        })?;
+
+    // Stale-entry hygiene: drop every tracedecay-personal trust record before
+    // re-adding the current set, so removed events or shifted indices do not
+    // linger. Foreign plugins' entries (different prefix) are untouched.
+    state.retain(|key, _| !key.starts_with(CODEX_PERSONAL_PLUGIN_HOOK_TRUST_PREFIX));
+
+    let mut trusted = 0usize;
+    let mut skipped = Vec::new();
+    for entry in &entries {
+        if !codex_hook_command_invokes_tracedecay(&entry.command, tracedecay_bin) {
+            skipped.push(entry.event_label.clone());
+            continue;
+        }
+        let mut record = toml::value::Table::new();
+        record.insert(
+            "trusted_hash".to_string(),
+            toml::Value::String(entry.hash.clone()),
+        );
+        state.insert(entry.trust_key.clone(), toml::Value::Table(record));
+        trusted += 1;
+    }
+
+    write_toml_file(&config_path, &config)?;
+    Ok(CodexHookTrustSyncOutcome { trusted, skipped })
+}
+
+/// Auto-trust the personal plugin's hooks, printing a concise confirmation on
+/// full success and falling back to [`print_hook_trust_guidance`] whenever a
+/// hook is skipped by the safety valve or the config could not be written.
+fn announce_codex_hook_trust(home: &Path, tracedecay_bin: &str) {
+    let config_path = codex_config_path(home);
+    match sync_codex_hook_trust(home, tracedecay_bin) {
+        Ok(outcome) if outcome.skipped.is_empty() => {
+            eprintln!(
+                "\x1b[32m✔\x1b[0m Trusted {} Codex hook(s) in {}",
+                outcome.trusted,
+                config_path.display()
+            );
+        }
+        Ok(outcome) => {
+            if outcome.trusted > 0 {
+                eprintln!(
+                    "\x1b[32m✔\x1b[0m Trusted {} Codex hook(s) in {}",
+                    outcome.trusted,
+                    config_path.display()
+                );
+            }
+            eprintln!(
+                "  Skipped auto-trust for {} (command does not invoke the tracedecay binary).",
+                outcome.skipped.join(", ")
+            );
+            print_hook_trust_guidance();
+        }
+        Err(err) => {
+            eprintln!("  Could not auto-trust Codex hooks: {err}");
+            print_hook_trust_guidance();
+        }
+    }
+}
+
+/// Classify the recorded Codex trust state for the personal plugin's hooks by
+/// comparing each expected [`CodexHookTrustEntry`] against `config.toml`.
+fn codex_plugin_hook_trust_state(
+    config: &toml::Value,
+    entries: &[CodexHookTrustEntry],
+) -> CodexHookTrustState {
     // A missing [hooks.state] table is just "nothing trusted yet" — treat it
     // as empty so one pipeline produces the missing list either way.
     let empty = toml::value::Table::new();
@@ -720,24 +1019,26 @@ fn codex_plugin_hook_trust_state(config: &toml::Value) -> CodexHookTrustState {
         .and_then(|state| state.as_table())
         .unwrap_or(&empty);
 
-    let missing: Vec<String> = CODEX_MANAGED_HOOKS
-        .iter()
-        .map(codex_hook_state_event_key)
-        .filter(|event_key| {
-            let trust_key = format!("{CODEX_PERSONAL_PLUGIN_HOOK_TRUST_PREFIX}{event_key}:0:0");
-            !state.get(&trust_key).is_some_and(|entry| {
-                entry
-                    .get("trusted_hash")
-                    .and_then(|hash| hash.as_str())
-                    .is_some_and(|hash| hash.starts_with("sha256:"))
-            })
-        })
-        .collect();
+    let mut missing = Vec::new();
+    let mut modified = Vec::new();
+    for entry in entries {
+        match state
+            .get(&entry.trust_key)
+            .and_then(|record| record.get("trusted_hash"))
+            .and_then(|hash| hash.as_str())
+        {
+            None => missing.push(entry.event_label.clone()),
+            Some(stored) if stored == entry.hash => {}
+            Some(_) => modified.push(entry.event_label.clone()),
+        }
+    }
 
-    if missing.is_empty() {
-        CodexHookTrustState::Trusted
-    } else {
+    if !missing.is_empty() {
         CodexHookTrustState::Missing(missing)
+    } else if !modified.is_empty() {
+        CodexHookTrustState::Modified(modified)
+    } else {
+        CodexHookTrustState::Trusted
     }
 }
 
@@ -1454,20 +1755,28 @@ fn doctor_check_hooks(dc: &mut DoctorCounters, hooks_path: &Path, config_path: &
         CODEX_MANAGED_HOOKS.len(),
         hooks_path.display()
     ));
+    // Hash the on-disk hooks.json exactly as Codex would, then compare against
+    // the trust records in config.toml to distinguish trusted / missing / stale.
+    let entries = codex_hook_trust_entries(&hooks);
     match load_toml_file(config_path) {
-        Ok(config) => match codex_plugin_hook_trust_state(&config) {
-            CodexHookTrustState::Trusted => dc.info(&format!(
-                "Codex hook trust entries recorded in {} — trust is pinned to hook content, so if hooks changed since trusting (e.g. after update-plugin), run /hooks in Codex to re-trust",
+        Ok(config) => match codex_plugin_hook_trust_state(&config, &entries) {
+            CodexHookTrustState::Trusted => dc.pass(&format!(
+                "Codex hook trust entries recorded and current in {}",
                 config_path.display()
             )),
             CodexHookTrustState::Missing(missing) => dc.info(&format!(
-                "Codex skips new/changed command hooks until trusted — missing trust for {} in {}; run `/hooks` in Codex",
+                "Codex skips untrusted command hooks — missing trust for {} in {}; run `tracedecay update-plugin` (or `/hooks` in Codex) to trust them",
                 missing.join(", "),
+                config_path.display()
+            )),
+            CodexHookTrustState::Modified(modified) => dc.warn(&format!(
+                "Codex hook trust is stale for {} in {} — the hook content changed since it was trusted, so Codex now skips it; run `tracedecay update-plugin` to re-trust",
+                modified.join(", "),
                 config_path.display()
             )),
         },
         Err(_) => dc.info(
-            "Codex skips new/changed command hooks until trusted — run `/hooks` in Codex to trust the tracedecay hooks",
+            "Codex skips untrusted command hooks — run `tracedecay update-plugin` (or `/hooks` in Codex) to trust the tracedecay hooks",
         ),
     }
 }

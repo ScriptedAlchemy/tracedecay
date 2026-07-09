@@ -3307,9 +3307,19 @@ fn test_codex_install_creates_plugin_bundle_and_marketplace() {
     );
     assert_codex_personal_marketplace_entry(home);
 
+    // Global Codex install auto-trusts the bundled lifecycle hooks by writing
+    // their content hashes into ~/.codex/config.toml, so Codex runs them without
+    // a manual /hooks approval. The MCP server itself still comes from the
+    // plugin bundle, not config.toml.
+    let config = std::fs::read_to_string(home.join(".codex/config.toml"))
+        .expect("global Codex install should record hook trust in config.toml");
     assert!(
-        !home.join(".codex/config.toml").exists(),
-        "global Codex install should rely on the plugin MCP config, not mutate config.toml"
+        config.contains("tracedecay@personal:hooks/hooks.json:") && config.contains("trusted_hash"),
+        "global Codex install should record tracedecay hook trust entries, got:\n{config}"
+    );
+    assert!(
+        !config.contains("[mcp_servers.tracedecay]"),
+        "global Codex install should not register the MCP server in config.toml"
     );
     assert!(
         !home.join(".codex/hooks.json").exists(),
@@ -3560,9 +3570,24 @@ fn test_codex_install_sweeps_legacy_global_config() {
     let ctx = make_install_ctx(home);
     CodexIntegration.install(&ctx).unwrap();
 
+    // The legacy MCP registration is swept, and the installer records hook
+    // trust in its place — so config.toml survives with only [hooks.state].
+    let migrated: toml::Value =
+        toml::from_str(&std::fs::read_to_string(codex_dir.join("config.toml")).unwrap()).unwrap();
     assert!(
-        !codex_dir.join("config.toml").exists(),
+        migrated
+            .get("mcp_servers")
+            .and_then(|servers| servers.get("tracedecay"))
+            .is_none(),
         "legacy global Codex MCP config should be removed when it only contained tracedecay"
+    );
+    assert!(
+        migrated["hooks"]["state"]
+            .as_table()
+            .unwrap()
+            .keys()
+            .any(|key| key.starts_with("tracedecay@personal:hooks/hooks.json:")),
+        "install should record tracedecay hook trust in config.toml"
     );
     assert!(
         !codex_dir.join("hooks.json").exists(),
@@ -4455,8 +4480,10 @@ fn test_codex_local_uninstall_unrecords_legacy_repo_memory_digest_target() {
 #[test]
 fn test_codex_install_preserves_existing_config() {
     // Regression test for issue #63: installing tracedecay used to wipe out the
-    // entire ~/.codex/config.toml because load_toml_file silently returned an
-    // empty table.
+    // entire ~/.codex/config.toml. The installer now records hook trust in
+    // config.toml, so it must add only its [hooks.state] entries while
+    // preserving every unrelated key the user already had, and back the file up
+    // first (issue #63) before rewriting it.
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let _agent_env = crate::common::AgentEnvLock::pin(home);
@@ -4475,14 +4502,29 @@ args = [\"--flag\"]
     let ctx = make_install_ctx(home);
     CodexIntegration.install(&ctx).unwrap();
 
+    let updated: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    // Unrelated user content survives untouched.
+    assert_eq!(updated["model"].as_str().unwrap(), "o4-mini");
+    assert_eq!(updated["approval_policy"].as_str().unwrap(), "on-failure");
     assert_eq!(
-        std::fs::read_to_string(&config_path).unwrap(),
-        original,
-        "global Codex plugin install must leave user config.toml byte-identical"
+        updated["mcp_servers"]["other"]["command"].as_str().unwrap(),
+        "other-bin"
     );
+    // Hook trust entries were added for the personal plugin bundle.
     assert!(
-        !home.join(".codex/config.toml.bak").exists(),
-        "global Codex plugin install should not back up config.toml because it does not rewrite it"
+        updated["hooks"]["state"]
+            .as_table()
+            .unwrap()
+            .keys()
+            .any(|key| key.starts_with("tracedecay@personal:hooks/hooks.json:")),
+        "install should record tracedecay hook trust entries"
+    );
+    // Issue #63: the pre-existing config is backed up before the rewrite.
+    assert_eq!(
+        std::fs::read_to_string(home.join(".codex/config.toml.bak")).unwrap(),
+        original,
+        "install should back up the original config before rewriting it"
     );
     assert_codex_plugin_bundle(
         &codex_plugin_install_dir(home),
