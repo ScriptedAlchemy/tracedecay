@@ -446,7 +446,9 @@ pub(crate) fn matching_legacy_profile_layouts(
     manifest_paths.sort();
 
     let mut layouts = Vec::new();
-    let project_git_common_dir = crate::worktree::git_common_dir(project_root);
+    let project_git_common_dir = (!crate::worktree::is_detached_linked_worktree(project_root))
+        .then(|| crate::worktree::git_common_dir(project_root))
+        .flatten();
     let mut legacy_git_common_dirs = HashMap::<PathBuf, Option<PathBuf>>::new();
     for manifest_path in manifest_paths {
         let Ok(manifest) = read_store_manifest(&manifest_path) else {
