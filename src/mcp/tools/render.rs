@@ -623,6 +623,55 @@ pub(super) fn risky_patterns_md(value: &Value) -> String {
     md.render()
 }
 
+/// Dedicated markdown renderer for `tracedecay_unused_imports`.
+///
+/// The generic renderer dumped the `imports` array as anonymous records; this
+/// spells each finding as `NAME unused in file:line` so agents (and tests) get
+/// a stable, greppable location — the same shape as [`risky_patterns_md`].
+pub(super) fn unused_imports_md(value: &Value) -> String {
+    let mut md = Md::new();
+    md.heading(2, "Unused Imports");
+
+    let imports = value
+        .get("imports")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let count = value
+        .get("unused_import_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(imports.len() as u64);
+    md.field("Unused import count", &count.to_string());
+    md.blank();
+
+    if imports.is_empty() {
+        md.empty_note("No unused imports found.");
+        return md.render();
+    }
+
+    md.heading(3, "Findings");
+    for imp in imports {
+        let name = imp
+            .get("unused")
+            .and_then(Value::as_str)
+            .or_else(|| imp.get("name").and_then(Value::as_str));
+        let file = imp
+            .get("file")
+            .and_then(Value::as_str)
+            .unwrap_or("<unknown>");
+        let line = imp.get("line").and_then(Value::as_u64).unwrap_or(0);
+        let label = name.unwrap_or("<unknown>");
+        md.bullet(&format!("**{label} unused in {file}:{line}**"));
+        // Show the full import path when it differs from the flagged identifier
+        // (grouped/aliased imports like `foo::{a, b as c}`).
+        if let Some(full) = imp.get("name").and_then(Value::as_str)
+            && Some(full) != name
+        {
+            md.line(&format!("  **Import:** {full}"));
+        }
+    }
+    md.render()
+}
+
 fn render_diagnostic_record(md: &mut Md, diagnostic: &Value) {
     let level = diagnostic
         .get("level")

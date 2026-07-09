@@ -425,6 +425,42 @@ fn risky_patterns_md_empty_is_noted() {
 }
 
 #[test]
+fn unused_imports_md_renders_findings() {
+    let v = json!({
+        "unused_import_count": 1,
+        "imports": [{
+            "id": "use:abc",
+            "name": "std::collections::BTreeMap",
+            "unused": "BTreeMap",
+            "file": "src/audit.rs",
+            "line": 18
+        }]
+    });
+
+    let out = unused_imports_md(&v);
+
+    assert!(out.contains("## Unused Imports"), "got: {out}");
+    assert!(out.contains("**Unused import count:** 1"), "got: {out}");
+    assert!(
+        out.contains("- **BTreeMap unused in src/audit.rs:18**"),
+        "got: {out}"
+    );
+    assert!(
+        out.contains("  **Import:** std::collections::BTreeMap"),
+        "got: {out}"
+    );
+    assert!(!out.contains("No unused imports"), "got: {out}");
+}
+
+#[test]
+fn unused_imports_md_empty_is_noted() {
+    let out = unused_imports_md(&json!({ "unused_import_count": 0, "imports": [] }));
+    assert!(out.contains("## Unused Imports"), "got: {out}");
+    assert!(out.contains("**Unused import count:** 0"), "got: {out}");
+    assert!(out.contains("No unused imports found."), "got: {out}");
+}
+
+#[test]
 fn generic_md_empty_is_noted() {
     assert!(generic_md(&json!([])).contains("None."));
     assert!(generic_md(&json!({})).contains("No results."));
