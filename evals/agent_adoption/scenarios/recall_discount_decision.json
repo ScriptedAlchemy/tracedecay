@@ -1,0 +1,42 @@
+{
+  "id": "recall_discount_decision",
+  "category": "memory_recall",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Did we decide anything about discount limits on orders? Check the project's recorded decisions.",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_fact_store",
+      "tracedecay_context"
+    ],
+    "acceptable": [
+      "tracedecay_memory_status",
+      "tracedecay_search"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [
+    "25",
+    "cap"
+  ],
+  "max_tool_calls": 4,
+  "seeded_fact": "discount_fact_id",
+  "notes": "Ground truth is a seeded decision fact: discounts capped at 25 percent."
+}

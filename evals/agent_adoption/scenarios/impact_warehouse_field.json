@@ -1,0 +1,45 @@
+{
+  "id": "impact_warehouse_field",
+  "category": "impact",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "I want to rename the on_hand field on the Warehouse struct. Where is it used?",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_field_sites",
+      "tracedecay_impact",
+      "tracedecay_affected",
+      "tracedecay_context",
+      "tracedecay_search"
+    ],
+    "acceptable": [
+      "tracedecay_body",
+      "tracedecay_grep",
+      "Read"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [
+    "check_availability",
+    "reserve_stock"
+  ],
+  "max_tool_calls": 6,
+  "notes": "on_hand is read in check_availability and mutated in reserve_stock."
+}

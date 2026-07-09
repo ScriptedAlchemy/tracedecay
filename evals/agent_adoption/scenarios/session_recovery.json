@@ -1,0 +1,40 @@
+{
+  "id": "session_recovery",
+  "category": "session_recovery",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "deferred",
+  "prompt": "What was I working on in my last session on this project, and what did I decide?",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_sessions_for",
+      "tracedecay_message_search",
+      "tracedecay_lcm_load_session",
+      "tracedecay_session_start"
+    ],
+    "acceptable": [
+      "tracedecay_fact_store",
+      "tracedecay_context"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [],
+  "max_tool_calls": 5,
+  "notes": "DEFERRED: requires a seeded prior host session bound to the fixture project path plus ingest, which the fixture cannot reproduce deterministically without recording a real transcript first. Kept in the corpus as a documented gap; the runner skips status=deferred scenarios unless EVAL_INCLUDE_DEFERRED=1."
+}

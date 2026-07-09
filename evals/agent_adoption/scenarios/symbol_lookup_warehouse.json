@@ -1,0 +1,47 @@
+{
+  "id": "symbol_lookup_warehouse",
+  "category": "code_exploration",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Where is the Warehouse struct defined and what does it hold?",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_context",
+      "tracedecay_search",
+      "tracedecay_body",
+      "tracedecay_outline",
+      "tracedecay_read",
+      "tracedecay_grep"
+    ],
+    "acceptable": [
+      "tracedecay_node",
+      "tracedecay_find_exact_symbol",
+      "Read"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [
+    "inventory",
+    "on_hand",
+    "HashMap"
+  ],
+  "max_tool_calls": 4,
+  "notes": "Symbol lookup; tracedecay_search/body pinpoints it without a file scan."
+}

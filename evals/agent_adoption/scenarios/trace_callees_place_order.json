@@ -1,0 +1,44 @@
+{
+  "id": "trace_callees_place_order",
+  "category": "call_tracing",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "What functions does place_order call?",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_callees",
+      "tracedecay_call_chain",
+      "tracedecay_context",
+      "tracedecay_search",
+      "tracedecay_body"
+    ],
+    "acceptable": [
+      "tracedecay_grep",
+      "Read"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [
+    "reserve_stock",
+    "compute_total"
+  ],
+  "max_tool_calls": 5,
+  "notes": "Callees of place_order."
+}

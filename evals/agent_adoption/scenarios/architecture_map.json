@@ -1,0 +1,49 @@
+{
+  "id": "architecture_map",
+  "category": "code_exploration",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Give me a high-level map of how this crate is organized.",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_context",
+      "tracedecay_search",
+      "tracedecay_body",
+      "tracedecay_outline",
+      "tracedecay_read",
+      "tracedecay_grep",
+      "tracedecay_dashboard",
+      "tracedecay_map_architecture",
+      "tracedecay_files"
+    ],
+    "acceptable": [
+      "tracedecay_module_api",
+      "Read"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [
+    "pricing",
+    "inventory",
+    "orders"
+  ],
+  "max_tool_calls": 6,
+  "notes": "Architecture orientation; modules are pricing, inventory, orders, discount."
+}
