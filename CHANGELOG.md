@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.44](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.43...v0.0.44) - 2026-07-09
+
+### Added
+
+- *(plugins)* add MCP-optional capability discovery ([#368](https://github.com/ScriptedAlchemy/tracedecay/pull/368))
+- daemon auto-tracking of open PR branches
+
+### Fixed
+
+- *(sessions)* deduplicate Claude reasoning text ([#384](https://github.com/ScriptedAlchemy/tracedecay/pull/384))
+- *(mcp)* cover all standard format captures ([#383](https://github.com/ScriptedAlchemy/tracedecay/pull/383))
+- *(skills)* harden managed-skill materialization
+- *(pr-autotrack)* harden daemon PR-branch auto-tracking ([#377](https://github.com/ScriptedAlchemy/tracedecay/pull/377))
+- *(backfill)* make structured-row sweep process-safe
+- *(sessions)* distinguish produced and observed commits ([#369](https://github.com/ScriptedAlchemy/tracedecay/pull/369))
+- *(daemon)* reconcile owned PR tracking safely ([#367](https://github.com/ScriptedAlchemy/tracedecay/pull/367))
+- *(skills)* preserve materialization ownership safely ([#366](https://github.com/ScriptedAlchemy/tracedecay/pull/366))
+
+### Other
+
+- hash reconcile artifacts once, reuse shared sha256 helper
+- Merge pull request #376 from ScriptedAlchemy/codex/attribution-hardening
+- Merge pull request #375 from ScriptedAlchemy/codex/lcm-grep-cap-disclosure
+- Merge pull request #374 from ScriptedAlchemy/codex/backfill-process-safety
+
 ## [0.0.43](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.42...v0.0.43) - 2026-07-09
 
 ### Fixed
