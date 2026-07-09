@@ -22,6 +22,33 @@ const MAX_RESULTS_CAP: usize = 200;
 /// Default `max_results` when the caller omits it.
 const DEFAULT_MAX_RESULTS: usize = 50;
 
+async fn search_tree_off_thread(
+    project_root: std::path::PathBuf,
+    pattern: String,
+    lang: Option<String>,
+    path_glob: Option<String>,
+    max_results: usize,
+) -> Result<crate::ast_grep_search::AstGrepSearchResult> {
+    let query = pattern.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        search_tree(
+            &project_root,
+            &pattern,
+            lang.as_deref(),
+            path_glob.as_deref(),
+            max_results,
+        )
+    })
+    .await
+    .map_err(|err| TraceDecayError::Search {
+        message: format!("structural search worker failed: {err}"),
+        query,
+    })?;
+    result.map_err(|err| TraceDecayError::Config {
+        message: err.to_string(),
+    })
+}
+
 /// Handles `tracedecay_ast_grep_search` tool calls.
 pub(super) async fn handle_ast_grep_search(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let pattern =
@@ -47,12 +74,14 @@ pub(super) async fn handle_ast_grep_search(cg: &TraceDecay, args: Value) -> Resu
         .max(1);
 
     let project_root = cg.project_root().to_path_buf();
-    let mut search =
-        search_tree(&project_root, pattern, lang, path_glob, max_results).map_err(|err| {
-            TraceDecayError::Config {
-                message: err.to_string(),
-            }
-        })?;
+    let mut search = search_tree_off_thread(
+        project_root,
+        pattern.to_string(),
+        lang.map(str::to_owned),
+        path_glob.map(str::to_owned),
+        max_results,
+    )
+    .await?;
 
     // Enrich each hit with the smallest graph node that contains it (mirrors
     // tracedecay_grep so the model can jump straight to tracedecay_body).
@@ -163,4 +192,28 @@ fn render_md(hits: &[EnrichedHit], truncated: bool, files_scanned: usize) -> Str
     }
     md.line(&summary);
     md.render()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocking_search_wrapper_finds_match() {
+        let temp = tempfile::tempdir().expect("temp project");
+        std::fs::write(temp.path().join("lib.rs"), "fn f() { target(1); }\n")
+            .expect("write fixture");
+
+        let result = search_tree_off_thread(
+            temp.path().to_path_buf(),
+            "target($A)".to_string(),
+            Some("rust".to_string()),
+            None,
+            10,
+        )
+        .await
+        .expect("structural search");
+
+        assert_eq!(result.matches.len(), 1);
+    }
 }
