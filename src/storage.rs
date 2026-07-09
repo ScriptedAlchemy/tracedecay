@@ -820,16 +820,21 @@ pub(crate) fn append_lock_path(path: &Path) -> PathBuf {
 // data region being written. This rationale lives here once; call sites point
 // back to it rather than restating it.
 
-fn open_sidecar_lock_file(lock_path: &Path) -> io::Result<fs::File> {
+fn open_lock_file(lock_path: &Path, private: bool) -> io::Result<fs::File> {
     if let Some(parent) = lock_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(lock_path)
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).truncate(false);
+    let file = if private {
+        PrivateStoreIo::open_private(lock_path, &mut options)?
+    } else {
+        options.create(true).open(lock_path)?
+    };
+    if private {
+        set_private_file_permissions(lock_path)?;
+    }
+    Ok(file)
 }
 
 /// Non-blocking sidecar lock acquisition. Returns the held lock file on
@@ -837,7 +842,7 @@ fn open_sidecar_lock_file(lock_path: &Path) -> io::Result<fs::File> {
 /// then skips its critical section). See the sidecar-lock module note above for
 /// the read+write-handle rationale.
 pub(crate) fn try_acquire_sidecar_lock(lock_path: &Path) -> io::Result<Option<fs::File>> {
-    let file = open_sidecar_lock_file(lock_path)?;
+    let file = open_lock_file(lock_path, false)?;
     match file.try_lock_exclusive() {
         Ok(()) => Ok(Some(file)),
         Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(None),
@@ -849,7 +854,11 @@ pub(crate) fn try_acquire_sidecar_lock(lock_path: &Path) -> io::Result<Option<fs
 /// exclusive lock is granted. See the sidecar-lock module note above for the
 /// read+write-handle rationale.
 pub(crate) fn acquire_sidecar_lock_blocking(lock_path: &Path) -> io::Result<fs::File> {
-    let file = open_sidecar_lock_file(lock_path)?;
+    acquire_lock_file_blocking(lock_path, false)
+}
+
+fn acquire_lock_file_blocking(lock_path: &Path, private: bool) -> io::Result<fs::File> {
+    let file = open_lock_file(lock_path, private)?;
     file.lock_exclusive()?;
     Ok(file)
 }
@@ -863,7 +872,7 @@ pub(crate) fn append_line_locked(path: &Path, line: &str, private: bool) -> io::
     if private {
         reject_symlink_components(&lock_path, "private store lock file")?;
     }
-    let lock_file = acquire_sidecar_lock_blocking(&lock_path)?;
+    let lock_file = acquire_lock_file_blocking(&lock_path, private)?;
     let write_result = if private {
         PrivateStoreIo::append_line_data(path, line)
     } else {
@@ -1190,6 +1199,22 @@ mod tests {
         assert!(lock_path.is_file());
         // The lock file is metadata only; it must not accumulate ledger bytes.
         assert_eq!(std::fs::metadata(&lock_path).unwrap().len(), 0);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn private_lock_file_is_created_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().canonicalize().unwrap().join("private.lock");
+        let file = open_lock_file(&lock_path, true).unwrap();
+        drop(file);
+
+        assert_eq!(
+            std::fs::metadata(lock_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]
