@@ -733,7 +733,8 @@ async fn build_session_reflector_evidence(
         .await
         .map_err(|e| TraceDecayError::Config {
             message: format!("failed to build session reflection evidence: {e}"),
-        })?;
+        })?
+        .hits;
     let recent_session_slices = if options.include_recent_sessions
         && session_reflector_replay_allowed(
             options.scope,
@@ -849,7 +850,8 @@ async fn build_skill_writer_evidence(
         .await
         .map_err(|e| TraceDecayError::Config {
             message: format!("failed to build skill writer evidence: {e}"),
-        })?;
+        })?
+        .hits;
     let recent_session_slices = if options.include_recent_sessions {
         recent_session_replay_evidence(
             &lcm_db,

@@ -266,7 +266,22 @@ pub struct LcmGrepHit {
     pub message_id: Option<String>,
     pub node_id: Option<String>,
     pub store_id: Option<i64>,
+    /// Raw-message role (`assistant`/`user`/`tool`/`system`); `None` for
+    /// summary nodes and rows ingested before roles were recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     pub snippet: String,
+}
+
+/// Grep hits plus retrieval-policy disclosure: sessions whose matches were
+/// dropped by the cross-session per-session cap, with dropped-hit counts.
+/// Silent truncation reads as "covered everything"; callers must be able to
+/// see that a session has more matches and rerun with `scope=session`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmGrepOutcome {
+    pub hits: Vec<LcmGrepHit>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub capped_sessions: std::collections::BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

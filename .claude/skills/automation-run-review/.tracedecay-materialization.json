@@ -1,0 +1,8 @@
+{
+  "files": {
+    "SKILL.md": "sha256:ce428b37c4067c28a8bfa803e31e5647f023aa6996be5997e065b6e9d75c1ebb"
+  },
+  "managed_by": "tracedecay-automation",
+  "package_hash": "sha256:070f5045d0af6f415c30166b75ecc0b3f4b2c9aaf61a23eaf8bb42a6900a390e",
+  "skill_id": "automation-run-review"
+}

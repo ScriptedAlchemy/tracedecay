@@ -2732,6 +2732,10 @@ pub(super) async fn handle_lcm_grep(
         })
         .await
         .map_err(lcm_error)?;
+    let crate::sessions::lcm::LcmGrepOutcome {
+        hits,
+        capped_sessions,
+    } = hits;
     let mut payload = json!({
         "status": "ok",
         "provider": provider,
@@ -2740,6 +2744,22 @@ pub(super) async fn handle_lcm_grep(
         "hits": hits,
         "sort": string_arg(&args, "sort").unwrap_or("relevance"),
     });
+    if !capped_sessions.is_empty() {
+        if let Some(map) = payload.as_object_mut() {
+            let dropped: usize = capped_sessions.values().sum();
+            map.insert(
+                "capped_sessions".to_string(),
+                serde_json::to_value(&capped_sessions).unwrap_or(Value::Null),
+            );
+            map.insert(
+                "note".to_string(),
+                json!(format!(
+                    "per-session cap dropped {dropped} additional hit(s) from {} session(s);                      rerun with scope=session and that session_id for complete results",
+                    capped_sessions.len()
+                )),
+            );
+        }
+    }
     if git_filter_applied {
         if let Some(map) = payload.as_object_mut() {
             map.insert(

@@ -339,7 +339,8 @@ async fn grep_searches_raw_snippets_and_summary_nodes() {
             git_filter: Default::default(),
         })
         .await
-        .expect("grep should succeed");
+        .expect("grep should succeed")
+        .hits;
 
     assert!(hits.iter().any(|hit| hit.kind == "raw_message"));
     assert!(hits.iter().any(|hit| hit.kind == "summary_node"));
@@ -382,7 +383,8 @@ async fn grep_tokenizes_punctuation_heavy_path_like_queries() {
             git_filter: Default::default(),
         })
         .await
-        .expect("path-like grep should not miss because punctuation was collapsed");
+        .expect("path-like grep should not miss because punctuation was collapsed")
+        .hits;
 
     assert_eq!(hits.len(), 2);
     let hit_ids = hits
@@ -441,7 +443,8 @@ async fn grep_like_fallback_recalls_infix_hyphen_query_matches() {
             git_filter: Default::default(),
         })
         .await
-        .expect("hyphenated fallback query should keep infix matches");
+        .expect("hyphenated fallback query should keep infix matches")
+        .hits;
 
     assert!(hits.iter().any(|hit| hit.store_id == Some(store_ids[0])));
     assert!(
@@ -479,7 +482,8 @@ async fn grep_like_fallback_recalls_infix_slash_query_matches() {
             git_filter: Default::default(),
         })
         .await
-        .expect("slash fallback query should keep infix matches");
+        .expect("slash fallback query should keep infix matches")
+        .hits;
 
     assert!(hits.iter().any(|hit| hit.store_id == Some(store_ids[0])));
     assert!(
@@ -517,7 +521,8 @@ async fn grep_like_fallback_handles_hash_separator_queries() {
             git_filter: Default::default(),
         })
         .await
-        .expect("hash separator grep should not produce an FTS syntax error");
+        .expect("hash separator grep should not produce an FTS syntax error")
+        .hits;
 
     assert!(hits.iter().any(|hit| hit.store_id == Some(store_ids[0])));
 }
@@ -554,7 +559,8 @@ async fn grep_quotes_reserved_operator_looking_query_text() {
             git_filter: Default::default(),
         })
         .await
-        .expect("reserved FTS operator text should be treated as literal text");
+        .expect("reserved FTS operator text should be treated as literal text")
+        .hits;
 
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].store_id, Some(store_ids[0]));
@@ -593,7 +599,8 @@ async fn grep_preserves_quoted_phrase_semantics() {
             git_filter: Default::default(),
         })
         .await
-        .expect("quoted phrase grep should preserve phrase matching");
+        .expect("quoted phrase grep should preserve phrase matching")
+        .hits;
 
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].store_id, Some(store_ids[0]));
@@ -632,7 +639,8 @@ async fn grep_preserves_boolean_or_semantics() {
             git_filter: Default::default(),
         })
         .await
-        .expect("OR query should preserve boolean operator semantics");
+        .expect("OR query should preserve boolean operator semantics")
+        .hits;
 
     let matched = hits
         .iter()
@@ -678,7 +686,8 @@ async fn grep_cjk_query_uses_like_fallback_substring_matching() {
             git_filter: Default::default(),
         })
         .await
-        .expect("CJK grep should fall back to LIKE substring matching");
+        .expect("CJK grep should fall back to LIKE substring matching")
+        .hits;
 
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].store_id, Some(store_ids[0]));
@@ -742,7 +751,8 @@ async fn grep_filters_raw_hits_by_role_source_and_time_and_sorts() {
             git_filter: Default::default(),
         })
         .await
-        .expect("filtered grep should succeed");
+        .expect("filtered grep should succeed")
+        .hits;
 
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].message_id.as_deref(), Some("old-cli-assistant"));
@@ -1991,7 +2001,8 @@ async fn empty_session_load_grep_and_describe_return_empty_results() {
             git_filter: Default::default(),
         })
         .await
-        .expect("grep on empty session should succeed");
+        .expect("grep on empty session should succeed")
+        .hits;
     assert!(hits.is_empty());
 
     let described = db
@@ -2149,7 +2160,8 @@ async fn grep_all_provider_searches_raw_messages_across_providers() {
     let hits = db
         .lcm_grep(request)
         .await
-        .expect("all-provider grep should succeed");
+        .expect("all-provider grep should succeed")
+        .hits;
     let providers = hits
         .iter()
         .map(|hit| hit.provider.as_str())
@@ -2182,7 +2194,8 @@ async fn grep_does_not_match_role_or_metadata_text() {
     let content_hits = db
         .lcm_grep(grep_request("pipeline"))
         .await
-        .expect("content grep should succeed");
+        .expect("content grep should succeed")
+        .hits;
     assert_eq!(content_hits.len(), 1);
     assert_eq!(
         content_hits[0].message_id.as_deref(),
@@ -2193,7 +2206,8 @@ async fn grep_does_not_match_role_or_metadata_text() {
     let role_hits = db
         .lcm_grep(grep_request("assistant"))
         .await
-        .expect("role grep should succeed");
+        .expect("role grep should succeed")
+        .hits;
     assert!(
         role_hits.is_empty(),
         "role column text must not satisfy an unqualified grep: {role_hits:?}"
@@ -2203,7 +2217,8 @@ async fn grep_does_not_match_role_or_metadata_text() {
     let metadata_hits = db
         .lcm_grep(grep_request("zephyrsource"))
         .await
-        .expect("metadata grep should succeed");
+        .expect("metadata grep should succeed")
+        .hits;
     assert!(
         metadata_hits.is_empty(),
         "metadata_json text must not satisfy an unqualified grep: {metadata_hits:?}"
@@ -2571,7 +2586,8 @@ async fn grep_downranks_transcript_inventory_below_substantive_hits() {
             git_filter: Default::default(),
         })
         .await
-        .expect("grep should succeed");
+        .expect("grep should succeed")
+        .hits;
 
     let impl_idx = hits.iter().position(|h| h.session_id == "impl-session");
     let inv_idx = hits.iter().position(|h| h.session_id == "review-session");
@@ -2629,7 +2645,8 @@ async fn grep_caps_hits_per_session_in_cross_session_scope() {
             git_filter: Default::default(),
         })
         .await
-        .expect("grep should succeed");
+        .expect("grep should succeed")
+        .hits;
 
     let flood_hits = hits
         .iter()
@@ -2643,6 +2660,113 @@ async fn grep_caps_hits_per_session_in_cross_session_scope() {
         hits.iter().any(|h| h.session_id == "other-session"),
         "the distinct session must still appear: {hits:?}"
     );
+}
+
+#[tokio::test]
+async fn grep_disclosed_cap_reserves_a_tool_slot_for_capped_sessions() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_session(&db, "codex", "busy-session").await;
+    insert_session(&db, "codex", "quiet-session").await;
+    // Four narration rows plus one exact-action tool row, all matching. The
+    // role penalty ranks the tool row below every narration row, so a naive
+    // cap keeps narration only and "what did it actually do" is unanswerable.
+    for i in 0..4 {
+        assert!(
+            db.upsert_session_message(&raw_message(
+                "codex",
+                &format!("busy-narration-{i}"),
+                "busy-session",
+                i + 1,
+                &format!("quokka merge narration recap number {i}"),
+            ))
+            .await
+        );
+    }
+    assert!(
+        db.upsert_session_message(&raw_message_with_role_source_timestamp(
+            "codex",
+            "busy-tool-call",
+            "busy-session",
+            9,
+            "tool",
+            "codex_rollout",
+            1_715_000_009,
+            "gh pr merge 366 quokka merge exact command",
+        ))
+        .await
+    );
+    assert!(
+        db.upsert_session_message(&raw_message(
+            "codex",
+            "quiet-only",
+            "quiet-session",
+            1,
+            "quokka merge summary elsewhere",
+        ))
+        .await
+    );
+
+    let outcome = db
+        .lcm_grep(LcmGrepRequest {
+            provider: "codex".into(),
+            query: "quokka merge".into(),
+            scope: LcmScope::All,
+            session_id: None,
+            include_summaries: false,
+            limit: 10,
+            sort: LcmGrepSort::Relevance,
+            source: None,
+            role: None,
+            start_time: None,
+            end_time: None,
+            git_filter: Default::default(),
+        })
+        .await
+        .expect("grep should succeed");
+
+    let busy_kept: Vec<_> = outcome
+        .hits
+        .iter()
+        .filter(|h| h.session_id == "busy-session")
+        .collect();
+    assert_eq!(busy_kept.len(), 3, "cap must hold: {busy_kept:?}");
+    assert!(
+        busy_kept.iter().any(|h| h.role.as_deref() == Some("tool")),
+        "one capped slot must be reserved for the top tool-role hit so exact \
+         actions are not fully shadowed by narration: {busy_kept:?}"
+    );
+    assert_eq!(
+        outcome.capped_sessions.get("busy-session").copied(),
+        Some(2),
+        "capping must be disclosed, never silent: {:?}",
+        outcome.capped_sessions
+    );
+    assert!(
+        !outcome.capped_sessions.contains_key("quiet-session"),
+        "uncapped sessions must not be reported"
+    );
+
+    // Session scope is uncapped and undisclosed: the full set comes back.
+    let scoped = db
+        .lcm_grep(LcmGrepRequest {
+            provider: "codex".into(),
+            query: "quokka merge".into(),
+            scope: LcmScope::Session,
+            session_id: Some("busy-session".into()),
+            include_summaries: false,
+            limit: 10,
+            sort: LcmGrepSort::Relevance,
+            source: None,
+            role: None,
+            start_time: None,
+            end_time: None,
+            git_filter: Default::default(),
+        })
+        .await
+        .expect("session-scoped grep should succeed");
+    assert_eq!(scoped.hits.len(), 5);
+    assert!(scoped.capped_sessions.is_empty());
 }
 
 #[tokio::test]
